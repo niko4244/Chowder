@@ -85,6 +85,17 @@ CREATE TABLE IF NOT EXISTS manifests (
 """
 
 
+_EXPERIMENT_INSERT = """INSERT INTO experiments
+   (experiment_id, parent_id, estimated_gpu_hours, hypothesis_json, config_json, status)
+   VALUES (?, ?, ?, ?, ?, ?)"""
+
+_FAILURE_UPSERT = """INSERT OR REPLACE INTO failure_records
+   (failure_id, experiment_id, evaluation_run_id, evaluator, suite, row_index,
+    protocol_sha256, artifact_sha256, source_role, prompt, expected, prediction,
+    score, failure_kind, metadata_json)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
+
 class RunRegistry:
     def __init__(self, path: str | Path):
         self.path = str(path)
@@ -101,21 +112,39 @@ class RunRegistry:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def record_experiment(self, experiment: Experiment) -> None:
-        self._conn.execute(
-            """INSERT INTO experiments
-               (experiment_id, parent_id, estimated_gpu_hours, hypothesis_json, config_json, status)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (
-                experiment.experiment_id,
-                experiment.parent_id,
-                experiment.estimated_gpu_hours,
-                json.dumps(asdict(experiment.hypothesis), sort_keys=True),
-                json.dumps(experiment.config_patch, sort_keys=True),
-                experiment.status.value,
-            ),
+    @staticmethod
+    def _experiment_row(experiment: Experiment) -> tuple[object, ...]:
+        return (
+            experiment.experiment_id,
+            experiment.parent_id,
+            experiment.estimated_gpu_hours,
+            json.dumps(asdict(experiment.hypothesis), sort_keys=True),
+            json.dumps(experiment.config_patch, sort_keys=True),
+            experiment.status.value,
         )
-        self._conn.commit()
+
+    def record_experiments(self, experiments: Iterable[Experiment]) -> None:
+        """Persist an ordered experiment batch atomically.
+
+        Parent rows may occur earlier in the same batch. Any primary-key or
+        foreign-key failure rolls back every row in the batch.
+        """
+
+        rows = tuple(experiments)
+        if not rows:
+            return
+        values = tuple(self._experiment_row(experiment) for experiment in rows)
+        with self._conn:
+            self._conn.executemany(_EXPERIMENT_INSERT, values)
+
+    def record_experiment(self, experiment: Experiment) -> None:
+        self.record_experiments((experiment,))
+
+    def has_experiment(self, experiment_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM experiments WHERE experiment_id = ?", (experiment_id,)
+        ).fetchone()
+        return row is not None
 
     def record_training_artifact(self, artifact: TrainingArtifact) -> None:
         self._conn.execute(
@@ -179,36 +208,36 @@ class RunRegistry:
                 evidence=json.loads(evidence),
             )
 
-    def record_failure(self, failure: FailureRecord) -> None:
-        self._conn.execute(
-            """INSERT OR REPLACE INTO failure_records
-               (failure_id, experiment_id, evaluation_run_id, evaluator, suite, row_index,
-                protocol_sha256, artifact_sha256, source_role, prompt, expected, prediction,
-                score, failure_kind, metadata_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                failure.failure_id,
-                failure.experiment_id,
-                failure.evaluation_run_id,
-                failure.evaluator,
-                failure.suite,
-                failure.row_index,
-                failure.protocol_sha256,
-                failure.artifact_sha256,
-                failure.source_role.value,
-                failure.prompt,
-                failure.expected,
-                failure.prediction,
-                failure.score,
-                failure.failure_kind,
-                json.dumps(dict(failure.metadata), sort_keys=True),
-            ),
+    @staticmethod
+    def _failure_row(failure: FailureRecord) -> tuple[object, ...]:
+        return (
+            failure.failure_id,
+            failure.experiment_id,
+            failure.evaluation_run_id,
+            failure.evaluator,
+            failure.suite,
+            failure.row_index,
+            failure.protocol_sha256,
+            failure.artifact_sha256,
+            failure.source_role.value,
+            failure.prompt,
+            failure.expected,
+            failure.prediction,
+            failure.score,
+            failure.failure_kind,
+            json.dumps(dict(failure.metadata), sort_keys=True),
         )
-        self._conn.commit()
+
+    def record_failure(self, failure: FailureRecord) -> None:
+        self.record_failures((failure,))
 
     def record_failures(self, failures: Iterable[FailureRecord]) -> None:
-        for failure in failures:
-            self.record_failure(failure)
+        rows = tuple(failures)
+        if not rows:
+            return
+        values = tuple(self._failure_row(failure) for failure in rows)
+        with self._conn:
+            self._conn.executemany(_FAILURE_UPSERT, values)
 
     def list_failures(self, *, experiment_id: str | None = None) -> Iterable[FailureRecord]:
         if experiment_id is None:
