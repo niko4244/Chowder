@@ -92,7 +92,9 @@ def test_executor_runs_worker_as_isolated_process_and_returns_artifact(tmp_path,
             spec_path = Path(command[command.index("--spec") + 1])
             result_path = Path(command[command.index("--result") + 1])
             spec = json.loads(spec_path.read_text())
-            Path(spec["output_dir"]).mkdir(parents=True, exist_ok=True)
+            output = Path(spec["output_dir"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "adapter_model.safetensors").write_bytes(b"adapter")
             result_path.write_text(json.dumps({
                 "telemetry": {"train_loss": 0.25, "global_step": 3},
                 "versions": {"transformers": "5.test"},
@@ -121,6 +123,7 @@ def test_executor_runs_worker_as_isolated_process_and_returns_artifact(tmp_path,
     assert len(artifact.evidence["execution_spec_sha256"]) == 64
     assert len(artifact.evidence["recipe_sha256"]) == 64
     assert len(artifact.evidence["dataset_sha256"]) == 64
+    assert len(artifact.evidence["artifact_sha256"]) == 64
 
 
 def test_recipe_digest_is_stable_across_output_paths(tmp_path):
