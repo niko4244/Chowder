@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
 
+from .config_validation import validate_transformers_backend_config
 from .engine import EvolutionEngine
 from .execution_failure import ExecutionFailure, normalize_execution_exception
 from .executor_investigator import ExecutorFailureAnalysis, analyze_execution_failure
@@ -111,6 +112,18 @@ def _declared_evaluation_reserve(config: Mapping[str, Any]) -> float:
     return value
 
 
+def _validate_trainer_config(trainer: TrainingExecutor, resolved: Mapping[str, Any]) -> None:
+    """Dispatch strict config validation only for backends Chowder understands.
+
+    Future/custom executors keep control of their own schemas. The built-in
+    Transformers/PEFT executor is strict because silent unknown-key fallback is
+    unsafe for autonomous research.
+    """
+
+    if str(getattr(trainer, "name", "")) == "transformers-peft":
+        validate_transformers_backend_config(resolved)
+
+
 @dataclass
 class ExperimentCycleRunner:
     """Run one generation through profile → train → evaluate → diagnose → gate."""
@@ -144,6 +157,7 @@ class ExperimentCycleRunner:
         run_context = replace(self.context, resolved_config=resolved)
 
         try:
+            _validate_trainer_config(self.trainer, resolved)
             evaluation_reserve = _declared_evaluation_reserve(resolved)
             try:
                 training_estimate = self.trainer.profile(experiment, run_context)
