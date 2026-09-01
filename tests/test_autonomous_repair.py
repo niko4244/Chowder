@@ -40,6 +40,13 @@ class FakeTrainer:
         if not dataset.is_absolute():
             dataset = Path(context.work_dir) / dataset
         dataset = dataset.resolve()
+        replay_sha = None
+        replay = backend.get("replay")
+        if isinstance(replay, dict) and isinstance(replay.get("dataset"), str):
+            replay_path = Path(replay["dataset"])
+            if not replay_path.is_absolute():
+                replay_path = Path(context.work_dir) / replay_path
+            replay_sha = sha256_file(replay_path.resolve())
         return TrainingArtifact(
             run_id=f"train-{experiment.experiment_id}",
             experiment_id=experiment.experiment_id,
@@ -48,6 +55,7 @@ class FakeTrainer:
             evidence={
                 "test": True,
                 "dataset_sha256": sha256_file(dataset),
+                "replay_dataset_sha256": replay_sha,
                 "artifact_sha256": sha256_directory(artifact),
             },
         )
@@ -229,9 +237,28 @@ def test_single_hop_autonomous_repair_runs_rejected_candidate_to_promoted_repair
     for candidate in outcome.population.proposed_candidates:
         backend = candidate.config_patch["backend"]
         replay = backend["replay"]
-        assert replay["dataset"] == str((tmp_path / "base.jsonl").resolve())
-        assert replay["sha256"] == base_sha
+        replay_path = Path(replay["dataset"])
+        assert replay_path.parent == (tmp_path / ".chowder" / "replay-history").resolve()
+        assert replay["sha256"] == sha256_file(replay_path)
         assert replay["ratio"] == pytest.approx(1.0)
+        assert Path(replay["manifest"]).is_file()
+        assert replay["manifest_sha256"] == sha256_file(replay["manifest"])
+        assert backend["text_field"] == "text"
+        replay_rows = [json.loads(line)["text"] for line in replay_path.read_text().splitlines()]
+        assert replay_rows == [
+            "original training example one",
+            "original training example two",
+            "original training example three",
+        ]
+        manifest = json.loads(Path(replay["manifest"]).read_text())
+        assert manifest["sources"] == [
+            {
+                "role": "parent_primary_training",
+                "row_count": 3,
+                "source_sha256": base_sha,
+                "text_field": "text",
+            }
+        ]
         assert backend["dataset_sha256"] == candidate.config_patch["repair"][
             "repair_dataset_sha256"
         ]
@@ -240,6 +267,9 @@ def test_single_hop_autonomous_repair_runs_rejected_candidate_to_promoted_repair
             "sha256": source_adapter_sha,
         }
         assert candidate.config_patch["repair"]["continuation"] is True
+        assert candidate.config_patch["repair"]["replay_manifest_sha256"] == replay[
+            "manifest_sha256"
+        ]
     assert outcome.promoted is not None
     assert outcome.promoted.metrics["quality"] == pytest.approx(0.86)
     assert runner.engine.baseline.experiment_id.startswith("repair-")
@@ -340,7 +370,7 @@ def test_repair_coordinator_rejects_tampered_parent_replay_before_provider(tmp_p
         def propose(self, request):
             raise AssertionError("provider must not see a repair request after replay tamper")
 
-    with pytest.raises(ValueError, match="replay dataset content changed"):
+    with pytest.raises(ValueError, match="replay history source content changed"):
         run_single_hop_autonomous_repair(
             runner=runner,
             source_generation=generation,
