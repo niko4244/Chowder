@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .contamination import ContaminationAudit
+from .contamination import ContaminationAudit, repair_dataset_index_digest
 from .failures import RepairPlan
 from .models import Experiment, Hypothesis
 from .provenance import sha256_file
@@ -23,12 +23,17 @@ class VerifiedRepairDataset:
             raise ValueError("repair dataset contamination audit is not clean")
         if len(self.sha256) != 64:
             raise ValueError("repair dataset SHA-256 is invalid")
+        if len(self.contamination_audit.repair_index_sha256) != 64:
+            raise ValueError("repair contamination audit is missing repair-example identity")
         path = Path(self.path).resolve()
         if not path.is_file():
             raise FileNotFoundError(f"repair dataset not found: {path}")
         actual = sha256_file(path)
         if actual != self.sha256:
             raise ValueError("repair dataset content changed after verification")
+        actual_repair_index = repair_dataset_index_digest(path)
+        if actual_repair_index != self.contamination_audit.repair_index_sha256:
+            raise ValueError("repair dataset examples do not match contamination audit")
         return path
 
 
@@ -82,11 +87,13 @@ def build_repair_candidate(
     if lora_patch:
         backend_patch["lora"] = lora_patch
 
+    audit = dataset.contamination_audit
     repair_evidence = {
         "plan_id": plan.plan_id,
         "cluster_id": plan.cluster_id,
         "repair_dataset_sha256": dataset.sha256,
-        "holdout_index_sha256": list(dataset.contamination_audit.holdout_index_sha256),
+        "repair_index_sha256": audit.repair_index_sha256,
+        "holdout_index_sha256": list(audit.holdout_index_sha256),
         "source_failure_ids": list(plan.source_failure_ids),
         "variant": variant.name,
     }
@@ -100,6 +107,8 @@ def build_repair_candidate(
             "parent_id": parent_id,
             "plan_id": plan.plan_id,
             "dataset_sha256": dataset.sha256,
+            "repair_index_sha256": audit.repair_index_sha256,
+            "holdout_index_sha256": list(audit.holdout_index_sha256),
             "variant": variant.name,
             "training_patch": training_patch,
             "lora_patch": lora_patch,
