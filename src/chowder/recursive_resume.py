@@ -40,6 +40,17 @@ def _provider_identity(provider: RepairSourceProvider) -> tuple[str, str]:
     )
 
 
+def _canonical_json_value(value: object) -> object:
+    """Normalize tuples/other JSON-compatible containers to durable JSON types."""
+
+    try:
+        return json.loads(
+            json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        )
+    except (TypeError, ValueError) as exc:
+        raise RecursiveResumeError("resume identity contains non-canonical JSON data") from exc
+
+
 def _portable_score(value: object) -> float | None:
     if value is None:
         return None
@@ -75,7 +86,9 @@ def _verify_resume_identity(
     if not isinstance(metadata, Mapping):
         raise RecursiveResumeError("recursive session metadata is invalid")
 
-    if metadata.get("engine_snapshot") != _engine_snapshot(runner):
+    if _canonical_json_value(metadata.get("engine_snapshot")) != _canonical_json_value(
+        _engine_snapshot(runner)
+    ):
         raise RecursiveResumeError(
             "current engine goal/baseline does not match the interrupted session snapshot"
         )
@@ -85,14 +98,20 @@ def _verify_resume_identity(
         raise RecursiveResumeError(
             "interrupted session predates execution-context snapshots and cannot be auto-resumed"
         )
-    if dict(execution_snapshot) != _execution_snapshot(runner):
+    if _canonical_json_value(execution_snapshot) != _canonical_json_value(
+        _execution_snapshot(runner)
+    ):
         raise RecursiveResumeError(
             "current executor/seed/base-config/hardware does not match the interrupted session"
         )
 
-    if session.get("policy") != _policy_payload(policy):
+    if _canonical_json_value(session.get("policy")) != _canonical_json_value(
+        _policy_payload(policy)
+    ):
         raise RecursiveResumeError("resume policy does not match the interrupted session")
-    if metadata.get("variants") != _variant_metadata(variants):
+    if _canonical_json_value(metadata.get("variants")) != _canonical_json_value(
+        _variant_metadata(variants)
+    ):
         raise RecursiveResumeError("repair variants do not match the interrupted session")
 
     provider_name, provider_version = _provider_identity(provider)
@@ -255,11 +274,9 @@ def resume_recursive_repair_session(
 ) -> RecursiveRepairOutcome:
     """Safely resume one interrupted bounded recursive-repair session.
 
-    This function is intentionally conservative. It will not resume legacy
-    sessions without execution snapshots, sessions with orphaned work, a runner
-    whose engine already contains live state, or any environment/config/provider
-    mismatch. The durable recovery claim is acquired before state reconstruction
-    and all recursive writes are fenced by that token thereafter.
+    The caller must supply a fresh runner whose immutable execution identity
+    matches the checkpoint. The session is reconciled once before and once after
+    an atomic recovery claim; only the claim holder may append new hops.
     """
 
     if runner.registry is None:
@@ -291,9 +308,6 @@ def resume_recursive_repair_session(
         store.claim_recovery(session_id=session_id, claim_token=claim_token)
         claimed = True
 
-        # Reconcile again after claim acquisition. A pre-crash writer may have
-        # committed between the initial read and the claim; after this point the
-        # claim fences all stale writers.
         second_report = analyze_recursive_repair_session(runner.registry, session_id)
         _require_resumable(second_report)
         session = store.get_session(session_id)
@@ -342,10 +356,6 @@ def resume_recursive_repair_session(
             recovery_claim_token=claim_token,
         )
     except Exception:
-        # Before the bounded loop starts, no terminal writer owns cleanup. After
-        # it starts, `_execute_bounded_loop` fails/finishes the session and clears
-        # its claim transactionally. This fallback only releases a still-live
-        # claim owned by us.
         if claimed and not loop_started:
             try:
                 claim = store.get_recovery_claim(session_id)
