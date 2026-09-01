@@ -15,6 +15,7 @@ from .repair_candidates import (
     VerifiedRepairDataset,
     VerifiedReplayDataset,
     build_autonomous_repair_population,
+    replay_compute_multiplier,
 )
 from .repair_requests import (
     MaterializedRepairProposal,
@@ -38,7 +39,9 @@ class RepairPopulationOutcome:
 
     @property
     def deferred_candidates(self) -> tuple[Experiment, ...]:
-        accepted = {candidate.experiment_id for candidate in self.proposed_candidates}
+        accepted = {
+            candidate.experiment_id for candidate in self.proposed_candidates
+        }
         return tuple(
             candidate
             for candidate in self.generated_candidates
@@ -80,18 +83,29 @@ def prepare_and_propose_repair_population(
     variant_rows = tuple(variants)
     if not variant_rows:
         raise ValueError("at least one repair variant is required")
-    if not any(variant.estimated_gpu_hours <= engine.remaining_budget for variant in variant_rows):
-        raise ValueError("no repair variant fits the remaining GPU-hour budget")
+
+    multiplier = replay_compute_multiplier(replay)
+    if not any(
+        variant.estimated_gpu_hours * multiplier <= engine.remaining_budget
+        for variant in variant_rows
+    ):
+        raise ValueError(
+            "no replay-adjusted repair variant fits the remaining GPU-hour budget"
+        )
 
     if replay is not None:
         replay.verify()
 
-    holdout_files = tuple(Path(path).resolve() for path in holdout_fingerprint_files)
+    holdout_files = tuple(
+        Path(path).resolve() for path in holdout_fingerprint_files
+    )
     if not holdout_files:
         raise ValueError("repair orchestration requires holdout fingerprint indexes")
     if any(not path.is_file() for path in holdout_files):
         missing = [str(path) for path in holdout_files if not path.is_file()]
-        raise FileNotFoundError(f"holdout fingerprint indexes not found: {missing}")
+        raise FileNotFoundError(
+            f"holdout fingerprint indexes not found: {missing}"
+        )
 
     request = build_repair_request(plan=plan, cluster=cluster)
     proposal = request_repair_sources(provider=provider, request=request)
