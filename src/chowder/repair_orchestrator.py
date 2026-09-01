@@ -13,6 +13,7 @@ from .registry import RunRegistry
 from .repair_candidates import (
     RepairVariant,
     VerifiedRepairDataset,
+    VerifiedReplayDataset,
     build_autonomous_repair_population,
 )
 from .repair_requests import (
@@ -61,14 +62,14 @@ def prepare_and_propose_repair_population(
     variants: Iterable[RepairVariant],
     work_dir: str | Path,
     registry: RunRegistry | None = None,
+    replay: VerifiedReplayDataset | None = None,
 ) -> RepairPopulationOutcome:
     """Prepare provenance-safe repair data and reserve candidate experiments.
 
     The complete proposal transaction spans filesystem materialization, engine
-    graph/budget admission, and optional SQLite persistence. A failure before
-    persistence completion removes generated repair files and withdraws any
-    still-PLANNED engine reservations, returning both systems to the state they
-    had before this repair population was attempted.
+    graph/budget admission, and optional SQLite persistence. ``replay`` is an
+    already-trained parent dataset whose exact bytes/ratio become part of repair
+    candidate identity; it is never supplied to the repair-source provider.
     """
 
     if parent_id not in engine.graph.nodes:
@@ -81,6 +82,9 @@ def prepare_and_propose_repair_population(
         raise ValueError("at least one repair variant is required")
     if not any(variant.estimated_gpu_hours <= engine.remaining_budget for variant in variant_rows):
         raise ValueError("no repair variant fits the remaining GPU-hour budget")
+
+    if replay is not None:
+        replay.verify()
 
     holdout_files = tuple(Path(path).resolve() for path in holdout_fingerprint_files)
     if not holdout_files:
@@ -120,6 +124,7 @@ def prepare_and_propose_repair_population(
             plan=plan,
             dataset=verified,
             variants=variant_rows,
+            replay=replay,
         )
         proposed = engine.propose(generated)
         if registry is not None:
