@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 from .memory import HardwareProfile
-from .models import Experiment, ExperimentResult
+from .models import Experiment
 
 
 @dataclass(frozen=True)
@@ -56,9 +56,26 @@ class TrainingExecutor(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class EvaluationOutcome:
+    """Independent benchmark evidence before lifecycle cost is finalized.
+
+    ``gpu_hours`` is evaluation-only compute. The generation runner combines it
+    with the training artifact cost before creating an ``ExperimentResult``.
+    This prevents evaluators from accidentally hiding training cost.
+    """
+
+    run_id: str
+    experiment_id: str
+    source_artifact_ref: str
+    metrics: Mapping[str, float]
+    gpu_hours: float
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+
+
 @runtime_checkable
 class EvaluationExecutor(Protocol):
-    """Independent evaluation contract used to produce promotion evidence."""
+    """Independent evaluation contract used to produce benchmark evidence."""
 
     name: str
 
@@ -68,5 +85,5 @@ class EvaluationExecutor(Protocol):
         experiment: Experiment,
         artifact: TrainingArtifact,
         context: ExecutionContext,
-    ) -> ExperimentResult:
+    ) -> EvaluationOutcome:
         ...
