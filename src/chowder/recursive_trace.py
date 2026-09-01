@@ -43,12 +43,11 @@ CREATE TABLE IF NOT EXISTS recursive_repair_recovery_claims (
 class RecursiveRepairTraceStore:
     """Durable event/checkpoint store for bounded recursive repair.
 
-    Each hop insert and session-checkpoint update is committed in one transaction.
-    Recovery claims live in a separate one-row-per-session table: a session remains
-    ``running`` so a crashed recovery process is still discoverable, while the
-    unique claim prevents concurrent resume. Normal terminal transitions clear an
-    outstanding claim atomically. A stale claim can be explicitly released after
-    reconciliation instead of becoming a hidden permanent ``recovering`` state.
+    Each hop insert and session-checkpoint update commits in one transaction.
+    Recovery claims live in a separate one-row-per-session table. Once a claim
+    exists, every hop/terminal write must present the matching token; this fences
+    both concurrent recovery attempts and a slow pre-crash controller that wakes
+    after recovery has begun.
     """
 
     def __init__(self, path: str | Path):
@@ -74,6 +73,21 @@ class RecursiveRepairTraceStore:
             separators=(",", ":"),
             allow_nan=False,
         )
+
+    def _validate_claim_access(
+        self, *, session_id: str, claim_token: str | None
+    ) -> None:
+        row = self._conn.execute(
+            """SELECT claim_token FROM recursive_repair_recovery_claims
+               WHERE session_id = ?""",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            if claim_token is not None:
+                raise ValueError("recursive repair recovery claim is missing")
+            return
+        if claim_token is None or row[0] != claim_token:
+            raise ValueError("recursive repair session is fenced by another recovery claim")
 
     def begin(
         self,
@@ -145,12 +159,7 @@ class RecursiveRepairTraceStore:
         }
 
     def release_recovery_claim(self, *, session_id: str, claim_token: str) -> None:
-        """Release exactly the claim held by ``claim_token``.
-
-        This is intended for conservative recovery tooling after it has proved no
-        new hop was committed. A different token cannot clear another process's
-        claim.
-        """
+        """Release exactly the claim held by ``claim_token``."""
 
         with self._conn:
             cursor = self._conn.execute(
@@ -174,6 +183,7 @@ class RecursiveRepairTraceStore:
         produced_candidate_ids: tuple[str, ...],
         promoted_experiment_id: str | None,
         state: Mapping[str, Any],
+        claim_token: str | None = None,
     ) -> None:
         if depth <= 0:
             raise ValueError("recursive repair hop depth must be positive")
@@ -192,6 +202,9 @@ class RecursiveRepairTraceStore:
                 raise ValueError("recursive repair session does not exist")
             if row[0] != "running":
                 raise ValueError("cannot append a hop to a completed recursive repair session")
+            self._validate_claim_access(
+                session_id=session_id, claim_token=claim_token
+            )
             self._conn.execute(
                 """INSERT INTO recursive_repair_hops
                    (session_id, depth, target_experiment_id, failure_signature,
@@ -222,10 +235,14 @@ class RecursiveRepairTraceStore:
         stop_reason: str,
         stop_detail: str,
         state: Mapping[str, Any],
+        claim_token: str | None = None,
     ) -> None:
         if not stop_reason.strip():
             raise ValueError("recursive repair stop_reason is required")
         with self._conn:
+            self._validate_claim_access(
+                session_id=session_id, claim_token=claim_token
+            )
             cursor = self._conn.execute(
                 """UPDATE recursive_repair_sessions
                    SET status = 'completed', state_json = ?, stop_reason = ?, stop_detail = ?
@@ -250,8 +267,12 @@ class RecursiveRepairTraceStore:
         session_id: str,
         error_detail: str,
         state: Mapping[str, Any],
+        claim_token: str | None = None,
     ) -> None:
         with self._conn:
+            self._validate_claim_access(
+                session_id=session_id, claim_token=claim_token
+            )
             cursor = self._conn.execute(
                 """UPDATE recursive_repair_sessions
                    SET status = 'failed', state_json = ?, stop_reason = 'error', stop_detail = ?
