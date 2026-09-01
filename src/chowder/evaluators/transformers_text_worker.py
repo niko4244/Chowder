@@ -110,9 +110,13 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         model_kwargs["device_map"] = {"": device_index}
 
     base = AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs)
+    resolved_commit = getattr(base.config, "_commit_hash", None)
     if spec.quantization == "none":
         base = base.to(device_name)
-    model = PeftModel.from_pretrained(base, spec.adapter_dir, is_trainable=False)
+    if spec.adapter_dir is None:
+        model = base
+    else:
+        model = PeftModel.from_pretrained(base, spec.adapter_dir, is_trainable=False)
     model.eval()
     device = next(model.parameters()).device
 
@@ -135,7 +139,7 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
 
             correct = 0.0
             predictions_path = output_dir / f"predictions-{suite.name}.jsonl"
-            with predictions_path.open("w", encoding="utf-8") as output:
+            with predictions_path.open("w", encoding="utf-8", newline="\n") as output:
                 for row in rows:
                     prompt = str(row[suite.prompt_field])
                     expected = str(row[suite.expected_field])
@@ -166,12 +170,18 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                     )
                     row_score = _score(prediction, expected, suite.scoring)
                     correct += row_score
-                    output.write(json.dumps({
-                        "prompt": prompt,
-                        "expected": expected,
-                        "prediction": prediction,
-                        "score": row_score,
-                    }, ensure_ascii=False) + "\n")
+                    output.write(
+                        json.dumps(
+                            {
+                                "prompt": prompt,
+                                "expected": expected,
+                                "prediction": prediction,
+                                "score": row_score,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
             metrics[suite.name] = correct / len(rows)
             suite_evidence[suite.name] = {
                 "rows": len(rows),
@@ -187,6 +197,12 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         "runtime": {
             "device": device_name,
             "gpu_count": 1 if device_name.startswith("cuda") else 0,
+        },
+        "model_provenance": {
+            "requested_base_model": spec.base_model,
+            "requested_revision": spec.revision,
+            "resolved_model_commit": resolved_commit,
+            "adapter_loaded": spec.adapter_dir is not None,
         },
         "versions": {
             "torch": _package_version("torch"),
@@ -207,7 +223,9 @@ def main() -> int:
     raw["suites"] = tuple(EvalSuiteSpec(**suite) for suite in raw["suites"])
     spec = TransformersTextEvalSpec(**raw)
     result = evaluate(spec)
-    Path(args.result).write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    Path(args.result).write_bytes(
+        (json.dumps(result, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    )
     return 0
 
 
