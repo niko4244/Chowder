@@ -29,13 +29,20 @@ class FakeTrainer:
     def run(self, experiment, context):
         artifact = Path(context.work_dir) / f"artifact-{experiment.experiment_id}"
         artifact.mkdir(exist_ok=False)
-        (artifact / "adapter.bin").write_bytes(experiment.experiment_id.encode("utf-8"))
+        (artifact / "adapter.bin").write_bytes(
+            experiment.experiment_id.encode("utf-8")
+        )
+        backend = context.resolved_config["backend"]
+        dataset = Path(str(backend["dataset"]))
+        if not dataset.is_absolute():
+            dataset = Path(context.work_dir) / dataset
+        dataset = dataset.resolve()
         return TrainingArtifact(
             run_id=f"train-{experiment.experiment_id}",
             experiment_id=experiment.experiment_id,
             artifact_ref=str(artifact),
             gpu_hours=0.2,
-            evidence={"test": True},
+            evidence={"test": True, "dataset_sha256": sha256_file(dataset)},
         )
 
     def cancel(self, run_id):
@@ -100,8 +107,20 @@ def _runner(tmp_path):
     write_holdout_fingerprint_index(
         [("hidden benchmark prompt", "hidden answer")], holdout_index
     )
+    _write_jsonl(
+        tmp_path / "base.jsonl",
+        [
+            {"text": "original training example one"},
+            {"text": "original training example two"},
+            {"text": "original training example three"},
+        ],
+    )
     engine = EvolutionEngine(
-        Goal((MetricTarget("quality", minimum=0.8),), gpu_hour_budget=4.0, max_parallel_candidates=2),
+        Goal(
+            (MetricTarget("quality", minimum=0.8),),
+            gpu_hour_budget=4.0,
+            max_parallel_candidates=2,
+        ),
         ExperimentResult("baseline", {"quality": 0.7}, 0.0),
     )
     context = ExecutionContext(
@@ -148,20 +167,26 @@ def _provider(tmp_path):
             },
         ],
     )
-    return LocalCorpusRepairProvider([corpus], max_examples=2, examples_per_failure=2)
+    return LocalCorpusRepairProvider(
+        [corpus], max_examples=2, examples_per_failure=2
+    )
 
 
 def _source_experiment():
     return Experiment(
         experiment_id="source",
         parent_id=None,
-        hypothesis=Hypothesis("quality regression", "reasoning weakness", "candidate change"),
+        hypothesis=Hypothesis(
+            "quality regression", "reasoning weakness", "candidate change"
+        ),
         config_patch={},
         estimated_gpu_hours=0.5,
     )
 
 
-def test_single_hop_autonomous_repair_runs_rejected_candidate_to_promoted_repair(tmp_path):
+def test_single_hop_autonomous_repair_runs_rejected_candidate_to_promoted_repair(
+    tmp_path,
+):
     runner = _runner(tmp_path)
     source = _source_experiment()
     assert runner.engine.propose((source,)) == (source,)
@@ -171,12 +196,15 @@ def test_single_hop_autonomous_repair_runs_rejected_candidate_to_promoted_repair
     assert source_generation.candidates[0].repair_plans
     assert runner.engine.graph.nodes["source"].status.value == "rejected"
 
+    base_sha = sha256_file(tmp_path / "base.jsonl")
     outcome = run_single_hop_autonomous_repair(
         runner=runner,
         source_generation=source_generation,
         provider=_provider(tmp_path),
         variants=(
-            RepairVariant("lr-low", 0.3, training_patch={"learning_rate": 5e-5}),
+            RepairVariant(
+                "lr-low", 0.3, training_patch={"learning_rate": 5e-5}
+            ),
             RepairVariant("rank-low", 0.3, lora_patch={"r": 8}),
         ),
     )
@@ -184,7 +212,18 @@ def test_single_hop_autonomous_repair_runs_rejected_candidate_to_promoted_repair
     assert outcome.target.candidate.experiment_id == "source"
     assert outcome.target.plan.requires_independent_source
     assert len(outcome.population.proposed_candidates) == 2
-    assert all(candidate.parent_id == "source" for candidate in outcome.population.proposed_candidates)
+    assert all(
+        candidate.parent_id == "source"
+        for candidate in outcome.population.proposed_candidates
+    )
+    for candidate in outcome.population.proposed_candidates:
+        replay = candidate.config_patch["backend"]["replay"]
+        assert replay["dataset"] == str((tmp_path / "base.jsonl").resolve())
+        assert replay["sha256"] == base_sha
+        assert replay["ratio"] == pytest.approx(1.0)
+        assert candidate.config_patch["backend"]["dataset_sha256"] == candidate.config_patch[
+            "repair"
+        ]["repair_dataset_sha256"]
     assert outcome.promoted is not None
     assert outcome.promoted.metrics["quality"] == pytest.approx(0.86)
     assert runner.engine.baseline.experiment_id.startswith("repair-")
@@ -199,7 +238,9 @@ def test_repair_coordinator_rejects_non_rejected_source_candidate(tmp_path):
 
     class PassingEvaluator(FakeEvaluator):
         def evaluate(self, *, experiment, artifact, context):
-            result = super().evaluate(experiment=experiment, artifact=artifact, context=context)
+            result = super().evaluate(
+                experiment=experiment, artifact=artifact, context=context
+            )
             return EvaluationOutcome(
                 result.run_id,
                 result.experiment_id,
@@ -213,7 +254,9 @@ def test_repair_coordinator_rejects_non_rejected_source_candidate(tmp_path):
     generation = runner.run_generation((source,))
     assert generation.promoted is not None
 
-    with pytest.raises(ValueError, match="no independently repairable rejected candidate"):
+    with pytest.raises(
+        ValueError, match="no independently repairable rejected candidate"
+    ):
         run_single_hop_autonomous_repair(
             runner=runner,
             source_generation=generation,
@@ -240,3 +283,45 @@ def test_repair_coordinator_reverifies_holdout_index_before_source_provider(tmp_
         )
 
     assert runner.engine.outstanding_candidates == 0
+
+
+def test_repair_coordinator_rejects_tampered_parent_replay_before_provider(tmp_path):
+    runner = _runner(tmp_path)
+    source = _source_experiment()
+    runner.engine.propose((source,))
+    generation = runner.run_generation((source,))
+
+    with open(tmp_path / "base.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"text": "post-training mutation"}) + "\n")
+
+    class ProviderMustNotRun:
+        name = "must-not-run"
+        version = "1"
+
+        def propose(self, request):
+            raise AssertionError("provider must not see a repair request after replay tamper")
+
+    with pytest.raises(ValueError, match="replay dataset content changed"):
+        run_single_hop_autonomous_repair(
+            runner=runner,
+            source_generation=generation,
+            provider=ProviderMustNotRun(),
+            variants=(RepairVariant("default", 0.2),),
+        )
+    assert runner.engine.outstanding_candidates == 0
+
+
+def test_repair_coordinator_can_explicitly_disable_replay(tmp_path):
+    runner = _runner(tmp_path)
+    source = _source_experiment()
+    runner.engine.propose((source,))
+    generation = runner.run_generation((source,))
+    outcome = run_single_hop_autonomous_repair(
+        runner=runner,
+        source_generation=generation,
+        provider=_provider(tmp_path),
+        variants=(RepairVariant("default", 0.2),),
+        replay_ratio=None,
+    )
+    assert outcome.population.proposed_candidates
+    assert "replay" not in outcome.population.proposed_candidates[0].config_patch["backend"]
