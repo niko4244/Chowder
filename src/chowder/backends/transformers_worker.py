@@ -9,6 +9,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from ..provenance import sha256_directory
 from .transformers_peft import TransformersPeftRunSpec
 
 
@@ -51,6 +52,16 @@ def _verify_bound_input(path: str, expected_sha: str | None, *, label: str) -> s
     return actual
 
 
+def _verify_bound_adapter(path: str, expected_sha: str, *, label: str) -> str:
+    resolved = Path(path).resolve()
+    if not resolved.is_dir():
+        raise FileNotFoundError(f"{label} adapter not found: {resolved}")
+    actual = sha256_directory(resolved)
+    if actual != expected_sha:
+        raise RuntimeError(f"{label} adapter digest changed before worker load")
+    return actual
+
+
 def _replay_sample_count(primary_rows: int, replay_rows: int, ratio: float) -> int:
     if primary_rows < 0 or replay_rows < 0:
         raise ValueError("dataset row counts cannot be negative")
@@ -71,9 +82,6 @@ def _text_digest(dataset: Any, text_field: str) -> str:
 
 
 def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
-    # Verify immutable data bindings before importing/downloading heavyweight
-    # model dependencies. The controller performs the same check immediately
-    # before spawning us, closing the proposal→worker boundary on both sides.
     primary_sha = _verify_bound_input(
         spec.dataset, spec.dataset_sha256, label="training"
     )
@@ -82,11 +90,25 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
         replay_sha = _verify_bound_input(
             spec.replay_dataset, spec.replay_sha256, label="replay"
         )
+    parent_adapter_sha: str | None = None
+    if spec.parent_adapter is not None:
+        assert spec.parent_adapter_sha256 is not None
+        parent_adapter_sha = _verify_bound_adapter(
+            spec.parent_adapter,
+            spec.parent_adapter_sha256,
+            label="parent",
+        )
 
     try:
         import torch
         from datasets import concatenate_datasets, load_dataset
-        from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
+        from peft import (
+            LoraConfig,
+            PeftModel,
+            TaskType,
+            get_peft_model,
+            prepare_model_for_kbit_training,
+        )
         from transformers import (
             AutoModelForCausalLM,
             AutoTokenizer,
@@ -132,23 +154,33 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
         )
         model_kwargs["device_map"] = 0
 
-    model = AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs)
+    base_model = AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs)
     if spec.quantization == "4bit":
-        model = prepare_model_for_kbit_training(
-            model,
+        base_model = prepare_model_for_kbit_training(
+            base_model,
             use_gradient_checkpointing=spec.gradient_checkpointing,
         )
 
-    lora_config = LoraConfig(
-        r=spec.lora_r,
-        lora_alpha=spec.lora_alpha,
-        lora_dropout=spec.lora_dropout,
-        target_modules=list(spec.target_modules),
-        bias="none",
-        task_type=TaskType.CAUSAL_LM,
-        use_rslora=spec.use_rslora,
-    )
-    model = get_peft_model(model, lora_config)
+    if spec.parent_adapter is not None:
+        # Continue the exact PEFT state that was evaluated and rejected. This is
+        # the critical distinction between cumulative repair and a fresh LoRA.
+        model = PeftModel.from_pretrained(
+            base_model,
+            spec.parent_adapter,
+            is_trainable=True,
+        )
+    else:
+        lora_config = LoraConfig(
+            r=spec.lora_r,
+            lora_alpha=spec.lora_alpha,
+            lora_dropout=spec.lora_dropout,
+            target_modules=list(spec.target_modules),
+            bias="none",
+            task_type=TaskType.CAUSAL_LM,
+            use_rslora=spec.use_rslora,
+        )
+        model = get_peft_model(base_model, lora_config)
+
     if spec.gradient_checkpointing:
         model.config.use_cache = False
 
@@ -234,15 +266,30 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
     else:
         peak_vram_gb = 0.0
 
-    # Reverify once more after training. A mutation during the run invalidates
-    # the artifact instead of silently changing what its provenance means.
-    if _verify_bound_input(spec.dataset, spec.dataset_sha256, label="training") != primary_sha:
+    if (
+        _verify_bound_input(spec.dataset, spec.dataset_sha256, label="training")
+        != primary_sha
+    ):
         raise RuntimeError("training dataset changed during worker execution")
     if spec.replay_dataset is not None:
-        if _verify_bound_input(
-            spec.replay_dataset, spec.replay_sha256, label="replay"
-        ) != replay_sha:
+        if (
+            _verify_bound_input(
+                spec.replay_dataset, spec.replay_sha256, label="replay"
+            )
+            != replay_sha
+        ):
             raise RuntimeError("replay dataset changed during worker execution")
+    if spec.parent_adapter is not None:
+        assert spec.parent_adapter_sha256 is not None
+        if (
+            _verify_bound_adapter(
+                spec.parent_adapter,
+                spec.parent_adapter_sha256,
+                label="parent",
+            )
+            != parent_adapter_sha
+        ):
+            raise RuntimeError("parent adapter changed during worker execution")
 
     return {
         "telemetry": {
@@ -268,6 +315,8 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
             "requested_base_model": spec.base_model,
             "requested_revision": spec.revision,
             "resolved_model_commit": getattr(model.config, "_commit_hash", None),
+            "continued_from_parent_adapter": parent_adapter_sha is not None,
+            "parent_adapter_sha256": parent_adapter_sha,
         },
         "versions": {
             "torch": _package_version("torch"),
