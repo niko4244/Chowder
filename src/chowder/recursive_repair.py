@@ -34,8 +34,6 @@ class RecursiveRepairStopReason(str, Enum):
 
 @dataclass(frozen=True)
 class RecursiveRepairPolicy:
-    """Finite stopping policy for autonomous repair recursion."""
-
     max_depth: int = 3
     min_score_improvement: float = 1e-4
     max_failure_signature_occurrences: int = 1
@@ -88,8 +86,6 @@ class RecursiveRepairOutcome:
 
     @property
     def depth(self) -> int:
-        """Total durable repair depth, including hops completed before resume."""
-
         return self.starting_depth + len(self.hops)
 
     @property
@@ -110,8 +106,6 @@ def _stable_failure_rows(target: RepairTarget) -> tuple[FailureRecord, ...]:
 
 
 def failure_signature(target: RepairTarget) -> str:
-    """Hash stable benchmark failure state, excluding experiment/run identity."""
-
     rows = _stable_failure_rows(target)
     payload = {
         "version": 1,
@@ -125,15 +119,11 @@ def failure_signature(target: RepairTarget) -> str:
                 {
                     "row_index": int(row.row_index),
                     "prompt_sha256": hashlib.sha256(row.prompt.encode("utf-8")).hexdigest(),
-                    "expected_sha256": hashlib.sha256(
-                        row.expected.encode("utf-8")
-                    ).hexdigest(),
+                    "expected_sha256": hashlib.sha256(row.expected.encode("utf-8")).hexdigest(),
                 }
                 for row in rows
             ),
-            key=lambda row: (
-                row["row_index"], row["prompt_sha256"], row["expected_sha256"]
-            ),
+            key=lambda row: (row["row_index"], row["prompt_sha256"], row["expected_sha256"]),
         ),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -159,20 +149,13 @@ def _score_improvement(previous: float, current: float) -> float:
     return 0.0
 
 
-def _ranked_repairable_targets(
-    generation: GenerationOutcome,
-) -> tuple[RepairTarget, ...]:
+def _ranked_repairable_targets(generation: GenerationOutcome) -> tuple[RepairTarget, ...]:
     targets: list[RepairTarget] = []
     for ranked in generation.ranking:
         if ranked.decision.accepted:
             continue
         try:
-            targets.append(
-                _repairable_target(
-                    generation,
-                    candidate_id=ranked.result.experiment_id,
-                )
-            )
+            targets.append(_repairable_target(generation, candidate_id=ranked.result.experiment_id))
         except ValueError as exc:
             if "no independently repairable diagnostics" in str(exc):
                 continue
@@ -267,10 +250,7 @@ def _result_snapshot(result: ExperimentResult) -> dict[str, Any]:
 
 
 def _engine_snapshot(runner: ExperimentCycleRunner) -> dict[str, Any]:
-    return {
-        "goal": _goal_snapshot(runner.engine.goal),
-        "baseline": _result_snapshot(runner.engine.baseline),
-    }
+    return {"goal": _goal_snapshot(runner.engine.goal), "baseline": _result_snapshot(runner.engine.baseline)}
 
 
 def _executor_name(executor: object) -> str:
@@ -278,8 +258,6 @@ def _executor_name(executor: object) -> str:
 
 
 def _execution_snapshot(runner: ExperimentCycleRunner) -> dict[str, Any]:
-    """Persist execution semantics required to prove a faithful resume."""
-
     return {
         "base_config": dict(runner.base_config),
         "seed": int(runner.context.seed),
@@ -312,8 +290,6 @@ def _execute_bounded_loop(
     begin_session: bool,
     recovery_claim_token: str | None = None,
 ) -> RecursiveRepairOutcome:
-    """Execute fresh or resumed bounded repair using one durable session."""
-
     if starting_depth < 0 or starting_depth > policy.max_depth:
         raise ValueError("starting_depth is outside recursive repair policy")
     if not session_id.strip():
@@ -333,24 +309,19 @@ def _execute_bounded_loop(
     current = current_generation
     new_hops: list[RecursiveRepairHop] = []
     previous_score = previous_target_score
-    store = (
-        RecursiveRepairTraceStore(runner.registry.path)
-        if runner.registry is not None
-        else None
-    )
+    store = RecursiveRepairTraceStore(runner.registry.path) if runner.registry is not None else None
     if not begin_session and store is None:
         raise ValueError("resuming recursive repair requires a RunRegistry")
     if not begin_session and not recovery_claim_token:
         raise ValueError("resuming recursive repair requires a recovery claim token")
     session_started = not begin_session
+    write_claim_token = recovery_claim_token if not begin_session else None
 
     def total_depth() -> int:
         return starting_depth + len(new_hops)
 
     def state_payload() -> dict[str, Any]:
-        promoted_id = (
-            current.promoted.experiment_id if current.promoted is not None else None
-        )
+        promoted_id = current.promoted.experiment_id if current.promoted is not None else None
         return {
             "depth_completed": total_depth(),
             "current_candidate_ids": list(_generation_candidate_ids(current)),
@@ -360,16 +331,14 @@ def _execute_bounded_loop(
             "promoted_experiment_id": promoted_id,
         }
 
-    def finish(
-        reason: RecursiveRepairStopReason,
-        detail: str,
-    ) -> RecursiveRepairOutcome:
+    def finish(reason: RecursiveRepairStopReason, detail: str) -> RecursiveRepairOutcome:
         if store is not None:
             store.finish(
                 session_id=session_id,
                 stop_reason=reason.value,
                 stop_detail=detail,
                 state=state_payload(),
+                claim_token=write_claim_token,
             )
         return RecursiveRepairOutcome(
             initial_generation=initial_generation,
@@ -409,22 +378,13 @@ def _execute_bounded_loop(
                 raise ValueError("recursive repair resume claim does not match")
 
         if current.promoted is not None:
-            return finish(
-                RecursiveRepairStopReason.PROMOTED,
-                "current generation already contains a promoted candidate",
-            )
+            return finish(RecursiveRepairStopReason.PROMOTED, "current generation already contains a promoted candidate")
         if total_depth() >= policy.max_depth:
-            return finish(
-                RecursiveRepairStopReason.MAX_DEPTH,
-                f"reached configured repair depth {policy.max_depth}",
-            )
+            return finish(RecursiveRepairStopReason.MAX_DEPTH, f"reached configured repair depth {policy.max_depth}")
 
         for depth in range(starting_depth + 1, policy.max_depth + 1):
             if runner.engine.remaining_budget <= 0:
-                return finish(
-                    RecursiveRepairStopReason.BUDGET_EXHAUSTED,
-                    "GPU-hour budget is exhausted",
-                )
+                return finish(RecursiveRepairStopReason.BUDGET_EXHAUSTED, "GPU-hour budget is exhausted")
 
             target, signature, had_repairable = _select_novel_target(
                 current,
@@ -432,11 +392,7 @@ def _execute_bounded_loop(
                 max_occurrences=policy.max_failure_signature_occurrences,
             )
             if target is None or signature is None:
-                reason = (
-                    RecursiveRepairStopReason.REPEATED_FAILURE
-                    if had_repairable
-                    else RecursiveRepairStopReason.NO_REPAIRABLE_DIAGNOSTIC
-                )
+                reason = RecursiveRepairStopReason.REPEATED_FAILURE if had_repairable else RecursiveRepairStopReason.NO_REPAIRABLE_DIAGNOSTIC
                 detail = (
                     "all repairable failure signatures reached their recurrence limit"
                     if had_repairable
@@ -451,10 +407,7 @@ def _execute_bounded_loop(
                 if gain < policy.min_score_improvement:
                     return finish(
                         RecursiveRepairStopReason.NO_PROGRESS,
-                        (
-                            f"best novel rejected candidate improved by {gain:.6g}; "
-                            f"minimum required is {policy.min_score_improvement:.6g}"
-                        ),
+                        f"best novel rejected candidate improved by {gain:.6g}; minimum required is {policy.min_score_improvement:.6g}",
                     )
 
             counts[signature] = counts.get(signature, 0) + 1
@@ -492,11 +445,7 @@ def _execute_bounded_loop(
 
             if store is not None:
                 produced_ids = _generation_candidate_ids(current)
-                promoted_id = (
-                    current.promoted.experiment_id
-                    if current.promoted is not None
-                    else None
-                )
+                promoted_id = current.promoted.experiment_id if current.promoted is not None else None
                 store.record_hop(
                     session_id=session_id,
                     depth=depth,
@@ -508,18 +457,13 @@ def _execute_bounded_loop(
                     produced_candidate_ids=produced_ids,
                     promoted_experiment_id=promoted_id,
                     state=state_payload(),
+                    claim_token=write_claim_token,
                 )
 
             if current.promoted is not None:
-                return finish(
-                    RecursiveRepairStopReason.PROMOTED,
-                    f"repair hop {depth} produced a promoted candidate",
-                )
+                return finish(RecursiveRepairStopReason.PROMOTED, f"repair hop {depth} produced a promoted candidate")
 
-        return finish(
-            RecursiveRepairStopReason.MAX_DEPTH,
-            f"reached configured repair depth {policy.max_depth}",
-        )
+        return finish(RecursiveRepairStopReason.MAX_DEPTH, f"reached configured repair depth {policy.max_depth}")
     except Exception as exc:
         if store is not None and session_started:
             try:
@@ -527,6 +471,7 @@ def _execute_bounded_loop(
                     session_id=session_id,
                     error_detail=f"{type(exc).__name__}: {exc}",
                     state=state_payload(),
+                    claim_token=write_claim_token,
                 )
             except Exception:
                 pass
@@ -544,8 +489,6 @@ def run_bounded_autonomous_repair(
     variants: Iterable[RepairVariant],
     policy: RecursiveRepairPolicy = RecursiveRepairPolicy(),
 ) -> RecursiveRepairOutcome:
-    """Start a new finite, evidence-preserving recursive repair session."""
-
     variant_rows = _validated_variants(variants)
     return _execute_bounded_loop(
         runner=runner,
@@ -574,8 +517,6 @@ def _resume_bounded_autonomous_repair_from_checkpoint(
     previous_target_score: float | None,
     recovery_claim_token: str,
 ) -> RecursiveRepairOutcome:
-    """Internal continuation entry point; callers must reconcile evidence first."""
-
     variant_rows = _validated_variants(variants)
     return _execute_bounded_loop(
         runner=runner,
