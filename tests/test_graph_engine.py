@@ -36,3 +36,28 @@ def test_adjudication_releases_reservation_and_accounts_actual_cost():
     assert engine.reserved_gpu_hours == 0
     assert engine.spent_gpu_hours == 0.7
     assert engine.remaining_budget == 2.3
+
+
+def test_config_resolution_applies_parent_patches_root_to_child_without_mutation():
+    graph = ExperimentGraph()
+    root = exp("root")
+    root.config_patch = {
+        "model": {"id": "base", "max_length": 512},
+        "training": {"lr": 1e-4, "epochs": 2},
+    }
+    child = exp("child", "root")
+    child.config_patch = {"training": {"lr": 2e-4}, "lora": {"r": 16}}
+    graph.add(root)
+    graph.add(child)
+
+    base = {"training": {"batch_size": 1}, "seed": 7}
+    resolved = graph.resolve_config("child", base)
+
+    assert resolved == {
+        "training": {"batch_size": 1, "lr": 2e-4, "epochs": 2},
+        "seed": 7,
+        "model": {"id": "base", "max_length": 512},
+        "lora": {"r": 16},
+    }
+    assert base == {"training": {"batch_size": 1}, "seed": 7}
+    assert root.config_patch["training"]["lr"] == 1e-4
