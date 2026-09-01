@@ -13,7 +13,7 @@ from .models import Hypothesis
 class RemediationOutcome(str, Enum):
     RESOLVED = "resolved"
     DID_NOT_RESOLVE = "did_not_resolve"
-    PARTIALLY_RESOLVED = "partially_resolved"  # got further, then hit a different incident
+    PARTIALLY_RESOLVED = "partially_resolved"
 
 
 def config_patch_digest(config_patch: Mapping[str, Any]) -> str:
@@ -21,15 +21,39 @@ def config_patch_digest(config_patch: Mapping[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def remediation_context_digest(capture: FailureCapture) -> str:
+    """Bind an auto-applicable remediation to the runtime context it fixed.
+
+    ``IncidentFingerprint`` intentionally normalizes volatile error text and is
+    useful for bucketing recurring incidents. It is not sufficient by itself to
+    prove that a previously successful fix is safe to auto-apply: package pins,
+    hardware, executor configuration, or other environment state may have
+    changed while the normalized exception stayed the same.
+    """
+
+    environment = capture.environment
+    payload = {
+        "executor_name": capture.executor_name,
+        "exception_type": capture.exception_type,
+        "hardware_summary": environment.hardware_summary,
+        "accelerator_count": environment.accelerator_count,
+        "installed_packages": dict(environment.installed_packages),
+        "config_patch": dict(environment.config_patch),
+        "extra": dict(environment.extra),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class RemediationRecord:
-    """A remediation that has actually been tried before, with its outcome.
+    """A remediation that was actually attempted against one incident.
 
-    ``fingerprint_sha256`` ties this to the exact incident it was tried
-    against. ``signature_kind`` is kept alongside for class-level lookups
-    (checking history across similar-but-not-identical incidents), but
-    class similarity alone is never sufficient to auto-apply a fix -- see
-    ``RemediationRegistry.lookup``.
+    Automatic reuse requires both the normalized incident fingerprint and the
+    exact captured runtime-context digest. ``signature_kind`` remains useful for
+    class-level investigation history but is never enough to auto-apply a fix.
+    ``spawned_incident`` preserves a full new failure capture when a remediation
+    gets further and then crashes differently.
     """
 
     remediation_id: str
@@ -41,33 +65,39 @@ class RemediationRecord:
     attempts_used: int
     gpu_hours_spent: float
     notes: str = ""
+    context_sha256: str | None = None
+    spawned_incident: FailureCapture | None = None
 
 
 @dataclass(frozen=True)
 class RemediationRegistry:
-    """Known remediation history.
-
-    Deliberately conservative: ``lookup`` only ever returns a "known
-    remediation, apply it" answer for an *exact* fingerprint match that
-    previously resolved cleanly. Same-class-but-not-identical incidents are
-    a real, common trap -- two of today's real incidents were both CUDA
-    RuntimeErrors in the same custom-op family (qwen3_5's conv1d "no
-    engine" vs. its gated-delta-rule cuBLAS failure), and the fix for one
-    did nothing for the other. Auto-applying a same-class fix would have
-    cost a full wasted attempt before discovering that. Class history is
-    still useful -- see ``class_history`` and ``already_failed_for_class``
-    -- but only to inform a real investigation, never to bypass one.
-    """
+    """Known remediation history with conservative exact-context reuse."""
 
     records: tuple[RemediationRecord, ...] = ()
 
-    def lookup(self, fingerprint: IncidentFingerprint) -> RemediationRecord | None:
+    def lookup(
+        self,
+        fingerprint: IncidentFingerprint,
+        *,
+        capture: FailureCapture | None = None,
+    ) -> RemediationRecord | None:
+        wanted_context = remediation_context_digest(capture) if capture is not None else None
         for record in self.records:
-            if (
-                record.fingerprint_sha256 == fingerprint.fingerprint_sha256
-                and record.outcome is RemediationOutcome.RESOLVED
-            ):
-                return record
+            if record.outcome is not RemediationOutcome.RESOLVED:
+                continue
+            if record.fingerprint_sha256 != fingerprint.fingerprint_sha256:
+                continue
+            # Legacy/context-free records remain inspectable history, but may not
+            # be auto-applied to a live capture because their environment cannot
+            # be proven equivalent.
+            if capture is not None:
+                if record.context_sha256 is None or record.context_sha256 != wanted_context:
+                    continue
+            elif record.context_sha256 is not None:
+                # Callers asking only by fingerprint cannot prove environment
+                # equivalence, so do not return context-bound fixes.
+                continue
+            return record
         return None
 
     def class_history(self, signature_kind: SignatureKind) -> tuple[RemediationRecord, ...]:
@@ -76,13 +106,6 @@ class RemediationRegistry:
     def already_failed_for_class(
         self, signature_kind: SignatureKind, config_patch: Mapping[str, Any]
     ) -> RemediationRecord | None:
-        """Has this exact intervention already failed against this failure class?
-
-        Identity is the config patch's content digest, not free-text
-        description, so two hypotheses that describe the same underlying
-        change in different words are still recognized as the same
-        intervention.
-        """
         digest = config_patch_digest(config_patch)
         for record in self.class_history(signature_kind):
             if record.outcome is RemediationOutcome.DID_NOT_RESOLVE and (
@@ -99,21 +122,11 @@ class InvestigationStatus(str, Enum):
     OPEN = "open"
     HYPOTHESIS_TESTING = "hypothesis_testing"
     RESOLVED = "resolved"
-    ABANDONED = "abandoned"  # exhausted its GPU-hour budget, or every candidate
-    # hypothesis on offer, without resolving -- see Investigation.abandon()
+    ABANDONED = "abandoned"
 
 
 @dataclass(frozen=True)
 class DiagnosticProbeResult:
-    """Cheap evidence-gathering, distinct from a remediation attempt.
-
-    A probe observes (checks installed versions, queries available hardware
-    shapes, inspects a partial artifact) -- it must never change execution
-    state. That distinction is what keeps "gather more evidence" cheap and
-    safe to run liberally, unlike a remediation trial, which is a real
-    bounded experiment with its own GPU-hour cost.
-    """
-
     probe_id: str
     description: str
     observation: Mapping[str, Any]
@@ -121,8 +134,6 @@ class DiagnosticProbeResult:
 
 @dataclass
 class HypothesisTrial:
-    """One hypothesis being tested against one incident's investigation."""
-
     hypothesis: Hypothesis
     config_patch: Mapping[str, Any]
     estimated_gpu_hours: float = 0.0
@@ -133,18 +144,6 @@ class HypothesisTrial:
 
 @dataclass
 class Investigation:
-    """The hypothesis graph for one incident with no known remediation.
-
-    Only reached via ``route_failure`` when ``RemediationRegistry.lookup``
-    finds nothing -- i.e. this exact incident has never resolved cleanly
-    before. Chowder's own reasoning does not live here: this is a state
-    container an external driver (a hypothesis generator, an agent, a rule
-    engine) populates and advances. That boundary mirrors
-    ``TrainingExecutor``: the control plane consumes results without caring
-    how they were produced, and this graph collects hypotheses/evidence
-    without caring how they were generated.
-    """
-
     investigation_id: str
     fingerprint: IncidentFingerprint
     capture: FailureCapture
@@ -164,22 +163,6 @@ class Investigation:
         estimated_gpu_hours: float = 0.0,
         registry: RemediationRegistry | None = None,
     ) -> HypothesisTrial:
-        """Register a new hypothesis, with the concrete change it proposes to try.
-
-        ``Hypothesis.intervention`` (from ``models.py``) is free text -- it
-        describes an idea, not an executable change. ``config_patch`` is
-        the actual patch that idea resolves to, and is what "have we tried
-        this before" has to compare against. ``estimated_gpu_hours`` is the
-        generator's own pre-run cost estimate for this candidate -- used by
-        ``ranking.py`` to break ties between equally-corroborated trials
-        (cheaper first), not a measured cost, which only exists once a
-        trial has actually run. When ``registry`` is supplied and this
-        exact patch already failed against this incident's signature
-        class, this raises rather than silently accepting a repeat -- the
-        structural guard behind "did it avoid repeating failed
-        interventions," enforced here rather than left to callers to
-        remember.
-        """
         if self.remaining_budget() <= 0:
             raise ValueError(
                 f"investigation {self.investigation_id} has no remaining GPU-hour budget"
@@ -211,31 +194,21 @@ class Investigation:
     def resolve(self, trial: HypothesisTrial, remediation: RemediationRecord) -> None:
         if remediation.outcome is not RemediationOutcome.RESOLVED:
             raise ValueError("cannot resolve an investigation with a non-resolving remediation")
+        if remediation.gpu_hours_spent > self.remaining_budget() + 1e-12:
+            raise ValueError("remediation exceeds investigation GPU-hour budget")
         trial.remediation = remediation
         self.gpu_hours_spent += remediation.gpu_hours_spent
         self.status = InvestigationStatus.RESOLVED
 
     def record_failed_trial(self, trial: HypothesisTrial, remediation: RemediationRecord) -> None:
+        if remediation.gpu_hours_spent > self.remaining_budget() + 1e-12:
+            raise ValueError("remediation exceeds investigation GPU-hour budget")
         trial.remediation = remediation
         self.gpu_hours_spent += remediation.gpu_hours_spent
         if self.remaining_budget() <= 0:
             self.status = InvestigationStatus.ABANDONED
 
     def abandon(self) -> None:
-        """Mark this investigation abandoned because there is nothing left
-        to try -- every candidate hypothesis the generator offered has been
-        attempted (or none existed at all) without resolving, independent
-        of whether any GPU-hour budget remains.
-
-        Distinct from the automatic ABANDONED transition inside
-        ``record_failed_trial`` (budget exhaustion): a driver that has run
-        out of *ideas*, not out of money, is equally stuck, and a
-        benchmark scoring "did it resolve or was it honestly abandoned"
-        needs both paths to land in the same terminal state rather than
-        leaving an idea-exhausted investigation stranded in
-        HYPOTHESIS_TESTING (or even OPEN, if no hypothesis was ever
-        proposed) forever.
-        """
         if self.status is InvestigationStatus.RESOLVED:
             raise ValueError(f"investigation {self.investigation_id} is already resolved")
         self.status = InvestigationStatus.ABANDONED
@@ -249,14 +222,9 @@ def route_failure(
     gpu_hour_budget: float,
     investigation_id: str,
 ) -> RemediationRecord | Investigation:
-    """The "known remediation?" fork.
+    """Auto-apply only a fix proven on this exact incident *and* runtime context."""
 
-    Exact-fingerprint match against a previously *resolved* remediation
-    routes to a bounded, low-risk retry of that exact fix. Anything else --
-    a genuinely new incident, or one that merely resembles a past class --
-    opens a real investigation instead of guessing.
-    """
-    known = registry.lookup(fingerprint)
+    known = registry.lookup(fingerprint, capture=capture)
     if known is not None:
         return known
     return Investigation(
