@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import asdict
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
+from .database import connect_database
 from .executors import EvaluationOutcome, TrainingArtifact
 from .failures import FailureRecord, FailureSourceRole, RepairPlan
 from .models import Experiment, ExperimentResult
@@ -13,7 +13,6 @@ from .provenance import EvidenceManifest
 
 
 SCHEMA = """
-PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS experiments (
     experiment_id TEXT PRIMARY KEY,
     parent_id TEXT,
@@ -84,27 +83,19 @@ CREATE TABLE IF NOT EXISTS manifests (
 );
 """
 
-
 _EXPERIMENT_INSERT = """INSERT INTO experiments
    (experiment_id, parent_id, estimated_gpu_hours, hypothesis_json, config_json, status)
    VALUES (?, ?, ?, ?, ?, ?)"""
 
-_FAILURE_UPSERT = """INSERT OR REPLACE INTO failure_records
-   (failure_id, experiment_id, evaluation_run_id, evaluator, suite, row_index,
-    protocol_sha256, artifact_sha256, source_role, prompt, expected, prediction,
-    score, failure_kind, metadata_json)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
-
 
 class RegistryInvariantError(ValueError):
-    """Raised when durable experiment lineage would violate graph invariants."""
+    """Raised when durable scientific state would be overwritten or malformed."""
 
 
 class RunRegistry:
     def __init__(self, path: str | Path):
         self.path = str(path)
-        self._conn = sqlite3.connect(self.path)
-        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn = connect_database(self.path)
         self._conn.executescript(SCHEMA)
 
     def close(self) -> None:
@@ -115,6 +106,37 @@ class RunRegistry:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
+
+    @staticmethod
+    def _json(value: object) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+    def _insert_immutable(
+        self,
+        *,
+        table: str,
+        key_column: str,
+        key: object,
+        columns: Sequence[str],
+        values: Sequence[object],
+    ) -> None:
+        """Insert once; identical replays are idempotent, divergent ones fail."""
+        existing = self._conn.execute(
+            f"SELECT {', '.join(columns)} FROM {table} WHERE {key_column} = ?",
+            (key,),
+        ).fetchone()
+        wanted = tuple(values)
+        if existing is not None:
+            if tuple(existing) == wanted:
+                return
+            raise RegistryInvariantError(
+                f"immutable {table} record {key!r} already exists with different content"
+            )
+        placeholders = ", ".join("?" for _ in columns)
+        self._conn.execute(
+            f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})",
+            wanted,
+        )
 
     @staticmethod
     def _experiment_row(experiment: Experiment) -> tuple[object, ...]:
@@ -128,15 +150,6 @@ class RunRegistry:
         )
 
     def _validate_experiment_batch(self, experiments: tuple[Experiment, ...]) -> None:
-        """Validate ordered lineage before writing, including legacy databases.
-
-        Early Chowder databases did not declare ``experiments.parent_id`` as a
-        SQLite foreign key. Application-level validation therefore remains the
-        durable compatibility invariant: a parent must already exist or appear
-        earlier in this same ordered batch, and IDs may not collide with either
-        existing rows or earlier batch members.
-        """
-
         existing_ids = {
             row[0] for row in self._conn.execute("SELECT experiment_id FROM experiments")
         }
@@ -149,20 +162,10 @@ class RunRegistry:
                 )
             parent_id = experiment.parent_id
             if parent_id is not None and parent_id not in staged_ids:
-                raise RegistryInvariantError(
-                    f"unknown persisted parent: {parent_id}"
-                )
+                raise RegistryInvariantError(f"unknown persisted parent: {parent_id}")
             staged_ids.add(experiment_id)
 
     def record_experiments(self, experiments: Iterable[Experiment]) -> None:
-        """Persist an ordered experiment batch atomically.
-
-        Parent rows may occur earlier in the same batch. Invariant validation is
-        performed before opening the write transaction so legacy databases with
-        no self-referential parent foreign key receive the same guarantees as new
-        ones. Any SQL failure still rolls back every write in the batch.
-        """
-
         rows = tuple(experiments)
         if not rows:
             return
@@ -181,20 +184,22 @@ class RunRegistry:
         return row is not None
 
     def record_training_artifact(self, artifact: TrainingArtifact) -> None:
-        self._conn.execute(
-            """INSERT OR REPLACE INTO training_runs
-               (run_id, experiment_id, artifact_ref, gpu_hours, telemetry_json, evidence_json)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (
-                artifact.run_id,
-                artifact.experiment_id,
-                artifact.artifact_ref,
-                artifact.gpu_hours,
-                json.dumps(dict(artifact.telemetry), sort_keys=True),
-                json.dumps(dict(artifact.evidence), sort_keys=True),
-            ),
+        columns = (
+            "run_id", "experiment_id", "artifact_ref", "gpu_hours", "telemetry_json", "evidence_json"
         )
-        self._conn.commit()
+        values = (
+            artifact.run_id,
+            artifact.experiment_id,
+            artifact.artifact_ref,
+            artifact.gpu_hours,
+            self._json(dict(artifact.telemetry)),
+            self._json(dict(artifact.evidence)),
+        )
+        with self._conn:
+            self._insert_immutable(
+                table="training_runs", key_column="run_id", key=artifact.run_id,
+                columns=columns, values=values,
+            )
 
     def list_training_artifacts(self) -> Iterable[TrainingArtifact]:
         rows = self._conn.execute(
@@ -212,20 +217,22 @@ class RunRegistry:
             )
 
     def record_evaluation_outcome(self, outcome: EvaluationOutcome) -> None:
-        self._conn.execute(
-            """INSERT OR REPLACE INTO evaluation_runs
-               (run_id, experiment_id, source_artifact_ref, metrics_json, gpu_hours, evidence_json)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (
-                outcome.run_id,
-                outcome.experiment_id,
-                outcome.source_artifact_ref,
-                json.dumps(dict(outcome.metrics), sort_keys=True),
-                outcome.gpu_hours,
-                json.dumps(dict(outcome.evidence), sort_keys=True),
-            ),
+        columns = (
+            "run_id", "experiment_id", "source_artifact_ref", "metrics_json", "gpu_hours", "evidence_json"
         )
-        self._conn.commit()
+        values = (
+            outcome.run_id,
+            outcome.experiment_id,
+            outcome.source_artifact_ref,
+            self._json(dict(outcome.metrics)),
+            outcome.gpu_hours,
+            self._json(dict(outcome.evidence)),
+        )
+        with self._conn:
+            self._insert_immutable(
+                table="evaluation_runs", key_column="run_id", key=outcome.run_id,
+                columns=columns, values=values,
+            )
 
     def list_evaluation_outcomes(self) -> Iterable[EvaluationOutcome]:
         rows = self._conn.execute(
@@ -259,7 +266,7 @@ class RunRegistry:
             failure.prediction,
             failure.score,
             failure.failure_kind,
-            json.dumps(dict(failure.metadata), sort_keys=True),
+            json.dumps(dict(failure.metadata), sort_keys=True, separators=(",", ":"), allow_nan=False),
         )
 
     def record_failure(self, failure: FailureRecord) -> None:
@@ -269,9 +276,18 @@ class RunRegistry:
         rows = tuple(failures)
         if not rows:
             return
-        values = tuple(self._failure_row(failure) for failure in rows)
+        columns = (
+            "failure_id", "experiment_id", "evaluation_run_id", "evaluator", "suite", "row_index",
+            "protocol_sha256", "artifact_sha256", "source_role", "prompt", "expected", "prediction",
+            "score", "failure_kind", "metadata_json",
+        )
         with self._conn:
-            self._conn.executemany(_FAILURE_UPSERT, values)
+            for failure in rows:
+                values = self._failure_row(failure)
+                self._insert_immutable(
+                    table="failure_records", key_column="failure_id", key=failure.failure_id,
+                    columns=columns, values=values,
+                )
 
     def list_failures(self, *, experiment_id: str | None = None) -> Iterable[FailureRecord]:
         if experiment_id is None:
@@ -291,21 +307,9 @@ class RunRegistry:
             )
         for row in rows:
             (
-                failure_id,
-                exp_id,
-                evaluation_run_id,
-                evaluator,
-                suite,
-                row_index,
-                protocol_sha256,
-                artifact_sha256,
-                source_role,
-                prompt,
-                expected,
-                prediction,
-                score,
-                failure_kind,
-                metadata_json,
+                failure_id, exp_id, evaluation_run_id, evaluator, suite, row_index,
+                protocol_sha256, artifact_sha256, source_role, prompt, expected,
+                prediction, score, failure_kind, metadata_json,
             ) = row
             yield FailureRecord(
                 failure_id=failure_id,
@@ -326,23 +330,25 @@ class RunRegistry:
             )
 
     def record_repair_plan(self, plan: RepairPlan) -> None:
-        self._conn.execute(
-            """INSERT OR REPLACE INTO repair_plans
-               (plan_id, cluster_id, observation, suspected_cause, intervention,
-                source_failure_ids_json, direct_training_allowed, requires_independent_source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                plan.plan_id,
-                plan.cluster_id,
-                plan.observation,
-                plan.suspected_cause,
-                plan.intervention,
-                json.dumps(list(plan.source_failure_ids), sort_keys=True),
-                int(plan.direct_training_allowed),
-                int(plan.requires_independent_source),
-            ),
+        columns = (
+            "plan_id", "cluster_id", "observation", "suspected_cause", "intervention",
+            "source_failure_ids_json", "direct_training_allowed", "requires_independent_source",
         )
-        self._conn.commit()
+        values = (
+            plan.plan_id,
+            plan.cluster_id,
+            plan.observation,
+            plan.suspected_cause,
+            plan.intervention,
+            self._json(list(plan.source_failure_ids)),
+            int(plan.direct_training_allowed),
+            int(plan.requires_independent_source),
+        )
+        with self._conn:
+            self._insert_immutable(
+                table="repair_plans", key_column="plan_id", key=plan.plan_id,
+                columns=columns, values=values,
+            )
 
     def list_repair_plans(self) -> Iterable[RepairPlan]:
         rows = self._conn.execute(
@@ -352,14 +358,8 @@ class RunRegistry:
         )
         for row in rows:
             (
-                plan_id,
-                cluster_id,
-                observation,
-                suspected_cause,
-                intervention,
-                source_failure_ids_json,
-                direct_training_allowed,
-                requires_independent_source,
+                plan_id, cluster_id, observation, suspected_cause, intervention,
+                source_failure_ids_json, direct_training_allowed, requires_independent_source,
             ) = row
             yield RepairPlan(
                 plan_id=plan_id,
@@ -373,35 +373,97 @@ class RunRegistry:
             )
 
     def update_experiment_status(self, experiment_id: str, status: str) -> None:
-        self._conn.execute(
-            "UPDATE experiments SET status = ? WHERE experiment_id = ?",
-            (status, experiment_id),
-        )
-        self._conn.commit()
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE experiments SET status = ? WHERE experiment_id = ?",
+                (status, experiment_id),
+            )
+            if cursor.rowcount != 1:
+                raise RegistryInvariantError(f"unknown persisted experiment id: {experiment_id}")
 
     def record_result(self, result: ExperimentResult) -> None:
-        self._conn.execute(
-            """INSERT OR REPLACE INTO results
-               (experiment_id, metrics_json, gpu_hours, artifact_ref, evidence_json)
-               VALUES (?, ?, ?, ?, ?)""",
-            (
-                result.experiment_id,
-                json.dumps(dict(result.metrics), sort_keys=True),
-                result.gpu_hours,
-                result.artifact_ref,
-                json.dumps(dict(result.evidence), sort_keys=True),
-            ),
+        columns = ("experiment_id", "metrics_json", "gpu_hours", "artifact_ref", "evidence_json")
+        values = (
+            result.experiment_id,
+            self._json(dict(result.metrics)),
+            result.gpu_hours,
+            result.artifact_ref,
+            self._json(dict(result.evidence)),
         )
-        self._conn.commit()
+        with self._conn:
+            self._insert_immutable(
+                table="results", key_column="experiment_id", key=result.experiment_id,
+                columns=columns, values=values,
+            )
 
     def record_manifest(self, manifest: EvidenceManifest) -> str:
         digest = manifest.digest()
-        self._conn.execute(
-            "INSERT OR REPLACE INTO manifests (experiment_id, digest, manifest_json) VALUES (?, ?, ?)",
-            (manifest.experiment_id, digest, manifest.canonical_json()),
-        )
-        self._conn.commit()
+        columns = ("experiment_id", "digest", "manifest_json")
+        values = (manifest.experiment_id, digest, manifest.canonical_json())
+        with self._conn:
+            self._insert_immutable(
+                table="manifests", key_column="experiment_id", key=manifest.experiment_id,
+                columns=columns, values=values,
+            )
         return digest
+
+    def record_execution_incident(self, analysis) -> None:
+        """Persist structured executor crash evidence from Executor Investigator."""
+        capture = analysis.capture
+        fingerprint = analysis.fingerprint
+        routed = analysis.routed
+        if hasattr(routed, "investigation_id"):
+            route_summary = {
+                "type": "investigation",
+                "id": routed.investigation_id,
+                "status": routed.status.value,
+            }
+        else:
+            route_summary = {
+                "type": "known_remediation",
+                "id": routed.remediation_id,
+                "outcome": routed.outcome.value,
+            }
+        columns = (
+            "incident_id", "experiment_id", "run_id", "executor_name", "fingerprint_sha256",
+            "signature_kind", "gpu_hours_spent", "capture_json", "analysis_json",
+        )
+        values = (
+            capture.incident_id,
+            capture.experiment_id,
+            capture.run_id or "unknown",
+            capture.executor_name,
+            fingerprint.fingerprint_sha256,
+            fingerprint.signature_kind.value,
+            capture.gpu_hours_spent,
+            self._json(asdict(capture)),
+            self._json(route_summary),
+        )
+        with self._conn:
+            self._insert_immutable(
+                table="execution_incidents", key_column="incident_id", key=capture.incident_id,
+                columns=columns, values=values,
+            )
+
+    def list_execution_incidents(self) -> Iterable[dict[str, object]]:
+        rows = self._conn.execute(
+            """SELECT incident_id, experiment_id, run_id, executor_name,
+                      fingerprint_sha256, signature_kind, gpu_hours_spent,
+                      capture_json, analysis_json
+               FROM execution_incidents ORDER BY rowid"""
+        )
+        for row in rows:
+            yield {
+                "incident_id": row[0],
+                "experiment_id": row[1],
+                "run_id": row[2],
+                "executor_name": row[3],
+                "fingerprint_sha256": row[4],
+                "signature_kind": row[5],
+                "gpu_hours_spent": row[6],
+                "capture": json.loads(row[7]),
+                "analysis": json.loads(row[8]),
+            }
 
     def lineage(self, experiment_id: str) -> tuple[str, ...]:
         lineage: list[str] = []
