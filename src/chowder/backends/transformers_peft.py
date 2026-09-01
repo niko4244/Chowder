@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from ..executors import CostEstimate, ExecutionContext, TrainingArtifact
 from ..models import Experiment
-from ..provenance import sha256_file
+from ..provenance import sha256_directory, sha256_file
 
 
 _ALLOWED_QUANTIZATION = {"none", "4bit"}
@@ -257,6 +257,8 @@ class TransformersPeftExecutor:
             raise RuntimeError(f"transformers worker failed with exit code {process.returncode}:\n{tail}")
         if not result_path.is_file():
             raise RuntimeError("transformers worker exited successfully without a result manifest")
+        if not Path(spec.output_dir).is_dir():
+            raise RuntimeError("transformers worker exited successfully without an adapter artifact")
 
         worker_result = json.loads(result_path.read_text(encoding="utf-8"))
         telemetry = worker_result.get("telemetry", {})
@@ -276,6 +278,7 @@ class TransformersPeftExecutor:
                 "execution_spec_sha256": spec.digest(),
                 "recipe_sha256": spec.recipe_digest(),
                 "dataset_sha256": sha256_file(spec.dataset),
+                "artifact_sha256": sha256_directory(spec.output_dir),
                 "resolved_config_sha256": self._json_digest(context.resolved_config),
                 "worker_result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
                 "stdout_log": str(stdout_path),
