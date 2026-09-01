@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from chowder.contamination import write_holdout_fingerprint_index
 from chowder.evaluators.transformers_text import TransformersTextEvaluator, TransformersTextEvalSpec
 from chowder.evaluators.transformers_text_worker import _score
 from chowder.executors import ExecutionContext, TrainingArtifact
@@ -61,6 +62,24 @@ def _artifact(tmp_path, *, resolved_commit="resolved123"):
     )
 
 
+def _fake_payload(result_path: Path, *, metric: float, device: str, gpu_count: int):
+    fingerprint_path = result_path.parent / "holdout-fingerprints-quality.jsonl"
+    fingerprint_digest = write_holdout_fingerprint_index([("2+2?", "4")], fingerprint_path)
+    return {
+        "metrics": {"quality": metric},
+        "suites": {
+            "quality": {
+                "rows": 1,
+                "scoring": "normalized_exact_match",
+                "holdout_fingerprints_file": str(fingerprint_path),
+                "holdout_fingerprints_sha256": fingerprint_digest,
+            }
+        },
+        "runtime": {"device": device, "gpu_count": gpu_count},
+        "versions": {"transformers": "5.test"},
+    }
+
+
 def test_eval_spec_pins_resolved_training_commit_and_inherits_runtime(tmp_path):
     data = tmp_path / "eval.jsonl"
     data.write_text('{"prompt":"2+2?","expected":"4"}\n')
@@ -93,7 +112,7 @@ def test_evaluator_refuses_mutated_adapter(tmp_path):
         )
 
 
-def test_evaluator_returns_named_metrics_from_isolated_worker(tmp_path, monkeypatch):
+def test_evaluator_returns_named_metrics_and_verified_holdout_index(tmp_path, monkeypatch):
     data = tmp_path / "eval.jsonl"
     data.write_text('{"prompt":"2+2?","expected":"4"}\n')
     artifact = _artifact(tmp_path)
@@ -104,12 +123,9 @@ def test_evaluator_returns_named_metrics_from_isolated_worker(tmp_path, monkeypa
 
         def __init__(self, command, **kwargs):
             result_path = Path(command[command.index("--result") + 1])
-            result_path.write_text(json.dumps({
-                "metrics": {"quality": 0.75},
-                "suites": {"quality": {"rows": 4, "scoring": "normalized_exact_match"}},
-                "runtime": {"device": "cuda:0", "gpu_count": 1},
-                "versions": {"transformers": "5.test"},
-            }))
+            result_path.write_text(json.dumps(_fake_payload(
+                result_path, metric=0.75, device="cuda:0", gpu_count=1
+            )))
 
         def wait(self, timeout=None):
             return 0
@@ -130,6 +146,39 @@ def test_evaluator_returns_named_metrics_from_isolated_worker(tmp_path, monkeypa
     assert result.gpu_hours < artifact.gpu_hours
     assert result.evidence["artifact_sha256"] == artifact.evidence["artifact_sha256"]
     assert len(result.evidence["evaluation_dataset_sha256"]["quality"]) == 64
+    assert len(result.evidence["holdout_fingerprint_sha256"]["quality"]) == 64
+
+
+def test_evaluator_rejects_tampered_holdout_fingerprint_index(tmp_path, monkeypatch):
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"2+2?","expected":"4"}\n')
+    artifact = _artifact(tmp_path)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=_config("eval.jsonl"))
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            result_path = Path(command[command.index("--result") + 1])
+            payload = _fake_payload(result_path, metric=1.0, device="cpu", gpu_count=0)
+            fingerprint_path = Path(payload["suites"]["quality"]["holdout_fingerprints_file"])
+            fingerprint_path.write_text("tampered\n", encoding="utf-8")
+            result_path.write_text(json.dumps(payload))
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr("chowder.evaluators.transformers_text.subprocess.Popen", FakeProcess)
+    with pytest.raises(RuntimeError, match="digest mismatch"):
+        TransformersTextEvaluator().evaluate(
+            experiment=_experiment(), artifact=artifact, context=context
+        )
 
 
 def test_worker_scoring_is_deterministic_and_explicit():
@@ -150,12 +199,9 @@ def test_cpu_evaluation_does_not_consume_gpu_hour_budget(tmp_path, monkeypatch):
 
         def __init__(self, command, **kwargs):
             result_path = Path(command[command.index("--result") + 1])
-            result_path.write_text(json.dumps({
-                "metrics": {"quality": 1.0},
-                "suites": {"quality": {"rows": 1, "scoring": "normalized_exact_match"}},
-                "runtime": {"device": "cpu", "gpu_count": 0},
-                "versions": {"transformers": "5.test"},
-            }))
+            result_path.write_text(json.dumps(_fake_payload(
+                result_path, metric=1.0, device="cpu", gpu_count=0
+            )))
 
         def wait(self, timeout=None):
             return 0

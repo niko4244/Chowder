@@ -7,6 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from ..contamination import write_holdout_fingerprint_index
 from .transformers_text import EvalSuiteSpec, TransformersTextEvalSpec
 
 
@@ -123,6 +124,15 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
     with torch.inference_mode():
         for suite in spec.suites:
             rows = _load_rows(suite)
+            fingerprint_path = output_dir / f"holdout-fingerprints-{suite.name}.jsonl"
+            fingerprint_digest = write_holdout_fingerprint_index(
+                (
+                    (str(row[suite.prompt_field]), str(row[suite.expected_field]))
+                    for row in rows
+                ),
+                fingerprint_path,
+            )
+
             correct = 0.0
             predictions_path = output_dir / f"predictions-{suite.name}.jsonl"
             with predictions_path.open("w", encoding="utf-8") as output:
@@ -167,6 +177,8 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                 "rows": len(rows),
                 "scoring": suite.scoring,
                 "predictions_file": str(predictions_path),
+                "holdout_fingerprints_file": str(fingerprint_path),
+                "holdout_fingerprints_sha256": fingerprint_digest,
             }
 
     return {
