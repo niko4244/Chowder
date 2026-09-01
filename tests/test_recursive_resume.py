@@ -65,6 +65,7 @@ def _runner(tmp_path, registry: RunRegistry, *, seed: int = 7):
 def _source_experiment():
     return Experiment(
         experiment_id="source",
+        parent_id=None,
         hypothesis=Hypothesis("obs", "cause", "intervention"),
         config_patch={},
         estimated_gpu_hours=0.2,
@@ -250,11 +251,16 @@ def test_clean_resume_restores_budget_and_continues_from_checkpoint(monkeypatch,
             promoted=winner,
         )
 
-        def fake_hop(*, runner, source_generation, provider, variants, candidate_id=None, replay_ratio=1.0):
+        def fake_hop(
+            *, runner, source_generation, provider, variants,
+            candidate_id=None, replay_ratio=1.0,
+        ):
             calls.append(candidate_id)
             return AutonomousRepairOutcome(
                 source_generation=source_generation,
-                target=_repairable_target(source_generation, candidate_id=candidate_id),
+                target=_repairable_target(
+                    source_generation, candidate_id=candidate_id
+                ),
                 population=None,
                 repair_generation=promoted_generation,
             )
