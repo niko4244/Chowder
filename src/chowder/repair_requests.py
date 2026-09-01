@@ -46,26 +46,21 @@ class RepairRequest:
     strategy: RepairStrategy
     failure_count: int
     protocol_sha256: str
-    source_failure_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if self.failure_count <= 0:
             raise ValueError("repair request failure_count must be positive")
-        if self.failure_count != len(self.source_failure_ids):
-            raise ValueError("repair request failure_count does not match failure IDs")
         if len(self.protocol_sha256) != 64:
             raise ValueError("repair request protocol_sha256 is invalid")
-        if not all(len(failure_id) == 64 for failure_id in self.source_failure_ids):
-            raise ValueError("repair request failure IDs must be SHA-256 digests")
         if self.strategy is not strategy_for_failure_kind(self.failure_kind):
             raise ValueError("repair request strategy does not match failure kind")
 
     def to_provider_payload(self) -> dict[str, object]:
         """Return the complete provider-visible payload.
 
-        Raw prompts, expected answers, model predictions, row indexes, and
-        free-form plan prose are not members of this type and cannot cross this
-        provider boundary through the canonical serializer.
+        Raw prompts, expected answers, model predictions, row indexes, failure
+        hashes, and free-form plan prose are not members of this type and cannot
+        cross this provider boundary through the canonical serializer.
         """
 
         return {
@@ -78,7 +73,6 @@ class RepairRequest:
             "strategy": self.strategy.value,
             "failure_count": self.failure_count,
             "protocol_sha256": self.protocol_sha256,
-            "source_failure_ids": list(self.source_failure_ids),
         }
 
 
@@ -142,6 +136,8 @@ def build_repair_request(*, plan: RepairPlan, cluster: FailureCluster) -> Repair
         raise ValueError("repair request is only for plans requiring independent source material")
 
     strategy = strategy_for_failure_kind(cluster.failure_kind)
+    # Failure IDs remain internal to request construction. They influence the
+    # opaque request ID, but are not stored on the provider-visible request.
     identity = {
         "plan_id": plan.plan_id,
         "cluster_id": cluster.cluster_id,
@@ -162,7 +158,6 @@ def build_repair_request(*, plan: RepairPlan, cluster: FailureCluster) -> Repair
         strategy=strategy,
         failure_count=len(cluster_ids),
         protocol_sha256=cluster.protocol_sha256,
-        source_failure_ids=cluster_ids,
     )
 
 
