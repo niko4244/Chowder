@@ -87,6 +87,12 @@ def _texts(source: ReplayHistorySource) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _write_exact_bytes(path: Path, payload: str) -> None:
+    """Write deterministic UTF-8 bytes without platform newline translation."""
+
+    path.write_bytes(payload.encode("utf-8"))
+
+
 def materialize_replay_history(
     *,
     sources: Iterable[ReplayHistorySource],
@@ -95,11 +101,10 @@ def materialize_replay_history(
 ) -> VerifiedReplayDataset:
     """Build one canonical replay corpus from all prior training sources.
 
-    Source paths are used only to read bytes. The materialized manifest contains
-    content identities rather than machine-specific paths, so the same training
-    history produces the same replay/manifest hashes on different machines.
-    Rows are deduplicated by exact text equality while preserving first-seen
-    source order; hashes are used only for portable identity/provenance.
+    Materialized replay bytes are identical on Linux and Windows. Text-mode
+    writes are intentionally avoided because Python translates ``\n`` to
+    ``\r\n`` on Windows, which would make a digest computed from canonical LF
+    content disagree with the bytes actually persisted.
     """
 
     source_rows = tuple(sources)
@@ -163,7 +168,7 @@ def materialize_replay_history(
         if sha256_file(dataset_path) != expected_dataset_sha:
             raise ValueError("existing replay history file does not match deterministic content")
     else:
-        dataset_path.write_text(dataset_text, encoding="utf-8")
+        _write_exact_bytes(dataset_path, dataset_text)
 
     manifest = {
         "version": 1,
@@ -181,7 +186,7 @@ def materialize_replay_history(
         if sha256_file(manifest_path) != expected_manifest_sha:
             raise ValueError("existing replay history manifest does not match deterministic content")
     else:
-        manifest_path.write_text(manifest_text, encoding="utf-8")
+        _write_exact_bytes(manifest_path, manifest_text)
 
     replay = VerifiedReplayDataset(
         path=str(dataset_path),
