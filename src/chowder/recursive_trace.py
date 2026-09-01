@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 from typing import Any, Mapping
 
+from .database import connect_database
+
 
 SCHEMA = """
-PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS recursive_repair_sessions (
     session_id TEXT PRIMARY KEY,
     status TEXT NOT NULL,
@@ -37,15 +37,15 @@ CREATE TABLE IF NOT EXISTS recursive_repair_hops (
 class RecursiveRepairTraceStore:
     """Durable event/checkpoint store for bounded recursive repair.
 
-    The store owns separate tables in the same SQLite database as ``RunRegistry``.
-    Each hop insert and session-checkpoint update is committed in one transaction,
-    so a crash cannot persist a hop without the matching controller state.
+    The trace store and RunRegistry share one SQLite ownership/migration
+    contract. Opening either component therefore applies the same application-id,
+    WAL, foreign-key, and schema-version guarantees before component tables are
+    touched.
     """
 
     def __init__(self, path: str | Path):
         self.path = str(path)
-        self._conn = sqlite3.connect(self.path)
-        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn = connect_database(self.path)
         self._conn.executescript(SCHEMA)
 
     def close(self) -> None:
