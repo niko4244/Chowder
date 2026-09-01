@@ -28,7 +28,9 @@ class VerifiedRepairDataset:
         if len(self.sha256) != 64:
             raise ValueError("repair dataset SHA-256 is invalid")
         if len(self.contamination_audit.repair_index_sha256) != 64:
-            raise ValueError("repair contamination audit is missing repair-example identity")
+            raise ValueError(
+                "repair contamination audit is missing repair-example identity"
+            )
         path = Path(self.path).resolve()
         if not path.is_file():
             raise FileNotFoundError(f"repair dataset not found: {path}")
@@ -37,14 +39,20 @@ class VerifiedRepairDataset:
             raise ValueError("repair dataset content changed after verification")
         actual_repair_index = repair_dataset_index_digest(path)
         if actual_repair_index != self.contamination_audit.repair_index_sha256:
-            raise ValueError("repair dataset examples do not match contamination audit")
+            raise ValueError(
+                "repair dataset examples do not match contamination audit"
+            )
 
         has_path = self.source_manifest_path is not None
         has_digest = self.source_manifest_sha256 is not None
         if has_path != has_digest:
-            raise ValueError("repair source manifest path and SHA must be supplied together")
+            raise ValueError(
+                "repair source manifest path and SHA must be supplied together"
+            )
         if require_source_manifest and not has_path:
-            raise ValueError("autonomous repair requires an independent-source provenance manifest")
+            raise ValueError(
+                "autonomous repair requires an independent-source provenance manifest"
+            )
         if has_path:
             assert self.source_manifest_path is not None
             assert self.source_manifest_sha256 is not None
@@ -54,7 +62,9 @@ class VerifiedRepairDataset:
                 contamination_audit=self.contamination_audit,
             )
             if actual_manifest != self.source_manifest_sha256:
-                raise ValueError("repair source manifest content changed after verification")
+                raise ValueError(
+                    "repair source manifest content changed after verification"
+                )
         return path
 
 
@@ -95,8 +105,25 @@ class RepairVariant:
             raise ValueError("repair variant estimated_gpu_hours must be positive")
 
 
+def replay_compute_multiplier(replay: VerifiedReplayDataset | None) -> float:
+    """Conservative compute multiplier for budget admission.
+
+    The worker caps replay rows at the available parent rows, so ``1 + ratio``
+    is an upper bound on row-count growth relative to repair-only training.
+    Reserving the upper bound is preferable to allowing default rehearsal to
+    create a known GPU-hour budget underestimate.
+    """
+
+    if replay is None:
+        return 1.0
+    replay.verify()
+    return 1.0 + float(replay.ratio)
+
+
 def _canonical_digest(payload: Mapping[str, Any]) -> str:
-    raw = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    raw = json.dumps(
+        dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -116,6 +143,7 @@ def build_repair_candidate(
     dataset_path = dataset.verify(require_source_manifest=require_source_manifest)
 
     replay_path: Path | None = None
+    replay_multiplier = replay_compute_multiplier(replay)
     if replay is not None:
         replay_path = replay.verify()
         if replay_path == dataset_path:
@@ -125,7 +153,9 @@ def build_repair_candidate(
     lora_patch = dict(variant.lora_patch)
     for mapping, label in ((training_patch, "training"), (lora_patch, "lora")):
         if any(not isinstance(key, str) or not key.strip() for key in mapping):
-            raise ValueError(f"repair {label} override keys must be non-empty strings")
+            raise ValueError(
+                f"repair {label} override keys must be non-empty strings"
+            )
 
     backend_patch: dict[str, Any] = {
         "dataset": str(dataset_path),
@@ -142,6 +172,7 @@ def build_repair_candidate(
     if lora_patch:
         backend_patch["lora"] = lora_patch
 
+    effective_estimate = variant.estimated_gpu_hours * replay_multiplier
     audit = dataset.contamination_audit
     repair_evidence = {
         "plan_id": plan.plan_id,
@@ -153,6 +184,8 @@ def build_repair_candidate(
         "source_failure_ids": list(plan.source_failure_ids),
         "replay_dataset_sha256": replay.sha256 if replay is not None else None,
         "replay_ratio": float(replay.ratio) if replay is not None else 0.0,
+        "repair_only_estimated_gpu_hours": variant.estimated_gpu_hours,
+        "replay_adjusted_estimated_gpu_hours": effective_estimate,
         "variant": variant.name,
     }
     config_patch = {
@@ -188,7 +221,7 @@ def build_repair_candidate(
         parent_id=parent_id,
         hypothesis=hypothesis,
         config_patch=config_patch,
-        estimated_gpu_hours=variant.estimated_gpu_hours,
+        estimated_gpu_hours=effective_estimate,
         tags=("repair", f"plan:{plan.plan_id[:12]}", f"variant:{variant.name}"),
     )
 
