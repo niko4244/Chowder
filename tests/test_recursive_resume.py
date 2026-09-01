@@ -7,7 +7,12 @@ from chowder.autonomous_repair import AutonomousRepairOutcome, _repairable_targe
 from chowder.cycle import CandidateCycleOutcome, ExperimentCycleRunner, GenerationOutcome
 from chowder.engine import EvolutionEngine
 from chowder.executors import EvaluationOutcome, ExecutionContext, TrainingArtifact
-from chowder.failures import FailureRecord, FailureSourceRole, RepairPlan
+from chowder.failures import (
+    FailureRecord,
+    FailureSourceRole,
+    RepairPlan,
+    cluster_failures,
+)
 from chowder.memory import HardwareProfile
 from chowder.models import (
     Experiment,
@@ -106,9 +111,10 @@ def _record_source(registry: RunRegistry):
         score=0.0,
         failure_kind="answer_mismatch",
     )
+    cluster = cluster_failures((failure,))[0]
     plan = RepairPlan(
         plan_id="r" * 64,
-        cluster_id="c" * 64,
+        cluster_id=cluster.cluster_id,
         observation="failure",
         suspected_cause="weakness",
         intervention="independent repair",
