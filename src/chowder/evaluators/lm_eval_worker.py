@@ -65,6 +65,11 @@ def _extract_metrics(raw_results: Mapping[str, Any], metric_map: Mapping[str, st
     return metrics
 
 
+def _stable_sha256(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def evaluate(spec: LmEvalSpec) -> dict[str, Any]:
     try:
         import lm_eval
@@ -104,6 +109,7 @@ def evaluate(spec: LmEvalSpec) -> dict[str, Any]:
     return {
         "metrics": metrics,
         "raw_results_sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+        "task_configs_sha256": _stable_sha256(raw.get("configs", {})),
         "runtime": {
             "device": device,
             "gpu_count": 1 if device.startswith("cuda") else 0,
