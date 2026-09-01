@@ -45,6 +45,7 @@ class Goal:
     gpu_hour_budget: float
     max_parallel_candidates: int = 4
     minimum_promotion_gain: float = 0.0
+    require_protocol_match: bool = False
 
     def target(self, name: str) -> MetricTarget | None:
         return next((m for m in self.metrics if m.name == name), None)

@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from ..executors import EvaluationOutcome, ExecutionContext, TrainingArtifact
 from ..models import Experiment
+from ..protocol import protocol_fingerprint
 from ..provenance import sha256_directory, sha256_file
 
 _ALLOWED_SCORING = {"exact_match", "normalized_exact_match"}
@@ -272,6 +273,29 @@ class TransformersTextEvaluator:
             raise RuntimeError("evaluation result metric names do not match configured suites")
 
         dataset_hashes = {suite.name: sha256_file(suite.dataset) for suite in spec.suites}
+        protocol = {
+            "evaluator": self.name,
+            "base_model": spec.base_model,
+            "revision": spec.revision,
+            "precision": spec.precision,
+            "quantization": spec.quantization,
+            "device": runtime.get("device"),
+            "seed": spec.seed,
+            "versions": dict(versions),
+            "suites": [
+                {
+                    "name": suite.name,
+                    "dataset_sha256": dataset_hashes[suite.name],
+                    "prompt_field": suite.prompt_field,
+                    "expected_field": suite.expected_field,
+                    "scoring": suite.scoring,
+                    "max_new_tokens": suite.max_new_tokens,
+                    "use_chat_template": suite.use_chat_template,
+                }
+                for suite in spec.suites
+            ],
+        }
+        protocol_sha = protocol_fingerprint(protocol)
         return EvaluationOutcome(
             run_id=eval_id,
             experiment_id=experiment.experiment_id,
@@ -285,6 +309,8 @@ class TransformersTextEvaluator:
                 "evaluation_spec_sha256": spec.digest(),
                 "evaluation_dataset_sha256": dataset_hashes,
                 "evaluation_result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+                "protocol": protocol,
+                "protocol_sha256": protocol_sha,
                 "suite_evidence": dict(suite_evidence),
                 "versions": dict(versions),
                 "runtime": dict(runtime),

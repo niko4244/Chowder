@@ -111,7 +111,7 @@ def test_extract_metrics_requires_explicit_task_metric_keys():
         _extract_metrics(raw, {"bad": "hellaswag:does_not_exist"})
 
 
-def test_lm_eval_evaluator_returns_evaluation_only_gpu_cost(tmp_path, monkeypatch):
+def test_lm_eval_evaluator_returns_evaluation_only_gpu_cost_and_protocol(tmp_path, monkeypatch):
     artifact = _artifact(tmp_path)
 
     class FakeProcess:
@@ -122,8 +122,14 @@ def test_lm_eval_evaluator_returns_evaluation_only_gpu_cost(tmp_path, monkeypatc
             result_path.write_text(json.dumps({
                 "metrics": {"hellaswag": 0.81, "arc_easy": 0.75},
                 "raw_results_sha256": "a" * 64,
+                "task_configs_sha256": "b" * 64,
                 "runtime": {"device": "cuda:0", "gpu_count": 1},
-                "versions": {"lm-eval": "0.4.13"},
+                "versions": {
+                    "lm-eval": "0.4.13",
+                    "torch": "2.test",
+                    "transformers": "5.test",
+                    "peft": "0.test",
+                },
             }))
 
         def wait(self, timeout=None):
@@ -144,3 +150,6 @@ def test_lm_eval_evaluator_returns_evaluation_only_gpu_cost(tmp_path, monkeypatc
     assert outcome.gpu_hours >= 0
     assert outcome.gpu_hours < artifact.gpu_hours
     assert outcome.evidence["raw_results_sha256"] == "a" * 64
+    assert outcome.evidence["task_configs_sha256"] == "b" * 64
+    assert len(outcome.evidence["protocol_sha256"]) == 64
+    assert outcome.evidence["protocol"]["task_configs_sha256"] == "b" * 64
