@@ -1,0 +1,11 @@
+{
+  "goal": {
+    "gpu_hour_budget": 200,
+    "max_parallel_candidates": 4,
+    "metrics": {
+      "reasoning": {"minimum": 84, "regression_tolerance": 0.5, "weight": 1.0},
+      "coding": {"minimum": 82, "regression_tolerance": 0.5, "weight": 1.0},
+      "tool_calling": {"minimum": 90, "regression_tolerance": 0.25, "weight": 1.5}
+    }
+  }
+}
