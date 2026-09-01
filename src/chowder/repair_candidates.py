@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -58,6 +59,28 @@ class VerifiedRepairDataset:
 
 
 @dataclass(frozen=True)
+class VerifiedReplayDataset:
+    """Immutable rehearsal source inherited from an already-trained parent."""
+
+    path: str
+    sha256: str
+    ratio: float = 1.0
+
+    def verify(self) -> Path:
+        if len(self.sha256) != 64:
+            raise ValueError("replay dataset SHA-256 is invalid")
+        ratio = float(self.ratio)
+        if not math.isfinite(ratio) or ratio <= 0 or ratio > 10:
+            raise ValueError("replay ratio must be finite and in (0, 10]")
+        path = Path(self.path).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"replay dataset not found: {path}")
+        if sha256_file(path) != self.sha256:
+            raise ValueError("replay dataset content changed after verification")
+        return path
+
+
+@dataclass(frozen=True)
 class RepairVariant:
     name: str
     estimated_gpu_hours: float
@@ -84,6 +107,7 @@ def build_repair_candidate(
     dataset: VerifiedRepairDataset,
     variant: RepairVariant,
     require_source_manifest: bool = False,
+    replay: VerifiedReplayDataset | None = None,
 ) -> Experiment:
     """Build one deterministic repair child without changing evaluation semantics."""
 
@@ -91,13 +115,28 @@ def build_repair_candidate(
         raise ValueError("repair candidate parent_id is required")
     dataset_path = dataset.verify(require_source_manifest=require_source_manifest)
 
+    replay_path: Path | None = None
+    if replay is not None:
+        replay_path = replay.verify()
+        if replay_path == dataset_path:
+            raise ValueError("repair and replay datasets must be different files")
+
     training_patch = dict(variant.training_patch)
     lora_patch = dict(variant.lora_patch)
     for mapping, label in ((training_patch, "training"), (lora_patch, "lora")):
         if any(not isinstance(key, str) or not key.strip() for key in mapping):
             raise ValueError(f"repair {label} override keys must be non-empty strings")
 
-    backend_patch: dict[str, Any] = {"dataset": str(dataset_path)}
+    backend_patch: dict[str, Any] = {
+        "dataset": str(dataset_path),
+        "dataset_sha256": dataset.sha256,
+    }
+    if replay is not None and replay_path is not None:
+        backend_patch["replay"] = {
+            "dataset": str(replay_path),
+            "sha256": replay.sha256,
+            "ratio": float(replay.ratio),
+        }
     if training_patch:
         backend_patch["training"] = training_patch
     if lora_patch:
@@ -112,6 +151,8 @@ def build_repair_candidate(
         "holdout_index_sha256": list(audit.holdout_index_sha256),
         "source_manifest_sha256": dataset.source_manifest_sha256,
         "source_failure_ids": list(plan.source_failure_ids),
+        "replay_dataset_sha256": replay.sha256 if replay is not None else None,
+        "replay_ratio": float(replay.ratio) if replay is not None else 0.0,
         "variant": variant.name,
     }
     config_patch = {
@@ -127,6 +168,8 @@ def build_repair_candidate(
             "repair_index_sha256": audit.repair_index_sha256,
             "holdout_index_sha256": list(audit.holdout_index_sha256),
             "source_manifest_sha256": dataset.source_manifest_sha256,
+            "replay_dataset_sha256": replay.sha256 if replay is not None else None,
+            "replay_ratio": float(replay.ratio) if replay is not None else 0.0,
             "variant": variant.name,
             "training_patch": training_patch,
             "lora_patch": lora_patch,
@@ -157,6 +200,7 @@ def build_repair_population(
     dataset: VerifiedRepairDataset,
     variants: Iterable[RepairVariant],
     require_source_manifest: bool = False,
+    replay: VerifiedReplayDataset | None = None,
 ) -> tuple[Experiment, ...]:
     variants = tuple(variants)
     if not variants:
@@ -171,6 +215,7 @@ def build_repair_population(
             dataset=dataset,
             variant=variant,
             require_source_manifest=require_source_manifest,
+            replay=replay,
         )
         for variant in variants
     )
@@ -186,6 +231,7 @@ def build_autonomous_repair_population(
     plan: RepairPlan,
     dataset: VerifiedRepairDataset,
     variants: Iterable[RepairVariant],
+    replay: VerifiedReplayDataset | None = None,
 ) -> tuple[Experiment, ...]:
     """Strict autonomous path: source provenance is mandatory."""
 
@@ -195,4 +241,5 @@ def build_autonomous_repair_population(
         dataset=dataset,
         variants=variants,
         require_source_manifest=True,
+        replay=replay,
     )
