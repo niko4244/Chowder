@@ -51,29 +51,27 @@ def _experiment(experiment_id: str, parent_id: str | None = None):
 
 
 def _record_complete_candidate(registry: RunRegistry, experiment_id: str):
-    registry.record_training_artifact(
-        TrainingArtifact(
-            run_id=f"train-{experiment_id}",
-            experiment_id=experiment_id,
-            artifact_ref=f"adapter-{experiment_id}",
-            gpu_hours=0.1,
-            evidence={"dataset_sha256": "d" * 64, "artifact_sha256": "a" * 64},
-        )
+    training = TrainingArtifact(
+        run_id=f"train-{experiment_id}",
+        experiment_id=experiment_id,
+        artifact_ref=f"adapter-{experiment_id}",
+        gpu_hours=0.1,
+        evidence={"dataset_sha256": "d" * 64, "artifact_sha256": "a" * 64},
     )
-    registry.record_evaluation_outcome(
-        EvaluationOutcome(
-            run_id=f"eval-{experiment_id}",
-            experiment_id=experiment_id,
-            source_artifact_ref=f"adapter-{experiment_id}",
-            metrics={"quality": 0.6},
-            gpu_hours=0.01,
-            evidence={"protocol_sha256": "p" * 64},
-        )
+    evaluation = EvaluationOutcome(
+        run_id=f"eval-{experiment_id}",
+        experiment_id=experiment_id,
+        source_artifact_ref=training.artifact_ref,
+        metrics={"quality": 0.6},
+        gpu_hours=0.01,
+        evidence={"protocol_sha256": "p" * 64},
     )
+    registry.record_training_artifact(training)
+    registry.record_evaluation_outcome(evaluation)
     failure = FailureRecord(
         failure_id=(experiment_id + "f" * 64)[:64],
         experiment_id=experiment_id,
-        evaluation_run_id=f"eval-{experiment_id}",
+        evaluation_run_id=evaluation.run_id,
         evaluator="transformers-text",
         suite="reasoning",
         row_index=0,
@@ -99,21 +97,31 @@ def _record_complete_candidate(registry: RunRegistry, experiment_id: str):
             requires_independent_source=True,
         )
     )
+    total = training.gpu_hours + evaluation.gpu_hours
     registry.record_result(
         ExperimentResult(
             experiment_id=experiment_id,
             metrics={"quality": 0.6},
-            gpu_hours=0.11,
-            artifact_ref=f"adapter-{experiment_id}",
+            gpu_hours=total,
+            artifact_ref=training.artifact_ref,
             evidence={
+                "training_run_id": training.run_id,
+                "evaluation_run_id": evaluation.run_id,
+                "evaluation_protocol_sha256": "p" * 64,
+                "compute": {
+                    "training_gpu_hours": training.gpu_hours,
+                    "evaluation_gpu_hours": evaluation.gpu_hours,
+                    "total_gpu_hours": total,
+                },
                 "diagnostics": {
                     "failure_count": 1,
                     "repair_plan_count": 1,
                     "error": None,
-                }
+                },
             },
         )
     )
+    registry.update_experiment_status(experiment_id, "rejected")
 
 
 def _begin_running(
@@ -141,6 +149,7 @@ def _begin_running(
                 {
                     "provider_name": "test",
                     "provider_version": "1",
+                    "baseline_experiment_id": "baseline",
                     "engine_snapshot": _engine_snapshot(),
                 }
                 if metadata is None
@@ -195,6 +204,21 @@ def test_legacy_running_session_without_engine_snapshot_is_blocked(tmp_path):
         assert report.disposition is RecoveryDisposition.MISSING_ENGINE_SNAPSHOT
 
 
+def test_malformed_engine_snapshot_is_blocked(tmp_path):
+    with RunRegistry(tmp_path / "runs.db") as registry:
+        malformed = {
+            "provider_name": "test",
+            "baseline_experiment_id": "baseline",
+            "engine_snapshot": {
+                "goal": {"metrics": [], "gpu_hour_budget": 5.0},
+                "baseline": _engine_snapshot()["baseline"],
+            },
+        }
+        _begin_running(registry, metadata=malformed)
+        report = analyze_recursive_repair_session(registry, "session")
+        assert report.disposition is RecoveryDisposition.INVALID_ENGINE_SNAPSHOT
+
+
 def test_checkpoint_depth_mismatch_is_blocked(tmp_path):
     with RunRegistry(tmp_path / "runs.db") as registry:
         _begin_running(registry, depth=1)
@@ -245,6 +269,26 @@ def test_multiple_training_runs_are_ambiguous(tmp_path):
         report = analyze_recursive_repair_session(registry, "session")
         assert report.disposition is RecoveryDisposition.AMBIGUOUS_REGISTRY_EVIDENCE
         assert any(value.startswith("training:source:2") for value in report.missing_evidence)
+
+
+def test_cross_record_artifact_mismatch_is_blocked(tmp_path):
+    with RunRegistry(tmp_path / "runs.db") as registry:
+        registry.record_experiment(_experiment("source"))
+        _record_complete_candidate(registry, "source")
+        registry.record_evaluation_outcome(
+            EvaluationOutcome(
+                run_id="eval-source",
+                experiment_id="source",
+                source_artifact_ref="different-adapter",
+                metrics={"quality": 0.6},
+                gpu_hours=0.01,
+                evidence={"protocol_sha256": "p" * 64},
+            )
+        )
+        _begin_running(registry)
+        report = analyze_recursive_repair_session(registry, "session")
+        assert report.disposition is RecoveryDisposition.REGISTRY_EVIDENCE_MISMATCH
+        assert "evaluation_artifact:source" in report.missing_evidence
 
 
 def test_orphaned_child_progress_is_detected_before_retraining(tmp_path):
