@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 
@@ -12,6 +13,13 @@ class Tier(str, Enum):
 
 @dataclass(frozen=True)
 class HardwareProfile:
+    """Memory-planning profile for one active device plus host tiers.
+
+    ``vram_gb`` is the contiguous VRAM pool used by this plan. Additional
+    accelerator pools are recorded separately in ``accelerator_vram_gb`` and are
+    never summed into ``vram_gb`` implicitly.
+    """
+
     vram_gb: float
     ram_gb: float
     nvme_gb: float
@@ -20,6 +28,40 @@ class HardwareProfile:
     nvme_gbps: float
     reserve_vram_gb: float = 1.0
     reserve_ram_fraction: float = 0.15
+    accelerator_vram_gb: tuple[float, ...] = ()
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("vram_gb", self.vram_gb),
+            ("ram_gb", self.ram_gb),
+            ("nvme_gb", self.nvme_gb),
+            ("pcie_gbps", self.pcie_gbps),
+            ("ram_gbps", self.ram_gbps),
+            ("nvme_gbps", self.nvme_gbps),
+            ("reserve_vram_gb", self.reserve_vram_gb),
+        ):
+            number = float(value)
+            if not math.isfinite(number) or number < 0:
+                raise ValueError(f"{label} must be finite and non-negative")
+        fraction = float(self.reserve_ram_fraction)
+        if not math.isfinite(fraction) or not 0 <= fraction < 1:
+            raise ValueError("reserve_ram_fraction must be finite and in [0, 1)")
+        for pool in self.accelerator_vram_gb:
+            number = float(pool)
+            if not math.isfinite(number) or number < 0:
+                raise ValueError("accelerator VRAM pools must be finite and non-negative")
+        if self.accelerator_vram_gb and self.vram_gb > max(self.accelerator_vram_gb) + 1e-12:
+            raise ValueError(
+                "vram_gb cannot exceed the largest declared accelerator VRAM pool"
+            )
+
+    @property
+    def vram_pools_gb(self) -> tuple[float, ...]:
+        return self.accelerator_vram_gb or ((self.vram_gb,) if self.vram_gb else ())
+
+    @property
+    def total_accelerator_vram_gb(self) -> float:
+        return sum(self.vram_pools_gb)
 
 
 @dataclass(frozen=True)
@@ -29,6 +71,18 @@ class WorkloadProfile:
     activation_gb: float
     optimizer_gb: float
     workspace_gb: float
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("frozen_weights_gb", self.frozen_weights_gb),
+            ("trainable_gb", self.trainable_gb),
+            ("activation_gb", self.activation_gb),
+            ("optimizer_gb", self.optimizer_gb),
+            ("workspace_gb", self.workspace_gb),
+        ):
+            number = float(value)
+            if not math.isfinite(number) or number < 0:
+                raise ValueError(f"{label} must be finite and non-negative")
 
 
 @dataclass(frozen=True)
@@ -52,11 +106,11 @@ def _place(amount: float, capacity: float) -> tuple[float, float]:
 
 
 def plan_memory(hardware: HardwareProfile, workload: WorkloadProfile) -> MemoryPlan:
-    """Create a conservative tensor-residency plan.
+    """Create a conservative single-device tensor-residency plan.
 
-    Policy intentionally favors high-frequency state in VRAM:
-    trainable/workspace -> activations -> optimizer -> frozen hot cache.
-    Cold frozen weights are the first tensors demoted to RAM/NVMe.
+    Multiple accelerator pools may exist, but this planner never treats their
+    aggregate capacity as one allocation domain. Multi-device sharding belongs to
+    a separate explicit placement planner.
     """
     usable_vram = max(0.0, hardware.vram_gb - hardware.reserve_vram_gb)
     mandatory = workload.trainable_gb + workload.workspace_gb
@@ -82,7 +136,6 @@ def plan_memory(hardware: HardwareProfile, workload: WorkloadProfile) -> MemoryP
     nvme: dict[str, float] = {}
     remaining_ram = ram_capacity
 
-    # Keep state with tighter latency requirements in RAM before cold weights.
     for name, amount in (
         ("optimizer", optimizer_offload),
         ("activations", activation_offload),
