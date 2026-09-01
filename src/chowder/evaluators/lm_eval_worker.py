@@ -93,6 +93,7 @@ def evaluate(spec: LmEvalSpec) -> dict[str, Any]:
         numpy_random_seed=spec.seed,
         torch_random_seed=spec.seed,
         fewshot_random_seed=spec.seed,
+        confirm_run_unsafe_code=False,
     )
     if raw is None:
         raise RuntimeError("lm-eval returned no result on this process")
