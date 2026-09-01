@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
 
 from .engine import EvolutionEngine
+from .execution_failure import ExecutionFailure, normalize_execution_exception
+from .executor_investigator import ExecutorFailureAnalysis, analyze_execution_failure
 from .executors import EvaluationExecutor, EvaluationOutcome, ExecutionContext, TrainingArtifact, TrainingExecutor
 from .failures import FailureRecord, RepairPlan, cluster_failures, plan_repairs
+from .investigation import RemediationRegistry
 from .models import Experiment, ExperimentResult, ExperimentStatus
 from .registry import RunRegistry
 from .tournament import RankedCandidate
@@ -22,6 +27,8 @@ class CandidateCycleOutcome:
     result: ExperimentResult | None = None
     harvested_failures: tuple[FailureRecord, ...] = ()
     repair_plans: tuple[RepairPlan, ...] = ()
+    execution_failure: ExecutionFailure | None = None
+    executor_analysis: ExecutorFailureAnalysis | None = None
     diagnostic_error: str | None = None
     error: str | None = None
 
@@ -115,6 +122,13 @@ class ExperimentCycleRunner:
     base_config: Mapping[str, Any] = field(default_factory=dict)
     registry: RunRegistry | None = None
     failure_harvester: FailureHarvester | None = None
+    executor_remediation_registry: RemediationRegistry = field(default_factory=RemediationRegistry)
+    executor_investigation_budget: float = 0.25
+
+    def __post_init__(self) -> None:
+        budget = float(self.executor_investigation_budget)
+        if not math.isfinite(budget) or budget < 0:
+            raise ValueError("executor_investigation_budget must be finite and non-negative")
 
     def _record_status(self, experiment: Experiment) -> None:
         if self.registry is not None:
@@ -129,9 +143,6 @@ class ExperimentCycleRunner:
         resolved = self.engine.resolve_config(experiment.experiment_id, self.base_config)
         run_context = replace(self.context, resolved_config=resolved)
 
-        # A legacy/test executor may explicitly signal that it has no profiler.
-        # In that one case, retain the engine's existing training reservation.
-        # Every other profile/config error remains a hard preflight rejection.
         try:
             evaluation_reserve = _declared_evaluation_reserve(resolved)
             try:
@@ -163,8 +174,49 @@ class ExperimentCycleRunner:
         repair_plans: tuple[RepairPlan, ...] = ()
         diagnostic_error: str | None = None
 
+        training_started = time.perf_counter()
         try:
             artifact = self.trainer.run(experiment, run_context)
+        except Exception as exc:
+            elapsed = time.perf_counter() - training_started
+            failure = normalize_execution_exception(
+                exc,
+                experiment=experiment,
+                executor_name=str(getattr(self.trainer, "name", type(self.trainer).__name__)),
+                context=run_context,
+                wall_seconds=elapsed,
+            )
+            analysis: ExecutorFailureAnalysis | None = None
+            try:
+                analysis = analyze_execution_failure(
+                    failure,
+                    context=run_context,
+                    registry=self.executor_remediation_registry,
+                    gpu_hour_budget=self.executor_investigation_budget,
+                    investigation_id=f"investigate-{failure.run_id}",
+                    occurred_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception as investigator_exc:
+                diagnostic_error = (
+                    f"executor investigator {type(investigator_exc).__name__}: "
+                    f"{investigator_exc}"
+                )
+
+            self.engine.fail(
+                experiment.experiment_id,
+                actual_gpu_hours=failure.gpu_hours_spent,
+            )
+            experiment.status = ExperimentStatus.FAILED
+            self._record_status(experiment)
+            return CandidateCycleOutcome(
+                experiment_id=experiment.experiment_id,
+                execution_failure=failure,
+                executor_analysis=analysis,
+                diagnostic_error=diagnostic_error,
+                error=f"{failure.cause_type}: {failure.cause_message}",
+            )
+
+        try:
             if artifact.experiment_id != experiment.experiment_id:
                 raise ValueError("trainer returned an artifact for a different experiment")
             if self.registry is not None:
