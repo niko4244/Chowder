@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from uuid import uuid4
 
 from .autonomous_repair import (
@@ -34,8 +34,6 @@ class RecursiveRepairStopReason(str, Enum):
 
 @dataclass(frozen=True)
 class RecursiveRepairPolicy:
-    """Finite stopping policy for autonomous repair recursion."""
-
     max_depth: int = 3
     min_score_improvement: float = 1e-4
     max_failure_signature_occurrences: int = 1
@@ -75,6 +73,7 @@ class RecursiveRepairOutcome:
     stop_reason: RecursiveRepairStopReason
     stop_detail: str
     session_id: str | None = None
+    starting_depth: int = 0
 
     @property
     def promoted(self):
@@ -87,6 +86,10 @@ class RecursiveRepairOutcome:
 
     @property
     def depth(self) -> int:
+        return self.starting_depth + len(self.hops)
+
+    @property
+    def new_hops(self) -> int:
         return len(self.hops)
 
 
@@ -103,8 +106,6 @@ def _stable_failure_rows(target: RepairTarget) -> tuple[FailureRecord, ...]:
 
 
 def failure_signature(target: RepairTarget) -> str:
-    """Hash the stable benchmark failure state, excluding experiment/run identity."""
-
     rows = _stable_failure_rows(target)
     payload = {
         "version": 1,
@@ -268,51 +269,87 @@ def _engine_snapshot(runner: ExperimentCycleRunner) -> dict[str, Any]:
     }
 
 
-def run_bounded_autonomous_repair(
+def _executor_name(executor: object) -> str:
+    return str(getattr(executor, "name", type(executor).__name__))
+
+
+def _execution_snapshot(runner: ExperimentCycleRunner) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "base_config": dict(runner.base_config),
+        "seed": int(runner.context.seed),
+        "trainer_name": _executor_name(runner.trainer),
+        "evaluator_name": _executor_name(runner.evaluator),
+        "hardware": asdict(runner.context.hardware),
+    }
+
+
+def _validated_variants(variants: Iterable[RepairVariant]) -> tuple[RepairVariant, ...]:
+    rows = tuple(variants)
+    if not rows:
+        raise ValueError("bounded recursive repair requires at least one variant")
+    if any(variant.lora_patch for variant in rows):
+        raise ValueError("bounded continuation repair cannot change LoRA topology")
+    return rows
+
+
+def _execute_bounded_loop(
     *,
     runner: ExperimentCycleRunner,
-    source_generation: GenerationOutcome,
+    current_generation: GenerationOutcome,
     provider: RepairSourceProvider,
-    variants: Iterable[RepairVariant],
-    policy: RecursiveRepairPolicy = RecursiveRepairPolicy(),
+    variants: tuple[RepairVariant, ...],
+    policy: RecursiveRepairPolicy,
+    session_id: str,
+    starting_depth: int,
+    signature_counts: Mapping[str, int],
+    previous_target_score: float | None,
+    begin_session: bool,
+    recovery_claim_token: str | None = None,
 ) -> RecursiveRepairOutcome:
-    """Run finite, evidence-preserving recursive repair with durable checkpoints.
+    if starting_depth < 0 or starting_depth > policy.max_depth:
+        raise ValueError("starting_depth is outside recursive repair policy")
+    if not session_id.strip():
+        raise ValueError("recursive repair session_id is required")
+    counts = dict(signature_counts)
+    if any(
+        not isinstance(key, str)
+        or len(key) != 64
+        or not isinstance(value, int)
+        or isinstance(value, bool)
+        or value <= 0
+        for key, value in counts.items()
+    ):
+        raise ValueError("recursive repair signature checkpoint is invalid")
 
-    When the runner has a ``RunRegistry``, Chowder creates a recursive session in
-    the same SQLite database. Every completed hop atomically appends an event and
-    updates controller checkpoint state. Terminal stop reasons are persisted, and
-    unexpected exceptions mark the session failed before being re-raised. The
-    exact Goal and baseline result are snapshotted before the first hop so gate
-    semantics can be reconstructed after process interruption.
-    """
-
-    variant_rows = tuple(variants)
-    if not variant_rows:
-        raise ValueError("bounded recursive repair requires at least one variant")
-    if any(variant.lora_patch for variant in variant_rows):
-        raise ValueError("bounded continuation repair cannot change LoRA topology")
-
-    session_id = uuid4().hex
-    current = source_generation
-    hops: list[RecursiveRepairHop] = []
-    signature_counts: dict[str, int] = {}
-    previous_target_score: float | None = None
+    initial_generation = current_generation
+    current = current_generation
+    new_hops: list[RecursiveRepairHop] = []
+    previous_score = previous_target_score
     store = (
         RecursiveRepairTraceStore(runner.registry.path)
         if runner.registry is not None
         else None
     )
-    session_started = False
+    if not begin_session and store is None:
+        raise ValueError("resuming recursive repair requires a RunRegistry")
+    if not begin_session and not recovery_claim_token:
+        raise ValueError("resuming recursive repair requires a recovery claim token")
+    session_started = not begin_session
+    write_claim_token = recovery_claim_token if not begin_session else None
+
+    def total_depth() -> int:
+        return starting_depth + len(new_hops)
 
     def state_payload() -> dict[str, Any]:
         promoted_id = (
             current.promoted.experiment_id if current.promoted is not None else None
         )
         return {
-            "depth_completed": len(hops),
+            "depth_completed": total_depth(),
             "current_candidate_ids": list(_generation_candidate_ids(current)),
-            "signature_counts": dict(sorted(signature_counts.items())),
-            "previous_target_score": _portable_number(previous_target_score),
+            "signature_counts": dict(sorted(counts.items())),
+            "previous_target_score": _portable_number(previous_score),
             "remaining_budget": runner.engine.remaining_budget,
             "promoted_experiment_id": promoted_id,
         }
@@ -327,18 +364,20 @@ def run_bounded_autonomous_repair(
                 stop_reason=reason.value,
                 stop_detail=detail,
                 state=state_payload(),
+                claim_token=write_claim_token,
             )
         return RecursiveRepairOutcome(
-            initial_generation=source_generation,
+            initial_generation=initial_generation,
             final_generation=current,
-            hops=tuple(hops),
+            hops=tuple(new_hops),
             stop_reason=reason,
             stop_detail=detail,
             session_id=session_id,
+            starting_depth=starting_depth,
         )
 
     try:
-        if store is not None:
+        if store is not None and begin_session:
             provider_name = str(getattr(provider, "name", type(provider).__name__))
             provider_version = str(getattr(provider, "version", "unknown"))
             store.begin(
@@ -347,22 +386,35 @@ def run_bounded_autonomous_repair(
                 metadata={
                     "provider_name": provider_name,
                     "provider_version": provider_version,
-                    "variants": _variant_metadata(variant_rows),
+                    "variants": _variant_metadata(variants),
                     "baseline_experiment_id": runner.engine.baseline.experiment_id,
                     "engine_snapshot": _engine_snapshot(runner),
+                    "execution_snapshot": _execution_snapshot(runner),
                 },
-                initial_candidate_ids=_generation_candidate_ids(source_generation),
+                initial_candidate_ids=_generation_candidate_ids(current_generation),
                 state=state_payload(),
             )
             session_started = True
+        elif store is not None:
+            existing = store.get_session(session_id)
+            if existing is None or existing.get("status") != "running":
+                raise ValueError("recursive repair resume session is not running")
+            claim = store.get_recovery_claim(session_id)
+            if claim is None or claim.get("claim_token") != recovery_claim_token:
+                raise ValueError("recursive repair resume claim does not match")
 
-        if source_generation.promoted is not None:
+        if current.promoted is not None:
             return finish(
                 RecursiveRepairStopReason.PROMOTED,
-                "source generation already contains a promoted candidate",
+                "current generation already contains a promoted candidate",
+            )
+        if total_depth() >= policy.max_depth:
+            return finish(
+                RecursiveRepairStopReason.MAX_DEPTH,
+                f"reached configured repair depth {policy.max_depth}",
             )
 
-        for depth in range(1, policy.max_depth + 1):
+        for depth in range(starting_depth + 1, policy.max_depth + 1):
             if runner.engine.remaining_budget <= 0:
                 return finish(
                     RecursiveRepairStopReason.BUDGET_EXHAUSTED,
@@ -371,7 +423,7 @@ def run_bounded_autonomous_repair(
 
             target, signature, had_repairable = _select_novel_target(
                 current,
-                signature_counts=signature_counts,
+                signature_counts=counts,
                 max_occurrences=policy.max_failure_signature_occurrences,
             )
             if target is None or signature is None:
@@ -389,8 +441,8 @@ def run_bounded_autonomous_repair(
 
             target_score = _score_for(current, target.candidate.experiment_id)
             gain: float | None = None
-            if previous_target_score is not None:
-                gain = _score_improvement(previous_target_score, target_score)
+            if previous_score is not None:
+                gain = _score_improvement(previous_score, target_score)
                 if gain < policy.min_score_improvement:
                     return finish(
                         RecursiveRepairStopReason.NO_PROGRESS,
@@ -400,13 +452,13 @@ def run_bounded_autonomous_repair(
                         ),
                     )
 
-            signature_counts[signature] = signature_counts.get(signature, 0) + 1
+            counts[signature] = counts.get(signature, 0) + 1
             try:
                 one_hop = run_single_hop_autonomous_repair(
                     runner=runner,
                     source_generation=current,
                     provider=provider,
-                    variants=variant_rows,
+                    variants=variants,
                     candidate_id=target.candidate.experiment_id,
                     replay_ratio=policy.replay_ratio,
                 )
@@ -429,9 +481,9 @@ def run_bounded_autonomous_repair(
                 outcome=one_hop,
                 remaining_budget_after=runner.engine.remaining_budget,
             )
-            hops.append(hop)
+            new_hops.append(hop)
             current = one_hop.repair_generation
-            previous_target_score = target_score
+            previous_score = target_score
 
             if store is not None:
                 produced_ids = _generation_candidate_ids(current)
@@ -451,6 +503,7 @@ def run_bounded_autonomous_repair(
                     produced_candidate_ids=produced_ids,
                     promoted_experiment_id=promoted_id,
                     state=state_payload(),
+                    claim_token=write_claim_token,
                 )
 
             if current.promoted is not None:
@@ -470,6 +523,7 @@ def run_bounded_autonomous_repair(
                     session_id=session_id,
                     error_detail=f"{type(exc).__name__}: {exc}",
                     state=state_payload(),
+                    claim_token=write_claim_token,
                 )
             except Exception:
                 pass
@@ -477,3 +531,55 @@ def run_bounded_autonomous_repair(
     finally:
         if store is not None:
             store.close()
+
+
+def run_bounded_autonomous_repair(
+    *,
+    runner: ExperimentCycleRunner,
+    source_generation: GenerationOutcome,
+    provider: RepairSourceProvider,
+    variants: Iterable[RepairVariant],
+    policy: RecursiveRepairPolicy = RecursiveRepairPolicy(),
+) -> RecursiveRepairOutcome:
+    variant_rows = _validated_variants(variants)
+    return _execute_bounded_loop(
+        runner=runner,
+        current_generation=source_generation,
+        provider=provider,
+        variants=variant_rows,
+        policy=policy,
+        session_id=uuid4().hex,
+        starting_depth=0,
+        signature_counts={},
+        previous_target_score=None,
+        begin_session=True,
+    )
+
+
+def _resume_bounded_autonomous_repair_from_checkpoint(
+    *,
+    runner: ExperimentCycleRunner,
+    current_generation: GenerationOutcome,
+    provider: RepairSourceProvider,
+    variants: Iterable[RepairVariant],
+    policy: RecursiveRepairPolicy,
+    session_id: str,
+    starting_depth: int,
+    signature_counts: Mapping[str, int],
+    previous_target_score: float | None,
+    recovery_claim_token: str,
+) -> RecursiveRepairOutcome:
+    variant_rows = _validated_variants(variants)
+    return _execute_bounded_loop(
+        runner=runner,
+        current_generation=current_generation,
+        provider=provider,
+        variants=variant_rows,
+        policy=policy,
+        session_id=session_id,
+        starting_depth=starting_depth,
+        signature_counts=signature_counts,
+        previous_target_score=previous_target_score,
+        begin_session=False,
+        recovery_claim_token=recovery_claim_token,
+    )

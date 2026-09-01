@@ -67,6 +67,10 @@ def test_legacy_database_is_forward_migrated_without_losing_rows(tmp_path):
             )
         }
         assert "execution_incidents" in tables
+        # Recursive-repair tables remain component-owned and are created only
+        # when the trace store is first used. The migration itself is still
+        # recorded globally so schema identity is deterministic.
+        assert "recursive_repair_recovery_claims" not in tables
         assert "chowder_schema_history" in tables
 
 
@@ -89,6 +93,7 @@ def test_supported_version_without_history_table_is_repaired_and_migrated(tmp_pa
         assert history == [
             (1, "baseline-version-marker"),
             (2, "execution-incidents"),
+            (3, "recursive-recovery-claims"),
         ]
 
 
@@ -110,6 +115,7 @@ def test_unrelated_versioned_database_is_not_adopted(tmp_path):
         tables = _table_names(check)
         assert "chowder_schema_history" not in tables
         assert "execution_incidents" not in tables
+        assert "recursive_repair_recovery_claims" not in tables
     finally:
         check.close()
 
