@@ -2,10 +2,17 @@ import json
 
 import pytest
 
-from chowder.contamination import RepairExample, write_holdout_fingerprint_index, write_verified_repair_dataset
+from chowder.contamination import (
+    RepairExample,
+    audit_repair_examples,
+    example_fingerprints,
+    write_holdout_fingerprint_index,
+    write_verified_repair_dataset,
+)
 from chowder.failures import RepairPlan
 from chowder.graph import ExperimentGraph
 from chowder.models import Experiment, Hypothesis
+from chowder.provenance import sha256_file
 from chowder.repair_candidates import (
     RepairVariant,
     VerifiedRepairDataset,
@@ -80,6 +87,7 @@ def test_repair_candidate_is_deterministic_and_does_not_patch_evaluation(tmp_pat
     assert "evaluation" not in first.config_patch
     assert set(first.config_patch["backend"]) == {"dataset", "training", "lora"}
     assert first.config_patch["repair"]["repair_dataset_sha256"] == dataset.sha256
+    assert first.config_patch["repair"]["repair_index_sha256"] == dataset.contamination_audit.repair_index_sha256
     assert first.hypothesis.expected_deltas == {"quality": 0.03}
 
 
@@ -146,6 +154,44 @@ def test_candidate_refuses_dataset_mutated_after_clean_audit(tmp_path):
             dataset=dataset,
             variant=RepairVariant("default", 0.2),
         )
+
+
+def test_candidate_refuses_new_dataset_digest_reusing_old_clean_audit(tmp_path):
+    dataset = _verified_dataset(tmp_path)
+    path = dataset.path
+    row = json.loads(open(path, encoding="utf-8").read())
+    row["prompt"] = "100+100?"
+    row["expected"] = "200"
+    row["text"] = "User: 100+100?\nAssistant: 200"
+    row["prompt_sha256"], row["pair_sha256"] = example_fingerprints(row["prompt"], row["expected"])
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+    forged = VerifiedRepairDataset(path, sha256_file(path), dataset.contamination_audit)
+    with pytest.raises(ValueError, match="do not match contamination audit"):
+        build_repair_candidate(
+            parent_id="root",
+            plan=_plan(),
+            dataset=forged,
+            variant=RepairVariant("default", 0.2),
+        )
+
+
+def test_candidate_identity_includes_holdout_audit_identity(tmp_path):
+    repair_path = tmp_path / "repair.jsonl"
+    repair_examples = [RepairExample("3+3?", "6", "independent-1")]
+    holdout_a = tmp_path / "holdout-a.jsonl"
+    holdout_b = tmp_path / "holdout-b.jsonl"
+    write_holdout_fingerprint_index([("2+2?", "4")], holdout_a)
+    write_holdout_fingerprint_index([("Capital of France?", "Paris")], holdout_b)
+    digest, audit_a = write_verified_repair_dataset(repair_examples, [holdout_a], repair_path)
+    audit_b = audit_repair_examples(repair_examples, [holdout_b])
+    assert audit_a.clean and audit_b.clean
+    dataset_a = VerifiedRepairDataset(str(repair_path), digest, audit_a)
+    dataset_b = VerifiedRepairDataset(str(repair_path), digest, audit_b)
+    variant = RepairVariant("same", 0.2)
+    candidate_a = build_repair_candidate(parent_id="root", plan=_plan(), dataset=dataset_a, variant=variant)
+    candidate_b = build_repair_candidate(parent_id="root", plan=_plan(), dataset=dataset_b, variant=variant)
+    assert candidate_a.experiment_id != candidate_b.experiment_id
 
 
 def test_population_requires_unique_variant_names(tmp_path):
