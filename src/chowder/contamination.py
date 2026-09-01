@@ -36,10 +36,38 @@ class ContaminationAudit:
     prompt_overlap_sha256: tuple[str, ...]
     pair_overlap_sha256: tuple[str, ...]
     holdout_index_sha256: tuple[str, ...]
+    repair_index_sha256: str
 
     @property
     def overlap_count(self) -> int:
         return len(set(self.prompt_overlap_sha256) | set(self.pair_overlap_sha256))
+
+
+def _canonical_digest(value: object) -> str:
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _repair_index_rows(examples: Iterable[RepairExample]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen_source_ids: set[str] = set()
+    for example in examples:
+        source_id = example.source_id.strip()
+        if not source_id:
+            raise ValueError("repair example source_id is required")
+        if source_id in seen_source_ids:
+            raise ValueError(f"duplicate repair example source_id: {source_id}")
+        seen_source_ids.add(source_id)
+        prompt_sha, pair_sha = example_fingerprints(example.prompt, example.expected)
+        rows.append(
+            {
+                "source_id": source_id,
+                "prompt_sha256": prompt_sha,
+                "pair_sha256": pair_sha,
+            }
+        )
+    rows.sort(key=lambda row: (row["source_id"], row["prompt_sha256"], row["pair_sha256"]))
+    return rows
 
 
 def write_holdout_fingerprint_index(
@@ -88,6 +116,36 @@ def _load_index(path: Path) -> tuple[set[str], set[str], str]:
     return prompt_hashes, pair_hashes, hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def repair_dataset_index_digest(path: str | Path) -> str:
+    """Recompute the audited repair-example identity from a written Chowder dataset."""
+
+    dataset_path = Path(path)
+    if not dataset_path.is_file():
+        raise FileNotFoundError(f"repair dataset not found: {dataset_path}")
+    examples: list[RepairExample] = []
+    with dataset_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, Mapping):
+                raise ValueError(f"{dataset_path}:{line_number} repair row is not an object")
+            source_id = row.get("source_id")
+            prompt = row.get("prompt")
+            expected = row.get("expected")
+            declared_prompt_sha = row.get("prompt_sha256")
+            declared_pair_sha = row.get("pair_sha256")
+            if not all(isinstance(value, str) for value in (source_id, prompt, expected, declared_prompt_sha, declared_pair_sha)):
+                raise ValueError(f"{dataset_path}:{line_number} repair row lacks verification fields")
+            prompt_sha, pair_sha = example_fingerprints(prompt, expected)
+            if prompt_sha != declared_prompt_sha or pair_sha != declared_pair_sha:
+                raise ValueError(f"{dataset_path}:{line_number} repair row fingerprint mismatch")
+            examples.append(RepairExample(prompt=prompt, expected=expected, source_id=source_id))
+    if not examples:
+        raise ValueError("repair dataset contains no examples")
+    return _canonical_digest(_repair_index_rows(examples))
+
+
 def audit_repair_examples(
     examples: Iterable[RepairExample],
     holdout_fingerprint_files: Iterable[str | Path],
@@ -95,6 +153,7 @@ def audit_repair_examples(
     rows = tuple(examples)
     if not rows:
         raise ValueError("no repair examples supplied")
+    repair_index_rows = _repair_index_rows(rows)
 
     holdout_prompts: set[str] = set()
     holdout_pairs: set[str] = set()
@@ -110,10 +169,9 @@ def audit_repair_examples(
 
     prompt_overlaps: set[str] = set()
     pair_overlaps: set[str] = set()
-    for example in rows:
-        if not example.source_id.strip():
-            raise ValueError("repair example source_id is required")
-        prompt_sha, pair_sha = example_fingerprints(example.prompt, example.expected)
+    for row in repair_index_rows:
+        prompt_sha = row["prompt_sha256"]
+        pair_sha = row["pair_sha256"]
         if prompt_sha in holdout_prompts:
             prompt_overlaps.add(prompt_sha)
         if pair_sha in holdout_pairs:
@@ -125,6 +183,7 @@ def audit_repair_examples(
         prompt_overlap_sha256=tuple(sorted(prompt_overlaps)),
         pair_overlap_sha256=tuple(sorted(pair_overlaps)),
         holdout_index_sha256=tuple(sorted(index_digests)),
+        repair_index_sha256=_canonical_digest(repair_index_rows),
     )
 
 
@@ -151,6 +210,8 @@ def write_verified_repair_dataset(
                 json.dumps(
                     {
                         "text": f"User: {example.prompt}\nAssistant: {example.expected}",
+                        "prompt": example.prompt,
+                        "expected": example.expected,
                         "source_id": example.source_id,
                         "prompt_sha256": prompt_sha,
                         "pair_sha256": pair_sha,
@@ -160,4 +221,6 @@ def write_verified_repair_dataset(
                 )
                 + "\n"
             )
+    if repair_dataset_index_digest(path) != audit.repair_index_sha256:
+        raise RuntimeError("written repair dataset does not match contamination audit")
     return hashlib.sha256(path.read_bytes()).hexdigest(), audit
