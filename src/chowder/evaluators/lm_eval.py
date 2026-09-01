@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from ..executors import EvaluationOutcome, ExecutionContext, TrainingArtifact
 from ..models import Experiment
+from ..protocol import protocol_fingerprint
 from ..provenance import sha256_directory
 
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
@@ -240,14 +241,36 @@ class LmEvalEvaluator:
         runtime = payload.get("runtime", {})
         versions = payload.get("versions", {})
         raw_digest = payload.get("raw_results_sha256")
+        task_configs_digest = payload.get("task_configs_sha256")
         if not isinstance(metrics, Mapping) or not isinstance(runtime, Mapping) or not isinstance(versions, Mapping):
             raise RuntimeError("lm-eval result contains invalid evidence")
+        if not isinstance(task_configs_digest, str) or len(task_configs_digest) != 64:
+            raise RuntimeError("lm-eval result is missing task config fingerprint")
         if set(metrics) != set(spec.metric_map):
             raise RuntimeError("lm-eval result metric names do not match metric_map")
         gpu_count = int(runtime.get("gpu_count", 0))
         if gpu_count < 0:
             raise RuntimeError("lm-eval runtime reported a negative gpu_count")
 
+        protocol = {
+            "evaluator": self.name,
+            "base_model": spec.base_model,
+            "revision": spec.revision,
+            "tasks": list(spec.tasks),
+            "task_configs_sha256": task_configs_digest,
+            "metric_map": dict(spec.metric_map),
+            "device": runtime.get("device"),
+            "batch_size": spec.batch_size,
+            "num_fewshot": spec.num_fewshot,
+            "limit": spec.limit,
+            "precision": spec.precision,
+            "quantization": spec.quantization,
+            "apply_chat_template": spec.apply_chat_template,
+            "fewshot_as_multiturn": spec.fewshot_as_multiturn,
+            "seed": spec.seed,
+            "versions": dict(versions),
+        }
+        protocol_sha = protocol_fingerprint(protocol)
         return EvaluationOutcome(
             run_id=eval_id,
             experiment_id=experiment.experiment_id,
@@ -261,6 +284,9 @@ class LmEvalEvaluator:
                 "evaluation_spec_sha256": spec.digest(),
                 "evaluation_result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
                 "raw_results_sha256": raw_digest,
+                "task_configs_sha256": task_configs_digest,
+                "protocol": protocol,
+                "protocol_sha256": protocol_sha,
                 "tasks": list(spec.tasks),
                 "metric_map": dict(spec.metric_map),
                 "runtime": dict(runtime),
