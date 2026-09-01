@@ -7,8 +7,11 @@ from typing import Mapping
 from .cycle import CandidateCycleOutcome, ExperimentCycleRunner, GenerationOutcome
 from .failures import FailureCluster, RepairPlan, cluster_failures
 from .provenance import sha256_file
-from .repair_candidates import RepairVariant
-from .repair_orchestrator import RepairPopulationOutcome, prepare_and_propose_repair_population
+from .repair_candidates import RepairVariant, VerifiedReplayDataset
+from .repair_orchestrator import (
+    RepairPopulationOutcome,
+    prepare_and_propose_repair_population,
+)
 from .repair_requests import RepairSourceProvider
 
 
@@ -39,7 +42,9 @@ def _ranked_rejections(generation: GenerationOutcome) -> dict[str, object]:
     }
 
 
-def _candidate_by_id(generation: GenerationOutcome) -> dict[str, CandidateCycleOutcome]:
+def _candidate_by_id(
+    generation: GenerationOutcome,
+) -> dict[str, CandidateCycleOutcome]:
     return {candidate.experiment_id: candidate for candidate in generation.candidates}
 
 
@@ -68,23 +73,36 @@ def _repairable_target(
         candidate = candidates.get(experiment_id)
         if candidate is None:
             raise ValueError("ranked candidate is missing from generation outcomes")
-        if candidate.error is not None or candidate.result is None or candidate.evaluation is None:
+        if (
+            candidate.error is not None
+            or candidate.result is None
+            or candidate.evaluation is None
+        ):
             continue
         if candidate.diagnostic_error is not None:
             continue
         if not candidate.harvested_failures or not candidate.repair_plans:
             continue
 
-        clusters = {cluster.cluster_id: cluster for cluster in cluster_failures(candidate.harvested_failures)}
+        clusters = {
+            cluster.cluster_id: cluster
+            for cluster in cluster_failures(candidate.harvested_failures)
+        }
         repairable: list[tuple[int, str, FailureCluster, RepairPlan]] = []
         for plan in candidate.repair_plans:
             if not plan.requires_independent_source:
                 continue
             cluster = clusters.get(plan.cluster_id)
             if cluster is None:
-                raise ValueError("repair plan cluster is missing from harvested failure evidence")
-            if tuple(sorted(plan.source_failure_ids)) != tuple(sorted(cluster.failure_ids)):
-                raise ValueError("repair plan failure lineage does not match harvested cluster")
+                raise ValueError(
+                    "repair plan cluster is missing from harvested failure evidence"
+                )
+            if tuple(sorted(plan.source_failure_ids)) != tuple(
+                sorted(cluster.failure_ids)
+            ):
+                raise ValueError(
+                    "repair plan failure lineage does not match harvested cluster"
+                )
             repairable.append((len(cluster.failure_ids), plan.plan_id, cluster, plan))
 
         if repairable:
@@ -94,7 +112,9 @@ def _repairable_target(
             return RepairTarget(candidate=candidate, cluster=cluster, plan=plan)
 
     if candidate_id is not None:
-        raise ValueError("requested rejected candidate has no independently repairable diagnostics")
+        raise ValueError(
+            "requested rejected candidate has no independently repairable diagnostics"
+        )
     raise ValueError("generation has no independently repairable rejected candidate")
 
 
@@ -105,7 +125,9 @@ def _verified_holdout_files(candidate: CandidateCycleOutcome) -> tuple[Path, ...
     evidence = evaluation.evidence
     suite_evidence = evidence.get("suite_evidence")
     declared_hashes = evidence.get("holdout_fingerprint_sha256")
-    if not isinstance(suite_evidence, Mapping) or not isinstance(declared_hashes, Mapping):
+    if not isinstance(suite_evidence, Mapping) or not isinstance(
+        declared_hashes, Mapping
+    ):
         raise ValueError("evaluation is missing holdout fingerprint evidence")
 
     files: list[Path] = []
@@ -120,22 +142,70 @@ def _verified_holdout_files(candidate: CandidateCycleOutcome) -> tuple[Path, ...
             raise ValueError(f"suite evidence for {suite_name!r} is invalid")
         path_raw = suite.get("holdout_fingerprints_file")
         suite_declared = suite.get("holdout_fingerprints_sha256")
-        if not isinstance(path_raw, str) or not isinstance(declared, str) or not isinstance(suite_declared, str):
-            raise ValueError(f"suite {suite_name!r} is missing fingerprint path/digest")
+        if (
+            not isinstance(path_raw, str)
+            or not isinstance(declared, str)
+            or not isinstance(suite_declared, str)
+        ):
+            raise ValueError(
+                f"suite {suite_name!r} is missing fingerprint path/digest"
+            )
         if declared != suite_declared:
-            raise ValueError(f"suite {suite_name!r} fingerprint digest declarations disagree")
+            raise ValueError(
+                f"suite {suite_name!r} fingerprint digest declarations disagree"
+            )
         path = Path(path_raw).resolve()
         if not path.is_file():
             raise FileNotFoundError(f"holdout fingerprint file not found: {path}")
         actual = sha256_file(path)
         if actual != declared:
-            raise ValueError(f"suite {suite_name!r} holdout fingerprint digest changed")
+            raise ValueError(
+                f"suite {suite_name!r} holdout fingerprint digest changed"
+            )
         if path not in seen:
             files.append(path)
             seen.add(path)
     if not files:
         raise ValueError("evaluation contains no holdout fingerprint files")
     return tuple(files)
+
+
+def _verified_parent_replay(
+    *,
+    runner: ExperimentCycleRunner,
+    target: RepairTarget,
+    ratio: float,
+) -> VerifiedReplayDataset:
+    """Bind rehearsal to the exact dataset used to train the rejected parent."""
+
+    artifact = target.candidate.artifact
+    if artifact is None:
+        raise ValueError("repair target has no training artifact for replay provenance")
+    recorded_sha = artifact.evidence.get("dataset_sha256")
+    if not isinstance(recorded_sha, str) or len(recorded_sha) != 64:
+        raise ValueError(
+            "repair target training artifact is missing dataset SHA-256 provenance"
+        )
+
+    resolved = runner.engine.resolve_config(
+        target.candidate.experiment_id, runner.base_config
+    )
+    backend = resolved.get("backend")
+    if not isinstance(backend, Mapping):
+        raise ValueError("repair target resolved config has no backend mapping")
+    dataset_raw = backend.get("dataset")
+    if not isinstance(dataset_raw, str) or not dataset_raw.strip():
+        raise ValueError("repair target resolved config has no training dataset")
+    dataset_path = Path(dataset_raw)
+    if not dataset_path.is_absolute():
+        dataset_path = Path(runner.context.work_dir) / dataset_path
+    dataset_path = dataset_path.resolve()
+
+    replay = VerifiedReplayDataset(
+        path=str(dataset_path), sha256=recorded_sha, ratio=float(ratio)
+    )
+    replay.verify()
+    return replay
 
 
 def run_single_hop_autonomous_repair(
@@ -145,12 +215,14 @@ def run_single_hop_autonomous_repair(
     provider: RepairSourceProvider,
     variants: tuple[RepairVariant, ...],
     candidate_id: str | None = None,
+    replay_ratio: float | None = 1.0,
 ) -> AutonomousRepairOutcome:
     """Repair one gate-rejected candidate and execute its repair population.
 
-    This is deliberately single-hop. It does not recursively repair failures from
-    the repair generation. Recursion requires a separate stopping policy, loop
-    budget, and repeated-failure guard and is therefore not implicit here.
+    By default each repair candidate rehearses a deterministic sample of the
+    exact dataset used to train the rejected parent. Set ``replay_ratio=None``
+    only when intentionally disabling rehearsal. This remains deliberately
+    single-hop; recursive repair needs a separate stopping/no-progress policy.
     """
 
     if not variants:
@@ -164,6 +236,13 @@ def run_single_hop_autonomous_repair(
         raise ValueError("repair target graph status is not rejected")
 
     holdout_files = _verified_holdout_files(target.candidate)
+    replay = (
+        _verified_parent_replay(
+            runner=runner, target=target, ratio=float(replay_ratio)
+        )
+        if replay_ratio is not None
+        else None
+    )
     population = prepare_and_propose_repair_population(
         engine=runner.engine,
         parent_id=target.candidate.experiment_id,
@@ -174,6 +253,7 @@ def run_single_hop_autonomous_repair(
         variants=variants,
         work_dir=runner.context.work_dir,
         registry=runner.registry,
+        replay=replay,
     )
     if not population.proposed_candidates:
         raise ValueError("repair population produced no budget-admissible candidates")
