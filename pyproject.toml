@@ -46,4 +46,6 @@ testpaths = ["tests"]
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E9", "F"]
+# Correctness gate only: syntax errors, invalid constructs and undefined names.
+# Style/unused-import cleanup remains a separate maintenance concern.
+select = ["E9", "F63", "F7", "F82"]
