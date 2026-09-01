@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .models import GateDecision, Goal, ExperimentResult
+from .protocol import result_protocol_fingerprint
 
 
 def evaluate_candidate(
@@ -19,6 +20,28 @@ def evaluate_candidate(
     missing: list[str] = []
     weighted_gain = 0.0
     weight_total = 0.0
+
+    if goal.require_protocol_match:
+        baseline_protocol = result_protocol_fingerprint(baseline.evidence)
+        candidate_protocol = result_protocol_fingerprint(candidate.evidence)
+        if baseline_protocol is None:
+            missing.append("baseline:evaluation_protocol")
+        if candidate_protocol is None:
+            missing.append("evaluation_protocol")
+        if (
+            baseline_protocol is not None
+            and candidate_protocol is not None
+            and baseline_protocol != candidate_protocol
+        ):
+            return GateDecision(
+                accepted=False,
+                score=float("-inf"),
+                regressions={},
+                unmet_targets=(),
+                missing_metrics=(),
+                goal_met=False,
+                reason="rejected: evaluation protocol does not match baseline",
+            )
 
     for target in goal.metrics:
         if target.name not in candidate.metrics:
