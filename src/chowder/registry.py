@@ -96,6 +96,10 @@ _FAILURE_UPSERT = """INSERT OR REPLACE INTO failure_records
    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 
+class RegistryInvariantError(ValueError):
+    """Raised when durable experiment lineage would violate graph invariants."""
+
+
 class RunRegistry:
     def __init__(self, path: str | Path):
         self.path = str(path)
@@ -123,16 +127,46 @@ class RunRegistry:
             experiment.status.value,
         )
 
+    def _validate_experiment_batch(self, experiments: tuple[Experiment, ...]) -> None:
+        """Validate ordered lineage before writing, including legacy databases.
+
+        Early Chowder databases did not declare ``experiments.parent_id`` as a
+        SQLite foreign key. Application-level validation therefore remains the
+        durable compatibility invariant: a parent must already exist or appear
+        earlier in this same ordered batch, and IDs may not collide with either
+        existing rows or earlier batch members.
+        """
+
+        existing_ids = {
+            row[0] for row in self._conn.execute("SELECT experiment_id FROM experiments")
+        }
+        staged_ids = set(existing_ids)
+        for experiment in experiments:
+            experiment_id = experiment.experiment_id
+            if experiment_id in staged_ids:
+                raise RegistryInvariantError(
+                    f"duplicate persisted experiment id: {experiment_id}"
+                )
+            parent_id = experiment.parent_id
+            if parent_id is not None and parent_id not in staged_ids:
+                raise RegistryInvariantError(
+                    f"unknown persisted parent: {parent_id}"
+                )
+            staged_ids.add(experiment_id)
+
     def record_experiments(self, experiments: Iterable[Experiment]) -> None:
         """Persist an ordered experiment batch atomically.
 
-        Parent rows may occur earlier in the same batch. Any primary-key or
-        foreign-key failure rolls back every row in the batch.
+        Parent rows may occur earlier in the same batch. Invariant validation is
+        performed before opening the write transaction so legacy databases with
+        no self-referential parent foreign key receive the same guarantees as new
+        ones. Any SQL failure still rolls back every write in the batch.
         """
 
         rows = tuple(experiments)
         if not rows:
             return
+        self._validate_experiment_batch(rows)
         values = tuple(self._experiment_row(experiment) for experiment in rows)
         with self._conn:
             self._conn.executemany(_EXPERIMENT_INSERT, values)
