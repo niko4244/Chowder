@@ -1,5 +1,7 @@
+from dataclasses import replace
+
 from chowder.closeout import finalize_investigation
-from chowder.hypothesis_generation import MinimalRuleBasedGenerator
+from chowder.hypothesis_generation import RuleBasedGenerator
 from chowder.incident import SignatureKind, compute_fingerprint
 from chowder.investigation import (
     DiagnosticProbeResult,
@@ -44,7 +46,7 @@ def test_walking_skeleton_resolves_known_incident_end_to_end():
     )
     assert probe_results[0].observation["compatible"] is True  # T4/sm_75, not the wrong-GPU case
 
-    candidates = MinimalRuleBasedGenerator().generate(fingerprint)
+    candidates = RuleBasedGenerator().generate(fingerprint)
     assert len(candidates) == 1
     candidate = candidates[0]
 
@@ -82,13 +84,22 @@ def test_walking_skeleton_resolves_known_incident_end_to_end():
     assert routed_again is remediation_record
 
 
-def test_minimal_generator_returns_nothing_for_unmodeled_signature():
-    """The Task 5 generator only knows one signature_kind -- it must fail
-    safe (no candidates) rather than fabricate a plausible-looking
-    hypothesis for a class it hasn't been taught yet."""
-    fingerprint = compute_fingerprint(PEFT_KBIT_PREP_OOM)
-    assert fingerprint.signature_kind is SignatureKind.CUDA_OOM
-    assert MinimalRuleBasedGenerator().generate(fingerprint) == ()
+def test_generator_returns_nothing_for_unmodeled_signature():
+    """UNKNOWN incidents get no fabricated hypothesis -- the generator must
+    fail safe rather than guess a plausible-looking fix for a class no rule
+    recognizes. (As of Task 6 the table covers all 9 signature kinds the
+    real dev fixtures classify into, so this test needs a genuinely
+    unclassifiable message rather than reusing a fixture that's now
+    covered.)"""
+    unclassified = replace(
+        PEFT_KBIT_PREP_OOM,
+        exception_type="RuntimeError",
+        exception_message="an entirely novel failure mode no rule recognizes",
+        traceback_text="RuntimeError: an entirely novel failure mode no rule recognizes",
+    )
+    fingerprint = compute_fingerprint(unclassified)
+    assert fingerprint.signature_kind is SignatureKind.UNKNOWN
+    assert RuleBasedGenerator().generate(fingerprint) == ()
 
 
 def test_rank_trials_orders_by_probe_corroboration_count_descending():

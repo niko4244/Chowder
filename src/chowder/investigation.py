@@ -124,6 +124,7 @@ class HypothesisTrial:
 
     hypothesis: Hypothesis
     config_patch: Mapping[str, Any]
+    estimated_gpu_hours: float = 0.0
     probe_results: tuple[DiagnosticProbeResult, ...] = ()
     remediation: RemediationRecord | None = None
     rank: float | None = None
@@ -159,6 +160,7 @@ class Investigation:
         hypothesis: Hypothesis,
         *,
         config_patch: Mapping[str, Any],
+        estimated_gpu_hours: float = 0.0,
         registry: RemediationRegistry | None = None,
     ) -> HypothesisTrial:
         """Register a new hypothesis, with the concrete change it proposes to try.
@@ -166,12 +168,16 @@ class Investigation:
         ``Hypothesis.intervention`` (from ``models.py``) is free text -- it
         describes an idea, not an executable change. ``config_patch`` is
         the actual patch that idea resolves to, and is what "have we tried
-        this before" has to compare against. When ``registry`` is supplied
-        and this exact patch already failed against this incident's
-        signature class, this raises rather than silently accepting a
-        repeat -- the structural guard behind "did it avoid repeating
-        failed interventions," enforced here rather than left to callers
-        to remember.
+        this before" has to compare against. ``estimated_gpu_hours`` is the
+        generator's own pre-run cost estimate for this candidate -- used by
+        ``ranking.py`` to break ties between equally-corroborated trials
+        (cheaper first), not a measured cost, which only exists once a
+        trial has actually run. When ``registry`` is supplied and this
+        exact patch already failed against this incident's signature
+        class, this raises rather than silently accepting a repeat -- the
+        structural guard behind "did it avoid repeating failed
+        interventions," enforced here rather than left to callers to
+        remember.
         """
         if self.remaining_budget() <= 0:
             raise ValueError(
@@ -188,7 +194,11 @@ class Investigation:
                     f"(remediation_id={prior_failure.remediation_id!r}); "
                     "propose a genuinely different intervention instead"
                 )
-        trial = HypothesisTrial(hypothesis=hypothesis, config_patch=config_patch)
+        trial = HypothesisTrial(
+            hypothesis=hypothesis,
+            config_patch=config_patch,
+            estimated_gpu_hours=estimated_gpu_hours,
+        )
         self.trials.append(trial)
         if self.status is InvestigationStatus.OPEN:
             self.status = InvestigationStatus.HYPOTHESIS_TESTING
