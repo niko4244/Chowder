@@ -1,0 +1,203 @@
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+from typing import Any
+
+from .transformers_text import EvalSuiteSpec, TransformersTextEvalSpec
+
+
+def _package_version(name: str) -> str:
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def _normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _score(prediction: str, expected: str, scoring: str) -> float:
+    if scoring == "exact_match":
+        return float(prediction.strip() == expected.strip())
+    if scoring == "normalized_exact_match":
+        return float(_normalize(prediction) == _normalize(expected))
+    raise ValueError(f"unsupported scoring: {scoring}")
+
+
+def _resolve_dtype(torch: Any, precision: str):
+    if precision == "fp32":
+        return torch.float32
+    if precision == "bf16":
+        if torch.cuda.is_available() and not torch.cuda.is_bf16_supported():
+            raise RuntimeError("bf16 requested but the active CUDA device does not support bf16")
+        return torch.bfloat16
+    if precision == "fp16":
+        return torch.float16
+    if torch.cuda.is_available():
+        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    return torch.float32
+
+
+def _resolve_device(torch: Any, requested: str) -> str:
+    requested = requested.strip().lower()
+    if requested == "auto":
+        return "cuda:0" if torch.cuda.is_available() else "cpu"
+    if requested.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(f"{requested} requested but CUDA is unavailable")
+    return requested
+
+
+def _load_rows(suite: EvalSuiteSpec) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with Path(suite.dataset).open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise RuntimeError(f"{suite.dataset}:{line_number} is not a JSON object")
+            if suite.prompt_field not in row or suite.expected_field not in row:
+                raise RuntimeError(
+                    f"{suite.dataset}:{line_number} missing {suite.prompt_field!r} or {suite.expected_field!r}"
+                )
+            rows.append(row)
+    if not rows:
+        raise RuntimeError(f"evaluation suite {suite.name!r} is empty")
+    return rows
+
+
+def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
+    try:
+        import torch
+        from peft import PeftModel
+        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, set_seed
+    except ImportError as exc:
+        raise RuntimeError("evaluation dependencies are missing; install chowder-ai[train]") from exc
+
+    if spec.trust_remote_code:
+        raise RuntimeError("trust_remote_code is disabled")
+    device_name = _resolve_device(torch, spec.device)
+    if spec.quantization == "4bit" and not device_name.startswith("cuda"):
+        raise RuntimeError("4-bit evaluation requires a CUDA device")
+
+    dtype = _resolve_dtype(torch, spec.precision)
+    set_seed(spec.seed)
+    tokenizer = AutoTokenizer.from_pretrained(
+        spec.base_model, revision=spec.revision, trust_remote_code=False
+    )
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token_id is None:
+            raise RuntimeError("tokenizer has neither pad_token nor eos_token")
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model_kwargs: dict[str, Any] = {"trust_remote_code": False, "dtype": dtype}
+    if spec.revision is not None:
+        model_kwargs["revision"] = spec.revision
+    if spec.quantization == "4bit":
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=dtype,
+        )
+        device_index = int(device_name.split(":", 1)[1]) if ":" in device_name else 0
+        model_kwargs["device_map"] = {"": device_index}
+
+    base = AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs)
+    if spec.quantization == "none":
+        base = base.to(device_name)
+    model = PeftModel.from_pretrained(base, spec.adapter_dir, is_trainable=False)
+    model.eval()
+    device = next(model.parameters()).device
+
+    output_dir = Path(spec.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metrics: dict[str, float] = {}
+    suite_evidence: dict[str, Any] = {}
+
+    with torch.inference_mode():
+        for suite in spec.suites:
+            rows = _load_rows(suite)
+            correct = 0.0
+            predictions_path = output_dir / f"predictions-{suite.name}.jsonl"
+            with predictions_path.open("w", encoding="utf-8") as output:
+                for row in rows:
+                    prompt = str(row[suite.prompt_field])
+                    expected = str(row[suite.expected_field])
+                    if suite.use_chat_template:
+                        if not getattr(tokenizer, "chat_template", None):
+                            raise RuntimeError(
+                                f"suite {suite.name!r} requested chat template but tokenizer has none"
+                            )
+                        rendered = tokenizer.apply_chat_template(
+                            [{"role": "user", "content": prompt}],
+                            tokenize=False,
+                            add_generation_prompt=True,
+                        )
+                    else:
+                        rendered = prompt
+                    encoded = tokenizer(rendered, return_tensors="pt")
+                    encoded = {key: value.to(device) for key, value in encoded.items()}
+                    generated = model.generate(
+                        **encoded,
+                        max_new_tokens=suite.max_new_tokens,
+                        do_sample=False,
+                        pad_token_id=tokenizer.pad_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                    )
+                    prompt_tokens = encoded["input_ids"].shape[1]
+                    prediction = tokenizer.decode(
+                        generated[0, prompt_tokens:], skip_special_tokens=True
+                    )
+                    row_score = _score(prediction, expected, suite.scoring)
+                    correct += row_score
+                    output.write(json.dumps({
+                        "prompt": prompt,
+                        "expected": expected,
+                        "prediction": prediction,
+                        "score": row_score,
+                    }, ensure_ascii=False) + "\n")
+            metrics[suite.name] = correct / len(rows)
+            suite_evidence[suite.name] = {
+                "rows": len(rows),
+                "scoring": suite.scoring,
+                "predictions_file": str(predictions_path),
+            }
+
+    return {
+        "metrics": metrics,
+        "suites": suite_evidence,
+        "runtime": {
+            "device": device_name,
+            "gpu_count": 1 if device_name.startswith("cuda") else 0,
+        },
+        "versions": {
+            "torch": _package_version("torch"),
+            "transformers": _package_version("transformers"),
+            "peft": _package_version("peft"),
+            "bitsandbytes": _package_version("bitsandbytes"),
+        },
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--spec", required=True)
+    parser.add_argument("--result", required=True)
+    args = parser.parse_args()
+
+    raw = json.loads(Path(args.spec).read_text(encoding="utf-8"))
+    raw["suites"] = tuple(EvalSuiteSpec(**suite) for suite in raw["suites"])
+    spec = TransformersTextEvalSpec(**raw)
+    result = evaluate(spec)
+    Path(args.result).write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
