@@ -23,6 +23,9 @@ train = [
 qlora = [
   "bitsandbytes>=0.50,<0.51",
 ]
+eval = [
+  "lm-eval[hf]>=0.4.13,<0.5",
+]
 
 [project.scripts]
 chowder = "chowder.cli:main"
