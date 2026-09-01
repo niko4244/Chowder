@@ -18,6 +18,8 @@ class StorageCalibration:
     write_gbps: float
     sample_mib: int
     passes: int
+    read_cache_sensitive: bool = True
+    durable_write: bool = True
 
 
 @dataclass(frozen=True)
@@ -65,8 +67,10 @@ def calibrate_storage(
 ) -> StorageCalibration:
     """Measure sequential file throughput using a temporary file.
 
-    This reports end-to-end filesystem throughput, not raw device marketing
-    bandwidth. The temporary file is removed even when calibration fails.
+    This reports end-to-end filesystem throughput. The read measurement can be
+    accelerated by the operating-system page cache, so it is explicitly marked
+    cache-sensitive and must not be treated as uncached NVMe bandwidth.
+    The write path is flushed and fsynced before it is timed as complete.
     """
     if sample_mib <= 0 or passes <= 0:
         raise ValueError("sample_mib and passes must be positive")
@@ -205,6 +209,7 @@ def calibrate_hardware(
     storage = calibrate_storage(path, sample_mib=sample_mib, passes=passes)
     host_memory = calibrate_host_memory(sample_mib=max(sample_mib, 64), passes=max(passes, 3))
     cuda = calibrate_cuda_transfer(sample_mib=sample_mib, passes=max(passes, 3)) if include_cuda else None
+    notes.append("storage read throughput may include OS page-cache effects; do not treat it as uncached NVMe bandwidth")
     if include_cuda and cuda is None:
         notes.append("CUDA transfer calibration unavailable; PyTorch/CUDA was not detected")
     return HardwareCalibration(storage=storage, host_memory=host_memory, cuda=cuda, notes=tuple(notes))
