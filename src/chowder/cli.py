@@ -4,6 +4,7 @@ import argparse
 import json
 from dataclasses import asdict
 
+from .hardware import detect_hardware
 from .memory import HardwareProfile, WorkloadProfile, plan_memory
 
 
@@ -27,6 +28,11 @@ def _memory_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _hardware_detect(args: argparse.Namespace) -> int:
+    print(json.dumps(detect_hardware(args.path).to_dict(), indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="chowder", description="Chowder autonomous post-training engine")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -44,6 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
     memory.add_argument("--optimizer", type=float, required=True)
     memory.add_argument("--workspace", type=float, required=True)
     memory.set_defaults(func=_memory_plan)
+
+    hardware = sub.add_parser("hardware-detect", help="Inventory local hardware without ML dependencies")
+    hardware.add_argument("--path", default=".", help="Filesystem path whose storage tier should be measured")
+    hardware.set_defaults(func=_hardware_detect)
     return parser
 
 
