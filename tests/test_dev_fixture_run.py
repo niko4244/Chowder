@@ -9,7 +9,7 @@ was never actually confirmed.
 """
 from typing import Any, Mapping
 
-from chowder.closeout import finalize_investigation
+from chowder.benchmark import run_investigation
 from chowder.hypothesis_generation import RuleBasedGenerator
 from chowder.incident import FailureCapture, compute_fingerprint
 from chowder.investigation import (
@@ -18,12 +18,8 @@ from chowder.investigation import (
     RemediationOutcome,
     RemediationRegistry,
     config_patch_digest,
-    route_failure,
 )
-from chowder.probes import HardwareCompatibilityProbe, InstalledPackageProbe, ProbeContext
-from chowder.ranking import rank_trials
-from chowder.remediation_runner import RemediationExperiment
-from chowder.replay import ReplayExecutor, ReplayGroundTruth
+from chowder.replay import ReplayGroundTruth
 
 from fixtures_incidents import (
     ALL_DEV_FIXTURES,
@@ -139,66 +135,24 @@ def _run_one(
     capture: FailureCapture,
     registry: RemediationRegistry,
     *,
-    gpu_hour_budget: float,
     investigation_id: str,
 ) -> tuple[Investigation, RemediationRegistry]:
-    """One fixture through the full loop: route -> probe -> generate ->
-    rank -> attempt ranked candidates in order until one resolves or the
-    budget runs out -> finalize if resolved. Mirrors the walking skeleton's
-    hand-driven sequence (Task 5), generalized to more than one candidate
-    per investigation.
+    """Thin wrapper around chowder.benchmark.run_investigation (Task 8),
+    which promoted this file's original hand-written loop to real source
+    once the benchmark scorer needed the same orchestration. A uniform
+    1.0-hour budget is enough for every dev fixture, including
+    DPO_TRAINER_DEVICE_MAP_AUTO_MISMATCH: it no longer needs a specially
+    tight budget to reach ABANDONED, now that Investigation.abandon()
+    covers "ran out of candidate hypotheses" as its own terminal path,
+    independent of budget exhaustion.
     """
-    fingerprint = compute_fingerprint(capture)
-    routed = route_failure(
-        capture, fingerprint, registry, gpu_hour_budget=gpu_hour_budget, investigation_id=investigation_id
-    )
-    assert isinstance(routed, Investigation), (
-        "every dev fixture is a first-time incident against a registry that "
-        "has never resolved it before -- a known-remediation fast path here "
-        "would mean two different incidents collided onto the same fingerprint"
-    )
-    investigation = routed
-
-    context = ProbeContext(capture=capture, fingerprint=fingerprint, registry=registry)
-    probe_results = (
-        HardwareCompatibilityProbe().run(context),
-        InstalledPackageProbe().run(context),
-    )
-
-    trials = []
-    for candidate in RuleBasedGenerator().generate(fingerprint):
-        trial = investigation.add_hypothesis(
-            candidate.hypothesis,
-            config_patch=candidate.config_patch,
-            estimated_gpu_hours=candidate.estimated_gpu_hours,
-            registry=registry,
-        )
-        for result in probe_results:
-            investigation.record_probe(trial, result)
-        trials.append(trial)
-
     truth = ReplayGroundTruth(
-        fingerprint_sha256=fingerprint.fingerprint_sha256,
+        fingerprint_sha256=compute_fingerprint(capture).fingerprint_sha256,
         outcomes=_GROUND_TRUTH_OUTCOMES[capture.incident_id],
     )
-
-    for trial in rank_trials(trials):
-        if investigation.remaining_budget() <= 0:
-            break
-        experiment = RemediationExperiment(
-            executor=ReplayExecutor(truth), gpu_hours_per_attempt=trial.estimated_gpu_hours
-        )
-        record = experiment.run(investigation, trial, environment=capture.environment)
-        if record.outcome is RemediationOutcome.RESOLVED:
-            investigation.resolve(trial, record)
-            break
-        investigation.record_failed_trial(trial, record)
-
-    if investigation.status is InvestigationStatus.RESOLVED:
-        remediation_record, _trail = finalize_investigation(investigation)
-        registry = registry.with_record(remediation_record)
-
-    return investigation, registry
+    return run_investigation(
+        capture, truth, RuleBasedGenerator(), registry, investigation_id=investigation_id
+    )
 
 
 def _resolving_record(investigation: Investigation):
@@ -228,10 +182,7 @@ def test_all_dev_fixtures_resolve_or_are_correctly_abandoned():
     registry = RemediationRegistry()
     for index, (capture, expected_status, expected_patch) in enumerate(_EXPECTATIONS):
         investigation, registry = _run_one(
-            capture,
-            registry,
-            gpu_hour_budget=1.0 if expected_status is InvestigationStatus.RESOLVED else 0.05,
-            investigation_id=f"inv-devrun-{index}",
+            capture, registry, investigation_id=f"inv-devrun-{index}"
         )
         assert investigation.status is expected_status, (
             f"{capture.incident_id}: expected {expected_status}, got {investigation.status}"
@@ -249,10 +200,10 @@ def test_conv1d_and_cublas_incidents_never_collapse_through_the_investigation_pa
     config patches, not share a remediation."""
     registry = RemediationRegistry()
     conv1d_investigation, registry = _run_one(
-        QWEN3_5_CONV1D_NO_ENGINE, registry, gpu_hour_budget=1.0, investigation_id="inv-conv1d"
+        QWEN3_5_CONV1D_NO_ENGINE, registry, investigation_id="inv-conv1d"
     )
     cublas_investigation, registry = _run_one(
-        GATED_DELTA_RULE_CUBLAS_FAILURE, registry, gpu_hour_budget=1.0, investigation_id="inv-cublas"
+        GATED_DELTA_RULE_CUBLAS_FAILURE, registry, investigation_id="inv-cublas"
     )
 
     assert conv1d_investigation.fingerprint.fingerprint_sha256 != (
@@ -273,10 +224,10 @@ def test_recurring_oom_incidents_need_different_fixes_through_the_investigation_
     setup."""
     registry = RemediationRegistry()
     kbit_investigation, registry = _run_one(
-        PEFT_KBIT_PREP_OOM, registry, gpu_hour_budget=1.0, investigation_id="inv-kbit-oom"
+        PEFT_KBIT_PREP_OOM, registry, investigation_id="inv-kbit-oom"
     )
     upcast_investigation, registry = _run_one(
-        DPO_LOGITS_FP32_UPCAST_OOM, registry, gpu_hour_budget=1.0, investigation_id="inv-upcast-oom"
+        DPO_LOGITS_FP32_UPCAST_OOM, registry, investigation_id="inv-upcast-oom"
     )
 
     assert kbit_investigation.fingerprint.fingerprint_sha256 != (

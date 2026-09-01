@@ -99,7 +99,8 @@ class InvestigationStatus(str, Enum):
     OPEN = "open"
     HYPOTHESIS_TESTING = "hypothesis_testing"
     RESOLVED = "resolved"
-    ABANDONED = "abandoned"  # exhausted its GPU-hour budget without resolving
+    ABANDONED = "abandoned"  # exhausted its GPU-hour budget, or every candidate
+    # hypothesis on offer, without resolving -- see Investigation.abandon()
 
 
 @dataclass(frozen=True)
@@ -219,6 +220,25 @@ class Investigation:
         self.gpu_hours_spent += remediation.gpu_hours_spent
         if self.remaining_budget() <= 0:
             self.status = InvestigationStatus.ABANDONED
+
+    def abandon(self) -> None:
+        """Mark this investigation abandoned because there is nothing left
+        to try -- every candidate hypothesis the generator offered has been
+        attempted (or none existed at all) without resolving, independent
+        of whether any GPU-hour budget remains.
+
+        Distinct from the automatic ABANDONED transition inside
+        ``record_failed_trial`` (budget exhaustion): a driver that has run
+        out of *ideas*, not out of money, is equally stuck, and a
+        benchmark scoring "did it resolve or was it honestly abandoned"
+        needs both paths to land in the same terminal state rather than
+        leaving an idea-exhausted investigation stranded in
+        HYPOTHESIS_TESTING (or even OPEN, if no hypothesis was ever
+        proposed) forever.
+        """
+        if self.status is InvestigationStatus.RESOLVED:
+            raise ValueError(f"investigation {self.investigation_id} is already resolved")
+        self.status = InvestigationStatus.ABANDONED
 
 
 def route_failure(
