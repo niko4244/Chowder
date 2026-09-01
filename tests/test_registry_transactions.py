@@ -5,7 +5,7 @@ import pytest
 from chowder.executors import EvaluationOutcome
 from chowder.failures import FailureRecord, FailureSourceRole
 from chowder.models import Experiment, Hypothesis
-from chowder.registry import RunRegistry
+from chowder.registry import RegistryInvariantError, RunRegistry
 
 
 def _experiment(name, parent=None):
@@ -37,19 +37,30 @@ def _failure(failure_id, *, experiment_id="e1", evaluation_run_id="eval-1"):
     )
 
 
-def test_record_experiments_rolls_back_complete_batch_on_foreign_key_failure(tmp_path):
+def test_record_experiments_rejects_unknown_parent_before_any_write(tmp_path):
     with RunRegistry(tmp_path / "runs.db") as registry:
         root = _experiment("root")
         registry.record_experiment(root)
         valid_child = _experiment("valid-child", "root")
         invalid_child = _experiment("invalid-child", "missing")
 
-        with pytest.raises(sqlite3.IntegrityError):
+        with pytest.raises(RegistryInvariantError, match="unknown persisted parent"):
             registry.record_experiments((valid_child, invalid_child))
 
         assert registry.has_experiment("root")
         assert not registry.has_experiment("valid-child")
         assert not registry.has_experiment("invalid-child")
+
+
+def test_record_experiments_rejects_duplicate_batch_before_any_write(tmp_path):
+    with RunRegistry(tmp_path / "runs.db") as registry:
+        root = _experiment("root")
+        registry.record_experiment(root)
+        first = _experiment("same", "root")
+        duplicate = _experiment("same", "root")
+        with pytest.raises(RegistryInvariantError, match="duplicate persisted experiment id"):
+            registry.record_experiments((first, duplicate))
+        assert not registry.has_experiment("same")
 
 
 def test_record_experiments_supports_parent_child_in_same_transaction(tmp_path):
