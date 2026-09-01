@@ -6,6 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable
 
+from .executors import TrainingArtifact
 from .models import Experiment, ExperimentResult
 from .provenance import EvidenceManifest
 
@@ -19,6 +20,15 @@ CREATE TABLE IF NOT EXISTS experiments (
     hypothesis_json TEXT NOT NULL,
     config_json TEXT NOT NULL,
     status TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS training_runs (
+    run_id TEXT PRIMARY KEY,
+    experiment_id TEXT NOT NULL,
+    artifact_ref TEXT NOT NULL,
+    gpu_hours REAL NOT NULL,
+    telemetry_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id)
 );
 CREATE TABLE IF NOT EXISTS results (
     experiment_id TEXT PRIMARY KEY,
@@ -67,6 +77,37 @@ class RunRegistry:
             ),
         )
         self._conn.commit()
+
+    def record_training_artifact(self, artifact: TrainingArtifact) -> None:
+        self._conn.execute(
+            """INSERT OR REPLACE INTO training_runs
+               (run_id, experiment_id, artifact_ref, gpu_hours, telemetry_json, evidence_json)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                artifact.run_id,
+                artifact.experiment_id,
+                artifact.artifact_ref,
+                artifact.gpu_hours,
+                json.dumps(dict(artifact.telemetry), sort_keys=True),
+                json.dumps(dict(artifact.evidence), sort_keys=True),
+            ),
+        )
+        self._conn.commit()
+
+    def list_training_artifacts(self) -> Iterable[TrainingArtifact]:
+        rows = self._conn.execute(
+            """SELECT run_id, experiment_id, artifact_ref, gpu_hours, telemetry_json, evidence_json
+               FROM training_runs ORDER BY rowid"""
+        )
+        for run_id, experiment_id, artifact_ref, gpu_hours, telemetry, evidence in rows:
+            yield TrainingArtifact(
+                run_id=run_id,
+                experiment_id=experiment_id,
+                artifact_ref=artifact_ref,
+                gpu_hours=gpu_hours,
+                telemetry=json.loads(telemetry),
+                evidence=json.loads(evidence),
+            )
 
     def record_result(self, result: ExperimentResult) -> None:
         self._conn.execute(
