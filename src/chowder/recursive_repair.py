@@ -16,6 +16,7 @@ from .autonomous_repair import (
 )
 from .cycle import ExperimentCycleRunner, GenerationOutcome
 from .failures import FailureRecord
+from .models import ExperimentResult, Goal
 from .repair_candidates import RepairVariant
 from .repair_requests import RepairSourceProvider
 from .recursive_trace import RecursiveRepairTraceStore
@@ -230,6 +231,43 @@ def _variant_metadata(variants: tuple[RepairVariant, ...]) -> list[dict[str, Any
     ]
 
 
+def _goal_snapshot(goal: Goal) -> dict[str, Any]:
+    return {
+        "metrics": [
+            {
+                "name": target.name,
+                "minimum": target.minimum,
+                "maximum": target.maximum,
+                "weight": target.weight,
+                "regression_tolerance": target.regression_tolerance,
+                "direction": target.direction.value,
+            }
+            for target in goal.metrics
+        ],
+        "gpu_hour_budget": goal.gpu_hour_budget,
+        "max_parallel_candidates": goal.max_parallel_candidates,
+        "minimum_promotion_gain": goal.minimum_promotion_gain,
+        "require_protocol_match": goal.require_protocol_match,
+    }
+
+
+def _result_snapshot(result: ExperimentResult) -> dict[str, Any]:
+    return {
+        "experiment_id": result.experiment_id,
+        "metrics": dict(result.metrics),
+        "gpu_hours": result.gpu_hours,
+        "artifact_ref": result.artifact_ref,
+        "evidence": dict(result.evidence),
+    }
+
+
+def _engine_snapshot(runner: ExperimentCycleRunner) -> dict[str, Any]:
+    return {
+        "goal": _goal_snapshot(runner.engine.goal),
+        "baseline": _result_snapshot(runner.engine.baseline),
+    }
+
+
 def run_bounded_autonomous_repair(
     *,
     runner: ExperimentCycleRunner,
@@ -243,7 +281,9 @@ def run_bounded_autonomous_repair(
     When the runner has a ``RunRegistry``, Chowder creates a recursive session in
     the same SQLite database. Every completed hop atomically appends an event and
     updates controller checkpoint state. Terminal stop reasons are persisted, and
-    unexpected exceptions mark the session failed before being re-raised.
+    unexpected exceptions mark the session failed before being re-raised. The
+    exact Goal and baseline result are snapshotted before the first hop so gate
+    semantics can be reconstructed after process interruption.
     """
 
     variant_rows = tuple(variants)
@@ -309,6 +349,7 @@ def run_bounded_autonomous_repair(
                     "provider_version": provider_version,
                     "variants": _variant_metadata(variant_rows),
                     "baseline_experiment_id": runner.engine.baseline.experiment_id,
+                    "engine_snapshot": _engine_snapshot(runner),
                 },
                 initial_candidate_ids=_generation_candidate_ids(source_generation),
                 state=state_payload(),
