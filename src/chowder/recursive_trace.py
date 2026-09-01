@@ -40,7 +40,14 @@ class RecursiveRepairTraceStore:
     The store owns separate tables in the same SQLite database as ``RunRegistry``.
     Each hop insert and session-checkpoint update is committed in one transaction,
     so a crash cannot persist a hop without the matching controller state.
+
+    Recovery uses an atomic ``running -> recovering`` claim. Only one process can
+    claim a resumable session, and only ``running``/``recovering`` sessions may
+    append hops or transition terminal. This prevents duplicate post-crash repair
+    work under concurrent recovery attempts.
     """
+
+    _ACTIVE_STATUSES = ("running", "recovering")
 
     def __init__(self, path: str | Path):
         self.path = str(path)
@@ -94,6 +101,34 @@ class RecursiveRepairTraceStore:
                 ),
             )
 
+    def claim_recovery(self, *, session_id: str) -> None:
+        """Atomically claim one interrupted session for resume.
+
+        Exactly one caller can transition a session from ``running`` to
+        ``recovering``. A second concurrent caller observes zero updated rows and
+        fails without mutating state.
+        """
+
+        if not session_id.strip():
+            raise ValueError("recursive repair session_id is required")
+        with self._conn:
+            cursor = self._conn.execute(
+                """UPDATE recursive_repair_sessions
+                   SET status = 'recovering'
+                   WHERE session_id = ? AND status = 'running'""",
+                (session_id,),
+            )
+            if cursor.rowcount != 1:
+                row = self._conn.execute(
+                    "SELECT status FROM recursive_repair_sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("recursive repair session does not exist")
+                raise ValueError(
+                    f"recursive repair session cannot be claimed from status={row[0]}"
+                )
+
     def record_hop(
         self,
         *,
@@ -123,8 +158,8 @@ class RecursiveRepairTraceStore:
             ).fetchone()
             if row is None:
                 raise ValueError("recursive repair session does not exist")
-            if row[0] != "running":
-                raise ValueError("cannot append a hop to a completed recursive repair session")
+            if row[0] not in self._ACTIVE_STATUSES:
+                raise ValueError("cannot append a hop to a terminal recursive repair session")
             self._conn.execute(
                 """INSERT INTO recursive_repair_hops
                    (session_id, depth, target_experiment_id, failure_signature,
@@ -162,7 +197,7 @@ class RecursiveRepairTraceStore:
             cursor = self._conn.execute(
                 """UPDATE recursive_repair_sessions
                    SET status = 'completed', state_json = ?, stop_reason = ?, stop_detail = ?
-                   WHERE session_id = ? AND status = 'running'""",
+                   WHERE session_id = ? AND status IN ('running', 'recovering')""",
                 (
                     self._json(dict(state)),
                     stop_reason,
@@ -184,7 +219,7 @@ class RecursiveRepairTraceStore:
             cursor = self._conn.execute(
                 """UPDATE recursive_repair_sessions
                    SET status = 'failed', state_json = ?, stop_reason = 'error', stop_detail = ?
-                   WHERE session_id = ? AND status = 'running'""",
+                   WHERE session_id = ? AND status IN ('running', 'recovering')""",
                 (self._json(dict(state)), error_detail, session_id),
             )
             if cursor.rowcount != 1:
