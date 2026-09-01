@@ -4,7 +4,7 @@ import json
 import pytest
 
 from chowder.failures import FailureCluster, FailureSourceRole, RepairPlan
-from chowder.local_corpus_provider import LocalCorpusRepairProvider
+from chowder.local_corpus_provider import LocalCorpusFile, LocalCorpusRepairProvider
 from chowder.repair_requests import RepairStrategy, build_repair_request, request_repair_sources
 
 
@@ -91,6 +91,35 @@ def test_local_corpus_provider_selects_by_sanitized_metadata_deterministically(t
     assert expected_sha in first.sources[0].ref
 
 
+def test_identical_bytes_with_different_logical_sources_have_distinct_source_ids(tmp_path):
+    first_path = tmp_path / "a.jsonl"
+    second_path = tmp_path / "b.jsonl"
+    rows = [
+        {
+            "example_id": "same-row",
+            "suite": "reasoning",
+            "strategy": "near_neighbor_reasoning",
+            "prompt": "Independent question",
+            "expected": "Independent answer",
+        }
+    ]
+    _write_jsonl(first_path, rows)
+    second_path.write_bytes(first_path.read_bytes())
+    provider = LocalCorpusRepairProvider(
+        [
+            LocalCorpusFile(str(first_path), logical_name="corpus-a"),
+            LocalCorpusFile(str(second_path), logical_name="corpus-b"),
+        ],
+        max_examples=2,
+        examples_per_failure=2,
+    )
+    request = build_repair_request(plan=_plan(), cluster=_cluster())
+    proposal = request_repair_sources(provider=provider, request=request)
+    assert len(proposal.sources) == 2
+    assert len({source.source_id for source in proposal.sources}) == 2
+    assert len({example.example_id for example in proposal.examples}) == 2
+
+
 def test_local_corpus_provider_honors_failure_kind_filter(tmp_path):
     corpus = tmp_path / "corpus.jsonl"
     _write_jsonl(
@@ -124,4 +153,16 @@ def test_local_corpus_provider_rejects_duplicate_row_ids(tmp_path):
     provider = LocalCorpusRepairProvider([corpus])
     request = build_repair_request(plan=_plan(), cluster=_cluster())
     with pytest.raises(ValueError, match="duplicate example_id"):
+        request_repair_sources(provider=provider, request=request)
+
+
+def test_local_corpus_provider_rejects_nonfinite_priority(tmp_path):
+    corpus = tmp_path / "corpus.jsonl"
+    _write_jsonl(
+        corpus,
+        [{"prompt": "A", "expected": "B", "priority": float("nan")}],
+    )
+    provider = LocalCorpusRepairProvider([corpus])
+    request = build_repair_request(plan=_plan(), cluster=_cluster())
+    with pytest.raises(ValueError, match="priority must be finite"):
         request_repair_sources(provider=provider, request=request)
