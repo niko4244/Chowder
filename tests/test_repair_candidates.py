@@ -65,6 +65,7 @@ def _root():
                 "precision": "bf16",
                 "quantization": "4bit",
                 "dataset": "base.jsonl",
+                "text_field": "content",
                 "training": {"learning_rate": 1e-4, "epochs": 2},
                 "lora": {"r": 16, "alpha": 32},
             },
@@ -99,9 +100,11 @@ def test_repair_candidate_is_deterministic_and_does_not_patch_evaluation(tmp_pat
     assert set(first.config_patch["backend"]) == {
         "dataset",
         "dataset_sha256",
+        "text_field",
         "training",
         "lora",
     }
+    assert first.config_patch["backend"]["text_field"] == "text"
     assert first.config_patch["backend"]["dataset_sha256"] == dataset.sha256
     assert first.config_patch["repair"]["repair_dataset_sha256"] == dataset.sha256
     assert (
@@ -134,6 +137,7 @@ def test_resolved_repair_config_inherits_protocol_defining_settings(tmp_path):
     assert resolved["backend"]["quantization"] == "4bit"
     assert resolved["backend"]["dataset"] == dataset_path(child)
     assert resolved["backend"]["dataset_sha256"] == child.config_patch["backend"]["dataset_sha256"]
+    assert resolved["backend"]["text_field"] == "text"
     assert resolved["backend"]["training"] == {"learning_rate": 2e-4, "epochs": 2}
     assert resolved["backend"]["lora"] == {"r": 8, "alpha": 32}
     assert resolved["evaluation"] == root.config_patch["evaluation"]
@@ -185,11 +189,14 @@ def test_replay_is_verified_and_part_of_candidate_identity(tmp_path):
     )
     assert a.experiment_id != b.experiment_id
     assert a.config_patch["backend"]["replay"] == {
-        "dataset": replay_a.path,
+        "dataset": str((tmp_path / "a.jsonl").resolve()),
         "sha256": replay_a.sha256,
         "ratio": 0.5,
+        "manifest": None,
+        "manifest_sha256": None,
     }
     assert a.config_patch["repair"]["replay_dataset_sha256"] == replay_a.sha256
+    assert a.config_patch["repair"]["replay_manifest_sha256"] is None
     assert a.config_patch["repair"]["replay_ratio"] == pytest.approx(0.5)
 
 
