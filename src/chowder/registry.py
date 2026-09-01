@@ -6,7 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable
 
-from .executors import TrainingArtifact
+from .executors import EvaluationOutcome, TrainingArtifact
 from .models import Experiment, ExperimentResult
 from .provenance import EvidenceManifest
 
@@ -27,6 +27,15 @@ CREATE TABLE IF NOT EXISTS training_runs (
     artifact_ref TEXT NOT NULL,
     gpu_hours REAL NOT NULL,
     telemetry_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id)
+);
+CREATE TABLE IF NOT EXISTS evaluation_runs (
+    run_id TEXT PRIMARY KEY,
+    experiment_id TEXT NOT NULL,
+    source_artifact_ref TEXT NOT NULL,
+    metrics_json TEXT NOT NULL,
+    gpu_hours REAL NOT NULL,
     evidence_json TEXT NOT NULL,
     FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id)
 );
@@ -108,6 +117,44 @@ class RunRegistry:
                 telemetry=json.loads(telemetry),
                 evidence=json.loads(evidence),
             )
+
+    def record_evaluation_outcome(self, outcome: EvaluationOutcome) -> None:
+        self._conn.execute(
+            """INSERT OR REPLACE INTO evaluation_runs
+               (run_id, experiment_id, source_artifact_ref, metrics_json, gpu_hours, evidence_json)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                outcome.run_id,
+                outcome.experiment_id,
+                outcome.source_artifact_ref,
+                json.dumps(dict(outcome.metrics), sort_keys=True),
+                outcome.gpu_hours,
+                json.dumps(dict(outcome.evidence), sort_keys=True),
+            ),
+        )
+        self._conn.commit()
+
+    def list_evaluation_outcomes(self) -> Iterable[EvaluationOutcome]:
+        rows = self._conn.execute(
+            """SELECT run_id, experiment_id, source_artifact_ref, metrics_json, gpu_hours, evidence_json
+               FROM evaluation_runs ORDER BY rowid"""
+        )
+        for run_id, experiment_id, artifact_ref, metrics, gpu_hours, evidence in rows:
+            yield EvaluationOutcome(
+                run_id=run_id,
+                experiment_id=experiment_id,
+                source_artifact_ref=artifact_ref,
+                metrics=json.loads(metrics),
+                gpu_hours=gpu_hours,
+                evidence=json.loads(evidence),
+            )
+
+    def update_experiment_status(self, experiment_id: str, status: str) -> None:
+        self._conn.execute(
+            "UPDATE experiments SET status = ? WHERE experiment_id = ?",
+            (status, experiment_id),
+        )
+        self._conn.commit()
 
     def record_result(self, result: ExperimentResult) -> None:
         self._conn.execute(
