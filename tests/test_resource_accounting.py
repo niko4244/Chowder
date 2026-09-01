@@ -174,6 +174,11 @@ class _MeasuredTrainer:
         return None
 
 
+class _NoProfileTrainer(_MeasuredTrainer):
+    def profile(self, experiment, context):
+        raise NotImplementedError
+
+
 class _MeasuredEvaluator:
     name = "measured-eval"
 
@@ -203,4 +208,21 @@ def test_cycle_reserves_training_profile_plus_declared_evaluation_cost(tmp_path)
     assert outcome.promoted.gpu_hours == pytest.approx(0.6)
     compute = outcome.promoted.evidence["compute"]
     assert compute["reserved_lifecycle_gpu_hours"] == pytest.approx(1.0)
+    assert engine.spent_gpu_hours == pytest.approx(0.6)
+
+
+def test_cycle_uses_existing_reservation_when_profile_is_not_implemented(tmp_path):
+    engine = _engine(2.0)
+    experiment = _experiment(hours=0.75)
+    engine.propose((experiment,))
+    runner = ExperimentCycleRunner(
+        engine=engine,
+        trainer=_NoProfileTrainer(),
+        evaluator=_MeasuredEvaluator(),
+        context=ExecutionContext(_hardware(), str(tmp_path), seed=1),
+        base_config={"evaluation": {"estimated_gpu_hours": 0.1}},
+    )
+    outcome = runner.run_generation((experiment,))
+    assert outcome.promoted is not None
+    assert outcome.promoted.evidence["compute"]["reserved_lifecycle_gpu_hours"] == pytest.approx(0.85)
     assert engine.spent_gpu_hours == pytest.approx(0.6)
