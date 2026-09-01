@@ -17,6 +17,7 @@ from .repair_orchestrator import (
     prepare_and_propose_repair_population,
 )
 from .repair_requests import RepairSourceProvider
+from .replay_history import ReplayHistorySource, materialize_replay_history
 
 
 @dataclass(frozen=True)
@@ -171,17 +172,31 @@ def _verified_holdout_files(candidate: CandidateCycleOutcome) -> tuple[Path, ...
     return tuple(files)
 
 
+def _resolved_path(raw: str, work_dir: str | Path) -> Path:
+    path = Path(raw)
+    if not path.is_absolute():
+        path = Path(work_dir) / path
+    return path.resolve()
+
+
 def _verified_parent_replay(
     *,
     runner: ExperimentCycleRunner,
     target: RepairTarget,
     ratio: float,
 ) -> VerifiedReplayDataset:
+    """Materialize cumulative rehearsal from all history available to the parent.
+
+    If the parent already used replay, that verified history is carried forward
+    first. The parent's primary training dataset is then appended and exact-text
+    deduplicated. The result is normalized to a canonical `text` JSONL corpus.
+    """
+
     artifact = target.candidate.artifact
     if artifact is None:
         raise ValueError("repair target has no training artifact for replay provenance")
-    recorded_sha = artifact.evidence.get("dataset_sha256")
-    if not isinstance(recorded_sha, str) or len(recorded_sha) != 64:
+    recorded_primary_sha = artifact.evidence.get("dataset_sha256")
+    if not isinstance(recorded_primary_sha, str) or len(recorded_primary_sha) != 64:
         raise ValueError(
             "repair target training artifact is missing dataset SHA-256 provenance"
         )
@@ -192,24 +207,77 @@ def _verified_parent_replay(
     backend = resolved.get("backend")
     if not isinstance(backend, Mapping):
         raise ValueError("repair target resolved config has no backend mapping")
+
     dataset_raw = backend.get("dataset")
     if not isinstance(dataset_raw, str) or not dataset_raw.strip():
         raise ValueError("repair target resolved config has no training dataset")
-    dataset_path = Path(dataset_raw)
-    if not dataset_path.is_absolute():
-        dataset_path = Path(runner.context.work_dir) / dataset_path
-    dataset_path = dataset_path.resolve()
+    dataset_path = _resolved_path(dataset_raw, runner.context.work_dir)
+    declared_primary_sha = backend.get("dataset_sha256")
+    if declared_primary_sha is not None and declared_primary_sha != recorded_primary_sha:
+        raise ValueError("parent training dataset provenance disagrees with resolved config")
 
-    replay = VerifiedReplayDataset(
-        path=str(dataset_path), sha256=recorded_sha, ratio=float(ratio)
+    text_field = str(backend.get("text_field", "text")).strip()
+    if not text_field:
+        raise ValueError("parent backend text_field is empty")
+
+    sources: list[ReplayHistorySource] = []
+    replay_config = backend.get("replay")
+    if replay_config is not None:
+        if not isinstance(replay_config, Mapping):
+            raise ValueError("parent backend replay section is invalid")
+        replay_raw = replay_config.get("dataset")
+        replay_sha = replay_config.get("sha256")
+        if replay_raw is not None or replay_sha is not None:
+            if not isinstance(replay_raw, str) or not isinstance(replay_sha, str):
+                raise ValueError("parent replay history is missing dataset/SHA binding")
+            recorded_replay_sha = artifact.evidence.get("replay_dataset_sha256")
+            if not isinstance(recorded_replay_sha, str) or recorded_replay_sha != replay_sha:
+                raise ValueError(
+                    "parent training artifact does not prove the configured replay history"
+                )
+            prior_manifest = replay_config.get("manifest")
+            prior_manifest_sha = replay_config.get("manifest_sha256")
+            prior = VerifiedReplayDataset(
+                path=str(_resolved_path(replay_raw, runner.context.work_dir)),
+                sha256=replay_sha,
+                ratio=float(replay_config.get("ratio", 1.0)),
+                manifest_path=(
+                    str(_resolved_path(prior_manifest, runner.context.work_dir))
+                    if isinstance(prior_manifest, str)
+                    else None
+                ),
+                manifest_sha256=(
+                    str(prior_manifest_sha)
+                    if prior_manifest_sha is not None
+                    else None
+                ),
+            )
+            prior_path = prior.verify()
+            sources.append(
+                ReplayHistorySource(
+                    path=str(prior_path),
+                    sha256=prior.sha256,
+                    text_field=text_field,
+                    role="prior_replay_history",
+                )
+            )
+
+    sources.append(
+        ReplayHistorySource(
+            path=str(dataset_path),
+            sha256=recorded_primary_sha,
+            text_field=text_field,
+            role="parent_primary_training",
+        )
     )
-    replay.verify()
-    return replay
+    return materialize_replay_history(
+        sources=sources,
+        work_dir=runner.context.work_dir,
+        ratio=float(ratio),
+    )
 
 
 def _verified_parent_adapter(target: RepairTarget) -> VerifiedParentAdapter:
-    """Bind repair continuation to the exact adapter bytes that were evaluated."""
-
     artifact = target.candidate.artifact
     if artifact is None:
         raise ValueError("repair target has no training artifact to continue")
@@ -238,12 +306,7 @@ def run_single_hop_autonomous_repair(
     candidate_id: str | None = None,
     replay_ratio: float | None = 1.0,
 ) -> AutonomousRepairOutcome:
-    """Repair one gate-rejected candidate by continuing its exact adapter weights.
-
-    New repair examples remain independently sourced and contamination checked;
-    parent replay protects prior capabilities; the trainable parent adapter makes
-    the child a genuine cumulative repair rather than a fresh LoRA from the base.
-    """
+    """Repair one rejected adapter with cumulative, provenance-bound rehearsal."""
 
     if not variants:
         raise ValueError("autonomous repair requires at least one repair variant")
