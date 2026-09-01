@@ -2,7 +2,7 @@
 
 from .cycle import ExperimentCycleRunner
 from .engine import EvolutionEngine
-from .models import Goal, MetricTarget, Experiment, ExperimentResult
+from .models import Experiment, ExperimentResult, Goal, MetricTarget
 
 __all__ = [
     "ExperimentCycleRunner",
@@ -13,4 +13,4 @@ __all__ = [
     "ExperimentResult",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
