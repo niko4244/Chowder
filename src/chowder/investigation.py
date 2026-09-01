@@ -22,14 +22,7 @@ def config_patch_digest(config_patch: Mapping[str, Any]) -> str:
 
 
 def remediation_context_digest(capture: FailureCapture) -> str:
-    """Bind an auto-applicable remediation to the runtime context it fixed.
-
-    ``IncidentFingerprint`` intentionally normalizes volatile error text and is
-    useful for bucketing recurring incidents. It is not sufficient by itself to
-    prove that a previously successful fix is safe to auto-apply: package pins,
-    hardware, executor configuration, or other environment state may have
-    changed while the normalized exception stayed the same.
-    """
+    """Bind an auto-applicable remediation to the runtime context it fixed."""
 
     environment = capture.environment
     payload = {
@@ -47,14 +40,7 @@ def remediation_context_digest(capture: FailureCapture) -> str:
 
 @dataclass(frozen=True)
 class RemediationRecord:
-    """A remediation that was actually attempted against one incident.
-
-    Automatic reuse requires both the normalized incident fingerprint and the
-    exact captured runtime-context digest. ``signature_kind`` remains useful for
-    class-level investigation history but is never enough to auto-apply a fix.
-    ``spawned_incident`` preserves a full new failure capture when a remediation
-    gets further and then crashes differently.
-    """
+    """A remediation that was actually attempted against one incident."""
 
     remediation_id: str
     fingerprint_sha256: str
@@ -71,7 +57,12 @@ class RemediationRecord:
 
 @dataclass(frozen=True)
 class RemediationRegistry:
-    """Known remediation history with conservative exact-context reuse."""
+    """Known remediation history with conservative exact-context auto-reuse.
+
+    ``lookup(fingerprint)`` remains useful for read-only history/reproducibility
+    checks. Live auto-application goes through ``route_failure``, which always
+    supplies a ``FailureCapture`` and therefore requires an exact context digest.
+    """
 
     records: tuple[RemediationRecord, ...] = ()
 
@@ -87,16 +78,9 @@ class RemediationRegistry:
                 continue
             if record.fingerprint_sha256 != fingerprint.fingerprint_sha256:
                 continue
-            # Legacy/context-free records remain inspectable history, but may not
-            # be auto-applied to a live capture because their environment cannot
-            # be proven equivalent.
             if capture is not None:
                 if record.context_sha256 is None or record.context_sha256 != wanted_context:
                     continue
-            elif record.context_sha256 is not None:
-                # Callers asking only by fingerprint cannot prove environment
-                # equivalence, so do not return context-bound fixes.
-                continue
             return record
         return None
 
@@ -222,8 +206,6 @@ def route_failure(
     gpu_hour_budget: float,
     investigation_id: str,
 ) -> RemediationRecord | Investigation:
-    """Auto-apply only a fix proven on this exact incident *and* runtime context."""
-
     known = registry.lookup(fingerprint, capture=capture)
     if known is not None:
         return known
