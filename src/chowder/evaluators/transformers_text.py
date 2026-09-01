@@ -271,6 +271,26 @@ class TransformersTextEvaluator:
         expected_names = {suite.name for suite in spec.suites}
         if set(metrics) != expected_names:
             raise RuntimeError("evaluation result metric names do not match configured suites")
+        if set(suite_evidence) != expected_names:
+            raise RuntimeError("evaluation suite evidence names do not match configured suites")
+
+        fingerprint_hashes: dict[str, str] = {}
+        for suite_name, suite_payload in suite_evidence.items():
+            if not isinstance(suite_payload, Mapping):
+                raise RuntimeError(f"suite evidence for {suite_name!r} is invalid")
+            fingerprint_ref = suite_payload.get("holdout_fingerprints_file")
+            declared_digest = suite_payload.get("holdout_fingerprints_sha256")
+            if not isinstance(fingerprint_ref, str) or not isinstance(declared_digest, str):
+                raise RuntimeError(f"suite {suite_name!r} is missing holdout fingerprint evidence")
+            fingerprint_path = Path(fingerprint_ref).resolve()
+            if not fingerprint_path.is_relative_to(eval_dir):
+                raise RuntimeError("holdout fingerprint evidence escaped evaluation directory")
+            if not fingerprint_path.is_file():
+                raise RuntimeError(f"holdout fingerprint evidence not found: {fingerprint_path}")
+            actual_fingerprint_digest = sha256_file(fingerprint_path)
+            if actual_fingerprint_digest != declared_digest:
+                raise RuntimeError("holdout fingerprint evidence digest mismatch")
+            fingerprint_hashes[str(suite_name)] = actual_fingerprint_digest
 
         dataset_hashes = {suite.name: sha256_file(suite.dataset) for suite in spec.suites}
         protocol = {
@@ -311,6 +331,7 @@ class TransformersTextEvaluator:
                 "evaluation_result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
                 "protocol": protocol,
                 "protocol_sha256": protocol_sha,
+                "holdout_fingerprint_sha256": fingerprint_hashes,
                 "suite_evidence": dict(suite_evidence),
                 "versions": dict(versions),
                 "runtime": dict(runtime),
