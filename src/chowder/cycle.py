@@ -91,14 +91,22 @@ def _validated_failures(
     return tuple(validated)
 
 
+def _declared_evaluation_reserve(config: Mapping[str, Any]) -> float:
+    evaluation = config.get("evaluation", {})
+    if evaluation is None:
+        return 0.0
+    if not isinstance(evaluation, Mapping):
+        raise ValueError("resolved config evaluation section must be a mapping")
+    raw = evaluation.get("estimated_gpu_hours", 0.0)
+    value = float(raw)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("evaluation.estimated_gpu_hours must be finite and non-negative")
+    return value
+
+
 @dataclass
 class ExperimentCycleRunner:
-    """Run one experiment generation through train → evaluate → diagnose → gate.
-
-    Training and evaluation remain separate executors. Failure harvesting is an
-    optional diagnostic stage: a harvester failure is recorded but cannot turn
-    otherwise valid benchmark evidence into a failed experiment.
-    """
+    """Run one generation through profile → train → evaluate → diagnose → gate."""
 
     engine: EvolutionEngine
     trainer: TrainingExecutor
@@ -120,6 +128,28 @@ class ExperimentCycleRunner:
 
         resolved = self.engine.resolve_config(experiment.experiment_id, self.base_config)
         run_context = replace(self.context, resolved_config=resolved)
+
+        # Preflight is intentionally outside the execution/failure accounting
+        # path. A profile/config failure consumed no model compute, so release the
+        # reservation without charging the experiment as a failed GPU run.
+        try:
+            training_estimate = self.trainer.profile(experiment, run_context)
+            lifecycle_estimate = (
+                training_estimate.gpu_hours + _declared_evaluation_reserve(resolved)
+            )
+            self.engine.resize_reservation(experiment.experiment_id, lifecycle_estimate)
+        except Exception as exc:
+            self.engine.cancel_reservation(
+                experiment.experiment_id,
+                status=ExperimentStatus.REJECTED,
+            )
+            experiment.status = ExperimentStatus.REJECTED
+            self._record_status(experiment)
+            return CandidateCycleOutcome(
+                experiment_id=experiment.experiment_id,
+                error=f"preflight {type(exc).__name__}: {exc}",
+            )
+
         experiment.status = ExperimentStatus.RUNNING
         self._record_status(experiment)
 
@@ -133,10 +163,6 @@ class ExperimentCycleRunner:
             artifact = self.trainer.run(experiment, run_context)
             if artifact.experiment_id != experiment.experiment_id:
                 raise ValueError("trainer returned an artifact for a different experiment")
-            if artifact.gpu_hours < 0:
-                raise ValueError("trainer returned negative gpu_hours")
-            if not artifact.artifact_ref:
-                raise ValueError("trainer returned an empty artifact_ref")
             if self.registry is not None:
                 self.registry.record_training_artifact(artifact)
 
@@ -149,8 +175,6 @@ class ExperimentCycleRunner:
                 raise ValueError("evaluator returned evidence for a different experiment")
             if evaluation.source_artifact_ref != artifact.artifact_ref:
                 raise ValueError("evaluator did not evaluate the training artifact")
-            if evaluation.gpu_hours < 0:
-                raise ValueError("evaluator returned negative gpu_hours")
             metrics = _validated_metrics(evaluation.metrics)
             if self.registry is not None:
                 self.registry.record_evaluation_outcome(evaluation)
@@ -176,6 +200,9 @@ class ExperimentCycleRunner:
                 "training": dict(artifact.evidence),
                 "evaluation": dict(evaluation.evidence),
                 "compute": {
+                    "reserved_lifecycle_gpu_hours": self.engine.reservation_for(
+                        experiment.experiment_id
+                    ),
                     "training_gpu_hours": artifact.gpu_hours,
                     "evaluation_gpu_hours": evaluation.gpu_hours,
                     "total_gpu_hours": total_gpu_hours,
