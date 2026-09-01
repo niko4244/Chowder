@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any, Iterable, Mapping
 from uuid import uuid4
@@ -110,7 +110,7 @@ def _stable_failure_rows(target: RepairTarget) -> tuple[FailureRecord, ...]:
 
 
 def failure_signature(target: RepairTarget) -> str:
-    """Hash the stable benchmark failure state, excluding experiment/run identity."""
+    """Hash stable benchmark failure state, excluding experiment/run identity."""
 
     rows = _stable_failure_rows(target)
     payload = {
@@ -124,9 +124,7 @@ def failure_signature(target: RepairTarget) -> str:
             (
                 {
                     "row_index": int(row.row_index),
-                    "prompt_sha256": hashlib.sha256(
-                        row.prompt.encode("utf-8")
-                    ).hexdigest(),
+                    "prompt_sha256": hashlib.sha256(row.prompt.encode("utf-8")).hexdigest(),
                     "expected_sha256": hashlib.sha256(
                         row.expected.encode("utf-8")
                     ).hexdigest(),
@@ -275,6 +273,22 @@ def _engine_snapshot(runner: ExperimentCycleRunner) -> dict[str, Any]:
     }
 
 
+def _executor_name(executor: object) -> str:
+    return str(getattr(executor, "name", type(executor).__name__))
+
+
+def _execution_snapshot(runner: ExperimentCycleRunner) -> dict[str, Any]:
+    """Persist execution semantics required to prove a faithful resume."""
+
+    return {
+        "base_config": dict(runner.base_config),
+        "seed": int(runner.context.seed),
+        "trainer_name": _executor_name(runner.trainer),
+        "evaluator_name": _executor_name(runner.evaluator),
+        "hardware": asdict(runner.context.hardware),
+    }
+
+
 def _validated_variants(variants: Iterable[RepairVariant]) -> tuple[RepairVariant, ...]:
     rows = tuple(variants)
     if not rows:
@@ -296,6 +310,7 @@ def _execute_bounded_loop(
     signature_counts: Mapping[str, int],
     previous_target_score: float | None,
     begin_session: bool,
+    recovery_claim_token: str | None = None,
 ) -> RecursiveRepairOutcome:
     """Execute fresh or resumed bounded repair using one durable session."""
 
@@ -325,6 +340,8 @@ def _execute_bounded_loop(
     )
     if not begin_session and store is None:
         raise ValueError("resuming recursive repair requires a RunRegistry")
+    if not begin_session and not recovery_claim_token:
+        raise ValueError("resuming recursive repair requires a recovery claim token")
     session_started = not begin_session
 
     def total_depth() -> int:
@@ -377,6 +394,7 @@ def _execute_bounded_loop(
                     "variants": _variant_metadata(variants),
                     "baseline_experiment_id": runner.engine.baseline.experiment_id,
                     "engine_snapshot": _engine_snapshot(runner),
+                    "execution_snapshot": _execution_snapshot(runner),
                 },
                 initial_candidate_ids=_generation_candidate_ids(current_generation),
                 state=state_payload(),
@@ -386,6 +404,9 @@ def _execute_bounded_loop(
             existing = store.get_session(session_id)
             if existing is None or existing.get("status") != "running":
                 raise ValueError("recursive repair resume session is not running")
+            claim = store.get_recovery_claim(session_id)
+            if claim is None or claim.get("claim_token") != recovery_claim_token:
+                raise ValueError("recursive repair resume claim does not match")
 
         if current.promoted is not None:
             return finish(
@@ -551,6 +572,7 @@ def _resume_bounded_autonomous_repair_from_checkpoint(
     starting_depth: int,
     signature_counts: Mapping[str, int],
     previous_target_score: float | None,
+    recovery_claim_token: str,
 ) -> RecursiveRepairOutcome:
     """Internal continuation entry point; callers must reconcile evidence first."""
 
@@ -566,4 +588,5 @@ def _resume_bounded_autonomous_repair_from_checkpoint(
         signature_counts=signature_counts,
         previous_target_score=previous_target_score,
         begin_session=False,
+        recovery_claim_token=recovery_claim_token,
     )
