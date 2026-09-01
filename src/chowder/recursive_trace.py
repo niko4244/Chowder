@@ -37,10 +37,9 @@ CREATE TABLE IF NOT EXISTS recursive_repair_hops (
 class RecursiveRepairTraceStore:
     """Durable event/checkpoint store for bounded recursive repair.
 
-    The store intentionally owns separate tables in the same SQLite database as
-    ``RunRegistry``. Each hop insert and session-checkpoint update is committed in
-    one SQLite transaction, so a crash cannot persist a hop without the matching
-    controller state or vice versa.
+    The store owns separate tables in the same SQLite database as ``RunRegistry``.
+    Each hop insert and session-checkpoint update is committed in one transaction,
+    so a crash cannot persist a hop without the matching controller state.
     """
 
     def __init__(self, path: str | Path):
@@ -60,7 +59,12 @@ class RecursiveRepairTraceStore:
 
     @staticmethod
     def _json(value: object) -> str:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
 
     def begin(
         self,
@@ -73,8 +77,6 @@ class RecursiveRepairTraceStore:
     ) -> None:
         if not session_id.strip():
             raise ValueError("recursive repair session_id is required")
-        if not initial_candidate_ids:
-            raise ValueError("recursive repair session requires initial candidates")
         if len(initial_candidate_ids) != len(set(initial_candidate_ids)):
             raise ValueError("recursive repair session initial candidate IDs must be unique")
         with self._conn:
@@ -112,6 +114,8 @@ class RecursiveRepairTraceStore:
             raise ValueError("recursive repair failure signature must be SHA-256")
         if not produced_candidate_ids:
             raise ValueError("recursive repair hop must record produced candidates")
+        if len(produced_candidate_ids) != len(set(produced_candidate_ids)):
+            raise ValueError("recursive repair hop candidate IDs must be unique")
         with self._conn:
             row = self._conn.execute(
                 "SELECT status FROM recursive_repair_sessions WHERE session_id = ?",
