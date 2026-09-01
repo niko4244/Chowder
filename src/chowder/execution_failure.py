@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import math
+import traceback
 from enum import Enum
 from typing import Any, Mapping
+from uuid import uuid4
 
+from .executors import ExecutionContext
+from .models import Experiment
 from .resources import ResourceUsage
 
 
@@ -16,13 +20,7 @@ class ExecutionStage(str, Enum):
 
 
 class ExecutionFailure(RuntimeError):
-    """Structured failure emitted by an execution backend.
-
-    The exception remains usable as a normal ``RuntimeError`` while preserving
-    the evidence an investigator needs after a worker process has disappeared.
-    In particular, partial resource usage survives a crash so failed runs are not
-    treated as free compute.
-    """
+    """Structured failure emitted or normalized at the execution boundary."""
 
     def __init__(
         self,
@@ -80,3 +78,63 @@ class ExecutionFailure(RuntimeError):
         if not math.isfinite(value) or value < 0:
             raise ValueError("execution failure resource usage is invalid")
         return value
+
+
+def declared_active_accelerator_count(context: ExecutionContext) -> int:
+    """Best available pre-worker accelerator count for conservative crash cost.
+
+    Cloud runtimes such as Kaggle should declare the count in
+    ``backend.runtime.active_accelerator_count`` (or the measured profile). For
+    example a Kaggle T4x2 session declares ``2``. If no declaration exists,
+    Chowder conservatively assumes one accelerator when the hardware profile has
+    VRAM and zero for CPU-only execution.
+    """
+
+    config = context.resolved_config
+    backend = config.get("backend", {}) if isinstance(config, Mapping) else {}
+    if isinstance(backend, Mapping):
+        profile = backend.get("profile", {})
+        if isinstance(profile, Mapping) and profile.get("active_accelerator_count") is not None:
+            count = int(profile["active_accelerator_count"])
+            if count < 0:
+                raise ValueError("active_accelerator_count cannot be negative")
+            return count
+        runtime = backend.get("runtime", {})
+        if isinstance(runtime, Mapping) and runtime.get("active_accelerator_count") is not None:
+            count = int(runtime["active_accelerator_count"])
+            if count < 0:
+                raise ValueError("active_accelerator_count cannot be negative")
+            return count
+    return 1 if context.hardware.vram_gb > 0 else 0
+
+
+def normalize_execution_exception(
+    exc: BaseException,
+    *,
+    experiment: Experiment,
+    executor_name: str,
+    context: ExecutionContext,
+    wall_seconds: float,
+) -> ExecutionFailure:
+    """Convert a legacy/raw executor exception without discarding evidence."""
+
+    if isinstance(exc, ExecutionFailure):
+        return exc
+    active = declared_active_accelerator_count(context)
+    usage = ResourceUsage.from_wall_time(
+        wall_seconds=max(0.0, float(wall_seconds)),
+        active_accelerator_count=active,
+        visible_accelerator_count=active,
+    )
+    return ExecutionFailure(
+        f"{executor_name} failed during training: {type(exc).__qualname__}: {exc}",
+        run_id=f"{experiment.experiment_id}-failed-{uuid4().hex[:12]}",
+        experiment_id=experiment.experiment_id,
+        executor_name=executor_name,
+        stage=ExecutionStage.TRAIN,
+        cause_type=type(exc).__qualname__,
+        cause_message=str(exc),
+        traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        resource_usage=usage,
+        runtime_metadata={"normalized_from_raw_exception": True},
+    )
