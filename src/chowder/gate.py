@@ -31,12 +31,12 @@ def evaluate_candidate(
             continue
 
         base_value = float(baseline.metrics[target.name])
-        delta = value - base_value
-        weighted_gain += delta * target.weight
+        utility_delta = target.utility_delta(base_value, value)
+        weighted_gain += utility_delta * target.weight
         weight_total += target.weight
 
-        if delta < -target.regression_tolerance:
-            regressions[target.name] = delta
+        if utility_delta < -target.regression_tolerance:
+            regressions[target.name] = utility_delta
         if not target.target_met(value):
             unmet.append(target.name)
 
