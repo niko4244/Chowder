@@ -10,7 +10,7 @@ from typing import Any, Iterable, Mapping
 from .contamination import ContaminationAudit, repair_dataset_index_digest
 from .failures import RepairPlan
 from .models import Experiment, Hypothesis
-from .provenance import sha256_file
+from .provenance import sha256_directory, sha256_file
 from .repair_sources import verify_source_manifest
 
 
@@ -91,6 +91,24 @@ class VerifiedReplayDataset:
 
 
 @dataclass(frozen=True)
+class VerifiedParentAdapter:
+    """Exact trainable adapter state from which a repair child must continue."""
+
+    path: str
+    sha256: str
+
+    def verify(self) -> Path:
+        if len(self.sha256) != 64:
+            raise ValueError("parent adapter SHA-256 is invalid")
+        path = Path(self.path).resolve()
+        if not path.is_dir():
+            raise FileNotFoundError(f"parent adapter not found: {path}")
+        if sha256_directory(path) != self.sha256:
+            raise ValueError("parent adapter content changed after verification")
+        return path
+
+
+@dataclass(frozen=True)
 class RepairVariant:
     name: str
     estimated_gpu_hours: float
@@ -110,8 +128,6 @@ def replay_compute_multiplier(replay: VerifiedReplayDataset | None) -> float:
 
     The worker caps replay rows at the available parent rows, so ``1 + ratio``
     is an upper bound on row-count growth relative to repair-only training.
-    Reserving the upper bound is preferable to allowing default rehearsal to
-    create a known GPU-hour budget underestimate.
     """
 
     if replay is None:
@@ -135,8 +151,16 @@ def build_repair_candidate(
     variant: RepairVariant,
     require_source_manifest: bool = False,
     replay: VerifiedReplayDataset | None = None,
+    parent_adapter: VerifiedParentAdapter | None = None,
 ) -> Experiment:
-    """Build one deterministic repair child without changing evaluation semantics."""
+    """Build one deterministic repair child without changing evaluation semantics.
+
+    When ``parent_adapter`` is present this candidate is a true continuation of
+    the rejected adapter weights. LoRA topology overrides are intentionally
+    blocked on continuation branches: changing rank/targets requires a separate
+    migration/merge experiment rather than pretending the parent adapter can be
+    loaded into a different topology.
+    """
 
     if not parent_id.strip():
         raise ValueError("repair candidate parent_id is required")
@@ -149,6 +173,10 @@ def build_repair_candidate(
         if replay_path == dataset_path:
             raise ValueError("repair and replay datasets must be different files")
 
+    parent_adapter_path: Path | None = None
+    if parent_adapter is not None:
+        parent_adapter_path = parent_adapter.verify()
+
     training_patch = dict(variant.training_patch)
     lora_patch = dict(variant.lora_patch)
     for mapping, label in ((training_patch, "training"), (lora_patch, "lora")):
@@ -156,6 +184,10 @@ def build_repair_candidate(
             raise ValueError(
                 f"repair {label} override keys must be non-empty strings"
             )
+    if parent_adapter is not None and lora_patch:
+        raise ValueError(
+            "continuation repair cannot change LoRA topology; use a separate adapter migration experiment"
+        )
 
     backend_patch: dict[str, Any] = {
         "dataset": str(dataset_path),
@@ -166,6 +198,11 @@ def build_repair_candidate(
             "dataset": str(replay_path),
             "sha256": replay.sha256,
             "ratio": float(replay.ratio),
+        }
+    if parent_adapter is not None and parent_adapter_path is not None:
+        backend_patch["parent_adapter"] = {
+            "path": str(parent_adapter_path),
+            "sha256": parent_adapter.sha256,
         }
     if training_patch:
         backend_patch["training"] = training_patch
@@ -184,14 +221,15 @@ def build_repair_candidate(
         "source_failure_ids": list(plan.source_failure_ids),
         "replay_dataset_sha256": replay.sha256 if replay is not None else None,
         "replay_ratio": float(replay.ratio) if replay is not None else 0.0,
+        "parent_adapter_sha256": (
+            parent_adapter.sha256 if parent_adapter is not None else None
+        ),
+        "continuation": parent_adapter is not None,
         "repair_only_estimated_gpu_hours": variant.estimated_gpu_hours,
         "replay_adjusted_estimated_gpu_hours": effective_estimate,
         "variant": variant.name,
     }
-    config_patch = {
-        "backend": backend_patch,
-        "repair": repair_evidence,
-    }
+    config_patch = {"backend": backend_patch, "repair": repair_evidence}
 
     identity = _canonical_digest(
         {
@@ -203,6 +241,9 @@ def build_repair_candidate(
             "source_manifest_sha256": dataset.source_manifest_sha256,
             "replay_dataset_sha256": replay.sha256 if replay is not None else None,
             "replay_ratio": float(replay.ratio) if replay is not None else 0.0,
+            "parent_adapter_sha256": (
+                parent_adapter.sha256 if parent_adapter is not None else None
+            ),
             "variant": variant.name,
             "training_patch": training_patch,
             "lora_patch": lora_patch,
@@ -234,6 +275,7 @@ def build_repair_population(
     variants: Iterable[RepairVariant],
     require_source_manifest: bool = False,
     replay: VerifiedReplayDataset | None = None,
+    parent_adapter: VerifiedParentAdapter | None = None,
 ) -> tuple[Experiment, ...]:
     variants = tuple(variants)
     if not variants:
@@ -249,6 +291,7 @@ def build_repair_population(
             variant=variant,
             require_source_manifest=require_source_manifest,
             replay=replay,
+            parent_adapter=parent_adapter,
         )
         for variant in variants
     )
@@ -265,6 +308,7 @@ def build_autonomous_repair_population(
     dataset: VerifiedRepairDataset,
     variants: Iterable[RepairVariant],
     replay: VerifiedReplayDataset | None = None,
+    parent_adapter: VerifiedParentAdapter | None = None,
 ) -> tuple[Experiment, ...]:
     """Strict autonomous path: source provenance is mandatory."""
 
@@ -275,4 +319,5 @@ def build_autonomous_repair_population(
         variants=variants,
         require_source_manifest=True,
         replay=replay,
+        parent_adapter=parent_adapter,
     )

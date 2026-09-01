@@ -29,6 +29,8 @@ class TransformersPeftRunSpec:
     replay_dataset: str | None = None
     replay_sha256: str | None = None
     replay_ratio: float = 0.0
+    parent_adapter: str | None = None
+    parent_adapter_sha256: str | None = None
     revision: str | None = None
     text_field: str = "text"
     max_length: int = 512
@@ -74,6 +76,20 @@ class TransformersPeftRunSpec:
         elif ratio != 0.0:
             raise ValueError("backend replay ratio requires a replay dataset")
 
+        has_parent_path = self.parent_adapter is not None
+        has_parent_sha = self.parent_adapter_sha256 is not None
+        if has_parent_path != has_parent_sha:
+            raise ValueError(
+                "backend parent adapter path and SHA must be supplied together"
+            )
+        if has_parent_path:
+            assert self.parent_adapter is not None
+            assert self.parent_adapter_sha256 is not None
+            if not self.parent_adapter.strip():
+                raise ValueError("backend parent adapter path cannot be empty")
+            if len(self.parent_adapter_sha256) != 64:
+                raise ValueError("backend parent adapter SHA must be a SHA-256 digest")
+
         if self.max_length <= 0:
             raise ValueError("backend.max_length must be positive")
         if self.epochs <= 0 or self.learning_rate <= 0:
@@ -110,6 +126,7 @@ class TransformersPeftRunSpec:
         recipe.pop("output_dir", None)
         recipe.pop("dataset", None)
         recipe.pop("replay_dataset", None)
+        recipe.pop("parent_adapter", None)
         recipe.pop("timeout_seconds", None)
         payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -133,12 +150,21 @@ class TransformersPeftRunSpec:
         lora = backend.get("lora", {})
         runtime = backend.get("runtime", {})
         replay = backend.get("replay", {})
-        if not isinstance(training, Mapping) or not isinstance(lora, Mapping) or not isinstance(runtime, Mapping):
+        parent_adapter = backend.get("parent_adapter", {})
+        if (
+            not isinstance(training, Mapping)
+            or not isinstance(lora, Mapping)
+            or not isinstance(runtime, Mapping)
+        ):
             raise ValueError("backend training/lora/runtime sections must be mappings")
         if replay is None:
             replay = {}
+        if parent_adapter is None:
+            parent_adapter = {}
         if not isinstance(replay, Mapping):
             raise ValueError("backend replay section must be a mapping")
+        if not isinstance(parent_adapter, Mapping):
+            raise ValueError("backend parent_adapter section must be a mapping")
 
         dataset = Path(str(backend.get("dataset", "")))
         if not dataset.is_absolute():
@@ -152,8 +178,16 @@ class TransformersPeftRunSpec:
                 replay_dataset = Path(work_dir) / replay_dataset
             replay_dataset = replay_dataset.resolve()
 
+        parent_adapter_path: Path | None = None
+        if parent_adapter.get("path") is not None:
+            parent_adapter_path = Path(str(parent_adapter.get("path")))
+            if not parent_adapter_path.is_absolute():
+                parent_adapter_path = Path(work_dir) / parent_adapter_path
+            parent_adapter_path = parent_adapter_path.resolve()
+
         dataset_sha = backend.get("dataset_sha256")
         replay_sha = replay.get("sha256")
+        parent_sha = parent_adapter.get("sha256")
         return cls(
             base_model=str(backend.get("base_model", "")),
             dataset=str(dataset),
@@ -164,13 +198,23 @@ class TransformersPeftRunSpec:
             replay_ratio=(
                 float(replay.get("ratio", 1.0)) if replay_dataset is not None else 0.0
             ),
-            revision=(str(backend["revision"]) if backend.get("revision") is not None else None),
+            parent_adapter=(
+                str(parent_adapter_path) if parent_adapter_path is not None else None
+            ),
+            parent_adapter_sha256=(
+                str(parent_sha) if parent_sha is not None else None
+            ),
+            revision=(
+                str(backend["revision"]) if backend.get("revision") is not None else None
+            ),
             text_field=str(backend.get("text_field", "text")),
             max_length=int(backend.get("max_length", 512)),
             epochs=float(training.get("epochs", 1.0)),
             learning_rate=float(training.get("learning_rate", 2e-4)),
             batch_size=int(training.get("batch_size", 1)),
-            gradient_accumulation_steps=int(training.get("gradient_accumulation_steps", 4)),
+            gradient_accumulation_steps=int(
+                training.get("gradient_accumulation_steps", 4)
+            ),
             logging_steps=int(training.get("logging_steps", 10)),
             lora_r=int(lora.get("r", 16)),
             lora_alpha=int(lora.get("alpha", 32)),
@@ -184,7 +228,9 @@ class TransformersPeftRunSpec:
             use_rslora=bool(lora.get("use_rslora", False)),
             quantization=str(backend.get("quantization", "none")).lower(),
             precision=str(backend.get("precision", "auto")).lower(),
-            gradient_checkpointing=bool(training.get("gradient_checkpointing", True)),
+            gradient_checkpointing=bool(
+                training.get("gradient_checkpointing", True)
+            ),
             seed=int(config.get("seed", seed)),
             timeout_seconds=(
                 float(runtime["timeout_seconds"])
@@ -196,11 +242,7 @@ class TransformersPeftRunSpec:
 
 
 class TransformersPeftExecutor:
-    """Isolated Transformers + PEFT SFT backend.
-
-    Heavy ML dependencies are imported only inside the worker subprocess. The
-    controller remains importable and testable without torch/transformers.
-    """
+    """Isolated Transformers + PEFT SFT backend."""
 
     name = "transformers-peft"
 
@@ -222,6 +264,16 @@ class TransformersPeftExecutor:
             raise ValueError(f"{label} dataset content changed after proposal")
         return actual
 
+    @staticmethod
+    def _verify_adapter(path: str, expected_sha: str, *, label: str) -> str:
+        resolved = Path(path).resolve()
+        if not resolved.is_dir():
+            raise FileNotFoundError(f"{label} adapter not found: {resolved}")
+        actual = sha256_directory(resolved)
+        if actual != expected_sha:
+            raise ValueError(f"{label} adapter content changed after proposal")
+        return actual
+
     def _spec_for(
         self,
         experiment: Experiment,
@@ -230,7 +282,9 @@ class TransformersPeftExecutor:
         run_dir: Path,
     ) -> TransformersPeftRunSpec:
         if not context.resolved_config:
-            raise ValueError("TransformersPeftExecutor requires ExecutionContext.resolved_config")
+            raise ValueError(
+                "TransformersPeftExecutor requires ExecutionContext.resolved_config"
+            )
         artifact_dir = run_dir / "adapter"
         spec = TransformersPeftRunSpec.from_resolved_config(
             context.resolved_config,
@@ -242,18 +296,22 @@ class TransformersPeftExecutor:
             spec.dataset, spec.dataset_sha256, label="training"
         )
         if spec.dataset_sha256 is None:
-            # Bind every run to the bytes observed immediately before launch,
-            # even when a non-repair caller did not predeclare a digest.
             spec = replace(spec, dataset_sha256=primary_sha)
 
         if spec.replay_dataset is not None:
-            replay_sha = self._verify_input(
+            self._verify_input(
                 spec.replay_dataset, spec.replay_sha256, label="replay"
             )
             if Path(spec.replay_dataset).resolve() == Path(spec.dataset).resolve():
                 raise ValueError("training and replay datasets must be different files")
-            if replay_sha != spec.replay_sha256:
-                raise ValueError("replay dataset content changed after proposal")
+
+        if spec.parent_adapter is not None:
+            assert spec.parent_adapter_sha256 is not None
+            self._verify_adapter(
+                spec.parent_adapter,
+                spec.parent_adapter_sha256,
+                label="parent",
+            )
         return spec
 
     def profile(self, experiment: Experiment, context: ExecutionContext) -> CostEstimate:
@@ -273,7 +331,9 @@ class TransformersPeftExecutor:
         else:
             hours = max(0.0, experiment.estimated_gpu_hours)
             confidence = 0.25
-            notes = ("using experiment-declared GPU-hour estimate; no measured step profile",)
+            notes = (
+                "using experiment-declared GPU-hour estimate; no measured step profile",
+            )
         return CostEstimate(
             gpu_hours=hours,
             peak_vram_gb=float(peak_vram) if peak_vram is not None else None,
@@ -348,8 +408,6 @@ class TransformersPeftExecutor:
                 "transformers worker exited successfully without an adapter artifact"
             )
 
-        # Recheck after the worker exits so a concurrent mutation during training
-        # cannot silently produce an artifact attributed to different input bytes.
         primary_sha = self._verify_input(
             spec.dataset, spec.dataset_sha256, label="training"
         )
@@ -357,6 +415,14 @@ class TransformersPeftExecutor:
         if spec.replay_dataset is not None:
             replay_sha = self._verify_input(
                 spec.replay_dataset, spec.replay_sha256, label="replay"
+            )
+        parent_adapter_sha: str | None = None
+        if spec.parent_adapter is not None:
+            assert spec.parent_adapter_sha256 is not None
+            parent_adapter_sha = self._verify_adapter(
+                spec.parent_adapter,
+                spec.parent_adapter_sha256,
+                label="parent",
             )
 
         worker_result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -387,6 +453,8 @@ class TransformersPeftExecutor:
                 "dataset_sha256": primary_sha,
                 "replay_dataset_sha256": replay_sha,
                 "replay_ratio": spec.replay_ratio,
+                "parent_adapter_sha256": parent_adapter_sha,
+                "continued_from_parent_adapter": parent_adapter_sha is not None,
                 "data_provenance": dict(data_provenance),
                 "artifact_sha256": sha256_directory(spec.output_dir),
                 "resolved_config_sha256": self._json_digest(context.resolved_config),

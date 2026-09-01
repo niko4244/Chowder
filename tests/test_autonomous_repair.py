@@ -12,7 +12,7 @@ from chowder.failures import FailureRecord, FailureSourceRole
 from chowder.local_corpus_provider import LocalCorpusRepairProvider
 from chowder.memory import HardwareProfile
 from chowder.models import Experiment, ExperimentResult, Goal, Hypothesis, MetricTarget
-from chowder.provenance import sha256_file
+from chowder.provenance import sha256_directory, sha256_file
 from chowder.repair_candidates import RepairVariant
 
 
@@ -29,6 +29,9 @@ class FakeTrainer:
     def run(self, experiment, context):
         artifact = Path(context.work_dir) / f"artifact-{experiment.experiment_id}"
         artifact.mkdir(exist_ok=False)
+        (artifact / "adapter_config.json").write_text(
+            '{"peft_type":"LORA"}\n', encoding="utf-8"
+        )
         (artifact / "adapter.bin").write_bytes(
             experiment.experiment_id.encode("utf-8")
         )
@@ -42,7 +45,11 @@ class FakeTrainer:
             experiment_id=experiment.experiment_id,
             artifact_ref=str(artifact),
             gpu_hours=0.2,
-            evidence={"test": True, "dataset_sha256": sha256_file(dataset)},
+            evidence={
+                "test": True,
+                "dataset_sha256": sha256_file(dataset),
+                "artifact_sha256": sha256_directory(artifact),
+            },
         )
 
     def cancel(self, run_id):
@@ -196,6 +203,9 @@ def test_single_hop_autonomous_repair_runs_rejected_candidate_to_promoted_repair
     assert source_generation.candidates[0].repair_plans
     assert runner.engine.graph.nodes["source"].status.value == "rejected"
 
+    source_artifact = source_generation.candidates[0].artifact
+    assert source_artifact is not None
+    source_adapter_sha = source_artifact.evidence["artifact_sha256"]
     base_sha = sha256_file(tmp_path / "base.jsonl")
     outcome = run_single_hop_autonomous_repair(
         runner=runner,
@@ -205,7 +215,7 @@ def test_single_hop_autonomous_repair_runs_rejected_candidate_to_promoted_repair
             RepairVariant(
                 "lr-low", 0.3, training_patch={"learning_rate": 5e-5}
             ),
-            RepairVariant("rank-low", 0.3, lora_patch={"r": 8}),
+            RepairVariant("epochs-low", 0.3, training_patch={"epochs": 1}),
         ),
     )
 
@@ -217,18 +227,47 @@ def test_single_hop_autonomous_repair_runs_rejected_candidate_to_promoted_repair
         for candidate in outcome.population.proposed_candidates
     )
     for candidate in outcome.population.proposed_candidates:
-        replay = candidate.config_patch["backend"]["replay"]
+        backend = candidate.config_patch["backend"]
+        replay = backend["replay"]
         assert replay["dataset"] == str((tmp_path / "base.jsonl").resolve())
         assert replay["sha256"] == base_sha
         assert replay["ratio"] == pytest.approx(1.0)
-        assert candidate.config_patch["backend"]["dataset_sha256"] == candidate.config_patch[
-            "repair"
-        ]["repair_dataset_sha256"]
+        assert backend["dataset_sha256"] == candidate.config_patch["repair"][
+            "repair_dataset_sha256"
+        ]
+        assert backend["parent_adapter"] == {
+            "path": str(Path(source_artifact.artifact_ref).resolve()),
+            "sha256": source_adapter_sha,
+        }
+        assert candidate.config_patch["repair"]["continuation"] is True
     assert outcome.promoted is not None
     assert outcome.promoted.metrics["quality"] == pytest.approx(0.86)
     assert runner.engine.baseline.experiment_id.startswith("repair-")
     assert runner.engine.outstanding_candidates == 0
     assert runner.engine.spent_gpu_hours == pytest.approx(0.75)
+
+
+def test_repair_coordinator_rejects_lora_topology_variant_before_provider(tmp_path):
+    runner = _runner(tmp_path)
+    source = _source_experiment()
+    runner.engine.propose((source,))
+    generation = runner.run_generation((source,))
+
+    class ProviderMustNotRun:
+        name = "must-not-run"
+        version = "1"
+
+        def propose(self, request):
+            raise AssertionError("provider must not run for invalid continuation topology")
+
+    with pytest.raises(ValueError, match="cannot change LoRA topology"):
+        run_single_hop_autonomous_repair(
+            runner=runner,
+            source_generation=generation,
+            provider=ProviderMustNotRun(),
+            variants=(RepairVariant("rank-change", 0.2, lora_patch={"r": 8}),),
+        )
+    assert runner.engine.outstanding_candidates == 0
 
 
 def test_repair_coordinator_rejects_non_rejected_source_candidate(tmp_path):
@@ -311,6 +350,33 @@ def test_repair_coordinator_rejects_tampered_parent_replay_before_provider(tmp_p
     assert runner.engine.outstanding_candidates == 0
 
 
+def test_repair_coordinator_rejects_tampered_parent_adapter_before_provider(tmp_path):
+    runner = _runner(tmp_path)
+    source = _source_experiment()
+    runner.engine.propose((source,))
+    generation = runner.run_generation((source,))
+    artifact = generation.candidates[0].artifact
+    assert artifact is not None
+    with open(Path(artifact.artifact_ref) / "adapter.bin", "ab") as handle:
+        handle.write(b"tampered")
+
+    class ProviderMustNotRun:
+        name = "must-not-run"
+        version = "1"
+
+        def propose(self, request):
+            raise AssertionError("provider must not run after adapter tamper")
+
+    with pytest.raises(ValueError, match="parent adapter content changed"):
+        run_single_hop_autonomous_repair(
+            runner=runner,
+            source_generation=generation,
+            provider=ProviderMustNotRun(),
+            variants=(RepairVariant("default", 0.2),),
+        )
+    assert runner.engine.outstanding_candidates == 0
+
+
 def test_repair_coordinator_can_explicitly_disable_replay(tmp_path):
     runner = _runner(tmp_path)
     source = _source_experiment()
@@ -323,5 +389,6 @@ def test_repair_coordinator_can_explicitly_disable_replay(tmp_path):
         variants=(RepairVariant("default", 0.2),),
         replay_ratio=None,
     )
-    assert outcome.population.proposed_candidates
-    assert "replay" not in outcome.population.proposed_candidates[0].config_patch["backend"]
+    candidate = outcome.population.proposed_candidates[0]
+    assert "replay" not in candidate.config_patch["backend"]
+    assert "parent_adapter" in candidate.config_patch["backend"]
