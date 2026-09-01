@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
@@ -24,6 +25,10 @@ class TransformersPeftRunSpec:
     base_model: str
     dataset: str
     output_dir: str
+    dataset_sha256: str | None = None
+    replay_dataset: str | None = None
+    replay_sha256: str | None = None
+    replay_ratio: float = 0.0
     revision: str | None = None
     text_field: str = "text"
     max_length: int = 512
@@ -49,6 +54,26 @@ class TransformersPeftRunSpec:
             raise ValueError("backend.base_model is required")
         if not self.dataset.strip():
             raise ValueError("backend.dataset is required")
+        if self.dataset_sha256 is not None and len(self.dataset_sha256) != 64:
+            raise ValueError("backend.dataset_sha256 must be a SHA-256 digest")
+
+        has_replay_dataset = self.replay_dataset is not None
+        has_replay_sha = self.replay_sha256 is not None
+        if has_replay_dataset != has_replay_sha:
+            raise ValueError("backend replay dataset and SHA must be supplied together")
+        ratio = float(self.replay_ratio)
+        if has_replay_dataset:
+            assert self.replay_dataset is not None
+            assert self.replay_sha256 is not None
+            if not self.replay_dataset.strip():
+                raise ValueError("backend replay dataset cannot be empty")
+            if len(self.replay_sha256) != 64:
+                raise ValueError("backend replay SHA must be a SHA-256 digest")
+            if not math.isfinite(ratio) or ratio <= 0 or ratio > 10:
+                raise ValueError("backend replay ratio must be finite and in (0, 10]")
+        elif ratio != 0.0:
+            raise ValueError("backend replay ratio requires a replay dataset")
+
         if self.max_length <= 0:
             raise ValueError("backend.max_length must be positive")
         if self.epochs <= 0 or self.learning_rate <= 0:
@@ -84,6 +109,7 @@ class TransformersPeftRunSpec:
         recipe = self.to_dict()
         recipe.pop("output_dir", None)
         recipe.pop("dataset", None)
+        recipe.pop("replay_dataset", None)
         recipe.pop("timeout_seconds", None)
         payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -106,18 +132,38 @@ class TransformersPeftRunSpec:
         training = backend.get("training", {})
         lora = backend.get("lora", {})
         runtime = backend.get("runtime", {})
+        replay = backend.get("replay", {})
         if not isinstance(training, Mapping) or not isinstance(lora, Mapping) or not isinstance(runtime, Mapping):
             raise ValueError("backend training/lora/runtime sections must be mappings")
+        if replay is None:
+            replay = {}
+        if not isinstance(replay, Mapping):
+            raise ValueError("backend replay section must be a mapping")
 
         dataset = Path(str(backend.get("dataset", "")))
         if not dataset.is_absolute():
             dataset = Path(work_dir) / dataset
         dataset = dataset.resolve()
 
+        replay_dataset: Path | None = None
+        if replay.get("dataset") is not None:
+            replay_dataset = Path(str(replay.get("dataset")))
+            if not replay_dataset.is_absolute():
+                replay_dataset = Path(work_dir) / replay_dataset
+            replay_dataset = replay_dataset.resolve()
+
+        dataset_sha = backend.get("dataset_sha256")
+        replay_sha = replay.get("sha256")
         return cls(
             base_model=str(backend.get("base_model", "")),
             dataset=str(dataset),
             output_dir=str(Path(output_dir).resolve()),
+            dataset_sha256=(str(dataset_sha) if dataset_sha is not None else None),
+            replay_dataset=(str(replay_dataset) if replay_dataset is not None else None),
+            replay_sha256=(str(replay_sha) if replay_sha is not None else None),
+            replay_ratio=(
+                float(replay.get("ratio", 1.0)) if replay_dataset is not None else 0.0
+            ),
             revision=(str(backend["revision"]) if backend.get("revision") is not None else None),
             text_field=str(backend.get("text_field", "text")),
             max_length=int(backend.get("max_length", 512)),
@@ -129,13 +175,22 @@ class TransformersPeftRunSpec:
             lora_r=int(lora.get("r", 16)),
             lora_alpha=int(lora.get("alpha", 32)),
             lora_dropout=float(lora.get("dropout", 0.05)),
-            target_modules=tuple(str(x) for x in lora.get("target_modules", ("q_proj", "k_proj", "v_proj", "o_proj"))),
+            target_modules=tuple(
+                str(x)
+                for x in lora.get(
+                    "target_modules", ("q_proj", "k_proj", "v_proj", "o_proj")
+                )
+            ),
             use_rslora=bool(lora.get("use_rslora", False)),
             quantization=str(backend.get("quantization", "none")).lower(),
             precision=str(backend.get("precision", "auto")).lower(),
             gradient_checkpointing=bool(training.get("gradient_checkpointing", True)),
             seed=int(config.get("seed", seed)),
-            timeout_seconds=(float(runtime["timeout_seconds"]) if runtime.get("timeout_seconds") is not None else None),
+            timeout_seconds=(
+                float(runtime["timeout_seconds"])
+                if runtime.get("timeout_seconds") is not None
+                else None
+            ),
             trust_remote_code=bool(backend.get("trust_remote_code", False)),
         )
 
@@ -157,6 +212,16 @@ class TransformersPeftExecutor:
         payload = json.dumps(dict(value), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _verify_input(path: str, expected_sha: str | None, *, label: str) -> str:
+        resolved = Path(path).resolve()
+        if not resolved.is_file():
+            raise FileNotFoundError(f"{label} dataset not found: {resolved}")
+        actual = sha256_file(resolved)
+        if expected_sha is not None and actual != expected_sha:
+            raise ValueError(f"{label} dataset content changed after proposal")
+        return actual
+
     def _spec_for(
         self,
         experiment: Experiment,
@@ -173,9 +238,22 @@ class TransformersPeftExecutor:
             output_dir=artifact_dir,
             seed=context.seed,
         )
-        dataset_path = Path(spec.dataset)
-        if not dataset_path.is_file():
-            raise FileNotFoundError(f"training dataset not found: {dataset_path}")
+        primary_sha = self._verify_input(
+            spec.dataset, spec.dataset_sha256, label="training"
+        )
+        if spec.dataset_sha256 is None:
+            # Bind every run to the bytes observed immediately before launch,
+            # even when a non-repair caller did not predeclare a digest.
+            spec = replace(spec, dataset_sha256=primary_sha)
+
+        if spec.replay_dataset is not None:
+            replay_sha = self._verify_input(
+                spec.replay_dataset, spec.replay_sha256, label="replay"
+            )
+            if Path(spec.replay_dataset).resolve() == Path(spec.dataset).resolve():
+                raise ValueError("training and replay datasets must be different files")
+            if replay_sha != spec.replay_sha256:
+                raise ValueError("replay dataset content changed after proposal")
         return spec
 
     def profile(self, experiment: Experiment, context: ExecutionContext) -> CostEstimate:
@@ -219,7 +297,9 @@ class TransformersPeftExecutor:
     def _tail(path: Path, lines: int = 30) -> str:
         if not path.exists():
             return ""
-        return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+        return "\n".join(
+            path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
+        )
 
     def run(self, experiment: Experiment, context: ExecutionContext) -> TrainingArtifact:
         run_id = f"{experiment.experiment_id}-{uuid4().hex[:12]}"
@@ -235,7 +315,9 @@ class TransformersPeftExecutor:
 
         command = self._worker_command(spec_path, result_path)
         started = time.perf_counter()
-        with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+        with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
+            "w", encoding="utf-8"
+        ) as stderr:
             process = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True)
             self._processes[run_id] = process
             try:
@@ -254,18 +336,43 @@ class TransformersPeftExecutor:
         elapsed = time.perf_counter() - started
         if process.returncode != 0:
             tail = self._tail(stderr_path)
-            raise RuntimeError(f"transformers worker failed with exit code {process.returncode}:\n{tail}")
+            raise RuntimeError(
+                f"transformers worker failed with exit code {process.returncode}:\n{tail}"
+            )
         if not result_path.is_file():
-            raise RuntimeError("transformers worker exited successfully without a result manifest")
+            raise RuntimeError(
+                "transformers worker exited successfully without a result manifest"
+            )
         if not Path(spec.output_dir).is_dir():
-            raise RuntimeError("transformers worker exited successfully without an adapter artifact")
+            raise RuntimeError(
+                "transformers worker exited successfully without an adapter artifact"
+            )
+
+        # Recheck after the worker exits so a concurrent mutation during training
+        # cannot silently produce an artifact attributed to different input bytes.
+        primary_sha = self._verify_input(
+            spec.dataset, spec.dataset_sha256, label="training"
+        )
+        replay_sha: str | None = None
+        if spec.replay_dataset is not None:
+            replay_sha = self._verify_input(
+                spec.replay_dataset, spec.replay_sha256, label="replay"
+            )
 
         worker_result = json.loads(result_path.read_text(encoding="utf-8"))
         telemetry = worker_result.get("telemetry", {})
         versions = worker_result.get("versions", {})
         worker_provenance = worker_result.get("provenance", {})
-        if not isinstance(telemetry, Mapping) or not isinstance(versions, Mapping) or not isinstance(worker_provenance, Mapping):
-            raise RuntimeError("worker result contains invalid telemetry/version/provenance payload")
+        data_provenance = worker_result.get("data_provenance", {})
+        if (
+            not isinstance(telemetry, Mapping)
+            or not isinstance(versions, Mapping)
+            or not isinstance(worker_provenance, Mapping)
+            or not isinstance(data_provenance, Mapping)
+        ):
+            raise RuntimeError(
+                "worker result contains invalid telemetry/version/provenance payload"
+            )
 
         return TrainingArtifact(
             run_id=run_id,
@@ -277,10 +384,15 @@ class TransformersPeftExecutor:
                 "backend": self.name,
                 "execution_spec_sha256": spec.digest(),
                 "recipe_sha256": spec.recipe_digest(),
-                "dataset_sha256": sha256_file(spec.dataset),
+                "dataset_sha256": primary_sha,
+                "replay_dataset_sha256": replay_sha,
+                "replay_ratio": spec.replay_ratio,
+                "data_provenance": dict(data_provenance),
                 "artifact_sha256": sha256_directory(spec.output_dir),
                 "resolved_config_sha256": self._json_digest(context.resolved_config),
-                "worker_result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+                "worker_result_sha256": hashlib.sha256(
+                    result_path.read_bytes()
+                ).hexdigest(),
                 "stdout_log": str(stdout_path),
                 "stderr_log": str(stderr_path),
                 "versions": dict(versions),

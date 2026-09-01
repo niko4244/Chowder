@@ -8,7 +8,8 @@ from chowder.engine import EvolutionEngine
 from chowder.failures import FailureCluster, FailureSourceRole, RepairPlan
 from chowder.local_corpus_provider import LocalCorpusRepairProvider
 from chowder.models import Experiment, ExperimentResult, Goal, Hypothesis, MetricTarget
-from chowder.repair_candidates import RepairVariant
+from chowder.provenance import sha256_file
+from chowder.repair_candidates import RepairVariant, VerifiedReplayDataset
 from chowder.repair_orchestrator import prepare_and_propose_repair_population
 
 
@@ -43,7 +44,11 @@ def _plan():
 
 def _engine(max_parallel=2, budget=5.0):
     engine = EvolutionEngine(
-        Goal((MetricTarget("quality", minimum=0.8),), gpu_hour_budget=budget, max_parallel_candidates=max_parallel),
+        Goal(
+            (MetricTarget("quality", minimum=0.8),),
+            gpu_hour_budget=budget,
+            max_parallel_candidates=max_parallel,
+        ),
         ExperimentResult("baseline", {"quality": 0.7}, 0.0),
     )
     parent = Experiment(
@@ -90,13 +95,28 @@ def _provider(tmp_path, *, contaminated=False):
             },
         ],
     )
-    return LocalCorpusRepairProvider([corpus], max_examples=2, examples_per_failure=2)
+    return LocalCorpusRepairProvider(
+        [corpus], max_examples=2, examples_per_failure=2
+    )
 
 
 def _holdout(tmp_path):
     path = tmp_path / "holdout-index.jsonl"
     write_holdout_fingerprint_index([("2+2?", "4")], path)
     return path
+
+
+def _replay(tmp_path, ratio=1.0):
+    path = tmp_path / "base.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {"text": "parent one"},
+            {"text": "parent two"},
+            {"text": "parent three"},
+        ],
+    )
+    return VerifiedReplayDataset(str(path), sha256_file(path), ratio)
 
 
 def test_orchestrator_materializes_verified_data_and_reserves_budgeted_population(tmp_path):
@@ -134,6 +154,28 @@ def test_orchestrator_materializes_verified_data_and_reserves_budgeted_populatio
         assert resolved["evaluation"]["type"] == "transformers-text"
 
 
+def test_replay_adjusts_reserved_compute_upper_bound(tmp_path):
+    engine = _engine(max_parallel=2, budget=2.0)
+    replay = _replay(tmp_path, ratio=1.0)
+    outcome = prepare_and_propose_repair_population(
+        engine=engine,
+        parent_id="parent",
+        plan=_plan(),
+        cluster=_cluster(),
+        provider=_provider(tmp_path),
+        holdout_fingerprint_files=(_holdout(tmp_path),),
+        variants=(RepairVariant("default", 0.25),),
+        work_dir=tmp_path,
+        replay=replay,
+    )
+    assert len(outcome.proposed_candidates) == 1
+    candidate = outcome.proposed_candidates[0]
+    assert candidate.estimated_gpu_hours == pytest.approx(0.5)
+    assert engine.reserved_gpu_hours == pytest.approx(0.5)
+    assert candidate.config_patch["repair"]["repair_only_estimated_gpu_hours"] == pytest.approx(0.25)
+    assert candidate.config_patch["repair"]["replay_adjusted_estimated_gpu_hours"] == pytest.approx(0.5)
+
+
 def test_contaminated_provider_is_rejected_before_engine_mutation_and_retry_dir_is_cleaned(tmp_path):
     engine = _engine()
     with pytest.raises(ValueError, match="overlaps holdout"):
@@ -168,4 +210,22 @@ def test_orchestrator_refuses_work_when_no_variant_fits_remaining_budget(tmp_pat
             variants=(RepairVariant("too-large", 0.2),),
             work_dir=tmp_path,
         )
+    assert not (tmp_path / ".chowder" / "repairs").exists()
+
+
+def test_orchestrator_refuses_variant_that_only_fits_without_replay(tmp_path):
+    engine = _engine(budget=0.3)
+    with pytest.raises(ValueError, match="replay-adjusted"):
+        prepare_and_propose_repair_population(
+            engine=engine,
+            parent_id="parent",
+            plan=_plan(),
+            cluster=_cluster(),
+            provider=_provider(tmp_path),
+            holdout_fingerprint_files=(_holdout(tmp_path),),
+            variants=(RepairVariant("repair-only-fits", 0.2),),
+            work_dir=tmp_path,
+            replay=_replay(tmp_path, ratio=1.0),
+        )
+    assert engine.outstanding_candidates == 0
     assert not (tmp_path / ".chowder" / "repairs").exists()
