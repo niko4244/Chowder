@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 from .graph import ExperimentGraph
 from .models import Experiment, ExperimentResult, ExperimentStatus, Goal
@@ -41,6 +41,11 @@ class EvolutionEngine:
             self._reservations[experiment.experiment_id] = experiment.estimated_gpu_hours
             self.reserved_gpu_hours += experiment.estimated_gpu_hours
         return tuple(accepted)
+
+    def resolve_config(
+        self, experiment_id: str, base_config: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return self.graph.resolve_config(experiment_id, base_config)
 
     def adjudicate(self, results: Iterable[ExperimentResult]) -> tuple[RankedCandidate, ...]:
         results = tuple(results)

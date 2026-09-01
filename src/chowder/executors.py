@@ -20,6 +20,7 @@ class ExecutionContext:
     hardware: HardwareProfile
     work_dir: str
     seed: int
+    resolved_config: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
