@@ -70,11 +70,13 @@ class VerifiedRepairDataset:
 
 @dataclass(frozen=True)
 class VerifiedReplayDataset:
-    """Immutable rehearsal source inherited from an already-trained parent."""
+    """Immutable normalized rehearsal history."""
 
     path: str
     sha256: str
     ratio: float = 1.0
+    manifest_path: str | None = None
+    manifest_sha256: str | None = None
 
     def verify(self) -> Path:
         if len(self.sha256) != 64:
@@ -87,6 +89,19 @@ class VerifiedReplayDataset:
             raise FileNotFoundError(f"replay dataset not found: {path}")
         if sha256_file(path) != self.sha256:
             raise ValueError("replay dataset content changed after verification")
+
+        has_manifest_path = self.manifest_path is not None
+        has_manifest_sha = self.manifest_sha256 is not None
+        if has_manifest_path != has_manifest_sha:
+            raise ValueError("replay manifest path and SHA must be supplied together")
+        if has_manifest_path:
+            assert self.manifest_path is not None
+            assert self.manifest_sha256 is not None
+            manifest = Path(self.manifest_path).resolve()
+            if not manifest.is_file():
+                raise FileNotFoundError(f"replay manifest not found: {manifest}")
+            if sha256_file(manifest) != self.manifest_sha256:
+                raise ValueError("replay manifest content changed after verification")
         return path
 
 
@@ -124,12 +139,6 @@ class RepairVariant:
 
 
 def replay_compute_multiplier(replay: VerifiedReplayDataset | None) -> float:
-    """Conservative compute multiplier for budget admission.
-
-    The worker caps replay rows at the available parent rows, so ``1 + ratio``
-    is an upper bound on row-count growth relative to repair-only training.
-    """
-
     if replay is None:
         return 1.0
     replay.verify()
@@ -153,15 +162,6 @@ def build_repair_candidate(
     replay: VerifiedReplayDataset | None = None,
     parent_adapter: VerifiedParentAdapter | None = None,
 ) -> Experiment:
-    """Build one deterministic repair child without changing evaluation semantics.
-
-    When ``parent_adapter`` is present this candidate is a true continuation of
-    the rejected adapter weights. LoRA topology overrides are intentionally
-    blocked on continuation branches: changing rank/targets requires a separate
-    migration/merge experiment rather than pretending the parent adapter can be
-    loaded into a different topology.
-    """
-
     if not parent_id.strip():
         raise ValueError("repair candidate parent_id is required")
     dataset_path = dataset.verify(require_source_manifest=require_source_manifest)
@@ -189,15 +189,21 @@ def build_repair_candidate(
             "continuation repair cannot change LoRA topology; use a separate adapter migration experiment"
         )
 
+    # Independently materialized repair rows and replay histories are canonical
+    # JSONL with a `text` field. Pinning this prevents a custom parent text_field
+    # from making otherwise valid autonomous repair data unreadable.
     backend_patch: dict[str, Any] = {
         "dataset": str(dataset_path),
         "dataset_sha256": dataset.sha256,
+        "text_field": "text",
     }
     if replay is not None and replay_path is not None:
         backend_patch["replay"] = {
             "dataset": str(replay_path),
             "sha256": replay.sha256,
             "ratio": float(replay.ratio),
+            "manifest": replay.manifest_path,
+            "manifest_sha256": replay.manifest_sha256,
         }
     if parent_adapter is not None and parent_adapter_path is not None:
         backend_patch["parent_adapter"] = {
@@ -220,6 +226,9 @@ def build_repair_candidate(
         "source_manifest_sha256": dataset.source_manifest_sha256,
         "source_failure_ids": list(plan.source_failure_ids),
         "replay_dataset_sha256": replay.sha256 if replay is not None else None,
+        "replay_manifest_sha256": (
+            replay.manifest_sha256 if replay is not None else None
+        ),
         "replay_ratio": float(replay.ratio) if replay is not None else 0.0,
         "parent_adapter_sha256": (
             parent_adapter.sha256 if parent_adapter is not None else None
@@ -240,6 +249,9 @@ def build_repair_candidate(
             "holdout_index_sha256": list(audit.holdout_index_sha256),
             "source_manifest_sha256": dataset.source_manifest_sha256,
             "replay_dataset_sha256": replay.sha256 if replay is not None else None,
+            "replay_manifest_sha256": (
+                replay.manifest_sha256 if replay is not None else None
+            ),
             "replay_ratio": float(replay.ratio) if replay is not None else 0.0,
             "parent_adapter_sha256": (
                 parent_adapter.sha256 if parent_adapter is not None else None
@@ -310,8 +322,6 @@ def build_autonomous_repair_population(
     replay: VerifiedReplayDataset | None = None,
     parent_adapter: VerifiedParentAdapter | None = None,
 ) -> tuple[Experiment, ...]:
-    """Strict autonomous path: source provenance is mandatory."""
-
     return build_repair_population(
         parent_id=parent_id,
         plan=plan,
