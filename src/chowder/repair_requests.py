@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -15,6 +16,23 @@ from .repair_sources import (
 )
 
 
+class RepairStrategy(str, Enum):
+    CONCISE_ANSWER = "concise_answer"
+    CALIBRATED_ANSWERING = "calibrated_answering"
+    FORMAT_CONTROL = "format_control"
+    NEAR_NEIGHBOR_REASONING = "near_neighbor_reasoning"
+
+
+def strategy_for_failure_kind(failure_kind: str) -> RepairStrategy:
+    if failure_kind == "empty_prediction":
+        return RepairStrategy.CONCISE_ANSWER
+    if failure_kind == "refusal_or_unknown":
+        return RepairStrategy.CALIBRATED_ANSWERING
+    if failure_kind == "overlong_mismatch":
+        return RepairStrategy.FORMAT_CONTROL
+    return RepairStrategy.NEAR_NEIGHBOR_REASONING
+
+
 @dataclass(frozen=True)
 class RepairRequest:
     """Aggregate repair intent that deliberately excludes raw evaluation rows."""
@@ -25,10 +43,9 @@ class RepairRequest:
     evaluator: str
     suite: str
     failure_kind: str
+    strategy: RepairStrategy
     failure_count: int
     protocol_sha256: str
-    suspected_cause: str
-    intervention: str
     source_failure_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -40,12 +57,15 @@ class RepairRequest:
             raise ValueError("repair request protocol_sha256 is invalid")
         if not all(len(failure_id) == 64 for failure_id in self.source_failure_ids):
             raise ValueError("repair request failure IDs must be SHA-256 digests")
+        if self.strategy is not strategy_for_failure_kind(self.failure_kind):
+            raise ValueError("repair request strategy does not match failure kind")
 
     def to_provider_payload(self) -> dict[str, object]:
         """Return the complete provider-visible payload.
 
-        Raw prompts, expected answers, model predictions, and row indexes are not
-        members of this type and therefore cannot be serialized through this API.
+        Raw prompts, expected answers, model predictions, row indexes, and
+        free-form plan prose are not members of this type and cannot cross this
+        provider boundary through the canonical serializer.
         """
 
         return {
@@ -55,10 +75,9 @@ class RepairRequest:
             "evaluator": self.evaluator,
             "suite": self.suite,
             "failure_kind": self.failure_kind,
+            "strategy": self.strategy.value,
             "failure_count": self.failure_count,
             "protocol_sha256": self.protocol_sha256,
-            "suspected_cause": self.suspected_cause,
-            "intervention": self.intervention,
             "source_failure_ids": list(self.source_failure_ids),
         }
 
@@ -122,16 +141,16 @@ def build_repair_request(*, plan: RepairPlan, cluster: FailureCluster) -> Repair
     if not plan.requires_independent_source:
         raise ValueError("repair request is only for plans requiring independent source material")
 
+    strategy = strategy_for_failure_kind(cluster.failure_kind)
     identity = {
         "plan_id": plan.plan_id,
         "cluster_id": cluster.cluster_id,
         "evaluator": cluster.evaluator,
         "suite": cluster.suite,
         "failure_kind": cluster.failure_kind,
+        "strategy": strategy.value,
         "protocol_sha256": cluster.protocol_sha256,
         "failure_ids": list(cluster_ids),
-        "suspected_cause": plan.suspected_cause,
-        "intervention": plan.intervention,
     }
     return RepairRequest(
         request_id=f"repair-request-{_canonical_digest(identity)[:16]}",
@@ -140,10 +159,9 @@ def build_repair_request(*, plan: RepairPlan, cluster: FailureCluster) -> Repair
         evaluator=cluster.evaluator,
         suite=cluster.suite,
         failure_kind=cluster.failure_kind,
+        strategy=strategy,
         failure_count=len(cluster_ids),
         protocol_sha256=cluster.protocol_sha256,
-        suspected_cause=plan.suspected_cause,
-        intervention=plan.intervention,
         source_failure_ids=cluster_ids,
     )
 
