@@ -27,6 +27,7 @@ class SignatureKind(str, Enum):
     DEPENDENCY_INCOMPATIBLE = "dependency_incompatible"
     CONFIG_INVALID = "config_invalid"
     ARTIFACT_NOT_FOUND = "artifact_not_found"
+    ARTIFACT_CORRUPTED = "artifact_corrupted"
     UNKNOWN = "unknown"
 
 
@@ -56,6 +57,8 @@ _SIGNATURE_RULES: tuple[tuple[SignatureKind, tuple[str, ...]], ...] = (
             "readtimeout",
             "chunkedencodingerror",
             "peer closed connection",
+            "service unavailable",
+            "too many requests",
         ),
     ),
     (
@@ -69,6 +72,10 @@ _SIGNATURE_RULES: tuple[tuple[SignatureKind, tuple[str, ...]], ...] = (
     ),
     (SignatureKind.CONFIG_INVALID, ("unrecognized arguments", "argumenterror")),
     (SignatureKind.ARTIFACT_NOT_FOUND, ("filenotfounderror", "no such file or directory")),
+    (
+        SignatureKind.ARTIFACT_CORRUPTED,
+        ("checksum mismatch", "sha256 mismatch", "hash mismatch"),
+    ),
 )
 
 

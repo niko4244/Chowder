@@ -328,7 +328,10 @@ re-litigate them):
     run against the hidden set (Task 7) and scored.
 - **Test:** `tests/test_benchmark.py` — full scored run against dev cases
   (10, expected clean given Task 6 already proved this); full run against
-  hidden cases (7, per Task 7), asserting the report is produced and
+  hidden cases (8, per Task 7 -- 6 original rows plus the 2 new ones the
+  Context table added; an earlier revision of this plan said "7" here,
+  an arithmetic slip caught while actually building Task 7, see
+  `docs/HIDDEN_SET_FREEZE.md`), asserting the report is produced and
   matches the pre-registered predictions field-for-field — a prediction
   mismatch is a **finding to write up** (which case, why, what class of
   rule-set gap it reveals), not a test to quietly loosen until it passes.
