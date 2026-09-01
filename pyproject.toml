@@ -26,6 +26,11 @@ qlora = [
 eval = [
   "lm-eval[hf]>=0.4.13,<0.5",
 ]
+dev = [
+  "pytest>=8,<10",
+  "ruff>=0.12,<1",
+  "build>=1,<2",
+]
 
 [project.scripts]
 chowder = "chowder.cli:main"
@@ -36,3 +41,11 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+# Correctness gate only: syntax errors, invalid constructs and undefined names.
+# Style/unused-import cleanup remains a separate maintenance concern.
+select = ["E9", "F63", "F7", "F82"]

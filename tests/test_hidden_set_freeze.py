@@ -23,7 +23,11 @@ _FROZEN_HASHES = {
 
 
 def _sha256_of(relative_path: str) -> str:
-    return hashlib.sha256((_REPO_ROOT / relative_path).read_bytes()).hexdigest()
+    # Git may check text files out with CRLF on Windows. The freeze protects the
+    # repository content, not a checkout platform's newline convention, so hash
+    # canonical LF bytes while preserving every other byte exactly.
+    data = (_REPO_ROOT / relative_path).read_bytes().replace(b"\r\n", b"\n")
+    return hashlib.sha256(data).hexdigest()
 
 
 def test_freeze_intact():
