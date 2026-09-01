@@ -10,6 +10,7 @@ from .contamination import ContaminationAudit, repair_dataset_index_digest
 from .failures import RepairPlan
 from .models import Experiment, Hypothesis
 from .provenance import sha256_file
+from .repair_sources import verify_source_manifest
 
 
 @dataclass(frozen=True)
@@ -17,8 +18,10 @@ class VerifiedRepairDataset:
     path: str
     sha256: str
     contamination_audit: ContaminationAudit
+    source_manifest_path: str | None = None
+    source_manifest_sha256: str | None = None
 
-    def verify(self) -> Path:
+    def verify(self, *, require_source_manifest: bool = False) -> Path:
         if not self.contamination_audit.clean:
             raise ValueError("repair dataset contamination audit is not clean")
         if len(self.sha256) != 64:
@@ -34,6 +37,23 @@ class VerifiedRepairDataset:
         actual_repair_index = repair_dataset_index_digest(path)
         if actual_repair_index != self.contamination_audit.repair_index_sha256:
             raise ValueError("repair dataset examples do not match contamination audit")
+
+        has_path = self.source_manifest_path is not None
+        has_digest = self.source_manifest_sha256 is not None
+        if has_path != has_digest:
+            raise ValueError("repair source manifest path and SHA must be supplied together")
+        if require_source_manifest and not has_path:
+            raise ValueError("autonomous repair requires an independent-source provenance manifest")
+        if has_path:
+            assert self.source_manifest_path is not None
+            assert self.source_manifest_sha256 is not None
+            actual_manifest = verify_source_manifest(
+                self.source_manifest_path,
+                dataset_sha256=self.sha256,
+                contamination_audit=self.contamination_audit,
+            )
+            if actual_manifest != self.source_manifest_sha256:
+                raise ValueError("repair source manifest content changed after verification")
         return path
 
 
@@ -63,17 +83,13 @@ def build_repair_candidate(
     plan: RepairPlan,
     dataset: VerifiedRepairDataset,
     variant: RepairVariant,
+    require_source_manifest: bool = False,
 ) -> Experiment:
-    """Build one deterministic repair child without changing evaluation semantics.
-
-    Only `backend.dataset`, `backend.training`, and `backend.lora` are patched.
-    Base model, revision, precision, quantization, and the entire evaluation
-    section therefore remain inherited from the parent lineage.
-    """
+    """Build one deterministic repair child without changing evaluation semantics."""
 
     if not parent_id.strip():
         raise ValueError("repair candidate parent_id is required")
-    dataset_path = dataset.verify()
+    dataset_path = dataset.verify(require_source_manifest=require_source_manifest)
 
     training_patch = dict(variant.training_patch)
     lora_patch = dict(variant.lora_patch)
@@ -94,6 +110,7 @@ def build_repair_candidate(
         "repair_dataset_sha256": dataset.sha256,
         "repair_index_sha256": audit.repair_index_sha256,
         "holdout_index_sha256": list(audit.holdout_index_sha256),
+        "source_manifest_sha256": dataset.source_manifest_sha256,
         "source_failure_ids": list(plan.source_failure_ids),
         "variant": variant.name,
     }
@@ -109,6 +126,7 @@ def build_repair_candidate(
             "dataset_sha256": dataset.sha256,
             "repair_index_sha256": audit.repair_index_sha256,
             "holdout_index_sha256": list(audit.holdout_index_sha256),
+            "source_manifest_sha256": dataset.source_manifest_sha256,
             "variant": variant.name,
             "training_patch": training_patch,
             "lora_patch": lora_patch,
@@ -138,6 +156,7 @@ def build_repair_population(
     plan: RepairPlan,
     dataset: VerifiedRepairDataset,
     variants: Iterable[RepairVariant],
+    require_source_manifest: bool = False,
 ) -> tuple[Experiment, ...]:
     variants = tuple(variants)
     if not variants:
@@ -151,6 +170,7 @@ def build_repair_population(
             plan=plan,
             dataset=dataset,
             variant=variant,
+            require_source_manifest=require_source_manifest,
         )
         for variant in variants
     )
@@ -158,3 +178,21 @@ def build_repair_population(
     if len(ids) != len(set(ids)):
         raise ValueError("repair variants collapsed to duplicate experiment IDs")
     return candidates
+
+
+def build_autonomous_repair_population(
+    *,
+    parent_id: str,
+    plan: RepairPlan,
+    dataset: VerifiedRepairDataset,
+    variants: Iterable[RepairVariant],
+) -> tuple[Experiment, ...]:
+    """Strict autonomous path: source provenance is mandatory."""
+
+    return build_repair_population(
+        parent_id=parent_id,
+        plan=plan,
+        dataset=dataset,
+        variants=variants,
+        require_source_manifest=True,
+    )
