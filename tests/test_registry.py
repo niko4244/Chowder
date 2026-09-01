@@ -1,3 +1,4 @@
+from chowder.executors import TrainingArtifact
 from chowder.models import Experiment, ExperimentResult, Hypothesis
 from chowder.provenance import EvidenceManifest
 from chowder.registry import RunRegistry
@@ -18,3 +19,19 @@ def test_registry_persists_result_manifest_and_lineage(tmp_path):
         assert registry.lineage("child") == ("root",)
         assert list(registry.list_results()) == [result]
         assert len(digest) == 64
+
+
+def test_registry_records_training_artifacts_before_evaluation(tmp_path):
+    db = tmp_path / "runs.db"
+    experiment = Experiment(
+        "e1", None, Hypothesis("obs", "cause", "fix"), {}, 1.0
+    )
+    artifact = TrainingArtifact(
+        "run-1", "e1", "./adapter", 0.25,
+        telemetry={"train_loss": 0.4}, evidence={"dataset_sha256": "abc"}
+    )
+    with RunRegistry(db) as registry:
+        registry.record_experiment(experiment)
+        registry.record_training_artifact(artifact)
+        loaded = tuple(registry.list_training_artifacts())
+    assert loaded == (artifact,)
