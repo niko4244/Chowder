@@ -14,6 +14,7 @@ from uuid import uuid4
 from ..executors import CostEstimate, ExecutionContext, TrainingArtifact
 from ..models import Experiment
 from ..provenance import sha256_directory, sha256_file
+from ..resources import ResourceUsage
 
 
 _ALLOWED_QUANTIZATION = {"none", "4bit"}
@@ -121,7 +122,6 @@ class TransformersPeftRunSpec:
         return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
 
     def recipe_digest(self) -> str:
-        """Hash the reproducible training recipe, excluding machine/run paths."""
         recipe = self.to_dict()
         recipe.pop("output_dir", None)
         recipe.pop("dataset", None)
@@ -201,20 +201,14 @@ class TransformersPeftRunSpec:
             parent_adapter=(
                 str(parent_adapter_path) if parent_adapter_path is not None else None
             ),
-            parent_adapter_sha256=(
-                str(parent_sha) if parent_sha is not None else None
-            ),
-            revision=(
-                str(backend["revision"]) if backend.get("revision") is not None else None
-            ),
+            parent_adapter_sha256=(str(parent_sha) if parent_sha is not None else None),
+            revision=(str(backend["revision"]) if backend.get("revision") is not None else None),
             text_field=str(backend.get("text_field", "text")),
             max_length=int(backend.get("max_length", 512)),
             epochs=float(training.get("epochs", 1.0)),
             learning_rate=float(training.get("learning_rate", 2e-4)),
             batch_size=int(training.get("batch_size", 1)),
-            gradient_accumulation_steps=int(
-                training.get("gradient_accumulation_steps", 4)
-            ),
+            gradient_accumulation_steps=int(training.get("gradient_accumulation_steps", 4)),
             logging_steps=int(training.get("logging_steps", 10)),
             lora_r=int(lora.get("r", 16)),
             lora_alpha=int(lora.get("alpha", 32)),
@@ -228,9 +222,7 @@ class TransformersPeftRunSpec:
             use_rslora=bool(lora.get("use_rslora", False)),
             quantization=str(backend.get("quantization", "none")).lower(),
             precision=str(backend.get("precision", "auto")).lower(),
-            gradient_checkpointing=bool(
-                training.get("gradient_checkpointing", True)
-            ),
+            gradient_checkpointing=bool(training.get("gradient_checkpointing", True)),
             seed=int(config.get("seed", seed)),
             timeout_seconds=(
                 float(runtime["timeout_seconds"])
@@ -242,8 +234,6 @@ class TransformersPeftRunSpec:
 
 
 class TransformersPeftExecutor:
-    """Isolated Transformers + PEFT SFT backend."""
-
     name = "transformers-peft"
 
     def __init__(self) -> None:
@@ -292,16 +282,12 @@ class TransformersPeftExecutor:
             output_dir=artifact_dir,
             seed=context.seed,
         )
-        primary_sha = self._verify_input(
-            spec.dataset, spec.dataset_sha256, label="training"
-        )
+        primary_sha = self._verify_input(spec.dataset, spec.dataset_sha256, label="training")
         if spec.dataset_sha256 is None:
             spec = replace(spec, dataset_sha256=primary_sha)
 
         if spec.replay_dataset is not None:
-            self._verify_input(
-                spec.replay_dataset, spec.replay_sha256, label="replay"
-            )
+            self._verify_input(spec.replay_dataset, spec.replay_sha256, label="replay")
             if Path(spec.replay_dataset).resolve() == Path(spec.dataset).resolve():
                 raise ValueError("training and replay datasets must be different files")
 
@@ -314,6 +300,20 @@ class TransformersPeftExecutor:
             )
         return spec
 
+    @staticmethod
+    def _profile_accelerator_count(backend: Mapping[str, Any], profile: Mapping[str, Any]) -> int:
+        raw = profile.get("active_accelerator_count")
+        if raw is None:
+            runtime = backend.get("runtime", {})
+            if isinstance(runtime, Mapping):
+                raw = runtime.get("active_accelerator_count")
+        if raw is None:
+            return 1
+        count = int(raw)
+        if count < 0:
+            raise ValueError("active_accelerator_count cannot be negative")
+        return count
+
     def profile(self, experiment: Experiment, context: ExecutionContext) -> CostEstimate:
         config = context.resolved_config
         backend = config.get("backend", {}) if isinstance(config, Mapping) else {}
@@ -325,9 +325,13 @@ class TransformersPeftExecutor:
         seconds_per_step = profile.get("seconds_per_step")
         peak_vram = profile.get("peak_vram_gb")
         if steps is not None and seconds_per_step is not None:
-            hours = max(0.0, float(steps) * float(seconds_per_step) / 3600.0)
+            wall_hours = max(0.0, float(steps) * float(seconds_per_step) / 3600.0)
+            active_count = self._profile_accelerator_count(backend, profile)
+            hours = wall_hours * active_count
             confidence = 0.75 if profile.get("source") == "measured" else 0.5
-            notes = ("derived from backend step-time profile",)
+            notes = (
+                f"derived from backend step-time profile across {active_count} active accelerator(s)",
+            )
         else:
             hours = max(0.0, experiment.estimated_gpu_hours)
             confidence = 0.25
@@ -359,6 +363,36 @@ class TransformersPeftExecutor:
             return ""
         return "\n".join(
             path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
+        )
+
+    @staticmethod
+    def _resource_usage_from_worker(
+        worker_result: Mapping[str, Any],
+        *,
+        wall_seconds: float,
+        fallback_gpu: bool,
+    ) -> ResourceUsage:
+        raw = worker_result.get("resource_usage", {})
+        if not isinstance(raw, Mapping):
+            raise RuntimeError("worker result resource_usage must be a mapping")
+        if raw:
+            active_count = int(raw.get("active_accelerator_count", 0))
+            visible_count = int(raw.get("visible_accelerator_count", active_count))
+            peak_raw = raw.get("peak_vram_gb_by_accelerator", {})
+            if not isinstance(peak_raw, Mapping):
+                raise RuntimeError("worker peak_vram_gb_by_accelerator must be a mapping")
+            peaks = {str(key): float(value) for key, value in peak_raw.items()}
+        else:
+            # Backward-compatible fallback for old/mock worker manifests. New real
+            # workers always emit resource_usage.
+            active_count = 1 if fallback_gpu else 0
+            visible_count = active_count
+            peaks = {}
+        return ResourceUsage.from_wall_time(
+            wall_seconds=wall_seconds,
+            active_accelerator_count=active_count,
+            visible_accelerator_count=visible_count,
+            peak_vram_gb_by_accelerator=peaks,
         )
 
     def run(self, experiment: Experiment, context: ExecutionContext) -> TrainingArtifact:
@@ -408,9 +442,7 @@ class TransformersPeftExecutor:
                 "transformers worker exited successfully without an adapter artifact"
             )
 
-        primary_sha = self._verify_input(
-            spec.dataset, spec.dataset_sha256, label="training"
-        )
+        primary_sha = self._verify_input(spec.dataset, spec.dataset_sha256, label="training")
         replay_sha: str | None = None
         if spec.replay_dataset is not None:
             replay_sha = self._verify_input(
@@ -440,12 +472,18 @@ class TransformersPeftExecutor:
                 "worker result contains invalid telemetry/version/provenance payload"
             )
 
+        usage = self._resource_usage_from_worker(
+            worker_result,
+            wall_seconds=elapsed,
+            fallback_gpu=context.hardware.vram_gb > 0,
+        )
         return TrainingArtifact(
             run_id=run_id,
             experiment_id=experiment.experiment_id,
             artifact_ref=spec.output_dir,
-            gpu_hours=elapsed / 3600.0,
+            gpu_hours=usage.gpu_hours,
             telemetry=dict(telemetry),
+            resource_usage=usage,
             evidence={
                 "backend": self.name,
                 "execution_spec_sha256": spec.digest(),
@@ -458,13 +496,20 @@ class TransformersPeftExecutor:
                 "data_provenance": dict(data_provenance),
                 "artifact_sha256": sha256_directory(spec.output_dir),
                 "resolved_config_sha256": self._json_digest(context.resolved_config),
-                "worker_result_sha256": hashlib.sha256(
-                    result_path.read_bytes()
-                ).hexdigest(),
+                "worker_result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
                 "stdout_log": str(stdout_path),
                 "stderr_log": str(stderr_path),
                 "versions": dict(versions),
                 "model_provenance": dict(worker_provenance),
+                "resource_usage": {
+                    "wall_seconds": usage.wall_seconds,
+                    "accelerator_seconds": usage.accelerator_seconds,
+                    "active_accelerator_count": usage.active_accelerator_count,
+                    "visible_accelerator_count": usage.visible_accelerator_count,
+                    "peak_vram_gb_by_accelerator": dict(
+                        usage.peak_vram_gb_by_accelerator
+                    ),
+                },
                 "seed": spec.seed,
             },
         )
