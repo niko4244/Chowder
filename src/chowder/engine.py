@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
@@ -17,6 +18,17 @@ class EvolutionEngine:
     reserved_gpu_hours: float = 0.0
     _reservations: dict[str, float] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("spent_gpu_hours", self.spent_gpu_hours),
+            ("reserved_gpu_hours", self.reserved_gpu_hours),
+        ):
+            number = float(value)
+            if not math.isfinite(number) or number < 0:
+                raise ValueError(f"{label} must be finite and non-negative")
+        if self.spent_gpu_hours + self.reserved_gpu_hours > self.goal.gpu_hour_budget + 1e-12:
+            raise ValueError("engine spent + reserved GPU-hours exceed goal budget")
+
     @property
     def remaining_budget(self) -> float:
         return max(0.0, self.goal.gpu_hour_budget - self.spent_gpu_hours - self.reserved_gpu_hours)
@@ -28,22 +40,17 @@ class EvolutionEngine:
     def has_reservation(self, experiment_id: str) -> bool:
         return experiment_id in self._reservations
 
+    def reservation_for(self, experiment_id: str) -> float:
+        if experiment_id not in self._reservations:
+            raise ValueError(f"experiment has no active reservation: {experiment_id}")
+        return self._reservations[experiment_id]
+
     def propose(self, experiments: Iterable[Experiment]) -> tuple[Experiment, ...]:
-        """Atomically add and reserve the budget-admissible prefix/subset.
-
-        Candidate selection is computed without mutating the graph. The complete
-        accepted batch is then graph-validated before any node or reservation is
-        committed. A duplicate/unknown-parent failure therefore leaves both graph
-        and budget state unchanged.
-        """
-
         accepted: list[Experiment] = []
         staged_hours = 0.0
         for experiment in experiments:
             if self.outstanding_candidates + len(accepted) >= self.goal.max_parallel_candidates:
                 break
-            if experiment.estimated_gpu_hours <= 0:
-                continue
             if experiment.estimated_gpu_hours > self.remaining_budget - staged_hours:
                 continue
             accepted.append(experiment)
@@ -56,9 +63,45 @@ class EvolutionEngine:
         self.reserved_gpu_hours += staged_hours
         return rows
 
-    def withdraw_proposals(self, experiment_ids: Iterable[str]) -> tuple[Experiment, ...]:
-        """Rollback still-planned proposals without charging spent compute."""
+    def resize_reservation(self, experiment_id: str, gpu_hours: float) -> float:
+        """Resize a planned reservation from a measured/profiled lifecycle estimate."""
 
+        if experiment_id not in self._reservations:
+            raise ValueError(f"experiment has no active reservation: {experiment_id}")
+        number = float(gpu_hours)
+        if not math.isfinite(number) or number < 0:
+            raise ValueError("reservation GPU-hours must be finite and non-negative")
+        old = self._reservations[experiment_id]
+        delta = number - old
+        if delta > self.remaining_budget + 1e-12:
+            raise ValueError(
+                f"profiled lifecycle cost {number:.6g} GPU-hours does not fit remaining budget"
+            )
+        self._reservations[experiment_id] = number
+        self.reserved_gpu_hours += delta
+        if self.reserved_gpu_hours < -1e-12:
+            raise RuntimeError("reservation accounting became negative")
+        self.reserved_gpu_hours = max(0.0, self.reserved_gpu_hours)
+        return number
+
+    def cancel_reservation(
+        self,
+        experiment_id: str,
+        *,
+        status: ExperimentStatus = ExperimentStatus.REJECTED,
+    ) -> None:
+        """Release a reservation before execution without charging compute."""
+
+        if experiment_id not in self._reservations:
+            raise ValueError(f"experiment has no active reservation: {experiment_id}")
+        reserved = self._reservations.pop(experiment_id)
+        self.reserved_gpu_hours = max(0.0, self.reserved_gpu_hours - reserved)
+        node = self.graph.nodes.get(experiment_id)
+        if node is None:
+            raise ValueError(f"reserved experiment is missing from graph: {experiment_id}")
+        node.status = status
+
+    def withdraw_proposals(self, experiment_ids: Iterable[str]) -> tuple[Experiment, ...]:
         ids = tuple(experiment_ids)
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate experiment id in proposal withdrawal")
@@ -90,26 +133,30 @@ class EvolutionEngine:
     ) -> None:
         if experiment_id not in self._reservations:
             raise ValueError(f"experiment has no active reservation: {experiment_id}")
+        actual = float(actual_gpu_hours)
+        if not math.isfinite(actual) or actual < 0:
+            raise ValueError("actual GPU-hours must be finite and non-negative")
         reserved = self._reservations.pop(experiment_id)
         self.reserved_gpu_hours = max(0.0, self.reserved_gpu_hours - reserved)
-        self.spent_gpu_hours += max(0.0, actual_gpu_hours)
+        self.spent_gpu_hours += actual
         if experiment_id in self.graph.nodes:
             self.graph.nodes[experiment_id].status = status
 
     def fail(self, experiment_id: str, *, actual_gpu_hours: float | None = None) -> None:
-        """Fail a candidate and conservatively settle its reservation.
-
-        When a backend crashes before it can report actual compute, Chowder
-        charges the reserved estimate rather than pretending the failed run was
-        free. If partial compute is known, the larger of actual and reserved is
-        charged so failures cannot create phantom budget.
-        """
         if experiment_id not in self._reservations:
             raise ValueError(f"experiment has no active reservation: {experiment_id}")
         reserved = self._reservations[experiment_id]
-        charge = reserved if actual_gpu_hours is None else max(reserved, actual_gpu_hours)
+        if actual_gpu_hours is None:
+            charge = reserved
+        else:
+            actual = float(actual_gpu_hours)
+            if not math.isfinite(actual) or actual < 0:
+                raise ValueError("failed-run actual GPU-hours must be finite and non-negative")
+            charge = max(reserved, actual)
         self._settle_reservation(
-            experiment_id, actual_gpu_hours=charge, status=ExperimentStatus.FAILED
+            experiment_id,
+            actual_gpu_hours=charge,
+            status=ExperimentStatus.FAILED,
         )
 
     def adjudicate(self, results: Iterable[ExperimentResult]) -> tuple[RankedCandidate, ...]:
@@ -133,7 +180,9 @@ class EvolutionEngine:
             decision = decisions[result.experiment_id]
             status = ExperimentStatus.PASSED if decision.accepted else ExperimentStatus.REJECTED
             self._settle_reservation(
-                result.experiment_id, actual_gpu_hours=result.gpu_hours, status=status
+                result.experiment_id,
+                actual_gpu_hours=result.gpu_hours,
+                status=status,
             )
         return ranked
 

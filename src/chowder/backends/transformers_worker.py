@@ -81,6 +81,45 @@ def _text_digest(dataset: Any, text_field: str) -> str:
     return digest.hexdigest()
 
 
+def _cuda_resource_snapshot(torch: Any, model: Any, trainer: Any) -> dict[str, Any]:
+    if not torch.cuda.is_available():
+        return {
+            "visible_accelerator_count": 0,
+            "active_accelerator_count": 0,
+            "active_accelerators": [],
+            "peak_vram_gb_by_accelerator": {},
+        }
+
+    visible = int(torch.cuda.device_count())
+    model_devices: set[int] = set()
+    try:
+        for parameter in model.parameters():
+            device = getattr(parameter, "device", None)
+            if getattr(device, "type", None) == "cuda" and device.index is not None:
+                model_devices.add(int(device.index))
+    except Exception:
+        model_devices = set()
+
+    world_size = int(getattr(getattr(trainer, "args", None), "world_size", 1) or 1)
+    inferred = max(1, len(model_devices), world_size)
+    active_count = min(visible, inferred) if visible else 0
+    if model_devices:
+        active_devices = sorted(model_devices)
+    else:
+        active_devices = list(range(active_count))
+
+    peak_map = {
+        f"cuda:{index}": float(torch.cuda.max_memory_allocated(index) / (1024 ** 3))
+        for index in range(visible)
+    }
+    return {
+        "visible_accelerator_count": visible,
+        "active_accelerator_count": active_count,
+        "active_accelerators": [f"cuda:{index}" for index in active_devices],
+        "peak_vram_gb_by_accelerator": peak_map,
+    }
+
+
 def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
     primary_sha = _verify_bound_input(
         spec.dataset, spec.dataset_sha256, label="training"
@@ -162,8 +201,6 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
         )
 
     if spec.parent_adapter is not None:
-        # Continue the exact PEFT state that was evaluated and rejected. This is
-        # the critical distinction between cumulative repair and a fresh LoRA.
         model = PeftModel.from_pretrained(
             base_model,
             spec.parent_adapter,
@@ -212,9 +249,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
             selected_replay = replay.shuffle(seed=spec.seed).select(
                 range(replay_selected_rows)
             )
-            dataset = concatenate_datasets([primary, selected_replay]).shuffle(
-                seed=spec.seed
-            )
+            dataset = concatenate_datasets([primary, selected_replay]).shuffle(seed=spec.seed)
 
     mixed_text_sha = _text_digest(dataset, spec.text_field)
 
@@ -226,9 +261,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
             padding=False,
         )
 
-    tokenized = dataset.map(
-        tokenize, batched=True, remove_columns=dataset.column_names
-    )
+    tokenized = dataset.map(tokenize, batched=True, remove_columns=dataset.column_names)
     collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
     output_dir = Path(spec.output_dir)
@@ -260,11 +293,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
     runtime = time.perf_counter() - started
     model.save_pretrained(output_dir, safe_serialization=True)
     tokenizer.save_pretrained(output_dir)
-
-    if torch.cuda.is_available():
-        peak_vram_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
-    else:
-        peak_vram_gb = 0.0
+    resource_snapshot = _cuda_resource_snapshot(torch, model, trainer)
 
     if (
         _verify_bound_input(spec.dataset, spec.dataset_sha256, label="training")
@@ -273,9 +302,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
         raise RuntimeError("training dataset changed during worker execution")
     if spec.replay_dataset is not None:
         if (
-            _verify_bound_input(
-                spec.replay_dataset, spec.replay_sha256, label="replay"
-            )
+            _verify_bound_input(spec.replay_dataset, spec.replay_sha256, label="replay")
             != replay_sha
         ):
             raise RuntimeError("replay dataset changed during worker execution")
@@ -291,6 +318,8 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
         ):
             raise RuntimeError("parent adapter changed during worker execution")
 
+    peak_values = list(resource_snapshot["peak_vram_gb_by_accelerator"].values())
+    peak_vram_gb = max(peak_values, default=0.0)
     return {
         "telemetry": {
             "train_loss": float(train_output.training_loss),
@@ -301,6 +330,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
             "replay_selected_rows": replay_selected_rows,
             "training_rows": len(dataset),
         },
+        "resource_usage": resource_snapshot,
         "data_provenance": {
             "primary_dataset_sha256": primary_sha,
             "primary_rows": primary_rows,
