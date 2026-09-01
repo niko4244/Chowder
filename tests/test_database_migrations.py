@@ -67,7 +67,10 @@ def test_legacy_database_is_forward_migrated_without_losing_rows(tmp_path):
             )
         }
         assert "execution_incidents" in tables
-        assert "recursive_repair_recovery_claims" in tables
+        # Recursive-repair tables remain component-owned and are created only
+        # when the trace store is first used. The migration itself is still
+        # recorded globally so schema identity is deterministic.
+        assert "recursive_repair_recovery_claims" not in tables
         assert "chowder_schema_history" in tables
 
 
