@@ -19,8 +19,10 @@ class RecoveryDisposition(str, Enum):
     SESSION_NOT_FOUND = "session_not_found"
     CHECKPOINT_INCONSISTENT = "checkpoint_inconsistent"
     MISSING_ENGINE_SNAPSHOT = "missing_engine_snapshot"
+    INVALID_ENGINE_SNAPSHOT = "invalid_engine_snapshot"
     MISSING_REGISTRY_EVIDENCE = "missing_registry_evidence"
     AMBIGUOUS_REGISTRY_EVIDENCE = "ambiguous_registry_evidence"
+    REGISTRY_EVIDENCE_MISMATCH = "registry_evidence_mismatch"
     ORPHANED_PROGRESS = "orphaned_progress"
 
 
@@ -101,7 +103,7 @@ def _parse_portable_number(value: object) -> float | None:
         return math.inf
     if value == "-inf":
         return -math.inf
-    if isinstance(value, (int, float)):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
     raise ValueError("checkpoint previous_target_score is invalid")
 
@@ -177,7 +179,7 @@ def _validate_checkpoint(
     return depth, current, previous_score
 
 
-def _engine_snapshot(metadata: object) -> Mapping[str, Any] | None:
+def _raw_engine_snapshot(metadata: object) -> Mapping[str, Any] | None:
     if not isinstance(metadata, Mapping):
         return None
     snapshot = metadata.get("engine_snapshot")
@@ -188,14 +190,98 @@ def _engine_snapshot(metadata: object) -> Mapping[str, Any] | None:
     return snapshot
 
 
+def _finite_number(value: object, *, label: str, non_negative: bool = False) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{label} must be numeric")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{label} must be finite")
+    if non_negative and number < 0:
+        raise ValueError(f"{label} must be non-negative")
+    return number
+
+
+def _validate_engine_snapshot(
+    snapshot: Mapping[str, Any],
+    *,
+    metadata: Mapping[str, Any],
+    remaining_budget: float,
+) -> None:
+    goal = snapshot.get("goal")
+    baseline = snapshot.get("baseline")
+    if not isinstance(goal, Mapping) or not isinstance(baseline, Mapping):
+        raise ValueError("engine snapshot goal/baseline must be mappings")
+
+    metrics = goal.get("metrics")
+    if not isinstance(metrics, list) or not metrics:
+        raise ValueError("engine snapshot goal must contain metric targets")
+    names: set[str] = set()
+    for index, target in enumerate(metrics):
+        if not isinstance(target, Mapping):
+            raise ValueError(f"engine snapshot goal metric {index} is invalid")
+        name = target.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"engine snapshot goal metric {index} has invalid name")
+        if name in names:
+            raise ValueError("engine snapshot goal contains duplicate metric names")
+        names.add(name)
+        direction = target.get("direction")
+        if direction not in {"maximize", "minimize"}:
+            raise ValueError(f"engine snapshot goal metric {name!r} has invalid direction")
+        for bound_name in ("minimum", "maximum"):
+            bound = target.get(bound_name)
+            if bound is not None:
+                _finite_number(bound, label=f"goal metric {name} {bound_name}")
+        _finite_number(target.get("weight"), label=f"goal metric {name} weight")
+        _finite_number(
+            target.get("regression_tolerance"),
+            label=f"goal metric {name} regression_tolerance",
+            non_negative=True,
+        )
+
+    budget = _finite_number(
+        goal.get("gpu_hour_budget"), label="goal gpu_hour_budget", non_negative=True
+    )
+    parallel = goal.get("max_parallel_candidates")
+    if not isinstance(parallel, int) or isinstance(parallel, bool) or parallel <= 0:
+        raise ValueError("goal max_parallel_candidates must be positive")
+    _finite_number(
+        goal.get("minimum_promotion_gain"), label="goal minimum_promotion_gain"
+    )
+    if not isinstance(goal.get("require_protocol_match"), bool):
+        raise ValueError("goal require_protocol_match must be boolean")
+    if remaining_budget > budget + 1e-9:
+        raise ValueError("checkpoint remaining budget exceeds snapshotted goal budget")
+
+    baseline_id = baseline.get("experiment_id")
+    if not isinstance(baseline_id, str) or not baseline_id:
+        raise ValueError("engine snapshot baseline experiment_id is invalid")
+    declared_baseline = metadata.get("baseline_experiment_id")
+    if declared_baseline is not None and declared_baseline != baseline_id:
+        raise ValueError("engine snapshot baseline ID disagrees with session metadata")
+    baseline_metrics = baseline.get("metrics")
+    if not isinstance(baseline_metrics, Mapping) or not baseline_metrics:
+        raise ValueError("engine snapshot baseline metrics are invalid")
+    for name, value in baseline_metrics.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("engine snapshot baseline metric name is invalid")
+        _finite_number(value, label=f"baseline metric {name}")
+    _finite_number(
+        baseline.get("gpu_hours"), label="baseline gpu_hours", non_negative=True
+    )
+    artifact_ref = baseline.get("artifact_ref")
+    if artifact_ref is not None and not isinstance(artifact_ref, str):
+        raise ValueError("engine snapshot baseline artifact_ref is invalid")
+    if not isinstance(baseline.get("evidence"), Mapping):
+        raise ValueError("engine snapshot baseline evidence must be a mapping")
+
+
 def list_interrupted_recursive_sessions(
     registry_path: str | Path,
 ) -> tuple[str, ...]:
     """List non-terminal recursive sessions without mutating recovery state."""
 
     path = str(registry_path)
-    # Constructing the trace store also migrates older Chowder DBs by creating
-    # the trace tables if they do not yet exist.
     with RecursiveRepairTraceStore(path):
         pass
     connection = sqlite3.connect(path)
@@ -216,10 +302,9 @@ def analyze_recursive_repair_session(
     """Reconcile one durable recursive checkpoint against persisted run evidence.
 
     This function is read-only. It never requeues training. A session is marked
-    resumable only when the checkpoint is internally self-consistent, the engine
-    goal/baseline snapshot exists, every current candidate has one unambiguous
-    training/evaluation/result record, diagnostic evidence can be recovered, and
-    no child experiment exists beyond the committed checkpoint.
+    resumable only when checkpoint, engine snapshot, lineage, training artifact,
+    evaluation, result, diagnostics, and compute evidence agree and no descendant
+    experiment exists beyond the committed recursive checkpoint.
     """
 
     with RecursiveRepairTraceStore(registry.path) as store:
@@ -258,7 +343,8 @@ def analyze_recursive_repair_session(
             depth_completed=len(hops),
         )
 
-    snapshot = _engine_snapshot(session.get("metadata"))
+    metadata = session.get("metadata")
+    snapshot = _raw_engine_snapshot(metadata)
     if snapshot is None:
         return RecursiveRecoveryReport(
             session_id,
@@ -266,6 +352,22 @@ def analyze_recursive_repair_session(
             "session predates or lacks the goal/baseline snapshot required for deterministic recovery",
             depth_completed=depth,
             current_candidate_ids=current_ids,
+        )
+    assert isinstance(metadata, Mapping)
+    try:
+        _validate_engine_snapshot(
+            snapshot,
+            metadata=metadata,
+            remaining_budget=float(session["state"]["remaining_budget"]),
+        )
+    except (TypeError, ValueError) as exc:
+        return RecursiveRecoveryReport(
+            session_id,
+            RecoveryDisposition.INVALID_ENGINE_SNAPSHOT,
+            str(exc),
+            depth_completed=depth,
+            current_candidate_ids=current_ids,
+            engine_snapshot=snapshot,
         )
 
     state = session["state"]
@@ -346,9 +448,11 @@ def analyze_recursive_repair_session(
 
     missing: list[str] = []
     ambiguous: list[str] = []
+    mismatches: list[str] = []
     for experiment_id in current_ids:
         train_rows = training.get(experiment_id, ())
         eval_rows = evaluations.get(experiment_id, ())
+        result = results.get(experiment_id)
         if len(train_rows) == 0:
             missing.append(f"training:{experiment_id}")
         elif len(train_rows) != 1:
@@ -357,8 +461,46 @@ def analyze_recursive_repair_session(
             missing.append(f"evaluation:{experiment_id}")
         elif len(eval_rows) != 1:
             ambiguous.append(f"evaluation:{experiment_id}:{len(eval_rows)}")
-        if experiment_id not in results:
+        if result is None:
             missing.append(f"result:{experiment_id}")
+
+        if len(train_rows) == 1 and len(eval_rows) == 1 and result is not None:
+            artifact = train_rows[0]
+            evaluation = eval_rows[0]
+            if evaluation.source_artifact_ref != artifact.artifact_ref:
+                mismatches.append(f"evaluation_artifact:{experiment_id}")
+            if result.artifact_ref != artifact.artifact_ref:
+                mismatches.append(f"result_artifact:{experiment_id}")
+            if result.evidence.get("training_run_id") != artifact.run_id:
+                mismatches.append(f"training_run_id:{experiment_id}")
+            if result.evidence.get("evaluation_run_id") != evaluation.run_id:
+                mismatches.append(f"evaluation_run_id:{experiment_id}")
+            expected_compute = artifact.gpu_hours + evaluation.gpu_hours
+            if not math.isclose(result.gpu_hours, expected_compute, rel_tol=1e-9, abs_tol=1e-12):
+                mismatches.append(f"result_compute:{experiment_id}")
+            compute = result.evidence.get("compute")
+            if not isinstance(compute, Mapping):
+                mismatches.append(f"compute_evidence:{experiment_id}")
+            else:
+                try:
+                    train_hours = float(compute.get("training_gpu_hours"))
+                    eval_hours = float(compute.get("evaluation_gpu_hours"))
+                    total_hours = float(compute.get("total_gpu_hours"))
+                except (TypeError, ValueError):
+                    mismatches.append(f"compute_evidence:{experiment_id}")
+                else:
+                    if not math.isclose(train_hours, artifact.gpu_hours, rel_tol=1e-9, abs_tol=1e-12):
+                        mismatches.append(f"training_compute:{experiment_id}")
+                    if not math.isclose(eval_hours, evaluation.gpu_hours, rel_tol=1e-9, abs_tol=1e-12):
+                        mismatches.append(f"evaluation_compute:{experiment_id}")
+                    if not math.isclose(total_hours, result.gpu_hours, rel_tol=1e-9, abs_tol=1e-12):
+                        mismatches.append(f"total_compute:{experiment_id}")
+            protocol = evaluation.evidence.get("protocol_sha256")
+            result_protocol = result.evidence.get("evaluation_protocol_sha256")
+            if isinstance(protocol, str) and len(protocol) == 64 and result_protocol != protocol:
+                mismatches.append(f"evaluation_protocol:{experiment_id}")
+            if experiments[experiment_id].get("status") != "rejected":
+                mismatches.append(f"experiment_status:{experiment_id}")
 
         failure_ids = {failure.failure_id for failure in failures[experiment_id]}
         if failure_ids:
@@ -368,7 +510,6 @@ def analyze_recursive_repair_session(
                 if set(plan.source_failure_ids).issubset(failure_ids)
                 and plan.source_failure_ids
             ]
-            result = results.get(experiment_id)
             diagnostic_error = None
             if result is not None:
                 diagnostics = result.evidence.get("diagnostics")
@@ -395,6 +536,16 @@ def analyze_recursive_repair_session(
             depth_completed=depth,
             current_candidate_ids=current_ids,
             missing_evidence=tuple(sorted(missing)),
+            engine_snapshot=snapshot,
+        )
+    if mismatches:
+        return RecursiveRecoveryReport(
+            session_id,
+            RecoveryDisposition.REGISTRY_EVIDENCE_MISMATCH,
+            "persisted candidate evidence disagrees across training/evaluation/result records",
+            depth_completed=depth,
+            current_candidate_ids=current_ids,
+            missing_evidence=tuple(sorted(set(mismatches))),
             engine_snapshot=snapshot,
         )
 
