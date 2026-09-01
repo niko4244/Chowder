@@ -1,12 +1,13 @@
 """Chowder: autonomous evidence-gated post-training orchestration."""
 
 from .engine import EvolutionEngine
-from .models import Goal, MetricTarget, Experiment, ExperimentResult
+from .models import Experiment, ExperimentResult, Goal, MetricTarget, OptimizationDirection
 
 __all__ = [
     "EvolutionEngine",
     "Goal",
     "MetricTarget",
+    "OptimizationDirection",
     "Experiment",
     "ExperimentResult",
 ]
