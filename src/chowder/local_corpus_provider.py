@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -45,7 +46,7 @@ class LocalCorpusRepairProvider:
     - ``suite``: exact suite name or ``*`` (default ``*``)
     - ``strategy`` / ``strategies``: repair strategy names or ``*``
     - ``failure_kind`` / ``failure_kinds``: optional failure-class filter
-    - ``priority``: numeric deterministic tie-break priority
+    - ``priority``: finite numeric deterministic tie-break priority
     """
 
     name = "local-corpus"
@@ -99,7 +100,10 @@ class LocalCorpusRepairProvider:
         logical_name = (spec.logical_name or path.name).strip()
         if not logical_name:
             raise ValueError("local corpus logical_name cannot be empty")
-        source_id = f"local-{digest[:24]}"
+        source_identity = hashlib.sha256(
+            (logical_name + "\x00" + digest).encode("utf-8")
+        ).hexdigest()
+        source_id = f"local-{source_identity[:24]}"
         source = RepairSource(
             source_id=source_id,
             ref=f"local-corpus://{logical_name}@sha256:{digest}",
@@ -138,6 +142,9 @@ class LocalCorpusRepairProvider:
             priority_raw = parsed.get("priority", 0.0)
             if isinstance(priority_raw, bool) or not isinstance(priority_raw, (int, float)):
                 raise ValueError(f"{path}:{line_number} priority must be numeric")
+            priority = float(priority_raw)
+            if not math.isfinite(priority):
+                raise ValueError(f"{path}:{line_number} priority must be finite")
             example_id = f"{source_id}:{row_id}"
             rows.append(
                 _CorpusRow(
@@ -151,7 +158,7 @@ class LocalCorpusRepairProvider:
                     suite=suite,
                     strategies=strategies,
                     failure_kinds=failure_kinds,
-                    priority=float(priority_raw),
+                    priority=priority,
                 )
             )
         if not rows:
