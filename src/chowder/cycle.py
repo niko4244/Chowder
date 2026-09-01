@@ -129,14 +129,18 @@ class ExperimentCycleRunner:
         resolved = self.engine.resolve_config(experiment.experiment_id, self.base_config)
         run_context = replace(self.context, resolved_config=resolved)
 
-        # Preflight is intentionally outside the execution/failure accounting
-        # path. A profile/config failure consumed no model compute, so release the
-        # reservation without charging the experiment as a failed GPU run.
+        # A legacy/test executor may explicitly signal that it has no profiler.
+        # In that one case, retain the engine's existing training reservation.
+        # Every other profile/config error remains a hard preflight rejection.
         try:
-            training_estimate = self.trainer.profile(experiment, run_context)
-            lifecycle_estimate = (
-                training_estimate.gpu_hours + _declared_evaluation_reserve(resolved)
-            )
+            evaluation_reserve = _declared_evaluation_reserve(resolved)
+            try:
+                training_estimate = self.trainer.profile(experiment, run_context)
+            except NotImplementedError:
+                training_gpu_hours = self.engine.reservation_for(experiment.experiment_id)
+            else:
+                training_gpu_hours = training_estimate.gpu_hours
+            lifecycle_estimate = training_gpu_hours + evaluation_reserve
             self.engine.resize_reservation(experiment.experiment_id, lifecycle_estimate)
         except Exception as exc:
             self.engine.cancel_reservation(
