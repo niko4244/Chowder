@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from .engine import EvolutionEngine
 from .executors import EvaluationExecutor, EvaluationOutcome, ExecutionContext, TrainingArtifact, TrainingExecutor
+from .failures import FailureRecord, RepairPlan, cluster_failures, plan_repairs
 from .models import Experiment, ExperimentResult, ExperimentStatus
 from .registry import RunRegistry
 from .tournament import RankedCandidate
+
+FailureHarvester = Callable[[EvaluationOutcome], tuple[FailureRecord, ...]]
 
 
 @dataclass(frozen=True)
@@ -17,6 +20,9 @@ class CandidateCycleOutcome:
     artifact: TrainingArtifact | None = None
     evaluation: EvaluationOutcome | None = None
     result: ExperimentResult | None = None
+    harvested_failures: tuple[FailureRecord, ...] = ()
+    repair_plans: tuple[RepairPlan, ...] = ()
+    diagnostic_error: str | None = None
     error: str | None = None
 
     @property
@@ -34,6 +40,18 @@ class GenerationOutcome:
     def failures(self) -> tuple[CandidateCycleOutcome, ...]:
         return tuple(candidate for candidate in self.candidates if not candidate.succeeded)
 
+    @property
+    def harvested_failures(self) -> tuple[FailureRecord, ...]:
+        return tuple(
+            failure
+            for candidate in self.candidates
+            for failure in candidate.harvested_failures
+        )
+
+    @property
+    def repair_plans(self) -> tuple[RepairPlan, ...]:
+        return tuple(plan for candidate in self.candidates for plan in candidate.repair_plans)
+
 
 def _validated_metrics(metrics: Mapping[str, float]) -> dict[str, float]:
     if not metrics:
@@ -49,13 +67,37 @@ def _validated_metrics(metrics: Mapping[str, float]) -> dict[str, float]:
     return normalized
 
 
+def _validated_failures(
+    failures: Iterable[FailureRecord],
+    *,
+    evaluation: EvaluationOutcome,
+) -> tuple[FailureRecord, ...]:
+    protocol_sha = evaluation.evidence.get("protocol_sha256")
+    validated: list[FailureRecord] = []
+    seen: set[str] = set()
+    for failure in failures:
+        if failure.failure_id in seen:
+            raise ValueError("failure harvester returned duplicate failure IDs")
+        seen.add(failure.failure_id)
+        if failure.experiment_id != evaluation.experiment_id:
+            raise ValueError("failure record belongs to a different experiment")
+        if failure.evaluation_run_id != evaluation.run_id:
+            raise ValueError("failure record belongs to a different evaluation run")
+        if isinstance(protocol_sha, str) and failure.protocol_sha256 != protocol_sha:
+            raise ValueError("failure record protocol does not match evaluation protocol")
+        if not math.isfinite(float(failure.score)):
+            raise ValueError("failure record score is not finite")
+        validated.append(failure)
+    return tuple(validated)
+
+
 @dataclass
 class ExperimentCycleRunner:
-    """Run one experiment generation through train → evaluate → gate.
+    """Run one experiment generation through train → evaluate → diagnose → gate.
 
-    The runner is intentionally framework-neutral. Training and evaluation are
-    separate executors, and only the runner can combine their costs/evidence into
-    the ``ExperimentResult`` accepted by ``EvolutionEngine.adjudicate``.
+    Training and evaluation remain separate executors. Failure harvesting is an
+    optional diagnostic stage: a harvester failure is recorded but cannot turn
+    otherwise valid benchmark evidence into a failed experiment.
     """
 
     engine: EvolutionEngine
@@ -64,6 +106,7 @@ class ExperimentCycleRunner:
     context: ExecutionContext
     base_config: Mapping[str, Any] = field(default_factory=dict)
     registry: RunRegistry | None = None
+    failure_harvester: FailureHarvester | None = None
 
     def _record_status(self, experiment: Experiment) -> None:
         if self.registry is not None:
@@ -82,6 +125,10 @@ class ExperimentCycleRunner:
 
         artifact: TrainingArtifact | None = None
         evaluation: EvaluationOutcome | None = None
+        harvested: tuple[FailureRecord, ...] = ()
+        repair_plans: tuple[RepairPlan, ...] = ()
+        diagnostic_error: str | None = None
+
         try:
             artifact = self.trainer.run(experiment, run_context)
             if artifact.experiment_id != experiment.experiment_id:
@@ -108,6 +155,20 @@ class ExperimentCycleRunner:
             if self.registry is not None:
                 self.registry.record_evaluation_outcome(evaluation)
 
+            if self.failure_harvester is not None:
+                try:
+                    harvested = _validated_failures(
+                        self.failure_harvester(evaluation),
+                        evaluation=evaluation,
+                    )
+                    repair_plans = plan_repairs(cluster_failures(harvested))
+                    if self.registry is not None:
+                        self.registry.record_failures(harvested)
+                        for plan in repair_plans:
+                            self.registry.record_repair_plan(plan)
+                except Exception as exc:
+                    diagnostic_error = f"{type(exc).__name__}: {exc}"
+
             total_gpu_hours = artifact.gpu_hours + evaluation.gpu_hours
             evidence: dict[str, Any] = {
                 "training_run_id": artifact.run_id,
@@ -118,6 +179,11 @@ class ExperimentCycleRunner:
                     "training_gpu_hours": artifact.gpu_hours,
                     "evaluation_gpu_hours": evaluation.gpu_hours,
                     "total_gpu_hours": total_gpu_hours,
+                },
+                "diagnostics": {
+                    "failure_count": len(harvested),
+                    "repair_plan_count": len(repair_plans),
+                    "error": diagnostic_error,
                 },
             }
             protocol_sha = evaluation.evidence.get("protocol_sha256")
@@ -138,6 +204,9 @@ class ExperimentCycleRunner:
                 artifact=artifact,
                 evaluation=evaluation,
                 result=result,
+                harvested_failures=harvested,
+                repair_plans=repair_plans,
+                diagnostic_error=diagnostic_error,
             )
         except Exception as exc:
             known_compute = artifact.gpu_hours if artifact is not None else None
@@ -148,14 +217,15 @@ class ExperimentCycleRunner:
                 experiment_id=experiment.experiment_id,
                 artifact=artifact,
                 evaluation=evaluation,
+                harvested_failures=harvested,
+                repair_plans=repair_plans,
+                diagnostic_error=diagnostic_error,
                 error=f"{type(exc).__name__}: {exc}",
             )
 
     def run_generation(self, experiments: Iterable[Experiment]) -> GenerationOutcome:
         candidates = tuple(self._run_candidate(experiment) for experiment in experiments)
-        results = tuple(
-            candidate.result for candidate in candidates if candidate.result is not None
-        )
+        results = tuple(candidate.result for candidate in candidates if candidate.result is not None)
         ranking = self.engine.adjudicate(results) if results else ()
         promoted = self.engine.promote(ranking)
 

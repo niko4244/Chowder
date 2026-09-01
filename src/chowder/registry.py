@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .executors import EvaluationOutcome, TrainingArtifact
+from .failures import FailureRecord, FailureSourceRole, RepairPlan
 from .models import Experiment, ExperimentResult
 from .provenance import EvidenceManifest
 
@@ -46,6 +47,35 @@ CREATE TABLE IF NOT EXISTS results (
     artifact_ref TEXT,
     evidence_json TEXT NOT NULL,
     FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id)
+);
+CREATE TABLE IF NOT EXISTS failure_records (
+    failure_id TEXT PRIMARY KEY,
+    experiment_id TEXT NOT NULL,
+    evaluation_run_id TEXT NOT NULL,
+    evaluator TEXT NOT NULL,
+    suite TEXT NOT NULL,
+    row_index INTEGER NOT NULL,
+    protocol_sha256 TEXT NOT NULL,
+    artifact_sha256 TEXT NOT NULL,
+    source_role TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    expected TEXT NOT NULL,
+    prediction TEXT NOT NULL,
+    score REAL NOT NULL,
+    failure_kind TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id),
+    FOREIGN KEY(evaluation_run_id) REFERENCES evaluation_runs(run_id)
+);
+CREATE TABLE IF NOT EXISTS repair_plans (
+    plan_id TEXT PRIMARY KEY,
+    cluster_id TEXT NOT NULL,
+    observation TEXT NOT NULL,
+    suspected_cause TEXT NOT NULL,
+    intervention TEXT NOT NULL,
+    source_failure_ids_json TEXT NOT NULL,
+    direct_training_allowed INTEGER NOT NULL,
+    requires_independent_source INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS manifests (
     experiment_id TEXT PRIMARY KEY,
@@ -147,6 +177,136 @@ class RunRegistry:
                 metrics=json.loads(metrics),
                 gpu_hours=gpu_hours,
                 evidence=json.loads(evidence),
+            )
+
+    def record_failure(self, failure: FailureRecord) -> None:
+        self._conn.execute(
+            """INSERT OR REPLACE INTO failure_records
+               (failure_id, experiment_id, evaluation_run_id, evaluator, suite, row_index,
+                protocol_sha256, artifact_sha256, source_role, prompt, expected, prediction,
+                score, failure_kind, metadata_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                failure.failure_id,
+                failure.experiment_id,
+                failure.evaluation_run_id,
+                failure.evaluator,
+                failure.suite,
+                failure.row_index,
+                failure.protocol_sha256,
+                failure.artifact_sha256,
+                failure.source_role.value,
+                failure.prompt,
+                failure.expected,
+                failure.prediction,
+                failure.score,
+                failure.failure_kind,
+                json.dumps(dict(failure.metadata), sort_keys=True),
+            ),
+        )
+        self._conn.commit()
+
+    def record_failures(self, failures: Iterable[FailureRecord]) -> None:
+        for failure in failures:
+            self.record_failure(failure)
+
+    def list_failures(self, *, experiment_id: str | None = None) -> Iterable[FailureRecord]:
+        if experiment_id is None:
+            rows = self._conn.execute(
+                """SELECT failure_id, experiment_id, evaluation_run_id, evaluator, suite, row_index,
+                          protocol_sha256, artifact_sha256, source_role, prompt, expected, prediction,
+                          score, failure_kind, metadata_json
+                   FROM failure_records ORDER BY rowid"""
+            )
+        else:
+            rows = self._conn.execute(
+                """SELECT failure_id, experiment_id, evaluation_run_id, evaluator, suite, row_index,
+                          protocol_sha256, artifact_sha256, source_role, prompt, expected, prediction,
+                          score, failure_kind, metadata_json
+                   FROM failure_records WHERE experiment_id = ? ORDER BY rowid""",
+                (experiment_id,),
+            )
+        for row in rows:
+            (
+                failure_id,
+                exp_id,
+                evaluation_run_id,
+                evaluator,
+                suite,
+                row_index,
+                protocol_sha256,
+                artifact_sha256,
+                source_role,
+                prompt,
+                expected,
+                prediction,
+                score,
+                failure_kind,
+                metadata_json,
+            ) = row
+            yield FailureRecord(
+                failure_id=failure_id,
+                experiment_id=exp_id,
+                evaluation_run_id=evaluation_run_id,
+                evaluator=evaluator,
+                suite=suite,
+                row_index=row_index,
+                protocol_sha256=protocol_sha256,
+                artifact_sha256=artifact_sha256,
+                source_role=FailureSourceRole(source_role),
+                prompt=prompt,
+                expected=expected,
+                prediction=prediction,
+                score=score,
+                failure_kind=failure_kind,
+                metadata=json.loads(metadata_json),
+            )
+
+    def record_repair_plan(self, plan: RepairPlan) -> None:
+        self._conn.execute(
+            """INSERT OR REPLACE INTO repair_plans
+               (plan_id, cluster_id, observation, suspected_cause, intervention,
+                source_failure_ids_json, direct_training_allowed, requires_independent_source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                plan.plan_id,
+                plan.cluster_id,
+                plan.observation,
+                plan.suspected_cause,
+                plan.intervention,
+                json.dumps(list(plan.source_failure_ids), sort_keys=True),
+                int(plan.direct_training_allowed),
+                int(plan.requires_independent_source),
+            ),
+        )
+        self._conn.commit()
+
+    def list_repair_plans(self) -> Iterable[RepairPlan]:
+        rows = self._conn.execute(
+            """SELECT plan_id, cluster_id, observation, suspected_cause, intervention,
+                      source_failure_ids_json, direct_training_allowed, requires_independent_source
+               FROM repair_plans ORDER BY rowid"""
+        )
+        for row in rows:
+            (
+                plan_id,
+                cluster_id,
+                observation,
+                suspected_cause,
+                intervention,
+                source_failure_ids_json,
+                direct_training_allowed,
+                requires_independent_source,
+            ) = row
+            yield RepairPlan(
+                plan_id=plan_id,
+                cluster_id=cluster_id,
+                observation=observation,
+                suspected_cause=suspected_cause,
+                intervention=intervention,
+                source_failure_ids=tuple(json.loads(source_failure_ids_json)),
+                direct_training_allowed=bool(direct_training_allowed),
+                requires_independent_source=bool(requires_independent_source),
             )
 
     def update_experiment_status(self, experiment_id: str, status: str) -> None:
