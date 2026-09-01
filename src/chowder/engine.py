@@ -44,6 +44,8 @@ class EvolutionEngine:
 
     def adjudicate(self, results: Iterable[ExperimentResult]) -> tuple[RankedCandidate, ...]:
         results = tuple(results)
+        if any(not isinstance(result, ExperimentResult) for result in results):
+            raise TypeError("adjudicate accepts evaluated ExperimentResult objects only")
         for result in results:
             reserved = self._reservations.pop(result.experiment_id, 0.0)
             self.reserved_gpu_hours = max(0.0, self.reserved_gpu_hours - reserved)
