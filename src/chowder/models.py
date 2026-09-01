@@ -5,6 +5,11 @@ from enum import Enum
 from typing import Any, Mapping
 
 
+class OptimizationDirection(str, Enum):
+    MAXIMIZE = "maximize"
+    MINIMIZE = "minimize"
+
+
 class ExperimentStatus(str, Enum):
     PLANNED = "planned"
     RUNNING = "running"
@@ -20,6 +25,11 @@ class MetricTarget:
     maximum: float | None = None
     weight: float = 1.0
     regression_tolerance: float = 0.0
+    direction: OptimizationDirection = OptimizationDirection.MAXIMIZE
+
+    def utility_delta(self, baseline: float, candidate: float) -> float:
+        raw = candidate - baseline
+        return raw if self.direction is OptimizationDirection.MAXIMIZE else -raw
 
     def target_met(self, value: float) -> bool:
         if self.minimum is not None and value < self.minimum:
