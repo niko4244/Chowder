@@ -76,7 +76,7 @@ def test_unrelated_unversioned_database_is_refused_by_both_components(tmp_path):
     connection.commit()
     connection.close()
 
-    with pytest.raises(RuntimeError, match="not recognizable as a Chowder database"):
+    with pytest.raises(RuntimeError, match="not recognizable as a Chowder"):
         RunRegistry(registry_path)
 
     trace_path = tmp_path / "unrelated-trace.sqlite"
@@ -85,7 +85,7 @@ def test_unrelated_unversioned_database_is_refused_by_both_components(tmp_path):
     connection.commit()
     connection.close()
 
-    with pytest.raises(RuntimeError, match="not recognizable as a Chowder database"):
+    with pytest.raises(RuntimeError, match="not recognizable as a Chowder"):
         RecursiveRepairTraceStore(trace_path)
 
     for path in (registry_path, trace_path):
