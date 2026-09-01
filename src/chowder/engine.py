@@ -25,6 +25,9 @@ class EvolutionEngine:
     def outstanding_candidates(self) -> int:
         return len(self._reservations)
 
+    def has_reservation(self, experiment_id: str) -> bool:
+        return experiment_id in self._reservations
+
     def propose(self, experiments: Iterable[Experiment]) -> tuple[Experiment, ...]:
         accepted: list[Experiment] = []
         for experiment in experiments:
@@ -47,17 +50,42 @@ class EvolutionEngine:
     ) -> dict[str, Any]:
         return self.graph.resolve_config(experiment_id, base_config)
 
+    def _settle_reservation(
+        self, experiment_id: str, *, actual_gpu_hours: float, status: ExperimentStatus
+    ) -> None:
+        reserved = self._reservations.pop(experiment_id, 0.0)
+        self.reserved_gpu_hours = max(0.0, self.reserved_gpu_hours - reserved)
+        self.spent_gpu_hours += max(0.0, actual_gpu_hours)
+        if experiment_id in self.graph.nodes:
+            self.graph.nodes[experiment_id].status = status
+
+    def fail(self, experiment_id: str, *, actual_gpu_hours: float | None = None) -> None:
+        """Fail a candidate and conservatively settle its reservation.
+
+        When a backend crashes before it can report actual compute, Chowder
+        charges the reserved estimate rather than pretending the failed run was
+        free. If partial compute is known, the larger of actual and reserved is
+        charged so failures cannot create phantom budget.
+        """
+        reserved = self._reservations.get(experiment_id, 0.0)
+        charge = reserved if actual_gpu_hours is None else max(reserved, actual_gpu_hours)
+        self._settle_reservation(
+            experiment_id, actual_gpu_hours=charge, status=ExperimentStatus.FAILED
+        )
+
     def adjudicate(self, results: Iterable[ExperimentResult]) -> tuple[RankedCandidate, ...]:
         results = tuple(results)
         if any(not isinstance(result, ExperimentResult) for result in results):
             raise TypeError("adjudicate accepts evaluated ExperimentResult objects only")
+        ranked = rank_candidates(goal=self.goal, baseline=self.baseline, candidates=results)
+        decisions = {candidate.result.experiment_id: candidate.decision for candidate in ranked}
         for result in results:
-            reserved = self._reservations.pop(result.experiment_id, 0.0)
-            self.reserved_gpu_hours = max(0.0, self.reserved_gpu_hours - reserved)
-            self.spent_gpu_hours += max(0.0, result.gpu_hours)
-            if result.experiment_id in self.graph.nodes:
-                self.graph.nodes[result.experiment_id].status = ExperimentStatus.PASSED
-        return rank_candidates(goal=self.goal, baseline=self.baseline, candidates=results)
+            decision = decisions[result.experiment_id]
+            status = ExperimentStatus.PASSED if decision.accepted else ExperimentStatus.REJECTED
+            self._settle_reservation(
+                result.experiment_id, actual_gpu_hours=result.gpu_hours, status=status
+            )
+        return ranked
 
     def promote(self, ranked: Iterable[RankedCandidate]) -> ExperimentResult | None:
         for candidate in ranked:
