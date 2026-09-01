@@ -192,6 +192,22 @@ def validate_repair_proposal(
         raise ValueError(f"repair proposal examples reference undeclared sources: {undeclared}")
 
 
+def request_repair_sources(
+    *,
+    provider: RepairSourceProvider,
+    request: RepairRequest,
+) -> RepairSourceProposal:
+    """Invoke a provider through the leak-resistant boundary and validate its identity."""
+
+    if not isinstance(provider, RepairSourceProvider):
+        raise TypeError("provider does not implement RepairSourceProvider")
+    proposal = provider.propose(request)
+    if not isinstance(proposal, RepairSourceProposal):
+        raise TypeError("repair source provider returned an invalid proposal type")
+    validate_repair_proposal(request=request, proposal=proposal, provider=provider)
+    return proposal
+
+
 def materialize_repair_proposal(
     *,
     request: RepairRequest,
