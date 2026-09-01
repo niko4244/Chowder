@@ -275,16 +275,16 @@ def test_cross_record_artifact_mismatch_is_blocked(tmp_path):
     with RunRegistry(tmp_path / "runs.db") as registry:
         registry.record_experiment(_experiment("source"))
         _record_complete_candidate(registry, "source")
-        registry.record_evaluation_outcome(
-            EvaluationOutcome(
-                run_id="eval-source",
-                experiment_id="source",
-                source_artifact_ref="different-adapter",
-                metrics={"quality": 0.6},
-                gpu_hours=0.01,
-                evidence={"protocol_sha256": "p" * 64},
+
+        # Public registry writes are now immutable, so simulate corruption that
+        # predates that invariant (or external/manual DB tampering) directly at
+        # the storage boundary. Recovery must still detect it.
+        with registry._conn:
+            registry._conn.execute(
+                "UPDATE evaluation_runs SET source_artifact_ref = ? WHERE run_id = ?",
+                ("different-adapter", "eval-source"),
             )
-        )
+
         _begin_running(registry)
         report = analyze_recursive_repair_session(registry, "session")
         assert report.disposition is RecoveryDisposition.REGISTRY_EVIDENCE_MISMATCH
