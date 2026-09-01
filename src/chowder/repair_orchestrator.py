@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -66,6 +67,11 @@ def prepare_and_propose_repair_population(
     This function intentionally stops before training. Candidate admission and
     compute reservation are delegated to ``EvolutionEngine.propose`` so repair
     automation cannot bypass parallelism or GPU-hour budgets.
+
+    Materialization is transactional at the filesystem boundary: if provider
+    validation, source provenance, contamination checking, or candidate
+    construction fails, the partial repair directory is removed and no engine
+    reservations are created.
     """
 
     if parent_id not in engine.graph.nodes:
@@ -95,27 +101,32 @@ def prepare_and_propose_repair_population(
     dataset_path = repair_dir / "repair.jsonl"
     manifest_path = repair_dir / "sources.json"
 
-    materialized = materialize_repair_proposal(
-        request=request,
-        proposal=proposal,
-        provider=provider,
-        holdout_fingerprint_files=holdout_files,
-        dataset_path=dataset_path,
-        source_manifest_path=manifest_path,
-    )
-    verified = VerifiedRepairDataset(
-        path=materialized.dataset_path,
-        sha256=materialized.dataset_sha256,
-        contamination_audit=materialized.contamination_audit,
-        source_manifest_path=materialized.source_manifest_path,
-        source_manifest_sha256=materialized.source_manifest_sha256,
-    )
-    generated = build_autonomous_repair_population(
-        parent_id=parent_id,
-        plan=plan,
-        dataset=verified,
-        variants=variant_rows,
-    )
+    try:
+        materialized = materialize_repair_proposal(
+            request=request,
+            proposal=proposal,
+            provider=provider,
+            holdout_fingerprint_files=holdout_files,
+            dataset_path=dataset_path,
+            source_manifest_path=manifest_path,
+        )
+        verified = VerifiedRepairDataset(
+            path=materialized.dataset_path,
+            sha256=materialized.dataset_sha256,
+            contamination_audit=materialized.contamination_audit,
+            source_manifest_path=materialized.source_manifest_path,
+            source_manifest_sha256=materialized.source_manifest_sha256,
+        )
+        generated = build_autonomous_repair_population(
+            parent_id=parent_id,
+            plan=plan,
+            dataset=verified,
+            variants=variant_rows,
+        )
+    except Exception:
+        shutil.rmtree(repair_dir, ignore_errors=True)
+        raise
+
     proposed = engine.propose(generated)
 
     if registry is not None:
