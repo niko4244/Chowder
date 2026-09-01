@@ -4,6 +4,7 @@ from chowder.engine import EvolutionEngine
 from chowder.executors import (
     CostEstimate,
     EvaluationExecutor,
+    EvaluationOutcome,
     ExecutionContext,
     TrainingArtifact,
     TrainingExecutor,
@@ -35,11 +36,12 @@ class StubEvaluator:
     name = "stub-evaluator"
 
     def evaluate(self, *, experiment, artifact, context):
-        return ExperimentResult(
+        return EvaluationOutcome(
+            run_id="eval-1",
             experiment_id=experiment.experiment_id,
+            source_artifact_ref=artifact.artifact_ref,
             metrics={"quality": 0.8},
-            gpu_hours=artifact.gpu_hours,
-            artifact_ref=artifact.artifact_ref,
+            gpu_hours=0.02,
         )
 
 
@@ -72,8 +74,10 @@ def test_training_and_evaluation_are_separate_contracts(tmp_path):
     assert artifact.telemetry["train_loss"] == 0.4
     assert not hasattr(artifact, "metrics")
 
-    result = evaluator.evaluate(experiment=experiment, artifact=artifact, context=_context(tmp_path))
-    assert result.metrics["quality"] == 0.8
+    outcome = evaluator.evaluate(experiment=experiment, artifact=artifact, context=_context(tmp_path))
+    assert isinstance(outcome, EvaluationOutcome)
+    assert outcome.metrics["quality"] == 0.8
+    assert outcome.gpu_hours == 0.02
 
 
 def test_engine_rejects_unevaluated_training_artifact():
