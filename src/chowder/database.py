@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 # SQLite application_id is a 32-bit marker stored in the database header.
 # 0x43484F57 == ASCII "CHOW".
 CHOWDER_APPLICATION_ID = 0x43484F57
@@ -56,9 +56,35 @@ def _migration_2_execution_incidents(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_3_recursive_recovery_claims(connection: sqlite3.Connection) -> None:
+    """Fence recursive-repair recovery so only one controller may resume."""
+
+    # The session table is component-owned and may not exist in registries that
+    # never used recursive repair. Creating the claims table conditionally avoids
+    # manufacturing the whole recursive schema in unrelated runs; the trace store
+    # creates the same table after it creates its session table on first use.
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "recursive_repair_sessions" not in tables:
+        return
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS recursive_repair_recovery_claims (
+               session_id TEXT PRIMARY KEY,
+               claim_token TEXT NOT NULL UNIQUE,
+               claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               FOREIGN KEY(session_id) REFERENCES recursive_repair_sessions(session_id)
+           )"""
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline-version-marker", _migration_1_baseline),
     Migration(2, "execution-incidents", _migration_2_execution_incidents),
+    Migration(3, "recursive-recovery-claims", _migration_3_recursive_recovery_claims),
 )
 
 
