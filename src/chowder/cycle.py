@@ -109,22 +109,27 @@ class ExperimentCycleRunner:
                 self.registry.record_evaluation_outcome(evaluation)
 
             total_gpu_hours = artifact.gpu_hours + evaluation.gpu_hours
+            evidence: dict[str, Any] = {
+                "training_run_id": artifact.run_id,
+                "evaluation_run_id": evaluation.run_id,
+                "training": dict(artifact.evidence),
+                "evaluation": dict(evaluation.evidence),
+                "compute": {
+                    "training_gpu_hours": artifact.gpu_hours,
+                    "evaluation_gpu_hours": evaluation.gpu_hours,
+                    "total_gpu_hours": total_gpu_hours,
+                },
+            }
+            protocol_sha = evaluation.evidence.get("protocol_sha256")
+            if isinstance(protocol_sha, str) and len(protocol_sha) == 64:
+                evidence["evaluation_protocol_sha256"] = protocol_sha
+
             result = ExperimentResult(
                 experiment_id=experiment.experiment_id,
                 metrics=metrics,
                 gpu_hours=total_gpu_hours,
                 artifact_ref=artifact.artifact_ref,
-                evidence={
-                    "training_run_id": artifact.run_id,
-                    "evaluation_run_id": evaluation.run_id,
-                    "training": dict(artifact.evidence),
-                    "evaluation": dict(evaluation.evidence),
-                    "compute": {
-                        "training_gpu_hours": artifact.gpu_hours,
-                        "evaluation_gpu_hours": evaluation.gpu_hours,
-                        "total_gpu_hours": total_gpu_hours,
-                    },
-                },
+                evidence=evidence,
             )
             if self.registry is not None:
                 self.registry.record_result(result)
