@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -114,7 +115,7 @@ def test_registry_failure_withdraws_engine_proposals_and_removes_repair_artifact
     with RunRegistry(tmp_path / "runs.db") as registry:
         # Deliberately do not persist parent. Repair child inserts therefore fail
         # the registry foreign-key check after engine proposal succeeds.
-        with pytest.raises(Exception):
+        with pytest.raises(sqlite3.IntegrityError):
             prepare_and_propose_repair_population(
                 engine=engine,
                 parent_id="parent",
