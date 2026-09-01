@@ -1,5 +1,4 @@
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -9,7 +8,7 @@ from chowder.engine import EvolutionEngine
 from chowder.failures import FailureCluster, FailureSourceRole, RepairPlan
 from chowder.local_corpus_provider import LocalCorpusRepairProvider
 from chowder.models import Experiment, ExperimentResult, Goal, Hypothesis, MetricTarget
-from chowder.registry import RunRegistry
+from chowder.registry import RegistryInvariantError, RunRegistry
 from chowder.repair_candidates import RepairVariant
 from chowder.repair_orchestrator import prepare_and_propose_repair_population
 
@@ -113,9 +112,9 @@ def _variants():
 def test_registry_failure_withdraws_engine_proposals_and_removes_repair_artifacts(tmp_path):
     engine = _engine()
     with RunRegistry(tmp_path / "runs.db") as registry:
-        # Deliberately do not persist parent. Repair child inserts therefore fail
-        # the registry foreign-key check after engine proposal succeeds.
-        with pytest.raises(sqlite3.IntegrityError):
+        # Deliberately do not persist parent. Registry lineage preflight fails
+        # after engine proposal succeeds, exercising the cross-system rollback.
+        with pytest.raises(RegistryInvariantError, match="unknown persisted parent"):
             prepare_and_propose_repair_population(
                 engine=engine,
                 parent_id="parent",
