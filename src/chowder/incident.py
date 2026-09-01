@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import traceback
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
@@ -161,6 +162,47 @@ def _normalize_exception_message(message: str) -> str:
 def _canonical_digest(payload: Mapping[str, Any]) -> str:
     raw = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def capture_from_exception(
+    exc: BaseException,
+    *,
+    incident_id: str,
+    experiment_id: str,
+    executor_name: str,
+    occurred_at: str,
+    environment: EnvironmentSnapshot,
+    attempt_number: int = 1,
+    gpu_hours_spent: float = 0.0,
+    run_id: str | None = None,
+    partial_artifact_ref: str | None = None,
+) -> FailureCapture:
+    """Build a ``FailureCapture`` from a live Python exception.
+
+    The one place this project constructs evidence directly from a raised
+    exception rather than transcribing historical incident text by hand
+    (as the dev/hidden fixtures do). Used both for a training executor's
+    first failure and for a remediation attempt that raises a genuinely
+    new problem mid-investigation -- the same construction either way, so
+    a remediation-attempt crash is captured with the same fidelity as an
+    original one, not a lesser summary of it.
+    """
+    return FailureCapture(
+        incident_id=incident_id,
+        experiment_id=experiment_id,
+        executor_name=executor_name,
+        occurred_at=occurred_at,
+        exception_type=type(exc).__qualname__,
+        exception_message=str(exc),
+        traceback_text="".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        ),
+        environment=environment,
+        attempt_number=attempt_number,
+        gpu_hours_spent=gpu_hours_spent,
+        run_id=run_id,
+        partial_artifact_ref=partial_artifact_ref,
+    )
 
 
 def compute_fingerprint(capture: FailureCapture) -> IncidentFingerprint:

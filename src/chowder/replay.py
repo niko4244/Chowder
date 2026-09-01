@@ -6,6 +6,18 @@ from typing import Any, Mapping
 from .investigation import RemediationOutcome, config_patch_digest
 
 
+class GroundTruthMissingError(KeyError):
+    """A config_patch was proposed that this benchmark case never defined
+    an outcome for.
+
+    Deliberately a distinct type from a plain ``KeyError`` (even though it
+    subclasses one, so existing ``except KeyError`` callers still work) --
+    this must never be silently caught and reinterpreted as incident
+    evidence by a remediation runner. It means the *fixture* is
+    incomplete, not that anything about the incident under test happened.
+    """
+
+
 @dataclass(frozen=True)
 class ReplayGroundTruth:
     """The known outcome of every config_patch a benchmark case's
@@ -25,7 +37,7 @@ class ReplayGroundTruth:
     def outcome_for(self, config_patch: Mapping[str, Any]) -> RemediationOutcome:
         digest = config_patch_digest(config_patch)
         if digest not in self.outcomes:
-            raise KeyError(
+            raise GroundTruthMissingError(
                 f"no ground truth recorded for this config_patch against "
                 f"fingerprint {self.fingerprint_sha256[:12]}...; "
                 "add it to this ReplayGroundTruth before proposing it"
