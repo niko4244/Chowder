@@ -10,9 +10,13 @@ Chowder treats these as one proposal transaction.
 
 ## Registry batches
 
-`RunRegistry.record_experiments()` inserts an ordered experiment batch in one SQLite transaction. Parent rows may appear earlier in the same batch. A primary-key or foreign-key failure rolls back every insert.
+`RunRegistry.record_experiments()` validates the complete ordered lineage before writing, then inserts the batch in one SQLite transaction. Parent rows may already exist or appear earlier in the same batch; duplicate IDs and unknown parents are rejected before any write occurs.
 
-`RunRegistry.record_failures()` likewise persists harvested failure evidence as one transaction, preventing partial diagnostic histories.
+This validation is intentionally application-level because early Chowder databases did not declare `experiments.parent_id` as a self-referential SQLite foreign key. The invariant therefore applies consistently to existing databases without requiring a destructive table migration.
+
+SQL errors during the subsequent batch insert still roll back every row.
+
+`RunRegistry.record_failures()` likewise persists harvested failure evidence as one transaction, preventing partial diagnostic histories. Its existing experiment/evaluation foreign keys remain enforced by SQLite.
 
 ## Repair orchestration rollback
 
@@ -37,7 +41,7 @@ If any step raises before registry persistence completes:
 - their GPU-hour reservations are released without being charged,
 - their graph nodes are removed,
 - the generated repair directory is deleted,
-- the SQLite batch is rolled back.
+- no partial experiment batch remains in SQLite.
 
 This prevents a split-brain state where the engine believes candidates exist but the durable registry does not, or where only a prefix of a candidate population is persisted.
 
