@@ -10,6 +10,16 @@ CURRENT_SCHEMA_VERSION = 2
 # 0x43484F57 == ASCII "CHOW".
 CHOWDER_APPLICATION_ID = 0x43484F57
 
+# These tables were independently created by pre-migration Chowder components.
+# Presence of either primary anchor is sufficient to recognize an unmarked
+# legacy database without accepting arbitrary existing SQLite files.
+_LEGACY_CHOWDER_ANCHORS = frozenset(
+    {
+        "experiments",
+        "recursive_repair_sessions",
+    }
+)
+
 
 @dataclass(frozen=True)
 class Migration:
@@ -19,10 +29,6 @@ class Migration:
 
 
 def _migration_1_baseline(connection: sqlite3.Connection) -> None:
-    # Version 1 marks the pre-migration Chowder schema. Existing databases may
-    # already contain any subset of those tables; ownership remains with the
-    # component schemas that created them. This migration deliberately does not
-    # rewrite legacy tables.
     connection.execute(
         """CREATE TABLE IF NOT EXISTS chowder_schema_history (
                version INTEGER PRIMARY KEY,
@@ -79,14 +85,9 @@ def _table_names(connection: sqlite3.Connection) -> set[str]:
 
 
 def _looks_like_legacy_chowder(connection: sqlite3.Connection) -> bool:
-    """Conservatively recognize a pre-application-id Chowder registry.
+    """Conservatively recognize a pre-application-id Chowder database."""
 
-    Before schema versioning, RunRegistry always owned the ``experiments``
-    table. Requiring that marker prevents an unrelated SQLite database that
-    happens to use ``user_version`` from being silently adopted and mutated.
-    """
-
-    return "experiments" in _table_names(connection)
+    return bool(_table_names(connection) & _LEGACY_CHOWDER_ANCHORS)
 
 
 def _ensure_history_table(connection: sqlite3.Connection) -> None:
@@ -116,11 +117,10 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
     Safety properties:
     - a future schema is refused before any mutation;
     - a database marked for a different application is refused;
-    - pre-marker legacy Chowder databases are adopted only when a known Chowder
-      registry table is present (or the database is completely empty);
-    - schema-history metadata is repairable for supported versions, so a
-      version-1 database cannot fail migration merely because the history table
-      was introduced after its ``user_version`` was set.
+    - any non-empty pre-marker database must contain a known legacy Chowder
+      anchor before Chowder adopts or mutates it;
+    - both legacy registry-first and trace-first databases are recognized;
+    - schema-history metadata is repairable for supported versions.
     """
 
     current = schema_version(connection)
@@ -137,15 +137,12 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
         )
 
     tables = _table_names(connection)
-    if app_id == 0 and current > 0 and tables and not _looks_like_legacy_chowder(connection):
+    if app_id == 0 and tables and not _looks_like_legacy_chowder(connection):
         raise RuntimeError(
-            "versioned SQLite database is not recognizable as a Chowder registry; "
+            "SQLite database is not recognizable as a Chowder database; "
             "refusing to adopt it"
         )
 
-    # Bootstrap ownership/history in one transaction. This also repairs the
-    # supported edge case where user_version is already 1 but the history table
-    # does not yet exist.
     with connection:
         connection.execute(f"PRAGMA application_id={CHOWDER_APPLICATION_ID}")
         _ensure_history_table(connection)
