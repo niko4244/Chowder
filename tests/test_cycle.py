@@ -3,6 +3,7 @@ from dataclasses import replace
 from chowder.cycle import ExperimentCycleRunner
 from chowder.engine import EvolutionEngine
 from chowder.executors import EvaluationOutcome, ExecutionContext, TrainingArtifact
+from chowder.failures import FailureRecord, FailureSourceRole
 from chowder.memory import HardwareProfile
 from chowder.models import Experiment, ExperimentResult, ExperimentStatus, Goal, Hypothesis, MetricTarget
 from chowder.registry import RunRegistry
@@ -122,3 +123,77 @@ def test_gate_rejection_marks_candidate_rejected_and_still_accounts_total_cost(t
     assert engine.graph.nodes["e1"].status is ExperimentStatus.REJECTED
     assert engine.spent_gpu_hours == 0.5
     assert outcome.ranking[0].decision.accepted is False
+
+
+def test_generation_harvests_and_persists_failure_diagnostics(tmp_path):
+    class ProtocolEvaluator(Evaluator):
+        def evaluate(self, *, experiment, artifact, context):
+            return EvaluationOutcome(
+                "eval-1",
+                experiment.experiment_id,
+                artifact.artifact_ref,
+                {"quality": 0.85},
+                0.1,
+                {"protocol_sha256": "a" * 64},
+            )
+
+    def harvester(evaluation):
+        return (
+            FailureRecord(
+                failure_id="f" * 64,
+                experiment_id=evaluation.experiment_id,
+                evaluation_run_id=evaluation.run_id,
+                evaluator="fake-eval",
+                suite="quality",
+                row_index=0,
+                protocol_sha256="a" * 64,
+                artifact_sha256="b" * 64,
+                source_role=FailureSourceRole.GATE_HOLDOUT,
+                prompt="hard prompt",
+                expected="right",
+                prediction="wrong",
+                score=0.0,
+                failure_kind="answer_mismatch",
+            ),
+        )
+
+    engine = _engine()
+    exp = _experiment()
+    engine.propose([exp])
+    with RunRegistry(tmp_path / "runs.db") as registry:
+        registry.record_experiment(exp)
+        runner = ExperimentCycleRunner(
+            engine,
+            Trainer(),
+            ProtocolEvaluator(),
+            _context(tmp_path),
+            registry=registry,
+            failure_harvester=harvester,
+        )
+        outcome = runner.run_generation([exp])
+        assert outcome.promoted is not None
+        assert len(outcome.harvested_failures) == 1
+        assert len(outcome.repair_plans) == 1
+        assert len(tuple(registry.list_failures())) == 1
+        assert len(tuple(registry.list_repair_plans())) == 1
+        assert outcome.promoted.evidence["diagnostics"]["failure_count"] == 1
+
+
+def test_diagnostic_failure_does_not_invalidate_valid_evaluation(tmp_path):
+    def broken_harvester(evaluation):
+        raise RuntimeError("diagnostic parser broke")
+
+    engine = _engine()
+    exp = _experiment()
+    engine.propose([exp])
+    runner = ExperimentCycleRunner(
+        engine,
+        Trainer(),
+        Evaluator(),
+        _context(tmp_path),
+        failure_harvester=broken_harvester,
+    )
+    outcome = runner.run_generation([exp])
+    assert outcome.promoted is not None
+    assert outcome.candidates[0].diagnostic_error == "RuntimeError: diagnostic parser broke"
+    assert outcome.candidates[0].error is None
