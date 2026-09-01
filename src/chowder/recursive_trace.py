@@ -31,23 +31,25 @@ CREATE TABLE IF NOT EXISTS recursive_repair_hops (
     PRIMARY KEY(session_id, depth),
     FOREIGN KEY(session_id) REFERENCES recursive_repair_sessions(session_id)
 );
+CREATE TABLE IF NOT EXISTS recursive_repair_recovery_claims (
+    session_id TEXT PRIMARY KEY,
+    claim_token TEXT NOT NULL,
+    claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(session_id) REFERENCES recursive_repair_sessions(session_id)
+);
 """
 
 
 class RecursiveRepairTraceStore:
     """Durable event/checkpoint store for bounded recursive repair.
 
-    The store owns separate tables in the same SQLite database as ``RunRegistry``.
-    Each hop insert and session-checkpoint update is committed in one transaction,
-    so a crash cannot persist a hop without the matching controller state.
-
-    Recovery uses an atomic ``running -> recovering`` claim. Only one process can
-    claim a resumable session, and only ``running``/``recovering`` sessions may
-    append hops or transition terminal. This prevents duplicate post-crash repair
-    work under concurrent recovery attempts.
+    Each hop insert and session-checkpoint update is committed in one transaction.
+    Recovery claims live in a separate one-row-per-session table: a session remains
+    ``running`` so a crashed recovery process is still discoverable, while the
+    unique claim prevents concurrent resume. Normal terminal transitions clear an
+    outstanding claim atomically. A stale claim can be explicitly released after
+    reconciliation instead of becoming a hidden permanent ``recovering`` state.
     """
-
-    _ACTIVE_STATUSES = ("running", "recovering")
 
     def __init__(self, path: str | Path):
         self.path = str(path)
@@ -101,33 +103,63 @@ class RecursiveRepairTraceStore:
                 ),
             )
 
-    def claim_recovery(self, *, session_id: str) -> None:
-        """Atomically claim one interrupted session for resume.
-
-        Exactly one caller can transition a session from ``running`` to
-        ``recovering``. A second concurrent caller observes zero updated rows and
-        fails without mutating state.
-        """
+    def claim_recovery(self, *, session_id: str, claim_token: str) -> None:
+        """Atomically claim one running recursive session for resume."""
 
         if not session_id.strip():
             raise ValueError("recursive repair session_id is required")
+        if not claim_token.strip():
+            raise ValueError("recursive repair recovery claim_token is required")
         with self._conn:
-            cursor = self._conn.execute(
-                """UPDATE recursive_repair_sessions
-                   SET status = 'recovering'
-                   WHERE session_id = ? AND status = 'running'""",
+            row = self._conn.execute(
+                "SELECT status FROM recursive_repair_sessions WHERE session_id = ?",
                 (session_id,),
-            )
-            if cursor.rowcount != 1:
-                row = self._conn.execute(
-                    "SELECT status FROM recursive_repair_sessions WHERE session_id = ?",
-                    (session_id,),
-                ).fetchone()
-                if row is None:
-                    raise ValueError("recursive repair session does not exist")
+            ).fetchone()
+            if row is None:
+                raise ValueError("recursive repair session does not exist")
+            if row[0] != "running":
                 raise ValueError(
                     f"recursive repair session cannot be claimed from status={row[0]}"
                 )
+            try:
+                self._conn.execute(
+                    """INSERT INTO recursive_repair_recovery_claims
+                       (session_id, claim_token) VALUES (?, ?)""",
+                    (session_id, claim_token),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("recursive repair session already has a recovery claim") from exc
+
+    def get_recovery_claim(self, session_id: str) -> dict[str, str] | None:
+        row = self._conn.execute(
+            """SELECT claim_token, claimed_at
+               FROM recursive_repair_recovery_claims WHERE session_id = ?""",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "session_id": session_id,
+            "claim_token": row[0],
+            "claimed_at": row[1],
+        }
+
+    def release_recovery_claim(self, *, session_id: str, claim_token: str) -> None:
+        """Release exactly the claim held by ``claim_token``.
+
+        This is intended for conservative recovery tooling after it has proved no
+        new hop was committed. A different token cannot clear another process's
+        claim.
+        """
+
+        with self._conn:
+            cursor = self._conn.execute(
+                """DELETE FROM recursive_repair_recovery_claims
+                   WHERE session_id = ? AND claim_token = ?""",
+                (session_id, claim_token),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("recursive repair recovery claim does not match")
 
     def record_hop(
         self,
@@ -158,8 +190,8 @@ class RecursiveRepairTraceStore:
             ).fetchone()
             if row is None:
                 raise ValueError("recursive repair session does not exist")
-            if row[0] not in self._ACTIVE_STATUSES:
-                raise ValueError("cannot append a hop to a terminal recursive repair session")
+            if row[0] != "running":
+                raise ValueError("cannot append a hop to a completed recursive repair session")
             self._conn.execute(
                 """INSERT INTO recursive_repair_hops
                    (session_id, depth, target_experiment_id, failure_signature,
@@ -197,7 +229,7 @@ class RecursiveRepairTraceStore:
             cursor = self._conn.execute(
                 """UPDATE recursive_repair_sessions
                    SET status = 'completed', state_json = ?, stop_reason = ?, stop_detail = ?
-                   WHERE session_id = ? AND status IN ('running', 'recovering')""",
+                   WHERE session_id = ? AND status = 'running'""",
                 (
                     self._json(dict(state)),
                     stop_reason,
@@ -207,6 +239,10 @@ class RecursiveRepairTraceStore:
             )
             if cursor.rowcount != 1:
                 raise ValueError("recursive repair session is missing or already terminal")
+            self._conn.execute(
+                "DELETE FROM recursive_repair_recovery_claims WHERE session_id = ?",
+                (session_id,),
+            )
 
     def fail(
         self,
@@ -219,11 +255,15 @@ class RecursiveRepairTraceStore:
             cursor = self._conn.execute(
                 """UPDATE recursive_repair_sessions
                    SET status = 'failed', state_json = ?, stop_reason = 'error', stop_detail = ?
-                   WHERE session_id = ? AND status IN ('running', 'recovering')""",
+                   WHERE session_id = ? AND status = 'running'""",
                 (self._json(dict(state)), error_detail, session_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("recursive repair session is missing or already terminal")
+            self._conn.execute(
+                "DELETE FROM recursive_repair_recovery_claims WHERE session_id = ?",
+                (session_id,),
+            )
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
