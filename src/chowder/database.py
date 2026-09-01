@@ -10,9 +10,6 @@ CURRENT_SCHEMA_VERSION = 2
 # 0x43484F57 == ASCII "CHOW".
 CHOWDER_APPLICATION_ID = 0x43484F57
 
-# These tables were independently created by pre-migration Chowder components.
-# Presence of either primary anchor is sufficient to recognize an unmarked
-# legacy database without accepting arbitrary existing SQLite files.
 _LEGACY_CHOWDER_ANCHORS = frozenset(
     {
         "experiments",
@@ -112,16 +109,7 @@ def _backfill_history(connection: sqlite3.Connection, current: int) -> None:
 
 
 def apply_migrations(connection: sqlite3.Connection) -> int:
-    """Apply forward-only, ownership-checked transactional SQLite migrations.
-
-    Safety properties:
-    - a future schema is refused before any mutation;
-    - a database marked for a different application is refused;
-    - any non-empty pre-marker database must contain a known legacy Chowder
-      anchor before Chowder adopts or mutates it;
-    - both legacy registry-first and trace-first databases are recognized;
-    - schema-history metadata is repairable for supported versions.
-    """
+    """Apply forward-only, ownership-checked transactional SQLite migrations."""
 
     current = schema_version(connection)
     if current > CURRENT_SCHEMA_VERSION:
@@ -139,7 +127,7 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
     tables = _table_names(connection)
     if app_id == 0 and tables and not _looks_like_legacy_chowder(connection):
         raise RuntimeError(
-            "SQLite database is not recognizable as a Chowder database; "
+            "SQLite database is not recognizable as a Chowder registry/database; "
             "refusing to adopt it"
         )
 
