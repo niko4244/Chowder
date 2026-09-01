@@ -98,6 +98,8 @@ def materialize_replay_history(
     Source paths are used only to read bytes. The materialized manifest contains
     content identities rather than machine-specific paths, so the same training
     history produces the same replay/manifest hashes on different machines.
+    Rows are deduplicated by exact text equality while preserving first-seen
+    source order; hashes are used only for portable identity/provenance.
     """
 
     source_rows = tuple(sources)
@@ -106,16 +108,15 @@ def materialize_replay_history(
 
     verified_sources: list[dict[str, object]] = []
     unique_texts: list[str] = []
-    seen: set[str] = set()
+    seen_texts: set[str] = set()
     total_rows = 0
     for source in source_rows:
         texts = _texts(source)
         total_rows += len(texts)
         for text in texts:
-            text_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
-            if text_sha in seen:
+            if text in seen_texts:
                 continue
-            seen.add(text_sha)
+            seen_texts.add(text)
             unique_texts.append(text)
         verified_sources.append(
             {
