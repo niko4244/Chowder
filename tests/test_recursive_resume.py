@@ -86,7 +86,7 @@ def _record_source(registry: RunRegistry):
         run_id="eval-source",
         experiment_id="source",
         source_artifact_ref=artifact.artifact_ref,
-        metrics={"quality": 0.6},
+        metrics={"quality": 0.4},
         gpu_hours=0.01,
         evidence={"protocol_sha256": "p" * 64},
     )
@@ -118,7 +118,7 @@ def _record_source(registry: RunRegistry):
     )
     result = ExperimentResult(
         "source",
-        {"quality": 0.6},
+        {"quality": 0.4},
         0.11,
         artifact_ref=artifact.artifact_ref,
         evidence={
