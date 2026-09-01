@@ -10,36 +10,25 @@ from .investigation import (
     RemediationOutcome,
     RemediationRecord,
     config_patch_digest,
+    remediation_context_digest,
 )
 from .replay import GroundTruthMissingError
 
 
 @runtime_checkable
 class RemediationExecutor(Protocol):
-    """What a remediation attempt needs from an executor.
-
-    Matches ``ReplayExecutor``'s shape (``replay.py``) so tests run against
-    replayed ground truth; a live implementation would apply
-    ``config_patch`` to a real training invocation instead. Raising is a
-    legitimate outcome of ``run`` -- it means the attempt itself caused a
-    new problem, handled explicitly below, not something callers are
-    expected to prevent by construction.
-    """
-
     def run(self, config_patch: Mapping[str, Any]) -> RemediationOutcome:
         ...
 
 
 @dataclass(frozen=True)
 class RemediationExperiment:
-    """Runs one hypothesis trial against an executor, bounded on two axes.
+    """Run one remediation hypothesis under attempt and GPU-hour limits.
 
-    ``max_attempts`` (per hypothesis) and the investigation's own
-    ``remaining_budget()`` (GPU-hours) are independent limits -- neither
-    alone is sufficient. A single very expensive attempt could exhaust the
-    whole budget in one try regardless of an attempts cap; a cap on
-    attempts alone doesn't stop one long attempt from blowing through
-    budget before a second attempt is even considered.
+    Budget is checked before *every* attempt. The investigation is charged by
+    its caller only after this record is accepted, so this method reserves
+    locally against the investigation's current remaining budget and never
+    returns a record whose measured/declared remediation spend exceeds it.
     """
 
     executor: RemediationExecutor
@@ -60,27 +49,27 @@ class RemediationExperiment:
             )
         if self.max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
+        if self.gpu_hours_per_attempt < 0:
+            raise ValueError("gpu_hours_per_attempt cannot be negative")
 
         remediation_id = (
             f"{investigation.investigation_id}-{config_patch_digest(trial.config_patch)[:12]}"
         )
+        available_budget = investigation.remaining_budget()
+        context_sha = remediation_context_digest(investigation.capture)
 
         attempts_used = 0
         outcome: RemediationOutcome | None = None
         for attempt in range(1, self.max_attempts + 1):
+            projected_spend = self.gpu_hours_per_attempt * attempt
+            if projected_spend > available_budget + 1e-12:
+                break
             attempts_used = attempt
             try:
                 outcome = self.executor.run(trial.config_patch)
             except GroundTruthMissingError:
-                # Not incident evidence -- a benchmark/replay fixture that
-                # never defined an outcome for this patch is a test-data
-                # bug and must fail loudly, never be reinterpreted as "the
-                # remediation attempt caused a new problem."
                 raise
-            except Exception as exc:  # noqa: BLE001 -- deliberately broad: any
-                # OTHER exception the executor raises here IS the new
-                # incident's evidence, not a bug in this runner to narrow
-                # away.
+            except Exception as exc:  # noqa: BLE001 -- executor exceptions are incident evidence
                 new_capture = capture_from_exception(
                     exc,
                     incident_id=f"{remediation_id}-attempt-{attempt}",
@@ -92,10 +81,6 @@ class RemediationExperiment:
                     gpu_hours_spent=self.gpu_hours_per_attempt,
                 )
                 new_fingerprint = compute_fingerprint(new_capture)
-                # Deliberately not opening a new Investigation here -- that
-                # decision (route_failure on new_capture) belongs to
-                # whatever is driving the loop, keeping this runner's job
-                # limited to "run one trial, report what happened."
                 return RemediationRecord(
                     remediation_id=f"{remediation_id}-partial-{attempt}",
                     fingerprint_sha256=investigation.fingerprint.fingerprint_sha256,
@@ -107,14 +92,20 @@ class RemediationExperiment:
                     config_patch=trial.config_patch,
                     outcome=RemediationOutcome.PARTIALLY_RESOLVED,
                     attempts_used=attempt,
-                    gpu_hours_spent=self.gpu_hours_per_attempt * attempt,
-                    notes=f"new_incident_fingerprint_sha256={new_fingerprint.fingerprint_sha256}",
+                    gpu_hours_spent=projected_spend,
+                    notes=f"spawned_signature_kind={new_fingerprint.signature_kind.value}",
+                    context_sha256=context_sha,
+                    spawned_incident=new_capture,
                 )
             else:
                 if outcome is RemediationOutcome.RESOLVED:
                     break
 
-        assert outcome is not None  # loop always runs at least once (max_attempts >= 1)
+        if attempts_used == 0:
+            raise ValueError(
+                "insufficient remaining GPU-hour budget for one remediation attempt"
+            )
+        assert outcome is not None
         return RemediationRecord(
             remediation_id=remediation_id,
             fingerprint_sha256=investigation.fingerprint.fingerprint_sha256,
@@ -124,4 +115,5 @@ class RemediationExperiment:
             outcome=outcome,
             attempts_used=attempts_used,
             gpu_hours_spent=self.gpu_hours_per_attempt * attempts_used,
+            context_sha256=context_sha,
         )
