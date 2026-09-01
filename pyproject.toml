@@ -4,13 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chowder-ai"
-version = "0.1.0"
+version = "0.2.0"
 description = "Autonomous, evidence-gated post-training experiment engine for local AI hardware."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "Chowder contributors"}]
 dependencies = []
+
+[project.optional-dependencies]
+train = [
+  "torch>=2.7",
+  "transformers>=5.12,<6",
+  "peft>=0.20,<0.21",
+  "datasets>=4,<5",
+  "accelerate>=1,<2",
+]
+qlora = [
+  "bitsandbytes>=0.50,<0.51",
+]
 
 [project.scripts]
 chowder = "chowder.cli:main"
