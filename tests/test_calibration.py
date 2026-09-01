@@ -15,6 +15,8 @@ def test_storage_calibration_uses_temp_file_and_cleans_up(tmp_path):
     result = calibrate_storage(tmp_path, sample_mib=1, passes=1)
     assert result.read_gbps > 0
     assert result.write_gbps > 0
+    assert result.read_cache_sensitive
+    assert result.durable_write
     assert not list(tmp_path.glob('.chowder-cal-*'))
 
 
@@ -28,3 +30,4 @@ def test_combined_calibration_can_skip_cuda(tmp_path):
     assert result.storage is not None
     assert result.host_memory is not None
     assert result.cuda is None
+    assert any("page-cache" in note for note in result.notes)
