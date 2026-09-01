@@ -95,9 +95,9 @@ def materialize_replay_history(
 ) -> VerifiedReplayDataset:
     """Build one canonical replay corpus from all prior training sources.
 
-    Sources are verified against the exact hashes recorded when they trained a
-    parent. Rows are normalized to a single ``text`` field and deduplicated by
-    exact UTF-8 text identity while preserving first-seen source order.
+    Source paths are used only to read bytes. The materialized manifest contains
+    content identities rather than machine-specific paths, so the same training
+    history produces the same replay/manifest hashes on different machines.
     """
 
     source_rows = tuple(sources)
@@ -109,7 +109,6 @@ def materialize_replay_history(
     seen: set[str] = set()
     total_rows = 0
     for source in source_rows:
-        path = source.verify()
         texts = _texts(source)
         total_rows += len(texts)
         for text in texts:
@@ -123,7 +122,6 @@ def materialize_replay_history(
                 "role": source.role,
                 "source_sha256": source.sha256,
                 "text_field": source.text_field,
-                "source_ref": str(path),
                 "row_count": len(texts),
             }
         )
