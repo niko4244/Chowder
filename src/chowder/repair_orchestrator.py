@@ -64,14 +64,11 @@ def prepare_and_propose_repair_population(
 ) -> RepairPopulationOutcome:
     """Prepare provenance-safe repair data and reserve candidate experiments.
 
-    This function intentionally stops before training. Candidate admission and
-    compute reservation are delegated to ``EvolutionEngine.propose`` so repair
-    automation cannot bypass parallelism or GPU-hour budgets.
-
-    Materialization is transactional at the filesystem boundary: if provider
-    validation, source provenance, contamination checking, or candidate
-    construction fails, the partial repair directory is removed and no engine
-    reservations are created.
+    The complete proposal transaction spans filesystem materialization, engine
+    graph/budget admission, and optional SQLite persistence. A failure before
+    persistence completion removes generated repair files and withdraws any
+    still-PLANNED engine reservations, returning both systems to the state they
+    had before this repair population was attempted.
     """
 
     if parent_id not in engine.graph.nodes:
@@ -101,6 +98,7 @@ def prepare_and_propose_repair_population(
     dataset_path = repair_dir / "repair.jsonl"
     manifest_path = repair_dir / "sources.json"
 
+    proposed: tuple[Experiment, ...] = ()
     try:
         materialized = materialize_repair_proposal(
             request=request,
@@ -123,15 +121,16 @@ def prepare_and_propose_repair_population(
             dataset=verified,
             variants=variant_rows,
         )
+        proposed = engine.propose(generated)
+        if registry is not None:
+            registry.record_experiments(proposed)
     except Exception:
+        if proposed:
+            engine.withdraw_proposals(
+                experiment.experiment_id for experiment in proposed
+            )
         shutil.rmtree(repair_dir, ignore_errors=True)
         raise
-
-    proposed = engine.propose(generated)
-
-    if registry is not None:
-        for experiment in proposed:
-            registry.record_experiment(experiment)
 
     return RepairPopulationOutcome(
         request=request,
