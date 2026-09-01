@@ -12,6 +12,7 @@ from .models import Experiment
 from .registry import RunRegistry
 from .repair_candidates import (
     RepairVariant,
+    VerifiedParentAdapter,
     VerifiedRepairDataset,
     VerifiedReplayDataset,
     build_autonomous_repair_population,
@@ -66,13 +67,13 @@ def prepare_and_propose_repair_population(
     work_dir: str | Path,
     registry: RunRegistry | None = None,
     replay: VerifiedReplayDataset | None = None,
+    parent_adapter: VerifiedParentAdapter | None = None,
 ) -> RepairPopulationOutcome:
     """Prepare provenance-safe repair data and reserve candidate experiments.
 
-    The complete proposal transaction spans filesystem materialization, engine
-    graph/budget admission, and optional SQLite persistence. ``replay`` is an
-    already-trained parent dataset whose exact bytes/ratio become part of repair
-    candidate identity; it is never supplied to the repair-source provider.
+    ``replay`` protects prior capabilities while ``parent_adapter`` binds the
+    repair to the exact rejected weights being repaired. Neither is exposed to
+    the independent repair-source provider.
     """
 
     if parent_id not in engine.graph.nodes:
@@ -95,6 +96,12 @@ def prepare_and_propose_repair_population(
 
     if replay is not None:
         replay.verify()
+    if parent_adapter is not None:
+        parent_adapter.verify()
+        if any(variant.lora_patch for variant in variant_rows):
+            raise ValueError(
+                "continuation repair variants cannot patch LoRA topology"
+            )
 
     holdout_files = tuple(
         Path(path).resolve() for path in holdout_fingerprint_files
@@ -139,6 +146,7 @@ def prepare_and_propose_repair_population(
             dataset=verified,
             variants=variant_rows,
             replay=replay,
+            parent_adapter=parent_adapter,
         )
         proposed = engine.propose(generated)
         if registry is not None:
