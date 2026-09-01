@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 from chowder.executors import EvaluationOutcome, TrainingArtifact
 from chowder.failures import FailureRecord, FailureSourceRole, RepairPlan
 from chowder.models import Experiment, ExperimentResult, Hypothesis
@@ -293,14 +291,14 @@ def test_interrupted_session_listing_returns_only_running(tmp_path):
         assert list_interrupted_recursive_sessions(registry.path) == ("running",)
 
 
-def test_new_controller_session_persists_goal_and_baseline_snapshot(tmp_path, monkeypatch):
-    import chowder.recursive_repair as recursive
-    from chowder.autonomous_repair import AutonomousRepairOutcome, _repairable_target
-    from chowder.cycle import CandidateCycleOutcome, ExperimentCycleRunner, GenerationOutcome
+def test_new_controller_session_persists_goal_and_baseline_snapshot(tmp_path):
+    from chowder.cycle import ExperimentCycleRunner, GenerationOutcome
     from chowder.engine import EvolutionEngine
+    from chowder.executors import ExecutionContext
     from chowder.memory import HardwareProfile
-    from chowder.models import GateDecision, Goal, MetricTarget
-    from chowder.tournament import RankedCandidate
+    from chowder.models import Goal, MetricTarget
+    from chowder.recursive_repair import run_bounded_autonomous_repair
+    from chowder.repair_candidates import RepairVariant
 
     registry = RunRegistry(tmp_path / "controller.db")
     engine = EvolutionEngine(
@@ -311,67 +309,18 @@ def test_new_controller_session_persists_goal_and_baseline_snapshot(tmp_path, mo
         engine=engine,
         trainer=object(),
         evaluator=object(),
-        context=__import__("chowder.executors", fromlist=["ExecutionContext"]).ExecutionContext(
+        context=ExecutionContext(
             HardwareProfile(16, 64, 500, 12, 40, 3), str(tmp_path), 7
         ),
         registry=registry,
     )
-
-    failure = FailureRecord(
-        failure_id="f" * 64,
-        experiment_id="source",
-        evaluation_run_id="eval-source",
-        evaluator="transformers-text",
-        suite="reasoning",
-        row_index=0,
-        protocol_sha256="p" * 64,
-        artifact_sha256="a" * 64,
-        source_role=FailureSourceRole.GATE_HOLDOUT,
-        prompt="hidden",
-        expected="answer",
-        prediction="wrong",
-        score=0.0,
-        failure_kind="answer_mismatch",
-    )
-    plan = RepairPlan(
-        plan_id="r" * 64,
-        cluster_id=__import__("chowder.failures", fromlist=["cluster_failures"]).cluster_failures((failure,))[0].cluster_id,
-        observation="failure",
-        suspected_cause="weakness",
-        intervention="repair",
-        source_failure_ids=(failure.failure_id,),
-        direct_training_allowed=False,
-        requires_independent_source=True,
-    )
-    result = ExperimentResult("source", {"quality": 0.4}, 0.1)
-    evaluation = EvaluationOutcome(
-        "eval-source", "source", "adapter-source", {"quality": 0.4}, 0.01, {"protocol_sha256": "p" * 64}
-    )
-    candidate = CandidateCycleOutcome(
-        "source", evaluation=evaluation, result=result, harvested_failures=(failure,), repair_plans=(plan,)
-    )
-    ranked = RankedCandidate(
-        result,
-        GateDecision(False, -0.1, {}, ("quality",), (), False, "rejected"),
-        -1.0,
-    )
-    source_generation = GenerationOutcome((candidate,), (ranked,), None)
-    next_generation = GenerationOutcome((), (), ExperimentResult("winner", {"quality": 0.9}, 0.1))
-
-    def fake_hop(*, runner, source_generation, provider, variants, candidate_id=None, replay_ratio=1.0):
-        return AutonomousRepairOutcome(
-            source_generation,
-            _repairable_target(source_generation, candidate_id=candidate_id),
-            None,
-            next_generation,
-        )
-
-    monkeypatch.setattr(recursive, "run_single_hop_autonomous_repair", fake_hop)
-    outcome = recursive.run_bounded_autonomous_repair(
+    winner = ExperimentResult("winner", {"quality": 0.9}, 0.1)
+    source_generation = GenerationOutcome((), (), winner)
+    outcome = run_bounded_autonomous_repair(
         runner=runner,
         source_generation=source_generation,
         provider=type("Provider", (), {"name": "test", "version": "1"})(),
-        variants=(__import__("chowder.repair_candidates", fromlist=["RepairVariant"]).RepairVariant("default", 0.1),),
+        variants=(RepairVariant("default", 0.1),),
     )
     with RecursiveRepairTraceStore(registry.path) as store:
         session = store.get_session(outcome.session_id)
