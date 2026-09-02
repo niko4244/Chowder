@@ -46,6 +46,12 @@ _KAGGLE_T4_ENV_5_10_2 = EnvironmentSnapshot(
     },
 )
 
+_KAGGLE_SINGLE_T4_ENV_5_10_2 = EnvironmentSnapshot(
+    hardware_summary="1x Tesla T4, sm_75 (device_map=0, single-GPU by design)",
+    accelerator_count=1,
+    installed_packages=_KAGGLE_T4_ENV_5_10_2.installed_packages,
+)
+
 
 # 1. NETWORK_TRANSIENT -- expected: retry (the HF Hub cache resumes the
 #    broken shard via HTTP Range on the next attempt within the same
@@ -338,6 +344,61 @@ DPO_LOGITS_FP32_UPCAST_OOM = FailureCapture(
 )
 
 
+# 11. CUDA_OOM (a third real memory-capacity failure shape, and the newest
+#     fixture in this set -- discovered live, days after fixtures 1-10 were
+#     written, while actually trying to unblock DPO_TRAINER_DEVICE_MAP_AUTO_
+#     MISMATCH's real incident by reverting to single-GPU). Distinct from
+#     both earlier OOMs: it fails in loss.backward() (accelerate.accelerator.
+#     backward), not the fp32-logits-upcast forward pass #2/#10 both hit, and
+#     it's a near-miss (732 MiB short of the 14.56 GiB ceiling) rather than a
+#     multi-GB shortfall. Expected: recognize as CUDA_OOM like #2/#10 (same
+#     coarse signature_kind) but a genuinely different exact incident -- and
+#     the real remediation history here is itself evidence for exactly that:
+#     the length-cap fix that got past #10's forward-pass OOM did NOT resolve
+#     this one, and tightening the cap further (before this fixture existed
+#     -- 42 pairs -> 28 pairs) barely moved the margin (732 -> 706 MiB
+#     short), the clearest real confirmation in this whole dev set that "same
+#     coarse class" does not mean "same fix, just needs more of it."
+#     Real-world status: still open. Three real remediation attempts against
+#     this exact incident, all confirmed by actually running them, not
+#     guessed: allocator_conf (already active the whole time, did not
+#     prevent it), a max-length cap (insufficient alone), and a grad-accum
+#     reduction 8->2 (byte-identical crash -- same 706 MiB short, same
+#     26.81 MiB free, same line -- proving accumulation-step count has zero
+#     effect on this specific OOM, not just an untried hypothesis). None of
+#     this project's currently-modeled CUDA_OOM remediations resolve it;
+#     none is invented here to look complete, matching this project's
+#     discipline elsewhere (DPO_TRAINER_DEVICE_MAP_AUTO_MISMATCH) of never
+#     encoding a fix that hasn't actually been confirmed.
+DPO_BACKWARD_PASS_OOM_NEAR_LIMIT = FailureCapture(
+    incident_id="2026-09-02-cycle4-train-v10-backward-oom-near-limit",
+    experiment_id="dpo-cycle4-math-v1",
+    executor_name="kaggle-train-dpo-trl",
+    occurred_at="2026-09-02T02:xx:00Z",
+    exception_type="torch.OutOfMemoryError",
+    exception_message=(
+        "CUDA out of memory. Tried to allocate 732.00 MiB. GPU 0 has a total capacity "
+        "of 14.56 GiB of which 464.81 MiB is free. Including non-PyTorch memory, this "
+        "process has 14.11 GiB memory in use."
+    ),
+    traceback_text=(
+        "File \"transformers/trainer.py\", line 1943, in training_step\n"
+        "  self.accelerator.backward(loss, **kwargs)\n"
+        "File \"accelerate/accelerator.py\", line 2838, in backward\n"
+        "  loss.backward(**kwargs)\n"
+        "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 732.00 MiB."
+    ),
+    environment=EnvironmentSnapshot(
+        hardware_summary=_KAGGLE_SINGLE_T4_ENV_5_10_2.hardware_summary,
+        accelerator_count=1,
+        installed_packages=_KAGGLE_SINGLE_T4_ENV_5_10_2.installed_packages,
+        config_patch={"device_map": "0", "max_length_cap_pairs": 900, "grad_accum": 8},
+    ),
+    attempt_number=1,
+    gpu_hours_spent=0.05,
+)
+
+
 ALL_DEV_FIXTURES: tuple[FailureCapture, ...] = (
     HF_HUB_TRANSIENT_DROP,
     PEFT_KBIT_PREP_OOM,
@@ -349,4 +410,5 @@ ALL_DEV_FIXTURES: tuple[FailureCapture, ...] = (
     STALE_EXECUTOR_ARTIFACT_MISSING_FLAG,
     DPO_TRAINER_DEVICE_MAP_AUTO_MISMATCH,
     DPO_LOGITS_FP32_UPCAST_OOM,
+    DPO_BACKWARD_PASS_OOM_NEAR_LIMIT,
 )

@@ -1,11 +1,12 @@
-"""Run all 10 real dev-set fixtures through the same loop the walking
+"""Run all 11 real dev-set fixtures through the same loop the walking
 skeleton (Task 5) proved on one incident -- still entirely within the dev
 set, no scoring, no hidden fixtures. Confirms the machinery (generator +
 ranking + remediation runner + closeout) handles the full, already-known
-variety end-to-end: two CUDA_OOM incidents needing different fixes, the two
-CUDA-RuntimeError incidents that must stay distinct, and one incident
-(device-mismatch) that is honestly abandoned rather than given a fix that
-was never actually confirmed.
+variety end-to-end: three CUDA_OOM incidents (two needing different fixes,
+one -- found live, later -- that neither known fix resolves), the two
+CUDA-RuntimeError incidents that must stay distinct, and two incidents
+(device-mismatch, and now the third OOM) that are honestly abandoned rather
+than given a fix that was never actually confirmed.
 """
 from typing import Any, Mapping
 
@@ -23,6 +24,7 @@ from chowder.replay import ReplayGroundTruth
 
 from fixtures_incidents import (
     ALL_DEV_FIXTURES,
+    DPO_BACKWARD_PASS_OOM_NEAR_LIMIT,
     DPO_LOGITS_FP32_UPCAST_OOM,
     DPO_TRAINER_DEVICE_MAP_AUTO_MISMATCH,
     GATED_DELTA_RULE_CUBLAS_FAILURE,
@@ -76,6 +78,7 @@ _EXPECTATIONS: tuple[tuple[FailureCapture, InvestigationStatus, Mapping[str, Any
     ),
     (DPO_TRAINER_DEVICE_MAP_AUTO_MISMATCH, InvestigationStatus.ABANDONED, None),
     (DPO_LOGITS_FP32_UPCAST_OOM, InvestigationStatus.RESOLVED, {"max_length": 1024}),
+    (DPO_BACKWARD_PASS_OOM_NEAR_LIMIT, InvestigationStatus.ABANDONED, None),
 )
 
 # Ground truth for every candidate the generator could plausibly propose for
@@ -128,6 +131,18 @@ _GROUND_TRUTH_OUTCOMES: Mapping[str, Mapping[str, RemediationOutcome]] = {
         ): RemediationOutcome.DID_NOT_RESOLVE,
         config_patch_digest({"max_length": 1024}): RemediationOutcome.RESOLVED,
     },
+    # Confirmed real evidence, not a guess: allocator_conf was already active
+    # the whole time this incident occurred and did not prevent it; a
+    # max-length cap (tightened twice, 900 tokens then 850) got past the
+    # unrelated forward-pass OOM but never closed this incident's own
+    # backward-pass gap. Neither known CUDA_OOM remediation resolves this --
+    # matches DPO_TRAINER_DEVICE_MAP_AUTO_MISMATCH's honesty discipline.
+    DPO_BACKWARD_PASS_OOM_NEAR_LIMIT.incident_id: {
+        config_patch_digest(
+            {"allocator_conf": "expandable_segments:True"}
+        ): RemediationOutcome.DID_NOT_RESOLVE,
+        config_patch_digest({"max_length": 1024}): RemediationOutcome.DID_NOT_RESOLVE,
+    },
 }
 
 
@@ -171,7 +186,7 @@ def test_all_dev_fixtures_expectation_table_is_complete():
     ever added to ALL_DEV_FIXTURES without updating this file's expectation
     and ground-truth tables, this fails loudly instead of the new fixture
     silently being skipped."""
-    assert len(ALL_DEV_FIXTURES) == 10
+    assert len(ALL_DEV_FIXTURES) == 11
     assert {capture.incident_id for capture, _, _ in _EXPECTATIONS} == {
         c.incident_id for c in ALL_DEV_FIXTURES
     }

@@ -388,3 +388,40 @@ reproduced here, summarized for record-keeping):
   fixtures (→ added, Task 7); the plan built the entire pipeline before
   running any of it once (→ Task 5's walking skeleton inserted specifically
   to catch this).
+
+## Addendum (2026-09-02): an 11th dev fixture, found live
+
+The dev set grew from 10 to 11 real fixtures after Tasks 1-8 already
+landed, merged, and had a PR open. While actually trying to unblock
+`DPO_TRAINER_DEVICE_MAP_AUTO_MISMATCH`'s real incident (still open per
+fixture #9) by reverting to single-GPU training, a third genuinely distinct
+`CUDA_OOM` incident turned up: `DPO_BACKWARD_PASS_OOM_NEAR_LIMIT`, failing
+in `accelerate.accelerator.backward()` rather than the forward-pass
+fp32-logits-upcast both earlier OOMs (#2, #10) hit, and as a near-miss (732
+MiB short of the GPU ceiling) rather than a multi-GB shortfall.
+
+This is exactly the kind of validation this whole plan was built to
+produce: the real remediation history for this new incident is itself
+evidence, not a fixture author's guess. A length-cap fix that resolves
+`DPO_LOGITS_FP32_UPCAST_OOM` (#10) does **not** resolve this one --
+tightening the cap further (before this fixture was written) barely moved
+the failure margin, the clearest real confirmation yet that `signature_kind`
+grouping incidents together is a starting point for investigation, never a
+guarantee that one class shares one fix. Its dev-set ground truth
+(`tests/test_dev_fixture_run.py`, `tests/test_benchmark.py`) marks both of
+this project's known `CUDA_OOM` remediations `DID_NOT_RESOLVE` and the
+investigation correctly ends `ABANDONED`. A third real attempt -- reducing
+`--grad-accum` 8->2, on the theory that memory was accumulating across the
+grad-accumulation micro-batches -- was also run for real and also failed,
+byte-identically to the pre-attempt crash (same 706 MiB short, same 26.81
+MiB free, same line), disproving that theory outright rather than leaving
+it untested. None of this is invented to look complete; the fixture stays
+honestly unresolved, matching the same discipline already applied to
+fixture #9.
+
+This does not touch the Task 7 freeze: `fixtures_incidents.py` is not one
+of the three hash-protected files (`incident.py`, `probes.py`,
+`hypothesis_generation.py`), and none of them changed. `ALL_DEV_FIXTURES`
+is now 11; every reference to "10 real dev fixtures" elsewhere in this
+document describes what was true when that task was written and is left
+as historical record rather than silently rewritten.
