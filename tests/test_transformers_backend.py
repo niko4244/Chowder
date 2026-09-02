@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -531,6 +532,226 @@ def test_resume_allows_a_different_total_epoch_count(tmp_path, monkeypatch):
     artifact = TransformersPeftExecutor().run(_experiment(), context)
     assert observed_spec["resume_from_checkpoint"] == str(checkpoint_dir.resolve())
     assert artifact is not None
+
+
+def test_worker_command_is_a_plain_single_process_for_one_accelerator(tmp_path):
+    spec_path = tmp_path / "spec.json"
+    result_path = tmp_path / "result.json"
+    command = TransformersPeftExecutor._worker_command(
+        spec_path, result_path, active_accelerator_count=1
+    )
+    assert command == [
+        sys.executable,
+        "-m",
+        "chowder.backends.transformers_worker",
+        "--spec",
+        str(spec_path),
+        "--result",
+        str(result_path),
+    ]
+
+
+def test_worker_command_uses_accelerate_launch_for_multiple_accelerators(tmp_path):
+    spec_path = tmp_path / "spec.json"
+    result_path = tmp_path / "result.json"
+    command = TransformersPeftExecutor._worker_command(
+        spec_path, result_path, active_accelerator_count=2
+    )
+    assert command == [
+        sys.executable,
+        "-m",
+        "accelerate.commands.launch",
+        "--multi_gpu",
+        "--num_processes=2",
+        "--num_machines=1",
+        "-m",
+        "chowder.backends.transformers_worker",
+        "--spec",
+        str(spec_path),
+        "--result",
+        str(result_path),
+    ]
+
+
+def test_active_accelerator_count_defaults_to_one_when_unset(tmp_path):
+    context = ExecutionContext(
+        _hardware(), str(tmp_path), 1, resolved_config=_config("train.jsonl")
+    )
+    assert TransformersPeftExecutor._active_accelerator_count(context) == 1
+
+
+def test_active_accelerator_count_reads_runtime_config_against_real_topology(tmp_path):
+    config = _config("train.jsonl")
+    config["backend"]["runtime"] = {"active_accelerator_count": 2}
+    hardware = HardwareProfile(16, 64, 500, 12, 40, 3, accelerator_vram_gb=(16.0, 6.0))
+    context = ExecutionContext(hardware, str(tmp_path), 1, resolved_config=config)
+    assert TransformersPeftExecutor._active_accelerator_count(context) == 2
+
+
+def test_active_accelerator_count_rejects_count_below_one(tmp_path):
+    config = _config("train.jsonl")
+    config["backend"]["runtime"] = {"active_accelerator_count": 0}
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    with pytest.raises(ValueError, match="at least 1"):
+        TransformersPeftExecutor._active_accelerator_count(context)
+
+
+def test_active_accelerator_count_rejects_count_above_legacy_single_pool_hardware(
+    tmp_path,
+):
+    # _hardware() only sets the legacy vram_gb scalar (accelerator_vram_gb is
+    # empty) -- exactly the shape most HardwareProfile construction still
+    # uses. That must read as one visible device, not zero.
+    config = _config("train.jsonl")
+    config["backend"]["runtime"] = {"active_accelerator_count": 2}
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    with pytest.raises(ValueError, match=r"more accelerators than are visible \(1\)"):
+        TransformersPeftExecutor._active_accelerator_count(context)
+
+
+def test_active_accelerator_count_rejects_count_above_real_topology(tmp_path):
+    config = _config("train.jsonl")
+    config["backend"]["runtime"] = {"active_accelerator_count": 3}
+    hardware = HardwareProfile(16, 64, 500, 12, 40, 3, accelerator_vram_gb=(16.0, 6.0))
+    context = ExecutionContext(hardware, str(tmp_path), 1, resolved_config=config)
+    with pytest.raises(ValueError, match=r"more accelerators than are visible \(2\)"):
+        TransformersPeftExecutor._active_accelerator_count(context)
+
+
+def test_executor_launches_accelerate_when_multiple_accelerators_requested(
+    tmp_path, monkeypatch
+):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["runtime"] = {"active_accelerator_count": 2}
+    hardware = HardwareProfile(16, 64, 500, 12, 40, 3, accelerator_vram_gb=(16.0, 6.0))
+    context = ExecutionContext(hardware, str(tmp_path), 1, resolved_config=config)
+
+    observed: dict = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            observed["command"] = command
+            spec_path = Path(command[command.index("--spec") + 1])
+            result_path = Path(command[command.index("--result") + 1])
+            spec = json.loads(spec_path.read_text())
+            output = Path(spec["output_dir"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "adapter_model.safetensors").write_bytes(b"adapter")
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "telemetry": {"train_loss": 0.25, "global_step": 3},
+                        "versions": {"transformers": "5.test"},
+                        "provenance": {"resolved_model_commit": "abc123"},
+                        "data_provenance": {
+                            "primary_rows": 1,
+                            "replay_selected_rows": 0,
+                        },
+                        "resource_usage": {
+                            "active_accelerator_count": 2,
+                            "visible_accelerator_count": 2,
+                            "peak_vram_gb_by_accelerator": {
+                                "cuda:0": 1.0,
+                                "cuda:1": 0.9,
+                            },
+                        },
+                    }
+                )
+            )
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen", FakeProcess
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    command = observed["command"]
+    assert command[0] == sys.executable
+    assert command[1:5] == [
+        "-m",
+        "accelerate.commands.launch",
+        "--multi_gpu",
+        "--num_processes=2",
+    ]
+    assert artifact.evidence["requested_active_accelerator_count"] == 2
+    assert artifact.evidence["resource_usage"]["active_accelerator_count"] == 2
+
+
+def test_executor_rejects_a_worker_that_did_not_engage_every_requested_accelerator(
+    tmp_path, monkeypatch
+):
+    """A worker whose own resource snapshot reports fewer active accelerators
+    than requested means accelerate launch silently failed to engage every
+    device -- the run's GPU-hour accounting would be wrong if trusted."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["runtime"] = {"active_accelerator_count": 2}
+    hardware = HardwareProfile(16, 64, 500, 12, 40, 3, accelerator_vram_gb=(16.0, 6.0))
+    context = ExecutionContext(hardware, str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+
+    class UnderEngagedFakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            spec_path = Path(command[command.index("--spec") + 1])
+            result_path = Path(command[command.index("--result") + 1])
+            spec = json.loads(spec_path.read_text())
+            observed_spec.update(spec)
+            output = Path(spec["output_dir"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "adapter_model.safetensors").write_bytes(b"adapter")
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "telemetry": {"train_loss": 0.25, "global_step": 3},
+                        "versions": {"transformers": "5.test"},
+                        "provenance": {"resolved_model_commit": "abc123"},
+                        "data_provenance": {
+                            "primary_rows": 1,
+                            "replay_selected_rows": 0,
+                        },
+                        "resource_usage": {
+                            "active_accelerator_count": 1,
+                            "visible_accelerator_count": 2,
+                            "peak_vram_gb_by_accelerator": {"cuda:0": 1.0},
+                        },
+                    }
+                )
+            )
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen", UnderEngagedFakeProcess
+    )
+    with pytest.raises(RuntimeError, match="did not actually engage every requested device"):
+        TransformersPeftExecutor().run(_experiment(), context)
 
 
 @pytest.mark.skipif(

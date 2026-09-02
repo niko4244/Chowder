@@ -21,6 +21,9 @@ Real local executor (v0.2):
 
 - **Hardware profiler** that inventories real CUDA/CPU/RAM/NVMe capacity (`chowder hardware-detect`), not a static config.
 - **Transformers + PEFT LoRA/SFT training executor**, isolated in its own worker process, with real subprocess cancellation. Proven end-to-end (not mocked) by a real-model training run in CI: load → train → serialize an adapter → independently reload and evaluate it → verify the evidence — required to pass before anything merges to `main`.
+- **Automatic baseline evaluation**: the untouched model is evaluated first (not user-supplied), the resolved model revision is bound into the training run so it starts from the exact snapshot the baseline measured, and `require_protocol_match=True` rejects a candidate whose evaluation protocol drifted from the baseline's instead of comparing anyway.
+- **Training checkpoint/restart** on top of Trainer's own checkpoint mechanism (`save_strategy`/`save_steps`, optimizer/scheduler state), with a manifest binding dataset/config/model hashes to each checkpoint so a resume is rejected if any of those inputs changed underneath it.
+- **Multi-GPU training launch** (`accelerate launch` + DDP; FSDP not yet implemented) driven by `backend.runtime.active_accelerator_count`, with GPU-hour accounting (`accelerator_seconds = wall_seconds * active_accelerator_count`) that reflects real launched processes rather than a declared estimate, and a post-run check that fails loudly if the launch did not actually engage every requested device.
 - **Independent holdout evaluator** that reloads the base model and adapter separately from training and checks adapter/protocol evidence itself, rather than trusting the trainer's own claim of what it produced.
 - **Immutable, schema-versioned SQLite persistence** for every training artifact, evaluation outcome, and result — an append-only evidence trail, not a mutable status field.
 - **JSON project configuration** with fail-closed validation, plus a guided TUI (`chowder tui`, also the default with no arguments) for building and running training projects without hand-writing config.
@@ -31,7 +34,7 @@ Autonomous repair loop:
 - **Bounded, autonomous recursive repair**: a rejected candidate can be diagnosed, repaired, and re-evaluated automatically within a GPU-hour budget, with crash-safe resume and full provenance back to the training data and parent adapter it repaired.
 - **Evidence manifest hashing** for reproducibility/provenance across the whole chain.
 
-Still ahead: checkpoint/resume for the training executor itself, real multi-GPU (Accelerate/DDP → FSDP), an evaluator resource contract matching the training executor's, expanded training recipes (loss masking, chat datasets, LR scheduling), and wiring the autonomous repair loop into the default single-command user path. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full, currently-accurate list.
+Still ahead: FSDP for multi-GPU (DDP now supported), an evaluator resource contract matching the training executor's, expanded training recipes (loss masking, chat datasets, LR scheduling), and wiring the autonomous repair loop into the default single-command user path. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full, currently-accurate list.
 
 ## Design rules
 
