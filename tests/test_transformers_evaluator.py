@@ -100,6 +100,41 @@ def test_eval_spec_pins_resolved_training_commit_and_inherits_runtime(tmp_path):
     assert spec.suites[0].dataset == str(data.resolve())
 
 
+def test_eval_spec_offline_defaults_to_false(tmp_path):
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"2+2?","expected":"4"}\n')
+    artifact = _artifact(tmp_path)
+    spec = TransformersTextEvalSpec.from_context(
+        config=_config("eval.jsonl"), artifact=artifact, work_dir=tmp_path, output_dir=tmp_path / "out", seed=1
+    )
+    assert spec.offline is False
+
+
+def test_eval_spec_offline_inherits_from_backend_when_unset_on_evaluation(tmp_path):
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"2+2?","expected":"4"}\n')
+    artifact = _artifact(tmp_path)
+    config = _config("eval.jsonl")
+    config["backend"]["offline"] = True
+    spec = TransformersTextEvalSpec.from_context(
+        config=config, artifact=artifact, work_dir=tmp_path, output_dir=tmp_path / "out", seed=1
+    )
+    assert spec.offline is True
+
+
+def test_eval_spec_offline_on_evaluation_overrides_backend(tmp_path):
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"2+2?","expected":"4"}\n')
+    artifact = _artifact(tmp_path)
+    config = _config("eval.jsonl")
+    config["backend"]["offline"] = True
+    config["evaluation"]["offline"] = False
+    spec = TransformersTextEvalSpec.from_context(
+        config=config, artifact=artifact, work_dir=tmp_path, output_dir=tmp_path / "out", seed=1
+    )
+    assert spec.offline is False
+
+
 def test_evaluator_refuses_mutated_adapter(tmp_path):
     data = tmp_path / "eval.jsonl"
     data.write_text('{"prompt":"2+2?","expected":"4"}\n')

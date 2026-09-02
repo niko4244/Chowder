@@ -97,6 +97,7 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
             spec.base_model,
             revision=spec.revision,
             trust_remote_code=False,
+            local_files_only=spec.offline,
         ),
         label=f"tokenizer download for {spec.base_model}",
     )
@@ -105,7 +106,11 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
             raise RuntimeError("tokenizer has neither pad_token nor eos_token")
         tokenizer.pad_token = tokenizer.eos_token
 
-    model_kwargs: dict[str, Any] = {"trust_remote_code": False, "dtype": dtype}
+    model_kwargs: dict[str, Any] = {
+        "trust_remote_code": False,
+        "dtype": dtype,
+        "local_files_only": spec.offline,
+    }
     if spec.revision is not None:
         model_kwargs["revision"] = spec.revision
     if spec.quantization == "4bit":

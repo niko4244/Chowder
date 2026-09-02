@@ -53,6 +53,7 @@ class TransformersTextEvalSpec:
     seed: int = 1
     timeout_seconds: float | None = None
     trust_remote_code: bool = False
+    offline: bool = False
 
     def __post_init__(self) -> None:
         if not self.base_model.strip():
@@ -161,6 +162,7 @@ class TransformersTextEvalSpec:
             seed=int(config.get("seed", seed)),
             timeout_seconds=(float(runtime["timeout_seconds"]) if runtime.get("timeout_seconds") is not None else None),
             trust_remote_code=bool(evaluation.get("trust_remote_code", False)),
+            offline=bool(evaluation.get("offline", backend.get("offline", False))),
         )
 
 

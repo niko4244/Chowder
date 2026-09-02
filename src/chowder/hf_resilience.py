@@ -16,9 +16,12 @@ DEFAULT_MAX_DELAY_SECONDS = 30.0
 
 def _permanent_hub_error_types() -> tuple[type[BaseException], ...]:
     """Errors retrying can never fix: a bad model name, no access to a
-    gated repo, a bad revision, or a malformed repo id. These must raise
-    immediately, not be retried into a long, confusing wait that ends in
-    the exact same error.
+    gated repo, a bad revision, a malformed repo id, or -- with offline
+    mode enabled -- a cache miss (LocalEntryNotFoundError, raised when
+    local_files_only=True and the file simply isn't cached; retrying can't
+    materialize a file offline mode has already refused to go fetch).
+    These must raise immediately, not be retried into a long, confusing
+    wait that ends in the exact same error.
     """
     try:
         from huggingface_hub import errors as hub_errors
@@ -31,6 +34,7 @@ def _permanent_hub_error_types() -> tuple[type[BaseException], ...]:
         hub_errors.DisabledRepoError,
         hub_errors.BadRequestError,
         hub_errors.HFValidationError,
+        hub_errors.LocalEntryNotFoundError,
     )
 
 

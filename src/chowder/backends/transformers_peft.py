@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
+from ..dependency_preflight import check_dependencies
 from ..executors import CostEstimate, ExecutionContext, TrainingArtifact
 from ..memory import HardwareProfile
 from ..models import Experiment
@@ -114,6 +115,7 @@ class TransformersPeftRunSpec:
     seed: int = 1
     timeout_seconds: float | None = None
     trust_remote_code: bool = False
+    offline: bool = False
     save_strategy: str = "no"
     save_steps: int = 0
     save_total_limit: int | None = None
@@ -223,11 +225,13 @@ class TransformersPeftRunSpec:
 
     def recipe_digest(self) -> str:
         """Digest of the training *recipe* -- hyperparameters that determine
-        what model resuming/replaying would produce. Paths, timeouts, and
+        what model resuming/replaying would produce. Paths, timeouts,
         checkpoint cadence (save_strategy/save_steps/save_total_limit,
-        resume_from_checkpoint) are operational, not recipe: how often you
-        checkpoint or which checkpoint you resume from doesn't change what
-        the training run is trying to do.
+        resume_from_checkpoint), and offline mode are operational, not
+        recipe: none of them change what the training run is trying to do
+        -- how often you checkpoint, which checkpoint you resume from, and
+        whether the model was fetched from cache or network all produce the
+        exact same trained result.
         """
         recipe = self.to_dict()
         recipe.pop("output_dir", None)
@@ -235,6 +239,7 @@ class TransformersPeftRunSpec:
         recipe.pop("replay_dataset", None)
         recipe.pop("parent_adapter", None)
         recipe.pop("timeout_seconds", None)
+        recipe.pop("offline", None)
         recipe.pop("save_strategy", None)
         recipe.pop("save_steps", None)
         recipe.pop("save_total_limit", None)
@@ -364,6 +369,7 @@ class TransformersPeftRunSpec:
                 else None
             ),
             trust_remote_code=bool(backend.get("trust_remote_code", False)),
+            offline=bool(backend.get("offline", False)),
             save_strategy=str(training.get("save_strategy", "no")),
             save_steps=int(training.get("save_steps", 0)),
             save_total_limit=(
@@ -413,6 +419,7 @@ class TransformersPeftExecutor:
             "replay_dataset",
             "parent_adapter",
             "timeout_seconds",
+            "offline",
             "save_strategy",
             "save_steps",
             "save_total_limit",
@@ -557,6 +564,20 @@ class TransformersPeftExecutor:
         if count < 0:
             raise ValueError("active_accelerator_count cannot be negative")
         return count
+
+    @staticmethod
+    def resolved_quantization(context: ExecutionContext) -> str:
+        """The quantization value this executor would actually train with,
+        accounting for the hardware-aware default -- used by preflight
+        dependency checking, which needs to know whether bitsandbytes will
+        actually be required before any config-resolution/spec-building has
+        happened yet.
+        """
+        config = context.resolved_config
+        backend = config.get("backend", {}) if isinstance(config, Mapping) else {}
+        if isinstance(backend, Mapping) and "quantization" in backend:
+            return str(backend["quantization"]).lower()
+        return _default_quantization(context.hardware)
 
     def profile(self, experiment: Experiment, context: ExecutionContext) -> CostEstimate:
         config = context.resolved_config
