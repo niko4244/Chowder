@@ -19,6 +19,15 @@ from ..resources import ResourceUsage
 
 _ALLOWED_QUANTIZATION = {"none", "4bit"}
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
+_ALLOWED_LR_SCHEDULER_TYPES = {
+    "linear",
+    "cosine",
+    "cosine_with_restarts",
+    "polynomial",
+    "constant",
+    "constant_with_warmup",
+    "inverse_sqrt",
+}
 
 
 @dataclass(frozen=True)
@@ -37,6 +46,12 @@ class TransformersPeftRunSpec:
     max_length: int = 512
     epochs: float = 1.0
     learning_rate: float = 2e-4
+    lr_scheduler_type: str = "linear"
+    warmup_ratio: float = 0.0
+    warmup_steps: int = 0
+    weight_decay: float = 0.0
+    max_grad_norm: float = 1.0
+    max_steps: int = -1
     batch_size: int = 1
     gradient_accumulation_steps: int = 4
     logging_steps: int = 10
@@ -99,6 +114,23 @@ class TransformersPeftRunSpec:
             raise ValueError("backend.max_length must be positive")
         if self.epochs <= 0 or self.learning_rate <= 0:
             raise ValueError("training epochs and learning_rate must be positive")
+        if self.lr_scheduler_type not in _ALLOWED_LR_SCHEDULER_TYPES:
+            raise ValueError(f"unsupported lr_scheduler_type: {self.lr_scheduler_type}")
+        if not math.isfinite(self.warmup_ratio) or not 0 <= self.warmup_ratio < 1:
+            # Strictly < 1: the worker forwards this as HF TrainingArguments'
+            # overloaded warmup_steps, which treats a value >= 1 as an
+            # absolute step count, not a ratio. Accepting 1.0 here would
+            # silently become "warm up for 1 step" instead of "warm up for
+            # the entire run" once it reaches the worker.
+            raise ValueError("warmup_ratio must be finite and in [0, 1)")
+        if self.warmup_steps < 0:
+            raise ValueError("warmup_steps cannot be negative")
+        if not math.isfinite(self.weight_decay) or self.weight_decay < 0:
+            raise ValueError("weight_decay must be finite and non-negative")
+        if not math.isfinite(self.max_grad_norm) or self.max_grad_norm < 0:
+            raise ValueError("max_grad_norm must be finite and non-negative")
+        if self.max_steps != -1 and self.max_steps <= 0:
+            raise ValueError("max_steps must be -1 (disabled) or a positive integer")
         if self.batch_size <= 0 or self.gradient_accumulation_steps <= 0:
             raise ValueError("batch sizes must be positive")
         if self.lora_r <= 0 or self.lora_alpha <= 0:
@@ -240,6 +272,12 @@ class TransformersPeftRunSpec:
             max_length=int(backend.get("max_length", 512)),
             epochs=float(training.get("epochs", 1.0)),
             learning_rate=float(training.get("learning_rate", 2e-4)),
+            lr_scheduler_type=str(training.get("lr_scheduler_type", "linear")),
+            warmup_ratio=float(training.get("warmup_ratio", 0.0)),
+            warmup_steps=int(training.get("warmup_steps", 0)),
+            weight_decay=float(training.get("weight_decay", 0.0)),
+            max_grad_norm=float(training.get("max_grad_norm", 1.0)),
+            max_steps=int(training.get("max_steps", -1)),
             batch_size=int(training.get("batch_size", 1)),
             gradient_accumulation_steps=int(training.get("gradient_accumulation_steps", 4)),
             logging_steps=int(training.get("logging_steps", 10)),
@@ -297,12 +335,13 @@ class TransformersPeftExecutor:
         Deliberately its own digest, not ``spec.recipe_digest()`` (which
         serves a different purpose elsewhere -- comparing whether two
         experiments used "the same recipe" for repair-tracking -- and
-        includes ``epochs``). ``epochs`` is excluded here on purpose:
-        training for more total epochs than originally planned is the
-        entire point of resuming, and Trainer legitimately recomputes the
-        remaining LR-scheduler trajectory for a new total when resuming --
-        that is not a hazard to the optimizer state the way a changed
-        learning rate, batch size, or dataset would be.
+        includes ``epochs``/``max_steps``). ``epochs`` and ``max_steps`` are
+        excluded here on purpose: training for more total epochs/steps than
+        originally planned is the entire point of resuming, and Trainer
+        legitimately recomputes the remaining LR-scheduler trajectory for a
+        new total when resuming -- that is not a hazard to the optimizer
+        state the way a changed learning rate, batch size, weight decay, LR
+        schedule shape, or dataset would be.
         """
         recipe = spec.to_dict()
         for key in (
@@ -316,6 +355,7 @@ class TransformersPeftExecutor:
             "save_total_limit",
             "resume_from_checkpoint",
             "epochs",
+            "max_steps",
         ):
             recipe.pop(key, None)
         recipe_payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))

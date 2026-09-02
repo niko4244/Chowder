@@ -269,12 +269,25 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
 
     output_dir = Path(spec.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # transformers>=5.2 merged the old two-field warmup_ratio/warmup_steps
+    # split into a single overloaded warmup_steps: a float in [0, 1) means a
+    # ratio of total steps, an int/float >= 1 means an absolute step count.
+    # warmup_ratio itself is gone as a TrainingArguments kwarg entirely as of
+    # 5.16. Chowder's own spec keeps the two separate, unambiguous fields as
+    # its public schema -- only this translation, and only warmup_steps'
+    # existing precedence over warmup_ratio, is HF-version plumbing.
+    warmup_steps_arg = spec.warmup_steps if spec.warmup_steps > 0 else spec.warmup_ratio
     args_kwargs: dict[str, Any] = {
         "output_dir": str(output_dir / "trainer"),
         "num_train_epochs": spec.epochs,
+        "max_steps": spec.max_steps,
         "per_device_train_batch_size": spec.batch_size,
         "gradient_accumulation_steps": spec.gradient_accumulation_steps,
         "learning_rate": spec.learning_rate,
+        "lr_scheduler_type": spec.lr_scheduler_type,
+        "warmup_steps": warmup_steps_arg,
+        "weight_decay": spec.weight_decay,
+        "max_grad_norm": spec.max_grad_norm,
         "logging_steps": spec.logging_steps,
         "save_strategy": spec.save_strategy,
         "report_to": "none",
