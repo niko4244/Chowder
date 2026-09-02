@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..contamination import write_holdout_fingerprint_index
+from ..hf_resilience import with_hub_retries
 from .base_text import BaseTextEvalSpec
 from .transformers_text import EvalSuiteSpec
 
@@ -91,10 +92,13 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
     dtype = _dtype(torch, spec.precision)
     set_seed(spec.seed)
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        spec.base_model,
-        revision=spec.revision,
-        trust_remote_code=False,
+    tokenizer = with_hub_retries(
+        lambda: AutoTokenizer.from_pretrained(
+            spec.base_model,
+            revision=spec.revision,
+            trust_remote_code=False,
+        ),
+        label=f"tokenizer download for {spec.base_model}",
     )
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token_id is None:
@@ -114,7 +118,10 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
         index = int(device_name.split(":", 1)[1]) if ":" in device_name else 0
         model_kwargs["device_map"] = {"": index}
 
-    model = AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs)
+    model = with_hub_retries(
+        lambda: AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs),
+        label=f"model download for {spec.base_model}",
+    )
     resolved_commit = getattr(model.config, "_commit_hash", None)
     if spec.quantization == "none":
         model = model.to(device_name)

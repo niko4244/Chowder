@@ -1783,3 +1783,74 @@ def test_real_tiny_llama_trains_with_hardware_defaulted_gradient_checkpointing_d
     assert hardware_defaults["gradient_checkpointing_defaulted"] is True
     assert hardware_defaults["resolved_gradient_checkpointing"] is False
     assert artifact.telemetry["global_step"] > 0
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_training_retries_a_flaky_tokenizer_download(tmp_path, monkeypatch):
+    """Proves with_hub_retries is actually wired into the worker's real
+    tokenizer-loading call, not just correct in isolation against a
+    directly-constructed function. Calls transformers_worker.train()
+    in-process (not through TransformersPeftExecutor's usual real
+    subprocess) because a subprocess's imports can't be monkeypatched from
+    the parent test process -- this is the one place that deviates from
+    this file's usual real-subprocess pattern, and only for that reason."""
+    from chowder.backends import transformers_worker
+
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"Question: What token comes after alpha? Answer: beta"}\n')
+
+    config = _config(str(data))
+    config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    config["backend"]["precision"] = "fp32"
+    config["backend"]["quantization"] = "none"
+    config["backend"]["lora"] = {
+        "r": 4,
+        "alpha": 8,
+        "dropout": 0.0,
+        "target_modules": ["q_proj", "v_proj"],
+    }
+    config["backend"]["training"] = {
+        "epochs": 1.0,
+        "learning_rate": 0.001,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 1,
+        "logging_steps": 1,
+        "gradient_checkpointing": False,
+    }
+    config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+    spec = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+
+    import httpx
+    import transformers as real_transformers
+
+    real_from_pretrained = real_transformers.AutoTokenizer.from_pretrained
+    attempts = {"n": 0}
+
+    def flaky_from_pretrained(*args, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            try:
+                raise httpx.ConnectTimeout("simulated timeout")
+            except httpx.ConnectTimeout as exc:
+                raise OSError("simulated wrapped transient failure") from exc
+        return real_from_pretrained(*args, **kwargs)
+
+    monkeypatch.setattr(
+        real_transformers.AutoTokenizer, "from_pretrained", flaky_from_pretrained
+    )
+    # with_hub_retries' sleep parameter defaults to time.sleep, bound once at
+    # function-definition time -- monkeypatching time.sleep afterward can't
+    # intercept it (the default already holds a direct reference to the
+    # original function object, not a name that later patching re-resolves).
+    # Production code never passes sleep= explicitly, so this test accepts
+    # the real ~3.5s of default backoff delay (1.0s + 2.0s, plus jitter)
+    # rather than mocking internals the real code path doesn't expose.
+    result = transformers_worker.train(spec)
+    assert attempts["n"] == 3
+    assert result is not None
+    assert result["telemetry"]["global_step"] > 0
