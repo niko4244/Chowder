@@ -218,3 +218,59 @@ def test_cpu_evaluation_does_not_consume_gpu_hour_budget(tmp_path, monkeypatch):
     )
     assert result.gpu_hours == 0.0
     assert result.evidence["runtime"]["device"] == "cpu"
+
+
+def test_evaluator_profile_reads_declared_estimated_gpu_hours(tmp_path):
+    context = ExecutionContext(
+        _hardware(),
+        str(tmp_path),
+        1,
+        resolved_config={"evaluation": {"estimated_gpu_hours": 0.3}},
+    )
+    estimate = TransformersTextEvaluator().profile(_experiment(), context)
+    assert estimate.gpu_hours == pytest.approx(0.3)
+    assert estimate.confidence == 0.25
+
+
+def test_evaluator_profile_defaults_to_zero_when_unset(tmp_path):
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config={})
+    estimate = TransformersTextEvaluator().profile(_experiment(), context)
+    assert estimate.gpu_hours == 0.0
+
+
+def test_evaluator_cancel_terminates_a_tracked_running_process():
+    class FakeRunningProcess:
+        def __init__(self):
+            self.terminated = False
+            self.waited = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            self.waited = True
+
+    evaluator = TransformersTextEvaluator()
+    process = FakeRunningProcess()
+    evaluator._processes["run-1"] = process
+    evaluator.cancel("run-1")
+    assert process.terminated
+    assert process.waited
+
+
+def test_evaluator_cancel_is_a_no_op_for_unknown_or_finished_run():
+    evaluator = TransformersTextEvaluator()
+    evaluator.cancel("never-started")
+
+    class FinishedProcess:
+        def poll(self):
+            return 0
+
+        def terminate(self):
+            raise AssertionError("must not terminate an already-finished process")
+
+    evaluator._processes["run-2"] = FinishedProcess()
+    evaluator.cancel("run-2")

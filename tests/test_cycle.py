@@ -40,8 +40,14 @@ class Trainer:
 class Evaluator:
     name = "fake-eval"
 
+    def profile(self, experiment, context):
+        raise NotImplementedError
+
     def evaluate(self, *, experiment, artifact, context):
         return EvaluationOutcome("eval-1", experiment.experiment_id, artifact.artifact_ref, {"quality": 0.85}, 0.1, {"suite": "q"})
+
+    def cancel(self, run_id):
+        pass
 
 
 def test_generation_combines_training_and_evaluation_cost_before_adjudication(tmp_path):

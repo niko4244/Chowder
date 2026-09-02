@@ -133,8 +133,14 @@ class _ProfileTooLargeTrainer:
 class _UnusedEvaluator:
     name = "unused"
 
+    def profile(self, experiment, context):
+        raise NotImplementedError
+
     def evaluate(self, *, experiment, artifact, context):
         raise AssertionError("evaluation must not run")
+
+    def cancel(self, run_id):
+        return None
 
 
 def test_cycle_preflight_releases_budget_without_charging_when_profile_cannot_fit(tmp_path):
@@ -182,6 +188,9 @@ class _NoProfileTrainer(_MeasuredTrainer):
 class _MeasuredEvaluator:
     name = "measured-eval"
 
+    def profile(self, experiment, context):
+        raise NotImplementedError
+
     def evaluate(self, *, experiment, artifact, context):
         return EvaluationOutcome(
             run_id="eval-1",
@@ -190,6 +199,21 @@ class _MeasuredEvaluator:
             metrics={"score": 2.0},
             gpu_hours=0.1,
         )
+
+    def cancel(self, run_id):
+        return None
+
+
+class _ProfiledEvaluator(_MeasuredEvaluator):
+    """Unlike _MeasuredEvaluator, implements profile() -- this is the branch
+    that should take priority over the declared evaluation.estimated_gpu_hours
+    fallback, mirroring how a trainer's own profile() already outranks the
+    engine's existing reservation."""
+
+    name = "profiled-eval"
+
+    def profile(self, experiment, context):
+        return CostEstimate(gpu_hours=0.15)
 
 
 def test_cycle_reserves_training_profile_plus_declared_evaluation_cost(tmp_path):
@@ -225,4 +249,25 @@ def test_cycle_uses_existing_reservation_when_profile_is_not_implemented(tmp_pat
     outcome = runner.run_generation((experiment,))
     assert outcome.promoted is not None
     assert outcome.promoted.evidence["compute"]["reserved_lifecycle_gpu_hours"] == pytest.approx(0.85)
+    assert engine.spent_gpu_hours == pytest.approx(0.6)
+
+
+def test_cycle_reserves_evaluator_profile_over_declared_reserve_when_implemented(tmp_path):
+    engine = _engine(2.0)
+    experiment = _experiment(hours=0.25)
+    engine.propose((experiment,))
+    runner = ExperimentCycleRunner(
+        engine=engine,
+        trainer=_MeasuredTrainer(),
+        evaluator=_ProfiledEvaluator(),
+        context=ExecutionContext(_hardware(), str(tmp_path), seed=1),
+        # A declared estimate is present too, but the evaluator's own
+        # profile() (0.15) must win over it (0.9), the same way a trainer's
+        # profile() already outranks the engine's existing reservation.
+        base_config={"evaluation": {"estimated_gpu_hours": 0.9}},
+    )
+    outcome = runner.run_generation((experiment,))
+    assert outcome.promoted is not None
+    compute = outcome.promoted.evidence["compute"]
+    assert compute["reserved_lifecycle_gpu_hours"] == pytest.approx(0.95)
     assert engine.spent_gpu_hours == pytest.approx(0.6)

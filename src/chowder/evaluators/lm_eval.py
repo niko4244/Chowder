@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..executors import EvaluationOutcome, ExecutionContext, TrainingArtifact
+from ..executors import CostEstimate, EvaluationOutcome, ExecutionContext, TrainingArtifact
 from ..models import Experiment
 from ..protocol import protocol_fingerprint
 from ..provenance import sha256_directory
@@ -156,6 +156,34 @@ class LmEvalEvaluator:
 
     name = "lm-eval"
 
+    def __init__(self) -> None:
+        self._processes: dict[str, subprocess.Popen[Any]] = {}
+
+    def profile(self, experiment: Experiment, context: ExecutionContext) -> CostEstimate:
+        config = context.resolved_config
+        evaluation = config.get("evaluation", {}) if isinstance(config, Mapping) else {}
+        hours = 0.0
+        if isinstance(evaluation, Mapping) and evaluation.get("estimated_gpu_hours") is not None:
+            hours = max(0.0, float(evaluation["estimated_gpu_hours"]))
+        return CostEstimate(
+            gpu_hours=hours,
+            confidence=0.25,
+            notes=(
+                "using evaluation-declared GPU-hour estimate; no measured evaluation profile",
+            ),
+        )
+
+    def cancel(self, run_id: str) -> None:
+        process = self._processes.get(run_id)
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
     @staticmethod
     def _worker_command(spec_path: Path, result_path: Path) -> list[str]:
         return [
@@ -217,6 +245,7 @@ class LmEvalEvaluator:
                 stderr=stderr,
                 text=True,
             )
+            self._processes[eval_id] = process
             try:
                 process.wait(timeout=spec.timeout_seconds)
             except subprocess.TimeoutExpired as exc:
@@ -227,6 +256,8 @@ class LmEvalEvaluator:
                     process.kill()
                     process.wait()
                 raise TimeoutError(f"evaluation {eval_id} exceeded timeout") from exc
+            finally:
+                self._processes.pop(eval_id, None)
 
         elapsed = time.perf_counter() - started
         if process.returncode != 0:

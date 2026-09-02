@@ -161,8 +161,14 @@ class _MustNotRunTransformersTrainer:
 class _MustNotEvaluate:
     name = "unused"
 
+    def profile(self, experiment, context):
+        raise NotImplementedError
+
     def evaluate(self, *, experiment, artifact, context):
         raise AssertionError("invalid config must never reach evaluation")
+
+    def cancel(self, run_id):
+        return None
 
 
 def test_cycle_rejects_typo_before_profile_and_charges_zero_compute(tmp_path):

@@ -153,3 +153,55 @@ def test_lm_eval_evaluator_returns_evaluation_only_gpu_cost_and_protocol(tmp_pat
     assert outcome.evidence["task_configs_sha256"] == "b" * 64
     assert len(outcome.evidence["protocol_sha256"]) == 64
     assert outcome.evidence["protocol"]["task_configs_sha256"] == "b" * 64
+
+
+def test_evaluator_profile_reads_declared_estimated_gpu_hours(tmp_path):
+    config = _config()
+    config["evaluation"]["estimated_gpu_hours"] = 0.4
+    context = ExecutionContext(HardwareProfile(16, 64, 500, 12, 40, 3), str(tmp_path), 1, resolved_config=config)
+    estimate = LmEvalEvaluator().profile(_experiment(), context)
+    assert estimate.gpu_hours == pytest.approx(0.4)
+    assert estimate.confidence == 0.25
+
+
+def test_evaluator_profile_defaults_to_zero_when_unset(tmp_path):
+    estimate = LmEvalEvaluator().profile(_experiment(), _context(tmp_path))
+    assert estimate.gpu_hours == 0.0
+
+
+def test_evaluator_cancel_terminates_a_tracked_running_process():
+    class FakeRunningProcess:
+        def __init__(self):
+            self.terminated = False
+            self.waited = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            self.waited = True
+
+    evaluator = LmEvalEvaluator()
+    process = FakeRunningProcess()
+    evaluator._processes["run-1"] = process
+    evaluator.cancel("run-1")
+    assert process.terminated
+    assert process.waited
+
+
+def test_evaluator_cancel_is_a_no_op_for_unknown_or_finished_run():
+    evaluator = LmEvalEvaluator()
+    evaluator.cancel("never-started")
+
+    class FinishedProcess:
+        def poll(self):
+            return 0
+
+        def terminate(self):
+            raise AssertionError("must not terminate an already-finished process")
+
+    evaluator._processes["run-2"] = FinishedProcess()
+    evaluator.cancel("run-2")

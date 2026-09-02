@@ -71,6 +71,12 @@ class FakeEvaluator:
         self.holdout_path = Path(holdout_path).resolve()
         self.holdout_sha = sha256_file(self.holdout_path)
 
+    def profile(self, experiment, context):
+        raise NotImplementedError
+
+    def cancel(self, run_id):
+        pass
+
     def evaluate(self, *, experiment, artifact, context):
         is_repair = "repair" in experiment.tags
         quality = 0.86 if is_repair else 0.65
