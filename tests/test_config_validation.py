@@ -125,6 +125,19 @@ def test_misspelled_target_preset_key_fails_closed():
         validate_transformers_backend_config(config)
 
 
+def test_offline_key_is_accepted():
+    config = _backend_config()
+    config["backend"]["offline"] = True
+    validate_transformers_backend_config(config)
+
+
+def test_misspelled_offline_key_fails_closed():
+    config = _backend_config()
+    config["backend"]["offlien"] = True
+    with pytest.raises(ConfigValidationError, match="offlien"):
+        validate_transformers_backend_config(config)
+
+
 def test_top_level_repair_metadata_is_not_rejected():
     config = _backend_config()
     config["repair"] = {

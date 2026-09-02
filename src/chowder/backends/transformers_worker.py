@@ -323,7 +323,10 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     set_seed(spec.seed)
     tokenizer = with_hub_retries(
         lambda: AutoTokenizer.from_pretrained(
-            spec.base_model, revision=spec.revision, trust_remote_code=False
+            spec.base_model,
+            revision=spec.revision,
+            trust_remote_code=False,
+            local_files_only=spec.offline,
         ),
         label=f"tokenizer download for {spec.base_model}",
     )
@@ -334,7 +337,11 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             )
         tokenizer.pad_token = tokenizer.eos_token
 
-    model_kwargs: dict[str, Any] = {"trust_remote_code": False, "dtype": dtype}
+    model_kwargs: dict[str, Any] = {
+        "trust_remote_code": False,
+        "dtype": dtype,
+        "local_files_only": spec.offline,
+    }
     if spec.revision is not None:
         model_kwargs["revision"] = spec.revision
     if spec.quantization == "4bit":

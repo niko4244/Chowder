@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -834,6 +835,81 @@ def test_executor_threads_context_hardware_into_default_resolution(tmp_path, mon
     assert hardware_defaults["gradient_checkpointing_defaulted"] is True
     assert hardware_defaults["quantization_defaulted"] is False  # _config() sets it explicitly
     assert hardware_defaults["resolved_gradient_checkpointing"] is False
+
+
+# --- offline / local-model mode ----------------------------------------------
+
+
+def test_spec_defaults_offline_to_false(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    spec = TransformersPeftRunSpec.from_resolved_config(
+        _config(str(data)), work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert spec.offline is False
+
+
+def test_spec_reads_offline_from_resolved_config(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["offline"] = True
+    spec = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert spec.offline is True
+
+
+def test_recipe_digest_is_stable_across_offline_toggle(tmp_path):
+    """offline is purely operational -- it changes how the model is
+    fetched, never what training produces -- so it must not be part of the
+    recipe digest, unlike quantization/target_preset/etc."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    a = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    config["backend"]["offline"] = True
+    b = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert a.recipe_digest() == b.recipe_digest()
+
+
+def test_resume_allows_a_different_offline_value(tmp_path, monkeypatch):
+    """offline is excluded from the checkpoint-resume bound-inputs check
+    the same way it's excluded from recipe_digest -- it was never a hazard
+    to the loaded optimizer state to begin with."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    config["backend"]["offline"] = False
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    config["backend"]["offline"] = True
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert observed_spec["resume_from_checkpoint"] == str(checkpoint_dir.resolve())
+    assert artifact is not None
 
 
 # --- checkpoint/restart -----------------------------------------------------
@@ -1854,3 +1930,78 @@ def test_real_tiny_llama_training_retries_a_flaky_tokenizer_download(tmp_path, m
     assert attempts["n"] == 3
     assert result is not None
     assert result["telemetry"]["global_step"] > 0
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_trains_with_offline_mode_against_a_cached_model(tmp_path):
+    """backend.offline=True against the real, already-cached test model --
+    proves local_files_only=True is actually threaded through to both the
+    tokenizer and model from_pretrained calls and that a real cache hit
+    trains successfully without touching the network at all."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"Question: What token comes after alpha? Answer: beta"}\n')
+
+    config = _config(str(data))
+    config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    config["backend"]["precision"] = "fp32"
+    config["backend"]["quantization"] = "none"
+    config["backend"]["offline"] = True
+    config["backend"]["lora"] = {
+        "r": 4,
+        "alpha": 8,
+        "dropout": 0.0,
+        "target_modules": ["q_proj", "v_proj"],
+    }
+    config["backend"]["training"] = {
+        "epochs": 1.0,
+        "learning_rate": 0.001,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 1,
+        "logging_steps": 1,
+        "gradient_checkpointing": False,
+    }
+    config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert Path(artifact.artifact_ref).is_dir()
+    assert artifact.telemetry["global_step"] > 0
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_offline_mode_fails_fast_with_zero_retries_for_an_uncached_model(tmp_path):
+    """offline=True against a model that is definitely not cached must fail
+    immediately (LocalEntryNotFoundError, classified as permanent) rather
+    than retrying into ~30s of pointless backoff for a fetch it was told
+    never to attempt."""
+    # Pre-import the same stack transformers_worker.train() imports lazily,
+    # so its own internal `import torch`/etc. are sys.modules cache hits
+    # instead of a genuine ~5s cold import -- this test measures whether
+    # the offline lookup itself retries, not one-time interpreter warmup.
+    import datasets  # noqa: F401
+    import peft  # noqa: F401
+    import torch  # noqa: F401
+    import transformers  # noqa: F401
+
+    from chowder.backends import transformers_worker
+
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["base_model"] = "chowder-test-org/definitely-not-cached-offline-xyz"
+    config["backend"]["offline"] = True
+    spec = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+
+    started = time.perf_counter()
+    with pytest.raises(Exception):
+        transformers_worker.train(spec)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 5.0  # would be 1.0s+ into backoff alone if it retried even once

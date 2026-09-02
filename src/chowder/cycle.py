@@ -6,8 +6,11 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
 
+from .backends.transformers_peft import TransformersPeftExecutor
 from .config_validation import validate_transformers_backend_config
+from .dependency_preflight import check_dependencies
 from .engine import EvolutionEngine
+from .evaluators.transformers_text import TransformersTextEvaluator
 from .execution_failure import ExecutionFailure, ExecutionStage, normalize_execution_exception
 from .executor_investigator import ExecutorFailureAnalysis, analyze_execution_failure
 from .executors import EvaluationExecutor, EvaluationOutcome, ExecutionContext, TrainingArtifact, TrainingExecutor
@@ -124,6 +127,52 @@ def _validate_trainer_config(trainer: TrainingExecutor, resolved: Mapping[str, A
         validate_transformers_backend_config(resolved)
 
 
+_TRANSFORMERS_PEFT_TRAINING_PACKAGES = ("torch", "transformers", "peft", "datasets", "accelerate")
+_TRANSFORMERS_TEXT_EVAL_PACKAGES = ("torch", "transformers", "peft")
+
+
+def _check_dependencies(
+    trainer: TrainingExecutor,
+    evaluator: EvaluationExecutor,
+    resolved: Mapping[str, Any],
+    context: ExecutionContext,
+) -> None:
+    """Dependency preflight, dispatched by real type rather than by the
+    duck-typed `.name` string _validate_trainer_config uses. Config
+    validation legitimately applies to anything claiming to be a
+    transformers-peft/-text backend, since it only inspects the resolved
+    config dict -- but "are torch/transformers/peft/etc. importable in
+    this process" is a question about whether the actual executor class
+    can run, not about what name a test double happens to share. An
+    isinstance check keeps every existing hand-written trainer/evaluator
+    test double (which never subclasses the real executors) unaffected,
+    while still catching a real missing dependency for the real backends.
+    Runs before engine.resize_reservation(), so a missing package is a
+    config-time rejection, not something discovered deep inside a spawned
+    subprocess after GPU-hours were already reserved and a process
+    already started.
+    """
+    if isinstance(trainer, TransformersPeftExecutor):
+        check_dependencies(
+            packages=_TRANSFORMERS_PEFT_TRAINING_PACKAGES,
+            quantization=trainer.resolved_quantization(context),
+            label="transformers-peft training",
+        )
+    if isinstance(evaluator, TransformersTextEvaluator):
+        backend = resolved.get("backend", {})
+        evaluation = resolved.get("evaluation", {})
+        backend = backend if isinstance(backend, Mapping) else {}
+        evaluation = evaluation if isinstance(evaluation, Mapping) else {}
+        quantization = str(evaluation.get("quantization", "inherit")).lower()
+        if quantization == "inherit":
+            quantization = str(backend.get("quantization", "none")).lower()
+        check_dependencies(
+            packages=_TRANSFORMERS_TEXT_EVAL_PACKAGES,
+            quantization=quantization,
+            label="transformers-text evaluation",
+        )
+
+
 @dataclass
 class ExperimentCycleRunner:
     """Run one generation through profile → train → evaluate → diagnose → gate."""
@@ -158,6 +207,7 @@ class ExperimentCycleRunner:
 
         try:
             _validate_trainer_config(self.trainer, resolved)
+            _check_dependencies(self.trainer, self.evaluator, resolved, run_context)
             try:
                 training_estimate = self.trainer.profile(experiment, run_context)
             except NotImplementedError:

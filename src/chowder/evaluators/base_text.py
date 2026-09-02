@@ -28,6 +28,7 @@ class BaseTextEvalSpec:
     seed: int = 1
     timeout_seconds: float | None = None
     trust_remote_code: bool = False
+    offline: bool = False
 
     def __post_init__(self) -> None:
         if not self.base_model.strip():
@@ -130,6 +131,7 @@ class BaseTextEvalSpec:
                 else None
             ),
             trust_remote_code=bool(evaluation.get("trust_remote_code", False)),
+            offline=bool(evaluation.get("offline", backend.get("offline", False))),
         )
 
 
