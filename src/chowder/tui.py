@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -17,7 +17,16 @@ from .project import ProjectValidationError, write_project
 from .project_runner import hardware_profile_from_snapshot, run_project
 from .recursive_repair import RecursiveRepairStopReason
 from .registry import RunRegistry
-from .run_events import RunEventPayload, format_event
+from .run_events import (
+    CheckpointEvent,
+    FailureEvent,
+    PromotionEvent,
+    RepairEvent,
+    RunEvent,
+    RunEventPayload,
+    TrainingProgressEvent,
+    format_event,
+)
 
 
 class ChowderTUI(App[None]):
@@ -40,6 +49,7 @@ class ChowderTUI(App[None]):
     #actions Button { margin-right: 1; }
     #log { height: 14; border: round $primary; }
     #status { padding: 0 1; height: 1; }
+    #run_status { padding: 1; border: round $success; margin-bottom: 1; }
     """
 
     def __init__(self, *, project_path: str | Path = "chowder-project.json") -> None:
@@ -49,6 +59,7 @@ class ChowderTUI(App[None]):
         self._cancellation: CancellationToken | None = None
         self._training_worker = None
         self._discovered_checkpoints: tuple[DiscoveredCheckpoint, ...] = ()
+        self._run_status: dict[str, Any] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -153,6 +164,7 @@ class ChowderTUI(App[None]):
                 yield Button("View History", id="history")
                 yield Button("Quit", id="quit")
             yield Static("Ready", id="status")
+            yield Static("Not running", id="run_status")
             yield RichLog(id="log", wrap=True, highlight=True, markup=True)
         yield Footer()
 
@@ -449,6 +461,104 @@ class ChowderTUI(App[None]):
         )
         return "\n".join([header, *(self._format_checkpoint(c) for c in checkpoints)])
 
+    def _reset_run_status(self, *, project: str, model: str) -> None:
+        self._run_status = {"project": project, "model": model, "stage": "starting"}
+        self.query_one("#run_status", Static).update(self._render_run_status())
+
+    @staticmethod
+    def _estimate_remaining_seconds(status: Mapping[str, Any]) -> float | None:
+        step = status.get("step")
+        max_steps = status.get("max_steps")
+        wall_seconds = status.get("wall_seconds")
+        if not step or not max_steps or not wall_seconds or step >= max_steps:
+            return None
+        seconds_per_step = wall_seconds / step
+        return seconds_per_step * (max_steps - step)
+
+    def _render_run_status(self) -> str:
+        status = self._run_status
+        if not status:
+            return "Not running"
+        lines = [
+            f"Project: {status.get('project', '?')} | Model: {status.get('model', '?')} | "
+            f"Stage: {status.get('stage', '?')}"
+        ]
+        if status.get("step") is not None:
+            parts = [f"step {status['step']}" + (f"/{status['max_steps']}" if status.get("max_steps") else "")]
+            if status.get("epoch") is not None:
+                parts.append(f"epoch {status['epoch']:.2f}")
+            if status.get("loss") is not None:
+                parts.append(f"loss {status['loss']:.4f}")
+            if status.get("learning_rate") is not None:
+                parts.append(f"lr {status['learning_rate']:.2e}")
+            if status.get("wall_seconds") is not None:
+                parts.append(f"{status['wall_seconds']:.1f}s elapsed")
+            eta = self._estimate_remaining_seconds(status)
+            if eta is not None:
+                parts.append(f"~{eta:.0f}s remaining")
+            lines.append("Training: " + ", ".join(parts))
+        if status.get("checkpoint_dir"):
+            lines.append(f"Checkpoint: {status['checkpoint_dir']}")
+        if status.get("repair_depth") is not None:
+            repair_line = f"Repair: depth {status['repair_depth']}"
+            signature = status.get("repair_failure_signature")
+            if signature:
+                repair_line += f", cluster {signature[:12]}"
+            stop_reason = status.get("repair_stop_reason")
+            if stop_reason:
+                repair_line += f", stopped: {stop_reason}"
+            lines.append(repair_line)
+        if status.get("failure_count") is not None:
+            lines.append(
+                f"Failures harvested: {status['failure_count']} "
+                f"({status.get('repair_plan_count', 0)} repair plan(s))"
+            )
+        if status.get("promoted_experiment_id"):
+            metrics = ", ".join(
+                f"{name}={value:.4f}"
+                for name, value in sorted(status.get("promoted_metrics", {}).items())
+            )
+            lines.append(f"Promoted: {status['promoted_experiment_id']} ({metrics})")
+        return "\n".join(lines)
+
+    def _update_run_status(self, event: RunEventPayload) -> None:
+        if not self._run_status:
+            return  # no run in progress -- nothing to update
+        if isinstance(event, RunEvent):
+            self._run_status["stage"] = event.stage
+        elif isinstance(event, TrainingProgressEvent):
+            self._run_status.update(
+                step=event.step,
+                max_steps=event.max_steps,
+                epoch=event.epoch,
+                loss=event.loss,
+                learning_rate=event.learning_rate,
+                wall_seconds=event.wall_seconds,
+            )
+        elif isinstance(event, CheckpointEvent):
+            self._run_status["checkpoint_dir"] = event.checkpoint_dir
+        elif isinstance(event, RepairEvent):
+            self._run_status.update(
+                repair_depth=event.depth,
+                repair_failure_signature=event.failure_signature,
+                repair_stop_reason=event.stop_reason,
+            )
+        elif isinstance(event, FailureEvent):
+            self._run_status.update(
+                failure_count=event.failure_count, repair_plan_count=event.repair_plan_count
+            )
+        elif isinstance(event, PromotionEvent):
+            self._run_status.update(
+                promoted_experiment_id=event.experiment_id, promoted_metrics=dict(event.metrics)
+            )
+        else:
+            return
+        # This runs on a background thread (the training worker, or its
+        # nested progress-polling thread) -- the actual widget update is
+        # marshaled the same way _update_hardware_panel's is.
+        widget = self.query_one("#run_status", Static)
+        self.call_from_thread(widget.update, self._render_run_status())
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "quit":
             self.exit()
@@ -523,6 +633,9 @@ class ChowderTUI(App[None]):
             # instead, a click in the brief window before that thread starts
             # would silently find self._cancellation still None.
             self._cancellation = CancellationToken()
+            self._reset_run_status(
+                project=self._value("project_name"), model=self._value("base_model")
+            )
             self._set_running(True)
             self._set_status("Training started")
             self._append_log(f"[bold]Starting project:[/] {target}")
@@ -571,6 +684,7 @@ class ChowderTUI(App[None]):
     def _run_training(self, project_path: Path, token: CancellationToken) -> None:
         def event_sink(event: RunEventPayload) -> None:
             self.call_from_thread(self._append_log, format_event(event))
+            self._update_run_status(event)
 
         try:
             outcome = run_project(project_path, on_event=event_sink, cancellation=token)

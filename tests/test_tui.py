@@ -16,6 +16,14 @@ from chowder.project import ProjectValidationError
 from chowder.provenance import sha256_file
 from chowder.recursive_repair import RecursiveRepairStopReason
 from chowder.registry import RunRegistry
+from chowder.run_events import (
+    CheckpointEvent,
+    FailureEvent,
+    PromotionEvent,
+    RepairEvent,
+    RunEvent,
+    TrainingProgressEvent,
+)
 from chowder.tui import ChowderTUI
 
 
@@ -605,3 +613,149 @@ async def test_discover_checkpoints_reports_a_build_payload_error_gracefully(tmp
         assert app.query_one("#resume_best", Button).disabled is True
         panel_text = app.query_one("#checkpoints", Static).content
         assert "failed" in panel_text.lower()
+
+
+# --- run-status panel -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_render_run_status_reports_not_running_before_any_run(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        assert app._render_run_status() == "Not running"
+
+
+@pytest.mark.asyncio
+async def test_reset_run_status_sets_project_model_and_starting_stage(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        app._reset_run_status(project="My Project", model="org/model")
+        rendered = app._render_run_status()
+    assert "Project: My Project" in rendered
+    assert "Model: org/model" in rendered
+    assert "Stage: starting" in rendered
+
+
+def test_estimate_remaining_seconds_computes_a_linear_eta():
+    status = {"step": 10, "max_steps": 100, "wall_seconds": 20.0}
+    eta = ChowderTUI._estimate_remaining_seconds(status)
+    assert eta == pytest.approx(180.0)  # 2s/step * 90 remaining steps
+
+
+def test_estimate_remaining_seconds_none_at_or_past_max_steps():
+    assert ChowderTUI._estimate_remaining_seconds({"step": 100, "max_steps": 100, "wall_seconds": 20.0}) is None
+
+
+def test_estimate_remaining_seconds_none_without_max_steps():
+    assert ChowderTUI._estimate_remaining_seconds({"step": 10, "wall_seconds": 20.0}) is None
+
+
+def test_estimate_remaining_seconds_none_with_zero_step():
+    assert (
+        ChowderTUI._estimate_remaining_seconds({"step": 0, "max_steps": 100, "wall_seconds": 0.0})
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_render_run_status_includes_training_progress_and_eta(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        app._reset_run_status(project="p", model="m")
+        app._run_status.update(
+            step=5, max_steps=10, epoch=0.5, loss=1.2345, learning_rate=2e-4, wall_seconds=10.0
+        )
+        rendered = app._render_run_status()
+    assert "step 5/10" in rendered
+    assert "epoch 0.50" in rendered
+    assert "loss 1.2345" in rendered
+    assert "remaining" in rendered
+
+
+@pytest.mark.asyncio
+async def test_render_run_status_includes_checkpoint_repair_failure_and_promotion(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        app._reset_run_status(project="p", model="m")
+        app._run_status.update(
+            checkpoint_dir="/ckpt/e1",
+            repair_depth=2,
+            repair_failure_signature="abcdef0123456789",
+            repair_stop_reason="max_depth",
+            failure_count=3,
+            repair_plan_count=1,
+            promoted_experiment_id="e1-repair-1",
+            promoted_metrics={"quality": 0.9},
+        )
+        rendered = app._render_run_status()
+    assert "Checkpoint: /ckpt/e1" in rendered
+    assert "Repair: depth 2" in rendered
+    assert "cluster abcdef012345" in rendered
+    assert "stopped: max_depth" in rendered
+    assert "Failures harvested: 3 (1 repair plan(s))" in rendered
+    assert "Promoted: e1-repair-1 (quality=0.9000)" in rendered
+
+
+@pytest.mark.asyncio
+async def test_update_run_status_is_a_noop_before_a_run_starts(tmp_path):
+    """self._run_status starts empty (no _reset_run_status call yet) --
+    events arriving before that must not crash or fabricate a run."""
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        assert app._run_status == {}
+        app._update_run_status(RunEvent(stage="train", message="x"))
+        assert app._run_status == {}
+
+
+def _fake_run_project_with_events(events_to_emit, outcome):
+    def fake_run_project(project_path, *, on_event=None, cancellation=None):
+        if on_event is not None:
+            for event in events_to_emit:
+                on_event(event)
+        return outcome
+
+    return fake_run_project
+
+
+@pytest.mark.asyncio
+async def test_run_status_panel_updates_live_through_the_real_event_pipeline(
+    tmp_path, monkeypatch
+):
+    """Drives _reset_run_status -> a real @work(thread=True) worker calling
+    event_sink from a genuine background thread -> _update_run_status's
+    call_from_thread marshaling -> the actual #run_status widget. Exercises
+    the real cross-thread path, not just the pure rendering logic covered
+    above."""
+    events = [
+        RunEvent(stage="train", message="starting", experiment_id="e1"),
+        TrainingProgressEvent(
+            experiment_id="e1",
+            step=5,
+            max_steps=10,
+            epoch=0.5,
+            loss=1.5,
+            learning_rate=2e-4,
+            wall_seconds=3.0,
+        ),
+        CheckpointEvent(experiment_id="e1", checkpoint_dir="/ckpt/e1", step=5),
+        RepairEvent(target_experiment_id="e1", depth=1, failure_signature="sig123"),
+        FailureEvent(experiment_id="e1", failure_count=2, repair_plan_count=1),
+        PromotionEvent(experiment_id="e1", metrics={"quality": 0.95}),
+    ]
+    monkeypatch.setattr(
+        "chowder.tui.run_project",
+        _fake_run_project_with_events(events, _fake_outcome(promoted_experiment_id="e1")),
+    )
+
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        app.on_button_pressed(Button.Pressed(app.query_one("#start", Button)))
+        await app._training_worker.wait()
+        panel_text = app.query_one("#run_status", Static).content
+
+    assert "step 5/10" in panel_text
+    assert "Checkpoint: /ckpt/e1" in panel_text
+    assert "Repair: depth 1" in panel_text
+    assert "Failures harvested: 2" in panel_text
+    assert "Promoted: e1 (quality=0.9500)" in panel_text
