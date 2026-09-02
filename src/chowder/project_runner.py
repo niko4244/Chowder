@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .backends.transformers_peft import TransformersPeftExecutor
+from .cancellation import CancellationToken
 from .cycle import ExperimentCycleRunner, GenerationOutcome
 from .engine import EvolutionEngine
 from .evaluators.base_text import BaseModelTextEvaluator
@@ -167,8 +168,17 @@ def run_project(
     project_or_path: ProjectSpec | str | Path,
     *,
     on_event: EventCallback | None = None,
+    cancellation: CancellationToken | None = None,
 ) -> ProjectRunOutcome:
-    """Execute one real (baseline if automatic) → train → evaluate → gate project generation."""
+    """Execute one real (baseline if automatic) → train → evaluate → gate project generation.
+
+    `cancellation`, if given, is checked before each candidate (and each
+    autonomous-repair hop) starts, and is bound to the real trainer/evaluator
+    while one is in flight so a request can terminate an already-running
+    subprocess rather than only preventing the next one. Not consulted
+    during automatic baseline evaluation, which runs before any candidate
+    and is typically short relative to training.
+    """
 
     if isinstance(project_or_path, ProjectSpec):
         project = project_or_path
@@ -224,6 +234,7 @@ def run_project(
             base_config=training_config,
             registry=registry,
             failure_harvester=harvest_transformers_text_failures,
+            cancellation=cancellation,
         )
         accepted = engine.propose((project.experiment,))
         if not accepted:

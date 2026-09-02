@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
+from ..cancellation import CancellationToken
 from ..dependency_preflight import check_dependencies
 from ..executors import CostEstimate, ExecutionContext, TrainingArtifact
 from ..memory import HardwareProfile
@@ -389,6 +390,14 @@ class TransformersPeftExecutor:
 
     def __init__(self) -> None:
         self._processes: dict[str, subprocess.Popen[Any]] = {}
+        self._cancellation: CancellationToken | None = None
+
+    def bind_cancellation(self, token: CancellationToken | None) -> None:
+        """Optional capability: a CancellationToken to register the
+        in-flight run against, so token.request() can terminate a training
+        subprocess that is already running, not just prevent a future one
+        from starting."""
+        self._cancellation = token
 
     @staticmethod
     def _bound_inputs(spec: TransformersPeftRunSpec) -> dict[str, Any]:
@@ -752,6 +761,8 @@ class TransformersPeftExecutor:
         ) as stderr:
             process = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True)
             self._processes[run_id] = process
+            if self._cancellation is not None:
+                self._cancellation._register_active(self, run_id)
             try:
                 process.wait(timeout=spec.timeout_seconds)
             except subprocess.TimeoutExpired as exc:
@@ -764,6 +775,8 @@ class TransformersPeftExecutor:
                 raise TimeoutError(f"training run {run_id} exceeded timeout") from exc
             finally:
                 self._processes.pop(run_id, None)
+                if self._cancellation is not None:
+                    self._cancellation._clear_active()
 
         elapsed = time.perf_counter() - started
         if process.returncode != 0:

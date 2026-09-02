@@ -1,5 +1,6 @@
 from dataclasses import replace
 
+from chowder.cancellation import CancellationToken
 from chowder.cycle import ExperimentCycleRunner
 from chowder.engine import EvolutionEngine
 from chowder.executors import EvaluationOutcome, ExecutionContext, TrainingArtifact
@@ -202,4 +203,107 @@ def test_diagnostic_failure_does_not_invalidate_valid_evaluation(tmp_path):
     outcome = runner.run_generation([exp])
     assert outcome.promoted is not None
     assert outcome.candidates[0].diagnostic_error == "RuntimeError: diagnostic parser broke"
+
+
+# --- cooperative cancellation -------------------------------------------------
+
+
+def test_cancellation_requested_before_start_skips_the_candidate_cleanly(tmp_path):
+    class MustNotRun(Trainer):
+        def run(self, experiment, context):
+            raise AssertionError("must not run once cancellation was requested")
+
+    engine = _engine()
+    exp = _experiment()
+    engine.propose([exp])
+    token = CancellationToken()
+    token.request()
+    runner = ExperimentCycleRunner(
+        engine, MustNotRun(), Evaluator(), _context(tmp_path), cancellation=token
+    )
+    outcome = runner.run_generation([exp])
+    candidate = outcome.candidates[0]
+    assert candidate.error == "cancelled before start"
+    assert candidate.artifact is None
+    assert engine.spent_gpu_hours == 0
+    assert engine.reserved_gpu_hours == 0
+    assert not engine.has_reservation(exp.experiment_id)
+
+
+def test_cancellation_during_training_is_reported_cleanly_without_investigation(tmp_path):
+    token = CancellationToken()
+
+    class CancelsMidTraining(Trainer):
+        def run(self, experiment, context):
+            # Simulates request() successfully terminating an in-flight
+            # subprocess: the token becomes requested, and the interrupted
+            # call raises rather than returning an artifact.
+            token.request()
+            raise RuntimeError("worker terminated")
+
+    engine = _engine()
+    exp = _experiment()
+    engine.propose([exp])
+    runner = ExperimentCycleRunner(
+        engine, CancelsMidTraining(), Evaluator(), _context(tmp_path), cancellation=token
+    )
+    outcome = runner.run_generation([exp])
+    candidate = outcome.candidates[0]
+    assert candidate.error is not None
+    assert candidate.error.startswith("cancelled: ")
+    assert candidate.executor_analysis is None
+
+
+def test_cancellation_during_evaluation_is_reported_cleanly_without_investigation(tmp_path):
+    token = CancellationToken()
+
+    class CancelsMidEvaluation(Evaluator):
+        def evaluate(self, *, experiment, artifact, context):
+            token.request()
+            raise RuntimeError("worker terminated")
+
+    engine = _engine()
+    exp = _experiment()
+    engine.propose([exp])
+    runner = ExperimentCycleRunner(
+        engine, Trainer(), CancelsMidEvaluation(), _context(tmp_path), cancellation=token
+    )
+    outcome = runner.run_generation([exp])
+    candidate = outcome.candidates[0]
+    assert candidate.error is not None
+    assert candidate.error.startswith("cancelled: ")
+    assert candidate.executor_analysis is None
+    assert candidate.artifact is not None  # training itself completed normally
+
+
+def test_bind_cancellation_is_used_when_the_executor_supports_it(tmp_path):
+    seen = []
+
+    class BindAwareTrainer(Trainer):
+        def bind_cancellation(self, token):
+            seen.append(token)
+
+    engine = _engine()
+    exp = _experiment()
+    engine.propose([exp])
+    token = CancellationToken()
+    runner = ExperimentCycleRunner(
+        engine, BindAwareTrainer(), Evaluator(), _context(tmp_path), cancellation=token
+    )
+    runner.run_generation([exp])
+    assert seen == [token, None]  # bound before run(), cleared afterward
+
+
+def test_a_trainer_without_bind_cancellation_support_is_unaffected(tmp_path):
+    """Trainer/Evaluator (used throughout this file) never define
+    bind_cancellation -- proves passing a token doesn't break a plain
+    executor that doesn't opt into the capability."""
+    engine = _engine()
+    exp = _experiment()
+    engine.propose([exp])
+    runner = ExperimentCycleRunner(
+        engine, Trainer(), Evaluator(), _context(tmp_path), cancellation=CancellationToken()
+    )
+    outcome = runner.run_generation([exp])
+    assert outcome.promoted is not None
     assert outcome.candidates[0].error is None
