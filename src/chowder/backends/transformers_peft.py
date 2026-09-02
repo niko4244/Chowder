@@ -51,6 +51,10 @@ class TransformersPeftRunSpec:
     seed: int = 1
     timeout_seconds: float | None = None
     trust_remote_code: bool = False
+    save_strategy: str = "no"
+    save_steps: int = 0
+    save_total_limit: int | None = None
+    resume_from_checkpoint: str | None = None
 
     def __post_init__(self) -> None:
         if not self.base_model.strip():
@@ -111,6 +115,14 @@ class TransformersPeftRunSpec:
             raise ValueError("timeout_seconds must be positive")
         if self.trust_remote_code:
             raise ValueError("trust_remote_code is disabled for autonomous Chowder execution")
+        if self.save_strategy not in {"no", "steps", "epoch"}:
+            raise ValueError(f"unsupported save_strategy: {self.save_strategy}")
+        if self.save_strategy == "steps" and self.save_steps <= 0:
+            raise ValueError("save_steps must be positive when save_strategy='steps'")
+        if self.save_total_limit is not None and self.save_total_limit <= 0:
+            raise ValueError("save_total_limit must be positive")
+        if self.resume_from_checkpoint is not None and not self.resume_from_checkpoint.strip():
+            raise ValueError("resume_from_checkpoint cannot be empty")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -122,12 +134,23 @@ class TransformersPeftRunSpec:
         return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
 
     def recipe_digest(self) -> str:
+        """Digest of the training *recipe* -- hyperparameters that determine
+        what model resuming/replaying would produce. Paths, timeouts, and
+        checkpoint cadence (save_strategy/save_steps/save_total_limit,
+        resume_from_checkpoint) are operational, not recipe: how often you
+        checkpoint or which checkpoint you resume from doesn't change what
+        the training run is trying to do.
+        """
         recipe = self.to_dict()
         recipe.pop("output_dir", None)
         recipe.pop("dataset", None)
         recipe.pop("replay_dataset", None)
         recipe.pop("parent_adapter", None)
         recipe.pop("timeout_seconds", None)
+        recipe.pop("save_strategy", None)
+        recipe.pop("save_steps", None)
+        recipe.pop("save_total_limit", None)
+        recipe.pop("resume_from_checkpoint", None)
         payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -188,6 +211,16 @@ class TransformersPeftRunSpec:
         dataset_sha = backend.get("dataset_sha256")
         replay_sha = replay.get("sha256")
         parent_sha = parent_adapter.get("sha256")
+
+        resume_raw = backend.get("resume_from_checkpoint")
+        resume_from_checkpoint: Path | None = None
+        if resume_raw is not None:
+            resume_from_checkpoint = Path(str(resume_raw))
+            if not resume_from_checkpoint.is_absolute():
+                resume_from_checkpoint = Path(work_dir) / resume_from_checkpoint
+            resume_from_checkpoint = resume_from_checkpoint.resolve()
+
+        save_total_limit_raw = training.get("save_total_limit")
         return cls(
             base_model=str(backend.get("base_model", "")),
             dataset=str(dataset),
@@ -230,7 +263,18 @@ class TransformersPeftRunSpec:
                 else None
             ),
             trust_remote_code=bool(backend.get("trust_remote_code", False)),
+            save_strategy=str(training.get("save_strategy", "no")),
+            save_steps=int(training.get("save_steps", 0)),
+            save_total_limit=(
+                int(save_total_limit_raw) if save_total_limit_raw is not None else None
+            ),
+            resume_from_checkpoint=(
+                str(resume_from_checkpoint) if resume_from_checkpoint is not None else None
+            ),
         )
+
+
+_CHECKPOINT_MANIFEST_NAME = "chowder-checkpoint-manifest.json"
 
 
 class TransformersPeftExecutor:
@@ -238,6 +282,102 @@ class TransformersPeftExecutor:
 
     def __init__(self) -> None:
         self._processes: dict[str, subprocess.Popen[Any]] = {}
+
+    @staticmethod
+    def _bound_inputs(spec: TransformersPeftRunSpec) -> dict[str, Any]:
+        """The training inputs a checkpoint is bound to.
+
+        Everything a resumed run must match exactly before its optimizer/
+        scheduler state can be trusted: the exact base model and revision,
+        the exact dataset/replay/parent-adapter content this checkpoint was
+        actually produced from, and a recipe digest of the hyperparameters
+        that determine optimizer-state validity (learning rate, batch size,
+        LoRA config, quantization/precision, seed, sequence length).
+
+        Deliberately its own digest, not ``spec.recipe_digest()`` (which
+        serves a different purpose elsewhere -- comparing whether two
+        experiments used "the same recipe" for repair-tracking -- and
+        includes ``epochs``). ``epochs`` is excluded here on purpose:
+        training for more total epochs than originally planned is the
+        entire point of resuming, and Trainer legitimately recomputes the
+        remaining LR-scheduler trajectory for a new total when resuming --
+        that is not a hazard to the optimizer state the way a changed
+        learning rate, batch size, or dataset would be.
+        """
+        recipe = spec.to_dict()
+        for key in (
+            "output_dir",
+            "dataset",
+            "replay_dataset",
+            "parent_adapter",
+            "timeout_seconds",
+            "save_strategy",
+            "save_steps",
+            "save_total_limit",
+            "resume_from_checkpoint",
+            "epochs",
+        ):
+            recipe.pop(key, None)
+        recipe_payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
+        return {
+            "checkpoint_recipe_sha256": hashlib.sha256(
+                recipe_payload.encode("utf-8")
+            ).hexdigest(),
+            "base_model": spec.base_model,
+            "revision": spec.revision,
+            "dataset_sha256": spec.dataset_sha256,
+            "replay_dataset_sha256": spec.replay_sha256,
+            "parent_adapter_sha256": spec.parent_adapter_sha256,
+        }
+
+    @staticmethod
+    def _write_checkpoint_manifest(trainer_dir: Path, bound_inputs: Mapping[str, Any]) -> None:
+        trainer_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = trainer_dir / _CHECKPOINT_MANIFEST_NAME
+        payload = json.dumps(dict(bound_inputs), sort_keys=True, indent=2) + "\n"
+        existing = manifest_path.read_text(encoding="utf-8") if manifest_path.is_file() else None
+        if existing is not None and existing != payload:
+            raise RuntimeError(
+                f"checkpoint manifest {manifest_path} already exists with different bound "
+                "inputs -- this run directory was not produced by the current spec"
+            )
+        manifest_path.write_text(payload, encoding="utf-8")
+
+    @classmethod
+    def _verify_resume_checkpoint(
+        cls, spec: TransformersPeftRunSpec, bound_inputs: Mapping[str, Any]
+    ) -> None:
+        """Reject a resume if any bound training input has changed.
+
+        A checkpoint's optimizer/scheduler state is only meaningful for the
+        exact recipe, model, and data it was produced under -- resuming
+        into it after any of those changed would silently continue
+        optimizing toward a different objective with stale momentum/LR
+        schedule state. Refusing is the safe default; the caller can always
+        start a fresh (non-resuming) run instead.
+        """
+        checkpoint_dir = Path(spec.resume_from_checkpoint).resolve()  # type: ignore[arg-type]
+        if not checkpoint_dir.is_dir():
+            raise FileNotFoundError(f"resume_from_checkpoint not found: {checkpoint_dir}")
+        manifest_path = checkpoint_dir.parent / _CHECKPOINT_MANIFEST_NAME
+        if not manifest_path.is_file():
+            raise RuntimeError(
+                f"no checkpoint manifest found at {manifest_path} -- refusing to resume "
+                "from a checkpoint with no recorded bound inputs to verify against"
+            )
+        recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(recorded, Mapping):
+            raise RuntimeError(f"checkpoint manifest {manifest_path} is not a JSON object")
+        changed = {
+            key: {"checkpoint": recorded.get(key), "requested": value}
+            for key, value in bound_inputs.items()
+            if recorded.get(key) != value
+        }
+        if changed:
+            raise ValueError(
+                f"refusing to resume from {checkpoint_dir}: bound training input(s) changed "
+                f"since this checkpoint was produced: {json.dumps(changed, sort_keys=True)}"
+            )
 
     @staticmethod
     def _json_digest(value: Mapping[str, Any]) -> str:
@@ -401,6 +541,12 @@ class TransformersPeftExecutor:
         run_dir.mkdir(parents=True, exist_ok=False)
         spec = self._spec_for(experiment, context, run_dir=run_dir)
 
+        bound_inputs = self._bound_inputs(spec)
+        if spec.resume_from_checkpoint is not None:
+            self._verify_resume_checkpoint(spec, bound_inputs)
+        if spec.save_strategy != "no":
+            self._write_checkpoint_manifest(Path(spec.output_dir) / "trainer", bound_inputs)
+
         spec_path = run_dir / "run-spec.json"
         result_path = run_dir / "worker-result.json"
         stdout_path = run_dir / "stdout.log"
@@ -511,6 +657,17 @@ class TransformersPeftExecutor:
                     ),
                 },
                 "seed": spec.seed,
+                "checkpoint": {
+                    "save_strategy": spec.save_strategy,
+                    "save_steps": spec.save_steps,
+                    "save_total_limit": spec.save_total_limit,
+                    "resumed_from_checkpoint": spec.resume_from_checkpoint,
+                    "trainer_dir": (
+                        str(Path(spec.output_dir) / "trainer")
+                        if spec.save_strategy != "no"
+                        else None
+                    ),
+                },
             },
         )
 

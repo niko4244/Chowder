@@ -266,21 +266,26 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
 
     output_dir = Path(spec.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    args = TrainingArguments(
-        output_dir=str(output_dir / "trainer"),
-        num_train_epochs=spec.epochs,
-        per_device_train_batch_size=spec.batch_size,
-        gradient_accumulation_steps=spec.gradient_accumulation_steps,
-        learning_rate=spec.learning_rate,
-        logging_steps=spec.logging_steps,
-        save_strategy="no",
-        report_to="none",
-        gradient_checkpointing=spec.gradient_checkpointing,
-        bf16=(dtype is torch.bfloat16),
-        fp16=(dtype is torch.float16),
-        seed=spec.seed,
-        data_seed=spec.seed,
-    )
+    args_kwargs: dict[str, Any] = {
+        "output_dir": str(output_dir / "trainer"),
+        "num_train_epochs": spec.epochs,
+        "per_device_train_batch_size": spec.batch_size,
+        "gradient_accumulation_steps": spec.gradient_accumulation_steps,
+        "learning_rate": spec.learning_rate,
+        "logging_steps": spec.logging_steps,
+        "save_strategy": spec.save_strategy,
+        "report_to": "none",
+        "gradient_checkpointing": spec.gradient_checkpointing,
+        "bf16": (dtype is torch.bfloat16),
+        "fp16": (dtype is torch.float16),
+        "seed": spec.seed,
+        "data_seed": spec.seed,
+    }
+    if spec.save_strategy == "steps":
+        args_kwargs["save_steps"] = spec.save_steps
+    if spec.save_total_limit is not None:
+        args_kwargs["save_total_limit"] = spec.save_total_limit
+    args = TrainingArguments(**args_kwargs)
     trainer = Trainer(
         model=model,
         args=args,
@@ -289,7 +294,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
     )
 
     started = time.perf_counter()
-    train_output = trainer.train()
+    train_output = trainer.train(resume_from_checkpoint=spec.resume_from_checkpoint)
     runtime = time.perf_counter() - started
     model.save_pretrained(output_dir, safe_serialization=True)
     tokenizer.save_pretrained(output_dir)

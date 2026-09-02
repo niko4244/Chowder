@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -265,3 +266,347 @@ def test_replay_sample_count_is_bounded_and_deterministic():
     assert _replay_sample_count(4, 3, 10.0) == 3
     assert _replay_sample_count(1, 4, 0.01) == 1
     assert _replay_sample_count(0, 4, 1.0) == 0
+
+
+# --- checkpoint/restart -----------------------------------------------------
+
+
+def test_save_strategy_and_resume_are_read_from_resolved_config(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    checkpoint_dir = tmp_path / "prior" / "trainer" / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+    config = _config(str(data))
+    config["backend"]["training"]["save_strategy"] = "steps"
+    config["backend"]["training"]["save_steps"] = 25
+    config["backend"]["training"]["save_total_limit"] = 3
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    spec = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert spec.save_strategy == "steps"
+    assert spec.save_steps == 25
+    assert spec.save_total_limit == 3
+    assert spec.resume_from_checkpoint == str(checkpoint_dir.resolve())
+
+
+def test_save_steps_required_when_strategy_is_steps(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["save_strategy"] = "steps"
+    with pytest.raises(ValueError, match="save_steps must be positive"):
+        TransformersPeftRunSpec.from_resolved_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+        )
+
+
+def test_unsupported_save_strategy_is_rejected(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["save_strategy"] = "every_full_moon"
+    with pytest.raises(ValueError, match="unsupported save_strategy"):
+        TransformersPeftRunSpec.from_resolved_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+        )
+
+
+def test_recipe_digest_is_stable_across_checkpoint_cadence(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = sha256_file(data)
+    a = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "a", seed=1
+    )
+    config["backend"]["training"]["save_strategy"] = "steps"
+    config["backend"]["training"]["save_steps"] = 10
+    config["backend"]["training"]["save_total_limit"] = 2
+    b = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "b", seed=1
+    )
+    assert a.recipe_digest() == b.recipe_digest()
+
+
+def _fake_process_factory(observed_spec: dict):
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            spec_path = Path(command[command.index("--spec") + 1])
+            result_path = Path(command[command.index("--result") + 1])
+            spec = json.loads(spec_path.read_text())
+            observed_spec.update(spec)
+            output = Path(spec["output_dir"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "adapter_model.safetensors").write_bytes(b"adapter")
+            if spec.get("save_strategy") != "no":
+                (Path(output) / "trainer").mkdir(parents=True, exist_ok=True)
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "telemetry": {"train_loss": 0.25, "global_step": 3},
+                        "versions": {"transformers": "5.test"},
+                        "provenance": {"resolved_model_commit": "abc123"},
+                        "data_provenance": {"primary_rows": 1, "replay_selected_rows": 0},
+                    }
+                )
+            )
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    return FakeProcess
+
+
+def test_run_writes_a_checkpoint_manifest_when_save_strategy_enabled(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["save_strategy"] = "steps"
+    config["backend"]["training"]["save_steps"] = 5
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    manifest_path = Path(artifact.artifact_ref) / "trainer" / "chowder-checkpoint-manifest.json"
+    assert manifest_path.is_file()
+    manifest = json.loads(manifest_path.read_text())
+    # Deliberately its own digest, not artifact.evidence["recipe_sha256"] --
+    # see TransformersPeftExecutor._bound_inputs's docstring for why (it
+    # excludes epochs, spec.recipe_digest() does not).
+    assert len(manifest["checkpoint_recipe_sha256"]) == 64
+    assert manifest["dataset_sha256"] == sha256_file(data)
+    assert artifact.evidence["checkpoint"]["save_strategy"] == "steps"
+    assert artifact.evidence["checkpoint"]["save_steps"] == 5
+
+
+def test_run_writes_no_manifest_when_save_strategy_is_default_no(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    context = ExecutionContext(
+        _hardware(), str(tmp_path), 1, resolved_config=_config(str(data))
+    )
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact.evidence["checkpoint"]["trainer_dir"] is None
+    assert not (Path(artifact.artifact_ref) / "trainer").exists()
+
+
+def test_resume_is_rejected_when_no_checkpoint_manifest_exists(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    checkpoint_dir = tmp_path / "prior" / "trainer" / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)  # no chowder-checkpoint-manifest.json alongside it
+    config = _config(str(data))
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch for an unverifiable checkpoint")
+
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen", should_not_launch
+    )
+    with pytest.raises(RuntimeError, match="no checkpoint manifest found"):
+        TransformersPeftExecutor().run(_experiment(), context)
+
+
+def test_resume_is_rejected_when_dataset_changed_since_checkpoint(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"original"}\n')
+    original_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = original_sha
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    # A different dataset now bound to the same checkpoint path -- e.g. a
+    # differently-configured retry pointed resume_from_checkpoint at someone
+    # else's run directory, or the training data was edited in place.
+    data2 = tmp_path / "train2.jsonl"
+    data2.write_text('{"text":"different"}\n')
+    config2 = _config(str(data2))
+    config2["backend"]["dataset_sha256"] = sha256_file(data2)
+    config2["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config2)
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch when bound inputs changed")
+
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen", should_not_launch
+    )
+    with pytest.raises(ValueError, match="refusing to resume"):
+        TransformersPeftExecutor().run(_experiment(), context)
+
+
+def test_resume_succeeds_when_bound_inputs_match(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert observed_spec["resume_from_checkpoint"] == str(checkpoint_dir.resolve())
+    assert artifact.evidence["checkpoint"]["resumed_from_checkpoint"] == str(
+        checkpoint_dir.resolve()
+    )
+
+
+def test_resume_allows_a_different_total_epoch_count(tmp_path, monkeypatch):
+    """Training for more total epochs than originally planned is the whole
+    point of resuming -- it must not be treated as a bound-input change."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    config["backend"]["training"]["epochs"] = 1
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    config["backend"]["training"]["epochs"] = 5  # extend, not restart
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert observed_spec["resume_from_checkpoint"] == str(checkpoint_dir.resolve())
+    assert artifact is not None
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_resumes_training_from_a_real_checkpoint(tmp_path):
+    """Prove resume actually works against real Transformers+PEFT+Trainer
+    machinery, not just that the manifest plumbing is wired correctly --
+    PEFT models resuming through Trainer's own checkpoint/optimizer-state
+    mechanism is exactly the kind of interaction a mocked subprocess test
+    cannot catch a real bug in."""
+    data = tmp_path / "train.jsonl"
+    rows = [
+        {"text": "Question: What token comes after alpha? Answer: beta"},
+        {"text": "Question: What token comes after red? Answer: blue"},
+        {"text": "Question: What token comes after one? Answer: two"},
+        {"text": "Question: What token comes after up? Answer: down"},
+    ]
+    data.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    base_config = _config(str(data))
+    base_config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    base_config["backend"]["precision"] = "fp32"
+    base_config["backend"]["quantization"] = "none"
+    base_config["backend"]["lora"] = {
+        "r": 4,
+        "alpha": 8,
+        "dropout": 0.0,
+        "target_modules": ["q_proj", "v_proj"],
+    }
+    base_config["backend"]["training"] = {
+        "epochs": 1.0,
+        "learning_rate": 0.001,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 1,
+        "logging_steps": 1,
+        "gradient_checkpointing": False,
+        "save_strategy": "steps",
+        "save_steps": 1,
+    }
+    base_config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(
+        _hardware(), str(tmp_path), 1, resolved_config=base_config
+    )
+    first = TransformersPeftExecutor().run(_experiment(), context)
+    trainer_dir = Path(first.artifact_ref) / "trainer"
+    checkpoints = sorted(
+        (p for p in trainer_dir.glob("checkpoint-*") if p.is_dir()),
+        key=lambda p: int(p.name.rsplit("-", 1)[1]),
+    )
+    assert checkpoints, "no checkpoints were written by the first run"
+    manifest_path = trainer_dir / "chowder-checkpoint-manifest.json"
+    assert manifest_path.is_file()
+
+    resume_config = json.loads(json.dumps(base_config))  # deep copy
+    resume_config["backend"]["resume_from_checkpoint"] = str(checkpoints[-1])
+    resume_config["backend"]["training"]["epochs"] = 2.0
+    resume_context = ExecutionContext(
+        _hardware(), str(tmp_path), 1, resolved_config=resume_config
+    )
+
+    # A mismatched resume must be rejected before any real training happens.
+    tampered_config = json.loads(json.dumps(resume_config))
+    tampered_config["backend"]["training"]["learning_rate"] = 0.5
+    with pytest.raises(ValueError, match="refusing to resume"):
+        TransformersPeftExecutor().run(
+            _experiment(),
+            ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=tampered_config),
+        )
+
+    # The matching resume must actually run and continue past where the
+    # first run stopped.
+    second = TransformersPeftExecutor().run(_experiment(), resume_context)
+    assert second.telemetry["global_step"] >= first.telemetry["global_step"]
+    assert second.evidence["checkpoint"]["resumed_from_checkpoint"] == str(
+        checkpoints[-1].resolve()
+    )
