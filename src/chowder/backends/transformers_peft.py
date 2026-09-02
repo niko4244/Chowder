@@ -531,8 +531,8 @@ class TransformersPeftExecutor:
         runtime = backend.get("runtime", {}) if isinstance(backend, Mapping) else {}
         raw = runtime.get("active_accelerator_count") if isinstance(runtime, Mapping) else None
         count = 1 if raw is None else int(raw)
-        if count < 1:
-            raise ValueError("backend.runtime.active_accelerator_count must be at least 1")
+        if count < 0:
+            raise ValueError("backend.runtime.active_accelerator_count cannot be negative")
         # accelerator_vram_gb is the accurate multi-device topology when
         # populated (always true for real hardware via hardware_bridge.py).
         # Callers that only set the legacy single-pool vram_gb (most tests,

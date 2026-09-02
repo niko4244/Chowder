@@ -588,11 +588,22 @@ def test_active_accelerator_count_reads_runtime_config_against_real_topology(tmp
     assert TransformersPeftExecutor._active_accelerator_count(context) == 2
 
 
-def test_active_accelerator_count_rejects_count_below_one(tmp_path):
+def test_active_accelerator_count_accepts_zero_as_no_accelerator_declared(tmp_path):
+    # 0 is an established sentinel elsewhere (_profile_accelerator_count) for
+    # "no accelerator used" -- e.g. CPU-only smoke configs -- distinct from
+    # an unset value (which defaults to 1). It must still resolve to a plain
+    # single-process launch, not be rejected.
     config = _config("train.jsonl")
     config["backend"]["runtime"] = {"active_accelerator_count": 0}
     context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
-    with pytest.raises(ValueError, match="at least 1"):
+    assert TransformersPeftExecutor._active_accelerator_count(context) == 0
+
+
+def test_active_accelerator_count_rejects_negative_count(tmp_path):
+    config = _config("train.jsonl")
+    config["backend"]["runtime"] = {"active_accelerator_count": -1}
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    with pytest.raises(ValueError, match="cannot be negative"):
         TransformersPeftExecutor._active_accelerator_count(context)
 
 
