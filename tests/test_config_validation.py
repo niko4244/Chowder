@@ -60,6 +60,43 @@ def test_valid_t4x2_backend_config_is_accepted():
     validate_transformers_backend_config(_backend_config())
 
 
+def test_checkpoint_restart_keys_are_accepted():
+    """Regression test: backend.resume_from_checkpoint and
+    backend.training.save_strategy/save_steps/save_total_limit are fully
+    supported by TransformersPeftRunSpec but were never added to this
+    strict allowlist, so a real project using them through the
+    ExperimentCycleRunner path would have been rejected before reaching
+    the executor at all."""
+    config = _backend_config()
+    config["backend"]["resume_from_checkpoint"] = "prior/trainer/checkpoint-50"
+    config["backend"]["training"]["save_strategy"] = "steps"
+    config["backend"]["training"]["save_steps"] = 25
+    config["backend"]["training"]["save_total_limit"] = 3
+    validate_transformers_backend_config(config)
+
+
+def test_optimizer_schedule_recipe_keys_are_accepted():
+    config = _backend_config()
+    config["backend"]["training"].update(
+        {
+            "lr_scheduler_type": "cosine",
+            "warmup_ratio": 0.03,
+            "warmup_steps": 0,
+            "weight_decay": 0.01,
+            "max_grad_norm": 1.0,
+            "max_steps": -1,
+        }
+    )
+    validate_transformers_backend_config(config)
+
+
+def test_misspelled_optimizer_schedule_key_fails_closed():
+    config = _backend_config()
+    config["backend"]["training"]["max_grad_nrom"] = 1.0
+    with pytest.raises(ConfigValidationError, match="max_grad_nrom"):
+        validate_transformers_backend_config(config)
+
+
 def test_top_level_repair_metadata_is_not_rejected():
     config = _backend_config()
     config["repair"] = {

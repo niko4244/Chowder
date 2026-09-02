@@ -77,6 +77,7 @@ def validate_transformers_backend_config(config: Mapping[str, Any]) -> None:
             "replay",
             "parent_adapter",
             "profile",
+            "resume_from_checkpoint",
         },
         path="backend",
     )
@@ -102,10 +103,19 @@ def validate_transformers_backend_config(config: Mapping[str, Any]) -> None:
         {
             "epochs",
             "learning_rate",
+            "lr_scheduler_type",
+            "warmup_ratio",
+            "warmup_steps",
+            "weight_decay",
+            "max_grad_norm",
+            "max_steps",
             "batch_size",
             "gradient_accumulation_steps",
             "logging_steps",
             "gradient_checkpointing",
+            "save_strategy",
+            "save_steps",
+            "save_total_limit",
         },
         path="backend.training",
     )

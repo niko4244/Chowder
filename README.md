@@ -24,7 +24,9 @@ Real local executor (v0.2):
 - **Automatic baseline evaluation**: the untouched model is evaluated first (not user-supplied), the resolved model revision is bound into the training run so it starts from the exact snapshot the baseline measured, and `require_protocol_match=True` rejects a candidate whose evaluation protocol drifted from the baseline's instead of comparing anyway.
 - **Training checkpoint/restart** on top of Trainer's own checkpoint mechanism (`save_strategy`/`save_steps`, optimizer/scheduler state), with a manifest binding dataset/config/model hashes to each checkpoint so a resume is rejected if any of those inputs changed underneath it.
 - **Multi-GPU training launch** (`accelerate launch` + DDP; FSDP not yet implemented) driven by `backend.runtime.active_accelerator_count`, with GPU-hour accounting (`accelerator_seconds = wall_seconds * active_accelerator_count`) that reflects real launched processes rather than a declared estimate, and a post-run check that fails loudly if the launch did not actually engage every requested device.
+- **Optimizer/schedule recipe controls**: LR scheduler type, warmup (ratio or step count), weight decay, gradient clipping, and `max_steps` (overrides epoch-based length) are all first-class training-recipe fields, not hardcoded HF defaults — `max_steps` is excluded from the checkpoint-resume bound-inputs check the same way `epochs` is (extending training length is the point of resuming), while the others are treated as optimizer-trajectory hazards a resume must match exactly.
 - **Independent holdout evaluator** that reloads the base model and adapter separately from training and checks adapter/protocol evidence itself, rather than trusting the trainer's own claim of what it produced.
+- **Evaluator resource contract matching the trainer's**: evaluators support `profile()` (cost estimation) and `cancel()` alongside `evaluate()`, and an evaluator crash gets the same structured-failure capture, Executor Investigator routing, and partial GPU-hour accounting a training crash already did — not silent generic-exception handling.
 - **Immutable, schema-versioned SQLite persistence** for every training artifact, evaluation outcome, and result — an append-only evidence trail, not a mutable status field.
 - **JSON project configuration** with fail-closed validation, plus a guided TUI (`chowder tui`, also the default with no arguments) for building and running training projects without hand-writing config.
 
@@ -34,7 +36,7 @@ Autonomous repair loop:
 - **Bounded, autonomous recursive repair**: a rejected candidate can be diagnosed, repaired, and re-evaluated automatically within a GPU-hour budget, with crash-safe resume and full provenance back to the training data and parent adapter it repaired.
 - **Evidence manifest hashing** for reproducibility/provenance across the whole chain.
 
-Still ahead: FSDP for multi-GPU (DDP now supported), an evaluator resource contract matching the training executor's, expanded training recipes (loss masking, chat datasets, LR scheduling), and wiring the autonomous repair loop into the default single-command user path. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full, currently-accurate list.
+Still ahead: FSDP for multi-GPU (DDP now supported), assistant/completion-only loss masking and chat/message dataset support, auto-detected LoRA target modules and architecture presets, hardware-aware recipe defaults, and wiring the autonomous repair loop into the default single-command user path. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full, currently-accurate list.
 
 ## Design rules
 

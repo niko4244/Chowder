@@ -58,6 +58,15 @@ def test_spec_is_built_from_resolved_config_and_workdir(tmp_path):
     assert spec.lora_r == 8
     assert spec.quantization == "4bit"
     assert spec.target_modules == ("q_proj", "v_proj")
+    # Omitting the new optimizer/schedule fields must reproduce the exact
+    # values already baked into every prior recipe -- these are HF's own
+    # TrainingArguments defaults, not new Chowder-chosen defaults.
+    assert spec.lr_scheduler_type == "linear"
+    assert spec.warmup_ratio == 0.0
+    assert spec.warmup_steps == 0
+    assert spec.weight_decay == 0.0
+    assert spec.max_grad_norm == 1.0
+    assert spec.max_steps == -1
 
 
 def test_spec_resolves_bound_replay_config(tmp_path):
@@ -267,6 +276,116 @@ def test_replay_sample_count_is_bounded_and_deterministic():
     assert _replay_sample_count(4, 3, 10.0) == 3
     assert _replay_sample_count(1, 4, 0.01) == 1
     assert _replay_sample_count(0, 4, 1.0) == 0
+
+
+# --- optimizer/schedule recipe controls -------------------------------------
+
+
+def test_spec_reads_optimizer_schedule_fields_from_resolved_config(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"].update(
+        {
+            "lr_scheduler_type": "cosine",
+            "warmup_ratio": 0.1,
+            "warmup_steps": 50,
+            "weight_decay": 0.01,
+            "max_grad_norm": 0.5,
+            "max_steps": 200,
+        }
+    )
+    spec = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert spec.lr_scheduler_type == "cosine"
+    assert spec.warmup_ratio == pytest.approx(0.1)
+    assert spec.warmup_steps == 50
+    assert spec.weight_decay == pytest.approx(0.01)
+    assert spec.max_grad_norm == pytest.approx(0.5)
+    assert spec.max_steps == 200
+
+
+def test_unsupported_lr_scheduler_type_is_rejected(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["lr_scheduler_type"] = "warp_speed"
+    with pytest.raises(ValueError, match="unsupported lr_scheduler_type"):
+        TransformersPeftRunSpec.from_resolved_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+        )
+
+
+@pytest.mark.parametrize("ratio", [-0.1, 1.1, float("nan"), float("inf")])
+def test_warmup_ratio_out_of_range_is_rejected(tmp_path, ratio):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["warmup_ratio"] = ratio
+    with pytest.raises(ValueError, match="warmup_ratio"):
+        TransformersPeftRunSpec.from_resolved_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+        )
+
+
+def test_negative_warmup_steps_is_rejected(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["warmup_steps"] = -1
+    with pytest.raises(ValueError, match="warmup_steps cannot be negative"):
+        TransformersPeftRunSpec.from_resolved_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+        )
+
+
+def test_negative_weight_decay_is_rejected(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["weight_decay"] = -0.01
+    with pytest.raises(ValueError, match="weight_decay must be finite and non-negative"):
+        TransformersPeftRunSpec.from_resolved_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+        )
+
+
+def test_negative_max_grad_norm_is_rejected(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["max_grad_norm"] = -1.0
+    with pytest.raises(ValueError, match="max_grad_norm must be finite and non-negative"):
+        TransformersPeftRunSpec.from_resolved_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+        )
+
+
+@pytest.mark.parametrize("steps", [0, -2])
+def test_invalid_max_steps_is_rejected(tmp_path, steps):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["max_steps"] = steps
+    with pytest.raises(ValueError, match="max_steps must be -1"):
+        TransformersPeftRunSpec.from_resolved_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+        )
+
+
+def test_recipe_digest_changes_when_weight_decay_changes(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    a = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    config["backend"]["training"]["weight_decay"] = 0.05
+    b = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert a.recipe_digest() != b.recipe_digest()
 
 
 # --- checkpoint/restart -----------------------------------------------------
@@ -532,6 +651,77 @@ def test_resume_allows_a_different_total_epoch_count(tmp_path, monkeypatch):
     artifact = TransformersPeftExecutor().run(_experiment(), context)
     assert observed_spec["resume_from_checkpoint"] == str(checkpoint_dir.resolve())
     assert artifact is not None
+
+
+def test_resume_allows_a_different_max_steps(tmp_path, monkeypatch):
+    """max_steps is excluded from the bound-inputs check for the same reason
+    epochs is: extending the total training length is the point of
+    resuming, not a hazard to the loaded optimizer state."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    config["backend"]["training"]["max_steps"] = 50
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    config["backend"]["training"]["max_steps"] = 200  # extend, not restart
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert observed_spec["resume_from_checkpoint"] == str(checkpoint_dir.resolve())
+    assert artifact is not None
+
+
+def test_resume_is_rejected_when_weight_decay_changed(tmp_path, monkeypatch):
+    """Unlike epochs/max_steps, weight_decay shapes the optimizer trajectory
+    itself -- changing it mid-resume must be rejected the same way a changed
+    learning rate or batch size already is."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    config["backend"]["training"]["weight_decay"] = 0.0
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    config["backend"]["training"]["weight_decay"] = 0.05
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch when bound inputs changed")
+
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen", should_not_launch
+    )
+    with pytest.raises(ValueError, match="refusing to resume"):
+        TransformersPeftExecutor().run(_experiment(), context)
 
 
 def test_worker_command_is_a_plain_single_process_for_one_accelerator(tmp_path):
@@ -842,3 +1032,51 @@ def test_real_tiny_llama_resumes_training_from_a_real_checkpoint(tmp_path):
     assert second.evidence["checkpoint"]["resumed_from_checkpoint"] == str(
         checkpoints[-1].resolve()
     )
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_max_steps_caps_training_and_schedule_fields_apply(tmp_path):
+    """Prove max_steps really overrides epoch-based length against a real
+    Trainer (not just that the value round-trips through the spec), and
+    that the LR-scheduler/warmup/weight-decay/grad-clip fields are accepted
+    by real TrainingArguments construction, not just Chowder's own schema."""
+    data = tmp_path / "train.jsonl"
+    rows = [
+        {"text": f"Question: What token comes after {word}? Answer: next"}
+        for word in ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"]
+    ]
+    data.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    config = _config(str(data))
+    config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    config["backend"]["precision"] = "fp32"
+    config["backend"]["quantization"] = "none"
+    config["backend"]["lora"] = {
+        "r": 4,
+        "alpha": 8,
+        "dropout": 0.0,
+        "target_modules": ["q_proj", "v_proj"],
+    }
+    config["backend"]["training"] = {
+        # 8 rows / batch_size 1 / grad_accum 1 * 5 epochs = 40 steps if
+        # max_steps did not override it -- max_steps=2 must stop it early.
+        "epochs": 5.0,
+        "max_steps": 2,
+        "learning_rate": 0.001,
+        "lr_scheduler_type": "cosine",
+        "warmup_steps": 1,
+        "weight_decay": 0.01,
+        "max_grad_norm": 0.5,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 1,
+        "logging_steps": 1,
+        "gradient_checkpointing": False,
+    }
+    config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact.telemetry["global_step"] == 2
