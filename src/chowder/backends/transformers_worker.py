@@ -9,6 +9,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from ..hf_resilience import with_hub_retries
 from ..provenance import sha256_directory
 from .transformers_peft import TransformersPeftRunSpec
 
@@ -320,8 +321,11 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         raise RuntimeError("initial 4-bit QLoRA backend requires an available CUDA device")
 
     set_seed(spec.seed)
-    tokenizer = AutoTokenizer.from_pretrained(
-        spec.base_model, revision=spec.revision, trust_remote_code=False
+    tokenizer = with_hub_retries(
+        lambda: AutoTokenizer.from_pretrained(
+            spec.base_model, revision=spec.revision, trust_remote_code=False
+        ),
+        label=f"tokenizer download for {spec.base_model}",
     )
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token_id is None:
@@ -342,7 +346,10 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         )
         model_kwargs["device_map"] = 0
 
-    base_model = AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs)
+    base_model = with_hub_retries(
+        lambda: AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs),
+        label=f"model download for {spec.base_model}",
+    )
     if spec.quantization == "4bit":
         base_model = prepare_model_for_kbit_training(
             base_model,
