@@ -71,8 +71,6 @@ class ChowderTUI(App[None]):
             yield Static("Goal", classes="section")
             yield Label("Metric / suite name")
             yield Input("quality", id="metric_name")
-            yield Label("Current baseline score (0–1)")
-            yield Input("0.0", id="baseline_score", type="number")
             yield Label("Target minimum score (0–1)")
             yield Input("0.8", id="target_score", type="number")
             yield Label("Total GPU-hour budget")
@@ -168,13 +166,18 @@ class ChowderTUI(App[None]):
                 "gpu_hour_budget": self._float("gpu_budget"),
                 "max_parallel_candidates": 1,
                 "minimum_promotion_gain": 0.0,
-                "require_protocol_match": False,
+                # A generated project has no prior, independently-verified
+                # measurement to compare against -- require the baseline and
+                # candidate evaluations to have run under a matching protocol
+                # rather than silently comparing scores that may not mean
+                # the same thing.
+                "require_protocol_match": True,
             },
-            "baseline": {
-                "experiment_id": "baseline",
-                "metrics": {metric: self._float("baseline_score")},
-                "gpu_hours": 0.0,
-            },
+            # The user provides the model, holdout, and target -- not a guess
+            # at the model's present score. The untouched base model is
+            # evaluated automatically, under this same project's evaluation
+            # protocol, before training starts.
+            "baseline": {"mode": "auto"},
             "experiment": {
                 "experiment_id": "initial-sft",
                 "estimated_gpu_hours": self._float("estimated_gpu_hours"),

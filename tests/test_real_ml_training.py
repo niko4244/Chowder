@@ -173,3 +173,173 @@ def test_real_tiny_llama_train_evaluate_and_persist(tmp_path: Path):
         assert artifacts[0].artifact_ref == str(adapter_dir)
         assert evaluations[0].source_artifact_ref == str(adapter_dir)
         assert results[0].artifact_ref == str(adapter_dir)
+
+
+def test_real_tiny_llama_automatic_baseline_binds_revision_and_matches_protocol(
+    tmp_path: Path,
+):
+    """Prove the automatic-baseline path end to end: evaluate the untouched
+    model first, persist that evidence, bind the resolved revision into
+    training, then confirm post-training evaluation used the exact same
+    protocol and model snapshot -- not just that each piece works in
+    isolation."""
+
+    train_path = tmp_path / "train.jsonl"
+    train_path.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in [
+                {"text": "Question: What token comes after alpha? Answer: beta"},
+                {"text": "Question: What token comes after red? Answer: blue"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    eval_path = tmp_path / "eval.jsonl"
+    eval_path.write_text(
+        json.dumps(
+            {
+                "prompt": "Question: What token comes after alpha? Answer:",
+                "expected": "beta",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    project_path = tmp_path / "project.json"
+    write_project(
+        project_path,
+        {
+            "schema_version": 1,
+            "name": "real tiny llama automatic baseline",
+            "work_dir": str(tmp_path),
+            "registry_path": ".chowder/runs.db",
+            "seed": 123,
+            "goal": {
+                "metrics": [
+                    {
+                        "name": "quality",
+                        "minimum": 0.0,
+                        "direction": "maximize",
+                        "regression_tolerance": 1.0,
+                    }
+                ],
+                "gpu_hour_budget": 2.0,
+                "max_parallel_candidates": 1,
+                "minimum_promotion_gain": 1.0,
+                # The default this should have for generated projects: a
+                # candidate whose evaluation protocol doesn't match the
+                # baseline's must be rejected, not silently compared anyway.
+                "require_protocol_match": True,
+            },
+            "baseline": {"mode": "auto"},
+            "experiment": {
+                "experiment_id": "real-sft",
+                "estimated_gpu_hours": 0.25,
+                "hypothesis": {
+                    "observation": "tiny model is unadapted",
+                    "suspected_cause": "target examples are unseen",
+                    "intervention": "one small LoRA SFT run",
+                    "expected_deltas": {"quality": 0.0},
+                },
+                "config_patch": {},
+                "tags": ["integration", "real-ml", "automatic-baseline"],
+            },
+            "config": {
+                "seed": 123,
+                "backend": {
+                    "schema_version": 1,
+                    "type": "transformers-peft",
+                    "base_model": "trl-internal-testing/tiny-LlamaForCausalLM-3.2",
+                    "dataset": "train.jsonl",
+                    "text_field": "text",
+                    "max_length": 64,
+                    "precision": "fp32",
+                    "quantization": "none",
+                    "trust_remote_code": False,
+                    "training": {
+                        "epochs": 1.0,
+                        "learning_rate": 0.001,
+                        "batch_size": 1,
+                        "gradient_accumulation_steps": 1,
+                        "logging_steps": 1,
+                        "gradient_checkpointing": False,
+                    },
+                    "lora": {
+                        "r": 4,
+                        "alpha": 8,
+                        "dropout": 0.0,
+                        "target_modules": ["q_proj", "v_proj"],
+                        "use_rslora": False,
+                    },
+                    "runtime": {
+                        "active_accelerator_count": 0,
+                        "timeout_seconds": 180.0,
+                    },
+                },
+                "evaluation": {
+                    "type": "transformers-text",
+                    "estimated_gpu_hours": 0.05,
+                    "precision": "fp32",
+                    "quantization": "none",
+                    "device": "cpu",
+                    "trust_remote_code": False,
+                    "runtime": {"timeout_seconds": 180.0},
+                    "suites": [
+                        {
+                            "name": "quality",
+                            "dataset": "eval.jsonl",
+                            "prompt_field": "prompt",
+                            "expected_field": "expected",
+                            "scoring": "normalized_exact_match",
+                            "max_new_tokens": 2,
+                            "use_chat_template": False,
+                        }
+                    ],
+                },
+            },
+        },
+    )
+
+    events = []
+    outcome = run_project(project_path, on_event=events.append)
+    assert any(event.stage == "baseline" for event in events), (
+        "no baseline stage was emitted -- automatic baseline evaluation did not run"
+    )
+
+    candidate = outcome.generation.candidates[0]
+    assert candidate.error is None, candidate.error
+    assert candidate.result is not None
+
+    registry_path = tmp_path / ".chowder" / "runs.db"
+    with RunRegistry(registry_path) as registry:
+        results = {result.experiment_id: result for result in registry.list_results()}
+
+    assert "baseline" in results, "automatic baseline was not persisted"
+    baseline_result = results["baseline"]
+    candidate_result = results["real-sft"]
+
+    # The baseline ran against the untouched model, not an adapter.
+    assert baseline_result.artifact_ref is None
+    baseline_evaluation = baseline_result.evidence["evaluation"]
+    assert baseline_evaluation.get("baseline") is True
+
+    # require_protocol_match=True did not reject the candidate -- the two
+    # evaluations were run under a matching protocol, not merely similar.
+    baseline_protocol = baseline_result.evidence["evaluation_protocol_sha256"]
+    candidate_protocol = candidate_result.evidence["evaluation_protocol_sha256"]
+    assert len(baseline_protocol) == 64
+    # Equal by construction only if evaluate_candidate()'s protocol-mismatch
+    # branch (gate.py) could not have fired -- the strongest available proof
+    # that require_protocol_match=True did not spuriously reject on a
+    # baseline/candidate protocol drift that shouldn't exist.
+    assert baseline_protocol == candidate_protocol
+
+    # The resolved revision the baseline measured is the exact one training
+    # actually started from -- bound, not independently re-resolved.
+    baseline_revision = baseline_evaluation["model_provenance"]["resolved_model_commit"]
+    training_revision = candidate.artifact.evidence["model_provenance"]["resolved_model_commit"]
+    assert baseline_revision
+    assert baseline_revision == training_revision

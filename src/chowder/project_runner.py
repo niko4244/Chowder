@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Mapping
 
 from .backends.transformers_peft import TransformersPeftExecutor
 from .cycle import ExperimentCycleRunner, GenerationOutcome
 from .engine import EvolutionEngine
+from .evaluators.base_text import BaseModelTextEvaluator
 from .evaluators.transformers_text import TransformersTextEvaluator
-from .executors import ExecutionContext
+from .executors import EvaluationOutcome, ExecutionContext
 from .hardware import HardwareSnapshot, detect_hardware
 from .memory import HardwareProfile
+from .models import Experiment, ExperimentResult, Hypothesis
 from .project import ProjectSpec, load_project
 from .registry import RunRegistry
 
@@ -67,12 +69,102 @@ def hardware_profile_from_snapshot(snapshot: HardwareSnapshot) -> HardwareProfil
     )
 
 
+def _resolved_revision_from_outcome(outcome: EvaluationOutcome) -> str | None:
+    """The exact base-model commit the baseline actually measured, if pinned.
+
+    ``BaseModelTextEvaluator`` resolves a floating ref (e.g. no revision, or
+    "main") to the exact commit it loaded and records that under
+    ``model_provenance``. Reusing it -- rather than letting training
+    independently re-resolve the same floating ref later -- is what makes
+    "the untouched model" and "the model training actually started from"
+    provably the same snapshot, not merely likely the same one.
+    """
+    provenance = outcome.evidence.get("model_provenance")
+    if isinstance(provenance, Mapping):
+        commit = provenance.get("resolved_model_commit")
+        if isinstance(commit, str) and commit:
+            return commit
+    return None
+
+
+def _config_with_bound_revision(config: Mapping[str, Any], revision: str) -> dict[str, Any]:
+    bound = dict(config)
+    backend = dict(bound.get("backend", {}))
+    backend["revision"] = revision
+    bound["backend"] = backend
+    return bound
+
+
+def _run_automatic_baseline(
+    project: ProjectSpec,
+    context: ExecutionContext,
+    registry: RunRegistry,
+    on_event: EventCallback | None,
+) -> tuple[ExperimentResult, str | None]:
+    """Evaluate the untouched base model and persist it as the baseline.
+
+    Runs before any training happens, using the exact same evaluator and
+    protocol (suites, precision, quantization, seed) that will later score
+    the trained candidate -- so ``Goal.require_protocol_match`` is comparing
+    like with like, not the user's guess of where the base model already
+    stood against a differently-configured post-training run.
+    """
+    _emit(on_event, "baseline", "Evaluating the untouched base model for an automatic baseline")
+    # evaluation_runs/results both carry FOREIGN KEY(experiment_id) REFERENCES
+    # experiments(experiment_id) -- the baseline needs a real row there too,
+    # the same as any candidate experiment gets via record_experiment below.
+    evaluation_config = project.config.get("evaluation")
+    estimated_gpu_hours = 0.01
+    if isinstance(evaluation_config, Mapping):
+        try:
+            estimated_gpu_hours = max(0.01, float(evaluation_config.get("estimated_gpu_hours", 0.01)))
+        except (TypeError, ValueError):
+            pass
+    registry.record_experiment(
+        Experiment(
+            experiment_id="baseline",
+            parent_id=None,
+            hypothesis=Hypothesis(
+                observation="No prior measurement of this base model on this protocol exists",
+                suspected_cause="A baseline has never been established for this project",
+                intervention="Evaluate the untouched base model under the configured evaluation protocol",
+            ),
+            config_patch={},
+            estimated_gpu_hours=estimated_gpu_hours,
+        )
+    )
+    outcome = BaseModelTextEvaluator().evaluate(config=project.config, context=context)
+    evidence: dict[str, Any] = {
+        "evaluation_run_id": outcome.run_id,
+        "evaluation": dict(outcome.evidence),
+        "compute": {
+            "evaluation_gpu_hours": outcome.gpu_hours,
+            "total_gpu_hours": outcome.gpu_hours,
+        },
+    }
+    protocol_sha = outcome.evidence.get("protocol_sha256")
+    if isinstance(protocol_sha, str) and len(protocol_sha) == 64:
+        evidence["evaluation_protocol_sha256"] = protocol_sha
+    result = ExperimentResult(
+        experiment_id="baseline",
+        metrics=dict(outcome.metrics),
+        gpu_hours=outcome.gpu_hours,
+        artifact_ref=None,
+        evidence=evidence,
+    )
+    registry.record_evaluation_outcome(outcome)
+    registry.record_result(result)
+    metrics_summary = ", ".join(f"{name}={value:.4f}" for name, value in sorted(result.metrics.items()))
+    _emit(on_event, "baseline", f"Automatic baseline established: {metrics_summary}")
+    return result, _resolved_revision_from_outcome(outcome)
+
+
 def run_project(
     project_or_path: ProjectSpec | str | Path,
     *,
     on_event: EventCallback | None = None,
 ) -> ProjectRunOutcome:
-    """Execute one real train → evaluate → gate project generation."""
+    """Execute one real (baseline if automatic) → train → evaluate → gate project generation."""
 
     if isinstance(project_or_path, ProjectSpec):
         project = project_or_path
@@ -92,13 +184,6 @@ def run_project(
     else:
         _emit(on_event, "hardware", "No NVIDIA accelerator detected; using CPU-compatible path")
 
-    engine = EvolutionEngine(
-        goal=project.goal,
-        baseline=project.baseline,
-        spent_gpu_hours=project.baseline.gpu_hours,
-    )
-    trainer = TransformersPeftExecutor()
-    evaluator = TransformersTextEvaluator()
     context = ExecutionContext(
         hardware=profile,
         work_dir=str(project.work_dir),
@@ -106,12 +191,33 @@ def run_project(
     )
 
     with RunRegistry(project.registry_path) as registry:
+        if project.baseline_mode == "auto":
+            baseline, resolved_revision = _run_automatic_baseline(
+                project, context, registry, on_event
+            )
+            training_config: Mapping[str, Any] = (
+                _config_with_bound_revision(project.config, resolved_revision)
+                if resolved_revision
+                else project.config
+            )
+        else:
+            assert project.baseline is not None  # enforced by ProjectSpec.__post_init__
+            baseline = project.baseline
+            training_config = project.config
+
+        engine = EvolutionEngine(
+            goal=project.goal,
+            baseline=baseline,
+            spent_gpu_hours=baseline.gpu_hours,
+        )
+        trainer = TransformersPeftExecutor()
+        evaluator = TransformersTextEvaluator()
         runner = ExperimentCycleRunner(
             engine=engine,
             trainer=trainer,
             evaluator=evaluator,
             context=context,
-            base_config=project.config,
+            base_config=training_config,
             registry=registry,
         )
         accepted = engine.propose((project.experiment,))

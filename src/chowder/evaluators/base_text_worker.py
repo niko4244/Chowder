@@ -205,6 +205,14 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
         "versions": {
             "torch": _package_version("torch"),
             "transformers": _package_version("transformers"),
+            # Reported even though the baseline never loads an adapter and
+            # therefore never imports peft: transformers_text_worker.py's
+            # candidate-side protocol always includes it, and the protocol
+            # fingerprint must cover the same software-version surface on
+            # both sides for a baseline/candidate comparison to mean
+            # anything -- an installed-but-unused version is real
+            # information, an omitted key is just an asymmetry artifact.
+            "peft": _package_version("peft"),
             "bitsandbytes": _package_version("bitsandbytes"),
         },
     }
