@@ -120,7 +120,10 @@ def _cuda_resource_snapshot(torch: Any, model: Any, trainer: Any) -> dict[str, A
     }
 
 
-def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
+def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
+    """Returns None on non-main ranks under multi-GPU DDP -- only the main
+    process (trainer.is_world_process_zero()) produces a result; see the
+    rank-0 guard below for why."""
     primary_sha = _verify_bound_input(
         spec.dataset, spec.dataset_sha256, label="training"
     )
@@ -296,8 +299,28 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any]:
     started = time.perf_counter()
     train_output = trainer.train(resume_from_checkpoint=spec.resume_from_checkpoint)
     runtime = time.perf_counter() - started
+
+    # Under multi-GPU DDP (accelerate launch spawns active_accelerator_count
+    # real processes, one per device -- see TransformersPeftExecutor._worker_
+    # command), every rank reaches this point, but only one process may write
+    # the adapter/tokenizer/result files: N processes writing the same path
+    # concurrently is a real corruption risk, not just wasted I/O. Trainer's
+    # own train()/state are already synchronized across ranks by the time
+    # .train() returns, so the non-main ranks have nothing left to do.
+    if not trainer.is_world_process_zero():
+        return None
     model.save_pretrained(output_dir, safe_serialization=True)
     tokenizer.save_pretrained(output_dir)
+    # KNOWN LIMITATION: under multi-GPU DDP, torch.cuda.max_memory_allocated
+    # is scoped to the CALLING process's own CUDA context per device -- this
+    # process (rank 0) only ever allocated on its own device, so peak VRAM
+    # for the other active devices reads as 0 here, not their real peak. The
+    # accounting-critical fields (active/visible_accelerator_count, and
+    # therefore accelerator_seconds/gpu_hours) are unaffected -- those come
+    # from trainer.args.world_size, a distributed-environment property, not
+    # a per-process memory query. Per-rank peak-VRAM aggregation (each rank
+    # reporting its own device, rank 0 merging them) is a real follow-up,
+    # not done here.
     resource_snapshot = _cuda_resource_snapshot(torch, model, trainer)
 
     if (
@@ -373,10 +396,11 @@ def main() -> int:
     spec_data = json.loads(Path(args.spec).read_text(encoding="utf-8"))
     spec = TransformersPeftRunSpec(**spec_data)
     result = train(spec)
-    result_path = Path(args.result)
-    result_path.write_text(
-        json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8"
-    )
+    if result is not None:
+        result_path = Path(args.result)
+        result_path.write_text(
+            json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+        )
     return 0
 
 

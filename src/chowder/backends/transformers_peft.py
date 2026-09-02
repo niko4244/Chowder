@@ -486,9 +486,8 @@ class TransformersPeftExecutor:
         )
 
     @staticmethod
-    def _worker_command(spec_path: Path, result_path: Path) -> list[str]:
+    def _worker_module_args(spec_path: Path, result_path: Path) -> list[str]:
         return [
-            sys.executable,
             "-m",
             "chowder.backends.transformers_worker",
             "--spec",
@@ -496,6 +495,58 @@ class TransformersPeftExecutor:
             "--result",
             str(result_path),
         ]
+
+    @classmethod
+    def _worker_command(
+        cls, spec_path: Path, result_path: Path, *, active_accelerator_count: int
+    ) -> list[str]:
+        module_args = cls._worker_module_args(spec_path, result_path)
+        if active_accelerator_count <= 1:
+            return [sys.executable, *module_args]
+        # DDP, not FSDP, for a first multi-GPU launcher: accelerate launch
+        # spawns active_accelerator_count real worker processes, each on its
+        # own device, each with the full model -- HF's Trainer detects the
+        # resulting WORLD_SIZE/RANK env vars and wraps the model in DDP
+        # automatically, no worker-side launch code required. This is why
+        # DDP does NOT let a model "use" combined VRAM across devices the
+        # way naive sharding might suggest: every process still needs the
+        # full model on its own single device, which is exactly what
+        # HardwareTopology/HardwareProfile already refuse to pool (see
+        # hardware_bridge.py) -- multi-GPU here means more parallel
+        # replicas, not more room for one bigger model.
+        return [
+            sys.executable,
+            "-m",
+            "accelerate.commands.launch",
+            "--multi_gpu",
+            f"--num_processes={active_accelerator_count}",
+            "--num_machines=1",
+            *module_args,
+        ]
+
+    @staticmethod
+    def _active_accelerator_count(context: ExecutionContext) -> int:
+        config = context.resolved_config
+        backend = config.get("backend", {}) if isinstance(config, Mapping) else {}
+        runtime = backend.get("runtime", {}) if isinstance(backend, Mapping) else {}
+        raw = runtime.get("active_accelerator_count") if isinstance(runtime, Mapping) else None
+        count = 1 if raw is None else int(raw)
+        if count < 0:
+            raise ValueError("backend.runtime.active_accelerator_count cannot be negative")
+        # accelerator_vram_gb is the accurate multi-device topology when
+        # populated (always true for real hardware via hardware_bridge.py).
+        # Callers that only set the legacy single-pool vram_gb (most tests,
+        # and any pre-topology construction) leave it empty -- that still
+        # means exactly one visible device, not zero.
+        visible = len(context.hardware.accelerator_vram_gb) or (
+            1 if context.hardware.vram_gb > 0 else 0
+        )
+        if count > visible:
+            raise ValueError(
+                f"backend.runtime.active_accelerator_count={count} requests more "
+                f"accelerators than are visible ({visible})"
+            )
+        return count
 
     @staticmethod
     def _tail(path: Path, lines: int = 30) -> str:
@@ -553,7 +604,10 @@ class TransformersPeftExecutor:
         stderr_path = run_dir / "stderr.log"
         spec_path.write_text(spec.canonical_json() + "\n", encoding="utf-8")
 
-        command = self._worker_command(spec_path, result_path)
+        active_accelerator_count = self._active_accelerator_count(context)
+        command = self._worker_command(
+            spec_path, result_path, active_accelerator_count=active_accelerator_count
+        )
         started = time.perf_counter()
         with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
             "w", encoding="utf-8"
@@ -623,6 +677,14 @@ class TransformersPeftExecutor:
             wall_seconds=elapsed,
             fallback_gpu=context.hardware.vram_gb > 0,
         )
+        if active_accelerator_count > 1 and usage.active_accelerator_count != active_accelerator_count:
+            raise RuntimeError(
+                f"requested {active_accelerator_count} active accelerators via "
+                f"accelerate launch, but the worker's own resource snapshot reports "
+                f"{usage.active_accelerator_count} -- the multi-GPU launch did not "
+                "actually engage every requested device; do not trust this run's "
+                "GPU-hour accounting"
+            )
         return TrainingArtifact(
             run_id=run_id,
             experiment_id=experiment.experiment_id,
@@ -657,6 +719,7 @@ class TransformersPeftExecutor:
                     ),
                 },
                 "seed": spec.seed,
+                "requested_active_accelerator_count": active_accelerator_count,
                 "checkpoint": {
                     "save_strategy": spec.save_strategy,
                     "save_steps": spec.save_steps,
