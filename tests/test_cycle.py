@@ -307,3 +307,36 @@ def test_a_trainer_without_bind_cancellation_support_is_unaffected(tmp_path):
     outcome = runner.run_generation([exp])
     assert outcome.promoted is not None
     assert outcome.candidates[0].error is None
+
+
+def test_bind_progress_is_used_when_the_trainer_supports_it(tmp_path):
+    seen = []
+
+    class ProgressAwareTrainer(Trainer):
+        def bind_progress_callback(self, callback):
+            seen.append(callback)
+
+    engine = _engine()
+    exp = _experiment()
+    engine.propose([exp])
+    callback = lambda event: None  # noqa: E731
+    runner = ExperimentCycleRunner(
+        engine, ProgressAwareTrainer(), Evaluator(), _context(tmp_path), progress_callback=callback
+    )
+    runner.run_generation([exp])
+    assert seen == [callback, None]  # bound before run(), cleared afterward
+
+
+def test_a_trainer_without_bind_progress_support_is_unaffected(tmp_path):
+    """Trainer/Evaluator (used throughout this file) never define
+    bind_progress_callback -- proves passing one doesn't break a plain
+    executor that doesn't opt into the capability."""
+    engine = _engine()
+    exp = _experiment()
+    engine.propose([exp])
+    runner = ExperimentCycleRunner(
+        engine, Trainer(), Evaluator(), _context(tmp_path), progress_callback=lambda event: None
+    )
+    outcome = runner.run_generation([exp])
+    assert outcome.promoted is not None
+    assert outcome.candidates[0].error is None

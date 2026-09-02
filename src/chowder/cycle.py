@@ -20,6 +20,7 @@ from .failures import FailureRecord, RepairPlan, cluster_failures, plan_repairs
 from .investigation import RemediationRegistry
 from .models import Experiment, ExperimentResult, ExperimentStatus
 from .registry import RunRegistry
+from .run_events import TrainingProgressEvent
 from .tournament import RankedCandidate
 
 FailureHarvester = Callable[[EvaluationOutcome], tuple[FailureRecord, ...]]
@@ -249,6 +250,7 @@ class ExperimentCycleRunner:
     executor_remediation_registry: RemediationRegistry = field(default_factory=RemediationRegistry)
     executor_investigation_budget: float = 0.25
     cancellation: CancellationToken | None = None
+    progress_callback: Callable[[TrainingProgressEvent], None] | None = None
 
     def __post_init__(self) -> None:
         budget = float(self.executor_investigation_budget)
@@ -263,6 +265,16 @@ class ExperimentCycleRunner:
         bind = getattr(executor, "bind_cancellation", None)
         if callable(bind):
             bind(token)
+
+    def _bind_progress(self, executor: object, callback) -> None:
+        """Optional capability, same shape as _bind_cancellation: only
+        TransformersPeftExecutor defines bind_progress_callback today
+        (evaluation progress is a separate, not-yet-built piece), so this
+        is a silent no-op for the evaluator and for every hand-written test
+        double in this suite -- getattr/callable, never isinstance."""
+        bind = getattr(executor, "bind_progress_callback", None)
+        if callable(bind):
+            bind(callback)
 
     def _run_candidate(self, experiment: Experiment) -> CandidateCycleOutcome:
         if experiment.experiment_id not in self.engine.graph.nodes:
@@ -326,6 +338,7 @@ class ExperimentCycleRunner:
 
         training_started = time.perf_counter()
         self._bind_cancellation(self.trainer, self.cancellation)
+        self._bind_progress(self.trainer, self.progress_callback)
         try:
             artifact = self.trainer.run(experiment, run_context)
         except Exception as exc:
@@ -375,6 +388,7 @@ class ExperimentCycleRunner:
             )
         finally:
             self._bind_cancellation(self.trainer, None)
+            self._bind_progress(self.trainer, None)
 
         try:
             if artifact.experiment_id != experiment.experiment_id:

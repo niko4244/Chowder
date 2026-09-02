@@ -12,7 +12,7 @@ from chowder.cancellation import CancellationToken
 from chowder.project import write_project
 from chowder.project_runner import run_project
 from chowder.registry import RunRegistry
-from chowder.run_events import RunEvent
+from chowder.run_events import RunEvent, TrainingProgressEvent
 
 
 pytestmark = pytest.mark.skipif(
@@ -495,3 +495,139 @@ def test_real_cancellation_terminates_an_in_flight_training_subprocess(tmp_path:
     assert candidate.error.startswith("cancelled"), candidate.error
     assert candidate.executor_analysis is None
     assert candidate.result is None
+
+
+def test_real_training_reports_live_progress_events(tmp_path: Path):
+    """Prove step/loss/lr progress genuinely crosses the worker-subprocess
+    boundary while training is still running -- not just something
+    reconstructed from the final result after the process exits."""
+
+    train_path = tmp_path / "train.jsonl"
+    train_path.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in [
+                {"text": "Question: What token comes after alpha? Answer: beta"},
+                {"text": "Question: What token comes after red? Answer: blue"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    eval_path = tmp_path / "eval.jsonl"
+    eval_path.write_text(
+        json.dumps({"prompt": "Question: What token comes after alpha? Answer:", "expected": "beta"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    project_path = tmp_path / "project.json"
+    write_project(
+        project_path,
+        {
+            "schema_version": 1,
+            "name": "real progress smoke",
+            "work_dir": str(tmp_path),
+            "registry_path": ".chowder/runs.db",
+            "seed": 123,
+            "goal": {
+                "metrics": [{"name": "quality", "minimum": 0.0, "direction": "maximize"}],
+                "gpu_hour_budget": 2.0,
+                "max_parallel_candidates": 1,
+                "minimum_promotion_gain": 0.0,
+                "require_protocol_match": False,
+            },
+            "baseline": {
+                "experiment_id": "baseline",
+                "metrics": {"quality": 0.0},
+                "gpu_hours": 0.0,
+            },
+            "experiment": {
+                "experiment_id": "real-sft",
+                "estimated_gpu_hours": 0.25,
+                "hypothesis": {
+                    "observation": "tiny model is unadapted",
+                    "suspected_cause": "target examples are unseen",
+                    "intervention": "one small LoRA SFT run",
+                    "expected_deltas": {"quality": 0.0},
+                },
+                "config_patch": {},
+                "tags": ["integration", "real-ml", "progress"],
+            },
+            "config": {
+                "seed": 123,
+                "backend": {
+                    "schema_version": 1,
+                    "type": "transformers-peft",
+                    "base_model": "trl-internal-testing/tiny-LlamaForCausalLM-3.2",
+                    "dataset": "train.jsonl",
+                    "text_field": "text",
+                    "max_length": 64,
+                    "precision": "fp32",
+                    "quantization": "none",
+                    "trust_remote_code": False,
+                    # Enough epochs to run for multiple seconds -- the
+                    # poller checks every 1s, so a run that finishes faster
+                    # than that could exit before a single poll happens.
+                    "training": {
+                        "epochs": 20.0,
+                        "learning_rate": 0.001,
+                        "batch_size": 1,
+                        "gradient_accumulation_steps": 1,
+                        "logging_steps": 1,
+                        "gradient_checkpointing": False,
+                    },
+                    "lora": {
+                        "r": 4,
+                        "alpha": 8,
+                        "dropout": 0.0,
+                        "target_modules": ["q_proj", "v_proj"],
+                        "use_rslora": False,
+                    },
+                    "runtime": {"active_accelerator_count": 0, "timeout_seconds": 180.0},
+                },
+                "evaluation": {
+                    "type": "transformers-text",
+                    "estimated_gpu_hours": 0.05,
+                    "precision": "fp32",
+                    "quantization": "none",
+                    "device": "cpu",
+                    "trust_remote_code": False,
+                    "runtime": {"timeout_seconds": 180.0},
+                    "suites": [
+                        {
+                            "name": "quality",
+                            "dataset": "eval.jsonl",
+                            "prompt_field": "prompt",
+                            "expected_field": "expected",
+                            "scoring": "normalized_exact_match",
+                            "max_new_tokens": 2,
+                            "use_chat_template": False,
+                        }
+                    ],
+                },
+            },
+        },
+    )
+
+    events: list = []
+    outcome = run_project(project_path, on_event=events.append)
+
+    candidate = outcome.generation.candidates[0]
+    assert candidate.error is None, candidate.error
+
+    progress_events = [e for e in events if isinstance(e, TrainingProgressEvent)]
+    assert len(progress_events) >= 1, "no live training progress was observed"
+    for event in progress_events:
+        assert event.experiment_id == "real-sft"
+        assert event.step >= 1
+        assert event.wall_seconds >= 0.0
+        # The worker only writes progress for real per-step logs (which
+        # always carry a loss), never Trainer's own end-of-train() summary
+        # log (train_runtime/train_loss/... -- no "loss" key) -- otherwise
+        # a poll landing right after a fast run finishes could report the
+        # loss-less summary snapshot as if it were live progress.
+        assert event.loss is not None
+    # Steps strictly increase -- each reported event is genuinely new
+    # progress, not the same snapshot reported twice.
+    steps = [event.step for event in progress_events]
+    assert steps == sorted(set(steps))

@@ -6,10 +6,11 @@ import json
 import math
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from ..cancellation import CancellationToken
@@ -19,6 +20,7 @@ from ..memory import HardwareProfile
 from ..models import Experiment
 from ..provenance import sha256_directory, sha256_file
 from ..resources import ResourceUsage
+from ..run_events import TrainingProgressEvent
 
 
 _ALLOWED_QUANTIZATION = {"none", "4bit"}
@@ -391,6 +393,7 @@ class TransformersPeftExecutor:
     def __init__(self) -> None:
         self._processes: dict[str, subprocess.Popen[Any]] = {}
         self._cancellation: CancellationToken | None = None
+        self._progress_callback: Callable[[TrainingProgressEvent], None] | None = None
 
     def bind_cancellation(self, token: CancellationToken | None) -> None:
         """Optional capability: a CancellationToken to register the
@@ -398,6 +401,64 @@ class TransformersPeftExecutor:
         subprocess that is already running, not just prevent a future one
         from starting."""
         self._cancellation = token
+
+    def bind_progress_callback(
+        self, callback: Callable[[TrainingProgressEvent], None] | None
+    ) -> None:
+        """Optional capability: called with a TrainingProgressEvent each
+        time the worker subprocess reports new step/loss/lr progress,
+        polled from the same progress file the worker writes -- the only
+        way to see inside an otherwise-opaque, isolated subprocess before
+        it exits."""
+        self._progress_callback = callback
+
+    def _poll_progress(
+        self, progress_path: Path, experiment_id: str, stop: threading.Event
+    ) -> None:
+        last_step: int | None = None
+        while not stop.is_set():
+            last_step = self._poll_progress_once(progress_path, experiment_id, last_step)
+            stop.wait(1.0)
+
+    def _poll_progress_once(
+        self, progress_path: Path, experiment_id: str, last_step: int | None
+    ) -> int | None:
+        """One read-and-maybe-report cycle, factored out of the polling
+        loop above so it's directly testable without waiting on real
+        thread timing: read the current progress file, and if its step
+        has moved on from `last_step`, report it and return the new step;
+        otherwise return `last_step` unchanged. Any read/parse failure
+        (the worker hasn't written the file yet, or is mid-write despite
+        the atomic rename) is treated as "nothing new yet", not an error.
+        """
+        if not progress_path.is_file():
+            return last_step
+        try:
+            data = json.loads(progress_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return last_step
+        if not isinstance(data, Mapping) or data.get("step") == last_step:
+            return last_step
+        callback = self._progress_callback
+        if callback is not None:
+            try:
+                callback(
+                    TrainingProgressEvent(
+                        experiment_id=experiment_id,
+                        step=int(data.get("step", 0)),
+                        max_steps=data.get("max_steps"),
+                        epoch=data.get("epoch"),
+                        loss=data.get("loss"),
+                        learning_rate=data.get("learning_rate"),
+                        wall_seconds=float(data.get("wall_seconds", 0.0)),
+                    )
+                )
+            except Exception:
+                # A caller's callback (writing to a UI, the registry) must
+                # never take down the poller -- the worst case is a missed
+                # progress update, not a crashed training run.
+                pass
+        return data.get("step")
 
     @staticmethod
     def _bound_inputs(spec: TransformersPeftRunSpec) -> dict[str, Any]:
@@ -763,6 +824,24 @@ class TransformersPeftExecutor:
             self._processes[run_id] = process
             if self._cancellation is not None:
                 self._cancellation._register_active(self, run_id)
+            # A separate thread polling the worker's progress file, running
+            # concurrently with (not instead of) the existing wait/timeout/
+            # cancellation handling below -- this is purely additive, so
+            # that well-tested lifecycle logic keeps working exactly as it
+            # did before, with no callback bound.
+            stop_polling = threading.Event()
+            poll_thread: threading.Thread | None = None
+            if self._progress_callback is not None:
+                poll_thread = threading.Thread(
+                    target=self._poll_progress,
+                    args=(
+                        Path(spec.output_dir) / "progress.json",
+                        experiment.experiment_id,
+                        stop_polling,
+                    ),
+                    daemon=True,
+                )
+                poll_thread.start()
             try:
                 process.wait(timeout=spec.timeout_seconds)
             except subprocess.TimeoutExpired as exc:
@@ -774,6 +853,9 @@ class TransformersPeftExecutor:
                     process.wait()
                 raise TimeoutError(f"training run {run_id} exceeded timeout") from exc
             finally:
+                stop_polling.set()
+                if poll_thread is not None:
+                    poll_thread.join(timeout=5)
                 self._processes.pop(run_id, None)
                 if self._cancellation is not None:
                     self._cancellation._clear_active()
