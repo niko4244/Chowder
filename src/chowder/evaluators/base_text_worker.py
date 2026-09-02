@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from ..contamination import write_holdout_fingerprint_index
-from .transformers_text import EvalSuiteSpec, TransformersTextEvalSpec
+from .base_text import BaseTextEvalSpec
+from .transformers_text import EvalSuiteSpec
 
 
 def _package_version(name: str) -> str:
@@ -30,7 +31,7 @@ def _score(prediction: str, expected: str, scoring: str) -> float:
     raise ValueError(f"unsupported scoring: {scoring}")
 
 
-def _resolve_dtype(torch: Any, precision: str):
+def _dtype(torch: Any, precision: str):
     if precision == "fp32":
         return torch.float32
     if precision == "bf16":
@@ -44,7 +45,7 @@ def _resolve_dtype(torch: Any, precision: str):
     return torch.float32
 
 
-def _resolve_device(torch: Any, requested: str) -> str:
+def _device(torch: Any, requested: str) -> str:
     requested = requested.strip().lower()
     if requested == "auto":
         return "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -53,8 +54,8 @@ def _resolve_device(torch: Any, requested: str) -> str:
     return requested
 
 
-def _load_rows(suite: EvalSuiteSpec) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+def _rows(suite: EvalSuiteSpec) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
     with Path(suite.dataset).open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
@@ -64,32 +65,36 @@ def _load_rows(suite: EvalSuiteSpec) -> list[dict[str, Any]]:
                 raise RuntimeError(f"{suite.dataset}:{line_number} is not a JSON object")
             if suite.prompt_field not in row or suite.expected_field not in row:
                 raise RuntimeError(
-                    f"{suite.dataset}:{line_number} missing {suite.prompt_field!r} or {suite.expected_field!r}"
+                    f"{suite.dataset}:{line_number} missing prompt or expected field"
                 )
-            rows.append(row)
-    if not rows:
+            result.append(row)
+    if not result:
         raise RuntimeError(f"evaluation suite {suite.name!r} is empty")
-    return rows
+    return result
 
 
-def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
+def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
     try:
         import torch
-        from peft import PeftModel
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, set_seed
+        from transformers import (
+            AutoModelForCausalLM,
+            AutoTokenizer,
+            BitsAndBytesConfig,
+            set_seed,
+        )
     except ImportError as exc:
-        raise RuntimeError("evaluation dependencies are missing; install chowder-ai[train]") from exc
+        raise RuntimeError("baseline dependencies are missing; install chowder-ai[train]") from exc
 
-    if spec.trust_remote_code:
-        raise RuntimeError("trust_remote_code is disabled")
-    device_name = _resolve_device(torch, spec.device)
+    device_name = _device(torch, spec.device)
     if spec.quantization == "4bit" and not device_name.startswith("cuda"):
-        raise RuntimeError("4-bit evaluation requires a CUDA device")
-
-    dtype = _resolve_dtype(torch, spec.precision)
+        raise RuntimeError("4-bit baseline evaluation requires CUDA")
+    dtype = _dtype(torch, spec.precision)
     set_seed(spec.seed)
+
     tokenizer = AutoTokenizer.from_pretrained(
-        spec.base_model, revision=spec.revision, trust_remote_code=False
+        spec.base_model,
+        revision=spec.revision,
+        trust_remote_code=False,
     )
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token_id is None:
@@ -106,43 +111,39 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=dtype,
         )
-        device_index = int(device_name.split(":", 1)[1]) if ":" in device_name else 0
-        model_kwargs["device_map"] = {"": device_index}
+        index = int(device_name.split(":", 1)[1]) if ":" in device_name else 0
+        model_kwargs["device_map"] = {"": index}
 
-    base = AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs)
-    resolved_commit = getattr(base.config, "_commit_hash", None)
+    model = AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs)
+    resolved_commit = getattr(model.config, "_commit_hash", None)
     if spec.quantization == "none":
-        base = base.to(device_name)
-    if spec.adapter_dir is None:
-        model = base
-    else:
-        model = PeftModel.from_pretrained(base, spec.adapter_dir, is_trainable=False)
+        model = model.to(device_name)
     model.eval()
     device = next(model.parameters()).device
 
     output_dir = Path(spec.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics: dict[str, float] = {}
-    suite_evidence: dict[str, Any] = {}
+    evidence: dict[str, Any] = {}
 
     with torch.inference_mode():
         for suite in spec.suites:
-            rows = _load_rows(suite)
+            rows = _rows(suite)
             fingerprint_path = output_dir / f"holdout-fingerprints-{suite.name}.jsonl"
-            fingerprint_digest = write_holdout_fingerprint_index(
+            fingerprint_sha = write_holdout_fingerprint_index(
                 (
                     (str(row[suite.prompt_field]), str(row[suite.expected_field]))
                     for row in rows
                 ),
                 fingerprint_path,
             )
-
-            correct = 0.0
             predictions_path = output_dir / f"predictions-{suite.name}.jsonl"
+            correct = 0.0
             with predictions_path.open("w", encoding="utf-8", newline="\n") as output:
                 for row in rows:
                     prompt = str(row[suite.prompt_field])
                     expected = str(row[suite.expected_field])
+                    rendered = prompt
                     if suite.use_chat_template:
                         if not getattr(tokenizer, "chat_template", None):
                             raise RuntimeError(
@@ -153,8 +154,6 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                             tokenize=False,
                             add_generation_prompt=True,
                         )
-                    else:
-                        rendered = prompt
                     encoded = tokenizer(rendered, return_tensors="pt")
                     encoded = {key: value.to(device) for key, value in encoded.items()}
                     generated = model.generate(
@@ -183,17 +182,17 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                         + "\n"
                     )
             metrics[suite.name] = correct / len(rows)
-            suite_evidence[suite.name] = {
+            evidence[suite.name] = {
                 "rows": len(rows),
                 "scoring": suite.scoring,
                 "predictions_file": str(predictions_path),
                 "holdout_fingerprints_file": str(fingerprint_path),
-                "holdout_fingerprints_sha256": fingerprint_digest,
+                "holdout_fingerprints_sha256": fingerprint_sha,
             }
 
     return {
         "metrics": metrics,
-        "suites": suite_evidence,
+        "suites": evidence,
         "runtime": {
             "device": device_name,
             "gpu_count": 1 if device_name.startswith("cuda") else 0,
@@ -202,11 +201,17 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
             "requested_base_model": spec.base_model,
             "requested_revision": spec.revision,
             "resolved_model_commit": resolved_commit,
-            "adapter_loaded": spec.adapter_dir is not None,
         },
         "versions": {
             "torch": _package_version("torch"),
             "transformers": _package_version("transformers"),
+            # Reported even though the baseline never loads an adapter and
+            # therefore never imports peft: transformers_text_worker.py's
+            # candidate-side protocol always includes it, and the protocol
+            # fingerprint must cover the same software-version surface on
+            # both sides for a baseline/candidate comparison to mean
+            # anything -- an installed-but-unused version is real
+            # information, an omitted key is just an asymmetry artifact.
             "peft": _package_version("peft"),
             "bitsandbytes": _package_version("bitsandbytes"),
         },
@@ -218,10 +223,9 @@ def main() -> int:
     parser.add_argument("--spec", required=True)
     parser.add_argument("--result", required=True)
     args = parser.parse_args()
-
     raw = json.loads(Path(args.spec).read_text(encoding="utf-8"))
-    raw["suites"] = tuple(EvalSuiteSpec(**suite) for suite in raw["suites"])
-    spec = TransformersTextEvalSpec(**raw)
+    raw["suites"] = tuple(EvalSuiteSpec(**row) for row in raw["suites"])
+    spec = BaseTextEvalSpec(**raw)
     result = evaluate(spec)
     Path(args.result).write_bytes(
         (json.dumps(result, sort_keys=True, indent=2) + "\n").encode("utf-8")
