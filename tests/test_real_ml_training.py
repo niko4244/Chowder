@@ -164,9 +164,9 @@ def test_real_tiny_llama_train_evaluate_and_persist(tmp_path: Path):
 
     registry_path = tmp_path / ".chowder" / "runs.db"
     with RunRegistry(registry_path) as registry:
-        artifacts = registry.list_training_artifacts()
-        evaluations = registry.list_evaluation_outcomes()
-        results = registry.list_results()
+        artifacts = list(registry.list_training_artifacts())
+        evaluations = list(registry.list_evaluation_outcomes())
+        results = list(registry.list_results())
         assert len(artifacts) == 1
         assert len(evaluations) == 1
         assert len(results) == 1
