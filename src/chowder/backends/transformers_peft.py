@@ -19,6 +19,7 @@ from ..resources import ResourceUsage
 
 _ALLOWED_QUANTIZATION = {"none", "4bit"}
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
+_ALLOWED_DATASET_FORMATS = {"text", "chat"}
 _ALLOWED_LR_SCHEDULER_TYPES = {
     "linear",
     "cosine",
@@ -42,7 +43,9 @@ class TransformersPeftRunSpec:
     parent_adapter: str | None = None
     parent_adapter_sha256: str | None = None
     revision: str | None = None
+    dataset_format: str = "text"
     text_field: str = "text"
+    messages_field: str = "messages"
     max_length: int = 512
     epochs: float = 1.0
     learning_rate: float = 2e-4
@@ -110,6 +113,10 @@ class TransformersPeftRunSpec:
             if len(self.parent_adapter_sha256) != 64:
                 raise ValueError("backend parent adapter SHA must be a SHA-256 digest")
 
+        if self.dataset_format not in _ALLOWED_DATASET_FORMATS:
+            raise ValueError(f"unsupported dataset_format: {self.dataset_format}")
+        if self.dataset_format == "chat" and not self.messages_field.strip():
+            raise ValueError("backend.messages_field cannot be empty")
         if self.max_length <= 0:
             raise ValueError("backend.max_length must be positive")
         if self.epochs <= 0 or self.learning_rate <= 0:
@@ -268,7 +275,9 @@ class TransformersPeftRunSpec:
             ),
             parent_adapter_sha256=(str(parent_sha) if parent_sha is not None else None),
             revision=(str(backend["revision"]) if backend.get("revision") is not None else None),
+            dataset_format=str(backend.get("dataset_format", "text")),
             text_field=str(backend.get("text_field", "text")),
+            messages_field=str(backend.get("messages_field", "messages")),
             max_length=int(backend.get("max_length", 512)),
             epochs=float(training.get("epochs", 1.0)),
             learning_rate=float(training.get("learning_rate", 2e-4)),

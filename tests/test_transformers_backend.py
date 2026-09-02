@@ -9,7 +9,11 @@ from chowder.backends.transformers_peft import (
     TransformersPeftExecutor,
     TransformersPeftRunSpec,
 )
-from chowder.backends.transformers_worker import _replay_sample_count
+from chowder.backends.transformers_worker import (
+    _build_chat_example,
+    _replay_sample_count,
+    _validate_chat_messages,
+)
 from chowder.executors import ExecutionContext
 from chowder.memory import HardwareProfile
 from chowder.models import Experiment, Hypothesis
@@ -386,6 +390,147 @@ def test_recipe_digest_changes_when_weight_decay_changes(tmp_path):
         config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
     )
     assert a.recipe_digest() != b.recipe_digest()
+
+
+# --- chat/message datasets & completion-only masking ------------------------
+
+
+def test_spec_defaults_to_flat_text_format(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    spec = TransformersPeftRunSpec.from_resolved_config(
+        _config(str(data)), work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert spec.dataset_format == "text"
+    assert spec.messages_field == "messages"
+
+
+def test_spec_reads_chat_format_and_messages_field(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"conversation":[{"role":"user","content":"hi"}]}\n')
+    config = _config(str(data))
+    config["backend"]["dataset_format"] = "chat"
+    config["backend"]["messages_field"] = "conversation"
+    spec = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert spec.dataset_format == "chat"
+    assert spec.messages_field == "conversation"
+
+
+def test_unsupported_dataset_format_is_rejected(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["dataset_format"] = "parquet"
+    with pytest.raises(ValueError, match="unsupported dataset_format"):
+        TransformersPeftRunSpec.from_resolved_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+        )
+
+
+def test_empty_messages_field_is_rejected_for_chat_format(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"messages":[]}\n')
+    config = _config(str(data))
+    config["backend"]["dataset_format"] = "chat"
+    config["backend"]["messages_field"] = "   "
+    with pytest.raises(ValueError, match="messages_field cannot be empty"):
+        TransformersPeftRunSpec.from_resolved_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+        )
+
+
+def test_recipe_digest_changes_with_dataset_format(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    a = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    config["backend"]["dataset_format"] = "chat"
+    config["backend"]["messages_field"] = "text"  # reuse the same file's field name
+    b = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert a.recipe_digest() != b.recipe_digest()
+
+
+def test_resume_is_rejected_when_dataset_format_changed(tmp_path, monkeypatch):
+    """dataset_format is a bound input, not excluded like epochs/max_steps --
+    switching between text and chat between save and resume changes what the
+    checkpoint's optimizer state was actually produced from."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    config["backend"]["dataset_format"] = "chat"
+    config["backend"]["messages_field"] = "text"
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch when bound inputs changed")
+
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen", should_not_launch
+    )
+    with pytest.raises(ValueError, match="refusing to resume"):
+        TransformersPeftExecutor().run(_experiment(), context)
+
+
+def test_validate_chat_messages_normalizes_a_well_formed_row():
+    normalized = _validate_chat_messages(
+        [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ],
+        row_index=0,
+    )
+    assert normalized == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+    ]
+
+
+@pytest.mark.parametrize("bad", [None, [], "not a list", {"role": "user"}])
+def test_validate_chat_messages_rejects_empty_or_non_list_rows(bad):
+    with pytest.raises(RuntimeError, match="empty or invalid messages list"):
+        _validate_chat_messages(bad, row_index=0)
+
+
+def test_validate_chat_messages_rejects_malformed_message():
+    with pytest.raises(RuntimeError, match="missing role/content"):
+        _validate_chat_messages([{"role": "user"}], row_index=0)
+
+
+def test_validate_chat_messages_rejects_unsupported_role():
+    with pytest.raises(RuntimeError, match="unsupported message role 'tool'"):
+        _validate_chat_messages(
+            [{"role": "tool", "content": "x"}, {"role": "assistant", "content": "y"}],
+            row_index=0,
+        )
+
+
+def test_validate_chat_messages_rejects_row_without_assistant_turn():
+    with pytest.raises(RuntimeError, match="no assistant turn"):
+        _validate_chat_messages(
+            [{"role": "system", "content": "x"}, {"role": "user", "content": "y"}],
+            row_index=0,
+        )
 
 
 # --- checkpoint/restart -----------------------------------------------------
@@ -1084,3 +1229,132 @@ def test_real_tiny_llama_max_steps_caps_training_and_schedule_fields_apply(tmp_p
     context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
     artifact = TransformersPeftExecutor().run(_experiment(), context)
     assert artifact.telemetry["global_step"] == 2
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_chat_completion_only_masking_matches_assistant_turns():
+    """Prove the boundary-diff masking approach against the real tokenizer
+    and its real (generation-tag-free) Llama 3.1 chat template -- the exact
+    template shape that made return_assistant_tokens_mask=True silently
+    produce an all-zero mask when tried directly against it."""
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained("trl-internal-testing/tiny-LlamaForCausalLM-3.2")
+    messages = _validate_chat_messages(
+        [
+            {"role": "user", "content": "What is the capital of France?"},
+            {"role": "assistant", "content": "The capital of France is Paris."},
+            {"role": "user", "content": "And of Germany?"},
+            {"role": "assistant", "content": "Berlin."},
+        ],
+        row_index=0,
+    )
+    example = _build_chat_example(tokenizer, messages, max_length=512, row_index=0)
+    input_ids = example["input_ids"]
+    labels = example["labels"]
+    assert len(labels) == len(input_ids) == len(example["attention_mask"])
+
+    unmasked_text = tokenizer.decode(
+        [token_id for token_id, label in zip(input_ids, labels) if label != -100]
+    )
+    assert "Paris" in unmasked_text
+    assert "Berlin" in unmasked_text
+    # The user's own turns must not have leaked into the trained labels --
+    # phrasing unique to the question, not the answer (both answers happen
+    # to contain "capital"/"Germany"-adjacent words, so those alone aren't
+    # a safe negative check).
+    assert "What is the capital" not in unmasked_text
+    assert "And of Germany" not in unmasked_text
+    assert 0 < sum(1 for label in labels if label != -100) < len(labels)
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_chat_example_rejects_a_conversation_with_no_room_for_the_response():
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained("trl-internal-testing/tiny-LlamaForCausalLM-3.2")
+    messages = _validate_chat_messages(
+        [
+            {"role": "user", "content": "What is the capital of France?"},
+            {"role": "assistant", "content": "The capital of France is Paris."},
+        ],
+        row_index=0,
+    )
+    with pytest.raises(RuntimeError, match="no assistant tokens remain after truncating"):
+        _build_chat_example(tokenizer, messages, max_length=5, row_index=0)
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_trains_on_a_chat_dataset_with_completion_only_masking(tmp_path):
+    """End-to-end: real LoRA training on chat/message rows, proving the
+    whole pipeline (chat dataset loading, per-row masking, the
+    DataCollatorForSeq2Seq label-padding path) works together against a
+    real Trainer, not just that each piece works in isolation."""
+    data = tmp_path / "train.jsonl"
+    rows = [
+        {
+            "messages": [
+                {"role": "user", "content": "What token comes after alpha?"},
+                {"role": "assistant", "content": "beta"},
+            ]
+        },
+        {
+            "messages": [
+                {"role": "user", "content": "What token comes after red?"},
+                {"role": "assistant", "content": "blue"},
+            ]
+        },
+        {
+            "messages": [
+                {"role": "user", "content": "What token comes after one?"},
+                {"role": "assistant", "content": "two"},
+            ]
+        },
+        {
+            "messages": [
+                {"role": "user", "content": "What token comes after up?"},
+                {"role": "assistant", "content": "down"},
+            ]
+        },
+    ]
+    data.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    config = _config(str(data))
+    config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    config["backend"]["precision"] = "fp32"
+    config["backend"]["quantization"] = "none"
+    config["backend"]["dataset_format"] = "chat"
+    config["backend"]["max_length"] = 128
+    config["backend"]["lora"] = {
+        "r": 4,
+        "alpha": 8,
+        "dropout": 0.0,
+        "target_modules": ["q_proj", "v_proj"],
+    }
+    config["backend"]["training"] = {
+        "epochs": 1.0,
+        "learning_rate": 0.001,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 1,
+        "logging_steps": 1,
+        "gradient_checkpointing": False,
+    }
+    config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert Path(artifact.artifact_ref).is_dir()
+
+    provenance = artifact.evidence["data_provenance"]
+    assert provenance["dataset_format"] == "chat"
+    assert provenance["total_token_count"] > 0
+    assert 0 < provenance["assistant_token_count"] < provenance["total_token_count"]
