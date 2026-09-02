@@ -10,10 +10,13 @@ from .engine import EvolutionEngine
 from .evaluators.base_text import BaseModelTextEvaluator
 from .evaluators.transformers_text import TransformersTextEvaluator
 from .executors import EvaluationOutcome, ExecutionContext
+from .failures import harvest_transformers_text_failures
 from .hardware import HardwareSnapshot, detect_hardware
+from .local_corpus_provider import LocalCorpusRepairProvider
 from .memory import HardwareProfile
 from .models import Experiment, ExperimentResult, Hypothesis
 from .project import ProjectSpec, load_project
+from .recursive_repair import RecursiveRepairOutcome, run_bounded_autonomous_repair
 from .registry import RunRegistry
 
 
@@ -28,6 +31,7 @@ class ProjectRunOutcome:
     project: ProjectSpec
     hardware: HardwareSnapshot
     generation: GenerationOutcome
+    repair: RecursiveRepairOutcome | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -219,6 +223,7 @@ def run_project(
             context=context,
             base_config=training_config,
             registry=registry,
+            failure_harvester=harvest_transformers_text_failures,
         )
         accepted = engine.propose((project.experiment,))
         if not accepted:
@@ -232,6 +237,36 @@ def run_project(
             f"Starting {project.experiment.experiment_id} with {engine.reservation_for(project.experiment.experiment_id):.4g} reserved GPU-hours",
         )
         generation = runner.run_generation(accepted)
+
+        repair_outcome: RecursiveRepairOutcome | None = None
+        if project.repair is not None and generation.promoted is None:
+            repair_spec = project.repair
+            _emit(
+                on_event,
+                "repair",
+                f"Initial candidate rejected; attempting autonomous repair "
+                f"(up to {repair_spec.policy.max_depth} hop(s))",
+            )
+            provider = LocalCorpusRepairProvider(
+                repair_spec.corpus_files,
+                max_examples=repair_spec.provider_max_examples,
+                min_examples=repair_spec.provider_min_examples,
+                examples_per_failure=repair_spec.provider_examples_per_failure,
+            )
+            repair_outcome = run_bounded_autonomous_repair(
+                runner=runner,
+                source_generation=generation,
+                provider=provider,
+                variants=repair_spec.variants,
+                policy=repair_spec.policy,
+            )
+            generation = repair_outcome.final_generation
+            _emit(
+                on_event,
+                "repair",
+                f"Repair stopped: {repair_outcome.stop_reason.value} after "
+                f"{repair_outcome.new_hops} hop(s) ({repair_outcome.stop_detail})",
+            )
 
     candidate = generation.candidates[0]
     if candidate.error is not None:
@@ -250,4 +285,5 @@ def run_project(
         project=project,
         hardware=hardware,
         generation=generation,
+        repair=repair_outcome,
     )

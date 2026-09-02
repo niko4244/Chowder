@@ -39,9 +39,10 @@ Autonomous repair loop:
 
 - **Structured execution-failure capture** with live routing into the **Executor Investigator**: a real failure gets fingerprinted, checked against known remediations, and — if unrecognized — routed into a bounded investigation instead of surfacing a raw traceback. Validated against a benchmark of 11 real training incidents (not synthetic examples) plus a frozen, contamination-guarded hidden set.
 - **Bounded, autonomous recursive repair**: a rejected candidate can be diagnosed, repaired, and re-evaluated automatically within a GPU-hour budget, with crash-safe resume and full provenance back to the training data and parent adapter it repaired.
+- **Wired into the default single-command user path**: `chowder train`/`run_project()` optionally continues straight from a gate-rejected initial candidate through failure harvesting → repair proposal → bounded repair → re-evaluation, config-driven (a `repair` section names a local corpus, training-config-only repair variants, and a recursive-repair policy) — no separate Python orchestration required.
 - **Evidence manifest hashing** for reproducibility/provenance across the whole chain.
 
-Still ahead: FSDP for multi-GPU (DDP now supported), wiring the autonomous repair loop into the default single-command user path, and the rest of HF/model infrastructure resilience (download retries, offline mode, and dependency preflight now supported; persistent cache-hit/miss reporting, disk-space preflight, and architecture-compatibility checks before GPU reservation remain). See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full, currently-accurate list.
+Still ahead: FSDP for multi-GPU (DDP now supported), and the rest of HF/model infrastructure resilience (download retries, offline mode, and dependency preflight now supported; persistent cache-hit/miss reporting, disk-space preflight, and architecture-compatibility checks before GPU reservation remain). See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full, currently-accurate list.
 
 ## Design rules
 
