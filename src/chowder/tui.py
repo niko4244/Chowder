@@ -13,6 +13,7 @@ from .checkpoint_discovery import DiscoveredCheckpoint, discover_checkpoints
 from .executors import ExecutionContext
 from .hardware import HardwareSnapshot, detect_hardware
 from .memory import HardwareProfile
+from .memory_preflight import MemoryEstimate, estimate_memory_requirements
 from .project import ProjectValidationError, write_project
 from .project_runner import hardware_profile_from_snapshot, run_project
 from .recursive_repair import RecursiveRepairStopReason
@@ -45,6 +46,7 @@ class ChowderTUI(App[None]):
     #checkpoint_actions { height: auto; margin-top: 1; }
     #checkpoint_actions Button { margin-right: 1; }
     #checkpoints { padding: 1; border: round $accent; margin-bottom: 1; }
+    #memory_estimate { padding: 1; border: round $accent; margin-bottom: 1; }
     #actions { height: auto; margin: 1 0; }
     #actions Button { margin-right: 1; }
     #log { height: 14; border: round $primary; }
@@ -58,6 +60,7 @@ class ChowderTUI(App[None]):
         self._hardware: HardwareSnapshot | None = None
         self._cancellation: CancellationToken | None = None
         self._training_worker = None
+        self._memory_estimate_worker = None
         self._discovered_checkpoints: tuple[DiscoveredCheckpoint, ...] = ()
         self._run_status: dict[str, Any] = {}
 
@@ -131,6 +134,8 @@ class ChowderTUI(App[None]):
             yield Input("auto", id="active_accelerator_count")
             yield Label("Evaluation max new tokens")
             yield Input("64", id="max_new_tokens", type="integer")
+            yield Button("Estimate Memory", id="estimate_memory")
+            yield Static("Not estimated yet", id="memory_estimate")
 
             yield Static("Checkpoint / resume", classes="section")
             yield Label("Save checkpoints: no, epoch, or steps")
@@ -461,6 +466,26 @@ class ChowderTUI(App[None]):
         )
         return "\n".join([header, *(self._format_checkpoint(c) for c in checkpoints)])
 
+    @staticmethod
+    def _format_memory_estimate(estimate: MemoryEstimate) -> str:
+        lines = [
+            f"Device: {estimate.device} | "
+            f"{estimate.trainable_params:,} trainable / {estimate.frozen_params:,} frozen params | "
+            f"max_length {estimate.max_length}",
+            f"Measured peak VRAM: {estimate.measured_peak_gb_at_batch_1:.2f} GB @ batch 1, "
+            f"{estimate.measured_peak_gb_at_batch_2:.2f} GB @ batch 2"
+            + (" (from cache)" if estimate.from_cache else " (fresh measurement)"),
+            f"Estimated peak at configured batch size {estimate.configured_batch_size}: "
+            f"{estimate.estimated_peak_gb:.2f} GB "
+            f"(per-device budget: {estimate.per_rank_available_gb:.2f} GB)",
+        ]
+        if estimate.fits:
+            lines.append("[green]Fits within available VRAM.[/]")
+        else:
+            lines.append("[red]Does NOT fit within available VRAM:[/]")
+            lines.extend(f"  - {recommendation}" for recommendation in estimate.recommendations)
+        return "\n".join(lines)
+
     def _reset_run_status(self, *, project: str, model: str) -> None:
         self._run_status = {"project": project, "model": model, "stage": "starting"}
         self.query_one("#run_status", Static).update(self._render_run_status())
@@ -611,6 +636,19 @@ class ChowderTUI(App[None]):
             self._set_status("Starting fresh (resume field cleared)")
             self._append_log("[bold]Starting fresh:[/] resume_from_checkpoint cleared")
             return
+        if event.button.id == "estimate_memory":
+            try:
+                payload = self._build_payload()
+            except Exception as exc:
+                self._append_log(f"[red]Validation failed:[/] {type(exc).__name__}: {exc}")
+                return
+            self.query_one("#estimate_memory", Button).disabled = True
+            self.query_one("#memory_estimate", Static).update(
+                "Estimating… (loads the real model once; may take a while on first run)"
+            )
+            self._append_log("[bold]Estimating memory requirements…[/]")
+            self._memory_estimate_worker = self._run_memory_estimate(payload)
+            return
         if event.button.id == "save":
             try:
                 target = self._save_project()
@@ -679,6 +717,49 @@ class ChowderTUI(App[None]):
                 "CPU training is allowed for small/test models; 4-bit QLoRA requires CUDA."
             )
         self._update_hardware_panel(note)
+
+    def _update_memory_estimate_panel(self, text: str) -> None:
+        # Same defensive shape as _update_hardware_panel: this runs from a
+        # background worker thread and the screen/app may already be torn
+        # down (real shutdown, or a test's run_test() context exiting)
+        # before the worker finishes -- querying/updating a gone widget must
+        # not raise out of a background thread.
+        try:
+            widget = self.query_one("#memory_estimate", Static)
+            self.call_from_thread(widget.update, text)
+        except Exception:
+            return
+
+    def _set_memory_estimate_button_disabled(self, disabled: bool) -> None:
+        try:
+            button = self.query_one("#estimate_memory", Button)
+            self.call_from_thread(setattr, button, "disabled", disabled)
+        except Exception:
+            return
+
+    @work(thread=True, exclusive=True)
+    def _run_memory_estimate(self, payload: dict[str, Any]) -> None:
+        # Spawns a real subprocess that loads the actual model -- genuinely
+        # slow (seconds, longer on a cold HF cache) -- so this runs off the
+        # main thread the same way _scan_hardware/_run_training do, with the
+        # widget update marshaled back via call_from_thread.
+        work_dir_raw = self._value("work_dir") or str(Path.cwd())
+        try:
+            estimate = estimate_memory_requirements(
+                resolved_config=payload["config"],
+                context=self._current_execution_context(),
+                work_dir=work_dir_raw,
+            )
+        except Exception as exc:
+            message = f"Memory estimate failed: {type(exc).__name__}: {exc}"
+            self._update_memory_estimate_panel(message)
+            self.call_from_thread(self._append_log, f"[red]{message}[/]")
+        else:
+            summary = self._format_memory_estimate(estimate)
+            self._update_memory_estimate_panel(summary)
+            self.call_from_thread(self._append_log, summary)
+        finally:
+            self._set_memory_estimate_button_disabled(False)
 
     @work(thread=True, exclusive=True)
     def _run_training(self, project_path: Path, token: CancellationToken) -> None:

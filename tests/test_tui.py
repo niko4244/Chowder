@@ -11,6 +11,7 @@ from textual.widgets import Button, Static
 from chowder.backends.transformers_peft import TransformersPeftExecutor, TransformersPeftRunSpec
 from chowder.cancellation import CancellationToken
 from chowder.hardware import AcceleratorProfile, HardwareSnapshot
+from chowder.memory_preflight import MemoryEstimate
 from chowder.models import Experiment, ExperimentResult, Hypothesis
 from chowder.project import ProjectValidationError
 from chowder.provenance import sha256_file
@@ -613,6 +614,115 @@ async def test_discover_checkpoints_reports_a_build_payload_error_gracefully(tmp
         assert app.query_one("#resume_best", Button).disabled is True
         panel_text = app.query_one("#checkpoints", Static).content
         assert "failed" in panel_text.lower()
+
+
+# --- memory estimate ---------------------------------------------------------
+
+
+def _fake_estimate(**overrides) -> MemoryEstimate:
+    fields = dict(
+        device="cuda",
+        frozen_params=1_000_000,
+        trainable_params=1_000,
+        max_length=512,
+        measured_peak_gb_at_batch_1=2.0,
+        measured_peak_gb_at_batch_2=3.5,
+        per_example_activation_gb=1.5,
+        configured_batch_size=1,
+        estimated_peak_gb=2.0,
+        per_rank_available_gb=16.0,
+        fits=True,
+        recommendations=(),
+        from_cache=False,
+    )
+    fields.update(overrides)
+    return MemoryEstimate(**fields)
+
+
+@pytest.mark.asyncio
+async def test_estimate_memory_reports_a_fitting_estimate(tmp_path, monkeypatch):
+    (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        "chowder.tui.estimate_memory_requirements", lambda **kwargs: _fake_estimate()
+    )
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        app.on_button_pressed(Button.Pressed(app.query_one("#estimate_memory", Button)))
+        assert app.query_one("#estimate_memory", Button).disabled is True
+        await app._memory_estimate_worker.wait()
+        assert app.query_one("#estimate_memory", Button).disabled is False
+        panel_text = app.query_one("#memory_estimate", Static).content
+        assert "cuda" in panel_text
+        assert "Fits within available VRAM" in panel_text
+
+
+@pytest.mark.asyncio
+async def test_estimate_memory_reports_a_non_fitting_estimate_with_recommendations(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        "chowder.tui.estimate_memory_requirements",
+        lambda **kwargs: _fake_estimate(
+            fits=False,
+            recommendations=("switch backend.quantization to '4bit'", "overage: 4.00 GB"),
+        ),
+    )
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        app.on_button_pressed(Button.Pressed(app.query_one("#estimate_memory", Button)))
+        await app._memory_estimate_worker.wait()
+        panel_text = app.query_one("#memory_estimate", Static).content
+        assert "Does NOT fit" in panel_text
+        assert "switch backend.quantization to '4bit'" in panel_text
+
+
+@pytest.mark.asyncio
+async def test_estimate_memory_reports_a_worker_failure_and_reenables_the_button(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
+
+    def _raise(**kwargs):
+        raise RuntimeError("memory preflight worker failed with exit code 1")
+
+    monkeypatch.setattr("chowder.tui.estimate_memory_requirements", _raise)
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        app.on_button_pressed(Button.Pressed(app.query_one("#estimate_memory", Button)))
+        await app._memory_estimate_worker.wait()
+        assert app.query_one("#estimate_memory", Button).disabled is False
+        panel_text = app.query_one("#memory_estimate", Static).content
+        assert "Memory estimate failed" in panel_text
+        assert "worker failed with exit code 1" in panel_text
+
+
+@pytest.mark.asyncio
+async def test_estimate_memory_reports_a_build_payload_error_without_starting_a_worker(
+    tmp_path, monkeypatch
+):
+    """A config validation error (e.g. a required field left blank) must
+    reject before spawning the expensive worker -- mirrors
+    test_discover_checkpoints_reports_a_build_payload_error_gracefully."""
+    called = False
+
+    def _should_not_run(**kwargs):
+        nonlocal called
+        called = True
+        return _fake_estimate()
+
+    monkeypatch.setattr("chowder.tui.estimate_memory_requirements", _should_not_run)
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path), metric_name="")  # required field left blank
+        app.on_button_pressed(Button.Pressed(app.query_one("#estimate_memory", Button)))
+        assert app._memory_estimate_worker is None
+        assert called is False
+        # The button must never have been left disabled by a run that never started.
+        assert app.query_one("#estimate_memory", Button).disabled is False
 
 
 # --- run-status panel -------------------------------------------------------
