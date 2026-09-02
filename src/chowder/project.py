@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .backends.transformers_peft import TransformersPeftRunSpec
 from .config_validation import validate_transformers_backend_config
+from .evaluators.base_text import BaseTextEvalSpec
 from .models import (
     Experiment,
     ExperimentResult,
@@ -54,7 +56,8 @@ class ProjectSpec:
     registry_path: Path
     seed: int
     goal: Goal
-    baseline: ExperimentResult
+    baseline_mode: str
+    baseline: ExperimentResult | None
     experiment: Experiment
     config: Mapping[str, Any]
 
@@ -63,11 +66,20 @@ class ProjectSpec:
             raise ProjectValidationError("project.name is required")
         if self.seed < 0:
             raise ProjectValidationError("project.seed cannot be negative")
+        if self.baseline_mode not in {"auto", "fixed"}:
+            raise ProjectValidationError("baseline.mode must be 'auto' or 'fixed'")
+
         metric_names = {target.name for target in self.goal.metrics}
-        if set(self.baseline.metrics) != metric_names:
-            raise ProjectValidationError(
-                "baseline metric names must exactly match goal metric names"
-            )
+        if self.baseline_mode == "fixed":
+            if self.baseline is None:
+                raise ProjectValidationError("fixed baseline requires baseline metrics")
+            if set(self.baseline.metrics) != metric_names:
+                raise ProjectValidationError(
+                    "baseline metric names must exactly match goal metric names"
+                )
+        elif self.baseline is not None:
+            raise ProjectValidationError("automatic baseline must not include fixed metrics")
+
         evaluation = _mapping(self.config.get("evaluation"), path="config.evaluation")
         if evaluation.get("type", "transformers-text") != "transformers-text":
             raise ProjectValidationError(
@@ -91,7 +103,26 @@ class ProjectSpec:
             raise ProjectValidationError(
                 "evaluation suite names must exactly match goal metric names"
             )
+
+        # Validate both the strict namespace and the actual executable spec at
+        # project-load time. This catches semantically invalid precision,
+        # quantization, LoRA, timeout, and evaluation settings before compute.
         validate_transformers_backend_config(self.config)
+        try:
+            TransformersPeftRunSpec.from_resolved_config(
+                self.config,
+                work_dir=self.work_dir,
+                output_dir=self.work_dir / ".chowder" / "validation-adapter",
+                seed=self.seed,
+            )
+            BaseTextEvalSpec.from_config(
+                self.config,
+                work_dir=self.work_dir,
+                output_dir=self.work_dir / ".chowder" / "validation-eval",
+                seed=self.seed,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ProjectValidationError(str(exc)) from exc
 
     def validate_files(self) -> None:
         backend = _mapping(self.config.get("backend"), path="config.backend")
@@ -119,14 +150,20 @@ def _metric_from_mapping(raw: Mapping[str, Any]) -> MetricTarget:
     try:
         direction = OptimizationDirection(str(raw.get("direction", "maximize")))
     except ValueError as exc:
-        raise ProjectValidationError("goal metric direction must be maximize or minimize") from exc
+        raise ProjectValidationError(
+            "goal metric direction must be maximize or minimize"
+        ) from exc
     return MetricTarget(
         name=str(raw.get("name", "")),
         minimum=(
-            None if raw.get("minimum") is None else _finite(raw["minimum"], path="metric.minimum")
+            None
+            if raw.get("minimum") is None
+            else _finite(raw["minimum"], path="metric.minimum")
         ),
         maximum=(
-            None if raw.get("maximum") is None else _finite(raw["maximum"], path="metric.maximum")
+            None
+            if raw.get("maximum") is None
+            else _finite(raw["maximum"], path="metric.maximum")
         ),
         weight=_finite(raw.get("weight", 1.0), path="metric.weight"),
         regression_tolerance=_finite(
@@ -134,6 +171,32 @@ def _metric_from_mapping(raw: Mapping[str, Any]) -> MetricTarget:
             path="metric.regression_tolerance",
         ),
         direction=direction,
+    )
+
+
+def _fixed_baseline(raw: Mapping[str, Any]) -> ExperimentResult:
+    metrics_raw = _mapping(raw.get("metrics"), path="baseline.metrics")
+    metrics = {
+        str(name): _finite(value, path=f"baseline.metrics.{name}")
+        for name, value in metrics_raw.items()
+    }
+    evidence: dict[str, Any] = {}
+    protocol_sha = raw.get("evaluation_protocol_sha256")
+    if protocol_sha is not None:
+        protocol = str(protocol_sha)
+        if len(protocol) != 64:
+            raise ProjectValidationError(
+                "baseline.evaluation_protocol_sha256 must be a SHA-256 digest"
+            )
+        evidence["evaluation_protocol_sha256"] = protocol
+    return ExperimentResult(
+        experiment_id=str(raw.get("experiment_id", "baseline")),
+        metrics=metrics,
+        gpu_hours=_finite(raw.get("gpu_hours", 0.0), path="baseline.gpu_hours"),
+        artifact_ref=(
+            str(raw["artifact_ref"]) if raw.get("artifact_ref") is not None else None
+        ),
+        evidence=evidence,
     )
 
 
@@ -183,39 +246,25 @@ def project_from_mapping(
         require_protocol_match=bool(goal_raw.get("require_protocol_match", False)),
     )
 
-    baseline_raw = _mapping(raw.get("baseline"), path="baseline")
-    baseline_metrics_raw = _mapping(baseline_raw.get("metrics"), path="baseline.metrics")
-    baseline_metrics = {
-        str(name): _finite(value, path=f"baseline.metrics.{name}")
-        for name, value in baseline_metrics_raw.items()
-    }
-    baseline_evidence: dict[str, Any] = {}
-    protocol_sha = baseline_raw.get("evaluation_protocol_sha256")
-    if protocol_sha is not None:
-        protocol = str(protocol_sha)
-        if len(protocol) != 64:
-            raise ProjectValidationError(
-                "baseline.evaluation_protocol_sha256 must be a SHA-256 digest"
-            )
-        baseline_evidence["evaluation_protocol_sha256"] = protocol
-    baseline = ExperimentResult(
-        experiment_id=str(baseline_raw.get("experiment_id", "baseline")),
-        metrics=baseline_metrics,
-        gpu_hours=_finite(baseline_raw.get("gpu_hours", 0.0), path="baseline.gpu_hours"),
-        artifact_ref=(
-            str(baseline_raw["artifact_ref"])
-            if baseline_raw.get("artifact_ref") is not None
-            else None
-        ),
-        evidence=baseline_evidence,
-    )
+    baseline_raw = _mapping(raw.get("baseline", {"mode": "auto"}), path="baseline")
+    baseline_mode = str(baseline_raw.get("mode", "fixed")).strip().lower()
+    if baseline_mode not in {"auto", "fixed"}:
+        raise ProjectValidationError("baseline.mode must be 'auto' or 'fixed'")
+    baseline = None if baseline_mode == "auto" else _fixed_baseline(baseline_raw)
 
     experiment_raw = _mapping(raw.get("experiment"), path="experiment")
-    hypothesis_raw = _mapping(experiment_raw.get("hypothesis", {}), path="experiment.hypothesis")
+    hypothesis_raw = _mapping(
+        experiment_raw.get("hypothesis", {}), path="experiment.hypothesis"
+    )
     hypothesis = Hypothesis(
-        observation=str(hypothesis_raw.get("observation", "Initial post-training run")),
+        observation=str(
+            hypothesis_raw.get("observation", "Initial post-training run")
+        ),
         suspected_cause=str(
-            hypothesis_raw.get("suspected_cause", "Base model has not been adapted to the target data")
+            hypothesis_raw.get(
+                "suspected_cause",
+                "Base model has not been adapted to the target data",
+            )
         ),
         intervention=str(
             hypothesis_raw.get("intervention", "Supervised LoRA fine-tuning")
@@ -244,6 +293,7 @@ def project_from_mapping(
         registry_path=registry_path,
         seed=seed_raw,
         goal=goal,
+        baseline_mode=baseline_mode,
         baseline=baseline,
         experiment=experiment,
         config=config,
@@ -266,12 +316,10 @@ def write_project(path: str | Path, payload: Mapping[str, Any]) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     normalized = dict(payload)
     normalized["schema_version"] = PROJECT_SCHEMA_VERSION
-    # Validate structure before writing. Files may not exist yet while the TUI
-    # wizard is being completed, so this is structural validation only.
     project_from_mapping(normalized, source_dir=target.parent)
     target.write_bytes(
-        (json.dumps(normalized, sort_keys=True, indent=2, allow_nan=False) + "\n").encode(
-            "utf-8"
-        )
+        (
+            json.dumps(normalized, sort_keys=True, indent=2, allow_nan=False) + "\n"
+        ).encode("utf-8")
     )
     return target
