@@ -8,9 +8,11 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, ScrollableContainer
 from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
 
+from .cancellation import CancellationToken
 from .hardware import HardwareSnapshot, detect_hardware
 from .project import ProjectValidationError, write_project
 from .project_runner import ProjectRunEvent, run_project
+from .registry import RunRegistry
 
 
 class ChowderTUI(App[None]):
@@ -36,6 +38,7 @@ class ChowderTUI(App[None]):
         super().__init__()
         self.project_path = Path(project_path).expanduser().resolve()
         self._hardware: HardwareSnapshot | None = None
+        self._cancellation: CancellationToken | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -131,6 +134,8 @@ class ChowderTUI(App[None]):
             with Horizontal(id="actions"):
                 yield Button("Validate + Save", id="save", variant="primary")
                 yield Button("Start Training", id="start", variant="success")
+                yield Button("Cancel", id="cancel", variant="error", disabled=True)
+                yield Button("View History", id="history")
                 yield Button("Quit", id="quit")
             yield Static("Ready", id="status")
             yield RichLog(id="log", wrap=True, highlight=True, markup=True)
@@ -353,10 +358,46 @@ class ChowderTUI(App[None]):
     def _set_running(self, running: bool) -> None:
         self.query_one("#start", Button).disabled = running
         self.query_one("#save", Button).disabled = running
+        self.query_one("#cancel", Button).disabled = not running
+
+    def _history_summary(self) -> str:
+        work_dir_raw = self._value("work_dir") or str(Path.cwd())
+        registry_path = (Path(work_dir_raw).expanduser() / ".chowder" / "runs.db").resolve()
+        if not registry_path.is_file():
+            return f"No run history found at {registry_path}"
+        with RunRegistry(registry_path) as registry:
+            results = sorted(registry.list_results(), key=lambda result: result.experiment_id)
+        if not results:
+            return f"No results recorded yet at {registry_path}"
+        lines = [f"History from {registry_path}:"]
+        for result in results:
+            metrics = ", ".join(
+                f"{name}={value:.4f}" for name, value in sorted(result.metrics.items())
+            )
+            artifact = "adapter" if result.artifact_ref else "no artifact (baseline)"
+            lines.append(
+                f"  {result.experiment_id}: {metrics} | "
+                f"{result.gpu_hours:.3f} GPU-hours | {artifact}"
+            )
+        return "\n".join(lines)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "quit":
             self.exit()
+            return
+        if event.button.id == "cancel":
+            if self._cancellation is not None:
+                self._cancellation.request()
+                self._set_status("Cancellation requested")
+                self._append_log("[yellow]Cancellation requested[/]")
+            return
+        if event.button.id == "history":
+            try:
+                summary = self._history_summary()
+            except Exception as exc:
+                self._append_log(f"[red]History unavailable:[/] {type(exc).__name__}: {exc}")
+                return
+            self._append_log(summary)
             return
         if event.button.id == "save":
             try:
@@ -375,10 +416,15 @@ class ChowderTUI(App[None]):
                 self._set_status(f"Validation failed: {exc}")
                 self._append_log(f"[red]Validation failed:[/] {type(exc).__name__}: {exc}")
                 return
+            # Created here, on the main thread, before the Cancel button is
+            # enabled -- if the token were created inside the worker thread
+            # instead, a click in the brief window before that thread starts
+            # would silently find self._cancellation still None.
+            self._cancellation = CancellationToken()
             self._set_running(True)
             self._set_status("Training started")
             self._append_log(f"[bold]Starting project:[/] {target}")
-            self._run_training(target)
+            self._run_training(target, self._cancellation)
 
     @work(thread=True, exclusive=True)
     def _scan_hardware(self) -> None:
@@ -412,7 +458,7 @@ class ChowderTUI(App[None]):
         self.call_from_thread(self.query_one("#hardware", Static).update, note)
 
     @work(thread=True, exclusive=True)
-    def _run_training(self, project_path: Path) -> None:
+    def _run_training(self, project_path: Path, token: CancellationToken) -> None:
         def event_sink(event: ProjectRunEvent) -> None:
             self.call_from_thread(
                 self._append_log,
@@ -420,7 +466,7 @@ class ChowderTUI(App[None]):
             )
 
         try:
-            outcome = run_project(project_path, on_event=event_sink)
+            outcome = run_project(project_path, on_event=event_sink, cancellation=token)
             candidate = outcome.generation.candidates[0]
             if candidate.error is not None:
                 message = f"Training failed: {candidate.error}"
@@ -440,6 +486,7 @@ class ChowderTUI(App[None]):
             self.call_from_thread(self._set_status, message)
             self.call_from_thread(self._append_log, f"[red]{message}[/]")
         finally:
+            self._cancellation = None
             self.call_from_thread(self._set_running, False)
 
 

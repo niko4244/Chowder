@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import pytest
+from textual.widgets import Button
 
+from chowder.cancellation import CancellationToken
 from chowder.hardware import AcceleratorProfile, HardwareSnapshot
+from chowder.models import Experiment, ExperimentResult, Hypothesis
 from chowder.project import ProjectValidationError
+from chowder.registry import RunRegistry
 from chowder.tui import ChowderTUI
 
 
@@ -239,3 +243,99 @@ async def test_repair_section_built_when_corpus_is_set(tmp_path):
     assert variant["estimated_gpu_hours"] == 0.5
     assert variant["training_patch"] == {"epochs": 2.0}
     assert variant["name"]
+
+
+# --- cancel ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancel_button_starts_disabled(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        assert app.query_one("#cancel", Button).disabled is True
+
+
+@pytest.mark.asyncio
+async def test_set_running_enables_and_disables_cancel_button(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        app._set_running(True)
+        assert app.query_one("#cancel", Button).disabled is False
+        app._set_running(False)
+        assert app.query_one("#cancel", Button).disabled is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_press_requests_the_active_token(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        token = CancellationToken()
+        app._cancellation = token
+        app.on_button_pressed(Button.Pressed(app.query_one("#cancel", Button)))
+    assert token.requested is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_press_with_no_active_run_is_a_noop(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        assert app._cancellation is None
+        app.on_button_pressed(Button.Pressed(app.query_one("#cancel", Button)))  # must not raise
+
+
+# --- history -----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_history_reports_a_missing_registry(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        summary = app._history_summary()
+    assert "No run history found" in summary
+
+
+@pytest.mark.asyncio
+async def test_history_reports_an_empty_registry(tmp_path):
+    registry_path = tmp_path / ".chowder" / "runs.db"
+    registry_path.parent.mkdir(parents=True)
+    with RunRegistry(registry_path):
+        pass
+
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        summary = app._history_summary()
+    assert "No results recorded yet" in summary
+
+
+@pytest.mark.asyncio
+async def test_history_summarizes_recorded_results(tmp_path):
+    registry_path = tmp_path / ".chowder" / "runs.db"
+    registry_path.parent.mkdir(parents=True)
+    with RunRegistry(registry_path) as registry:
+        registry.record_experiment(
+            Experiment("e1", None, Hypothesis("obs", "cause", "fix"), {}, 0.5)
+        )
+        registry.record_result(
+            ExperimentResult("e1", {"quality": 0.9}, 0.3, artifact_ref="/adapter")
+        )
+
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        summary = app._history_summary()
+    assert "e1" in summary
+    assert "quality=0.9000" in summary
+    assert "adapter" in summary
+
+
+@pytest.mark.asyncio
+async def test_history_button_press_does_not_raise(tmp_path):
+    """Exercises the same dispatch path _history_summary()'s own content is
+    already verified through above -- RichLog doesn't expose a plain-text
+    getter to also assert on what got logged here."""
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        app.on_button_pressed(Button.Pressed(app.query_one("#history", Button)))
