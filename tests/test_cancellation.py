@@ -72,3 +72,13 @@ def test_registering_a_new_active_run_replaces_the_previous_one():
     token.request()
     assert first.cancelled_run_ids == []
     assert second.cancelled_run_ids == ["run-2"]
+
+
+def test_repeated_request_calls_are_safe_and_idempotent():
+    token = CancellationToken()
+    executor = _FakeExecutor()
+    token._register_active(executor, "run-1")
+    for _ in range(5):
+        token.request()  # must not raise
+    assert token.requested is True
+    assert executor.cancelled_run_ids == ["run-1"] * 5

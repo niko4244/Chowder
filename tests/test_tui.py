@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
-from textual.widgets import Button
+from textual.widgets import Button, Static
 
 from chowder.cancellation import CancellationToken
 from chowder.hardware import AcceleratorProfile, HardwareSnapshot
 from chowder.models import Experiment, ExperimentResult, Hypothesis
 from chowder.project import ProjectValidationError
+from chowder.recursive_repair import RecursiveRepairStopReason
 from chowder.registry import RunRegistry
 from chowder.tui import ChowderTUI
 
@@ -339,3 +342,120 @@ async def test_history_button_press_does_not_raise(tmp_path):
     async with app.run_test():
         _set(app, work_dir=str(tmp_path))
         app.on_button_pressed(Button.Pressed(app.query_one("#history", Button)))
+
+
+# --- cancel: races, repeated clicks, and status wording ----------------------
+
+
+def _fake_outcome(*, candidate_error=None, repair_stop_reason=None, promoted_experiment_id=None):
+    candidate = SimpleNamespace(error=candidate_error, artifact=None)
+    generation = SimpleNamespace(candidates=(candidate,), promoted=None)
+    repair = (
+        SimpleNamespace(stop_reason=repair_stop_reason) if repair_stop_reason is not None else None
+    )
+    return SimpleNamespace(
+        generation=generation,
+        repair=repair,
+        promoted_experiment_id=promoted_experiment_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_then_immediate_cancel_reaches_run_project_already_requested(
+    tmp_path, monkeypatch
+):
+    """Simulates pressing Start then Cancel before the worker thread has
+    necessarily run at all -- the token passed into run_project() must
+    already carry the cancellation, since it is created on the main thread
+    before the Cancel button is even enabled."""
+    captured = {}
+
+    def fake_run_project(project_path, *, on_event=None, cancellation=None):
+        captured["cancellation"] = cancellation
+        return _fake_outcome(candidate_error="cancelled before start")
+
+    monkeypatch.setattr("chowder.tui.run_project", fake_run_project)
+
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        app.on_button_pressed(Button.Pressed(app.query_one("#start", Button)))
+        # Enabled and bound immediately -- no window where a click would
+        # find self._cancellation still None.
+        assert app.query_one("#cancel", Button).disabled is False
+        assert app._cancellation is not None
+        app.on_button_pressed(Button.Pressed(app.query_one("#cancel", Button)))
+        assert app._cancellation.requested is True
+        await app._training_worker.wait()
+
+    assert captured["cancellation"] is not None
+    assert captured["cancellation"].requested is True
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancel_clicks_do_not_raise(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "chowder.tui.run_project",
+        lambda *a, **k: _fake_outcome(candidate_error="cancelled before start"),
+    )
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        app.on_button_pressed(Button.Pressed(app.query_one("#start", Button)))
+        cancel_button = app.query_one("#cancel", Button)
+        for _ in range(5):
+            app.on_button_pressed(Button.Pressed(cancel_button))
+        assert app._cancellation.requested is True
+        await app._training_worker.wait()
+
+
+@pytest.mark.asyncio
+async def test_status_reads_cancelled_when_the_candidate_was_cancelled(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "chowder.tui.run_project",
+        lambda *a, **k: _fake_outcome(candidate_error="cancelled: RuntimeError: worker terminated"),
+    )
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        app.on_button_pressed(Button.Pressed(app.query_one("#start", Button)))
+        await app._training_worker.wait()
+        assert app.query_one("#status", Static).content == "Cancelled"
+
+
+@pytest.mark.asyncio
+async def test_status_reads_cancelled_when_the_repair_loop_stopped_as_cancelled(
+    tmp_path, monkeypatch
+):
+    """The last-run candidate can complete normally right before the token
+    was set -- only the repair loop's own stop reason says this run was
+    cancelled. That must still read as "Cancelled", not as an unpromoted
+    success."""
+    monkeypatch.setattr(
+        "chowder.tui.run_project",
+        lambda *a, **k: _fake_outcome(
+            candidate_error=None, repair_stop_reason=RecursiveRepairStopReason.CANCELLED
+        ),
+    )
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        app.on_button_pressed(Button.Pressed(app.query_one("#start", Button)))
+        await app._training_worker.wait()
+        assert app.query_one("#status", Static).content == "Cancelled"
+
+
+@pytest.mark.asyncio
+async def test_status_reads_failed_for_a_non_cancellation_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "chowder.tui.run_project",
+        lambda *a, **k: _fake_outcome(candidate_error="RuntimeError: dataset not found"),
+    )
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        app.on_button_pressed(Button.Pressed(app.query_one("#start", Button)))
+        await app._training_worker.wait()
+        status = app.query_one("#status", Static).content
+        assert status.startswith("Failed:")
+        assert "Cancelled" not in status
