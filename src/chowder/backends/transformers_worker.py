@@ -34,6 +34,50 @@ def _resolve_dtype(torch: Any, precision: str):
     return torch.float32
 
 
+# Only architectures whose attention (q/k/v/o_proj) AND MLP (gate/up/
+# down_proj) naming has actually been verified against a real loaded model
+# (directly, for llama; by well-documented, stable architectural convention
+# shared with llama, for the rest) are listed here. PEFT silently trains
+# only whatever subset of a target_modules list actually matches real module
+# names on the model -- it does NOT error if some names don't match, only if
+# NONE do -- so guessing wrong here would be a silent partial-coverage bug,
+# not a loud one. When in doubt, leave an architecture out: "auto" (PEFT's
+# own actively-maintained per-architecture mapping) or an explicit
+# backend.lora.target_modules list are always available.
+_ATTENTION_AND_MLP_MODEL_TYPES = {"llama", "mistral", "qwen2", "gemma", "gemma2"}
+_ATTENTION_AND_MLP_TARGET_MODULES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+
+
+def _resolve_target_modules(
+    model: Any, *, explicit: tuple[str, ...], preset: str
+) -> list[str] | None:
+    """None means "let PEFT's own per-architecture mapping decide" (its
+    LoraConfig(target_modules=None) auto-detection, keyed off
+    model.config.model_type) -- the safest, broadest-coverage default,
+    actively maintained by PEFT itself rather than duplicated here.
+    """
+    if explicit:
+        return list(explicit)
+    if preset == "attention_and_mlp":
+        model_type = getattr(model.config, "model_type", None)
+        if model_type not in _ATTENTION_AND_MLP_MODEL_TYPES:
+            raise RuntimeError(
+                f"lora.target_preset='attention_and_mlp' has no curated module list for "
+                f"model_type {model_type!r}; supported: {sorted(_ATTENTION_AND_MLP_MODEL_TYPES)}. "
+                "Specify backend.lora.target_modules explicitly instead."
+            )
+        return list(_ATTENTION_AND_MLP_TARGET_MODULES)
+    return None
+
+
 def _sha256_file(path: str | Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -312,16 +356,21 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             is_trainable=True,
         )
     else:
+        target_modules = _resolve_target_modules(
+            base_model, explicit=spec.target_modules, preset=spec.target_preset
+        )
         lora_config = LoraConfig(
             r=spec.lora_r,
             lora_alpha=spec.lora_alpha,
             lora_dropout=spec.lora_dropout,
-            target_modules=list(spec.target_modules),
+            target_modules=target_modules,
             bias="none",
             task_type=TaskType.CAUSAL_LM,
             use_rslora=spec.use_rslora,
         )
         model = get_peft_model(base_model, lora_config)
+
+    resolved_target_modules = sorted(model.peft_config[model.active_adapter].target_modules)
 
     if spec.gradient_checkpointing:
         model.config.use_cache = False
@@ -517,6 +566,8 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "requested_base_model": spec.base_model,
             "requested_revision": spec.revision,
             "resolved_model_commit": getattr(model.config, "_commit_hash", None),
+            "model_type": getattr(model.config, "model_type", None),
+            "resolved_target_modules": resolved_target_modules,
             "continued_from_parent_adapter": parent_adapter_sha is not None,
             "parent_adapter_sha256": parent_adapter_sha,
         },
