@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
+from pathlib import Path
 
 
 class MissingDependencyError(RuntimeError):
@@ -11,6 +13,15 @@ class MissingDependencyError(RuntimeError):
     failure, and should look like one rather than being reported deep
     inside a spawned subprocess after paying for the reservation and the
     process startup.
+    """
+
+
+class InsufficientDiskSpaceError(RuntimeError):
+    """Free disk space at the run's work_dir is below the configured
+    minimum. Raised at the same preflight point as MissingDependencyError,
+    before any GPU-hours are reserved -- an out-of-space failure partway
+    through a model download or checkpoint write is far more expensive to
+    discover than a cheap `shutil.disk_usage` check up front.
     """
 
 
@@ -40,3 +51,25 @@ def check_dependencies(
     raise MissingDependencyError(
         f"{label} is missing required package(s): {', '.join(missing)}; install {extras}"
     )
+
+
+def check_disk_space(*, path: str | Path, minimum_free_gb: float, label: str) -> None:
+    """Raise InsufficientDiskSpaceError if `path`'s filesystem has less than
+    `minimum_free_gb` free. `path` need not exist yet -- the nearest existing
+    ancestor directory is measured, matching how work_dir/registry_path are
+    created lazily elsewhere in this codebase.
+    """
+    if minimum_free_gb <= 0:
+        return
+    target = Path(path)
+    while not target.exists():
+        parent = target.parent
+        if parent == target:
+            break
+        target = parent
+    free_gb = shutil.disk_usage(target).free / (1024**3)
+    if free_gb < minimum_free_gb:
+        raise InsufficientDiskSpaceError(
+            f"{label} requires at least {minimum_free_gb:.2f} GB free at "
+            f"{target}, but only {free_gb:.2f} GB is available"
+        )

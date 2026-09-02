@@ -194,3 +194,54 @@ def test_permanent_wins_over_a_transient_looking_root_cause():
             ) from inner
     except hub_errors.RepositoryNotFoundError as chained:
         assert is_retriable_hub_error(chained) is False
+
+
+# --- cache_status -------------------------------------------------------------
+
+
+def test_cache_status_hit_when_a_cached_path_is_found(monkeypatch):
+    pytest.importorskip("huggingface_hub")
+    from chowder.hf_resilience import cache_status
+
+    monkeypatch.setattr(
+        "huggingface_hub.try_to_load_from_cache",
+        lambda **kwargs: "/cache/models--org--model/snapshots/abc/config.json",
+    )
+    assert cache_status("org/model", "main") == "hit"
+
+
+def test_cache_status_miss_when_nothing_is_cached(monkeypatch):
+    pytest.importorskip("huggingface_hub")
+    from chowder.hf_resilience import cache_status
+
+    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lambda **kwargs: None)
+    assert cache_status("org/model", None) == "miss"
+
+
+def test_cache_status_miss_for_the_cached_no_exist_sentinel(monkeypatch):
+    """try_to_load_from_cache can return a special non-string sentinel
+    meaning "we already know this file doesn't exist at this revision" --
+    that is not a usable cached file, so it must count as a miss too."""
+    pytest.importorskip("huggingface_hub")
+    from chowder.hf_resilience import cache_status
+
+    sentinel = object()
+    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lambda **kwargs: sentinel)
+    assert cache_status("org/model", None) == "miss"
+
+
+def test_cache_status_passes_repo_id_revision_and_filename_through(monkeypatch):
+    pytest.importorskip("huggingface_hub")
+    from chowder.hf_resilience import cache_status
+
+    seen = {}
+
+    def fake_try_to_load_from_cache(*, repo_id, filename, revision):
+        seen.update(repo_id=repo_id, filename=filename, revision=revision)
+        return None
+
+    monkeypatch.setattr(
+        "huggingface_hub.try_to_load_from_cache", fake_try_to_load_from_cache
+    )
+    cache_status("org/model", "abc123")
+    assert seen == {"repo_id": "org/model", "filename": "config.json", "revision": "abc123"}

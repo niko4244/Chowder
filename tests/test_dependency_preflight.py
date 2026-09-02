@@ -2,7 +2,12 @@ import pytest
 
 from chowder.backends.transformers_peft import TransformersPeftExecutor
 from chowder.cycle import ExperimentCycleRunner
-from chowder.dependency_preflight import MissingDependencyError, check_dependencies
+from chowder.dependency_preflight import (
+    InsufficientDiskSpaceError,
+    MissingDependencyError,
+    check_dependencies,
+    check_disk_space,
+)
 from chowder.engine import EvolutionEngine
 from chowder.evaluators.transformers_text import TransformersTextEvaluator
 from chowder.executors import EvaluationOutcome, ExecutionContext, TrainingArtifact
@@ -178,6 +183,116 @@ def test_cycle_dependency_check_ignores_stubs_that_only_share_the_name(tmp_path,
         # isinstance -- unlike the dependency check this test exists to
         # verify), so this still needs a config that satisfies that.
         base_config={"backend": {"type": "transformers-peft"}},
+    )
+    outcome = runner.run_generation((experiment,))
+    candidate = outcome.candidates[0]
+    assert candidate.error is None
+    assert candidate.result is not None
+
+
+# --- disk-space preflight ----------------------------------------------------
+
+
+def test_check_disk_space_passes_when_plenty_free(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "chowder.dependency_preflight.shutil.disk_usage",
+        lambda path: type("Usage", (), {"free": 10 * 1024**3})(),
+    )
+    check_disk_space(path=tmp_path, minimum_free_gb=2.0, label="t")
+
+
+def test_check_disk_space_raises_when_below_minimum(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "chowder.dependency_preflight.shutil.disk_usage",
+        lambda path: type("Usage", (), {"free": 1 * 1024**3})(),
+    )
+    with pytest.raises(InsufficientDiskSpaceError, match="2.00 GB.*1.00 GB"):
+        check_disk_space(path=tmp_path, minimum_free_gb=2.0, label="t")
+
+
+def test_check_disk_space_zero_minimum_never_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "chowder.dependency_preflight.shutil.disk_usage",
+        lambda path: type("Usage", (), {"free": 0})(),
+    )
+    check_disk_space(path=tmp_path, minimum_free_gb=0.0, label="t")
+
+
+def test_check_disk_space_measures_nearest_existing_ancestor(tmp_path, monkeypatch):
+    seen: list = []
+
+    def fake_disk_usage(path):
+        seen.append(path)
+        return type("Usage", (), {"free": 10 * 1024**3})()
+
+    monkeypatch.setattr("chowder.dependency_preflight.shutil.disk_usage", fake_disk_usage)
+    missing = tmp_path / "does" / "not" / "exist"
+    check_disk_space(path=missing, minimum_free_gb=1.0, label="t")
+    assert seen == [tmp_path]
+
+
+def test_cycle_rejects_insufficient_disk_space_before_subprocess_spawn(tmp_path, monkeypatch):
+    """A real TransformersPeftExecutor + TransformersTextEvaluator, with a
+    simulated near-empty disk -- proves the candidate is rejected at
+    preflight, before engine.resize_reservation() commits any GPU-hours and
+    before subprocess.Popen is ever reached (mocked to raise if called)."""
+    monkeypatch.setattr(
+        "chowder.dependency_preflight.shutil.disk_usage",
+        lambda path: type("Usage", (), {"free": 1024})(),  # 1 KB free
+    )
+    # Must reach the disk-space check regardless of whether [train] is
+    # actually installed on the machine running this test -- simulate every
+    # package as present so the earlier dependency check always passes.
+    monkeypatch.setattr(
+        "chowder.dependency_preflight.importlib.util.find_spec", lambda name: object()
+    )
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch when disk space is insufficient")
+
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen", should_not_launch
+    )
+
+    engine = _engine()
+    experiment = _experiment()
+    engine.propose((experiment,))
+    runner = ExperimentCycleRunner(
+        engine=engine,
+        trainer=TransformersPeftExecutor(),
+        evaluator=TransformersTextEvaluator(),
+        context=ExecutionContext(_hardware(), str(tmp_path), 1),
+        base_config={"backend": {"type": "transformers-peft"}},
+    )
+    outcome = runner.run_generation((experiment,))
+    candidate = outcome.candidates[0]
+    assert candidate.error is not None
+    assert candidate.error.startswith("preflight")
+    assert "InsufficientDiskSpaceError" in candidate.error
+    assert engine.spent_gpu_hours == 0
+    assert engine.reserved_gpu_hours == 0
+    assert not engine.has_reservation(experiment.experiment_id)
+
+
+def test_cycle_disk_space_check_ignores_stubs_that_only_share_the_name(tmp_path, monkeypatch):
+    """Even with a configured minimum no simulated-low-disk mock could
+    satisfy, a stub that only shares the real backends' .name must not be
+    rejected -- dispatch is by isinstance, matching _check_dependencies."""
+    monkeypatch.setattr(
+        "chowder.dependency_preflight.shutil.disk_usage",
+        lambda path: type("Usage", (), {"free": 0})(),  # 0 bytes free
+    )
+    engine = _engine()
+    experiment = _experiment()
+    engine.propose((experiment,))
+    runner = ExperimentCycleRunner(
+        engine=engine,
+        trainer=_NamedLikeRealTrainer(),
+        evaluator=_NamedLikeRealEvaluator(),
+        context=ExecutionContext(_hardware(), str(tmp_path), 1),
+        base_config={
+            "backend": {"type": "transformers-peft", "min_free_disk_gb": 5.0}
+        },
     )
     outcome = runner.run_generation((experiment,))
     candidate = outcome.candidates[0]

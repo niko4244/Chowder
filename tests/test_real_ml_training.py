@@ -157,8 +157,16 @@ def test_real_tiny_llama_train_evaluate_and_persist(tmp_path: Path):
     )
     assert candidate.artifact.evidence["backend"] == "transformers-peft"
     assert len(candidate.artifact.evidence["artifact_sha256"]) == 64
+    assert candidate.artifact.evidence["model_provenance"]["model_cache_status"] in (
+        "hit",
+        "miss",
+    )
     assert candidate.evaluation.evidence["evaluator"] == "transformers-text"
     assert len(candidate.evaluation.evidence["protocol_sha256"]) == 64
+    assert candidate.evaluation.evidence["model_provenance"]["model_cache_status"] in (
+        "hit",
+        "miss",
+    )
     assert set(candidate.result.metrics) == {"quality"}
     assert candidate.result.gpu_hours >= 0.0
 

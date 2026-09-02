@@ -110,6 +110,26 @@ def is_retriable_hub_error(exc: BaseException) -> bool:
     return any(isinstance(candidate, transient) for candidate in chain)
 
 
+def cache_status(repo_id: str, revision: str | None, *, filename: str = "config.json") -> str:
+    """"hit" if `filename` for repo_id/revision is already in the local HF
+    cache, "miss" otherwise (a download will be needed, or -- offline with
+    nothing cached -- the load is about to fail). Call this immediately
+    before the corresponding from_pretrained() call, since the answer is
+    only meaningful as a snapshot of cache state before that call may
+    populate it.
+
+    A cheap, dependency-already-required proxy (huggingface_hub is a
+    transformers dependency) for "did this run need the network for this
+    model at all" -- not a byte-exact audit of every file the load will
+    actually touch, since a repo can have its config cached but not its
+    weights.
+    """
+    from huggingface_hub import try_to_load_from_cache
+
+    cached = try_to_load_from_cache(repo_id=repo_id, filename=filename, revision=revision)
+    return "hit" if isinstance(cached, str) else "miss"
+
+
 def with_hub_retries(
     func: Callable[[], _T],
     *,

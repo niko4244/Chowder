@@ -9,7 +9,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
-from ..hf_resilience import with_hub_retries
+from ..hf_resilience import cache_status, with_hub_retries
 from ..provenance import sha256_directory
 from .transformers_peft import TransformersPeftRunSpec
 
@@ -321,6 +321,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         raise RuntimeError("initial 4-bit QLoRA backend requires an available CUDA device")
 
     set_seed(spec.seed)
+    model_cache_status = cache_status(spec.base_model, spec.revision)
     tokenizer = with_hub_retries(
         lambda: AutoTokenizer.from_pretrained(
             spec.base_model,
@@ -579,6 +580,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         "provenance": {
             "requested_base_model": spec.base_model,
             "requested_revision": spec.revision,
+            "model_cache_status": model_cache_status,
             "resolved_model_commit": getattr(model.config, "_commit_hash", None),
             "model_type": getattr(model.config, "model_type", None),
             "resolved_target_modules": resolved_target_modules,

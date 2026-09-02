@@ -8,7 +8,8 @@ from typing import Any, Callable, Iterable, Mapping
 
 from .backends.transformers_peft import TransformersPeftExecutor
 from .config_validation import validate_transformers_backend_config
-from .dependency_preflight import check_dependencies
+from .dependency_preflight import check_dependencies, check_disk_space
+from .model_compatibility import check_causal_lm_architecture
 from .engine import EvolutionEngine
 from .evaluators.transformers_text import TransformersTextEvaluator
 from .execution_failure import ExecutionFailure, ExecutionStage, normalize_execution_exception
@@ -173,6 +174,66 @@ def _check_dependencies(
         )
 
 
+_DEFAULT_MIN_FREE_DISK_GB = 2.0
+
+
+def _check_disk_space(
+    trainer: TrainingExecutor,
+    evaluator: EvaluationExecutor,
+    resolved: Mapping[str, Any],
+    context: ExecutionContext,
+) -> None:
+    """Free-disk-space preflight, dispatched the same way as
+    _check_dependencies: only for the real backends that actually download a
+    model and write checkpoints/adapters to context.work_dir. One check
+    covers both training and evaluation, since they share the same work_dir
+    and run back-to-back within the same candidate.
+    """
+    if not isinstance(trainer, TransformersPeftExecutor) and not isinstance(
+        evaluator, TransformersTextEvaluator
+    ):
+        return
+    backend = resolved.get("backend", {})
+    backend = backend if isinstance(backend, Mapping) else {}
+    minimum_free_gb = float(backend.get("min_free_disk_gb", _DEFAULT_MIN_FREE_DISK_GB))
+    check_disk_space(
+        path=context.work_dir,
+        minimum_free_gb=minimum_free_gb,
+        label="transformers-peft training/evaluation",
+    )
+
+
+def _check_model_architecture(
+    trainer: TrainingExecutor,
+    evaluator: EvaluationExecutor,
+    resolved: Mapping[str, Any],
+    context: ExecutionContext,
+) -> None:
+    """Model-architecture-compatibility preflight, dispatched the same way
+    as _check_dependencies/_check_disk_space. Training and evaluation both
+    load backend.base_model with AutoModelForCausalLM, so one check covers
+    both. Skips (rather than requiring base_model to be set) when it is
+    absent -- that is a different, pre-existing validation concern, not
+    this check's job.
+    """
+    if not isinstance(trainer, TransformersPeftExecutor) and not isinstance(
+        evaluator, TransformersTextEvaluator
+    ):
+        return
+    backend = resolved.get("backend", {})
+    backend = backend if isinstance(backend, Mapping) else {}
+    base_model = str(backend.get("base_model", "")).strip()
+    if not base_model:
+        return
+    revision = backend.get("revision")
+    check_causal_lm_architecture(
+        base_model=base_model,
+        revision=str(revision) if revision is not None else None,
+        offline=bool(backend.get("offline", False)),
+        label="transformers-peft training/evaluation",
+    )
+
+
 @dataclass
 class ExperimentCycleRunner:
     """Run one generation through profile → train → evaluate → diagnose → gate."""
@@ -208,6 +269,8 @@ class ExperimentCycleRunner:
         try:
             _validate_trainer_config(self.trainer, resolved)
             _check_dependencies(self.trainer, self.evaluator, resolved, run_context)
+            _check_disk_space(self.trainer, self.evaluator, resolved, run_context)
+            _check_model_architecture(self.trainer, self.evaluator, resolved, run_context)
             try:
                 training_estimate = self.trainer.profile(experiment, run_context)
             except NotImplementedError:

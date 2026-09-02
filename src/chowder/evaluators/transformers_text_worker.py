@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..contamination import write_holdout_fingerprint_index
-from ..hf_resilience import with_hub_retries
+from ..hf_resilience import cache_status, with_hub_retries
 from .transformers_text import EvalSuiteSpec, TransformersTextEvalSpec
 
 
@@ -89,6 +89,7 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
 
     dtype = _resolve_dtype(torch, spec.precision)
     set_seed(spec.seed)
+    model_cache_status = cache_status(spec.base_model, spec.revision)
     tokenizer = with_hub_retries(
         lambda: AutoTokenizer.from_pretrained(
             spec.base_model,
@@ -215,6 +216,7 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         "model_provenance": {
             "requested_base_model": spec.base_model,
             "requested_revision": spec.revision,
+            "model_cache_status": model_cache_status,
             "resolved_model_commit": resolved_commit,
             "adapter_loaded": spec.adapter_dir is not None,
         },

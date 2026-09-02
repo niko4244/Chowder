@@ -138,6 +138,26 @@ def test_misspelled_offline_key_fails_closed():
         validate_transformers_backend_config(config)
 
 
+def test_min_free_disk_gb_key_is_accepted():
+    config = _backend_config()
+    config["backend"]["min_free_disk_gb"] = 5.0
+    validate_transformers_backend_config(config)
+
+
+def test_min_free_disk_gb_must_be_finite_nonnegative():
+    config = _backend_config()
+    config["backend"]["min_free_disk_gb"] = -1.0
+    with pytest.raises(ConfigValidationError, match="min_free_disk_gb"):
+        validate_transformers_backend_config(config)
+
+
+def test_misspelled_min_free_disk_gb_key_fails_closed():
+    config = _backend_config()
+    config["backend"]["min_free_disk_bg"] = 5.0
+    with pytest.raises(ConfigValidationError, match="min_free_disk_bg"):
+        validate_transformers_backend_config(config)
+
+
 def test_top_level_repair_metadata_is_not_rejected():
     config = _backend_config()
     config["repair"] = {
