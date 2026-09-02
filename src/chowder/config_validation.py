@@ -81,9 +81,13 @@ def validate_transformers_backend_config(config: Mapping[str, Any]) -> None:
             "parent_adapter",
             "profile",
             "resume_from_checkpoint",
+            "min_free_disk_gb",
         },
         path="backend",
     )
+
+    if "min_free_disk_gb" in backend:
+        _finite_nonnegative(backend["min_free_disk_gb"], path="backend.min_free_disk_gb")
 
     schema_version = backend.get("schema_version", TRANSFORMERS_BACKEND_SCHEMA_VERSION)
     if isinstance(schema_version, bool) or not isinstance(schema_version, int):

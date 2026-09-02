@@ -290,11 +290,13 @@ class TransformersTextEvaluator:
         suite_evidence = payload.get("suites")
         versions = payload.get("versions", {})
         runtime = payload.get("runtime", {})
+        model_provenance = payload.get("model_provenance", {})
         if (
             not isinstance(metrics, Mapping)
             or not isinstance(suite_evidence, Mapping)
             or not isinstance(versions, Mapping)
             or not isinstance(runtime, Mapping)
+            or not isinstance(model_provenance, Mapping)
         ):
             raise RuntimeError("evaluation result contains invalid metrics/evidence payload")
         gpu_count = int(runtime.get("gpu_count", 0))
@@ -368,6 +370,7 @@ class TransformersTextEvaluator:
                 "suite_evidence": dict(suite_evidence),
                 "versions": dict(versions),
                 "runtime": dict(runtime),
+                "model_provenance": dict(model_provenance),
                 "wall_time_seconds": elapsed,
                 "stdout_log": str(stdout_path),
                 "stderr_log": str(stderr_path),
