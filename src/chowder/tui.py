@@ -9,9 +9,12 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
 
 from .cancellation import CancellationToken
+from .checkpoint_discovery import DiscoveredCheckpoint, discover_checkpoints
+from .executors import ExecutionContext
 from .hardware import HardwareSnapshot, detect_hardware
+from .memory import HardwareProfile
 from .project import ProjectValidationError, write_project
-from .project_runner import ProjectRunEvent, run_project
+from .project_runner import ProjectRunEvent, hardware_profile_from_snapshot, run_project
 from .recursive_repair import RecursiveRepairStopReason
 from .registry import RunRegistry
 
@@ -29,6 +32,9 @@ class ChowderTUI(App[None]):
     Label { margin-top: 1; }
     Input { width: 100%; }
     #hardware { padding: 1; border: round $accent; margin-bottom: 1; }
+    #checkpoint_actions { height: auto; margin-top: 1; }
+    #checkpoint_actions Button { margin-right: 1; }
+    #checkpoints { padding: 1; border: round $accent; margin-bottom: 1; }
     #actions { height: auto; margin: 1 0; }
     #actions Button { margin-right: 1; }
     #log { height: 14; border: round $primary; }
@@ -41,6 +47,7 @@ class ChowderTUI(App[None]):
         self._hardware: HardwareSnapshot | None = None
         self._cancellation: CancellationToken | None = None
         self._training_worker = None
+        self._discovered_checkpoints: tuple[DiscoveredCheckpoint, ...] = ()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -122,6 +129,11 @@ class ChowderTUI(App[None]):
             yield Input("", id="save_total_limit")
             yield Label("Resume from checkpoint directory (blank = start fresh)")
             yield Input("", id="resume_from_checkpoint")
+            with Horizontal(id="checkpoint_actions"):
+                yield Button("Find Interrupted Runs", id="discover_checkpoints")
+                yield Button("Resume Best Match", id="resume_best", disabled=True)
+                yield Button("Start Fresh", id="start_fresh")
+            yield Static("No interrupted runs checked yet", id="checkpoints")
 
             yield Static("Autonomous repair (optional)", classes="section")
             yield Label("Repair corpus JSONL (blank disables autonomous repair)")
@@ -383,6 +395,59 @@ class ChowderTUI(App[None]):
             )
         return "\n".join(lines)
 
+    def _current_execution_context(self) -> ExecutionContext:
+        work_dir_raw = self._value("work_dir") or str(Path.cwd())
+        profile = (
+            hardware_profile_from_snapshot(self._hardware)
+            if self._hardware is not None
+            else HardwareProfile(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        )
+        return ExecutionContext(hardware=profile, work_dir=work_dir_raw, seed=1)
+
+    def _run_checkpoint_discovery(self) -> tuple[DiscoveredCheckpoint, ...]:
+        payload = self._build_payload()
+        work_dir_raw = self._value("work_dir") or str(Path.cwd())
+        return discover_checkpoints(
+            work_dir=work_dir_raw,
+            resolved_config=payload["config"],
+            context=self._current_execution_context(),
+        )
+
+    @staticmethod
+    def _format_checkpoint(checkpoint: DiscoveredCheckpoint) -> str:
+        step = f"step {checkpoint.step:,}" if checkpoint.step is not None else "unknown step"
+        checked = ("base_model", "revision", "dataset_sha256", "parent_adapter_sha256")
+        lines = [f"  {checkpoint.checkpoint_dir} ({step})"]
+        for field in checked:
+            label = {
+                "base_model": "Base model",
+                "revision": "Model revision",
+                "dataset_sha256": "Dataset",
+                "parent_adapter_sha256": "Adapter lineage",
+            }[field]
+            ok = field not in checkpoint.mismatches
+            mark = "[green]verified[/]" if ok else "[red]MISMATCH[/]"
+            lines.append(f"    {label}: {mark}")
+        recipe_ok = "checkpoint_recipe_sha256" not in checkpoint.mismatches
+        lines.append(
+            f"    Training recipe: {'[green]verified[/]' if recipe_ok else '[red]MISMATCH[/]'}"
+        )
+        if not checkpoint.valid:
+            lines.append(f"    -> {checkpoint.reason}")
+        return "\n".join(lines)
+
+    def _format_discovery_results(
+        self, checkpoints: tuple[DiscoveredCheckpoint, ...]
+    ) -> str:
+        if not checkpoints:
+            return "No interrupted runs found under this project's work directory."
+        valid = [c for c in checkpoints if c.valid]
+        header = (
+            f"Found {len(checkpoints)} checkpoint(s), {len(valid)} resumable "
+            "with the current configuration:"
+        )
+        return "\n".join([header, *(self._format_checkpoint(c) for c in checkpoints)])
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "quit":
             self.exit()
@@ -400,6 +465,40 @@ class ChowderTUI(App[None]):
                 self._append_log(f"[red]History unavailable:[/] {type(exc).__name__}: {exc}")
                 return
             self._append_log(summary)
+            return
+        if event.button.id == "discover_checkpoints":
+            try:
+                self._discovered_checkpoints = self._run_checkpoint_discovery()
+            except Exception as exc:
+                self._discovered_checkpoints = ()
+                message = f"Checkpoint discovery failed: {type(exc).__name__}: {exc}"
+                self.query_one("#checkpoints", Static).update(message)
+                self._append_log(f"[red]{message}[/]")
+                self.query_one("#resume_best", Button).disabled = True
+                return
+            summary = self._format_discovery_results(self._discovered_checkpoints)
+            self.query_one("#checkpoints", Static).update(summary)
+            self._append_log(summary)
+            self.query_one("#resume_best", Button).disabled = not any(
+                c.valid for c in self._discovered_checkpoints
+            )
+            return
+        if event.button.id == "resume_best":
+            best = next((c for c in self._discovered_checkpoints if c.valid), None)
+            if best is None:
+                return
+            self.query_one("#resume_from_checkpoint", Input).value = str(best.checkpoint_dir)
+            self._set_status(f"Will resume from {best.checkpoint_dir}")
+            self._append_log(f"[green]Resume target set:[/] {best.checkpoint_dir}")
+            return
+        if event.button.id == "start_fresh":
+            # Never destroys anything -- prior runs/evidence under work_dir
+            # are untouched either way. This only clears the resume field
+            # so the next Start Training launches a new run instead of
+            # continuing a discovered one.
+            self.query_one("#resume_from_checkpoint", Input).value = ""
+            self._set_status("Starting fresh (resume field cleared)")
+            self._append_log("[bold]Starting fresh:[/] resume_from_checkpoint cleared")
             return
         if event.button.id == "save":
             try:
