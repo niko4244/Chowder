@@ -8,6 +8,9 @@ import pytest
 from chowder.backends.transformers_peft import (
     TransformersPeftExecutor,
     TransformersPeftRunSpec,
+    _default_gradient_checkpointing,
+    _default_quantization,
+    _min_device_vram_gb,
 )
 from chowder.backends.transformers_worker import (
     _build_chat_example,
@@ -668,6 +671,169 @@ def test_resume_is_rejected_when_target_preset_changed(tmp_path, monkeypatch):
     )
     with pytest.raises(ValueError, match="refusing to resume"):
         TransformersPeftExecutor().run(_experiment(), context)
+
+
+# --- hardware-aware recipe defaults ------------------------------------------
+
+
+def test_min_device_vram_gb_is_zero_when_hardware_is_unknown():
+    assert _min_device_vram_gb(None) == 0.0
+
+
+def test_min_device_vram_gb_uses_legacy_single_pool_when_topology_is_empty():
+    assert _min_device_vram_gb(HardwareProfile(16, 64, 500, 12, 40, 3)) == 16
+
+
+def test_min_device_vram_gb_uses_the_smallest_device_under_multi_gpu():
+    hardware = HardwareProfile(16, 64, 500, 12, 40, 3, accelerator_vram_gb=(16.0, 6.0))
+    assert _min_device_vram_gb(hardware) == 6.0
+
+
+@pytest.mark.parametrize(
+    "vram,expected",
+    [(0.0, True), (8.0, True), (23.9, True), (24.0, False), (40.0, False)],
+)
+def test_default_gradient_checkpointing_flips_at_the_ample_vram_threshold(vram, expected):
+    hardware = HardwareProfile(vram, 64, 500, 12, 40, 3)
+    assert _default_gradient_checkpointing(hardware) is expected
+
+
+def test_default_gradient_checkpointing_is_memory_safe_when_hardware_is_unknown():
+    assert _default_gradient_checkpointing(None) is True
+
+
+@pytest.mark.parametrize("vram", [0.0, 16.0, 40.0])
+def test_default_quantization_is_none_outside_the_low_vram_band(vram, monkeypatch):
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.importlib.util.find_spec", lambda name: object()
+    )
+    hardware = HardwareProfile(vram, 64, 500, 12, 40, 3)
+    assert _default_quantization(hardware) == "none"
+
+
+def test_default_quantization_is_4bit_in_the_low_vram_band_when_bitsandbytes_is_available(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.importlib.util.find_spec", lambda name: object()
+    )
+    hardware = HardwareProfile(8.0, 64, 500, 12, 40, 3)
+    assert _default_quantization(hardware) == "4bit"
+
+
+def test_default_quantization_stays_none_in_the_low_vram_band_without_bitsandbytes(monkeypatch):
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.importlib.util.find_spec", lambda name: None
+    )
+    hardware = HardwareProfile(8.0, 64, 500, 12, 40, 3)
+    assert _default_quantization(hardware) == "none"
+
+
+def test_default_quantization_is_none_when_hardware_is_unknown(monkeypatch):
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.importlib.util.find_spec", lambda name: object()
+    )
+    assert _default_quantization(None) == "none"
+
+
+def test_spec_uses_hardware_aware_defaults_when_fields_are_unset(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.importlib.util.find_spec", lambda name: object()
+    )
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    del config["backend"]["quantization"]
+    low_vram = HardwareProfile(8.0, 64, 500, 12, 40, 3)
+    spec = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1, hardware=low_vram
+    )
+    assert spec.quantization == "4bit"
+    assert spec.gradient_checkpointing is True
+
+    ample_vram = HardwareProfile(40.0, 64, 500, 12, 40, 3)
+    spec2 = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1, hardware=ample_vram
+    )
+    assert spec2.quantization == "none"
+    assert spec2.gradient_checkpointing is False
+
+
+def test_spec_explicit_config_overrides_hardware_aware_defaults(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["quantization"] = "none"
+    config["backend"]["training"]["gradient_checkpointing"] = True
+    low_vram = HardwareProfile(8.0, 64, 500, 12, 40, 3)
+    spec = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1, hardware=low_vram
+    )
+    # Both would have defaulted the opposite way for 8GB VRAM -- the
+    # explicit config values must win outright, not be second-guessed.
+    assert spec.quantization == "none"
+    assert spec.gradient_checkpointing is True
+
+
+def test_spec_without_hardware_argument_preserves_prior_fixed_defaults(tmp_path):
+    """Backward compatibility for callers that don't pass hardware at all
+    (e.g. pre-existing direct TransformersPeftRunSpec construction elsewhere
+    in the test suite) -- must behave exactly as it did before this feature:
+    quantization "none", gradient_checkpointing True."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    del config["backend"]["quantization"]
+    spec = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert spec.quantization == "none"
+    assert spec.gradient_checkpointing is True
+
+
+def test_recipe_digest_changes_with_hardware_aware_default_resolution(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    del config["backend"]["quantization"]
+    a = TransformersPeftRunSpec.from_resolved_config(
+        config,
+        work_dir=tmp_path,
+        output_dir=tmp_path / "adapter",
+        seed=1,
+        hardware=HardwareProfile(8.0, 64, 500, 12, 40, 3),
+    )
+    b = TransformersPeftRunSpec.from_resolved_config(
+        config,
+        work_dir=tmp_path,
+        output_dir=tmp_path / "adapter",
+        seed=1,
+        hardware=HardwareProfile(40.0, 64, 500, 12, 40, 3),
+    )
+    assert a.recipe_digest() != b.recipe_digest()
+
+
+def test_executor_threads_context_hardware_into_default_resolution(tmp_path, monkeypatch):
+    """End-to-end within the executor (not just the spec builder directly):
+    proves _spec_for actually passes context.hardware through, and that the
+    resolved value reaches the recorded evidence."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    ample_vram = HardwareProfile(40.0, 64, 500, 12, 40, 3)
+    context = ExecutionContext(ample_vram, str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert observed_spec["gradient_checkpointing"] is False
+    hardware_defaults = artifact.evidence["hardware_aware_defaults"]
+    assert hardware_defaults["min_device_vram_gb"] == 40.0
+    assert hardware_defaults["gradient_checkpointing_defaulted"] is True
+    assert hardware_defaults["quantization_defaulted"] is False  # _config() sets it explicitly
+    assert hardware_defaults["resolved_gradient_checkpointing"] is False
 
 
 # --- checkpoint/restart -----------------------------------------------------
@@ -1567,3 +1733,53 @@ def test_real_tiny_llama_attention_and_mlp_preset_targets_all_seven_modules(tmp_
     assert provenance["resolved_target_modules"] == sorted(
         ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     )
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_trains_with_hardware_defaulted_gradient_checkpointing_disabled(
+    tmp_path,
+):
+    """No backend.training.gradient_checkpointing set, real ample-VRAM
+    hardware context -- proves the "off by default with real headroom"
+    default reaches all the way through a real Trainer run, not just that
+    the resolution function itself picks the right boolean in isolation.
+    (The complementary "on by default when VRAM is small/unknown" default
+    is not new worker-side behavior -- gradient_checkpointing=True was
+    already this backend's fixed default and is already exercised by every
+    other real test in this file.) The low-VRAM quantization default
+    ("4bit") cannot be verified end-to-end here: it requires an actual CUDA
+    device, and this CI job is CPU-only -- covered instead by the unit
+    tests above, which do not depend on real hardware being present."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"Question: What token comes after alpha? Answer: beta"}\n')
+
+    config = _config(str(data))
+    config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    config["backend"]["precision"] = "fp32"
+    config["backend"]["quantization"] = "none"
+    config["backend"]["lora"] = {
+        "r": 4,
+        "alpha": 8,
+        "dropout": 0.0,
+        "target_modules": ["q_proj", "v_proj"],
+    }
+    config["backend"]["training"] = {
+        "epochs": 1.0,
+        "learning_rate": 0.001,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 1,
+        "logging_steps": 1,
+        # gradient_checkpointing deliberately omitted.
+    }
+    config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    ample_vram = HardwareProfile(40.0, 64, 500, 12, 40, 3)
+    context = ExecutionContext(ample_vram, str(tmp_path), 1, resolved_config=config)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    hardware_defaults = artifact.evidence["hardware_aware_defaults"]
+    assert hardware_defaults["gradient_checkpointing_defaulted"] is True
+    assert hardware_defaults["resolved_gradient_checkpointing"] is False
+    assert artifact.telemetry["global_step"] > 0

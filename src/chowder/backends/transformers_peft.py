@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import subprocess
@@ -12,6 +13,7 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from ..executors import CostEstimate, ExecutionContext, TrainingArtifact
+from ..memory import HardwareProfile
 from ..models import Experiment
 from ..provenance import sha256_directory, sha256_file
 from ..resources import ResourceUsage
@@ -30,6 +32,47 @@ _ALLOWED_LR_SCHEDULER_TYPES = {
     "constant_with_warmup",
     "inverse_sqrt",
 }
+
+# Hardware-aware defaults apply only when the corresponding config key is
+# absent entirely -- an explicit value, including one that happens to match
+# what the heuristic would have chosen, always takes precedence and is never
+# second-guessed. Both thresholds key off the smallest VRAM pool across
+# active devices (not the largest, and not a sum): under multi-GPU DDP every
+# device holds its own full model copy, so the worst-case device is what
+# actually determines whether a step fits, not the best one.
+_GRADIENT_CHECKPOINTING_VRAM_THRESHOLD_GB = 24.0
+_LOW_VRAM_QUANTIZATION_THRESHOLD_GB = 16.0
+
+
+def _min_device_vram_gb(hardware: HardwareProfile | None) -> float:
+    if hardware is None:
+        return 0.0
+    if hardware.accelerator_vram_gb:
+        return min(hardware.accelerator_vram_gb)
+    return hardware.vram_gb
+
+
+def _default_gradient_checkpointing(hardware: HardwareProfile | None) -> bool:
+    """Memory-safe (True) below the threshold -- including when hardware
+    info is unavailable, since "unknown" must not be treated as "plenty."
+    Above it, off by default: forcing activation recomputation on hardware
+    with real headroom only costs training speed for no benefit."""
+    return _min_device_vram_gb(hardware) < _GRADIENT_CHECKPOINTING_VRAM_THRESHOLD_GB
+
+
+def _default_quantization(hardware: HardwareProfile | None) -> str:
+    """"none" unless there's a real, VRAM-constrained CUDA device (0 means
+    either no GPU or unknown hardware -- never treated as "small") and the
+    qlora extra is actually importable in this environment; defaulting to
+    "4bit" when bitsandbytes isn't installed would trade a likely OOM for a
+    guaranteed ImportError, not fix anything.
+    """
+    vram = _min_device_vram_gb(hardware)
+    if vram <= 0 or vram >= _LOW_VRAM_QUANTIZATION_THRESHOLD_GB:
+        return "none"
+    if importlib.util.find_spec("bitsandbytes") is None:
+        return "none"
+    return "4bit"
 
 
 @dataclass(frozen=True)
@@ -207,6 +250,7 @@ class TransformersPeftRunSpec:
         work_dir: str | Path,
         output_dir: str | Path,
         seed: int,
+        hardware: HardwareProfile | None = None,
     ) -> "TransformersPeftRunSpec":
         backend = config.get("backend")
         if not isinstance(backend, Mapping):
@@ -302,9 +346,17 @@ class TransformersPeftRunSpec:
             target_modules=tuple(str(x) for x in lora.get("target_modules", ())),
             target_preset=str(lora.get("target_preset", "auto")),
             use_rslora=bool(lora.get("use_rslora", False)),
-            quantization=str(backend.get("quantization", "none")).lower(),
+            quantization=(
+                str(backend["quantization"]).lower()
+                if "quantization" in backend
+                else _default_quantization(hardware)
+            ),
             precision=str(backend.get("precision", "auto")).lower(),
-            gradient_checkpointing=bool(training.get("gradient_checkpointing", True)),
+            gradient_checkpointing=(
+                bool(training["gradient_checkpointing"])
+                if "gradient_checkpointing" in training
+                else _default_gradient_checkpointing(hardware)
+            ),
             seed=int(config.get("seed", seed)),
             timeout_seconds=(
                 float(runtime["timeout_seconds"])
@@ -472,6 +524,7 @@ class TransformersPeftExecutor:
             work_dir=context.work_dir,
             output_dir=artifact_dir,
             seed=context.seed,
+            hardware=context.hardware,
         )
         primary_sha = self._verify_input(spec.dataset, spec.dataset_sha256, label="training")
         if spec.dataset_sha256 is None:
@@ -637,10 +690,23 @@ class TransformersPeftExecutor:
             peak_vram_gb_by_accelerator=peaks,
         )
 
+    @staticmethod
+    def _hardware_aware_defaults_report(context: ExecutionContext) -> dict[str, Any]:
+        backend = context.resolved_config.get("backend", {})
+        backend = backend if isinstance(backend, Mapping) else {}
+        training = backend.get("training", {})
+        training = training if isinstance(training, Mapping) else {}
+        return {
+            "min_device_vram_gb": _min_device_vram_gb(context.hardware),
+            "quantization_defaulted": "quantization" not in backend,
+            "gradient_checkpointing_defaulted": "gradient_checkpointing" not in training,
+        }
+
     def run(self, experiment: Experiment, context: ExecutionContext) -> TrainingArtifact:
         run_id = f"{experiment.experiment_id}-{uuid4().hex[:12]}"
         run_dir = (Path(context.work_dir) / ".chowder" / "runs" / run_id).resolve()
         run_dir.mkdir(parents=True, exist_ok=False)
+        hardware_defaults = self._hardware_aware_defaults_report(context)
         spec = self._spec_for(experiment, context, run_dir=run_dir)
 
         bound_inputs = self._bound_inputs(spec)
@@ -771,6 +837,11 @@ class TransformersPeftExecutor:
                 },
                 "seed": spec.seed,
                 "requested_active_accelerator_count": active_accelerator_count,
+                "hardware_aware_defaults": {
+                    **hardware_defaults,
+                    "resolved_quantization": spec.quantization,
+                    "resolved_gradient_checkpointing": spec.gradient_checkpointing,
+                },
                 "checkpoint": {
                     "save_strategy": spec.save_strategy,
                     "save_steps": spec.save_steps,
