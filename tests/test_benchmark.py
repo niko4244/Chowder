@@ -20,6 +20,7 @@ from chowder.replay import ReplayGroundTruth
 
 from fixtures_incidents import (
     ALL_DEV_FIXTURES,
+    DPO_BACKWARD_PASS_OOM_NEAR_LIMIT,
     DPO_LOGITS_FP32_UPCAST_OOM,
     DPO_TRAINER_DEVICE_MAP_AUTO_MISMATCH,
     GATED_DELTA_RULE_CUBLAS_FAILURE,
@@ -127,6 +128,19 @@ _DEV_SPECS: tuple[tuple[Any, SignatureKind, Sequence[_PatchOutcome]], ...] = (
             ({"max_length": 1024}, Outcome.RESOLVED),
         ],
     ),
+    (
+        # Confirmed real evidence: allocator_conf was already active the
+        # whole time and did not prevent this incident; the max-length cap
+        # got past an unrelated forward-pass OOM but never closed this one's
+        # backward-pass gap. Neither known remediation resolves it -- same
+        # honesty discipline as DPO_TRAINER_DEVICE_MAP_AUTO_MISMATCH.
+        DPO_BACKWARD_PASS_OOM_NEAR_LIMIT,
+        Kind.CUDA_OOM,
+        [
+            ({"allocator_conf": "expandable_segments:True"}, Outcome.DID_NOT_RESOLVE),
+            ({"max_length": 1024}, Outcome.DID_NOT_RESOLVE),
+        ],
+    ),
 )
 assert {s[0].incident_id for s in _DEV_SPECS} == {c.incident_id for c in ALL_DEV_FIXTURES}
 
@@ -176,15 +190,21 @@ _HIDDEN_SPECS: tuple[tuple[Any, SignatureKind, Sequence[_PatchOutcome]], ...] = 
 assert {s[0].incident_id for s in _HIDDEN_SPECS} == {c.incident_id for c in ALL_HIDDEN_FIXTURES}
 
 
+_DEV_HONESTLY_ABANDONED = {
+    DPO_TRAINER_DEVICE_MAP_AUTO_MISMATCH.incident_id,
+    DPO_BACKWARD_PASS_OOM_NEAR_LIMIT.incident_id,
+}
+
+
 def test_dev_set_scores_clean():
     """Task 6 already proved the dev set resolves (or is correctly
     abandoned); this just confirms the scorer agrees and produces a
     complete, well-formed CaseScore per case."""
     report = run_benchmark(list(_cases(_DEV_SPECS)), [], RuleBasedGenerator())
-    assert len(report.dev_scores) == 10
+    assert len(report.dev_scores) == 11
     for score in report.dev_scores:
         assert score.correct_classification, score.incident_id
-        if score.incident_id == DPO_TRAINER_DEVICE_MAP_AUTO_MISMATCH.incident_id:
+        if score.incident_id in _DEV_HONESTLY_ABANDONED:
             assert score.final_status is InvestigationStatus.ABANDONED
             assert not score.recovery_success
         else:

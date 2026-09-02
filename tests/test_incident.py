@@ -8,6 +8,7 @@ from chowder.incident import (
 
 from fixtures_incidents import (
     ALL_DEV_FIXTURES,
+    DPO_BACKWARD_PASS_OOM_NEAR_LIMIT,
     DPO_LOGITS_FP32_UPCAST_OOM,
     DPO_TRAINER_DEVICE_MAP_AUTO_MISMATCH,
     GATED_DELTA_RULE_CUBLAS_FAILURE,
@@ -145,15 +146,33 @@ def test_two_distinct_cuda_kernel_incidents_do_not_collapse_into_one_class():
 
 
 def test_recurring_oom_class_stays_distinguishable_across_training_phases():
-    """Two real OOMs from today: same signature_kind (both are capacity
-    failures), but different incidents -- different executor phase,
-    different hardware state. Collapsing them would make Chowder think a
-    fix for one automatically covers the other."""
+    """Three real OOMs now (a third was found live, days later, while
+    actually trying to unblock DPO_TRAINER_DEVICE_MAP_AUTO_MISMATCH): same
+    signature_kind (all are capacity failures), but different incidents --
+    different executor phase, different hardware state, different
+    forward-vs-backward-pass location. Collapsing any pair would make
+    Chowder think a fix for one automatically covers the others -- which
+    the real remediation history disproves directly: the length-cap fix
+    that resolved the fp32-upcast OOM did NOT resolve the backward-pass
+    one."""
     kbit_prep = compute_fingerprint(PEFT_KBIT_PREP_OOM)
     fp32_upcast = compute_fingerprint(DPO_LOGITS_FP32_UPCAST_OOM)
+    backward_pass = compute_fingerprint(DPO_BACKWARD_PASS_OOM_NEAR_LIMIT)
     assert kbit_prep.signature_kind is SignatureKind.CUDA_OOM
     assert fp32_upcast.signature_kind is SignatureKind.CUDA_OOM
-    assert kbit_prep.fingerprint_sha256 != fp32_upcast.fingerprint_sha256
+    assert backward_pass.signature_kind is SignatureKind.CUDA_OOM
+    fingerprints = {kbit_prep.fingerprint_sha256, fp32_upcast.fingerprint_sha256,
+                    backward_pass.fingerprint_sha256}
+    assert len(fingerprints) == 3
+
+
+def test_backward_pass_oom_classifies_as_oom():
+    """The newest dev fixture (added after the first ten, discovered live
+    during a real attempt to unblock a different incident) -- confirms it
+    lands in the same coarse class as the other two OOMs despite failing in
+    accelerate's backward() call rather than the forward pass either of
+    them hit."""
+    assert compute_fingerprint(DPO_BACKWARD_PASS_OOM_NEAR_LIMIT).signature_kind is SignatureKind.CUDA_OOM
 
 
 def test_all_dev_fixtures_produce_a_known_signature_kind():
@@ -167,6 +186,6 @@ def test_all_dev_fixtures_produce_a_known_signature_kind():
 
 
 def test_all_dev_fixtures_have_unique_fingerprints():
-    """Nine distinct real incidents; none should accidentally collide."""
+    """Eleven distinct real incidents; none should accidentally collide."""
     fingerprints = {compute_fingerprint(c).fingerprint_sha256 for c in ALL_DEV_FIXTURES}
     assert len(fingerprints) == len(ALL_DEV_FIXTURES)
