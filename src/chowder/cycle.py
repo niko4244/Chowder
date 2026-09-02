@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
 
 from .backends.transformers_peft import TransformersPeftExecutor
+from .cancellation import CancellationToken
 from .config_validation import validate_transformers_backend_config
 from .dependency_preflight import check_dependencies, check_disk_space
 from .model_compatibility import check_causal_lm_architecture
@@ -247,6 +248,7 @@ class ExperimentCycleRunner:
     failure_harvester: FailureHarvester | None = None
     executor_remediation_registry: RemediationRegistry = field(default_factory=RemediationRegistry)
     executor_investigation_budget: float = 0.25
+    cancellation: CancellationToken | None = None
 
     def __post_init__(self) -> None:
         budget = float(self.executor_investigation_budget)
@@ -257,11 +259,27 @@ class ExperimentCycleRunner:
         if self.registry is not None:
             self.registry.update_experiment_status(experiment.experiment_id, experiment.status.value)
 
+    def _bind_cancellation(self, executor: object, token: CancellationToken | None) -> None:
+        bind = getattr(executor, "bind_cancellation", None)
+        if callable(bind):
+            bind(token)
+
     def _run_candidate(self, experiment: Experiment) -> CandidateCycleOutcome:
         if experiment.experiment_id not in self.engine.graph.nodes:
             raise ValueError("experiment must be proposed before execution")
         if not self.engine.has_reservation(experiment.experiment_id):
             raise ValueError("experiment has no active compute reservation")
+
+        if self.cancellation is not None and self.cancellation.requested:
+            self.engine.cancel_reservation(
+                experiment.experiment_id, status=ExperimentStatus.REJECTED
+            )
+            experiment.status = ExperimentStatus.REJECTED
+            self._record_status(experiment)
+            return CandidateCycleOutcome(
+                experiment_id=experiment.experiment_id,
+                error="cancelled before start",
+            )
 
         resolved = self.engine.resolve_config(experiment.experiment_id, self.base_config)
         run_context = replace(self.context, resolved_config=resolved)
@@ -307,10 +325,12 @@ class ExperimentCycleRunner:
         diagnostic_error: str | None = None
 
         training_started = time.perf_counter()
+        self._bind_cancellation(self.trainer, self.cancellation)
         try:
             artifact = self.trainer.run(experiment, run_context)
         except Exception as exc:
             elapsed = time.perf_counter() - training_started
+            was_cancelled = self.cancellation is not None and self.cancellation.requested
             failure = normalize_execution_exception(
                 exc,
                 experiment=experiment,
@@ -320,20 +340,24 @@ class ExperimentCycleRunner:
                 stage=ExecutionStage.TRAIN,
             )
             analysis: ExecutorFailureAnalysis | None = None
-            try:
-                analysis = analyze_execution_failure(
-                    failure,
-                    context=run_context,
-                    registry=self.executor_remediation_registry,
-                    gpu_hour_budget=self.executor_investigation_budget,
-                    investigation_id=f"investigate-{failure.run_id}",
-                    occurred_at=datetime.now(timezone.utc).isoformat(),
-                )
-            except Exception as investigator_exc:
-                diagnostic_error = (
-                    f"executor investigator {type(investigator_exc).__name__}: "
-                    f"{investigator_exc}"
-                )
+            # A cancellation is a deliberate, expected stop, not an anomaly
+            # -- routing it through the Executor Investigator would spend
+            # its investigation budget diagnosing something that isn't one.
+            if not was_cancelled:
+                try:
+                    analysis = analyze_execution_failure(
+                        failure,
+                        context=run_context,
+                        registry=self.executor_remediation_registry,
+                        gpu_hour_budget=self.executor_investigation_budget,
+                        investigation_id=f"investigate-{failure.run_id}",
+                        occurred_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                except Exception as investigator_exc:
+                    diagnostic_error = (
+                        f"executor investigator {type(investigator_exc).__name__}: "
+                        f"{investigator_exc}"
+                    )
 
             self.engine.fail(
                 experiment.experiment_id,
@@ -341,13 +365,16 @@ class ExperimentCycleRunner:
             )
             experiment.status = ExperimentStatus.FAILED
             self._record_status(experiment)
+            error = f"{failure.cause_type}: {failure.cause_message}"
             return CandidateCycleOutcome(
                 experiment_id=experiment.experiment_id,
                 execution_failure=failure,
                 executor_analysis=analysis,
                 diagnostic_error=diagnostic_error,
-                error=f"{failure.cause_type}: {failure.cause_message}",
+                error=f"cancelled: {error}" if was_cancelled else error,
             )
+        finally:
+            self._bind_cancellation(self.trainer, None)
 
         try:
             if artifact.experiment_id != experiment.experiment_id:
@@ -365,6 +392,7 @@ class ExperimentCycleRunner:
             )
 
         evaluation_started = time.perf_counter()
+        self._bind_cancellation(self.evaluator, self.cancellation)
         try:
             evaluation = self.evaluator.evaluate(
                 experiment=experiment,
@@ -373,6 +401,7 @@ class ExperimentCycleRunner:
             )
         except Exception as exc:
             elapsed = time.perf_counter() - evaluation_started
+            was_cancelled = self.cancellation is not None and self.cancellation.requested
             failure = normalize_execution_exception(
                 exc,
                 experiment=experiment,
@@ -382,33 +411,37 @@ class ExperimentCycleRunner:
                 stage=ExecutionStage.EVALUATE,
             )
             analysis: ExecutorFailureAnalysis | None = None
-            try:
-                analysis = analyze_execution_failure(
-                    failure,
-                    context=run_context,
-                    registry=self.executor_remediation_registry,
-                    gpu_hour_budget=self.executor_investigation_budget,
-                    investigation_id=f"investigate-{failure.run_id}",
-                    occurred_at=datetime.now(timezone.utc).isoformat(),
-                )
-            except Exception as investigator_exc:
-                diagnostic_error = (
-                    f"executor investigator {type(investigator_exc).__name__}: "
-                    f"{investigator_exc}"
-                )
+            if not was_cancelled:
+                try:
+                    analysis = analyze_execution_failure(
+                        failure,
+                        context=run_context,
+                        registry=self.executor_remediation_registry,
+                        gpu_hour_budget=self.executor_investigation_budget,
+                        investigation_id=f"investigate-{failure.run_id}",
+                        occurred_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                except Exception as investigator_exc:
+                    diagnostic_error = (
+                        f"executor investigator {type(investigator_exc).__name__}: "
+                        f"{investigator_exc}"
+                    )
 
             known_compute = artifact.gpu_hours + (failure.gpu_hours_spent or 0.0)
             self.engine.fail(experiment.experiment_id, actual_gpu_hours=known_compute)
             experiment.status = ExperimentStatus.FAILED
             self._record_status(experiment)
+            error = f"{failure.cause_type}: {failure.cause_message}"
             return CandidateCycleOutcome(
                 experiment_id=experiment.experiment_id,
                 artifact=artifact,
                 execution_failure=failure,
                 executor_analysis=analysis,
                 diagnostic_error=diagnostic_error,
-                error=f"{failure.cause_type}: {failure.cause_message}",
+                error=f"cancelled: {error}" if was_cancelled else error,
             )
+        finally:
+            self._bind_cancellation(self.evaluator, None)
 
         try:
             if evaluation.experiment_id != experiment.experiment_id:

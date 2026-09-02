@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
+from chowder.cancellation import CancellationToken
 from chowder.project import write_project
 from chowder.project_runner import run_project
 from chowder.registry import RunRegistry
@@ -351,3 +354,143 @@ def test_real_tiny_llama_automatic_baseline_binds_revision_and_matches_protocol(
     training_revision = candidate.artifact.evidence["model_provenance"]["resolved_model_commit"]
     assert baseline_revision
     assert baseline_revision == training_revision
+
+
+def test_real_cancellation_terminates_an_in_flight_training_subprocess(tmp_path: Path):
+    """Prove cooperative cancellation is wired all the way to a real
+    subprocess: request() must actually terminate a training worker that is
+    genuinely running, not just prevent a future candidate from starting."""
+
+    train_path = tmp_path / "train.jsonl"
+    train_path.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in [
+                {"text": "Question: What token comes after alpha? Answer: beta"},
+                {"text": "Question: What token comes after red? Answer: blue"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    eval_path = tmp_path / "eval.jsonl"
+    eval_path.write_text(
+        json.dumps({"prompt": "Question: What token comes after alpha? Answer:", "expected": "beta"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    project_path = tmp_path / "project.json"
+    write_project(
+        project_path,
+        {
+            "schema_version": 1,
+            "name": "real cancellation smoke",
+            "work_dir": str(tmp_path),
+            "registry_path": ".chowder/runs.db",
+            "seed": 123,
+            "goal": {
+                "metrics": [{"name": "quality", "minimum": 0.0, "direction": "maximize"}],
+                "gpu_hour_budget": 2.0,
+                "max_parallel_candidates": 1,
+                "minimum_promotion_gain": 0.0,
+                "require_protocol_match": False,
+            },
+            "baseline": {
+                "experiment_id": "baseline",
+                "metrics": {"quality": 0.0},
+                "gpu_hours": 0.0,
+            },
+            "experiment": {
+                "experiment_id": "real-sft",
+                "estimated_gpu_hours": 0.25,
+                "hypothesis": {
+                    "observation": "tiny model is unadapted",
+                    "suspected_cause": "target examples are unseen",
+                    "intervention": "one small LoRA SFT run",
+                    "expected_deltas": {"quality": 0.0},
+                },
+                "config_patch": {},
+                "tags": ["integration", "real-ml", "cancellation"],
+            },
+            "config": {
+                "seed": 123,
+                "backend": {
+                    "schema_version": 1,
+                    "type": "transformers-peft",
+                    "base_model": "trl-internal-testing/tiny-LlamaForCausalLM-3.2",
+                    "dataset": "train.jsonl",
+                    "text_field": "text",
+                    "max_length": 64,
+                    "precision": "fp32",
+                    "quantization": "none",
+                    "trust_remote_code": False,
+                    # Enough epochs/logging to give the canceller thread a
+                    # real window after the subprocess starts and before it
+                    # would finish on its own.
+                    "training": {
+                        "epochs": 20.0,
+                        "learning_rate": 0.001,
+                        "batch_size": 1,
+                        "gradient_accumulation_steps": 1,
+                        "logging_steps": 1,
+                        "gradient_checkpointing": False,
+                    },
+                    "lora": {
+                        "r": 4,
+                        "alpha": 8,
+                        "dropout": 0.0,
+                        "target_modules": ["q_proj", "v_proj"],
+                        "use_rslora": False,
+                    },
+                    "runtime": {"active_accelerator_count": 0, "timeout_seconds": 180.0},
+                },
+                "evaluation": {
+                    "type": "transformers-text",
+                    "estimated_gpu_hours": 0.05,
+                    "precision": "fp32",
+                    "quantization": "none",
+                    "device": "cpu",
+                    "trust_remote_code": False,
+                    "runtime": {"timeout_seconds": 180.0},
+                    "suites": [
+                        {
+                            "name": "quality",
+                            "dataset": "eval.jsonl",
+                            "prompt_field": "prompt",
+                            "expected_field": "expected",
+                            "scoring": "normalized_exact_match",
+                            "max_new_tokens": 2,
+                            "use_chat_template": False,
+                        }
+                    ],
+                },
+            },
+        },
+    )
+
+    token = CancellationToken()
+
+    def request_once_training_actually_starts() -> None:
+        # Poll the token's own bookkeeping rather than sleeping a fixed
+        # guess -- deterministic regardless of how fast the subprocess
+        # happens to start on the machine running this test.
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if token._active is not None:
+                token.request()
+                return
+            time.sleep(0.02)
+        raise AssertionError("training subprocess never registered as active")
+
+    canceller = threading.Thread(target=request_once_training_actually_starts, daemon=True)
+    canceller.start()
+    try:
+        outcome = run_project(project_path, cancellation=token)
+    finally:
+        canceller.join(timeout=30)
+
+    candidate = outcome.generation.candidates[0]
+    assert candidate.error is not None
+    assert candidate.error.startswith("cancelled"), candidate.error
+    assert candidate.executor_analysis is None
+    assert candidate.result is None

@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..cancellation import CancellationToken
 from ..executors import CostEstimate, EvaluationOutcome, ExecutionContext, TrainingArtifact
 from ..models import Experiment
 from ..protocol import protocol_fingerprint
@@ -173,6 +174,11 @@ class TransformersTextEvaluator:
 
     def __init__(self) -> None:
         self._processes: dict[str, subprocess.Popen[Any]] = {}
+        self._cancellation: CancellationToken | None = None
+
+    def bind_cancellation(self, token: CancellationToken | None) -> None:
+        """Optional capability: see TransformersPeftExecutor.bind_cancellation."""
+        self._cancellation = token
 
     def profile(self, experiment: Experiment, context: ExecutionContext) -> CostEstimate:
         config = context.resolved_config
@@ -264,6 +270,8 @@ class TransformersTextEvaluator:
                 text=True,
             )
             self._processes[eval_id] = process
+            if self._cancellation is not None:
+                self._cancellation._register_active(self, eval_id)
             try:
                 process.wait(timeout=spec.timeout_seconds)
             except subprocess.TimeoutExpired as exc:
@@ -276,6 +284,8 @@ class TransformersTextEvaluator:
                 raise TimeoutError(f"evaluation {eval_id} exceeded timeout") from exc
             finally:
                 self._processes.pop(eval_id, None)
+                if self._cancellation is not None:
+                    self._cancellation._clear_active()
 
         elapsed = time.perf_counter() - started
         if process.returncode != 0:
