@@ -99,8 +99,12 @@ class ChowderTUI(App[None]):
             yield Input("q_proj,k_proj,v_proj,o_proj", id="target_modules")
             yield Label("Precision: auto, bf16, fp16, or fp32")
             yield Input("auto", id="precision")
-            yield Label("Quantization: none or 4bit")
-            yield Input("none", id="quantization")
+            yield Label("Quantization: auto (hardware-aware), none, or 4bit")
+            yield Input("auto", id="quantization")
+            yield Label("Gradient checkpointing: auto (hardware-aware), true, or false")
+            yield Input("auto", id="gradient_checkpointing")
+            yield Label("Active accelerators: auto (all detected GPUs), or a count")
+            yield Input("auto", id="active_accelerator_count")
             yield Label("Evaluation max new tokens")
             yield Input("64", id="max_new_tokens", type="integer")
 
@@ -130,6 +134,23 @@ class ChowderTUI(App[None]):
             raise ProjectValidationError(f"{widget_id} is required")
         return int(value)
 
+    def _resolve_active_accelerator_count(self) -> int:
+        """"auto" uses every detected GPU (accelerate launch + DDP now
+        drives real multi-GPU training from this count); anything else is
+        an explicit integer the user chose instead."""
+        raw = self._value("active_accelerator_count")
+        if raw.lower() == "auto":
+            return len(self._hardware.accelerators) if self._hardware else 0
+        try:
+            count = int(raw)
+        except ValueError as exc:
+            raise ProjectValidationError(
+                "active accelerator count must be 'auto' or an integer"
+            ) from exc
+        if count < 0:
+            raise ProjectValidationError("active accelerator count cannot be negative")
+        return count
+
     def _build_payload(self) -> dict[str, Any]:
         metric = self._value("metric_name")
         if not metric:
@@ -142,10 +163,50 @@ class ChowderTUI(App[None]):
         if not target_modules:
             raise ProjectValidationError("at least one LoRA target module is required")
 
-        # The current built-in worker is a single training process. Even when
-        # inventory sees multiple GPUs (for example Kaggle T4×2), it must not
-        # claim both are active unless a distributed launcher is introduced.
-        active_accelerators = 1 if self._hardware and self._hardware.accelerators else 0
+        active_accelerators = self._resolve_active_accelerator_count()
+        quantization = self._value("quantization").lower()
+        gradient_checkpointing = self._value("gradient_checkpointing").lower()
+        if gradient_checkpointing not in {"auto", "true", "false"}:
+            raise ProjectValidationError(
+                "gradient checkpointing must be auto, true, or false"
+            )
+
+        training: dict[str, Any] = {
+            "epochs": self._float("epochs"),
+            "learning_rate": self._float("learning_rate"),
+            "batch_size": self._int("batch_size"),
+            "gradient_accumulation_steps": self._int("grad_accum"),
+            "logging_steps": 1,
+        }
+        # Omitting these keys entirely (rather than setting an explicit
+        # value) is what lets the backend's hardware-aware defaults resolve
+        # them from actually-detected VRAM instead of one fixed choice.
+        if gradient_checkpointing != "auto":
+            training["gradient_checkpointing"] = gradient_checkpointing == "true"
+
+        backend: dict[str, Any] = {
+            "schema_version": 1,
+            "type": "transformers-peft",
+            "base_model": self._value("base_model"),
+            "dataset": self._value("train_dataset"),
+            "text_field": self._value("text_field"),
+            "max_length": self._int("max_length"),
+            "precision": self._value("precision").lower(),
+            "trust_remote_code": False,
+            "training": training,
+            "lora": {
+                "r": self._int("lora_r"),
+                "alpha": self._int("lora_alpha"),
+                "dropout": 0.05,
+                "target_modules": list(target_modules),
+                "use_rslora": False,
+            },
+            "runtime": {
+                "active_accelerator_count": active_accelerators,
+            },
+        }
+        if quantization != "auto":
+            backend["quantization"] = quantization
 
         return {
             "schema_version": 1,
@@ -192,35 +253,7 @@ class ChowderTUI(App[None]):
             },
             "config": {
                 "seed": 1,
-                "backend": {
-                    "schema_version": 1,
-                    "type": "transformers-peft",
-                    "base_model": self._value("base_model"),
-                    "dataset": self._value("train_dataset"),
-                    "text_field": self._value("text_field"),
-                    "max_length": self._int("max_length"),
-                    "precision": self._value("precision").lower(),
-                    "quantization": self._value("quantization").lower(),
-                    "trust_remote_code": False,
-                    "training": {
-                        "epochs": self._float("epochs"),
-                        "learning_rate": self._float("learning_rate"),
-                        "batch_size": self._int("batch_size"),
-                        "gradient_accumulation_steps": self._int("grad_accum"),
-                        "logging_steps": 1,
-                        "gradient_checkpointing": True,
-                    },
-                    "lora": {
-                        "r": self._int("lora_r"),
-                        "alpha": self._int("lora_alpha"),
-                        "dropout": 0.05,
-                        "target_modules": list(target_modules),
-                        "use_rslora": False,
-                    },
-                    "runtime": {
-                        "active_accelerator_count": active_accelerators,
-                    },
-                },
+                "backend": backend,
                 "evaluation": {
                     "type": "transformers-text",
                     "estimated_gpu_hours": self._float("eval_gpu_hours"),
@@ -308,8 +341,9 @@ class ChowderTUI(App[None]):
             note = (
                 f"{gpu_lines}\nRAM: {snapshot.ram_gb:.1f} GB | "
                 f"Free storage: {snapshot.storage_free_gb:.1f} GB\n"
-                "Current built-in training worker uses one active accelerator per run; "
-                "multiple detected GPUs remain separate VRAM pools."
+                f"'auto' active-accelerator count launches all {len(snapshot.accelerators)} "
+                "detected GPU(s) via accelerate + DDP; each remains a separate VRAM pool "
+                "for planning purposes."
             )
         else:
             note = (
