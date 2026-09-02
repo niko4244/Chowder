@@ -81,6 +81,107 @@ def _text_digest(dataset: Any, text_field: str) -> str:
     return digest.hexdigest()
 
 
+_CHAT_ROLES = {"system", "user", "assistant"}
+
+
+def _validate_chat_messages(raw: Any, *, row_index: int) -> list[dict[str, str]]:
+    if not isinstance(raw, list) or not raw:
+        raise RuntimeError(
+            f"chat dataset row {row_index} has an empty or invalid messages list"
+        )
+    normalized: list[dict[str, str]] = []
+    has_assistant = False
+    for turn in raw:
+        if not isinstance(turn, dict) or "role" not in turn or "content" not in turn:
+            raise RuntimeError(
+                f"chat dataset row {row_index} has a message missing role/content"
+            )
+        role = str(turn["role"])
+        if role not in _CHAT_ROLES:
+            raise RuntimeError(
+                f"chat dataset row {row_index} has unsupported message role {role!r}; "
+                f"supported roles are {sorted(_CHAT_ROLES)}"
+            )
+        if role == "assistant":
+            has_assistant = True
+        normalized.append({"role": role, "content": str(turn["content"])})
+    if not has_assistant:
+        raise RuntimeError(
+            f"chat dataset row {row_index} has no assistant turn -- nothing to train on"
+        )
+    return normalized
+
+
+def _render_chat_ids(
+    tokenizer: Any, messages: list[dict[str, str]], *, add_generation_prompt: bool
+) -> list[int]:
+    encoded = tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=add_generation_prompt
+    )
+    return list(encoded["input_ids"] if hasattr(encoded, "keys") else encoded)
+
+
+def _build_chat_example(
+    tokenizer: Any, messages: list[dict[str, str]], *, max_length: int, row_index: int
+) -> dict[str, list[int]]:
+    """Tokenize one conversation with completion-only (assistant-turn) labels.
+
+    Does not rely on the chat template defining a ``{% generation %}`` block
+    -- most real templates (including the official Llama 3.1 template) don't.
+    Instead, for each assistant turn, renders the conversation twice: once up
+    to (not including) that turn with ``add_generation_prompt=True`` (the
+    exact point the assistant's own tokens begin), and once through the end
+    of that turn. The token-length difference is exactly the assistant's own
+    generated span, verified to be a real prefix of the full sequence before
+    being trusted -- a template that isn't prefix-consistent raises rather
+    than silently mislabeling.
+    """
+    full_ids = _render_chat_ids(tokenizer, messages, add_generation_prompt=False)
+    labels = [-100] * len(full_ids)
+    for index, turn in enumerate(messages):
+        if turn["role"] != "assistant":
+            continue
+        prefix_ids = _render_chat_ids(tokenizer, messages[:index], add_generation_prompt=True)
+        through_ids = _render_chat_ids(
+            tokenizer, messages[: index + 1], add_generation_prompt=False
+        )
+        if (
+            len(prefix_ids) > len(full_ids)
+            or len(through_ids) > len(full_ids)
+            or full_ids[: len(prefix_ids)] != prefix_ids
+            or full_ids[: len(through_ids)] != through_ids
+        ):
+            raise RuntimeError(
+                f"chat dataset row {row_index}: chat template is not prefix-consistent "
+                "across turns; cannot compute a reliable completion-only loss mask"
+            )
+        labels[len(prefix_ids) : len(through_ids)] = full_ids[len(prefix_ids) : len(through_ids)]
+
+    full_ids = full_ids[:max_length]
+    labels = labels[:max_length]
+    if not any(label != -100 for label in labels):
+        raise RuntimeError(
+            f"chat dataset row {row_index}: no assistant tokens remain after truncating "
+            f"to max_length={max_length} -- increase max_length or shorten this conversation"
+        )
+    return {
+        "input_ids": full_ids,
+        "attention_mask": [1] * len(full_ids),
+        "labels": labels,
+    }
+
+
+def _chat_digest(dataset: Any, messages_field: str) -> str:
+    digest = hashlib.sha256()
+    for index in range(len(dataset)):
+        payload = json.dumps(
+            dataset[index][messages_field], sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest()
+
+
 def _cuda_resource_snapshot(torch: Any, model: Any, trainer: Any) -> dict[str, Any]:
     if not torch.cuda.is_available():
         return {
@@ -156,6 +257,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             AutoTokenizer,
             BitsAndBytesConfig,
             DataCollatorForLanguageModeling,
+            DataCollatorForSeq2Seq,
             Trainer,
             TrainingArguments,
             set_seed,
@@ -224,12 +326,16 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     if spec.gradient_checkpointing:
         model.config.use_cache = False
 
+    is_chat = spec.dataset_format == "chat"
+    field = spec.messages_field if is_chat else spec.text_field
+    kind = "messages" if is_chat else "text"
+
     primary = load_dataset("json", data_files=spec.dataset, split="train")
-    if spec.text_field not in primary.column_names:
+    if field not in primary.column_names:
         raise RuntimeError(
-            f"dataset is missing text field {spec.text_field!r}; columns={primary.column_names}"
+            f"dataset is missing {kind} field {field!r}; columns={primary.column_names}"
         )
-    primary = primary.select_columns([spec.text_field])
+    primary = primary.select_columns([field])
     primary_rows = len(primary)
     if primary_rows == 0:
         raise RuntimeError("training dataset contains no rows")
@@ -239,11 +345,11 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     dataset = primary
     if spec.replay_dataset is not None:
         replay = load_dataset("json", data_files=spec.replay_dataset, split="train")
-        if spec.text_field not in replay.column_names:
+        if field not in replay.column_names:
             raise RuntimeError(
-                f"replay dataset is missing text field {spec.text_field!r}; columns={replay.column_names}"
+                f"replay dataset is missing {kind} field {field!r}; columns={replay.column_names}"
             )
-        replay = replay.select_columns([spec.text_field])
+        replay = replay.select_columns([field])
         replay_available_rows = len(replay)
         replay_selected_rows = _replay_sample_count(
             primary_rows, replay_available_rows, spec.replay_ratio
@@ -254,18 +360,40 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             )
             dataset = concatenate_datasets([primary, selected_replay]).shuffle(seed=spec.seed)
 
-    mixed_text_sha = _text_digest(dataset, spec.text_field)
+    assistant_token_count: int | None = None
+    total_token_count: int | None = None
+    if is_chat:
+        mixed_text_sha = _chat_digest(dataset, field)
 
-    def tokenize(batch):
-        return tokenizer(
-            batch[spec.text_field],
-            truncation=True,
-            max_length=spec.max_length,
-            padding=False,
+        def tokenize_chat(example, index):
+            messages = _validate_chat_messages(example[field], row_index=index)
+            return _build_chat_example(
+                tokenizer, messages, max_length=spec.max_length, row_index=index
+            )
+
+        tokenized = dataset.map(
+            tokenize_chat, with_indices=True, remove_columns=dataset.column_names
         )
+        collator = DataCollatorForSeq2Seq(
+            tokenizer=tokenizer, model=None, label_pad_token_id=-100, padding=True
+        )
+        total_token_count = sum(len(row) for row in tokenized["input_ids"])
+        assistant_token_count = sum(
+            sum(1 for label in row if label != -100) for row in tokenized["labels"]
+        )
+    else:
+        mixed_text_sha = _text_digest(dataset, field)
 
-    tokenized = dataset.map(tokenize, batched=True, remove_columns=dataset.column_names)
-    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+        def tokenize_text(batch):
+            return tokenizer(
+                batch[field],
+                truncation=True,
+                max_length=spec.max_length,
+                padding=False,
+            )
+
+        tokenized = dataset.map(tokenize_text, batched=True, remove_columns=dataset.column_names)
+        collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
     output_dir = Path(spec.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -381,6 +509,9 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "replay_ratio": spec.replay_ratio,
             "selection_seed": spec.seed,
             "mixed_training_text_sha256": mixed_text_sha,
+            "dataset_format": spec.dataset_format,
+            "total_token_count": total_token_count,
+            "assistant_token_count": assistant_token_count,
         },
         "provenance": {
             "requested_base_model": spec.base_model,

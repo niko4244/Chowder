@@ -97,6 +97,20 @@ def test_misspelled_optimizer_schedule_key_fails_closed():
         validate_transformers_backend_config(config)
 
 
+def test_chat_dataset_keys_are_accepted():
+    config = _backend_config()
+    config["backend"]["dataset_format"] = "chat"
+    config["backend"]["messages_field"] = "conversation"
+    validate_transformers_backend_config(config)
+
+
+def test_misspelled_messages_field_key_fails_closed():
+    config = _backend_config()
+    config["backend"]["mesages_field"] = "conversation"
+    with pytest.raises(ConfigValidationError, match="mesages_field"):
+        validate_transformers_backend_config(config)
+
+
 def test_top_level_repair_metadata_is_not_rejected():
     config = _backend_config()
     config["repair"] = {
