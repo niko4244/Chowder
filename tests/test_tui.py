@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from textual.widgets import Button, Static
 
+from chowder.backends.transformers_peft import TransformersPeftExecutor, TransformersPeftRunSpec
 from chowder.cancellation import CancellationToken
 from chowder.hardware import AcceleratorProfile, HardwareSnapshot
 from chowder.models import Experiment, ExperimentResult, Hypothesis
 from chowder.project import ProjectValidationError
+from chowder.provenance import sha256_file
 from chowder.recursive_repair import RecursiveRepairStopReason
 from chowder.registry import RunRegistry
 from chowder.tui import ChowderTUI
@@ -30,6 +35,33 @@ def _snapshot(n_gpus: int) -> HardwareSnapshot:
 def _set(app: ChowderTUI, **input_overrides: str) -> None:
     for widget_id, value in input_overrides.items():
         app.query_one(f"#{widget_id}").value = value
+
+
+def _write_matching_checkpoint(app: ChowderTUI, work_dir: Path, *, step: int) -> Path:
+    """A checkpoint whose manifest is derived from the app's own current
+    payload, so it is guaranteed valid against whatever _build_payload()
+    currently produces -- rather than hand-duplicating its config shape and
+    risking drift from the real generator."""
+    payload = app._build_payload()
+    config = payload["config"]
+    spec = TransformersPeftRunSpec.from_resolved_config(
+        config,
+        work_dir=work_dir,
+        output_dir=work_dir / "unused",
+        seed=1,
+        hardware=app._current_execution_context().hardware,
+    )
+    if spec.dataset_sha256 is None:
+        spec = replace(spec, dataset_sha256=sha256_file(spec.dataset))
+    bound_inputs = dict(TransformersPeftExecutor._bound_inputs(spec))
+
+    trainer_dir = work_dir / ".chowder" / "runs" / "e1-abc" / "adapter" / "trainer"
+    checkpoint_dir = trainer_dir / f"checkpoint-{step}"
+    checkpoint_dir.mkdir(parents=True)
+    (trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(bound_inputs), encoding="utf-8"
+    )
+    return checkpoint_dir
 
 
 @pytest.mark.asyncio
@@ -459,3 +491,117 @@ async def test_status_reads_failed_for_a_non_cancellation_error(tmp_path, monkey
         status = app.query_one("#status", Static).content
         assert status.startswith("Failed:")
         assert "Cancelled" not in status
+
+
+# --- checkpoint discovery ------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discover_checkpoints_finds_and_reports_a_valid_checkpoint(tmp_path):
+    (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        checkpoint_dir = _write_matching_checkpoint(app, tmp_path, step=250)
+
+        app.on_button_pressed(
+            Button.Pressed(app.query_one("#discover_checkpoints", Button))
+        )
+        assert len(app._discovered_checkpoints) == 1
+        found = app._discovered_checkpoints[0]
+        assert found.valid is True
+        assert found.checkpoint_dir == checkpoint_dir
+        assert app.query_one("#resume_best", Button).disabled is False
+        panel_text = app.query_one("#checkpoints", Static).content
+        assert "step 250" in panel_text
+        assert "verified" in panel_text
+
+
+@pytest.mark.asyncio
+async def test_discover_checkpoints_with_none_found_disables_resume_best(tmp_path):
+    (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        app.on_button_pressed(
+            Button.Pressed(app.query_one("#discover_checkpoints", Button))
+        )
+        assert app._discovered_checkpoints == ()
+        assert app.query_one("#resume_best", Button).disabled is True
+        assert "No interrupted runs" in app.query_one("#checkpoints", Static).content
+
+
+@pytest.mark.asyncio
+async def test_discover_checkpoints_reports_an_incompatible_checkpoint(tmp_path):
+    (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        _write_matching_checkpoint(app, tmp_path, step=100)
+        # Change the config after the checkpoint was "produced" -- a real
+        # mismatch, the same way a user editing the base model would be.
+        _set(app, base_model="org/a-different-model")
+
+        app.on_button_pressed(
+            Button.Pressed(app.query_one("#discover_checkpoints", Button))
+        )
+        assert len(app._discovered_checkpoints) == 1
+        found = app._discovered_checkpoints[0]
+        assert found.valid is False
+        assert "base_model" in found.mismatches
+        assert app.query_one("#resume_best", Button).disabled is True
+        panel_text = app.query_one("#checkpoints", Static).content
+        assert "MISMATCH" in panel_text
+
+
+@pytest.mark.asyncio
+async def test_resume_best_fills_the_resume_field_with_the_valid_checkpoint(tmp_path):
+    (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        checkpoint_dir = _write_matching_checkpoint(app, tmp_path, step=250)
+        app.on_button_pressed(
+            Button.Pressed(app.query_one("#discover_checkpoints", Button))
+        )
+        app.on_button_pressed(Button.Pressed(app.query_one("#resume_best", Button)))
+        assert app._value("resume_from_checkpoint") == str(checkpoint_dir)
+
+
+@pytest.mark.asyncio
+async def test_resume_best_is_a_noop_with_nothing_valid_discovered(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path), resume_from_checkpoint="")
+        app.on_button_pressed(Button.Pressed(app.query_one("#resume_best", Button)))
+        assert app._value("resume_from_checkpoint") == ""
+
+
+@pytest.mark.asyncio
+async def test_start_fresh_clears_the_resume_field_without_touching_disk(tmp_path):
+    (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path))
+        checkpoint_dir = _write_matching_checkpoint(app, tmp_path, step=250)
+        _set(app, resume_from_checkpoint=str(checkpoint_dir))
+
+        app.on_button_pressed(Button.Pressed(app.query_one("#start_fresh", Button)))
+        assert app._value("resume_from_checkpoint") == ""
+        # Start Fresh never deletes evidence -- the checkpoint itself is
+        # untouched on disk.
+        assert checkpoint_dir.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_discover_checkpoints_reports_a_build_payload_error_gracefully(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, work_dir=str(tmp_path), metric_name="")  # required field left blank
+        app.on_button_pressed(
+            Button.Pressed(app.query_one("#discover_checkpoints", Button))
+        )
+        assert app._discovered_checkpoints == ()
+        assert app.query_one("#resume_best", Button).disabled is True
+        panel_text = app.query_one("#checkpoints", Static).content
+        assert "failed" in panel_text.lower()
