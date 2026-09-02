@@ -304,6 +304,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             DataCollatorForLanguageModeling,
             DataCollatorForSeq2Seq,
             Trainer,
+            TrainerCallback,
             TrainingArguments,
             set_seed,
         )
@@ -312,6 +313,44 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "Transformers backend dependencies are missing; install chowder-ai[train] "
             "and chowder-ai[qlora] when using 4-bit quantization"
         ) from exc
+
+    class _ProgressReportingCallback(TrainerCallback):
+        """Writes the latest training progress to a fixed path after each
+        log event, so the main process -- otherwise blind until this
+        subprocess exits -- can poll it for live step/loss/lr instead of
+        parsing stdout. Rank-0-only under DDP: every rank runs this
+        callback, but only one may write the file without a real
+        corruption risk, matching why only rank 0 writes the adapter/
+        tokenizer/result files below.
+        """
+
+        def __init__(self, progress_path: Path, started: float) -> None:
+            self._progress_path = progress_path
+            self._started = started
+
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            # Trainer also calls on_log once more at the very end of
+            # train() with a summary dict (train_runtime, train_loss,
+            # total_flos, ...) that has no "loss" key -- writing that over
+            # the last real per-step snapshot would mean a poller whose
+            # only read lands after training finishes (a real risk for a
+            # fast run and a slow poll interval) sees loss=None instead of
+            # the actual last measured loss. Real per-step logs always
+            # carry "loss"; the summary one never does.
+            if not state.is_world_process_zero or not logs or "loss" not in logs:
+                return
+            payload = {
+                "step": state.global_step,
+                "max_steps": state.max_steps if state.max_steps and state.max_steps > 0 else None,
+                "epoch": logs.get("epoch", state.epoch),
+                "loss": logs.get("loss"),
+                "learning_rate": logs.get("learning_rate"),
+                "wall_seconds": time.perf_counter() - self._started,
+            }
+            tmp_path = self._progress_path.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+            tmp_path.replace(self._progress_path)  # atomic on POSIX/NTFS, so a
+            # concurrent poller in the main process never reads a half-written file.
 
     if spec.trust_remote_code:
         raise RuntimeError("trust_remote_code is disabled")
@@ -494,14 +533,15 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     if spec.save_total_limit is not None:
         args_kwargs["save_total_limit"] = spec.save_total_limit
     args = TrainingArguments(**args_kwargs)
+    started = time.perf_counter()
     trainer = Trainer(
         model=model,
         args=args,
         train_dataset=tokenized,
         data_collator=collator,
+        callbacks=[_ProgressReportingCallback(output_dir / "progress.json", started)],
     )
 
-    started = time.perf_counter()
     train_output = trainer.train(resume_from_checkpoint=spec.resume_from_checkpoint)
     runtime = time.perf_counter() - started
 

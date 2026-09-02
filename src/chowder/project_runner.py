@@ -277,6 +277,16 @@ def run_project(
             registry=registry,
             failure_harvester=harvest_transformers_text_failures,
             cancellation=cancellation,
+            # Deliberately NOT persisted via _emit/registry.record_event:
+            # this fires from a background thread polling the training
+            # subprocess (see TransformersPeftExecutor._poll_progress),
+            # concurrently with the main thread's use of the same registry
+            # connection, and sqlite3 connections are only safe on the
+            # thread that created them. Live progress ticks are ephemeral
+            # display data, not part of the durable history the way stage
+            # transitions, repair/failure/promotion events, and checkpoints
+            # already are.
+            progress_callback=on_event,
         )
         accepted = engine.propose((project.experiment,))
         if not accepted:
