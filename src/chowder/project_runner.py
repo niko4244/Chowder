@@ -19,12 +19,22 @@ from .models import Experiment, ExperimentResult, Hypothesis
 from .project import ProjectSpec, load_project
 from .recursive_repair import RecursiveRepairOutcome, run_bounded_autonomous_repair
 from .registry import RunRegistry
+from .run_events import (
+    CheckpointEvent,
+    FailureEvent,
+    PromotionEvent,
+    RepairEvent,
+    RunEvent,
+    RunEventPayload,
+)
 
-
-@dataclass(frozen=True)
-class ProjectRunEvent:
-    stage: str
-    message: str
+# Kept as the pre-existing public name for the generic stage/message event,
+# since every current caller (CLI, TUI, tests) matches on `.stage` --
+# run_project now also emits the more specific event types from run_events
+# (RepairEvent, FailureEvent, PromotionEvent, CheckpointEvent) through the
+# same callback, so a caller that only understands RunEvent can keep
+# ignoring the rest via isinstance/duck typing.
+ProjectRunEvent = RunEvent
 
 
 @dataclass(frozen=True)
@@ -44,12 +54,35 @@ class ProjectRunOutcome:
         return promoted.experiment_id if promoted is not None else None
 
 
-EventCallback = Callable[[ProjectRunEvent], None]
+EventCallback = Callable[[RunEventPayload], None]
 
 
-def _emit(callback: EventCallback | None, stage: str, message: str) -> None:
+def _emit(
+    callback: EventCallback | None,
+    registry: RunRegistry | None,
+    event: RunEventPayload,
+) -> None:
+    """Every event is durably persisted (when a registry is open) before
+    the live callback runs -- the TUI/CLI's on_event is a convenience for
+    live display, not the system of record. A caller that restarts after a
+    crash can reconstruct run history from registry.list_events() even if
+    nothing was watching on_event at the time.
+    """
+    if registry is not None:
+        registry.record_event(event)
     if callback is not None:
-        callback(ProjectRunEvent(stage=stage, message=message))
+        callback(event)
+
+
+def _emit_stage(
+    callback: EventCallback | None,
+    registry: RunRegistry | None,
+    stage: str,
+    message: str,
+    *,
+    experiment_id: str | None = None,
+) -> None:
+    _emit(callback, registry, RunEvent(stage=stage, message=message, experiment_id=experiment_id))
 
 
 def hardware_profile_from_snapshot(snapshot: HardwareSnapshot) -> HardwareProfile:
@@ -114,7 +147,9 @@ def _run_automatic_baseline(
     like with like, not the user's guess of where the base model already
     stood against a differently-configured post-training run.
     """
-    _emit(on_event, "baseline", "Evaluating the untouched base model for an automatic baseline")
+    _emit_stage(
+        on_event, registry, "baseline", "Evaluating the untouched base model for an automatic baseline"
+    )
     # evaluation_runs/results both carry FOREIGN KEY(experiment_id) REFERENCES
     # experiments(experiment_id) -- the baseline needs a real row there too,
     # the same as any candidate experiment gets via record_experiment below.
@@ -160,7 +195,9 @@ def _run_automatic_baseline(
     registry.record_evaluation_outcome(outcome)
     registry.record_result(result)
     metrics_summary = ", ".join(f"{name}={value:.4f}" for name, value in sorted(result.metrics.items()))
-    _emit(on_event, "baseline", f"Automatic baseline established: {metrics_summary}")
+    _emit_stage(
+        on_event, registry, "baseline", f"Automatic baseline established: {metrics_summary}"
+    )
     return result, _resolved_revision_from_outcome(outcome)
 
 
@@ -186,25 +223,30 @@ def run_project(
     else:
         project = load_project(project_or_path, validate_files=True)
 
-    _emit(on_event, "prepare", f"Loaded project {project.name!r}")
-    hardware = detect_hardware(project.work_dir)
-    profile = hardware_profile_from_snapshot(hardware)
-    if hardware.accelerators:
-        descriptions = ", ".join(
-            f"{accelerator.name} ({accelerator.memory_gb:.1f} GB)"
-            for accelerator in hardware.accelerators
-        )
-        _emit(on_event, "hardware", f"Detected accelerators: {descriptions}")
-    else:
-        _emit(on_event, "hardware", "No NVIDIA accelerator detected; using CPU-compatible path")
-
-    context = ExecutionContext(
-        hardware=profile,
-        work_dir=str(project.work_dir),
-        seed=project.seed,
-    )
-
     with RunRegistry(project.registry_path) as registry:
+        _emit_stage(on_event, registry, "prepare", f"Loaded project {project.name!r}")
+        hardware = detect_hardware(project.work_dir)
+        profile = hardware_profile_from_snapshot(hardware)
+        if hardware.accelerators:
+            descriptions = ", ".join(
+                f"{accelerator.name} ({accelerator.memory_gb:.1f} GB)"
+                for accelerator in hardware.accelerators
+            )
+            _emit_stage(on_event, registry, "hardware", f"Detected accelerators: {descriptions}")
+        else:
+            _emit_stage(
+                on_event,
+                registry,
+                "hardware",
+                "No NVIDIA accelerator detected; using CPU-compatible path",
+            )
+
+        context = ExecutionContext(
+            hardware=profile,
+            work_dir=str(project.work_dir),
+            seed=project.seed,
+        )
+
         if project.baseline_mode == "auto":
             baseline, resolved_revision = _run_automatic_baseline(
                 project, context, registry, on_event
@@ -242,21 +284,27 @@ def run_project(
                 "initial experiment does not fit the configured GPU-hour budget"
             )
         registry.record_experiment(project.experiment)
-        _emit(
+        _emit_stage(
             on_event,
+            registry,
             "train",
             f"Starting {project.experiment.experiment_id} with {engine.reservation_for(project.experiment.experiment_id):.4g} reserved GPU-hours",
+            experiment_id=project.experiment.experiment_id,
         )
         generation = runner.run_generation(accepted)
+        _emit_candidate_events(on_event, registry, generation.candidates[0])
 
         repair_outcome: RecursiveRepairOutcome | None = None
         if project.repair is not None and generation.promoted is None:
             repair_spec = project.repair
             _emit(
                 on_event,
-                "repair",
-                f"Initial candidate rejected; attempting autonomous repair "
-                f"(up to {repair_spec.policy.max_depth} hop(s))",
+                registry,
+                RepairEvent(
+                    target_experiment_id=project.experiment.experiment_id,
+                    depth=0,
+                    failure_signature=None,
+                ),
             )
             provider = LocalCorpusRepairProvider(
                 repair_spec.corpus_files,
@@ -272,25 +320,63 @@ def run_project(
                 policy=repair_spec.policy,
             )
             generation = repair_outcome.final_generation
+            for hop in repair_outcome.hops:
+                _emit_candidate_events(
+                    on_event,
+                    registry,
+                    hop.outcome.repair_generation.candidates[0],
+                )
             _emit(
                 on_event,
-                "repair",
-                f"Repair stopped: {repair_outcome.stop_reason.value} after "
-                f"{repair_outcome.new_hops} hop(s) ({repair_outcome.stop_detail})",
+                registry,
+                RepairEvent(
+                    target_experiment_id=project.experiment.experiment_id,
+                    depth=repair_outcome.depth,
+                    stop_reason=repair_outcome.stop_reason.value,
+                    stop_detail=repair_outcome.stop_detail,
+                ),
             )
 
-    candidate = generation.candidates[0]
-    if candidate.error is not None:
-        _emit(on_event, "failed", candidate.error)
-    elif candidate.result is not None:
-        metrics = ", ".join(
-            f"{name}={value:.4f}" for name, value in sorted(candidate.result.metrics.items())
-        )
-        _emit(on_event, "evaluate", f"Evaluation complete: {metrics}")
-        if generation.promoted is not None:
-            _emit(on_event, "promoted", f"Promoted {generation.promoted.experiment_id}")
-        else:
-            _emit(on_event, "rejected", "Candidate completed but did not pass the promotion gate")
+        candidate = generation.candidates[0]
+        if candidate.error is not None:
+            _emit_stage(
+                on_event, registry, "failed", candidate.error, experiment_id=candidate.experiment_id
+            )
+        elif candidate.result is not None:
+            metrics = ", ".join(
+                f"{name}={value:.4f}" for name, value in sorted(candidate.result.metrics.items())
+            )
+            _emit_stage(
+                on_event,
+                registry,
+                "evaluate",
+                f"Evaluation complete: {metrics}",
+                experiment_id=candidate.experiment_id,
+            )
+            if generation.promoted is not None:
+                promoted = generation.promoted
+                _emit_stage(
+                    on_event,
+                    registry,
+                    "promoted",
+                    f"Promoted {promoted.experiment_id}",
+                    experiment_id=promoted.experiment_id,
+                )
+                _emit(
+                    on_event,
+                    registry,
+                    PromotionEvent(
+                        experiment_id=promoted.experiment_id, metrics=dict(promoted.metrics)
+                    ),
+                )
+            else:
+                _emit_stage(
+                    on_event,
+                    registry,
+                    "rejected",
+                    "Candidate completed but did not pass the promotion gate",
+                    experiment_id=candidate.experiment_id,
+                )
 
     return ProjectRunOutcome(
         project=project,
@@ -298,3 +384,36 @@ def run_project(
         generation=generation,
         repair=repair_outcome,
     )
+
+
+def _emit_candidate_events(
+    callback: EventCallback | None, registry: RunRegistry | None, candidate
+) -> None:
+    """CheckpointEvent/FailureEvent for one candidate's real, already-known
+    outcome -- not a live progress stream (that needs the worker to report
+    intermediate state, which is a separate, later piece of work), just the
+    structured facts already available once training/evaluation for this
+    candidate has finished.
+    """
+    if candidate.artifact is not None:
+        checkpoint = candidate.artifact.evidence.get("checkpoint")
+        if isinstance(checkpoint, Mapping) and checkpoint.get("trainer_dir"):
+            _emit(
+                callback,
+                registry,
+                CheckpointEvent(
+                    experiment_id=candidate.experiment_id,
+                    checkpoint_dir=str(checkpoint["trainer_dir"]),
+                    step=None,
+                ),
+            )
+    if candidate.harvested_failures:
+        _emit(
+            callback,
+            registry,
+            FailureEvent(
+                experiment_id=candidate.experiment_id,
+                failure_count=len(candidate.harvested_failures),
+                repair_plan_count=len(candidate.repair_plans),
+            ),
+        )

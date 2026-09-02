@@ -14,9 +14,10 @@ from .executors import ExecutionContext
 from .hardware import HardwareSnapshot, detect_hardware
 from .memory import HardwareProfile
 from .project import ProjectValidationError, write_project
-from .project_runner import ProjectRunEvent, hardware_profile_from_snapshot, run_project
+from .project_runner import hardware_profile_from_snapshot, run_project
 from .recursive_repair import RecursiveRepairStopReason
 from .registry import RunRegistry
+from .run_events import RunEventPayload, format_event
 
 
 class ChowderTUI(App[None]):
@@ -568,11 +569,8 @@ class ChowderTUI(App[None]):
 
     @work(thread=True, exclusive=True)
     def _run_training(self, project_path: Path, token: CancellationToken) -> None:
-        def event_sink(event: ProjectRunEvent) -> None:
-            self.call_from_thread(
-                self._append_log,
-                f"[bold]{event.stage}[/]: {event.message}",
-            )
+        def event_sink(event: RunEventPayload) -> None:
+            self.call_from_thread(self._append_log, format_event(event))
 
         try:
             outcome = run_project(project_path, on_event=event_sink, cancellation=token)

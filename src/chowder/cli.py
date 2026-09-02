@@ -8,7 +8,8 @@ from .calibration import calibrate_hardware
 from .hardware import detect_hardware
 from .memory import HardwareProfile, WorkloadProfile, plan_memory
 from .project import load_project
-from .project_runner import ProjectRunEvent, run_project
+from .project_runner import run_project
+from .run_events import RunEventPayload, format_event
 
 
 def _memory_plan(args: argparse.Namespace) -> int:
@@ -67,8 +68,8 @@ def _project_validate(args: argparse.Namespace) -> int:
 
 
 def _train(args: argparse.Namespace) -> int:
-    def event_sink(event: ProjectRunEvent) -> None:
-        print(f"[{event.stage}] {event.message}", flush=True)
+    def event_sink(event: RunEventPayload) -> None:
+        print(format_event(event), flush=True)
 
     outcome = run_project(args.project, on_event=event_sink)
     candidate = outcome.generation.candidates[0]

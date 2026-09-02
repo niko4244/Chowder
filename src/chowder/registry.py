@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 from .database import connect_database
 from .executors import EvaluationOutcome, TrainingArtifact
 from .failures import FailureRecord, FailureSourceRole, RepairPlan
 from .models import Experiment, ExperimentResult
 from .provenance import EvidenceManifest
+from .run_events import RunEventPayload, event_experiment_id, event_payload, event_type_name
 
 
 SCHEMA = """
@@ -80,6 +82,13 @@ CREATE TABLE IF NOT EXISTS manifests (
     experiment_id TEXT PRIMARY KEY,
     digest TEXT NOT NULL,
     manifest_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS run_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT,
+    event_type TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL
 );
 """
 
@@ -497,3 +506,59 @@ class RunRegistry:
                 artifact_ref=artifact_ref,
                 evidence=json.loads(evidence),
             )
+
+    def record_event(self, event: RunEventPayload) -> None:
+        """Append one structured run event to the durable history.
+
+        Unlike the other record_* methods, this is a plain append-only log,
+        not an immutable single-record-per-key table -- many events share
+        the same experiment_id, ordered by insertion, and there is nothing
+        to compare a replay against.
+        """
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO run_events (experiment_id, event_type, occurred_at, payload_json) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    event_experiment_id(event),
+                    event_type_name(event),
+                    datetime.now(timezone.utc).isoformat(),
+                    self._json(event_payload(event)),
+                ),
+            )
+
+    def list_events(self, *, experiment_id: str | None = None) -> Iterable[RecordedEvent]:
+        if experiment_id is None:
+            rows = self._conn.execute(
+                "SELECT event_id, experiment_id, event_type, occurred_at, payload_json "
+                "FROM run_events ORDER BY event_id"
+            )
+        else:
+            rows = self._conn.execute(
+                "SELECT event_id, experiment_id, event_type, occurred_at, payload_json "
+                "FROM run_events WHERE experiment_id = ? ORDER BY event_id",
+                (experiment_id,),
+            )
+        for event_id, exp_id, event_type, occurred_at, payload_json in rows:
+            yield RecordedEvent(
+                event_id=event_id,
+                experiment_id=exp_id,
+                event_type=event_type,
+                occurred_at=occurred_at,
+                payload=json.loads(payload_json),
+            )
+
+
+@dataclass(frozen=True)
+class RecordedEvent:
+    """One durably-persisted run event, as read back from the registry.
+    `payload` is the plain dict a RunEventPayload dataclass serialized to
+    (see run_events.event_payload) -- reconstructing the exact original
+    dataclass is the caller's job if it needs one, keyed on `event_type`.
+    """
+
+    event_id: int
+    experiment_id: str | None
+    event_type: str
+    occurred_at: str
+    payload: dict[str, Any]

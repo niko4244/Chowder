@@ -12,6 +12,7 @@ from chowder.cancellation import CancellationToken
 from chowder.project import write_project
 from chowder.project_runner import run_project
 from chowder.registry import RunRegistry
+from chowder.run_events import RunEvent
 
 
 pytestmark = pytest.mark.skipif(
@@ -316,9 +317,9 @@ def test_real_tiny_llama_automatic_baseline_binds_revision_and_matches_protocol(
 
     events = []
     outcome = run_project(project_path, on_event=events.append)
-    assert any(event.stage == "baseline" for event in events), (
-        "no baseline stage was emitted -- automatic baseline evaluation did not run"
-    )
+    assert any(
+        isinstance(event, RunEvent) and event.stage == "baseline" for event in events
+    ), "no baseline stage was emitted -- automatic baseline evaluation did not run"
 
     candidate = outcome.generation.candidates[0]
     assert candidate.error is None, candidate.error

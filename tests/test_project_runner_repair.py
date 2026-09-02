@@ -7,8 +7,9 @@ from pathlib import Path
 import pytest
 
 from chowder.project import write_project
-from chowder.project_runner import ProjectRunEvent, run_project
+from chowder.project_runner import run_project
 from chowder.recursive_repair import RecursiveRepairStopReason
+from chowder.run_events import FailureEvent, RepairEvent, RunEventPayload
 
 
 pytestmark = pytest.mark.skipif(
@@ -189,7 +190,7 @@ def test_real_run_project_autonomously_repairs_a_rejected_candidate(tmp_path: Pa
         },
     )
 
-    events: list[ProjectRunEvent] = []
+    events: list[RunEventPayload] = []
     outcome = run_project(project_path, on_event=events.append)
 
     # Neither the initial candidate nor the repair hop could possibly clear
@@ -199,8 +200,16 @@ def test_real_run_project_autonomously_repairs_a_rejected_candidate(tmp_path: Pa
     assert outcome.promoted_experiment_id is None
     assert outcome.succeeded is True
 
-    repair_events = [event for event in events if event.stage == "repair"]
+    repair_events = [event for event in events if isinstance(event, RepairEvent)]
     assert len(repair_events) == 2, "expected a repair-start and repair-stop event"
+    assert repair_events[0].stop_reason is None  # the starting event
+    assert repair_events[1].stop_reason == RecursiveRepairStopReason.MAX_DEPTH.value
+
+    # The rejected initial candidate's evaluation harvests at least one real
+    # failure -- that's what makes it repairable at all.
+    failure_events = [event for event in events if isinstance(event, FailureEvent)]
+    assert len(failure_events) >= 1
+    assert failure_events[0].failure_count >= 1
 
     assert outcome.repair is not None
     assert outcome.repair.new_hops == 1
