@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -17,6 +17,8 @@ from .models import (
     MetricTarget,
     OptimizationDirection,
 )
+from .recursive_repair import RecursiveRepairPolicy
+from .repair_candidates import RepairVariant
 
 
 PROJECT_SCHEMA_VERSION = 1
@@ -50,6 +52,31 @@ def _resolve_path(value: str, *, base: Path) -> Path:
 
 
 @dataclass(frozen=True)
+class RepairSpec:
+    """Config-driven autonomous repair: how to source repair examples and what
+    hyperparameter variants to try when the initial candidate is rejected.
+
+    Repair variants may only patch training config, never LoRA topology --
+    ``run_bounded_autonomous_repair`` hard-rejects any variant with a
+    ``lora_patch`` (continuation repair cannot change adapter shape), so the
+    schema does not expose that field at all.
+    """
+
+    corpus_files: tuple[str, ...]
+    variants: tuple[RepairVariant, ...]
+    policy: RecursiveRepairPolicy = field(default_factory=RecursiveRepairPolicy)
+    provider_max_examples: int = 32
+    provider_min_examples: int = 1
+    provider_examples_per_failure: int = 2
+
+    def __post_init__(self) -> None:
+        if not self.corpus_files:
+            raise ProjectValidationError("repair.corpus_files must be a non-empty list")
+        if not self.variants:
+            raise ProjectValidationError("repair.variants must be a non-empty list")
+
+
+@dataclass(frozen=True)
 class ProjectSpec:
     name: str
     work_dir: Path
@@ -60,6 +87,7 @@ class ProjectSpec:
     baseline: ExperimentResult | None
     experiment: Experiment
     config: Mapping[str, Any]
+    repair: RepairSpec | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -142,6 +170,12 @@ class ProjectSpec:
                 raise ProjectValidationError(
                     f"evaluation dataset not found: {dataset}"
                 )
+        if self.repair is not None:
+            for index, corpus in enumerate(self.repair.corpus_files):
+                if not Path(corpus).is_file():
+                    raise ProjectValidationError(
+                        f"repair.corpus_files[{index}] not found: {corpus}"
+                    )
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.registry_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -197,6 +231,104 @@ def _fixed_baseline(raw: Mapping[str, Any]) -> ExperimentResult:
             str(raw["artifact_ref"]) if raw.get("artifact_ref") is not None else None
         ),
         evidence=evidence,
+    )
+
+
+def _repair_variant_from_mapping(raw: Mapping[str, Any], *, path: str) -> RepairVariant:
+    if "lora_patch" in raw:
+        raise ProjectValidationError(
+            f"{path}.lora_patch is not supported; repair variants may only patch training config"
+        )
+    name = str(raw.get("name", "")).strip()
+    if not name:
+        raise ProjectValidationError(f"{path}.name is required")
+    training_patch = _mapping(raw.get("training_patch", {}), path=f"{path}.training_patch")
+    expected_deltas_raw = _mapping(raw.get("expected_deltas", {}), path=f"{path}.expected_deltas")
+    expected_deltas = {
+        str(name): _finite(value, path=f"{path}.expected_deltas.{name}")
+        for name, value in expected_deltas_raw.items()
+    }
+    try:
+        return RepairVariant(
+            name=name,
+            estimated_gpu_hours=_finite(
+                raw.get("estimated_gpu_hours"), path=f"{path}.estimated_gpu_hours"
+            ),
+            training_patch=dict(training_patch),
+            expected_deltas=expected_deltas,
+        )
+    except ValueError as exc:
+        raise ProjectValidationError(str(exc)) from exc
+
+
+def _repair_policy_from_mapping(raw: Mapping[str, Any], *, path: str) -> RecursiveRepairPolicy:
+    max_depth = raw.get("max_depth", 3)
+    if isinstance(max_depth, bool) or not isinstance(max_depth, int):
+        raise ProjectValidationError(f"{path}.max_depth must be an integer")
+    max_occurrences = raw.get("max_failure_signature_occurrences", 1)
+    if isinstance(max_occurrences, bool) or not isinstance(max_occurrences, int):
+        raise ProjectValidationError(
+            f"{path}.max_failure_signature_occurrences must be an integer"
+        )
+    replay_ratio_raw = raw.get("replay_ratio", 1.0)
+    replay_ratio = (
+        None
+        if replay_ratio_raw is None
+        else _finite(replay_ratio_raw, path=f"{path}.replay_ratio")
+    )
+    try:
+        return RecursiveRepairPolicy(
+            max_depth=max_depth,
+            min_score_improvement=_finite(
+                raw.get("min_score_improvement", 1e-4), path=f"{path}.min_score_improvement"
+            ),
+            max_failure_signature_occurrences=max_occurrences,
+            replay_ratio=replay_ratio,
+        )
+    except ValueError as exc:
+        raise ProjectValidationError(str(exc)) from exc
+
+
+def _repair_from_mapping(raw: Any, *, base: Path, path: str = "repair") -> RepairSpec | None:
+    if raw is None:
+        return None
+    section = _mapping(raw, path=path)
+
+    corpus_raw = section.get("corpus_files")
+    if not isinstance(corpus_raw, (list, tuple)) or not corpus_raw:
+        raise ProjectValidationError(f"{path}.corpus_files must be a non-empty list")
+    corpus_files = tuple(
+        str(_resolve_path(str(item), base=base)) for item in corpus_raw
+    )
+
+    variant_rows = section.get("variants")
+    if not isinstance(variant_rows, (list, tuple)) or not variant_rows:
+        raise ProjectValidationError(f"{path}.variants must be a non-empty list")
+    variants = tuple(
+        _repair_variant_from_mapping(
+            _mapping(row, path=f"{path}.variants[{index}]"),
+            path=f"{path}.variants[{index}]",
+        )
+        for index, row in enumerate(variant_rows)
+    )
+
+    def _int_field(name: str, default: int) -> int:
+        value = section.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ProjectValidationError(f"{path}.{name} must be an integer")
+        return value
+
+    policy = _repair_policy_from_mapping(
+        _mapping(section.get("policy", {}), path=f"{path}.policy"), path=f"{path}.policy"
+    )
+
+    return RepairSpec(
+        corpus_files=corpus_files,
+        variants=variants,
+        policy=policy,
+        provider_max_examples=_int_field("max_examples", 32),
+        provider_min_examples=_int_field("min_examples", 1),
+        provider_examples_per_failure=_int_field("examples_per_failure", 2),
     )
 
 
@@ -287,6 +419,8 @@ def project_from_mapping(
     config = dict(config_raw)
     config.setdefault("seed", seed_raw)
 
+    repair = _repair_from_mapping(raw.get("repair"), base=work_dir)
+
     return ProjectSpec(
         name=str(raw.get("name", "Chowder Project")),
         work_dir=work_dir,
@@ -297,6 +431,7 @@ def project_from_mapping(
         baseline=baseline,
         experiment=experiment,
         config=config,
+        repair=repair,
     )
 
 
