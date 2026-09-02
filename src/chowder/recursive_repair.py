@@ -30,6 +30,7 @@ class RecursiveRepairStopReason(str, Enum):
     BUDGET_EXHAUSTED = "budget_exhausted"
     NO_ADMISSIBLE_CANDIDATE = "no_admissible_candidate"
     NO_REPAIRABLE_DIAGNOSTIC = "no_repairable_diagnostic"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True)
@@ -408,6 +409,11 @@ def _execute_bounded_loop(
                 RecursiveRepairStopReason.PROMOTED,
                 "current generation already contains a promoted candidate",
             )
+        if runner.cancellation is not None and runner.cancellation.requested:
+            return finish(
+                RecursiveRepairStopReason.CANCELLED,
+                "cancellation was requested",
+            )
         if total_depth() >= policy.max_depth:
             return finish(
                 RecursiveRepairStopReason.MAX_DEPTH,
@@ -419,6 +425,18 @@ def _execute_bounded_loop(
                 return finish(
                     RecursiveRepairStopReason.BUDGET_EXHAUSTED,
                     "GPU-hour budget is exhausted",
+                )
+            # Checked again each iteration, not just once before the loop:
+            # a hop that itself got cancelled mid-training/evaluation
+            # returns a normal (not raised) rejected-candidate outcome, so
+            # this is what turns that into a clean CANCELLED stop on the
+            # next iteration instead of it falling through to
+            # NO_REPAIRABLE_DIAGNOSTIC/REPEATED_FAILURE as if it were an
+            # ordinary dead end.
+            if runner.cancellation is not None and runner.cancellation.requested:
+                return finish(
+                    RecursiveRepairStopReason.CANCELLED,
+                    "cancellation was requested",
                 )
 
             target, signature, had_repairable = _select_novel_target(

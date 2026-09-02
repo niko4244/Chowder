@@ -12,6 +12,7 @@ from .cancellation import CancellationToken
 from .hardware import HardwareSnapshot, detect_hardware
 from .project import ProjectValidationError, write_project
 from .project_runner import ProjectRunEvent, run_project
+from .recursive_repair import RecursiveRepairStopReason
 from .registry import RunRegistry
 
 
@@ -39,6 +40,7 @@ class ChowderTUI(App[None]):
         self.project_path = Path(project_path).expanduser().resolve()
         self._hardware: HardwareSnapshot | None = None
         self._cancellation: CancellationToken | None = None
+        self._training_worker = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -388,8 +390,8 @@ class ChowderTUI(App[None]):
         if event.button.id == "cancel":
             if self._cancellation is not None:
                 self._cancellation.request()
-                self._set_status("Cancellation requested")
-                self._append_log("[yellow]Cancellation requested[/]")
+                self._set_status("Cancelling…")
+                self._append_log("[yellow]Cancelling…[/]")
             return
         if event.button.id == "history":
             try:
@@ -424,17 +426,25 @@ class ChowderTUI(App[None]):
             self._set_running(True)
             self._set_status("Training started")
             self._append_log(f"[bold]Starting project:[/] {target}")
-            self._run_training(target, self._cancellation)
+            self._training_worker = self._run_training(target, self._cancellation)
+
+    def _update_hardware_panel(self, text: str) -> None:
+        # The scan runs on a background thread and can still be in flight
+        # when the app is closed (in a real session) or the screen is torn
+        # down (in a test) -- querying/updating a widget that's already
+        # gone must not raise out of a background worker.
+        try:
+            widget = self.query_one("#hardware", Static)
+            self.call_from_thread(widget.update, text)
+        except Exception:
+            return
 
     @work(thread=True, exclusive=True)
     def _scan_hardware(self) -> None:
         try:
             snapshot = detect_hardware(Path.cwd())
         except Exception as exc:
-            self.call_from_thread(
-                self.query_one("#hardware", Static).update,
-                f"Hardware scan failed: {type(exc).__name__}: {exc}",
-            )
+            self._update_hardware_panel(f"Hardware scan failed: {type(exc).__name__}: {exc}")
             return
         self._hardware = snapshot
         if snapshot.accelerators:
@@ -455,7 +465,7 @@ class ChowderTUI(App[None]):
                 f"Free storage: {snapshot.storage_free_gb:.1f} GB\n"
                 "CPU training is allowed for small/test models; 4-bit QLoRA requires CUDA."
             )
-        self.call_from_thread(self.query_one("#hardware", Static).update, note)
+        self._update_hardware_panel(note)
 
     @work(thread=True, exclusive=True)
     def _run_training(self, project_path: Path, token: CancellationToken) -> None:
@@ -468,8 +478,25 @@ class ChowderTUI(App[None]):
         try:
             outcome = run_project(project_path, on_event=event_sink, cancellation=token)
             candidate = outcome.generation.candidates[0]
-            if candidate.error is not None:
-                message = f"Training failed: {candidate.error}"
+            # A cancellation can surface two ways: the last-run candidate's
+            # own error is prefixed "cancelled" (it was interrupted
+            # mid-training/evaluation), or -- if it completed normally right
+            # before the token was set -- the repair loop's own stop reason
+            # is CANCELLED instead. Either must read as "Cancelled" to the
+            # user, not as an unexplained failure.
+            candidate_cancelled = candidate.error is not None and candidate.error.startswith(
+                "cancelled"
+            )
+            repair_cancelled = (
+                outcome.repair is not None
+                and outcome.repair.stop_reason is RecursiveRepairStopReason.CANCELLED
+            )
+            if candidate_cancelled or repair_cancelled:
+                message = "Cancelled"
+                self.call_from_thread(self._set_status, message)
+                self.call_from_thread(self._append_log, f"[yellow]{message}[/]")
+            elif candidate.error is not None:
+                message = f"Failed: {candidate.error}"
                 self.call_from_thread(self._set_status, message)
                 self.call_from_thread(self._append_log, f"[red]{message}[/]")
             else:

@@ -6,6 +6,7 @@ import pytest
 
 import chowder.recursive_repair as recursive
 from chowder.autonomous_repair import AutonomousRepairOutcome, _repairable_target
+from chowder.cancellation import CancellationToken
 from chowder.cycle import CandidateCycleOutcome, ExperimentCycleRunner, GenerationOutcome
 from chowder.engine import EvolutionEngine
 from chowder.executors import EvaluationOutcome, ExecutionContext
@@ -306,6 +307,115 @@ def test_budget_exhaustion_stops_before_hop(monkeypatch):
     )
     assert outcome.stop_reason is recursive.RecursiveRepairStopReason.BUDGET_EXHAUSTED
     assert outcome.depth == 0
+
+
+def test_cancellation_requested_before_any_hop_stops_immediately(monkeypatch):
+    generation = _generation(_candidate("source", score=-0.1))
+
+    def should_not_run(**kwargs):
+        raise AssertionError("repair must not run once cancellation was requested")
+
+    monkeypatch.setattr(recursive, "run_single_hop_autonomous_repair", should_not_run)
+    runner = _runner()
+    token = CancellationToken()
+    token.request()
+    runner.cancellation = token
+    outcome = recursive.run_bounded_autonomous_repair(
+        runner=runner,
+        source_generation=generation,
+        provider=object(),
+        variants=(RepairVariant("default", 0.1),),
+    )
+    assert outcome.stop_reason is recursive.RecursiveRepairStopReason.CANCELLED
+    assert outcome.depth == 0
+
+
+def test_cancellation_requested_between_hops_stops_with_cancelled_not_a_dead_end(monkeypatch):
+    """A cancellation that fires during/after a hop must be reported as
+    CANCELLED on the next iteration, not misread as an ordinary dead end
+    (NO_REPAIRABLE_DIAGNOSTIC/REPEATED_FAILURE) just because the loop
+    happens to check for novel targets right after."""
+    token = CancellationToken()
+    first = _generation(_candidate("source", score=-0.1, prompt="failure one"))
+    second = _generation(_candidate("repair-1", score=0.5, prompt="failure two"))
+    calls = []
+
+    def fake_hop(*, runner, source_generation, provider, variants, candidate_id=None, replay_ratio=1.0):
+        calls.append(candidate_id)
+        token.request()
+        target = _repairable_target(source_generation, candidate_id=candidate_id)
+        return AutonomousRepairOutcome(
+            source_generation=source_generation,
+            target=target,
+            population=None,
+            repair_generation=second,
+        )
+
+    monkeypatch.setattr(recursive, "run_single_hop_autonomous_repair", fake_hop)
+    runner = _runner()
+    runner.cancellation = token
+    outcome = recursive.run_bounded_autonomous_repair(
+        runner=runner,
+        source_generation=first,
+        provider=object(),
+        variants=(RepairVariant("default", 0.1),),
+        policy=recursive.RecursiveRepairPolicy(max_depth=5),
+    )
+    assert calls == ["source"]  # exactly one hop attempted, not a second
+    assert outcome.depth == 1
+    assert outcome.stop_reason is recursive.RecursiveRepairStopReason.CANCELLED
+    # GPU-hour accounting for the one hop that did run is preserved --
+    # cancelling only prevents starting the next hop, it doesn't discard
+    # what the completed one already recorded.
+    assert outcome.hops[0].target_experiment_id == "source"
+    assert outcome.hops[0].outcome.repair_generation is second
+
+
+def test_cancellation_during_a_repair_hops_own_training_is_reported_as_cancelled(monkeypatch):
+    """Distinct from the between-hops case: here the hop function returns
+    normally with a rejected, cancelled candidate -- matching what
+    _run_candidate actually produces when cancellation interrupts training
+    mid-hop (it never raises, just returns error="cancelled: ..." with no
+    result) -- rather than a hop that completed cleanly before the token
+    was set. Without the fix, _repairable_target already excludes a
+    result=None candidate from being repairable, so the next iteration
+    would misreport this as a dead end (NO_REPAIRABLE_DIAGNOSTIC) instead
+    of the cancellation that actually caused it."""
+    token = CancellationToken()
+    first = _generation(_candidate("source", score=-0.1, prompt="failure one"))
+
+    cancelled_ranked = RankedCandidate(
+        ExperimentResult("repair-1", {"quality": 0.0}, 0.05),
+        GateDecision(False, -1.0, {}, ("quality",), (), False, "rejected"),
+        -1.0,
+    )
+    cancelled_candidate = CandidateCycleOutcome(
+        "repair-1", error="cancelled: RuntimeError: worker terminated"
+    )
+    cancelled_generation = GenerationOutcome((cancelled_candidate,), (cancelled_ranked,), None)
+
+    def fake_hop(*, runner, source_generation, provider, variants, candidate_id=None, replay_ratio=1.0):
+        token.request()  # the hop's own training was interrupted
+        target = _repairable_target(source_generation, candidate_id=candidate_id)
+        return AutonomousRepairOutcome(
+            source_generation=source_generation,
+            target=target,
+            population=None,
+            repair_generation=cancelled_generation,
+        )
+
+    monkeypatch.setattr(recursive, "run_single_hop_autonomous_repair", fake_hop)
+    runner = _runner()
+    runner.cancellation = token
+    outcome = recursive.run_bounded_autonomous_repair(
+        runner=runner,
+        source_generation=first,
+        provider=object(),
+        variants=(RepairVariant("default", 0.1),),
+        policy=recursive.RecursiveRepairPolicy(max_depth=5),
+    )
+    assert outcome.depth == 1
+    assert outcome.stop_reason is recursive.RecursiveRepairStopReason.CANCELLED
 
 
 def test_positive_budget_but_unfittable_population_is_no_admissible_candidate(monkeypatch):
