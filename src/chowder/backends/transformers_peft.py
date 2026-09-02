@@ -116,8 +116,13 @@ class TransformersPeftRunSpec:
             raise ValueError("training epochs and learning_rate must be positive")
         if self.lr_scheduler_type not in _ALLOWED_LR_SCHEDULER_TYPES:
             raise ValueError(f"unsupported lr_scheduler_type: {self.lr_scheduler_type}")
-        if not math.isfinite(self.warmup_ratio) or not 0 <= self.warmup_ratio <= 1:
-            raise ValueError("warmup_ratio must be finite and in [0, 1]")
+        if not math.isfinite(self.warmup_ratio) or not 0 <= self.warmup_ratio < 1:
+            # Strictly < 1: the worker forwards this as HF TrainingArguments'
+            # overloaded warmup_steps, which treats a value >= 1 as an
+            # absolute step count, not a ratio. Accepting 1.0 here would
+            # silently become "warm up for 1 step" instead of "warm up for
+            # the entire run" once it reaches the worker.
+            raise ValueError("warmup_ratio must be finite and in [0, 1)")
         if self.warmup_steps < 0:
             raise ValueError("warmup_steps cannot be negative")
         if not math.isfinite(self.weight_decay) or self.weight_decay < 0:

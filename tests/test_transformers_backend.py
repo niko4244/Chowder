@@ -317,7 +317,7 @@ def test_unsupported_lr_scheduler_type_is_rejected(tmp_path):
         )
 
 
-@pytest.mark.parametrize("ratio", [-0.1, 1.1, float("nan"), float("inf")])
+@pytest.mark.parametrize("ratio", [-0.1, 1.0, 1.1, float("nan"), float("inf")])
 def test_warmup_ratio_out_of_range_is_rejected(tmp_path, ratio):
     data = tmp_path / "train.jsonl"
     data.write_text('{"text":"hello"}\n')
@@ -1067,7 +1067,11 @@ def test_real_tiny_llama_max_steps_caps_training_and_schedule_fields_apply(tmp_p
         "max_steps": 2,
         "learning_rate": 0.001,
         "lr_scheduler_type": "cosine",
-        "warmup_steps": 1,
+        # Ratio-based warmup specifically, not warmup_steps -- this is the
+        # path that broke against real transformers>=5.2 (warmup_ratio was
+        # removed as its own TrainingArguments kwarg in favor of an
+        # overloaded warmup_steps; see transformers_worker.py).
+        "warmup_ratio": 0.1,
         "weight_decay": 0.01,
         "max_grad_norm": 0.5,
         "batch_size": 1,
