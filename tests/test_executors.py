@@ -35,6 +35,9 @@ class StubTrainer:
 class StubEvaluator:
     name = "stub-evaluator"
 
+    def profile(self, experiment, context):
+        return CostEstimate(gpu_hours=0.02)
+
     def evaluate(self, *, experiment, artifact, context):
         return EvaluationOutcome(
             run_id="eval-1",
@@ -43,6 +46,9 @@ class StubEvaluator:
             metrics={"quality": 0.8},
             gpu_hours=0.02,
         )
+
+    def cancel(self, run_id):
+        return None
 
 
 def _experiment():

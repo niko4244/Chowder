@@ -127,6 +127,9 @@ class EvaluationOutcome:
 class EvaluationExecutor(Protocol):
     name: str
 
+    def profile(self, experiment: Experiment, context: ExecutionContext) -> CostEstimate:
+        ...
+
     def evaluate(
         self,
         *,
@@ -134,4 +137,7 @@ class EvaluationExecutor(Protocol):
         artifact: TrainingArtifact,
         context: ExecutionContext,
     ) -> EvaluationOutcome:
+        ...
+
+    def cancel(self, run_id: str) -> None:
         ...

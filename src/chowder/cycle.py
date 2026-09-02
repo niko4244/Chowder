@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from .config_validation import validate_transformers_backend_config
 from .engine import EvolutionEngine
-from .execution_failure import ExecutionFailure, normalize_execution_exception
+from .execution_failure import ExecutionFailure, ExecutionStage, normalize_execution_exception
 from .executor_investigator import ExecutorFailureAnalysis, analyze_execution_failure
 from .executors import EvaluationExecutor, EvaluationOutcome, ExecutionContext, TrainingArtifact, TrainingExecutor
 from .failures import FailureRecord, RepairPlan, cluster_failures, plan_repairs
@@ -158,14 +158,19 @@ class ExperimentCycleRunner:
 
         try:
             _validate_trainer_config(self.trainer, resolved)
-            evaluation_reserve = _declared_evaluation_reserve(resolved)
             try:
                 training_estimate = self.trainer.profile(experiment, run_context)
             except NotImplementedError:
                 training_gpu_hours = self.engine.reservation_for(experiment.experiment_id)
             else:
                 training_gpu_hours = training_estimate.gpu_hours
-            lifecycle_estimate = training_gpu_hours + evaluation_reserve
+            try:
+                evaluation_estimate = self.evaluator.profile(experiment, run_context)
+            except NotImplementedError:
+                evaluation_gpu_hours = _declared_evaluation_reserve(resolved)
+            else:
+                evaluation_gpu_hours = evaluation_estimate.gpu_hours
+            lifecycle_estimate = training_gpu_hours + evaluation_gpu_hours
             self.engine.resize_reservation(experiment.experiment_id, lifecycle_estimate)
         except Exception as exc:
             self.engine.cancel_reservation(
@@ -199,6 +204,7 @@ class ExperimentCycleRunner:
                 executor_name=str(getattr(self.trainer, "name", type(self.trainer).__name__)),
                 context=run_context,
                 wall_seconds=elapsed,
+                stage=ExecutionStage.TRAIN,
             )
             analysis: ExecutorFailureAnalysis | None = None
             try:
@@ -235,12 +241,63 @@ class ExperimentCycleRunner:
                 raise ValueError("trainer returned an artifact for a different experiment")
             if self.registry is not None:
                 self.registry.record_training_artifact(artifact)
+        except Exception as exc:
+            self.engine.fail(experiment.experiment_id, actual_gpu_hours=artifact.gpu_hours)
+            experiment.status = ExperimentStatus.FAILED
+            self._record_status(experiment)
+            return CandidateCycleOutcome(
+                experiment_id=experiment.experiment_id,
+                artifact=artifact,
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
+        evaluation_started = time.perf_counter()
+        try:
             evaluation = self.evaluator.evaluate(
                 experiment=experiment,
                 artifact=artifact,
                 context=run_context,
             )
+        except Exception as exc:
+            elapsed = time.perf_counter() - evaluation_started
+            failure = normalize_execution_exception(
+                exc,
+                experiment=experiment,
+                executor_name=str(getattr(self.evaluator, "name", type(self.evaluator).__name__)),
+                context=run_context,
+                wall_seconds=elapsed,
+                stage=ExecutionStage.EVALUATE,
+            )
+            analysis: ExecutorFailureAnalysis | None = None
+            try:
+                analysis = analyze_execution_failure(
+                    failure,
+                    context=run_context,
+                    registry=self.executor_remediation_registry,
+                    gpu_hour_budget=self.executor_investigation_budget,
+                    investigation_id=f"investigate-{failure.run_id}",
+                    occurred_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception as investigator_exc:
+                diagnostic_error = (
+                    f"executor investigator {type(investigator_exc).__name__}: "
+                    f"{investigator_exc}"
+                )
+
+            known_compute = artifact.gpu_hours + (failure.gpu_hours_spent or 0.0)
+            self.engine.fail(experiment.experiment_id, actual_gpu_hours=known_compute)
+            experiment.status = ExperimentStatus.FAILED
+            self._record_status(experiment)
+            return CandidateCycleOutcome(
+                experiment_id=experiment.experiment_id,
+                artifact=artifact,
+                execution_failure=failure,
+                executor_analysis=analysis,
+                diagnostic_error=diagnostic_error,
+                error=f"{failure.cause_type}: {failure.cause_message}",
+            )
+
+        try:
             if evaluation.experiment_id != experiment.experiment_id:
                 raise ValueError("evaluator returned evidence for a different experiment")
             if evaluation.source_artifact_ref != artifact.artifact_ref:
@@ -306,8 +363,10 @@ class ExperimentCycleRunner:
                 diagnostic_error=diagnostic_error,
             )
         except Exception as exc:
-            known_compute = artifact.gpu_hours if artifact is not None else None
-            self.engine.fail(experiment.experiment_id, actual_gpu_hours=known_compute)
+            self.engine.fail(
+                experiment.experiment_id,
+                actual_gpu_hours=artifact.gpu_hours + evaluation.gpu_hours,
+            )
             experiment.status = ExperimentStatus.FAILED
             self._record_status(experiment)
             return CandidateCycleOutcome(

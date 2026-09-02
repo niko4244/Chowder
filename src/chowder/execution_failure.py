@@ -115,6 +115,7 @@ def normalize_execution_exception(
     executor_name: str,
     context: ExecutionContext,
     wall_seconds: float,
+    stage: ExecutionStage = ExecutionStage.TRAIN,
 ) -> ExecutionFailure:
     """Convert a legacy/raw executor exception without discarding evidence."""
 
@@ -127,11 +128,11 @@ def normalize_execution_exception(
         visible_accelerator_count=active,
     )
     return ExecutionFailure(
-        f"{executor_name} failed during training: {type(exc).__qualname__}: {exc}",
+        f"{executor_name} failed during {stage.value}: {type(exc).__qualname__}: {exc}",
         run_id=f"{experiment.experiment_id}-failed-{uuid4().hex[:12]}",
         experiment_id=experiment.experiment_id,
         executor_name=executor_name,
-        stage=ExecutionStage.TRAIN,
+        stage=stage,
         cause_type=type(exc).__qualname__,
         cause_message=str(exc),
         traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
