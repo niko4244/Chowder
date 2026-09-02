@@ -108,6 +108,26 @@ class ChowderTUI(App[None]):
             yield Label("Evaluation max new tokens")
             yield Input("64", id="max_new_tokens", type="integer")
 
+            yield Static("Checkpoint / resume", classes="section")
+            yield Label("Save checkpoints: no, epoch, or steps")
+            yield Input("no", id="save_strategy")
+            yield Label("Save every N steps (only used when save strategy is 'steps')")
+            yield Input("", id="save_steps")
+            yield Label("Keep at most N checkpoints (blank = unlimited)")
+            yield Input("", id="save_total_limit")
+            yield Label("Resume from checkpoint directory (blank = start fresh)")
+            yield Input("", id="resume_from_checkpoint")
+
+            yield Static("Autonomous repair (optional)", classes="section")
+            yield Label("Repair corpus JSONL (blank disables autonomous repair)")
+            yield Input("", id="repair_corpus")
+            yield Label("Repair retry: additional epochs on top of the recipe above")
+            yield Input("1.0", id="repair_extra_epochs", type="number")
+            yield Label("Repair retry: estimated GPU-hours")
+            yield Input("0.25", id="repair_estimated_gpu_hours", type="number")
+            yield Label("Repair: maximum retry attempts")
+            yield Input("2", id="repair_max_depth", type="integer")
+
             with Horizontal(id="actions"):
                 yield Button("Validate + Save", id="save", variant="primary")
                 yield Button("Start Training", id="start", variant="success")
@@ -150,6 +170,39 @@ class ChowderTUI(App[None]):
         if count < 0:
             raise ProjectValidationError("active accelerator count cannot be negative")
         return count
+
+    def _apply_checkpoint_fields(self, training: dict[str, Any], backend: dict[str, Any]) -> None:
+        save_strategy = (self._value("save_strategy") or "no").lower()
+        if save_strategy not in {"no", "epoch", "steps"}:
+            raise ProjectValidationError("save strategy must be no, epoch, or steps")
+        if save_strategy != "no":
+            training["save_strategy"] = save_strategy
+            if save_strategy == "steps":
+                training["save_steps"] = self._int("save_steps")
+            limit = self._value("save_total_limit")
+            if limit:
+                training["save_total_limit"] = int(limit)
+
+        resume = self._value("resume_from_checkpoint")
+        if resume:
+            backend["resume_from_checkpoint"] = resume
+
+    def _build_repair_section(self, metric: str) -> dict[str, Any] | None:
+        corpus = self._value("repair_corpus")
+        if not corpus:
+            return None
+        return {
+            "corpus_files": [corpus],
+            "variants": [
+                {
+                    "name": "extra-epochs",
+                    "estimated_gpu_hours": self._float("repair_estimated_gpu_hours"),
+                    "training_patch": {"epochs": self._float("repair_extra_epochs")},
+                    "expected_deltas": {metric: 0.01},
+                }
+            ],
+            "policy": {"max_depth": self._int("repair_max_depth")},
+        }
 
     def _build_payload(self) -> dict[str, Any]:
         metric = self._value("metric_name")
@@ -207,8 +260,9 @@ class ChowderTUI(App[None]):
         }
         if quantization != "auto":
             backend["quantization"] = quantization
+        self._apply_checkpoint_fields(training, backend)
 
-        return {
+        payload: dict[str, Any] = {
             "schema_version": 1,
             "name": self._value("project_name"),
             "work_dir": self._value("work_dir"),
@@ -275,6 +329,10 @@ class ChowderTUI(App[None]):
                 },
             },
         }
+        repair = self._build_repair_section(metric)
+        if repair is not None:
+            payload["repair"] = repair
+        return payload
 
     def _project_target(self) -> Path:
         raw = self._value("project_file")

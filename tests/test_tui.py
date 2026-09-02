@@ -20,93 +20,112 @@ def _snapshot(n_gpus: int) -> HardwareSnapshot:
     )
 
 
-async def _app(tmp_path, **input_overrides):
-    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
-    async with app.run_test() as pilot:
-        for widget_id, value in input_overrides.items():
-            widget = app.query_one(f"#{widget_id}")
-            widget.value = value
-        yield app, pilot
+def _set(app: ChowderTUI, **input_overrides: str) -> None:
+    for widget_id, value in input_overrides.items():
+        app.query_one(f"#{widget_id}").value = value
 
 
 @pytest.mark.asyncio
 async def test_quantization_auto_omits_the_key(tmp_path):
-    async for app, _ in _app(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
         payload = app._build_payload()
-        assert "quantization" not in payload["config"]["backend"]
+    assert "quantization" not in payload["config"]["backend"]
 
 
 @pytest.mark.asyncio
 async def test_quantization_explicit_value_is_included(tmp_path):
-    async for app, _ in _app(tmp_path, quantization="4bit"):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, quantization="4bit")
         payload = app._build_payload()
-        assert payload["config"]["backend"]["quantization"] == "4bit"
+    assert payload["config"]["backend"]["quantization"] == "4bit"
 
 
 @pytest.mark.asyncio
 async def test_gradient_checkpointing_auto_omits_the_key(tmp_path):
-    async for app, _ in _app(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
         payload = app._build_payload()
-        assert "gradient_checkpointing" not in payload["config"]["backend"]["training"]
+    assert "gradient_checkpointing" not in payload["config"]["backend"]["training"]
 
 
 @pytest.mark.asyncio
 async def test_gradient_checkpointing_explicit_true_is_included(tmp_path):
-    async for app, _ in _app(tmp_path, gradient_checkpointing="true"):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, gradient_checkpointing="true")
         payload = app._build_payload()
-        assert payload["config"]["backend"]["training"]["gradient_checkpointing"] is True
+    assert payload["config"]["backend"]["training"]["gradient_checkpointing"] is True
 
 
 @pytest.mark.asyncio
 async def test_gradient_checkpointing_explicit_false_is_included(tmp_path):
-    async for app, _ in _app(tmp_path, gradient_checkpointing="FALSE"):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, gradient_checkpointing="FALSE")
         payload = app._build_payload()
-        assert payload["config"]["backend"]["training"]["gradient_checkpointing"] is False
+    assert payload["config"]["backend"]["training"]["gradient_checkpointing"] is False
 
 
 @pytest.mark.asyncio
 async def test_gradient_checkpointing_invalid_value_raises(tmp_path):
-    async for app, _ in _app(tmp_path, gradient_checkpointing="sometimes"):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, gradient_checkpointing="sometimes")
         with pytest.raises(ProjectValidationError, match="gradient checkpointing"):
             app._build_payload()
 
 
 @pytest.mark.asyncio
 async def test_active_accelerator_count_auto_uses_detected_gpu_count(tmp_path):
-    async for app, _ in _app(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
         app._hardware = _snapshot(2)
         payload = app._build_payload()
-        assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 2
+    assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 2
 
 
 @pytest.mark.asyncio
 async def test_active_accelerator_count_auto_with_no_hardware_scanned_yet_defaults_to_zero(
     tmp_path,
 ):
-    async for app, _ in _app(tmp_path):
-        assert app._hardware is None
+    """The background hardware scan on_mount() kicks off can genuinely
+    finish before this test's own code runs (a real race, not just a local
+    timing accident -- observed passing locally and failing on CI), so this
+    forces the "not scanned yet" state directly rather than hoping the scan
+    hasn't completed."""
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        app._hardware = None
         payload = app._build_payload()
-        assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 0
+    assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 0
 
 
 @pytest.mark.asyncio
 async def test_active_accelerator_count_explicit_value_overrides_detected_count(tmp_path):
-    async for app, _ in _app(tmp_path, active_accelerator_count="1"):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, active_accelerator_count="1")
         app._hardware = _snapshot(2)
         payload = app._build_payload()
-        assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 1
+    assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 1
 
 
 @pytest.mark.asyncio
 async def test_active_accelerator_count_negative_raises(tmp_path):
-    async for app, _ in _app(tmp_path, active_accelerator_count="-1"):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, active_accelerator_count="-1")
         with pytest.raises(ProjectValidationError, match="negative"):
             app._build_payload()
 
 
 @pytest.mark.asyncio
 async def test_active_accelerator_count_non_integer_raises(tmp_path):
-    async for app, _ in _app(tmp_path, active_accelerator_count="two"):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, active_accelerator_count="two")
         with pytest.raises(ProjectValidationError, match="'auto' or an integer"):
             app._build_payload()
 
@@ -115,6 +134,108 @@ async def test_active_accelerator_count_non_integer_raises(tmp_path):
 async def test_precision_auto_is_passed_through_as_an_explicit_value(tmp_path):
     """Unlike quantization/gradient_checkpointing, precision's "auto" is a
     real value the worker itself resolves -- it must never be omitted."""
-    async for app, _ in _app(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
         payload = app._build_payload()
-        assert payload["config"]["backend"]["precision"] == "auto"
+    assert payload["config"]["backend"]["precision"] == "auto"
+
+
+# --- checkpoint / resume -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_save_strategy_no_omits_checkpoint_keys(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        payload = app._build_payload()
+    training = payload["config"]["backend"]["training"]
+    assert "save_strategy" not in training
+    assert "save_steps" not in training
+    assert "save_total_limit" not in training
+    assert "resume_from_checkpoint" not in payload["config"]["backend"]
+
+
+@pytest.mark.asyncio
+async def test_save_strategy_epoch_is_included_without_save_steps(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, save_strategy="epoch")
+        payload = app._build_payload()
+    training = payload["config"]["backend"]["training"]
+    assert training["save_strategy"] == "epoch"
+    assert "save_steps" not in training
+
+
+@pytest.mark.asyncio
+async def test_save_strategy_steps_requires_and_includes_save_steps(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, save_strategy="steps", save_steps="50")
+        payload = app._build_payload()
+    training = payload["config"]["backend"]["training"]
+    assert training["save_strategy"] == "steps"
+    assert training["save_steps"] == 50
+
+
+@pytest.mark.asyncio
+async def test_save_total_limit_included_only_when_set(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, save_strategy="epoch", save_total_limit="3")
+        payload = app._build_payload()
+    assert payload["config"]["backend"]["training"]["save_total_limit"] == 3
+
+
+@pytest.mark.asyncio
+async def test_invalid_save_strategy_raises(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(app, save_strategy="sometimes")
+        with pytest.raises(ProjectValidationError, match="save strategy"):
+            app._build_payload()
+
+
+@pytest.mark.asyncio
+async def test_resume_from_checkpoint_included_only_when_set(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        payload = app._build_payload()
+        assert "resume_from_checkpoint" not in payload["config"]["backend"]
+        _set(app, resume_from_checkpoint="/ckpt/run-1/checkpoint-100")
+        payload = app._build_payload()
+    assert (
+        payload["config"]["backend"]["resume_from_checkpoint"]
+        == "/ckpt/run-1/checkpoint-100"
+    )
+
+
+# --- autonomous repair ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_repair_omitted_when_corpus_is_blank(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        payload = app._build_payload()
+    assert "repair" not in payload
+
+
+@pytest.mark.asyncio
+async def test_repair_section_built_when_corpus_is_set(tmp_path):
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test():
+        _set(
+            app,
+            repair_corpus="repair.jsonl",
+            repair_extra_epochs="2.0",
+            repair_estimated_gpu_hours="0.5",
+            repair_max_depth="3",
+        )
+        payload = app._build_payload()
+    repair = payload["repair"]
+    assert repair["corpus_files"] == ["repair.jsonl"]
+    assert repair["policy"]["max_depth"] == 3
+    variant = repair["variants"][0]
+    assert variant["estimated_gpu_hours"] == 0.5
+    assert variant["training_patch"] == {"epochs": 2.0}
+    assert variant["name"]
