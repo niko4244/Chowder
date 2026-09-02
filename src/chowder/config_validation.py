@@ -125,7 +125,7 @@ def validate_transformers_backend_config(config: Mapping[str, Any]) -> None:
     lora = _mapping(backend.get("lora", {}), path="backend.lora")
     _reject_unknown(
         lora,
-        {"r", "alpha", "dropout", "target_modules", "use_rslora"},
+        {"r", "alpha", "dropout", "target_modules", "target_preset", "use_rslora"},
         path="backend.lora",
     )
     if "target_modules" in lora:

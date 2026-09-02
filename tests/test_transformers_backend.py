@@ -12,6 +12,7 @@ from chowder.backends.transformers_peft import (
 from chowder.backends.transformers_worker import (
     _build_chat_example,
     _replay_sample_count,
+    _resolve_target_modules,
     _validate_chat_messages,
 )
 from chowder.executors import ExecutionContext
@@ -531,6 +532,142 @@ def test_validate_chat_messages_rejects_row_without_assistant_turn():
             [{"role": "system", "content": "x"}, {"role": "user", "content": "y"}],
             row_index=0,
         )
+
+
+# --- LoRA target module auto-detection & presets -----------------------------
+
+
+class _FakeModelConfig:
+    def __init__(self, model_type):
+        self.model_type = model_type
+
+
+class _FakeModel:
+    def __init__(self, model_type):
+        self.config = _FakeModelConfig(model_type)
+
+
+def test_resolve_target_modules_explicit_wins_regardless_of_preset():
+    model = _FakeModel("llama")
+    resolved = _resolve_target_modules(
+        model, explicit=("q_proj", "v_proj"), preset="attention_and_mlp"
+    )
+    assert resolved == ["q_proj", "v_proj"]
+
+
+def test_resolve_target_modules_auto_delegates_to_peft():
+    model = _FakeModel("llama")
+    assert _resolve_target_modules(model, explicit=(), preset="auto") is None
+
+
+def test_resolve_target_modules_attention_and_mlp_uses_curated_list():
+    model = _FakeModel("llama")
+    resolved = _resolve_target_modules(model, explicit=(), preset="attention_and_mlp")
+    assert resolved == ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+
+def test_resolve_target_modules_attention_and_mlp_rejects_uncurated_architecture():
+    model = _FakeModel("falcon")
+    with pytest.raises(RuntimeError, match="no curated module list for model_type 'falcon'"):
+        _resolve_target_modules(model, explicit=(), preset="attention_and_mlp")
+
+
+def test_spec_defaults_to_auto_target_module_detection(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    del config["backend"]["lora"]["target_modules"]
+    spec = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert spec.target_modules == ()
+    assert spec.target_preset == "auto"
+
+
+def test_spec_reads_target_preset_from_resolved_config(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    del config["backend"]["lora"]["target_modules"]
+    config["backend"]["lora"]["target_preset"] = "attention_and_mlp"
+    spec = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert spec.target_preset == "attention_and_mlp"
+
+
+def test_unsupported_target_preset_is_rejected(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["lora"]["target_preset"] = "everything"
+    with pytest.raises(ValueError, match="unsupported lora.target_preset"):
+        TransformersPeftRunSpec.from_resolved_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+        )
+
+
+def test_target_module_entries_must_be_non_empty_strings(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["lora"]["target_modules"] = ["q_proj", "   "]
+    with pytest.raises(ValueError, match="non-empty strings"):
+        TransformersPeftRunSpec.from_resolved_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+        )
+
+
+def test_recipe_digest_changes_with_target_preset(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    del config["backend"]["lora"]["target_modules"]
+    a = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    config["backend"]["lora"]["target_preset"] = "attention_and_mlp"
+    b = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert a.recipe_digest() != b.recipe_digest()
+
+
+def test_resume_is_rejected_when_target_preset_changed(tmp_path, monkeypatch):
+    """target_preset (and target_modules) are bound inputs, not excluded like
+    epochs/max_steps -- changing the requested LoRA structure between save
+    and resume would build a model whose state_dict shape no longer matches
+    the checkpoint's."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    del config["backend"]["lora"]["target_modules"]
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    config["backend"]["lora"]["target_preset"] = "attention_and_mlp"
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch when bound inputs changed")
+
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen", should_not_launch
+    )
+    with pytest.raises(ValueError, match="refusing to resume"):
+        TransformersPeftExecutor().run(_experiment(), context)
 
 
 # --- checkpoint/restart -----------------------------------------------------
@@ -1358,3 +1495,75 @@ def test_real_tiny_llama_trains_on_a_chat_dataset_with_completion_only_masking(t
     assert provenance["dataset_format"] == "chat"
     assert provenance["total_token_count"] > 0
     assert 0 < provenance["assistant_token_count"] < provenance["total_token_count"]
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_auto_detects_target_modules_when_unset(tmp_path):
+    """No backend.lora.target_modules and no target_preset -- proves the
+    default ("auto") actually reaches real PEFT's own per-architecture
+    mapping and trains successfully, not just that the None sentinel is
+    threaded through correctly against mocks."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"Question: What token comes after alpha? Answer: beta"}\n')
+
+    config = _config(str(data))
+    config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    config["backend"]["precision"] = "fp32"
+    config["backend"]["quantization"] = "none"
+    config["backend"]["lora"] = {"r": 4, "alpha": 8, "dropout": 0.0}
+    config["backend"]["training"] = {
+        "epochs": 1.0,
+        "learning_rate": 0.001,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 1,
+        "logging_steps": 1,
+        "gradient_checkpointing": False,
+    }
+    config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    provenance = artifact.evidence["model_provenance"]
+    assert provenance["model_type"] == "llama"
+    # PEFT's own actively-maintained default for llama -- not a value Chowder
+    # invented, so this pins to whatever PEFT itself ships.
+    assert provenance["resolved_target_modules"] == ["q_proj", "v_proj"]
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_attention_and_mlp_preset_targets_all_seven_modules(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"Question: What token comes after alpha? Answer: beta"}\n')
+
+    config = _config(str(data))
+    config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    config["backend"]["precision"] = "fp32"
+    config["backend"]["quantization"] = "none"
+    config["backend"]["lora"] = {
+        "r": 4,
+        "alpha": 8,
+        "dropout": 0.0,
+        "target_preset": "attention_and_mlp",
+    }
+    config["backend"]["training"] = {
+        "epochs": 1.0,
+        "learning_rate": 0.001,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 1,
+        "logging_steps": 1,
+        "gradient_checkpointing": False,
+    }
+    config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    provenance = artifact.evidence["model_provenance"]
+    assert provenance["resolved_target_modules"] == sorted(
+        ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    )

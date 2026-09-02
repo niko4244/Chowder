@@ -111,6 +111,20 @@ def test_misspelled_messages_field_key_fails_closed():
         validate_transformers_backend_config(config)
 
 
+def test_target_preset_key_is_accepted():
+    config = _backend_config()
+    del config["backend"]["lora"]["target_modules"]
+    config["backend"]["lora"]["target_preset"] = "attention_and_mlp"
+    validate_transformers_backend_config(config)
+
+
+def test_misspelled_target_preset_key_fails_closed():
+    config = _backend_config()
+    config["backend"]["lora"]["target_preest"] = "attention_and_mlp"
+    with pytest.raises(ConfigValidationError, match="target_preest"):
+        validate_transformers_backend_config(config)
+
+
 def test_top_level_repair_metadata_is_not_rejected():
     config = _backend_config()
     config["repair"] = {

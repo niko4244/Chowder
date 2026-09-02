@@ -20,6 +20,7 @@ from ..resources import ResourceUsage
 _ALLOWED_QUANTIZATION = {"none", "4bit"}
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
 _ALLOWED_DATASET_FORMATS = {"text", "chat"}
+_ALLOWED_TARGET_PRESETS = {"auto", "attention_and_mlp"}
 _ALLOWED_LR_SCHEDULER_TYPES = {
     "linear",
     "cosine",
@@ -61,7 +62,8 @@ class TransformersPeftRunSpec:
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
-    target_modules: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj")
+    target_modules: tuple[str, ...] = ()
+    target_preset: str = "auto"
     use_rslora: bool = False
     quantization: str = "none"
     precision: str = "auto"
@@ -144,8 +146,12 @@ class TransformersPeftRunSpec:
             raise ValueError("LoRA rank and alpha must be positive")
         if not 0 <= self.lora_dropout < 1:
             raise ValueError("LoRA dropout must be in [0, 1)")
-        if not self.target_modules:
-            raise ValueError("at least one LoRA target module is required")
+        if self.target_modules and any(
+            not isinstance(module, str) or not module.strip() for module in self.target_modules
+        ):
+            raise ValueError("LoRA target module names must be non-empty strings")
+        if self.target_preset not in _ALLOWED_TARGET_PRESETS:
+            raise ValueError(f"unsupported lora.target_preset: {self.target_preset}")
         if self.quantization not in _ALLOWED_QUANTIZATION:
             raise ValueError(f"unsupported quantization: {self.quantization}")
         if self.precision not in _ALLOWED_PRECISION:
@@ -293,12 +299,8 @@ class TransformersPeftRunSpec:
             lora_r=int(lora.get("r", 16)),
             lora_alpha=int(lora.get("alpha", 32)),
             lora_dropout=float(lora.get("dropout", 0.05)),
-            target_modules=tuple(
-                str(x)
-                for x in lora.get(
-                    "target_modules", ("q_proj", "k_proj", "v_proj", "o_proj")
-                )
-            ),
+            target_modules=tuple(str(x) for x in lora.get("target_modules", ())),
+            target_preset=str(lora.get("target_preset", "auto")),
             use_rslora=bool(lora.get("use_rslora", False)),
             quantization=str(backend.get("quantization", "none")).lower(),
             precision=str(backend.get("precision", "auto")).lower(),
