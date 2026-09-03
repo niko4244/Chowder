@@ -21,6 +21,15 @@ train = [
   "peft>=0.20,<0.21",
   "datasets>=4,<5",
   "accelerate>=1,<2",
+  # Not used directly -- peft's LoRA module dispatcher unconditionally probes
+  # torchao availability for every adapter it builds, regardless of whether
+  # the model is torchao-quantized. peft raises (rather than treating it as
+  # merely unavailable) if an *incompatible* torchao happens to be present,
+  # which breaks LoRA training outright. Some base images (observed on
+  # Kaggle's GPU notebook image) ship a stale torchao as a transitive
+  # dependency of something else; since we never declared a floor on it,
+  # `pip install -e ".[train]"` had no reason to touch the existing install.
+  "torchao>=0.16",
 ]
 qlora = [
   "bitsandbytes>=0.50,<0.51",
