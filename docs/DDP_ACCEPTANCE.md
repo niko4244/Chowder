@@ -62,10 +62,28 @@ CHOWDER_REAL_ML_SMOKE=1 python -m pytest -q tests/test_ddp_acceptance.py -v
 
 ## Result
 
-**Not yet run for real.** This suite has been written and verified to skip
-cleanly (for the right reason -- device count, not the env var) on
-single-GPU/CPU development machines and in CI, and its non-DDP code paths are
-exercised by the existing real-ML smoke suite. It has not yet executed to
-completion on real 2-GPU hardware. Update this section with the real run's
-result (pass/fail, GPU model, driver/torch/accelerate versions, date) once
-that happens.
+**PASSED for real, on real 2xT4 hardware**, 2026-09-03, via a Kaggle notebook
+(GPU T4 x2 accelerator):
+
+```
+tests/test_ddp_acceptance.py ....                                        [100%]
+========================= 4 passed in 99.87s (0:01:39) =========================
+```
+
+All four tests passed: the core train/evaluate/GPU-hours flow, cancellation
+tearing down every rank with no orphaned GPU process, the deliberate
+one-rank-crash failure-accounting check, and the no-duplicate-checkpoint
+check.
+
+Environment: Python 3.12.13, torch 2.10.0+cu128, transformers 5.16.1,
+peft 0.20.0, accelerate 1.13.0, torchao 0.18.0, CUDA 12.8 driver stack.
+
+First attempt on this hardware failed both DDP-training tests (the
+cancellation and rank-crash tests already passed) with both ranks exiting
+code 1 -- diagnosed via a widened stderr tail (see the diagnostics fix in
+this same branch) to a real, non-DDP-specific environment bug: Kaggle's base
+image ships a stale `torchao==0.10.0` that peft's LoRA dispatcher rejects
+outright (`ImportError: Found an incompatible version of torchao`), fixed by
+adding `torchao>=0.16` to this project's own `[train]` extra so installing
+`chowder-ai[train]` upgrades it rather than leaving the pre-existing stale
+copy in place. Second attempt, same hardware, same branch, passed clean.
