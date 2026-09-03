@@ -121,6 +121,7 @@ def validate_transformers_backend_config(config: Mapping[str, Any]) -> None:
             "logging_steps",
             "gradient_checkpointing",
             "activation_offload",
+            "optimizer_tiering",
             "save_strategy",
             "save_steps",
             "save_total_limit",

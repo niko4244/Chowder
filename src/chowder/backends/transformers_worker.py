@@ -533,6 +533,14 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         args_kwargs["save_steps"] = spec.save_steps
     if spec.save_total_limit is not None:
         args_kwargs["save_total_limit"] = spec.save_total_limit
+    if spec.optimizer_tiering:
+        # HF's own built-in support (transformers.training_args.
+        # OptimizerNames) for bitsandbytes' CUDA-unified-memory-paged
+        # AdamW -- no custom optimizer construction needed, unlike
+        # activation_offload's hand-rolled saved_tensors_hooks. Real,
+        # proven library mechanism; state can page out to host RAM under
+        # VRAM pressure without OOM-crashing.
+        args_kwargs["optim"] = "paged_adamw_32bit"
     args = TrainingArguments(**args_kwargs)
     started = time.perf_counter()
     trainer = Trainer(
@@ -605,6 +613,18 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     # not done here.
     resource_snapshot = _cuda_resource_snapshot(torch, model, trainer)
 
+    # Real, device-agnostic tensor introspection -- identical approach to
+    # Phase 7A's optimizer_state_bytes and 7C's own experiment worker.
+    # Works the same whether trainer.optimizer holds a plain torch.optim.
+    # AdamW or bitsandbytes' paged variant: it reports what is actually
+    # resident in the live optimizer's state, not a formula.
+    optimizer_state_bytes = sum(
+        value.numel() * value.element_size()
+        for state in trainer.optimizer.state.values()
+        for value in state.values()
+        if torch.is_tensor(value)
+    )
+
     if (
         _verify_bound_input(spec.dataset, spec.dataset_sha256, label="training")
         != primary_sha
@@ -637,6 +657,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "train_runtime_seconds": float(runtime),
             "peak_vram_gb": float(peak_vram_gb),
             "activation_offload_bytes_transferred": activation_offload_bytes_transferred,
+            "optimizer_state_bytes": optimizer_state_bytes,
             "primary_rows": primary_rows,
             "replay_selected_rows": replay_selected_rows,
             "training_rows": len(dataset),

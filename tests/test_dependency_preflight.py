@@ -1,7 +1,7 @@
 import pytest
 
 from chowder.backends.transformers_peft import TransformersPeftExecutor
-from chowder.cycle import ExperimentCycleRunner
+from chowder.cycle import ExperimentCycleRunner, _check_dependencies
 from chowder.dependency_preflight import (
     InsufficientDiskSpaceError,
     MissingDependencyError,
@@ -73,6 +73,51 @@ def test_error_message_recommends_the_right_extras(monkeypatch):
         check_dependencies(packages=("torch",), quantization="4bit", label="t")
 
 
+def test_check_dependencies_requires_bitsandbytes_when_optimizer_tiering_always(monkeypatch):
+    """optimizer_tiering="always" bypasses run_optimizer_tiering_experiment's
+    own graceful degradation entirely and unconditionally constructs a real
+    paged optimizer -- unlike quantization="4bit" being the only other
+    bitsandbytes trigger, this must be checked even when quantization is
+    "none"."""
+    present = {"torch", "transformers", "peft", "datasets", "accelerate"}
+    monkeypatch.setattr(
+        "chowder.dependency_preflight.importlib.util.find_spec",
+        lambda name: object() if name in present else None,
+    )
+    resolved = {
+        "backend": {
+            "type": "transformers-peft",
+            "quantization": "none",
+            "training": {"optimizer_tiering": "always"},
+        }
+    }
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=resolved)
+    with pytest.raises(MissingDependencyError, match="bitsandbytes"):
+        _check_dependencies(TransformersPeftExecutor(), None, resolved, context)
+
+
+def test_check_dependencies_does_not_require_bitsandbytes_for_optimizer_tiering_auto(monkeypatch):
+    """"auto" is not checked explicitly here: its own real experiment
+    already degrades gracefully to unavailable/not-recommended when
+    bitsandbytes is missing, so a separate preflight rejection would only
+    block a config that would otherwise train successfully with tiering
+    simply declining."""
+    present = {"torch", "transformers", "peft", "datasets", "accelerate"}
+    monkeypatch.setattr(
+        "chowder.dependency_preflight.importlib.util.find_spec",
+        lambda name: object() if name in present else None,
+    )
+    resolved = {
+        "backend": {
+            "type": "transformers-peft",
+            "quantization": "none",
+            "training": {"optimizer_tiering": "auto"},
+        }
+    }
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=resolved)
+    _check_dependencies(TransformersPeftExecutor(), None, resolved, context)
+
+
 # --- dispatch through ExperimentCycleRunner's real preflight -----------------
 
 
@@ -123,6 +168,50 @@ def test_cycle_rejects_missing_dependency_before_subprocess_spawn(tmp_path, monk
     assert candidate.error is not None
     assert candidate.error.startswith("preflight")
     assert "torch" in candidate.error
+    assert engine.spent_gpu_hours == 0
+    assert engine.reserved_gpu_hours == 0
+    assert not engine.has_reservation(experiment.experiment_id)
+
+
+def test_cycle_rejects_optimizer_tiering_always_without_bitsandbytes(tmp_path, monkeypatch):
+    """A real TransformersPeftExecutor with optimizer_tiering="always" and a
+    simulated missing bitsandbytes install -- proves this is rejected at
+    preflight (config time), not discovered inside the spawned worker after
+    GPU-hours were already reserved and paged_adamw_32bit construction
+    fails deep inside TrainingArguments/Trainer."""
+    present = {"torch", "transformers", "peft", "datasets", "accelerate"}
+    monkeypatch.setattr(
+        "chowder.dependency_preflight.importlib.util.find_spec",
+        lambda name: object() if name in present else None,
+    )
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch when a dependency is missing")
+
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen", should_not_launch
+    )
+
+    engine = _engine()
+    experiment = _experiment()
+    engine.propose((experiment,))
+    runner = ExperimentCycleRunner(
+        engine=engine,
+        trainer=TransformersPeftExecutor(),
+        evaluator=TransformersTextEvaluator(),
+        context=ExecutionContext(_hardware(), str(tmp_path), 1),
+        base_config={
+            "backend": {
+                "type": "transformers-peft",
+                "training": {"optimizer_tiering": "always"},
+            }
+        },
+    )
+    outcome = runner.run_generation((experiment,))
+    candidate = outcome.candidates[0]
+    assert candidate.error is not None
+    assert candidate.error.startswith("preflight")
+    assert "bitsandbytes" in candidate.error
     assert engine.spent_gpu_hours == 0
     assert engine.reserved_gpu_hours == 0
     assert not engine.has_reservation(experiment.experiment_id)

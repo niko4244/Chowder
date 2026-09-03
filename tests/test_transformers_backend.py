@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import sys
@@ -11,10 +12,12 @@ from chowder.backends.transformers_peft import (
     TransformersPeftExecutor,
     TransformersPeftRunSpec,
     _ALLOWED_ACTIVATION_OFFLOAD_MODES,
+    _ALLOWED_OPTIMIZER_TIERING_MODES,
     _default_gradient_checkpointing,
     _default_quantization,
     _min_device_vram_gb,
     _resolve_activation_offload_flag,
+    _resolve_optimizer_tiering_flag,
 )
 from chowder.backends.transformers_worker import (
     _build_chat_example,
@@ -1207,6 +1210,296 @@ def test_evidence_records_predicted_vs_actual_for_auto(tmp_path, monkeypatch):
     assert offload_evidence["actual_bytes_transferred"] is None
 
 
+# --- optimizer tiering (production wiring) -----------------------------------
+
+
+def test_resolve_optimizer_tiering_flag_defaults_to_off_when_unset():
+    """Same "absent means off, not auto" default as activation_offload,
+    for the same reason: an existing project.json with no
+    optimizer_tiering key must train exactly as it always has."""
+    assert _resolve_optimizer_tiering_flag({}) is False
+
+
+def test_resolve_optimizer_tiering_flag_always_resolves_true():
+    assert _resolve_optimizer_tiering_flag({"optimizer_tiering": "always"}) is True
+
+
+def test_resolve_optimizer_tiering_flag_off_resolves_false():
+    assert _resolve_optimizer_tiering_flag({"optimizer_tiering": "off"}) is False
+
+
+def test_resolve_optimizer_tiering_flag_auto_resolves_false_here():
+    assert _resolve_optimizer_tiering_flag({"optimizer_tiering": "auto"}) is False
+
+
+def test_resolve_optimizer_tiering_flag_accepts_a_plain_boolean():
+    assert _resolve_optimizer_tiering_flag({"optimizer_tiering": True}) is True
+    assert _resolve_optimizer_tiering_flag({"optimizer_tiering": False}) is False
+
+
+def test_resolve_optimizer_tiering_flag_rejects_unknown_values():
+    with pytest.raises(ValueError, match="optimizer_tiering"):
+        _resolve_optimizer_tiering_flag({"optimizer_tiering": "sometimes"})
+
+
+def test_allowed_optimizer_tiering_modes_is_the_documented_set():
+    assert _ALLOWED_OPTIMIZER_TIERING_MODES == {"auto", "always", "off"}
+
+
+def test_recipe_digest_changes_with_optimizer_tiering_setting(tmp_path):
+    """The opposite of activation_offload's exclusion: bitsandbytes' paged
+    optimizers use their own internal state-dict keys (state1/state2),
+    incompatible with torch.optim.AdamW's (exp_avg/exp_avg_sq) -- a real,
+    confirmed KeyError on resume across implementations, not a
+    value-transparent change. optimizer_tiering must stay part of the
+    recipe digest."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["optimizer_tiering"] = "off"
+    a = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    config["backend"]["training"]["optimizer_tiering"] = "always"
+    b = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert a.optimizer_tiering != b.optimizer_tiering
+    assert a.recipe_digest() != b.recipe_digest()
+
+
+def test_resume_is_rejected_when_optimizer_tiering_setting_changed(tmp_path):
+    """The opposite of activation_offload's resume-allowed test, exercised
+    through the same real checkpoint bound-inputs check: a checkpoint
+    saved under one optimizer_tiering setting must be REJECTED, not
+    silently resumed, under a different one -- resuming into it would
+    otherwise reach bitsandbytes' real KeyError deep inside a spawned
+    worker instead of failing clearly at config-resolution time."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    config["backend"]["training"]["optimizer_tiering"] = "off"
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    config["backend"]["training"]["optimizer_tiering"] = "always"
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+
+    def should_not_spawn(*args, **kwargs):
+        raise AssertionError("must reject before spawning any subprocess")
+
+    with patch("chowder.backends.transformers_peft.subprocess.Popen", should_not_spawn):
+        with pytest.raises(ValueError, match="bound training input"):
+            TransformersPeftExecutor().run(_experiment(), context)
+
+
+def test_resolved_optimizer_tiering_returns_true_for_always():
+    config = {"backend": {"training": {"optimizer_tiering": "always"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    assert TransformersPeftExecutor.resolved_optimizer_tiering(context) is True
+
+
+def test_resolved_optimizer_tiering_returns_false_for_off():
+    config = {"backend": {"training": {"optimizer_tiering": "off"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    assert TransformersPeftExecutor.resolved_optimizer_tiering(context) is False
+
+
+def test_resolved_optimizer_tiering_defaults_to_false_when_unset():
+    config = {"backend": {"training": {}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    assert TransformersPeftExecutor.resolved_optimizer_tiering(context) is False
+
+
+def test_resolved_optimizer_tiering_rejects_unknown_string():
+    config = {"backend": {"training": {"optimizer_tiering": "sometimes"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    with pytest.raises(ValueError, match="optimizer_tiering"):
+        TransformersPeftExecutor.resolved_optimizer_tiering(context)
+
+
+def _fake_tiering_experiment(recommended: bool, **overrides):
+    from chowder.optimizer_tiering import OptimizerTieringExperiment, OptimizerVariantMeasurement
+
+    fields = dict(
+        device="cuda", available=True, batch_size=2, max_length=64,
+        variants=(
+            OptimizerVariantMeasurement(name="adamw", step_seconds=0.05, state_bytes=1000),
+            OptimizerVariantMeasurement(name="paged_adamw", step_seconds=0.06, state_bytes=1000),
+            OptimizerVariantMeasurement(name="paged_adamw_8bit", step_seconds=0.04, state_bytes=500),
+        ),
+        model_peak_vram_gb=1.0, per_rank_available_gb=16.0,
+        wall_time_penalty_ratio=1.2, required=False, recommended=recommended,
+    )
+    fields.update(overrides)
+    return OptimizerTieringExperiment(**fields)
+
+
+def test_resolved_optimizer_tiering_auto_uses_the_real_experiments_recommendation():
+    config = {"backend": {"training": {"optimizer_tiering": "auto"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    with patch(
+        "chowder.optimizer_tiering.run_optimizer_tiering_experiment",
+        return_value=_fake_tiering_experiment(recommended=True),
+    ) as mock_experiment:
+        result = TransformersPeftExecutor.resolved_optimizer_tiering(context)
+    mock_experiment.assert_called_once()
+    assert result is True
+
+
+def test_resolved_optimizer_tiering_auto_declines_when_not_recommended():
+    config = {"backend": {"training": {"optimizer_tiering": "auto"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    with patch(
+        "chowder.optimizer_tiering.run_optimizer_tiering_experiment",
+        return_value=_fake_tiering_experiment(recommended=False),
+    ):
+        result = TransformersPeftExecutor.resolved_optimizer_tiering(context)
+    assert result is False
+
+
+def test_run_rejects_optimizer_tiering_under_multi_gpu_ddp(tmp_path):
+    """Same explicit-safe-rejection principle as activation_offload: this
+    combination has not been proven safe on real multi-GPU hardware here,
+    so it must fail clearly and before any subprocess spawns."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["optimizer_tiering"] = "always"
+    config["backend"]["runtime"] = {"active_accelerator_count": 2}
+    hardware = HardwareProfile(16, 64, 500, 12, 40, 3, accelerator_vram_gb=(16.0, 6.0))
+    context = ExecutionContext(hardware, str(tmp_path), 1, resolved_config=config)
+
+    def should_not_spawn(*args, **kwargs):
+        raise AssertionError("must reject before spawning any subprocess")
+
+    with patch("chowder.backends.transformers_peft.subprocess.Popen", should_not_spawn):
+        with pytest.raises(ValueError, match="multi-GPU DDP"):
+            TransformersPeftExecutor().run(_experiment(), context)
+
+
+def test_run_allows_optimizer_tiering_off_under_multi_gpu_ddp(tmp_path, monkeypatch):
+    """The rejection is specifically about tiering being *active* under
+    DDP -- off (the default) must never be rejected just because
+    active_accelerator_count > 1."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["optimizer_tiering"] = "off"
+    config["backend"]["runtime"] = {"active_accelerator_count": 2}
+    hardware = HardwareProfile(16, 64, 500, 12, 40, 3, accelerator_vram_gb=(16.0, 6.0))
+    context = ExecutionContext(hardware, str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            spec_path = Path(command[command.index("--spec") + 1])
+            result_path = Path(command[command.index("--result") + 1])
+            spec = json.loads(spec_path.read_text())
+            observed_spec.update(spec)
+            output = Path(spec["output_dir"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "adapter_model.safetensors").write_bytes(b"adapter")
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "telemetry": {"train_loss": 0.25, "global_step": 3},
+                        "versions": {"transformers": "5.test"},
+                        "provenance": {"resolved_model_commit": "abc123"},
+                        "data_provenance": {"primary_rows": 1, "replay_selected_rows": 0},
+                        "resource_usage": {
+                            "active_accelerator_count": 2,
+                            "visible_accelerator_count": 2,
+                            "peak_vram_gb_by_accelerator": {"cuda:0": 1.0, "cuda:1": 0.9},
+                        },
+                    }
+                )
+            )
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr("chowder.backends.transformers_peft.subprocess.Popen", FakeProcess)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact is not None
+    assert observed_spec["optimizer_tiering"] is False
+
+
+def test_evidence_records_optimizer_tiering_mode_and_resolution_for_always(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["optimizer_tiering"] = "always"
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact.evidence["hardware_aware_defaults"]["resolved_optimizer_tiering"] is True
+    tiering_evidence = artifact.evidence["optimizer_tiering"]
+    assert tiering_evidence["mode"] == "always"
+    assert tiering_evidence["resolved"] is True
+    # "always" is an explicit choice, not an experiment-driven decision --
+    # there is no prediction to report.
+    assert "predicted_recommended" not in tiering_evidence
+
+
+def test_evidence_records_predicted_vs_actual_for_optimizer_tiering_auto(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["optimizer_tiering"] = "auto"
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    with patch(
+        "chowder.optimizer_tiering.run_optimizer_tiering_experiment",
+        return_value=_fake_tiering_experiment(recommended=True),
+    ):
+        artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert observed_spec["optimizer_tiering"] is True
+    tiering_evidence = artifact.evidence["optimizer_tiering"]
+    assert tiering_evidence["mode"] == "auto"
+    assert tiering_evidence["resolved"] is True
+    assert tiering_evidence["predicted_recommended"] is True
+    assert tiering_evidence["predicted_baseline_state_bytes"] == 1000
+    assert tiering_evidence["predicted_paged_state_bytes"] == 1000
+    # The fake worker result in _fake_process_factory carries no
+    # global_step/train_runtime_seconds/optimizer_state_bytes -- confirms
+    # the "actual" fields degrade to None rather than raising when that
+    # telemetry is absent.
+    assert tiering_evidence["actual_avg_step_seconds"] is None
+    assert tiering_evidence["actual_optimizer_state_bytes"] is None
+
+
 # --- checkpoint/restart -----------------------------------------------------
 
 
@@ -2008,6 +2301,156 @@ def test_real_tiny_llama_resumes_across_a_different_activation_offload_setting(t
     second = TransformersPeftExecutor().run(_experiment(), resume_context)
     assert second.telemetry["global_step"] >= first.telemetry["global_step"]
     assert second.evidence["hardware_aware_defaults"]["resolved_activation_offload"] is False
+
+
+# optimizer_tiering="always" bypasses run_optimizer_tiering_experiment's own
+# graceful degradation entirely (that only applies to "auto") and
+# unconditionally constructs a real bitsandbytes paged optimizer -- so unlike
+# the activation_offload real tests, these need bitsandbytes actually
+# installed (chowder-ai[qlora]), not just CHOWDER_REAL_ML_SMOKE=1 and [train].
+# CI's "real transformers peft cpu smoke" job installs only [train,dev], so
+# these are expected to skip there, not fail; they run for real locally
+# wherever qlora is also installed.
+_OPTIMIZER_TIERING_REAL_SMOKE = pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1"
+    or importlib.util.find_spec("bitsandbytes") is None,
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1, train dependencies, "
+    "and bitsandbytes (chowder-ai[qlora])",
+)
+
+
+@_OPTIMIZER_TIERING_REAL_SMOKE
+def test_real_tiny_llama_trains_with_optimizer_tiering_always(tmp_path):
+    """Prove optimizer_tiering actually sets optim='paged_adamw_32bit' on a
+    real Trainer and trains successfully -- a mocked subprocess test cannot
+    catch a real interaction between bitsandbytes' paged optimizer and
+    PEFT/Trainer's own optimizer construction."""
+    data = tmp_path / "train.jsonl"
+    rows = [
+        {"text": "Question: What token comes after alpha? Answer: beta"},
+        {"text": "Question: What token comes after red? Answer: blue"},
+    ]
+    data.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    config = _config(str(data))
+    config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    config["backend"]["precision"] = "fp32"
+    config["backend"]["quantization"] = "none"
+    config["backend"]["lora"] = {
+        "r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj", "v_proj"],
+    }
+    config["backend"]["training"] = {
+        "epochs": 1.0, "learning_rate": 0.001, "batch_size": 1,
+        "gradient_accumulation_steps": 1, "logging_steps": 1,
+        "gradient_checkpointing": False, "optimizer_tiering": "always",
+    }
+    config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact.telemetry["global_step"] > 0
+    assert artifact.evidence["hardware_aware_defaults"]["resolved_optimizer_tiering"] is True
+    tiering_evidence = artifact.evidence["optimizer_tiering"]
+    assert tiering_evidence["mode"] == "always"
+    assert tiering_evidence["resolved"] is True
+    assert tiering_evidence["actual_avg_step_seconds"] is not None
+    # Real optimizer-state tensor introspection: a real optimizer genuinely
+    # holds real state after stepping.
+    assert tiering_evidence["actual_optimizer_state_bytes"] > 0
+
+
+@_OPTIMIZER_TIERING_REAL_SMOKE
+def test_real_tiny_llama_optimizer_tiering_auto_runs_the_real_experiment(tmp_path):
+    """A real "auto" run must run the real optimizer-tiering experiment and
+    resolve according to its verdict -- proven end to end, not just at the
+    experiment-module level. Unlike activation_offload's analogous test,
+    this doesn't assert a specific recommended/declined outcome: bitsandbytes'
+    paged optimizer has no "zero benefit, never recommend" case by state size
+    (see OptimizerTieringExperiment's docstring), so whether this tiny
+    model's measured penalty ratio clears the acceptance threshold on any
+    given machine is not something this test should hard-code -- it proves
+    the real experiment ran and was honored, not a specific verdict."""
+    data = tmp_path / "train.jsonl"
+    rows = [
+        {"text": "Question: What token comes after alpha? Answer: beta"},
+        {"text": "Question: What token comes after red? Answer: blue"},
+    ]
+    data.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    config = _config(str(data))
+    config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    config["backend"]["precision"] = "fp32"
+    config["backend"]["quantization"] = "none"
+    config["backend"]["lora"] = {
+        "r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj", "v_proj"],
+    }
+    config["backend"]["training"] = {
+        "epochs": 1.0, "learning_rate": 0.001, "batch_size": 1,
+        "gradient_accumulation_steps": 1, "logging_steps": 1,
+        "gradient_checkpointing": False, "optimizer_tiering": "auto",
+    }
+    config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact.telemetry["global_step"] > 0
+    tiering_evidence = artifact.evidence["optimizer_tiering"]
+    assert tiering_evidence["mode"] == "auto"
+    assert tiering_evidence["predicted_available"] is True
+    resolved = artifact.evidence["hardware_aware_defaults"]["resolved_optimizer_tiering"]
+    assert resolved == tiering_evidence["predicted_recommended"]
+    assert resolved == tiering_evidence["resolved"]
+
+
+@_OPTIMIZER_TIERING_REAL_SMOKE
+def test_real_tiny_llama_resume_is_rejected_across_a_different_optimizer_tiering_setting(tmp_path):
+    """The opposite of activation_offload's resume-allowed real test: a
+    checkpoint trained under optimizer_tiering=off, then resumed under
+    optimizer_tiering=always, must be REJECTED at config-resolution time --
+    proving for real (not just via the unit-level bound-inputs check) that
+    this never reaches bitsandbytes' real KeyError deep inside a resumed
+    Trainer.train() call, which a manual reproduction confirmed happens
+    when torch.optim.AdamW state is fed to a PagedAdamW32bit resume."""
+    data = tmp_path / "train.jsonl"
+    rows = [
+        {"text": "Question: What token comes after alpha? Answer: beta"},
+        {"text": "Question: What token comes after red? Answer: blue"},
+        {"text": "Question: What token comes after one? Answer: two"},
+        {"text": "Question: What token comes after up? Answer: down"},
+    ]
+    data.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    base_config = _config(str(data))
+    base_config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    base_config["backend"]["precision"] = "fp32"
+    base_config["backend"]["quantization"] = "none"
+    base_config["backend"]["lora"] = {
+        "r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj", "v_proj"],
+    }
+    base_config["backend"]["training"] = {
+        "epochs": 1.0, "learning_rate": 0.001, "batch_size": 1,
+        "gradient_accumulation_steps": 1, "logging_steps": 1,
+        "gradient_checkpointing": False, "optimizer_tiering": "off",
+        "save_strategy": "steps", "save_steps": 1,
+    }
+    base_config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=base_config)
+    first = TransformersPeftExecutor().run(_experiment(), context)
+    trainer_dir = Path(first.artifact_ref) / "trainer"
+    checkpoints = sorted(
+        (p for p in trainer_dir.glob("checkpoint-*") if p.is_dir()),
+        key=lambda p: int(p.name.rsplit("-", 1)[1]),
+    )
+    assert checkpoints, "no checkpoints were written by the first run"
+
+    resume_config = json.loads(json.dumps(base_config))
+    resume_config["backend"]["resume_from_checkpoint"] = str(checkpoints[-1])
+    resume_config["backend"]["training"]["optimizer_tiering"] = "always"
+    resume_context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=resume_config)
+
+    with pytest.raises(ValueError, match="bound training input"):
+        TransformersPeftExecutor().run(_experiment(), resume_context)
 
 
 @pytest.mark.skipif(

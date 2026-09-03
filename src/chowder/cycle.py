@@ -161,6 +161,26 @@ def _check_dependencies(
             quantization=trainer.resolved_quantization(context),
             label="transformers-peft training",
         )
+        backend = resolved.get("backend", {})
+        training = backend.get("training", {}) if isinstance(backend, Mapping) else {}
+        optimizer_tiering_mode = (
+            str(training.get("optimizer_tiering", "off")).strip().lower()
+            if isinstance(training, Mapping)
+            else "off"
+        )
+        # Only "always" is checked explicitly here, not "auto": auto's own
+        # real experiment (chowder.optimizer_tiering.run_optimizer_tiering_
+        # experiment) already degrades gracefully to available=False/
+        # recommended=False when bitsandbytes is missing -- no separate
+        # preflight rejection is needed for that path. "always" bypasses
+        # the experiment entirely and would otherwise only fail deep
+        # inside the spawned training worker.
+        if optimizer_tiering_mode == "always":
+            check_dependencies(
+                packages=(),
+                quantization="4bit",
+                label="transformers-peft optimizer tiering",
+            )
     if isinstance(evaluator, TransformersTextEvaluator):
         backend = resolved.get("backend", {})
         evaluation = resolved.get("evaluation", {})
