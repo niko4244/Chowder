@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -638,11 +639,29 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     }
 
 
+def _crash_rank_for_ddp_acceptance_test() -> None:
+    """Test-support only, inert unless a specific env var is explicitly set
+    (normal runs never set it): deterministically fails one rank under a
+    real multi-process `accelerate launch`, so tests/test_ddp_acceptance.py
+    can prove failure accounting is correct when a rank genuinely crashes.
+    The crash itself is real -- this only makes it reliably reproducible
+    instead of incidental, which is the only practical way to exercise that
+    path under a real 2-GPU DDP launch rather than mocking it.
+    """
+    target_rank = os.environ.get("_CHOWDER_DDP_ACCEPTANCE_CRASH_RANK")
+    if target_rank is not None and os.environ.get("RANK") == target_rank:
+        raise RuntimeError(
+            f"deliberate rank-{target_rank} crash for DDP failure-accounting acceptance test"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--spec", required=True)
     parser.add_argument("--result", required=True)
     args = parser.parse_args()
+
+    _crash_rank_for_ddp_acceptance_test()
 
     spec_data = json.loads(Path(args.spec).read_text(encoding="utf-8"))
     spec = TransformersPeftRunSpec(**spec_data)
