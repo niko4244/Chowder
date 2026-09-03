@@ -1,7 +1,7 @@
 import pytest
 
 from chowder.backends.transformers_peft import TransformersPeftExecutor
-from chowder.cycle import ExperimentCycleRunner, _check_dependencies
+from chowder.cycle import ExperimentCycleRunner, _check_dependencies, _check_memory_fit
 from chowder.dependency_preflight import (
     InsufficientDiskSpaceError,
     MissingDependencyError,
@@ -215,6 +215,105 @@ def test_cycle_rejects_optimizer_tiering_always_without_bitsandbytes(tmp_path, m
     assert engine.spent_gpu_hours == 0
     assert engine.reserved_gpu_hours == 0
     assert not engine.has_reservation(experiment.experiment_id)
+
+
+def test_cycle_rejects_a_recipe_that_does_not_fit_when_memory_preflight_is_enabled(
+    tmp_path, monkeypatch
+):
+    """A real TransformersPeftExecutor with memory_preflight="always" and a
+    simulated real dry-run measurement that clearly does not fit -- proves
+    this is rejected at preflight (config time), not discovered as a real
+    OOM deep inside a spawned training subprocess after GPU-hours were
+    already reserved. Completes the "memory preflight integration" the
+    real dry run (memory_preflight.py) already had a mechanism for but was
+    never wired into the automated cycle before this policy existed."""
+    monkeypatch.setattr(
+        "chowder.dependency_preflight.importlib.util.find_spec", lambda name: object()
+    )
+    monkeypatch.setattr("chowder.cycle.check_causal_lm_architecture", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "chowder.memory_preflight._run_dry_run_worker",
+        lambda *args, **kwargs: {
+            "device": "cuda",
+            "frozen_params": 1000,
+            "trainable_params": 10,
+            "max_length": 64,
+            "peak_vram_gb_bs1": 100.0,
+            "peak_vram_gb_bs2": 150.0,
+        },
+    )
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch when the recipe does not fit")
+
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen", should_not_launch
+    )
+
+    engine = _engine()
+    experiment = _experiment()
+    engine.propose((experiment,))
+    runner = ExperimentCycleRunner(
+        engine=engine,
+        trainer=TransformersPeftExecutor(),
+        evaluator=TransformersTextEvaluator(),
+        context=ExecutionContext(_hardware(), str(tmp_path), 1),
+        base_config={
+            "backend": {
+                "type": "transformers-peft",
+                "base_model": "org/model",
+                "dataset": str(tmp_path / "train.jsonl"),
+                "memory_preflight": "always",
+            }
+        },
+    )
+    (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n')
+    outcome = runner.run_generation((experiment,))
+    candidate = outcome.candidates[0]
+    assert candidate.error is not None
+    assert candidate.error.startswith("preflight")
+    assert "not expected to fit" in candidate.error
+    assert engine.spent_gpu_hours == 0
+    assert engine.reserved_gpu_hours == 0
+    assert not engine.has_reservation(experiment.experiment_id)
+
+
+def test_check_memory_fit_allows_a_fitting_recipe(tmp_path, monkeypatch):
+    """The rejection is specifically about a recipe that does not fit --
+    memory_preflight="always" combined with a real measurement that
+    clearly does fit must never raise. Direct unit-level call, matching
+    this file's own established pattern for "doesn't reject" cases
+    (e.g. test_passes_when_every_package_is_importable)."""
+    monkeypatch.setattr(
+        "chowder.memory_preflight._run_dry_run_worker",
+        lambda *args, **kwargs: {
+            "device": "cuda",
+            "frozen_params": 1000,
+            "trainable_params": 10,
+            "max_length": 64,
+            "peak_vram_gb_bs1": 1.0,
+            "peak_vram_gb_bs2": 1.5,
+        },
+    )
+    resolved = {
+        "backend": {
+            "type": "transformers-peft",
+            "base_model": "org/model",
+            "memory_preflight": "always",
+        }
+    }
+    context = ExecutionContext(_hardware(), str(tmp_path), 1)
+    _check_memory_fit(TransformersPeftExecutor(), None, resolved, context)  # must not raise
+
+
+def test_check_memory_fit_is_a_no_op_when_policy_is_off(tmp_path, monkeypatch):
+    def should_not_measure(*args, **kwargs):
+        raise AssertionError("must not run a dry-run worker when memory_preflight is off")
+
+    monkeypatch.setattr("chowder.memory_preflight._run_dry_run_worker", should_not_measure)
+    resolved = {"backend": {"type": "transformers-peft", "base_model": "org/model"}}
+    context = ExecutionContext(_hardware(), str(tmp_path), 1)
+    _check_memory_fit(TransformersPeftExecutor(), None, resolved, context)  # must not raise
 
 
 class _NamedLikeRealTrainer:

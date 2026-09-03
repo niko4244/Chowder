@@ -14,6 +14,46 @@ from .executors import ExecutionContext
 _CACHE_FILENAME = "memory_calibration.json"
 _SAFETY_MARGIN_GB = 0.5
 _DEFAULT_TIMEOUT_SECONDS = 300.0
+_ALLOWED_MEMORY_PREFLIGHT_MODES = {"auto", "always", "cached", "off"}
+# A documented starting point, not a claimed-optimal constant, matching
+# every other threshold in this codebase's placement mechanisms
+# (_MAX_ACCEPTABLE_PENALTY_RATIO in activation_offload.py/optimizer_
+# tiering.py/frozen_layer_streaming.py). "auto" trusts a cached estimate
+# outright when it shows comfortable headroom, and only pays for a fresh
+# real dry-run when the cached number is close enough to the fit boundary
+# that trusting a possibly-stale measurement carries real risk.
+_AUTO_REFRESH_PRESSURE_RATIO = 0.9
+
+
+def _resolve_memory_preflight_policy(backend: Mapping[str, Any]) -> str:
+    """Parse backend.memory_preflight into one of auto/always/cached/off.
+
+    Defaults to "off" -- not "cached" or "auto" -- for the same reason
+    every other production-wiring flag in this codebase defaults to its
+    most conservative option: this preflight check did not exist at all
+    before this policy was added (estimate_memory_requirements was only
+    ever called from the TUI's manual "Estimate Memory" button, never
+    from the real automated training/evaluation cycle). Defaulting to
+    anything other than "off" would mean an existing project.json that
+    never asked for this suddenly gets its candidates rejected by a
+    check it never opted into -- exactly the "an existing project.json
+    with no X key must train exactly as it always has" regression this
+    session already hit once for real with activation_offload/
+    optimizer_tiering defaulting to "auto" instead of "off".
+    """
+    raw = backend.get("memory_preflight", "off")
+    if not isinstance(raw, str):
+        raise ValueError(
+            f"backend.memory_preflight must be one of {sorted(_ALLOWED_MEMORY_PREFLIGHT_MODES)}, "
+            f"got {raw!r}"
+        )
+    value = raw.strip().lower()
+    if value not in _ALLOWED_MEMORY_PREFLIGHT_MODES:
+        raise ValueError(
+            f"backend.memory_preflight must be one of {sorted(_ALLOWED_MEMORY_PREFLIGHT_MODES)}, "
+            f"got {raw!r}"
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -191,6 +231,86 @@ def estimate_memory_requirements(
             () if fits else _recommendations(estimate_gb=estimated_peak, available_gb=available_gb, spec=spec)
         ),
         from_cache=from_cache,
+    )
+
+
+def resolve_memory_fit(
+    *,
+    resolved_config: Mapping[str, Any],
+    context: ExecutionContext,
+    work_dir: str | Path,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> MemoryEstimate | None:
+    """The real preflight decision this policy governs: whether/how to
+    call estimate_memory_requirements before a run, based on
+    backend.memory_preflight ("auto" | "always" | "cached" | "off",
+    default "off" -- see _resolve_memory_preflight_policy).
+
+    Returns None for "off" (no measurement at all -- the caller should
+    skip fit-checking entirely, matching today's pre-existing behavior
+    for every config that doesn't opt in). Otherwise returns a real
+    MemoryEstimate:
+    - "always": always pays for a fresh real dry-run (use_cache=False).
+    - "cached": prefers any existing cache, measuring fresh only on a
+      cache miss (use_cache=True) -- a name for today's pre-existing
+      estimate_memory_requirements default, now reachable through this
+      policy layer too.
+    - "auto": reads the cache first. If it hits and shows comfortable
+      headroom (estimated_peak_gb is not within _AUTO_REFRESH_PRESSURE_
+      RATIO of per_rank_available_gb), trusts it -- another cache-hit
+      call, at effectively zero cost. If it misses, or if the cached
+      estimate is close enough to the fit boundary that trusting a
+      possibly-stale number carries real risk, pays for a fresh
+      measurement instead. Config novelty on its own never needs special
+      handling here -- estimate_memory_requirements' own calibration key
+      already changes with the config, so a genuinely different recipe
+      is already a cache miss by construction.
+    """
+    backend = resolved_config.get("backend", {})
+    backend = backend if isinstance(backend, Mapping) else {}
+    policy = _resolve_memory_preflight_policy(backend)
+    if policy == "off":
+        return None
+    if policy == "always":
+        return estimate_memory_requirements(
+            resolved_config=resolved_config,
+            context=context,
+            work_dir=work_dir,
+            use_cache=False,
+            timeout_seconds=timeout_seconds,
+        )
+    if policy == "cached":
+        return estimate_memory_requirements(
+            resolved_config=resolved_config,
+            context=context,
+            work_dir=work_dir,
+            use_cache=True,
+            timeout_seconds=timeout_seconds,
+        )
+
+    # "auto"
+    cached_estimate = estimate_memory_requirements(
+        resolved_config=resolved_config,
+        context=context,
+        work_dir=work_dir,
+        use_cache=True,
+        timeout_seconds=timeout_seconds,
+    )
+    if not cached_estimate.from_cache:
+        # Cache miss: estimate_memory_requirements already paid for a
+        # real fresh measurement and cached it -- nothing more to do.
+        return cached_estimate
+    under_pressure = cached_estimate.estimated_peak_gb >= (
+        cached_estimate.per_rank_available_gb * _AUTO_REFRESH_PRESSURE_RATIO
+    )
+    if not under_pressure:
+        return cached_estimate
+    return estimate_memory_requirements(
+        resolved_config=resolved_config,
+        context=context,
+        work_dir=work_dir,
+        use_cache=False,
+        timeout_seconds=timeout_seconds,
     )
 
 
