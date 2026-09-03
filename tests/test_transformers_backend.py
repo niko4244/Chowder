@@ -12,11 +12,13 @@ from chowder.backends.transformers_peft import (
     TransformersPeftExecutor,
     TransformersPeftRunSpec,
     _ALLOWED_ACTIVATION_OFFLOAD_MODES,
+    _ALLOWED_FROZEN_LAYER_STREAMING_MODES,
     _ALLOWED_OPTIMIZER_TIERING_MODES,
     _default_gradient_checkpointing,
     _default_quantization,
     _min_device_vram_gb,
     _resolve_activation_offload_flag,
+    _resolve_frozen_layer_streaming_flag,
     _resolve_optimizer_tiering_flag,
 )
 from chowder.backends.transformers_worker import (
@@ -1500,6 +1502,292 @@ def test_evidence_records_predicted_vs_actual_for_optimizer_tiering_auto(tmp_pat
     assert tiering_evidence["actual_optimizer_state_bytes"] is None
 
 
+# --- frozen layer streaming (production wiring) -------------------------------
+
+
+def test_resolve_frozen_layer_streaming_flag_defaults_to_off_when_unset():
+    """Same "absent means off, not auto" default as activation_offload/
+    optimizer_tiering, for the same reason: an existing project.json
+    with no frozen_layer_streaming key must train exactly as it always
+    has."""
+    assert _resolve_frozen_layer_streaming_flag({}) is False
+
+
+def test_resolve_frozen_layer_streaming_flag_always_resolves_true():
+    assert _resolve_frozen_layer_streaming_flag({"frozen_layer_streaming": "always"}) is True
+
+
+def test_resolve_frozen_layer_streaming_flag_off_resolves_false():
+    assert _resolve_frozen_layer_streaming_flag({"frozen_layer_streaming": "off"}) is False
+
+
+def test_resolve_frozen_layer_streaming_flag_auto_resolves_false_here():
+    assert _resolve_frozen_layer_streaming_flag({"frozen_layer_streaming": "auto"}) is False
+
+
+def test_resolve_frozen_layer_streaming_flag_accepts_a_plain_boolean():
+    assert _resolve_frozen_layer_streaming_flag({"frozen_layer_streaming": True}) is True
+    assert _resolve_frozen_layer_streaming_flag({"frozen_layer_streaming": False}) is False
+
+
+def test_resolve_frozen_layer_streaming_flag_rejects_unknown_values():
+    with pytest.raises(ValueError, match="frozen_layer_streaming"):
+        _resolve_frozen_layer_streaming_flag({"frozen_layer_streaming": "sometimes"})
+
+
+def test_allowed_frozen_layer_streaming_modes_is_the_documented_set():
+    assert _ALLOWED_FROZEN_LAYER_STREAMING_MODES == {"auto", "always", "off"}
+
+
+def test_recipe_digest_is_stable_across_frozen_layer_streaming_setting(tmp_path):
+    """Value-transparent -- the custom autograd.Function changes only
+    where a frozen layer's weight physically lives during compute, never
+    what gets computed, and the checkpoint never contains the frozen
+    base weights either way -- so unlike optimizer_tiering,
+    frozen_layer_streaming must not be part of the recipe digest."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["frozen_layer_streaming"] = "off"
+    a = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    config["backend"]["training"]["frozen_layer_streaming"] = "always"
+    b = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert a.frozen_layer_streaming != b.frozen_layer_streaming
+    assert a.recipe_digest() == b.recipe_digest()
+
+
+def test_resume_allows_a_different_frozen_layer_streaming_setting(tmp_path, monkeypatch):
+    """Same exclusion as activation_offload, exercised through the actual
+    checkpoint bound-inputs check TransformersPeftExecutor.run() performs
+    before resuming -- a checkpoint saved under one streaming setting
+    must resume cleanly under a different one."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    config["backend"]["training"]["frozen_layer_streaming"] = "always"
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    config["backend"]["training"]["frozen_layer_streaming"] = "off"
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact is not None
+    assert observed_spec["frozen_layer_streaming"] is False
+
+
+def test_resolved_frozen_layer_streaming_returns_true_for_always():
+    config = {"backend": {"training": {"frozen_layer_streaming": "always"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    assert TransformersPeftExecutor.resolved_frozen_layer_streaming(context) is True
+
+
+def test_resolved_frozen_layer_streaming_returns_false_for_off():
+    config = {"backend": {"training": {"frozen_layer_streaming": "off"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    assert TransformersPeftExecutor.resolved_frozen_layer_streaming(context) is False
+
+
+def test_resolved_frozen_layer_streaming_defaults_to_false_when_unset():
+    config = {"backend": {"training": {}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    assert TransformersPeftExecutor.resolved_frozen_layer_streaming(context) is False
+
+
+def test_resolved_frozen_layer_streaming_rejects_unknown_string():
+    config = {"backend": {"training": {"frozen_layer_streaming": "sometimes"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    with pytest.raises(ValueError, match="frozen_layer_streaming"):
+        TransformersPeftExecutor.resolved_frozen_layer_streaming(context)
+
+
+def _fake_streaming_experiment(recommended: bool, **overrides):
+    from chowder.frozen_layer_streaming import FrozenLayerStreamingExperiment
+
+    fields = dict(
+        device="cuda", available=True, batch_size=2, max_length=64,
+        baseline_peak_vram_gb=1.0, streamed_peak_vram_gb=0.8, vram_saved_gb=0.2,
+        baseline_wall_seconds=0.1, streamed_wall_seconds=0.12,
+        wall_time_penalty_ratio=1.2, bytes_transferred_per_step=1000,
+        per_rank_available_gb=16.0, required=False, recommended=recommended,
+    )
+    fields.update(overrides)
+    return FrozenLayerStreamingExperiment(**fields)
+
+
+def test_resolved_frozen_layer_streaming_auto_uses_the_real_experiments_recommendation():
+    config = {"backend": {"training": {"frozen_layer_streaming": "auto"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    with patch(
+        "chowder.frozen_layer_streaming.run_frozen_layer_streaming_experiment",
+        return_value=_fake_streaming_experiment(recommended=True),
+    ) as mock_experiment:
+        result = TransformersPeftExecutor.resolved_frozen_layer_streaming(context)
+    mock_experiment.assert_called_once()
+    assert result is True
+
+
+def test_resolved_frozen_layer_streaming_auto_declines_when_not_recommended():
+    config = {"backend": {"training": {"frozen_layer_streaming": "auto"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    with patch(
+        "chowder.frozen_layer_streaming.run_frozen_layer_streaming_experiment",
+        return_value=_fake_streaming_experiment(recommended=False),
+    ):
+        result = TransformersPeftExecutor.resolved_frozen_layer_streaming(context)
+    assert result is False
+
+
+def test_run_rejects_frozen_layer_streaming_under_multi_gpu_ddp(tmp_path):
+    """Explicit safe rejection, not silent best-effort: the custom
+    autograd.Function and dedicated CUDA prefetch stream have not been
+    proven safe on real multi-GPU hardware, so this combination must
+    fail clearly and *before* any subprocess spawns."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["frozen_layer_streaming"] = "always"
+    config["backend"]["runtime"] = {"active_accelerator_count": 2}
+    hardware = HardwareProfile(16, 64, 500, 12, 40, 3, accelerator_vram_gb=(16.0, 6.0))
+    context = ExecutionContext(hardware, str(tmp_path), 1, resolved_config=config)
+
+    def should_not_spawn(*args, **kwargs):
+        raise AssertionError("must reject before spawning any subprocess")
+
+    with patch("chowder.backends.transformers_peft.subprocess.Popen", should_not_spawn):
+        with pytest.raises(ValueError, match="multi-GPU DDP"):
+            TransformersPeftExecutor().run(_experiment(), context)
+
+
+def test_run_allows_frozen_layer_streaming_off_under_multi_gpu_ddp(tmp_path, monkeypatch):
+    """The rejection is specifically about streaming being *active* under
+    DDP -- off (the default) must never be rejected just because
+    active_accelerator_count > 1."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["frozen_layer_streaming"] = "off"
+    config["backend"]["runtime"] = {"active_accelerator_count": 2}
+    hardware = HardwareProfile(16, 64, 500, 12, 40, 3, accelerator_vram_gb=(16.0, 6.0))
+    context = ExecutionContext(hardware, str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            spec_path = Path(command[command.index("--spec") + 1])
+            result_path = Path(command[command.index("--result") + 1])
+            spec = json.loads(spec_path.read_text())
+            observed_spec.update(spec)
+            output = Path(spec["output_dir"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "adapter_model.safetensors").write_bytes(b"adapter")
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "telemetry": {"train_loss": 0.25, "global_step": 3},
+                        "versions": {"transformers": "5.test"},
+                        "provenance": {"resolved_model_commit": "abc123"},
+                        "data_provenance": {"primary_rows": 1, "replay_selected_rows": 0},
+                        "resource_usage": {
+                            "active_accelerator_count": 2,
+                            "visible_accelerator_count": 2,
+                            "peak_vram_gb_by_accelerator": {"cuda:0": 1.0, "cuda:1": 0.9},
+                        },
+                    }
+                )
+            )
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr("chowder.backends.transformers_peft.subprocess.Popen", FakeProcess)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact is not None
+    assert observed_spec["frozen_layer_streaming"] is False
+
+
+def test_evidence_records_frozen_layer_streaming_mode_and_resolution_for_always(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["frozen_layer_streaming"] = "always"
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact.evidence["hardware_aware_defaults"]["resolved_frozen_layer_streaming"] is True
+    streaming_evidence = artifact.evidence["frozen_layer_streaming"]
+    assert streaming_evidence["mode"] == "always"
+    assert streaming_evidence["resolved"] is True
+    # "always" is an explicit choice, not an experiment-driven decision --
+    # there is no prediction to report.
+    assert "predicted_recommended" not in streaming_evidence
+
+
+def test_evidence_records_predicted_vs_actual_for_frozen_layer_streaming_auto(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["frozen_layer_streaming"] = "auto"
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    with patch(
+        "chowder.frozen_layer_streaming.run_frozen_layer_streaming_experiment",
+        return_value=_fake_streaming_experiment(recommended=True),
+    ):
+        artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert observed_spec["frozen_layer_streaming"] is True
+    streaming_evidence = artifact.evidence["frozen_layer_streaming"]
+    assert streaming_evidence["mode"] == "auto"
+    assert streaming_evidence["resolved"] is True
+    assert streaming_evidence["predicted_recommended"] is True
+    assert streaming_evidence["predicted_vram_saved_gb"] == pytest.approx(0.2)
+    # The fake worker result in _fake_process_factory carries no
+    # global_step/train_runtime_seconds/frozen_layer_streaming_bytes_
+    # transferred -- confirms the "actual" fields degrade to None rather
+    # than raising when that telemetry is absent.
+    assert streaming_evidence["actual_avg_step_seconds"] is None
+    assert streaming_evidence["actual_bytes_transferred"] is None
+
+
 # --- checkpoint/restart -----------------------------------------------------
 
 
@@ -2451,6 +2739,154 @@ def test_real_tiny_llama_resume_is_rejected_across_a_different_optimizer_tiering
 
     with pytest.raises(ValueError, match="bound training input"):
         TransformersPeftExecutor().run(_experiment(), resume_context)
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_trains_with_frozen_layer_streaming_always(tmp_path):
+    """Prove frozen_layer_streaming actually wraps the real Trainer.train()
+    call via chowder.memory_fabric.stream_frozen_layers, including real
+    checkpoint saving under it -- a mocked subprocess test cannot catch a
+    real interaction between the custom autograd.Function/CUDA prefetch
+    stream and PEFT/Trainer's own machinery."""
+    data = tmp_path / "train.jsonl"
+    rows = [
+        {"text": "Question: What token comes after alpha? Answer: beta"},
+        {"text": "Question: What token comes after red? Answer: blue"},
+    ]
+    data.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    config = _config(str(data))
+    config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    config["backend"]["precision"] = "fp32"
+    config["backend"]["quantization"] = "none"
+    config["backend"]["lora"] = {
+        "r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj", "v_proj"],
+    }
+    config["backend"]["training"] = {
+        "epochs": 1.0, "learning_rate": 0.001, "batch_size": 1,
+        "gradient_accumulation_steps": 1, "logging_steps": 1,
+        "gradient_checkpointing": False, "frozen_layer_streaming": "always",
+        "save_strategy": "steps", "save_steps": 1,
+    }
+    config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact.telemetry["global_step"] > 0
+    assert artifact.evidence["hardware_aware_defaults"]["resolved_frozen_layer_streaming"] is True
+    streaming_evidence = artifact.evidence["frozen_layer_streaming"]
+    assert streaming_evidence["mode"] == "always"
+    assert streaming_evidence["resolved"] is True
+    assert streaming_evidence["actual_avg_step_seconds"] is not None
+    # Real transfer pressure: FrozenLayerPrefetchRuntime genuinely moved
+    # bytes between host and device during this real training run.
+    assert streaming_evidence["actual_bytes_transferred"] > 0
+    # A real checkpoint was written while streaming was active.
+    trainer_dir = Path(artifact.artifact_ref) / "trainer"
+    assert any(trainer_dir.glob("checkpoint-*"))
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_frozen_layer_streaming_auto_runs_the_real_experiment(tmp_path):
+    """A real "auto" run must run the real frozen-layer-streaming
+    experiment and resolve according to its verdict -- proven end to end,
+    not just at the experiment-module level. Like optimizer_tiering's
+    analogous test, this doesn't hard-code a specific recommended/
+    declined outcome: whether this tiny model's measured penalty ratio
+    clears the acceptance threshold on any given machine is not something
+    this test should assume -- it proves the real experiment ran and was
+    honored, not a specific verdict."""
+    data = tmp_path / "train.jsonl"
+    rows = [
+        {"text": "Question: What token comes after alpha? Answer: beta"},
+        {"text": "Question: What token comes after red? Answer: blue"},
+    ]
+    data.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    config = _config(str(data))
+    config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    config["backend"]["precision"] = "fp32"
+    config["backend"]["quantization"] = "none"
+    config["backend"]["lora"] = {
+        "r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj", "v_proj"],
+    }
+    config["backend"]["training"] = {
+        "epochs": 1.0, "learning_rate": 0.001, "batch_size": 1,
+        "gradient_accumulation_steps": 1, "logging_steps": 1,
+        "gradient_checkpointing": False, "frozen_layer_streaming": "auto",
+    }
+    config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact.telemetry["global_step"] > 0
+    streaming_evidence = artifact.evidence["frozen_layer_streaming"]
+    assert streaming_evidence["mode"] == "auto"
+    assert streaming_evidence["predicted_available"] is True
+    resolved = artifact.evidence["hardware_aware_defaults"]["resolved_frozen_layer_streaming"]
+    assert resolved == streaming_evidence["predicted_recommended"]
+    assert resolved == streaming_evidence["resolved"]
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_resumes_across_a_different_frozen_layer_streaming_setting(tmp_path):
+    """The recipe-digest/bound-inputs exclusion proven at the unit level
+    against a real checkpoint: training under frozen_layer_streaming=
+    always, then resuming the same checkpoint under
+    frozen_layer_streaming=off, must succeed against real Trainer/
+    optimizer-state machinery -- the opposite of optimizer_tiering's
+    resume-rejected test, matching activation_offload's own real
+    resume-allowed test."""
+    data = tmp_path / "train.jsonl"
+    rows = [
+        {"text": "Question: What token comes after alpha? Answer: beta"},
+        {"text": "Question: What token comes after red? Answer: blue"},
+        {"text": "Question: What token comes after one? Answer: two"},
+        {"text": "Question: What token comes after up? Answer: down"},
+    ]
+    data.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    base_config = _config(str(data))
+    base_config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    base_config["backend"]["precision"] = "fp32"
+    base_config["backend"]["quantization"] = "none"
+    base_config["backend"]["lora"] = {
+        "r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj", "v_proj"],
+    }
+    base_config["backend"]["training"] = {
+        "epochs": 1.0, "learning_rate": 0.001, "batch_size": 1,
+        "gradient_accumulation_steps": 1, "logging_steps": 1,
+        "gradient_checkpointing": False, "frozen_layer_streaming": "always",
+        "save_strategy": "steps", "save_steps": 1,
+    }
+    base_config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=base_config)
+    first = TransformersPeftExecutor().run(_experiment(), context)
+    trainer_dir = Path(first.artifact_ref) / "trainer"
+    checkpoints = sorted(
+        (p for p in trainer_dir.glob("checkpoint-*") if p.is_dir()),
+        key=lambda p: int(p.name.rsplit("-", 1)[1]),
+    )
+    assert checkpoints, "no checkpoints were written by the first run"
+
+    resume_config = json.loads(json.dumps(base_config))
+    resume_config["backend"]["resume_from_checkpoint"] = str(checkpoints[-1])
+    resume_config["backend"]["training"]["frozen_layer_streaming"] = "off"
+    resume_context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=resume_config)
+
+    second = TransformersPeftExecutor().run(_experiment(), resume_context)
+    assert second.telemetry["global_step"] >= first.telemetry["global_step"]
+    assert second.evidence["hardware_aware_defaults"]["resolved_frozen_layer_streaming"] is False
 
 
 @pytest.mark.skipif(

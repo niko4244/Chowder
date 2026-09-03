@@ -26,6 +26,7 @@ from ..run_events import TrainingProgressEvent
 _ALLOWED_QUANTIZATION = {"none", "4bit"}
 _ALLOWED_ACTIVATION_OFFLOAD_MODES = {"auto", "always", "off"}
 _ALLOWED_OPTIMIZER_TIERING_MODES = {"auto", "always", "off"}
+_ALLOWED_FROZEN_LAYER_STREAMING_MODES = {"auto", "always", "off"}
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
 _ALLOWED_DATASET_FORMATS = {"text", "chat"}
 _ALLOWED_TARGET_PRESETS = {"auto", "attention_and_mlp"}
@@ -127,6 +128,37 @@ def _resolve_optimizer_tiering_flag(training: Mapping[str, Any]) -> bool:
     return value == "always"
 
 
+def _resolve_frozen_layer_streaming_flag(training: Mapping[str, Any]) -> bool:
+    """Parse backend.training.frozen_layer_streaming into the concrete
+    boolean TransformersPeftRunSpec carries. Same "auto resolves to False
+    here" structure as _resolve_activation_offload_flag/
+    _resolve_optimizer_tiering_flag, and the same reason: this function
+    must stay cheap and side-effect-free.
+
+    Value-transparent across a resume, like activation_offload and
+    unlike optimizer_tiering: chowder.memory_fabric.stream_frozen_layers
+    only changes *where* a frozen layer's weight physically lives during
+    compute (pinned CPU RAM, streamed just-in-time, vs. GPU-resident the
+    whole time) via a custom autograd.Function proven to produce
+    bit-identical loss/gradients either way -- never what gets computed,
+    and never what a saved checkpoint contains (only the LoRA adapter and
+    optimizer state are ever saved; the frozen base is never part of a
+    checkpoint's own state). Verified directly against real hardware: a
+    checkpoint trained without streaming resumes correctly with
+    streaming turned on, and vice versa.
+    """
+    raw = training.get("frozen_layer_streaming", "off")
+    if isinstance(raw, bool):
+        return raw
+    value = str(raw).strip().lower()
+    if value not in _ALLOWED_FROZEN_LAYER_STREAMING_MODES:
+        raise ValueError(
+            f"backend.training.frozen_layer_streaming must be one of "
+            f"{sorted(_ALLOWED_FROZEN_LAYER_STREAMING_MODES)} or a boolean, got {raw!r}"
+        )
+    return value == "always"
+
+
 def _default_quantization(hardware: HardwareProfile | None) -> str:
     """"none" unless there's a real, VRAM-constrained CUDA device (0 means
     either no GPU or unknown hardware -- never treated as "small") and the
@@ -180,6 +212,7 @@ class TransformersPeftRunSpec:
     gradient_checkpointing: bool = True
     activation_offload: bool = False
     optimizer_tiering: bool = False
+    frozen_layer_streaming: bool = False
     seed: int = 1
     timeout_seconds: float | None = None
     trust_remote_code: bool = False
@@ -317,6 +350,17 @@ class TransformersPeftRunSpec:
         torch.optim.AdamW's (exp_avg/exp_avg_sq): switching between them
         across a resume is a real, confirmed KeyError, not a
         value-transparent change. It stays part of the recipe on purpose.
+
+        frozen_layer_streaming is excluded for the same reason as
+        activation_offload: chowder.memory_fabric.stream_frozen_layers is
+        a custom torch.autograd.Function proven to produce bit-identical
+        loss/gradients to normal resident training -- it only changes
+        where a frozen layer's weight physically lives during compute,
+        never what gets computed, and the checkpoint itself never
+        contains the frozen base weights in the first place (only the
+        LoRA adapter and optimizer state are saved). Verified directly:
+        a checkpoint trained without streaming resumes correctly with it
+        turned on, and vice versa.
         """
         recipe = self.to_dict()
         recipe.pop("output_dir", None)
@@ -330,6 +374,7 @@ class TransformersPeftRunSpec:
         recipe.pop("save_total_limit", None)
         recipe.pop("resume_from_checkpoint", None)
         recipe.pop("activation_offload", None)
+        recipe.pop("frozen_layer_streaming", None)
         payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -450,6 +495,7 @@ class TransformersPeftRunSpec:
             ),
             activation_offload=_resolve_activation_offload_flag(training),
             optimizer_tiering=_resolve_optimizer_tiering_flag(training),
+            frozen_layer_streaming=_resolve_frozen_layer_streaming_flag(training),
             seed=int(config.get("seed", seed)),
             timeout_seconds=(
                 float(runtime["timeout_seconds"])
@@ -575,6 +621,12 @@ class TransformersPeftExecutor:
         paged variant), and their state-dict keys are incompatible --
         resuming across a changed setting must be rejected here, not
         allowed to reach a real KeyError deep inside bitsandbytes.
+        ``frozen_layer_streaming`` is excluded for the same
+        value-transparency reason as ``activation_offload`` -- the
+        checkpoint never contains the frozen base weights either way,
+        only the LoRA adapter and optimizer state, and the custom
+        autograd.Function it uses is proven to produce bit-identical
+        results to normal resident computation.
         """
         recipe = spec.to_dict()
         for key in (
@@ -591,6 +643,7 @@ class TransformersPeftExecutor:
             "epochs",
             "max_steps",
             "activation_offload",
+            "frozen_layer_streaming",
         ):
             recipe.pop(key, None)
         recipe_payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
@@ -710,6 +763,10 @@ class TransformersPeftExecutor:
         if resolved_tiering != spec.optimizer_tiering:
             spec = replace(spec, optimizer_tiering=resolved_tiering)
 
+        resolved_streaming = self.resolved_frozen_layer_streaming(context)
+        if resolved_streaming != spec.frozen_layer_streaming:
+            spec = replace(spec, frozen_layer_streaming=resolved_streaming)
+
         if spec.replay_dataset is not None:
             self._verify_input(spec.replay_dataset, spec.replay_sha256, label="replay")
             if Path(spec.replay_dataset).resolve() == Path(spec.dataset).resolve():
@@ -816,6 +873,43 @@ class TransformersPeftExecutor:
         from ..optimizer_tiering import run_optimizer_tiering_experiment
 
         experiment = run_optimizer_tiering_experiment(
+            resolved_config=config, context=context, work_dir=context.work_dir
+        )
+        return experiment.recommended
+
+    @staticmethod
+    def resolved_frozen_layer_streaming(context: ExecutionContext) -> bool:
+        """The frozen_layer_streaming value this executor will actually
+        train with. Structurally identical to resolved_activation_offload
+        /resolved_optimizer_tiering: "always"/"off"/an explicit boolean
+        resolve directly; "auto" runs the real, cached frozen-layer-
+        streaming experiment (chowder.frozen_layer_streaming.
+        run_frozen_layer_streaming_experiment) and uses its `recommended`
+        verdict.
+        """
+        config = context.resolved_config
+        backend = config.get("backend", {}) if isinstance(config, Mapping) else {}
+        training = backend.get("training", {}) if isinstance(backend, Mapping) else {}
+        raw = (
+            training.get("frozen_layer_streaming", "off")
+            if isinstance(training, Mapping)
+            else "off"
+        )
+        if isinstance(raw, bool):
+            return raw
+        value = str(raw).strip().lower()
+        if value == "always":
+            return True
+        if value == "off":
+            return False
+        if value != "auto":
+            raise ValueError(
+                f"backend.training.frozen_layer_streaming must be one of "
+                f"{sorted(_ALLOWED_FROZEN_LAYER_STREAMING_MODES)} or a boolean, got {raw!r}"
+            )
+        from ..frozen_layer_streaming import run_frozen_layer_streaming_experiment
+
+        experiment = run_frozen_layer_streaming_experiment(
             resolved_config=config, context=context, work_dir=context.work_dir
         )
         return experiment.recommended
@@ -970,6 +1064,7 @@ class TransformersPeftExecutor:
             "gradient_checkpointing_defaulted": "gradient_checkpointing" not in training,
             "activation_offload_mode": str(training.get("activation_offload", "off")),
             "optimizer_tiering_mode": str(training.get("optimizer_tiering", "off")),
+            "frozen_layer_streaming_mode": str(training.get("frozen_layer_streaming", "off")),
         }
 
     @staticmethod
@@ -1105,6 +1200,66 @@ class TransformersPeftExecutor:
             **actual,
         }
 
+    @staticmethod
+    def _frozen_layer_streaming_evidence(
+        *, spec: "TransformersPeftRunSpec", context: ExecutionContext, telemetry: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Predicted vs. actual for frozen_layer_streaming, structurally
+        identical to _activation_offload_evidence -- see that method's
+        docstring for why "actual" stays separate real numbers rather
+        than one collapsed ratio, and why the experiment is re-fetched
+        (cache hit) instead of threaded through.
+
+        actual_bytes_transferred here IS directly observable (unlike
+        optimizer_tiering's PCIe traffic): memory_fabric.py's
+        FrozenLayerPrefetchRuntime tracks every real H2D copy it issues
+        in Python, the same way activation_offload's pack/unpack hooks
+        do -- see transformers_worker.train's frozen_layer_streaming_
+        bytes_transferred.
+        """
+        backend = context.resolved_config.get("backend", {})
+        backend = backend if isinstance(backend, Mapping) else {}
+        training = backend.get("training", {})
+        training = training if isinstance(training, Mapping) else {}
+        mode = str(training.get("frozen_layer_streaming", "off")).strip().lower()
+
+        global_step = telemetry.get("global_step")
+        train_runtime_seconds = telemetry.get("train_runtime_seconds")
+        actual: dict[str, Any] = {
+            "actual_avg_step_seconds": (
+                float(train_runtime_seconds) / global_step
+                if isinstance(global_step, int) and global_step > 0
+                and isinstance(train_runtime_seconds, (int, float))
+                else None
+            ),
+            "actual_bytes_transferred": telemetry.get("frozen_layer_streaming_bytes_transferred"),
+        }
+        if mode != "auto" or isinstance(training.get("frozen_layer_streaming"), bool):
+            return {"mode": mode, "resolved": spec.frozen_layer_streaming, **actual}
+
+        from ..frozen_layer_streaming import run_frozen_layer_streaming_experiment
+
+        try:
+            experiment = run_frozen_layer_streaming_experiment(
+                resolved_config=context.resolved_config, context=context, work_dir=context.work_dir
+            )
+        except Exception:
+            # Evidence is best-effort: a cache-read hiccup here must never
+            # fail an otherwise-successful training run.
+            return {"mode": mode, "resolved": spec.frozen_layer_streaming, **actual}
+        return {
+            "mode": mode,
+            "resolved": spec.frozen_layer_streaming,
+            "predicted_available": experiment.available,
+            "predicted_required": experiment.required,
+            "predicted_recommended": experiment.recommended,
+            "predicted_baseline_peak_vram_gb": experiment.baseline_peak_vram_gb,
+            "predicted_streamed_peak_vram_gb": experiment.streamed_peak_vram_gb,
+            "predicted_vram_saved_gb": experiment.vram_saved_gb,
+            "predicted_wall_time_penalty_ratio": experiment.wall_time_penalty_ratio,
+            **actual,
+        }
+
     def run(self, experiment: Experiment, context: ExecutionContext) -> TrainingArtifact:
         run_id = f"{experiment.experiment_id}-{uuid4().hex[:12]}"
         run_dir = (Path(context.work_dir) / ".chowder" / "runs" / run_id).resolve()
@@ -1139,6 +1294,19 @@ class TransformersPeftExecutor:
                 "optimizer_tiering is not yet verified safe under multi-GPU DDP "
                 f"(active_accelerator_count={active_accelerator_count}); set "
                 "backend.training.optimizer_tiering to 'off' for multi-GPU runs"
+            )
+        if spec.frozen_layer_streaming and active_accelerator_count > 1:
+            # Same explicit-rejection principle as activation_offload/
+            # optimizer_tiering above: the custom autograd.Function and
+            # dedicated CUDA prefetch stream in memory_fabric.py have
+            # only been verified on single-GPU hardware here -- whether
+            # per-rank CUDA streams interact safely under accelerate-
+            # launch DDP is plausible but unproven, so reject clearly
+            # rather than ship an unverified multi-GPU claim.
+            raise ValueError(
+                "frozen_layer_streaming is not yet verified safe under multi-GPU DDP "
+                f"(active_accelerator_count={active_accelerator_count}); set "
+                "backend.training.frozen_layer_streaming to 'off' for multi-GPU runs"
             )
 
         bound_inputs = self._bound_inputs(spec)
@@ -1264,6 +1432,9 @@ class TransformersPeftExecutor:
         optimizer_tiering_evidence = self._optimizer_tiering_evidence(
             spec=spec, context=context, telemetry=telemetry
         )
+        frozen_layer_streaming_evidence = self._frozen_layer_streaming_evidence(
+            spec=spec, context=context, telemetry=telemetry
+        )
         return TrainingArtifact(
             run_id=run_id,
             experiment_id=experiment.experiment_id,
@@ -1305,9 +1476,11 @@ class TransformersPeftExecutor:
                     "resolved_gradient_checkpointing": spec.gradient_checkpointing,
                     "resolved_activation_offload": spec.activation_offload,
                     "resolved_optimizer_tiering": spec.optimizer_tiering,
+                    "resolved_frozen_layer_streaming": spec.frozen_layer_streaming,
                 },
                 "activation_offload": activation_offload_evidence,
                 "optimizer_tiering": optimizer_tiering_evidence,
+                "frozen_layer_streaming": frozen_layer_streaming_evidence,
                 "checkpoint": {
                     "save_strategy": spec.save_strategy,
                     "save_steps": spec.save_steps,

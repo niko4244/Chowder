@@ -122,6 +122,7 @@ def validate_transformers_backend_config(config: Mapping[str, Any]) -> None:
             "gradient_checkpointing",
             "activation_offload",
             "optimizer_tiering",
+            "frozen_layer_streaming",
             "save_strategy",
             "save_steps",
             "save_total_limit",
