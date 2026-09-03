@@ -2750,7 +2750,14 @@ def test_real_tiny_llama_trains_with_frozen_layer_streaming_always(tmp_path):
     call via chowder.memory_fabric.stream_frozen_layers, including real
     checkpoint saving under it -- a mocked subprocess test cannot catch a
     real interaction between the custom autograd.Function/CUDA prefetch
-    stream and PEFT/Trainer's own machinery."""
+    stream and PEFT/Trainer's own machinery. Unlike activation_offload,
+    there is no meaningful CPU-only behavior to exercise here instead --
+    pinned memory and the dedicated CUDA prefetch stream both require a
+    real accelerator, so this genuinely needs CUDA, not just train deps."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device available for a real frozen-layer-streaming run")
     data = tmp_path / "train.jsonl"
     rows = [
         {"text": "Question: What token comes after alpha? Answer: beta"},
@@ -2828,7 +2835,16 @@ def test_real_tiny_llama_frozen_layer_streaming_auto_runs_the_real_experiment(tm
     assert artifact.telemetry["global_step"] > 0
     streaming_evidence = artifact.evidence["frozen_layer_streaming"]
     assert streaming_evidence["mode"] == "auto"
-    assert streaming_evidence["predicted_available"] is True
+    # The experiment itself requires CUDA (there is nothing to stream a
+    # frozen layer's weight "off of" without one) -- on CPU-only hardware
+    # it correctly reports unavailable rather than measuring a penalty
+    # ratio, and auto correctly declines for that honest reason.
+    import torch
+
+    if torch.cuda.is_available():
+        assert streaming_evidence["predicted_available"] is True
+    else:
+        assert streaming_evidence["predicted_available"] is False
     resolved = artifact.evidence["hardware_aware_defaults"]["resolved_frozen_layer_streaming"]
     assert resolved == streaming_evidence["predicted_recommended"]
     assert resolved == streaming_evidence["resolved"]
@@ -2845,7 +2861,12 @@ def test_real_tiny_llama_resumes_across_a_different_frozen_layer_streaming_setti
     frozen_layer_streaming=off, must succeed against real Trainer/
     optimizer-state machinery -- the opposite of optimizer_tiering's
     resume-rejected test, matching activation_offload's own real
-    resume-allowed test."""
+    resume-allowed test. "always" mode genuinely requires CUDA (pinned
+    memory and the dedicated prefetch stream have no CPU equivalent)."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device available for a real frozen-layer-streaming run")
     data = tmp_path / "train.jsonl"
     rows = [
         {"text": "Question: What token comes after alpha? Answer: beta"},

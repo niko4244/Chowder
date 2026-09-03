@@ -225,3 +225,24 @@ def test_patched_model_survives_a_blanket_to_device_call():
     for base_layer in streamed._patched:
         assert base_layer.weight.numel() == 0
         assert base_layer.weight.device.type == "cuda"
+
+
+@_REAL_ML_SMOKE
+def test_stream_frozen_layers_rejects_non_cuda_device_clearly():
+    """Regression test for a real bug found on CI's CPU-only job: pinned
+    memory and the dedicated CUDA prefetch stream both require a real
+    accelerator, so a non-CUDA device must fail immediately with a clear
+    Chowder-level message -- not deep inside torch.Tensor.pin_memory()
+    with a raw "Cannot access accelerator device" error. Deliberately
+    does not require CUDA to run (it tests the rejection path itself),
+    so this exercises for real on CPU-only CI, unlike the "always"-mode
+    production-wiring tests which genuinely need a CUDA device to test
+    anything meaningful."""
+    import torch
+
+    from chowder.memory_fabric import stream_frozen_layers
+
+    model = _build_lora_model()
+    model.train()
+    with pytest.raises(RuntimeError, match="requires an available CUDA device"):
+        stream_frozen_layers(model, torch.device("cpu"))
