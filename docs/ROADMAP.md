@@ -1,64 +1,162 @@
 # Roadmap
 
-## v0.1 — Research kernel
+Reorganized around what's actually proven vs. still speculative, rather than
+version milestones — a checkbox next to a bullet doesn't distinguish "real
+code with real tests" from "a stub that returns a plausible-looking dict."
+Each item below names the module/PR that backs the claim.
 
-- [x] experiment DAG
-- [x] hypothesis schema
-- [x] compute budget enforcement
-- [x] hard regression gate
-- [x] candidate tournament
-- [x] deterministic VRAM/RAM/NVMe planner
-- [x] evidence manifest hashing
-- [x] tests
+## PROVEN / MERGED
 
-## v0.2 — Real local executor
+**Research kernel**
+experiment DAG · hypothesis schema · compute budget enforcement · hard
+regression gate · candidate tournament (`tournament.py`, `ranking.py`) ·
+deterministic VRAM/RAM/NVMe planner · evidence manifest hashing
 
-- [x] hardware profiler (CUDA/ROCm/MPS/CPU/NVMe) — `hardware.py`
-- [x] Transformers + PEFT SFT executor — `backends/transformers_peft.py` + `transformers_worker.py`, proven end-to-end by a real (not mocked) training smoke test in CI
-- [ ] dry-run memory calibration using actual allocator peaks — partial: `transformers_worker.py` records real `torch.cuda.max_memory_allocated` telemetry post-run, but there is no dedicated preflight dry-run pass that estimates fit *before* committing GPU resources
-- [x] subprocess isolation + run cancellation — `executors.py` (`cancel()`), isolated worker process in `transformers_worker.py`
-- [x] checkpoint/artifact registry — `registry.py`, immutable SQLite-backed persistence
-- [x] SQLite run database — `database.py`, versioned schema (`CURRENT_SCHEMA_VERSION`)
-- [x] JSON project configuration — `project.py` + `config_validation.py` (YAML was never added; only JSON ships)
+**Real local executor**
+hardware profiler (CUDA/ROCm/MPS/CPU/NVMe) · Transformers+PEFT SFT executor
+with a real (not mocked) training smoke test in CI · subprocess isolation +
+cooperative cancellation · checkpoint/artifact registry (SQLite-backed,
+immutable) · SQLite run database with versioned schema · JSON project config
++ validation · checkpoint/restart with bound-input verification · HF
+download retries, offline/local-model mode, dependency + disk-space +
+architecture preflight · structured run-event contract with live progress
+across the worker-subprocess boundary · TUI (recipe auto-detection,
+multi-GPU, checkpoint/resume, repair, cancel, history, live run-status
+panel) · hardware-aware recipe defaults (quantization, gradient
+checkpointing)
 
-## v0.3 — Scientific loop
+**Multi-GPU DDP** — real launcher (`accelerate launch --multi_gpu`), proven
+on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
 
-- [ ] failure clustering
-- [ ] hypothesis templates from eval deltas
-- [ ] successive halving
-- [ ] Bayesian/bandit experiment selection
-- [x] independent holdout/evidence evaluator — `evaluators/` (`lm_eval.py`, `transformers_text.py` + isolated workers), independently reloads base+adapter and verifies adapter SHA/protocol evidence rather than trusting the training process's own claim
-- [ ] replay/regression curriculum
+**Scientific loop**
+- independent holdout/evidence evaluator (`evaluators/`) — reloads
+  base+adapter independently and verifies adapter SHA/protocol evidence
+  rather than trusting the training process's own claim
+- failure clustering — `failures.py::cluster_failures()` buckets eval
+  failures by (evaluator, suite, protocol_sha256, source_role, failure_kind)
+- hypothesis templates from eval deltas — `failures.py::plan_repairs()`
+  turns each failure cluster into a templated `RepairPlan`
+- replay/regression curriculum — `replay_history.py::materialize_replay_history()`
+  builds a deduplicated, content-hashed rehearsal corpus at a configurable
+  ratio, wired into repair candidate generation
 
-## v0.4 — Regression Surgeon
+**Regression Surgeon (partial — see hardening below for what's missing)**
+- repair dataset generation — `contamination.py` builds a new SFT dataset
+  from independent sources and hard-refuses any prompt/answer overlap with
+  holdout (`example_fingerprints()`)
+- repair-adapter branch — `repair_candidates.py`/`autonomous_repair.py`
+  continue training from the exact rejected adapter's hashed weights,
+  forbidding LoRA topology changes
+- **a full autonomous repair loop runs end-to-end**: reject → cluster
+  failures → plan → fetch independent repair sources → contamination-audit
+  → materialize replay curriculum → continue-train from parent adapter →
+  independently re-evaluate → gate → promote-or-not
+  (`test_autonomous_repair.py::test_single_hop_autonomous_repair_runs_rejected_candidate_to_promoted_repair`)
 
-- [ ] checkpoint bisect
-- [ ] dataset influence approximation
-- [ ] offending-sample clustering
-- [ ] repair dataset generation
-- [ ] repair-adapter branch
-- [ ] auto-revert on failed canary
+**Adaptive Memory Fabric — Priority 1**
+- real measured memory dry-run preflight (not just post-hoc telemetry) — PR #62
+- Phase 7A: real per-layer/optimizer runtime telemetry, forward hooks +
+  direct tensor introspection — PR #64
+- Phase 7B: activation-offload — real, measured (not formula-derived)
+  experiment (PR #65) **and** production wiring into the real training
+  worker with checkpoint/DDP-safety handling (PR #67)
+- Phase 7C: optimizer-state tiering — real bitsandbytes paged-optimizer
+  experiment (PR #66) **and** production wiring, including the
+  checkpoint-incompatibility discovery below (PR #68)
 
-## v0.5 — Adaptive Memory Fabric
+**Unlisted but real: incident-remediation benchmark harness** —
+`benchmark.py`, `investigation.py`, `hypothesis_generation.py`, `probes.py`,
+`closeout.py`, `remediation_runner.py`/`remediation_actions.py`,
+`model_compatibility.py`, `execution_failure.py` — CUDA OOM / dependency /
+hardware-failure auto-remediation, scored against real dev/hidden incident
+fixtures. Distinct from model-quality regression repair above; was entirely
+missing from this roadmap before this update.
 
-- [ ] measured PCIe/RAM/NVMe throughput calibration
-- [ ] asynchronous layer prefetch
-- [ ] activation offload
-- [ ] dynamic hot-layer cache
-- [ ] optimizer-state tiering
-- [ ] online placement policy from observed stalls
+## IN PRODUCTION HARDENING
 
-## v0.6 — Meta-controller
+Real, shipped code that needs more real-world validation before it should be
+treated as fully proven:
 
-- [ ] intervention/result dataset
-- [ ] expected-improvement model
-- [ ] GPU-hour-aware experiment policy
-- [ ] cross-model transfer of successful training strategies
+- **Activation offload (production)** — single-GPU only; multi-GPU DDP is
+  explicitly rejected at config time, not silently allowed, because the
+  interaction hasn't been verified on real multi-GPU hardware. The `"auto"`
+  acceptance threshold (`_MAX_ACCEPTABLE_PENALTY_RATIO = 1.2`) is a
+  documented starting point, not a measured-optimal constant.
+- **Optimizer-state tiering (production)** — same shape as above: real,
+  merged, single-GPU only, DDP explicitly rejected pending verification. No
+  PCIe-bytes-transferred instrumentation exists (bitsandbytes' CUDA-unified-
+  memory paging happens inside the driver, not through a Python-hookable
+  tensor copy) — `actual_optimizer_state_bytes` is reported instead.
+- **Auto-revert on failed canary** — achieved structurally, not as a
+  dedicated feature: `engine.py::promote()` only overwrites the baseline
+  when `GateDecision.accepted` is true, so a repair that fails its
+  independent holdout eval simply never replaces the working baseline. No
+  test currently drives a *failing* repair through this exact path end to
+  end, and there is no monitored post-promotion rollback (Chowder never
+  "deploys" before evaluating, so there is nothing to roll back from yet).
+- `checkpoint_discovery.py` is real and tested, but solves *resume
+  compatibility validation* for the TUI, not bisection — don't confuse it
+  with "checkpoint bisect" under Research below.
 
-## v0.7 — Elastic MoE research
+## NEXT
 
-- [ ] per-expert load/gradient statistics
-- [ ] expert specialization diagnostics
-- [ ] safe expert clone/split experiments
-- [ ] router retraining/distillation
-- [ ] architecture change promotion gates
+**Adaptive Memory Fabric, remaining (Priority 1)**
+- 7D — frozen-layer streaming: a first real Memory Fabric runtime.
+  Hot/current layer resident on GPU, other frozen layers in pinned CPU RAM,
+  next layer prefetched asynchronously one layer ahead, double buffering
+  where useful. No correctness change to gradients or LoRA weights. Measure
+  compute/transfer overlap and GPU stalls against normal resident training;
+  promote only when it enables otherwise-impossible models or gives
+  acceptable throughput. NVMe streaming stays out of scope until RAM↔GPU
+  streaming is proven. *(Investigation in progress: `accelerate.hooks.
+  AlignDevicesHook` — the same primitive `cpu_offload()`/`dispatch_model()`
+  use for inference — offloads frozen PEFT `base_layer` submodules
+  correctly for forward+backward with LoRA adapters kept GPU-resident, but
+  is synchronous with no prefetch overlap by default; a hand-built
+  next-layer prefetch on top of it is the current design direction.)*
+- 7E — adaptive placement policy: a deterministic, evidence-based placement
+  engine using hardware topology, model/layer sizes, and the real telemetry
+  7B–7D generate. Blocked on 7D producing real execution history; learned
+  placement stays out of scope until then.
+
+**Telemetry/calibration (Priority 2)**
+- real GPU↔GPU bandwidth/topology measurement
+- PCIe/NVLink capability measurement
+- production-training timing breakdown: forward/backward/optimizer/
+  all-reduce time, transfer wait, GPU idle/stall time, utilization
+- persisted aggregate telemetry for future placement learning
+
+**Memory preflight policy (Priority 3)**
+- `memory_preflight = auto | always | cached | off`, where `auto` uses
+  cached measurements whenever possible and only pays for a new real
+  dry-run when memory pressure or config novelty justifies it
+- DDP fit must stay per-rank/per-device, never compared against aggregate
+  GPU VRAM
+
+## RESEARCH
+
+Explicitly gated on the above being stable — no design work has started on
+any of these:
+
+- **Scientific search controller** (Priority 4) — successive halving is
+  **not implemented**: `cycle.py::run_generation()` is one flat
+  train-all → evaluate-all → rank pass, with no budget-elimination or
+  staged rounds. Bandit/Bayesian experiment selection is also **not
+  implemented** — `tournament.py`/`ranking.py` are deterministic sorts
+  (probe-evidence count, gate score + efficiency), not adaptive selection
+  policies.
+- **Regression Surgeon extensions** (Priority 5) — checkpoint bisect
+  (**not implemented**, despite the similarly-named `checkpoint_discovery.py`
+  solving a different problem), dataset influence approximation (**not
+  implemented**), offending-*training*-sample clustering (**not
+  implemented** — distinct from the already-shipped eval-failure
+  clustering), independent counterexample generation, targeted repair
+  adapters beyond the existing parent-adapter continuation.
+- **Meta-controller** (Priority 6) — persisted intervention/result dataset,
+  expected-improvement model, GPU-hour-aware experiment policy, cross-model
+  transfer of successful training strategies. Only claim learned-policy
+  improvement once validated against held-out experiments.
+- **Elastic MoE research** (Priority 7) — per-expert load/gradient
+  statistics, expert specialization diagnostics, safe expert clone/split
+  experiments, router retraining/distillation, architecture-change
+  promotion gates kept behind strict regression and compute-budget gates.
