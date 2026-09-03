@@ -149,6 +149,15 @@ class StreamedFrozenLayers:
     """
 
     def __init__(self, model: nn.Module, device: torch.device) -> None:
+        if device.type != "cuda":
+            # pin_memory() and the dedicated CUDA prefetch stream both
+            # require a real accelerator -- there is nothing to stream a
+            # frozen layer's weight "off of" without one. Fail clearly
+            # here rather than deep inside pin_memory() with a raw
+            # "Cannot access accelerator device" error.
+            raise RuntimeError(
+                f"frozen-layer streaming requires an available CUDA device, got device.type={device.type!r}"
+            )
         self._patched: list[nn.Module] = []
         self._originals: dict[int, tuple[Any, Any, Any]] = {}
         weights_cpu: list[torch.Tensor] = []

@@ -353,6 +353,25 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             tmp_path.replace(self._progress_path)  # atomic on POSIX/NTFS, so a
             # concurrent poller in the main process never reads a half-written file.
 
+    class _FrozenLayerStreamingCallback(TrainerCallback):
+        """Kicks off each step's frozen-layer prefetch right before that
+        step's forward pass. Constructed with streamed=None and passed
+        into Trainer(callbacks=[...]) at construction time -- the actual
+        StreamedFrozenLayers handle can only be created *after* Trainer's
+        own __init__ finishes (it calls a blanket model.to(device) that
+        raises if the model's frozen base_layer params have already been
+        patched -- confirmed for real; see memory_fabric.py's own fix for
+        the details), so this callback's real work starts only once
+        `.streamed` is set from outside, after Trainer() returns.
+        """
+
+        def __init__(self) -> None:
+            self.streamed: Any = None
+
+        def on_step_begin(self, args, state, control, **kwargs):
+            if self.streamed is not None:
+                self.streamed.start_step()
+
     if spec.trust_remote_code:
         raise RuntimeError("trust_remote_code is disabled")
 
@@ -543,13 +562,32 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         args_kwargs["optim"] = "paged_adamw_32bit"
     args = TrainingArguments(**args_kwargs)
     started = time.perf_counter()
+    frozen_layer_streaming_callback = _FrozenLayerStreamingCallback()
     trainer = Trainer(
         model=model,
         args=args,
         train_dataset=tokenized,
         data_collator=collator,
-        callbacks=[_ProgressReportingCallback(output_dir / "progress.json", started)],
+        callbacks=[
+            _ProgressReportingCallback(output_dir / "progress.json", started),
+            frozen_layer_streaming_callback,
+        ],
     )
+
+    frozen_layer_streaming_bytes_transferred: int | None = None
+    streamed_layers = None
+    if spec.frozen_layer_streaming:
+        # Applied *after* Trainer() construction, never before -- see
+        # _FrozenLayerStreamingCallback's docstring for why: Trainer.
+        # __init__ (already run by this point) and accelerator.
+        # prepare_model() (called again inside trainer.train() itself,
+        # on every call) both do a blanket model.to(device) this worker
+        # does not control, which raises on the patched frozen base_layer
+        # params if streaming were applied any earlier.
+        from ..memory_fabric import stream_frozen_layers
+
+        streamed_layers = stream_frozen_layers(model, trainer.args.device)
+        frozen_layer_streaming_callback.streamed = streamed_layers
 
     activation_offload_bytes_transferred: int | None = None
     if spec.activation_offload:
@@ -589,6 +627,16 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     else:
         train_output = trainer.train(resume_from_checkpoint=spec.resume_from_checkpoint)
     runtime = time.perf_counter() - started
+
+    if streamed_layers is not None:
+        frozen_layer_streaming_bytes_transferred = streamed_layers.runtime.bytes_transferred
+        # Restore before save_pretrained()/anything downstream touches the
+        # model again -- save_pretrained() itself was verified to work
+        # fine while still patched (PEFT's save only ever writes the
+        # adapter, never the frozen base), but leaving the model in its
+        # normal fully-resident shape afterward is the safer default for
+        # whatever else might run against it.
+        streamed_layers.restore()
 
     # Under multi-GPU DDP (accelerate launch spawns active_accelerator_count
     # real processes, one per device -- see TransformersPeftExecutor._worker_
@@ -658,6 +706,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "peak_vram_gb": float(peak_vram_gb),
             "activation_offload_bytes_transferred": activation_offload_bytes_transferred,
             "optimizer_state_bytes": optimizer_state_bytes,
+            "frozen_layer_streaming_bytes_transferred": frozen_layer_streaming_bytes_transferred,
             "primary_rows": primary_rows,
             "replay_selected_rows": replay_selected_rows,
             "training_rows": len(dataset),
