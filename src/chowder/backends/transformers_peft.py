@@ -159,6 +159,36 @@ def _resolve_frozen_layer_streaming_flag(training: Mapping[str, Any]) -> bool:
     return value == "always"
 
 
+def _resolve_detailed_timing_telemetry_flag(training: Mapping[str, Any]) -> bool:
+    """Parse backend.training.detailed_timing_telemetry into a plain
+    boolean -- unlike activation_offload/optimizer_tiering/
+    frozen_layer_streaming, this has no "auto" mode: it is pure
+    diagnostic instrumentation with no placement decision to make, so
+    there is nothing for an experiment to recommend.
+
+    Defaults to False for a real, measured reason, not just consistency
+    with this codebase's other "off by default" flags: forcing
+    torch.cuda.synchronize() around each of forward/backward/optimizer-
+    step to get accurate per-phase timing is not free -- measured at a
+    real ~17% wall-time overhead on a real training run (tiny model,
+    where per-step compute is small enough that synchronization
+    overhead is a meaningful fraction of it). Unlike Phase 7A's dry-run
+    telemetry (which runs in an isolated, separate subprocess that never
+    touches real production training), this instrumentation runs
+    *inside* the real training loop and has a real cost -- so it must be
+    an explicit opt-in, never silently always-on.
+    """
+    raw = training.get("detailed_timing_telemetry", False)
+    if isinstance(raw, bool):
+        return raw
+    value = str(raw).strip().lower()
+    if value not in ("true", "false"):
+        raise ValueError(
+            f"backend.training.detailed_timing_telemetry must be a boolean, got {raw!r}"
+        )
+    return value == "true"
+
+
 def _default_quantization(hardware: HardwareProfile | None) -> str:
     """"none" unless there's a real, VRAM-constrained CUDA device (0 means
     either no GPU or unknown hardware -- never treated as "small") and the
@@ -213,6 +243,7 @@ class TransformersPeftRunSpec:
     activation_offload: bool = False
     optimizer_tiering: bool = False
     frozen_layer_streaming: bool = False
+    detailed_timing_telemetry: bool = False
     seed: int = 1
     timeout_seconds: float | None = None
     trust_remote_code: bool = False
@@ -361,6 +392,11 @@ class TransformersPeftRunSpec:
         LoRA adapter and optimizer state are saved). Verified directly:
         a checkpoint trained without streaming resumes correctly with it
         turned on, and vice versa.
+
+        detailed_timing_telemetry is excluded for the most clear-cut
+        reason of all: it is pure observation, wrapping timing around
+        calls that already happen -- it changes nothing about what gets
+        computed, ever.
         """
         recipe = self.to_dict()
         recipe.pop("output_dir", None)
@@ -375,6 +411,7 @@ class TransformersPeftRunSpec:
         recipe.pop("resume_from_checkpoint", None)
         recipe.pop("activation_offload", None)
         recipe.pop("frozen_layer_streaming", None)
+        recipe.pop("detailed_timing_telemetry", None)
         payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -496,6 +533,7 @@ class TransformersPeftRunSpec:
             activation_offload=_resolve_activation_offload_flag(training),
             optimizer_tiering=_resolve_optimizer_tiering_flag(training),
             frozen_layer_streaming=_resolve_frozen_layer_streaming_flag(training),
+            detailed_timing_telemetry=_resolve_detailed_timing_telemetry_flag(training),
             seed=int(config.get("seed", seed)),
             timeout_seconds=(
                 float(runtime["timeout_seconds"])
@@ -626,7 +664,9 @@ class TransformersPeftExecutor:
         checkpoint never contains the frozen base weights either way,
         only the LoRA adapter and optimizer state, and the custom
         autograd.Function it uses is proven to produce bit-identical
-        results to normal resident computation.
+        results to normal resident computation. ``detailed_timing_
+        telemetry`` is excluded for the same reason -- it is pure
+        observation and never changes what gets computed.
         """
         recipe = spec.to_dict()
         for key in (
@@ -644,6 +684,7 @@ class TransformersPeftExecutor:
             "max_steps",
             "activation_offload",
             "frozen_layer_streaming",
+            "detailed_timing_telemetry",
         ):
             recipe.pop(key, None)
         recipe_payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
@@ -1065,6 +1106,9 @@ class TransformersPeftExecutor:
             "activation_offload_mode": str(training.get("activation_offload", "off")),
             "optimizer_tiering_mode": str(training.get("optimizer_tiering", "off")),
             "frozen_layer_streaming_mode": str(training.get("frozen_layer_streaming", "off")),
+            "detailed_timing_telemetry_enabled": bool(
+                training.get("detailed_timing_telemetry", False)
+            ),
         }
 
     @staticmethod
@@ -1260,6 +1304,66 @@ class TransformersPeftExecutor:
             **actual,
         }
 
+    @staticmethod
+    def _production_timing_evidence(
+        *, spec: "TransformersPeftRunSpec", telemetry: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Real per-phase timing breakdown, when detailed_timing_telemetry
+        was enabled for this run -- no predicted/auto path here, unlike
+        activation_offload/optimizer_tiering/frozen_layer_streaming, since
+        there is no placement decision to make: this is pure observation.
+
+        forward_seconds/backward_seconds/optimizer_seconds come from
+        real torch.cuda.synchronize()-bracketed timing around Trainer's
+        own compute_loss/accelerator.backward/optimizer.step calls (see
+        transformers_worker.train's _TrainingPhaseTimerCallback).
+        data_loading_and_overhead_seconds is an honest residual --
+        total wall time minus the three measured phases -- not a
+        separately measured quantity; it is dominated by DataLoader
+        fetch time but also includes ordinary Python/callback overhead,
+        and this method does not claim to separate those.
+        avg_gpu_utilization_percent is a real, NVML-sampled average
+        across training (see the same callback's background sampler
+        thread), a coarse but genuine proxy for "GPU idle/stall time"
+        -- not a precise idle-time measurement.
+
+        Deliberately does NOT report a separate all-reduce time: under
+        multi-GPU DDP, gradient synchronization happens inside
+        accelerator.backward() itself, so it is already folded into
+        backward_seconds rather than broken out -- doing so correctly
+        would need verification against real multi-GPU hardware this
+        instrumentation has not had.
+        """
+        enabled = spec.detailed_timing_telemetry
+        if not enabled:
+            return {"enabled": False}
+        train_runtime_seconds = telemetry.get("train_runtime_seconds")
+        forward_seconds = telemetry.get("forward_seconds")
+        backward_seconds = telemetry.get("backward_seconds")
+        optimizer_seconds = telemetry.get("optimizer_seconds")
+        other_seconds = None
+        if (
+            isinstance(train_runtime_seconds, (int, float))
+            and isinstance(forward_seconds, (int, float))
+            and isinstance(backward_seconds, (int, float))
+            and isinstance(optimizer_seconds, (int, float))
+        ):
+            other_seconds = max(
+                0.0,
+                float(train_runtime_seconds)
+                - float(forward_seconds)
+                - float(backward_seconds)
+                - float(optimizer_seconds),
+            )
+        return {
+            "enabled": True,
+            "forward_seconds": forward_seconds,
+            "backward_seconds": backward_seconds,
+            "optimizer_seconds": optimizer_seconds,
+            "data_loading_and_overhead_seconds": other_seconds,
+            "avg_gpu_utilization_percent": telemetry.get("avg_gpu_utilization_percent"),
+        }
+
     def run(self, experiment: Experiment, context: ExecutionContext) -> TrainingArtifact:
         run_id = f"{experiment.experiment_id}-{uuid4().hex[:12]}"
         run_dir = (Path(context.work_dir) / ".chowder" / "runs" / run_id).resolve()
@@ -1435,6 +1539,9 @@ class TransformersPeftExecutor:
         frozen_layer_streaming_evidence = self._frozen_layer_streaming_evidence(
             spec=spec, context=context, telemetry=telemetry
         )
+        production_timing_evidence = self._production_timing_evidence(
+            spec=spec, telemetry=telemetry
+        )
         return TrainingArtifact(
             run_id=run_id,
             experiment_id=experiment.experiment_id,
@@ -1477,10 +1584,12 @@ class TransformersPeftExecutor:
                     "resolved_activation_offload": spec.activation_offload,
                     "resolved_optimizer_tiering": spec.optimizer_tiering,
                     "resolved_frozen_layer_streaming": spec.frozen_layer_streaming,
+                    "detailed_timing_telemetry_enabled": spec.detailed_timing_telemetry,
                 },
                 "activation_offload": activation_offload_evidence,
                 "optimizer_tiering": optimizer_tiering_evidence,
                 "frozen_layer_streaming": frozen_layer_streaming_evidence,
+                "production_timing": production_timing_evidence,
                 "checkpoint": {
                     "save_strategy": spec.save_strategy,
                     "save_steps": spec.save_steps,

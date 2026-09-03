@@ -123,6 +123,7 @@ def validate_transformers_backend_config(config: Mapping[str, Any]) -> None:
             "activation_offload",
             "optimizer_tiering",
             "frozen_layer_streaming",
+            "detailed_timing_telemetry",
             "save_strategy",
             "save_steps",
             "save_total_limit",
