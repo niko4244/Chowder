@@ -176,10 +176,18 @@ class StreamedFrozenLayers:
             # Free the GPU-resident parameter data -- nothing computes
             # with base_layer.weight/.bias directly anymore; the runtime
             # hands the current forward call its prefetched GPU tensors
-            # explicitly instead.
-            base_layer.weight = nn.Parameter(torch.empty(0, device="meta"), requires_grad=False)
+            # explicitly instead. A genuinely empty (0-element) *real*
+            # tensor, not a meta one: HF's Trainer/accelerate call a
+            # blanket model.to(device) at more than one point (Trainer.
+            # __init__ and again inside accelerator.prepare_model() on
+            # every .train() call) that this module does not control and
+            # cannot skip -- a meta placeholder makes any of those calls
+            # raise ("Cannot copy out of meta tensor"), confirmed for
+            # real. An empty real tensor has that same near-zero memory
+            # cost but moves between devices like any ordinary parameter.
+            base_layer.weight = nn.Parameter(torch.empty(0, device="cpu"), requires_grad=False)
             if base_layer.bias is not None:
-                base_layer.bias = nn.Parameter(torch.empty(0, device="meta"), requires_grad=False)
+                base_layer.bias = nn.Parameter(torch.empty(0, device="cpu"), requires_grad=False)
 
             base_layer.forward = self._make_forward(idx)
             self._patched.append(base_layer)
