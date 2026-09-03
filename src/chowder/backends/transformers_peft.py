@@ -25,6 +25,7 @@ from ..run_events import TrainingProgressEvent
 
 _ALLOWED_QUANTIZATION = {"none", "4bit"}
 _ALLOWED_ACTIVATION_OFFLOAD_MODES = {"auto", "always", "off"}
+_ALLOWED_OPTIMIZER_TIERING_MODES = {"auto", "always", "off"}
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
 _ALLOWED_DATASET_FORMATS = {"text", "chat"}
 _ALLOWED_TARGET_PRESETS = {"auto", "attention_and_mlp"}
@@ -95,6 +96,37 @@ def _resolve_activation_offload_flag(training: Mapping[str, Any]) -> bool:
     return value == "always"
 
 
+def _resolve_optimizer_tiering_flag(training: Mapping[str, Any]) -> bool:
+    """Parse backend.training.optimizer_tiering into the concrete boolean
+    TransformersPeftRunSpec carries. Same "auto resolves to False here,
+    the real decision happens in TransformersPeftExecutor.
+    resolved_optimizer_tiering" structure as
+    _resolve_activation_offload_flag, and the same reason: this function
+    must stay cheap and side-effect-free.
+
+    Unlike activation_offload, optimizer_tiering is NOT value-transparent
+    across a resume: bitsandbytes' paged optimizers keep their own
+    internal state-dict keys (state1/state2), incompatible with
+    torch.optim.AdamW's (exp_avg/exp_avg_sq) -- resuming a checkpoint
+    trained under one optimizer implementation with the other fails with
+    a real KeyError deep inside bitsandbytes, confirmed against real
+    hardware before this was wired in. So, unlike activation_offload,
+    this field is deliberately left IN both recipe_digest() and
+    _bound_inputs() -- a changed optimizer_tiering setting must reject a
+    resume, not silently allow one into a corrupted optimizer state.
+    """
+    raw = training.get("optimizer_tiering", "off")
+    if isinstance(raw, bool):
+        return raw
+    value = str(raw).strip().lower()
+    if value not in _ALLOWED_OPTIMIZER_TIERING_MODES:
+        raise ValueError(
+            f"backend.training.optimizer_tiering must be one of "
+            f"{sorted(_ALLOWED_OPTIMIZER_TIERING_MODES)} or a boolean, got {raw!r}"
+        )
+    return value == "always"
+
+
 def _default_quantization(hardware: HardwareProfile | None) -> str:
     """"none" unless there's a real, VRAM-constrained CUDA device (0 means
     either no GPU or unknown hardware -- never treated as "small") and the
@@ -147,6 +179,7 @@ class TransformersPeftRunSpec:
     precision: str = "auto"
     gradient_checkpointing: bool = True
     activation_offload: bool = False
+    optimizer_tiering: bool = False
     seed: int = 1
     timeout_seconds: float | None = None
     trust_remote_code: bool = False
@@ -277,6 +310,13 @@ class TransformersPeftRunSpec:
         recomputation instead of caching -- and stays part of the recipe),
         resuming a checkpoint with a different activation_offload setting
         than it was saved under produces the identical result.
+
+        optimizer_tiering is deliberately NOT excluded, unlike
+        activation_offload -- bitsandbytes' paged optimizers use their own
+        internal state-dict keys (state1/state2), incompatible with
+        torch.optim.AdamW's (exp_avg/exp_avg_sq): switching between them
+        across a resume is a real, confirmed KeyError, not a
+        value-transparent change. It stays part of the recipe on purpose.
         """
         recipe = self.to_dict()
         recipe.pop("output_dir", None)
@@ -409,6 +449,7 @@ class TransformersPeftRunSpec:
                 else _default_gradient_checkpointing(hardware)
             ),
             activation_offload=_resolve_activation_offload_flag(training),
+            optimizer_tiering=_resolve_optimizer_tiering_flag(training),
             seed=int(config.get("seed", seed)),
             timeout_seconds=(
                 float(runtime["timeout_seconds"])
@@ -528,7 +569,12 @@ class TransformersPeftExecutor:
         excluded for the same value-transparency reason as in
         recipe_digest() -- resuming with a different offload setting (or a
         different real "auto" recommendation on re-run) never invalidates
-        the optimizer state.
+        the optimizer state. ``optimizer_tiering`` is deliberately kept
+        IN, the opposite choice: it changes which optimizer implementation
+        actually holds the state (torch.optim.AdamW vs. bitsandbytes'
+        paged variant), and their state-dict keys are incompatible --
+        resuming across a changed setting must be rejected here, not
+        allowed to reach a real KeyError deep inside bitsandbytes.
         """
         recipe = spec.to_dict()
         for key in (
@@ -660,6 +706,10 @@ class TransformersPeftExecutor:
         if resolved_offload != spec.activation_offload:
             spec = replace(spec, activation_offload=resolved_offload)
 
+        resolved_tiering = self.resolved_optimizer_tiering(context)
+        if resolved_tiering != spec.optimizer_tiering:
+            spec = replace(spec, optimizer_tiering=resolved_tiering)
+
         if spec.replay_dataset is not None:
             self._verify_input(spec.replay_dataset, spec.replay_sha256, label="replay")
             if Path(spec.replay_dataset).resolve() == Path(spec.dataset).resolve():
@@ -734,6 +784,38 @@ class TransformersPeftExecutor:
         from ..activation_offload import run_activation_offload_experiment
 
         experiment = run_activation_offload_experiment(
+            resolved_config=config, context=context, work_dir=context.work_dir
+        )
+        return experiment.recommended
+
+    @staticmethod
+    def resolved_optimizer_tiering(context: ExecutionContext) -> bool:
+        """The optimizer_tiering value this executor will actually train
+        with. Structurally identical to resolved_activation_offload:
+        "always"/"off"/an explicit boolean resolve directly; "auto" runs
+        the real, cached optimizer-tiering experiment
+        (chowder.optimizer_tiering.run_optimizer_tiering_experiment) and
+        uses its `recommended` verdict.
+        """
+        config = context.resolved_config
+        backend = config.get("backend", {}) if isinstance(config, Mapping) else {}
+        training = backend.get("training", {}) if isinstance(backend, Mapping) else {}
+        raw = training.get("optimizer_tiering", "off") if isinstance(training, Mapping) else "off"
+        if isinstance(raw, bool):
+            return raw
+        value = str(raw).strip().lower()
+        if value == "always":
+            return True
+        if value == "off":
+            return False
+        if value != "auto":
+            raise ValueError(
+                f"backend.training.optimizer_tiering must be one of "
+                f"{sorted(_ALLOWED_OPTIMIZER_TIERING_MODES)} or a boolean, got {raw!r}"
+            )
+        from ..optimizer_tiering import run_optimizer_tiering_experiment
+
+        experiment = run_optimizer_tiering_experiment(
             resolved_config=config, context=context, work_dir=context.work_dir
         )
         return experiment.recommended
@@ -887,6 +969,7 @@ class TransformersPeftExecutor:
             "quantization_defaulted": "quantization" not in backend,
             "gradient_checkpointing_defaulted": "gradient_checkpointing" not in training,
             "activation_offload_mode": str(training.get("activation_offload", "off")),
+            "optimizer_tiering_mode": str(training.get("optimizer_tiering", "off")),
         }
 
     @staticmethod
@@ -959,6 +1042,69 @@ class TransformersPeftExecutor:
             **actual,
         }
 
+    @staticmethod
+    def _optimizer_tiering_evidence(
+        *, spec: "TransformersPeftRunSpec", context: ExecutionContext, telemetry: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Predicted vs. actual for optimizer_tiering, structurally
+        identical to _activation_offload_evidence -- see that method's
+        docstring for why "actual" stays separate real numbers rather
+        than one collapsed ratio, and why the experiment is re-fetched
+        (cache hit) instead of threaded through.
+
+        There is no actual-PCIe-bytes-transferred counterpart to
+        activation_offload's actual_bytes_transferred here: bitsandbytes'
+        CUDA-unified-memory paging happens inside the driver/kernel, not
+        through a Python-visible tensor copy this code can hook and
+        count. actual_optimizer_state_bytes (real tensor introspection
+        of the live optimizer's state, identical approach to Phase 7A/7C's
+        own measurement) is what's actually observable from here.
+        """
+        backend = context.resolved_config.get("backend", {})
+        backend = backend if isinstance(backend, Mapping) else {}
+        training = backend.get("training", {})
+        training = training if isinstance(training, Mapping) else {}
+        mode = str(training.get("optimizer_tiering", "off")).strip().lower()
+
+        global_step = telemetry.get("global_step")
+        train_runtime_seconds = telemetry.get("train_runtime_seconds")
+        actual: dict[str, Any] = {
+            "actual_avg_step_seconds": (
+                float(train_runtime_seconds) / global_step
+                if isinstance(global_step, int) and global_step > 0
+                and isinstance(train_runtime_seconds, (int, float))
+                else None
+            ),
+            "actual_optimizer_state_bytes": telemetry.get("optimizer_state_bytes"),
+        }
+        if mode != "auto" or isinstance(training.get("optimizer_tiering"), bool):
+            return {"mode": mode, "resolved": spec.optimizer_tiering, **actual}
+
+        from ..optimizer_tiering import run_optimizer_tiering_experiment
+
+        try:
+            experiment = run_optimizer_tiering_experiment(
+                resolved_config=context.resolved_config, context=context, work_dir=context.work_dir
+            )
+        except Exception:
+            # Evidence is best-effort: a cache-read hiccup here must never
+            # fail an otherwise-successful training run.
+            return {"mode": mode, "resolved": spec.optimizer_tiering, **actual}
+        baseline = experiment.variant("adamw")
+        paged = experiment.variant("paged_adamw")
+        return {
+            "mode": mode,
+            "resolved": spec.optimizer_tiering,
+            "predicted_available": experiment.available,
+            "predicted_required": experiment.required,
+            "predicted_recommended": experiment.recommended,
+            "predicted_model_peak_vram_gb": experiment.model_peak_vram_gb,
+            "predicted_baseline_state_bytes": baseline.state_bytes if baseline else None,
+            "predicted_paged_state_bytes": paged.state_bytes if paged else None,
+            "predicted_wall_time_penalty_ratio": experiment.wall_time_penalty_ratio,
+            **actual,
+        }
+
     def run(self, experiment: Experiment, context: ExecutionContext) -> TrainingArtifact:
         run_id = f"{experiment.experiment_id}-{uuid4().hex[:12]}"
         run_dir = (Path(context.work_dir) / ".chowder" / "runs" / run_id).resolve()
@@ -980,6 +1126,19 @@ class TransformersPeftExecutor:
                 "activation_offload is not yet verified safe under multi-GPU DDP "
                 f"(active_accelerator_count={active_accelerator_count}); set "
                 "backend.training.activation_offload to 'off' for multi-GPU runs"
+            )
+        if spec.optimizer_tiering and active_accelerator_count > 1:
+            # Same explicit-rejection principle as activation_offload above:
+            # bitsandbytes' paged optimizers have not been proven safe
+            # under this project's own multi-GPU DDP launch path (each
+            # accelerate-launch rank constructing its own paged optimizer
+            # independently is plausible, but unverified on real hardware
+            # here), so reject clearly rather than ship an unverified
+            # multi-GPU claim.
+            raise ValueError(
+                "optimizer_tiering is not yet verified safe under multi-GPU DDP "
+                f"(active_accelerator_count={active_accelerator_count}); set "
+                "backend.training.optimizer_tiering to 'off' for multi-GPU runs"
             )
 
         bound_inputs = self._bound_inputs(spec)
@@ -1102,6 +1261,9 @@ class TransformersPeftExecutor:
         activation_offload_evidence = self._activation_offload_evidence(
             spec=spec, context=context, telemetry=telemetry
         )
+        optimizer_tiering_evidence = self._optimizer_tiering_evidence(
+            spec=spec, context=context, telemetry=telemetry
+        )
         return TrainingArtifact(
             run_id=run_id,
             experiment_id=experiment.experiment_id,
@@ -1142,8 +1304,10 @@ class TransformersPeftExecutor:
                     "resolved_quantization": spec.quantization,
                     "resolved_gradient_checkpointing": spec.gradient_checkpointing,
                     "resolved_activation_offload": spec.activation_offload,
+                    "resolved_optimizer_tiering": spec.optimizer_tiering,
                 },
                 "activation_offload": activation_offload_evidence,
+                "optimizer_tiering": optimizer_tiering_evidence,
                 "checkpoint": {
                     "save_strategy": spec.save_strategy,
                     "save_steps": spec.save_steps,
