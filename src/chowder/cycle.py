@@ -18,6 +18,7 @@ from .executor_investigator import ExecutorFailureAnalysis, analyze_execution_fa
 from .executors import EvaluationExecutor, EvaluationOutcome, ExecutionContext, TrainingArtifact, TrainingExecutor
 from .failures import FailureRecord, RepairPlan, cluster_failures, plan_repairs
 from .investigation import RemediationRegistry
+from .memory_preflight import resolve_memory_fit
 from .models import Experiment, ExperimentResult, ExperimentStatus
 from .registry import RunRegistry
 from .run_events import TrainingProgressEvent
@@ -256,6 +257,47 @@ def _check_model_architecture(
     )
 
 
+def _check_memory_fit(
+    trainer: TrainingExecutor,
+    evaluator: EvaluationExecutor,
+    resolved: Mapping[str, Any],
+    context: ExecutionContext,
+) -> None:
+    """Memory-fit preflight, dispatched the same way as
+    _check_dependencies/_check_disk_space/_check_model_architecture --
+    completes the "memory preflight integration" the real, measured dry
+    run (memory_preflight.py) already had a mechanism for but was never
+    actually wired into the automated training path: it was only ever
+    reachable from the TUI's manual "Estimate Memory" button.
+
+    Scoped to training only (not evaluation) -- unlike disk-space/
+    architecture, a training recipe's real VRAM footprint (LoRA rank,
+    batch size, quantization, gradient checkpointing) is what
+    estimate_memory_requirements actually measures; evaluation's own
+    footprint is a different, not-yet-covered concern.
+
+    Governed by backend.memory_preflight (see resolve_memory_fit),
+    default "off" -- returns None immediately in that case, so this is a
+    genuine no-op, not just an inexpensive one, for every config that
+    doesn't explicitly opt in. When enabled and the real estimate says
+    the recipe would not fit, rejects clearly here -- a config-time
+    preflight rejection, before engine.resize_reservation() commits any
+    GPU-hours, rather than a real OOM discovered deep inside a spawned
+    training subprocess.
+    """
+    if not isinstance(trainer, TransformersPeftExecutor):
+        return
+    estimate = resolve_memory_fit(resolved_config=resolved, context=context, work_dir=context.work_dir)
+    if estimate is None or estimate.fits:
+        return
+    reasons = "; ".join(estimate.recommendations) or "no specific recommendation available"
+    raise RuntimeError(
+        f"transformers-peft training is not expected to fit in available VRAM: "
+        f"estimated {estimate.estimated_peak_gb:.2f} GB required vs. "
+        f"{estimate.per_rank_available_gb:.2f} GB available per device ({reasons})"
+    )
+
+
 @dataclass
 class ExperimentCycleRunner:
     """Run one generation through profile → train → evaluate → diagnose → gate."""
@@ -321,6 +363,7 @@ class ExperimentCycleRunner:
             _check_dependencies(self.trainer, self.evaluator, resolved, run_context)
             _check_disk_space(self.trainer, self.evaluator, resolved, run_context)
             _check_model_architecture(self.trainer, self.evaluator, resolved, run_context)
+            _check_memory_fit(self.trainer, self.evaluator, resolved, run_context)
             try:
                 training_estimate = self.trainer.profile(experiment, run_context)
             except NotImplementedError:

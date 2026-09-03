@@ -82,6 +82,7 @@ def validate_transformers_backend_config(config: Mapping[str, Any]) -> None:
             "profile",
             "resume_from_checkpoint",
             "min_free_disk_gb",
+            "memory_preflight",
         },
         path="backend",
     )

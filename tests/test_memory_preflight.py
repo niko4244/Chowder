@@ -11,12 +11,15 @@ from chowder.backends.transformers_peft import TransformersPeftRunSpec
 from chowder.executors import ExecutionContext
 from chowder.memory import HardwareProfile
 from chowder.memory_preflight import (
+    _ALLOWED_MEMORY_PREFLIGHT_MODES,
     _calibration_key,
     _hardware_signature,
     _read_cache_entry,
     _recommendations,
+    _resolve_memory_preflight_policy,
     _write_cache_entry,
     estimate_memory_requirements,
+    resolve_memory_fit,
 )
 
 _REAL_ML_SMOKE = pytest.mark.skipif(
@@ -326,6 +329,113 @@ def test_estimate_cpu_device_always_fits(tmp_path):
         )
     assert estimate.device == "cpu"
     assert estimate.fits is True
+
+
+# --- memory_preflight policy (auto | always | cached | off) -----------------
+
+
+def test_resolve_memory_preflight_policy_defaults_to_off_when_unset():
+    """An existing project.json with no memory_preflight key must train
+    exactly as it always has -- this check did not exist at all before
+    this policy was added (estimate_memory_requirements was previously
+    only reachable from the TUI's manual button), so anything other than
+    "off" as the default would newly reject candidates a config never
+    opted into being rejected by."""
+    assert _resolve_memory_preflight_policy({}) == "off"
+
+
+def test_resolve_memory_preflight_policy_accepts_each_allowed_mode():
+    for mode in _ALLOWED_MEMORY_PREFLIGHT_MODES:
+        assert _resolve_memory_preflight_policy({"memory_preflight": mode}) == mode
+
+
+def test_resolve_memory_preflight_policy_is_case_insensitive():
+    assert _resolve_memory_preflight_policy({"memory_preflight": "ALWAYS"}) == "always"
+
+
+def test_resolve_memory_preflight_policy_rejects_unknown_values():
+    with pytest.raises(ValueError, match="memory_preflight"):
+        _resolve_memory_preflight_policy({"memory_preflight": "sometimes"})
+
+
+def test_resolve_memory_fit_off_returns_none_without_calling_the_worker(tmp_path):
+    with patch("chowder.memory_preflight._run_dry_run_worker") as mock_worker:
+        result = resolve_memory_fit(
+            resolved_config=_config(memory_preflight="off"), context=_context(), work_dir=tmp_path
+        )
+    mock_worker.assert_not_called()
+    assert result is None
+
+
+def test_resolve_memory_fit_always_ignores_an_existing_cache(tmp_path):
+    config = _config(memory_preflight="always")
+    context = _context()
+    with patch(
+        "chowder.memory_preflight._run_dry_run_worker", return_value=_fake_measured()
+    ) as mock_worker:
+        resolve_memory_fit(resolved_config=config, context=context, work_dir=tmp_path)
+        resolve_memory_fit(resolved_config=config, context=context, work_dir=tmp_path)
+    assert mock_worker.call_count == 2
+
+
+def test_resolve_memory_fit_cached_reuses_an_existing_cache(tmp_path):
+    config = _config(memory_preflight="cached")
+    context = _context()
+    with patch(
+        "chowder.memory_preflight._run_dry_run_worker", return_value=_fake_measured()
+    ) as mock_worker:
+        first = resolve_memory_fit(resolved_config=config, context=context, work_dir=tmp_path)
+        second = resolve_memory_fit(resolved_config=config, context=context, work_dir=tmp_path)
+    mock_worker.assert_called_once()
+    assert first is not None and first.from_cache is False
+    assert second is not None and second.from_cache is True
+
+
+def test_resolve_memory_fit_auto_trusts_a_cache_hit_with_comfortable_headroom(tmp_path):
+    """Cached estimate using well under the pressure threshold of
+    available VRAM -- auto must trust it, not pay for a fresh
+    measurement."""
+    config = _config(memory_preflight="auto", training={"batch_size": 1})
+    context = _context(_hardware(vram_gb=16.0, pools=(16.0,)))
+    with patch(
+        "chowder.memory_preflight._run_dry_run_worker",
+        return_value=_fake_measured(peak_vram_gb_bs1=1.0, peak_vram_gb_bs2=1.5),
+    ) as mock_worker:
+        first = resolve_memory_fit(resolved_config=config, context=context, work_dir=tmp_path)
+        second = resolve_memory_fit(resolved_config=config, context=context, work_dir=tmp_path)
+    mock_worker.assert_called_once()  # only the first call (the cache miss) ran the worker
+    assert first is not None and second is not None
+    assert second.from_cache is True
+
+
+def test_resolve_memory_fit_auto_refreshes_a_cache_hit_under_pressure(tmp_path):
+    """Cached estimate using nearly all of available VRAM -- auto must
+    not trust a possibly-stale number that close to the fit boundary,
+    and pays for a fresh measurement instead."""
+    config = _config(memory_preflight="auto", training={"batch_size": 1})
+    # available=16.0, estimated_peak=15.0 -> 15.0 / 16.0 = 93.75%, over the
+    # 90% pressure threshold.
+    context = _context(_hardware(vram_gb=16.0, pools=(16.0,)))
+    with patch(
+        "chowder.memory_preflight._run_dry_run_worker",
+        return_value=_fake_measured(peak_vram_gb_bs1=15.0, peak_vram_gb_bs2=15.0),
+    ) as mock_worker:
+        resolve_memory_fit(resolved_config=config, context=context, work_dir=tmp_path)
+        resolve_memory_fit(resolved_config=config, context=context, work_dir=tmp_path)
+    # First call: cache miss, real measurement. Second call: cache hit,
+    # but under pressure -- another real measurement, not trusted as-is.
+    assert mock_worker.call_count == 2
+
+
+def test_resolve_memory_fit_auto_measures_fresh_on_a_cache_miss(tmp_path):
+    config = _config(memory_preflight="auto")
+    context = _context()
+    with patch(
+        "chowder.memory_preflight._run_dry_run_worker", return_value=_fake_measured()
+    ) as mock_worker:
+        result = resolve_memory_fit(resolved_config=config, context=context, work_dir=tmp_path)
+    mock_worker.assert_called_once()
+    assert result is not None and result.from_cache is False
 
 
 # --- real end-to-end (actual model load + forward/backward in a subprocess) --
