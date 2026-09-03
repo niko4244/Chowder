@@ -85,6 +85,22 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
   is called at more than one point this module doesn't control), and a
   CPU-only CI gap (this mechanism genuinely requires CUDA, unlike
   `activation_offload`'s graceful no-op).
+- Phase 7E: adaptive placement policy — a first, deterministic, evidence-
+  based placement engine (`placement_policy.py`, PR #75). The real gap it
+  closes: activation_offload/optimizer_tiering/frozen_layer_streaming's
+  own `"auto"` modes each independently decide whether *that mechanism
+  alone* is worth enabling, never reasoning about combining them. `build_
+  placement_plan()` runs the three real experiments and searches all 2³
+  combinations for the cheapest one (fewest mechanisms, then lowest
+  worst-case penalty ratio) predicted to make a non-fitting recipe fit.
+  A real finding shaped the threshold logic: measured `vram_saved_gb` is
+  rarely exactly 0.0 even with no genuine benefit (allocator noise), so
+  a documented `_MEANINGFUL_SAVINGS_GB = 0.01` floor keeps negligible
+  "savings" from being folded into a combination. Deliberately
+  informational for this first slice, not yet auto-applied to
+  `spec.activation_offload`/etc. — wiring the plan to actually drive
+  those settings, and persisting it in a run's evidence for real
+  predicted-vs-actual comparison over time, are intentional follow-ups.
 
 **Telemetry/calibration — Priority 2 (single-GPU-verifiable slice complete)**
 - production-training timing breakdown — `_TrainingPhaseTimerCallback`
@@ -162,32 +178,29 @@ treated as fully proven:
 - `checkpoint_discovery.py` is real and tested, but solves *resume
   compatibility validation* for the TUI, not bisection — don't confuse it
   with "checkpoint bisect" under Research below.
+- **Adaptive placement policy (7E)** — real and merged, but deliberately
+  informational only: `build_placement_plan()`'s output does not yet
+  drive `spec.activation_offload`/`optimizer_tiering`/
+  `frozen_layer_streaming`, which keep resolving independently. Its
+  combined-effect estimate is additive (each mechanism's savings summed),
+  not a directly measured combined effect — no experiment here has run
+  two mechanisms simultaneously against each other.
 
 ## NEXT
 
-**Adaptive placement policy — 7E (Priority 1, final piece)**
-A deterministic, evidence-based placement engine using hardware topology,
-model/layer sizes, and the real telemetry 7B–7D now generate (all four now
-have real experiment + production data flowing into `RunRegistry` per run,
-per the persistence finding above). Not yet started. Real GPU↔GPU bandwidth
-data (deferred above) would sharpen this once available, but is not
-strictly required to begin: a first version can reason from the real
-per-mechanism telemetry already being persisted (peak VRAM saved, wall-time
-penalty ratios, bytes transferred) without it. Learned placement stays out
-of scope until enough real execution history exists — start deterministic/
-evidence-based.
+**Wire the placement plan to actually drive settings (Priority 1 follow-up)**
+`build_placement_plan()` (7E) currently only reports what it would
+recommend. Once enough real predicted-vs-actual comparisons exist (the
+plan is not yet persisted anywhere for that comparison to happen against),
+a natural next step is having "auto" mode on all three mechanisms defer to
+the combined plan instead of each deciding in isolation — but only after
+validating the additive-combination assumption against real measured
+combined runs, not before.
 
 **Multi-GPU telemetry (Priority 2, deferred slice)**
 Real GPU↔GPU bandwidth/topology measurement and PCIe/NVLink capability
 measurement — blocked on 2+ GPU hardware access (see above). Revisit if/when
 that access is arranged, the same way Phase 5's DDP acceptance was.
-
-**Memory preflight policy (Priority 3)**
-- `memory_preflight = auto | always | cached | off`, where `auto` uses
-  cached measurements whenever possible and only pays for a new real
-  dry-run when memory pressure or config novelty justifies it
-- DDP fit must stay per-rank/per-device, never compared against aggregate
-  GPU VRAM
 
 ## RESEARCH
 
