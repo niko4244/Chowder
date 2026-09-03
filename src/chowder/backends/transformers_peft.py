@@ -24,6 +24,7 @@ from ..run_events import TrainingProgressEvent
 
 
 _ALLOWED_QUANTIZATION = {"none", "4bit"}
+_ALLOWED_ACTIVATION_OFFLOAD_MODES = {"auto", "always", "off"}
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
 _ALLOWED_DATASET_FORMATS = {"text", "chat"}
 _ALLOWED_TARGET_PRESETS = {"auto", "attention_and_mlp"}
@@ -62,6 +63,36 @@ def _default_gradient_checkpointing(hardware: HardwareProfile | None) -> bool:
     Above it, off by default: forcing activation recomputation on hardware
     with real headroom only costs training speed for no benefit."""
     return _min_device_vram_gb(hardware) < _GRADIENT_CHECKPOINTING_VRAM_THRESHOLD_GB
+
+
+def _resolve_activation_offload_flag(training: Mapping[str, Any]) -> bool:
+    """Parse backend.training.activation_offload into the concrete boolean
+    TransformersPeftRunSpec carries. "always"/True -> True, "off"/False/
+    unset -> False. "auto" resolves to False *here* -- deciding "auto" for
+    real requires running the real activation-offload experiment
+    (chowder.activation_offload.run_activation_offload_experiment), which
+    is expensive (a real subprocess + model load) and must never happen
+    inside this cheap, pure config-parsing function: from_resolved_config
+    is called from many places that must stay cheap and side-effect-free
+    (checkpoint discovery building comparison specs, memory_preflight's
+    own dry-run spec construction, the offload/tiering experiments'
+    own spec construction -- an "auto" resolution triggering another real
+    experiment from inside spec-parsing would risk real recursion).
+    TransformersPeftExecutor.resolved_activation_offload is the one place
+    that actually runs the experiment for "auto" and substitutes a
+    concrete "always"/"off" into the config before spec construction, for
+    the real training path specifically.
+    """
+    raw = training.get("activation_offload", "off")
+    if isinstance(raw, bool):
+        return raw
+    value = str(raw).strip().lower()
+    if value not in _ALLOWED_ACTIVATION_OFFLOAD_MODES:
+        raise ValueError(
+            f"backend.training.activation_offload must be one of "
+            f"{sorted(_ALLOWED_ACTIVATION_OFFLOAD_MODES)} or a boolean, got {raw!r}"
+        )
+    return value == "always"
 
 
 def _default_quantization(hardware: HardwareProfile | None) -> str:
@@ -115,6 +146,7 @@ class TransformersPeftRunSpec:
     quantization: str = "none"
     precision: str = "auto"
     gradient_checkpointing: bool = True
+    activation_offload: bool = False
     seed: int = 1
     timeout_seconds: float | None = None
     trust_remote_code: bool = False
@@ -235,6 +267,16 @@ class TransformersPeftRunSpec:
         -- how often you checkpoint, which checkpoint you resume from, and
         whether the model was fetched from cache or network all produce the
         exact same trained result.
+
+        activation_offload is excluded for the same reason, but on a
+        stronger footing than "operational": torch.autograd.graph.
+        saved_tensors_hooks is explicitly designed to be value-transparent
+        -- it only changes *where* an intermediate tensor physically lives
+        between forward and backward, never what gets computed. Unlike
+        gradient_checkpointing (which changes the actual computation --
+        recomputation instead of caching -- and stays part of the recipe),
+        resuming a checkpoint with a different activation_offload setting
+        than it was saved under produces the identical result.
         """
         recipe = self.to_dict()
         recipe.pop("output_dir", None)
@@ -247,6 +289,7 @@ class TransformersPeftRunSpec:
         recipe.pop("save_steps", None)
         recipe.pop("save_total_limit", None)
         recipe.pop("resume_from_checkpoint", None)
+        recipe.pop("activation_offload", None)
         payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -365,6 +408,7 @@ class TransformersPeftRunSpec:
                 if "gradient_checkpointing" in training
                 else _default_gradient_checkpointing(hardware)
             ),
+            activation_offload=_resolve_activation_offload_flag(training),
             seed=int(config.get("seed", seed)),
             timeout_seconds=(
                 float(runtime["timeout_seconds"])
@@ -480,7 +524,11 @@ class TransformersPeftExecutor:
         legitimately recomputes the remaining LR-scheduler trajectory for a
         new total when resuming -- that is not a hazard to the optimizer
         state the way a changed learning rate, batch size, weight decay, LR
-        schedule shape, or dataset would be.
+        schedule shape, or dataset would be. ``activation_offload`` is
+        excluded for the same value-transparency reason as in
+        recipe_digest() -- resuming with a different offload setting (or a
+        different real "auto" recommendation on re-run) never invalidates
+        the optimizer state.
         """
         recipe = spec.to_dict()
         for key in (
@@ -496,6 +544,7 @@ class TransformersPeftExecutor:
             "resume_from_checkpoint",
             "epochs",
             "max_steps",
+            "activation_offload",
         ):
             recipe.pop(key, None)
         recipe_payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
@@ -607,6 +656,10 @@ class TransformersPeftExecutor:
         if spec.dataset_sha256 is None:
             spec = replace(spec, dataset_sha256=primary_sha)
 
+        resolved_offload = self.resolved_activation_offload(context)
+        if resolved_offload != spec.activation_offload:
+            spec = replace(spec, activation_offload=resolved_offload)
+
         if spec.replay_dataset is not None:
             self._verify_input(spec.replay_dataset, spec.replay_sha256, label="replay")
             if Path(spec.replay_dataset).resolve() == Path(spec.dataset).resolve():
@@ -648,6 +701,42 @@ class TransformersPeftExecutor:
         if isinstance(backend, Mapping) and "quantization" in backend:
             return str(backend["quantization"]).lower()
         return _default_quantization(context.hardware)
+
+    @staticmethod
+    def resolved_activation_offload(context: ExecutionContext) -> bool:
+        """The activation_offload value this executor will actually train
+        with. "always"/"off"/an explicit boolean resolve directly, with no
+        extra cost, matching _resolve_activation_offload_flag exactly.
+        "auto" is resolved for real here (unlike inside
+        TransformersPeftRunSpec.from_resolved_config, which must stay
+        cheap and side-effect-free -- see _resolve_activation_offload_flag)
+        by running the real, cached activation-offload experiment and
+        using its `recommended` verdict: only promote offload
+        automatically when it's required to fit or empirically
+        worthwhile, never as a blanket default.
+        """
+        config = context.resolved_config
+        backend = config.get("backend", {}) if isinstance(config, Mapping) else {}
+        training = backend.get("training", {}) if isinstance(backend, Mapping) else {}
+        raw = training.get("activation_offload", "off") if isinstance(training, Mapping) else "off"
+        if isinstance(raw, bool):
+            return raw
+        value = str(raw).strip().lower()
+        if value == "always":
+            return True
+        if value == "off":
+            return False
+        if value != "auto":
+            raise ValueError(
+                f"backend.training.activation_offload must be one of "
+                f"{sorted(_ALLOWED_ACTIVATION_OFFLOAD_MODES)} or a boolean, got {raw!r}"
+            )
+        from ..activation_offload import run_activation_offload_experiment
+
+        experiment = run_activation_offload_experiment(
+            resolved_config=config, context=context, work_dir=context.work_dir
+        )
+        return experiment.recommended
 
     def profile(self, experiment: Experiment, context: ExecutionContext) -> CostEstimate:
         config = context.resolved_config
@@ -797,6 +886,77 @@ class TransformersPeftExecutor:
             "min_device_vram_gb": _min_device_vram_gb(context.hardware),
             "quantization_defaulted": "quantization" not in backend,
             "gradient_checkpointing_defaulted": "gradient_checkpointing" not in training,
+            "activation_offload_mode": str(training.get("activation_offload", "off")),
+        }
+
+    @staticmethod
+    def _activation_offload_evidence(
+        *, spec: "TransformersPeftRunSpec", context: ExecutionContext, telemetry: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Predicted vs. actual, when there is a real prediction to compare
+        against: only when the config said "auto" did a real experiment
+        actually run a decision through -- for "always"/"off" there is no
+        prediction, just the explicit choice. Re-fetches the experiment
+        (a cache hit, since resolved_activation_offload already ran it
+        once for this same model+recipe+hardware+batch_size during
+        _spec_for) rather than threading the object through -- cheap, and
+        keeps resolved_activation_offload's own return type a plain bool.
+
+        "actual" is intentionally not a single like-for-like number against
+        the experiment's single-step prediction: a full training run's
+        wall-clock includes data loading, checkpointing, and logging
+        overhead the experiment's isolated forward+backward+step does not.
+        Reporting both the real measured peak VRAM and the real average
+        per-step time lets a caller judge the comparison themselves rather
+        than this method collapsing it into one possibly-misleading ratio.
+        """
+        backend = context.resolved_config.get("backend", {})
+        backend = backend if isinstance(backend, Mapping) else {}
+        training = backend.get("training", {})
+        training = training if isinstance(training, Mapping) else {}
+        mode = str(training.get("activation_offload", "off")).strip().lower()
+
+        global_step = telemetry.get("global_step")
+        train_runtime_seconds = telemetry.get("train_runtime_seconds")
+        actual: dict[str, Any] = {
+            "actual_peak_vram_gb": telemetry.get("peak_vram_gb"),
+            "actual_avg_step_seconds": (
+                float(train_runtime_seconds) / global_step
+                if isinstance(global_step, int) and global_step > 0
+                and isinstance(train_runtime_seconds, (int, float))
+                else None
+            ),
+            # Real transfer pressure: every byte the pack/unpack hooks
+            # actually moved between device and host during this real run
+            # (see transformers_worker.train's activation_offload_bytes_
+            # transferred) -- None when offload wasn't active, since there
+            # is nothing to report, not because it was zero.
+            "actual_bytes_transferred": telemetry.get("activation_offload_bytes_transferred"),
+        }
+        if mode != "auto" or isinstance(training.get("activation_offload"), bool):
+            return {"mode": mode, "resolved": spec.activation_offload, **actual}
+
+        from ..activation_offload import run_activation_offload_experiment
+
+        try:
+            experiment = run_activation_offload_experiment(
+                resolved_config=context.resolved_config, context=context, work_dir=context.work_dir
+            )
+        except Exception:
+            # Evidence is best-effort: a cache-read hiccup here must never
+            # fail an otherwise-successful training run.
+            return {"mode": mode, "resolved": spec.activation_offload, **actual}
+        return {
+            "mode": mode,
+            "resolved": spec.activation_offload,
+            "predicted_available": experiment.available,
+            "predicted_required": experiment.required,
+            "predicted_recommended": experiment.recommended,
+            "predicted_baseline_peak_vram_gb": experiment.baseline_peak_vram_gb,
+            "predicted_offload_peak_vram_gb": experiment.offload_peak_vram_gb,
+            "predicted_vram_saved_gb": experiment.vram_saved_gb,
+            "predicted_wall_time_penalty_ratio": experiment.wall_time_penalty_ratio,
+            **actual,
         }
 
     def run(self, experiment: Experiment, context: ExecutionContext) -> TrainingArtifact:
@@ -805,6 +965,22 @@ class TransformersPeftExecutor:
         run_dir.mkdir(parents=True, exist_ok=False)
         hardware_defaults = self._hardware_aware_defaults_report(context)
         spec = self._spec_for(experiment, context, run_dir=run_dir)
+        active_accelerator_count = self._active_accelerator_count(context)
+        if spec.activation_offload and active_accelerator_count > 1:
+            # Explicit safe rejection, not silent best-effort: saved_tensors_
+            # hooks is a per-process autograd context, and wrapping each
+            # accelerate-launch rank's own trainer.train() call in it
+            # *should* apply independently with no cross-rank interaction --
+            # but that reasoning has not been proven on real multi-GPU
+            # hardware (this codebase's own established discipline, per the
+            # Phase 5 DDP acceptance work, is that unverified multi-GPU
+            # claims do not ship as if proven). Reject clearly rather than
+            # risk a real, currently-unverified DDP interaction.
+            raise ValueError(
+                "activation_offload is not yet verified safe under multi-GPU DDP "
+                f"(active_accelerator_count={active_accelerator_count}); set "
+                "backend.training.activation_offload to 'off' for multi-GPU runs"
+            )
 
         bound_inputs = self._bound_inputs(spec)
         if spec.resume_from_checkpoint is not None:
@@ -818,7 +994,6 @@ class TransformersPeftExecutor:
         stderr_path = run_dir / "stderr.log"
         spec_path.write_text(spec.canonical_json() + "\n", encoding="utf-8")
 
-        active_accelerator_count = self._active_accelerator_count(context)
         command = self._worker_command(
             spec_path, result_path, active_accelerator_count=active_accelerator_count
         )
@@ -924,6 +1099,9 @@ class TransformersPeftExecutor:
                 "actually engage every requested device; do not trust this run's "
                 "GPU-hour accounting"
             )
+        activation_offload_evidence = self._activation_offload_evidence(
+            spec=spec, context=context, telemetry=telemetry
+        )
         return TrainingArtifact(
             run_id=run_id,
             experiment_id=experiment.experiment_id,
@@ -963,7 +1141,9 @@ class TransformersPeftExecutor:
                     **hardware_defaults,
                     "resolved_quantization": spec.quantization,
                     "resolved_gradient_checkpointing": spec.gradient_checkpointing,
+                    "resolved_activation_offload": spec.activation_offload,
                 },
+                "activation_offload": activation_offload_evidence,
                 "checkpoint": {
                     "save_strategy": spec.save_strategy,
                     "save_steps": spec.save_steps,

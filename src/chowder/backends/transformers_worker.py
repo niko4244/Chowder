@@ -543,7 +543,43 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         callbacks=[_ProgressReportingCallback(output_dir / "progress.json", started)],
     )
 
-    train_output = trainer.train(resume_from_checkpoint=spec.resume_from_checkpoint)
+    activation_offload_bytes_transferred: int | None = None
+    if spec.activation_offload:
+        # Nested (not module-level) for the same reason _ProgressReporting
+        # Callback is: torch is only importable after the lazy import at
+        # the top of this function, so these close over the local `torch`
+        # rather than needing a second import at module scope. Identical
+        # mechanism to the one proven in
+        # activation_offload_worker.run_experiment -- moves a tensor to
+        # CPU when it's saved for backward, and back to its original
+        # device when backward actually needs it. Value-transparent: the
+        # computed values are identical either way, only where the
+        # intermediate tensor physically lives changes (see
+        # TransformersPeftRunSpec.recipe_digest's docstring for why this
+        # is excluded from checkpoint-compatibility).
+        activation_offload_bytes_transferred = 0
+
+        def _activation_offload_pack(tensor: Any) -> Any:
+            nonlocal activation_offload_bytes_transferred
+            if not tensor.is_cuda:
+                return tensor
+            activation_offload_bytes_transferred += tensor.numel() * tensor.element_size()
+            return (tensor.device, tensor.to("cpu", non_blocking=True))
+
+        def _activation_offload_unpack(packed: Any) -> Any:
+            nonlocal activation_offload_bytes_transferred
+            if not isinstance(packed, tuple):
+                return packed
+            original_device, cpu_tensor = packed
+            activation_offload_bytes_transferred += cpu_tensor.numel() * cpu_tensor.element_size()
+            return cpu_tensor.to(original_device, non_blocking=True)
+
+        with torch.autograd.graph.saved_tensors_hooks(
+            _activation_offload_pack, _activation_offload_unpack
+        ):
+            train_output = trainer.train(resume_from_checkpoint=spec.resume_from_checkpoint)
+    else:
+        train_output = trainer.train(resume_from_checkpoint=spec.resume_from_checkpoint)
     runtime = time.perf_counter() - started
 
     # Under multi-GPU DDP (accelerate launch spawns active_accelerator_count
@@ -600,6 +636,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "global_step": int(trainer.state.global_step),
             "train_runtime_seconds": float(runtime),
             "peak_vram_gb": float(peak_vram_gb),
+            "activation_offload_bytes_transferred": activation_offload_bytes_transferred,
             "primary_rows": primary_rows,
             "replay_selected_rows": replay_selected_rows,
             "training_rows": len(dataset),
