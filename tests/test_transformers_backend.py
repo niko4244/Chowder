@@ -3,15 +3,18 @@ import os
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from chowder.backends.transformers_peft import (
     TransformersPeftExecutor,
     TransformersPeftRunSpec,
+    _ALLOWED_ACTIVATION_OFFLOAD_MODES,
     _default_gradient_checkpointing,
     _default_quantization,
     _min_device_vram_gb,
+    _resolve_activation_offload_flag,
 )
 from chowder.backends.transformers_worker import (
     _build_chat_example,
@@ -912,6 +915,298 @@ def test_resume_allows_a_different_offline_value(tmp_path, monkeypatch):
     assert artifact is not None
 
 
+# --- activation offload (production wiring) ---------------------------------
+
+
+def test_resolve_activation_offload_flag_defaults_to_off_when_unset():
+    """Absent entirely -- not "auto" -- must resolve to off: an existing
+    project.json with no activation_offload key must train exactly as it
+    always has, never suddenly pay for a real experiment subprocess."""
+    assert _resolve_activation_offload_flag({}) is False
+
+
+def test_resolve_activation_offload_flag_always_resolves_true():
+    assert _resolve_activation_offload_flag({"activation_offload": "always"}) is True
+
+
+def test_resolve_activation_offload_flag_off_resolves_false():
+    assert _resolve_activation_offload_flag({"activation_offload": "off"}) is False
+
+
+def test_resolve_activation_offload_flag_auto_resolves_false_here():
+    """"auto" reached directly (not through
+    TransformersPeftExecutor.resolved_activation_offload) must resolve to
+    False, never trigger a real experiment -- this function is called from
+    checkpoint discovery, memory_preflight's own spec construction, and
+    the offload/tiering experiments' own spec construction, all of which
+    must stay cheap and side-effect-free."""
+    assert _resolve_activation_offload_flag({"activation_offload": "auto"}) is False
+
+
+def test_resolve_activation_offload_flag_accepts_a_plain_boolean():
+    assert _resolve_activation_offload_flag({"activation_offload": True}) is True
+    assert _resolve_activation_offload_flag({"activation_offload": False}) is False
+
+
+def test_resolve_activation_offload_flag_rejects_unknown_values():
+    with pytest.raises(ValueError, match="activation_offload"):
+        _resolve_activation_offload_flag({"activation_offload": "sometimes"})
+
+
+def test_allowed_activation_offload_modes_is_the_documented_set():
+    assert _ALLOWED_ACTIVATION_OFFLOAD_MODES == {"auto", "always", "off"}
+
+
+def test_recipe_digest_is_stable_across_activation_offload_setting(tmp_path):
+    """Value-transparent -- saved_tensors_hooks changes only where an
+    intermediate tensor physically lives, never what gets computed -- so
+    unlike gradient_checkpointing (which changes the actual computation),
+    activation_offload must not be part of the recipe digest."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["activation_offload"] = "off"
+    a = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    config["backend"]["training"]["activation_offload"] = "always"
+    b = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert a.activation_offload != b.activation_offload
+    assert a.recipe_digest() == b.recipe_digest()
+
+
+def test_resume_allows_a_different_activation_offload_setting(tmp_path, monkeypatch):
+    """Same exclusion, exercised through the actual checkpoint bound-inputs
+    check TransformersPeftExecutor.run() performs before resuming -- a
+    checkpoint saved under one offload setting must resume cleanly under a
+    different one."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    config["backend"]["training"]["activation_offload"] = "always"
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    config["backend"]["training"]["activation_offload"] = "off"
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact is not None
+    assert observed_spec["activation_offload"] is False
+
+
+def test_resolved_activation_offload_returns_true_for_always():
+    config = {"backend": {"training": {"activation_offload": "always"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    assert TransformersPeftExecutor.resolved_activation_offload(context) is True
+
+
+def test_resolved_activation_offload_returns_false_for_off():
+    config = {"backend": {"training": {"activation_offload": "off"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    assert TransformersPeftExecutor.resolved_activation_offload(context) is False
+
+
+def test_resolved_activation_offload_defaults_to_false_when_unset():
+    config = {"backend": {"training": {}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    assert TransformersPeftExecutor.resolved_activation_offload(context) is False
+
+
+def test_resolved_activation_offload_rejects_unknown_string():
+    config = {"backend": {"training": {"activation_offload": "sometimes"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    with pytest.raises(ValueError, match="activation_offload"):
+        TransformersPeftExecutor.resolved_activation_offload(context)
+
+
+def _fake_offload_experiment(recommended: bool, **overrides):
+    from chowder.activation_offload import ActivationOffloadExperiment
+
+    fields = dict(
+        device="cuda", available=True, batch_size=2, max_length=64,
+        baseline_peak_vram_gb=1.0, offload_peak_vram_gb=0.8, vram_saved_gb=0.2,
+        baseline_wall_seconds=0.1, offload_wall_seconds=0.12,
+        wall_time_penalty_ratio=1.2, per_rank_available_gb=16.0,
+        required=False, recommended=recommended,
+    )
+    fields.update(overrides)
+    return ActivationOffloadExperiment(**fields)
+
+
+def test_resolved_activation_offload_auto_uses_the_real_experiments_recommendation():
+    config = {"backend": {"training": {"activation_offload": "auto"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    with patch(
+        "chowder.activation_offload.run_activation_offload_experiment",
+        return_value=_fake_offload_experiment(recommended=True),
+    ) as mock_experiment:
+        result = TransformersPeftExecutor.resolved_activation_offload(context)
+    mock_experiment.assert_called_once()
+    assert result is True
+
+
+def test_resolved_activation_offload_auto_declines_when_not_recommended():
+    config = {"backend": {"training": {"activation_offload": "auto"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    with patch(
+        "chowder.activation_offload.run_activation_offload_experiment",
+        return_value=_fake_offload_experiment(recommended=False),
+    ):
+        result = TransformersPeftExecutor.resolved_activation_offload(context)
+    assert result is False
+
+
+def test_run_rejects_activation_offload_under_multi_gpu_ddp(tmp_path):
+    """Explicit safe rejection, not silent best-effort: saved_tensors_hooks
+    under DDP has not been proven safe on real multi-GPU hardware, so this
+    combination must fail clearly and *before* any subprocess spawns --
+    never train with an unverified interaction just because nothing
+    crashed locally."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["activation_offload"] = "always"
+    config["backend"]["runtime"] = {"active_accelerator_count": 2}
+    hardware = HardwareProfile(16, 64, 500, 12, 40, 3, accelerator_vram_gb=(16.0, 6.0))
+    context = ExecutionContext(hardware, str(tmp_path), 1, resolved_config=config)
+
+    def should_not_spawn(*args, **kwargs):
+        raise AssertionError("must reject before spawning any subprocess")
+
+    with patch("chowder.backends.transformers_peft.subprocess.Popen", should_not_spawn):
+        with pytest.raises(ValueError, match="multi-GPU DDP"):
+            TransformersPeftExecutor().run(_experiment(), context)
+
+
+def test_run_allows_activation_offload_off_under_multi_gpu_ddp(tmp_path, monkeypatch):
+    """The rejection is specifically about offload being *active* under
+    DDP -- off (the default) must never be rejected just because
+    active_accelerator_count > 1."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["activation_offload"] = "off"
+    config["backend"]["runtime"] = {"active_accelerator_count": 2}
+    hardware = HardwareProfile(16, 64, 500, 12, 40, 3, accelerator_vram_gb=(16.0, 6.0))
+    context = ExecutionContext(hardware, str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            spec_path = Path(command[command.index("--spec") + 1])
+            result_path = Path(command[command.index("--result") + 1])
+            spec = json.loads(spec_path.read_text())
+            observed_spec.update(spec)
+            output = Path(spec["output_dir"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "adapter_model.safetensors").write_bytes(b"adapter")
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "telemetry": {"train_loss": 0.25, "global_step": 3},
+                        "versions": {"transformers": "5.test"},
+                        "provenance": {"resolved_model_commit": "abc123"},
+                        "data_provenance": {"primary_rows": 1, "replay_selected_rows": 0},
+                        "resource_usage": {
+                            "active_accelerator_count": 2,
+                            "visible_accelerator_count": 2,
+                            "peak_vram_gb_by_accelerator": {"cuda:0": 1.0, "cuda:1": 0.9},
+                        },
+                    }
+                )
+            )
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr("chowder.backends.transformers_peft.subprocess.Popen", FakeProcess)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact is not None
+    assert observed_spec["activation_offload"] is False
+
+
+def test_evidence_records_activation_offload_mode_and_resolution_for_always(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["activation_offload"] = "always"
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact.evidence["hardware_aware_defaults"]["resolved_activation_offload"] is True
+    offload_evidence = artifact.evidence["activation_offload"]
+    assert offload_evidence["mode"] == "always"
+    assert offload_evidence["resolved"] is True
+    # "always" is an explicit choice, not an experiment-driven decision --
+    # there is no prediction to report.
+    assert "predicted_recommended" not in offload_evidence
+
+
+def test_evidence_records_predicted_vs_actual_for_auto(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["activation_offload"] = "auto"
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    with patch(
+        "chowder.activation_offload.run_activation_offload_experiment",
+        return_value=_fake_offload_experiment(recommended=True),
+    ):
+        artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert observed_spec["activation_offload"] is True
+    offload_evidence = artifact.evidence["activation_offload"]
+    assert offload_evidence["mode"] == "auto"
+    assert offload_evidence["resolved"] is True
+    assert offload_evidence["predicted_recommended"] is True
+    assert offload_evidence["predicted_vram_saved_gb"] == pytest.approx(0.2)
+    # The fake worker result in _fake_process_factory carries no
+    # peak_vram_gb/train_runtime_seconds/activation_offload_bytes_
+    # transferred -- confirms the "actual" fields degrade to None rather
+    # than raising when that telemetry is absent.
+    assert offload_evidence["actual_peak_vram_gb"] is None
+    assert offload_evidence["actual_avg_step_seconds"] is None
+    assert offload_evidence["actual_bytes_transferred"] is None
+
+
 # --- checkpoint/restart -----------------------------------------------------
 
 
@@ -1556,6 +1851,145 @@ def test_real_tiny_llama_resumes_training_from_a_real_checkpoint(tmp_path):
     assert second.evidence["checkpoint"]["resumed_from_checkpoint"] == str(
         checkpoints[-1].resolve()
     )
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_trains_with_activation_offload_always(tmp_path):
+    """Prove activation_offload actually wraps a real Trainer.train() call
+    in torch.autograd.graph.saved_tensors_hooks without breaking training
+    -- a mocked subprocess test cannot catch a real interaction between
+    the hooks and PEFT/Trainer's own autograd usage."""
+    data = tmp_path / "train.jsonl"
+    rows = [
+        {"text": "Question: What token comes after alpha? Answer: beta"},
+        {"text": "Question: What token comes after red? Answer: blue"},
+    ]
+    data.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    config = _config(str(data))
+    config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    config["backend"]["precision"] = "fp32"
+    config["backend"]["quantization"] = "none"
+    config["backend"]["lora"] = {
+        "r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj", "v_proj"],
+    }
+    config["backend"]["training"] = {
+        "epochs": 1.0, "learning_rate": 0.001, "batch_size": 1,
+        "gradient_accumulation_steps": 1, "logging_steps": 1,
+        "gradient_checkpointing": False, "activation_offload": "always",
+    }
+    config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact.telemetry["global_step"] > 0
+    assert artifact.evidence["hardware_aware_defaults"]["resolved_activation_offload"] is True
+    offload_evidence = artifact.evidence["activation_offload"]
+    assert offload_evidence["mode"] == "always"
+    assert offload_evidence["resolved"] is True
+    assert offload_evidence["actual_avg_step_seconds"] is not None
+    # Real transfer pressure: the pack/unpack hooks genuinely moved bytes
+    # between device and host during this real training run.
+    assert offload_evidence["actual_bytes_transferred"] > 0
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_activation_offload_auto_declines_for_negligible_pressure(tmp_path):
+    """A real "auto" run against a tiny model must run the real
+    activation-offload experiment and correctly decline it -- matching
+    the experiment's own established finding for this exact model
+    (negligible VRAM savings, a real measured wall-time penalty). This is
+    the "only enable automatically when required or empirically
+    worthwhile" requirement proven end to end, not just at the
+    experiment-module level."""
+    data = tmp_path / "train.jsonl"
+    rows = [
+        {"text": "Question: What token comes after alpha? Answer: beta"},
+        {"text": "Question: What token comes after red? Answer: blue"},
+    ]
+    data.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    config = _config(str(data))
+    config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    config["backend"]["precision"] = "fp32"
+    config["backend"]["quantization"] = "none"
+    config["backend"]["lora"] = {
+        "r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj", "v_proj"],
+    }
+    config["backend"]["training"] = {
+        "epochs": 1.0, "learning_rate": 0.001, "batch_size": 1,
+        "gradient_accumulation_steps": 1, "logging_steps": 1,
+        "gradient_checkpointing": False, "activation_offload": "auto",
+    }
+    config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact.telemetry["global_step"] > 0
+    assert artifact.evidence["hardware_aware_defaults"]["resolved_activation_offload"] is False
+    offload_evidence = artifact.evidence["activation_offload"]
+    assert offload_evidence["mode"] == "auto"
+    assert offload_evidence["resolved"] is False
+    assert offload_evidence["predicted_available"] is True
+    assert offload_evidence["predicted_recommended"] is False
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_resumes_across_a_different_activation_offload_setting(tmp_path):
+    """The recipe-digest/bound-inputs exclusion proven at the unit level
+    against a real checkpoint: training under activation_offload=always,
+    then resuming the same checkpoint under activation_offload=off, must
+    succeed against real Trainer/optimizer-state machinery."""
+    data = tmp_path / "train.jsonl"
+    rows = [
+        {"text": "Question: What token comes after alpha? Answer: beta"},
+        {"text": "Question: What token comes after red? Answer: blue"},
+        {"text": "Question: What token comes after one? Answer: two"},
+        {"text": "Question: What token comes after up? Answer: down"},
+    ]
+    data.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    base_config = _config(str(data))
+    base_config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    base_config["backend"]["precision"] = "fp32"
+    base_config["backend"]["quantization"] = "none"
+    base_config["backend"]["lora"] = {
+        "r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj", "v_proj"],
+    }
+    base_config["backend"]["training"] = {
+        "epochs": 1.0, "learning_rate": 0.001, "batch_size": 1,
+        "gradient_accumulation_steps": 1, "logging_steps": 1,
+        "gradient_checkpointing": False, "activation_offload": "always",
+        "save_strategy": "steps", "save_steps": 1,
+    }
+    base_config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=base_config)
+    first = TransformersPeftExecutor().run(_experiment(), context)
+    trainer_dir = Path(first.artifact_ref) / "trainer"
+    checkpoints = sorted(
+        (p for p in trainer_dir.glob("checkpoint-*") if p.is_dir()),
+        key=lambda p: int(p.name.rsplit("-", 1)[1]),
+    )
+    assert checkpoints, "no checkpoints were written by the first run"
+
+    resume_config = json.loads(json.dumps(base_config))
+    resume_config["backend"]["resume_from_checkpoint"] = str(checkpoints[-1])
+    resume_config["backend"]["training"]["activation_offload"] = "off"
+    resume_context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=resume_config)
+
+    second = TransformersPeftExecutor().run(_experiment(), resume_context)
+    assert second.telemetry["global_step"] >= first.telemetry["global_step"]
+    assert second.evidence["hardware_aware_defaults"]["resolved_activation_offload"] is False
 
 
 @pytest.mark.skipif(
