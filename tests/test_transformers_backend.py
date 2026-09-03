@@ -18,6 +18,7 @@ from chowder.backends.transformers_peft import (
     _default_quantization,
     _min_device_vram_gb,
     _resolve_activation_offload_flag,
+    _resolve_detailed_timing_telemetry_flag,
     _resolve_frozen_layer_streaming_flag,
     _resolve_optimizer_tiering_flag,
 )
@@ -1788,6 +1789,154 @@ def test_evidence_records_predicted_vs_actual_for_frozen_layer_streaming_auto(tm
     assert streaming_evidence["actual_bytes_transferred"] is None
 
 
+# --- production timing telemetry ----------------------------------------------
+
+
+def test_resolve_detailed_timing_telemetry_flag_defaults_to_false_when_unset():
+    assert _resolve_detailed_timing_telemetry_flag({}) is False
+
+
+def test_resolve_detailed_timing_telemetry_flag_accepts_a_plain_boolean():
+    assert _resolve_detailed_timing_telemetry_flag({"detailed_timing_telemetry": True}) is True
+    assert _resolve_detailed_timing_telemetry_flag({"detailed_timing_telemetry": False}) is False
+
+
+def test_resolve_detailed_timing_telemetry_flag_accepts_string_booleans():
+    assert _resolve_detailed_timing_telemetry_flag({"detailed_timing_telemetry": "true"}) is True
+    assert _resolve_detailed_timing_telemetry_flag({"detailed_timing_telemetry": "false"}) is False
+
+
+def test_resolve_detailed_timing_telemetry_flag_rejects_unknown_values():
+    with pytest.raises(ValueError, match="detailed_timing_telemetry"):
+        _resolve_detailed_timing_telemetry_flag({"detailed_timing_telemetry": "sometimes"})
+
+
+def test_recipe_digest_is_stable_across_detailed_timing_telemetry_setting(tmp_path):
+    """Pure observation -- wrapping timing around calls that already
+    happen changes nothing about what gets computed, so this must not be
+    part of the recipe digest."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["detailed_timing_telemetry"] = False
+    a = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    config["backend"]["training"]["detailed_timing_telemetry"] = True
+    b = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert a.detailed_timing_telemetry != b.detailed_timing_telemetry
+    assert a.recipe_digest() == b.recipe_digest()
+
+
+def test_resume_allows_a_different_detailed_timing_telemetry_setting(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    config["backend"]["training"]["detailed_timing_telemetry"] = True
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    config["backend"]["training"]["detailed_timing_telemetry"] = False
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact is not None
+    assert observed_spec["detailed_timing_telemetry"] is False
+
+
+def test_evidence_reports_disabled_when_detailed_timing_telemetry_is_off(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact.evidence["hardware_aware_defaults"]["detailed_timing_telemetry_enabled"] is False
+    assert artifact.evidence["production_timing"] == {"enabled": False}
+
+
+def test_evidence_reports_real_phase_timing_when_enabled(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    config["backend"]["training"]["detailed_timing_telemetry"] = True
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            spec_path = Path(command[command.index("--spec") + 1])
+            result_path = Path(command[command.index("--result") + 1])
+            spec = json.loads(spec_path.read_text())
+            observed_spec.update(spec)
+            output = Path(spec["output_dir"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "adapter_model.safetensors").write_bytes(b"adapter")
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "telemetry": {
+                            "train_loss": 0.25, "global_step": 3,
+                            "train_runtime_seconds": 1.0,
+                            "forward_seconds": 0.5, "backward_seconds": 0.3,
+                            "optimizer_seconds": 0.1, "avg_gpu_utilization_percent": 42.5,
+                        },
+                        "versions": {"transformers": "5.test"},
+                        "provenance": {"resolved_model_commit": "abc123"},
+                        "data_provenance": {"primary_rows": 1, "replay_selected_rows": 0},
+                    }
+                )
+            )
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr("chowder.backends.transformers_peft.subprocess.Popen", FakeProcess)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert observed_spec["detailed_timing_telemetry"] is True
+    timing_evidence = artifact.evidence["production_timing"]
+    assert timing_evidence["enabled"] is True
+    assert timing_evidence["forward_seconds"] == 0.5
+    assert timing_evidence["backward_seconds"] == 0.3
+    assert timing_evidence["optimizer_seconds"] == 0.1
+    # 1.0 (total) - 0.5 - 0.3 - 0.1 = 0.1, the honest residual bucket.
+    assert timing_evidence["data_loading_and_overhead_seconds"] == pytest.approx(0.1)
+    assert timing_evidence["avg_gpu_utilization_percent"] == 42.5
+
+
 # --- checkpoint/restart -----------------------------------------------------
 
 
@@ -2908,6 +3057,59 @@ def test_real_tiny_llama_resumes_across_a_different_frozen_layer_streaming_setti
     second = TransformersPeftExecutor().run(_experiment(), resume_context)
     assert second.telemetry["global_step"] >= first.telemetry["global_step"]
     assert second.evidence["hardware_aware_defaults"]["resolved_frozen_layer_streaming"] is False
+
+
+@pytest.mark.skipif(
+    os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
+    reason="real ML smoke requires CHOWDER_REAL_ML_SMOKE=1 and train dependencies",
+)
+def test_real_tiny_llama_trains_with_detailed_timing_telemetry(tmp_path):
+    """Prove detailed_timing_telemetry actually wraps the real Trainer's
+    compute_loss/accelerator.backward/optimizer.step calls and produces
+    real, non-zero per-phase timing -- a mocked subprocess test cannot
+    catch a real interaction with Trainer's own internals. Deliberately
+    does NOT skip on CPU-only hardware (unlike frozen_layer_streaming):
+    forward/backward/optimizer wall-clock timing is meaningful on CPU
+    too (torch.cuda.synchronize() is skipped there, which is correct --
+    CPU ops are already synchronous); only avg_gpu_utilization_percent
+    is allowed to degrade to None without CUDA."""
+    data = tmp_path / "train.jsonl"
+    rows = [
+        {"text": "Question: What token comes after alpha? Answer: beta"},
+        {"text": "Question: What token comes after red? Answer: blue"},
+    ]
+    data.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    config = _config(str(data))
+    config["backend"]["base_model"] = "trl-internal-testing/tiny-LlamaForCausalLM-3.2"
+    config["backend"]["precision"] = "fp32"
+    config["backend"]["quantization"] = "none"
+    config["backend"]["lora"] = {
+        "r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj", "v_proj"],
+    }
+    config["backend"]["training"] = {
+        "epochs": 1.0, "learning_rate": 0.001, "batch_size": 1,
+        "gradient_accumulation_steps": 1, "logging_steps": 1,
+        "gradient_checkpointing": False, "detailed_timing_telemetry": True,
+    }
+    config["backend"]["runtime"] = {"timeout_seconds": 180.0}
+
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact.telemetry["global_step"] > 0
+    assert artifact.evidence["hardware_aware_defaults"]["detailed_timing_telemetry_enabled"] is True
+    timing_evidence = artifact.evidence["production_timing"]
+    assert timing_evidence["enabled"] is True
+    assert timing_evidence["forward_seconds"] > 0
+    assert timing_evidence["backward_seconds"] > 0
+    assert timing_evidence["optimizer_seconds"] > 0
+    assert timing_evidence["data_loading_and_overhead_seconds"] >= 0
+    # avg_gpu_utilization_percent is real when CUDA is present, and
+    # honestly None (not a crash) otherwise -- both are correct.
+    import torch
+
+    if torch.cuda.is_available():
+        assert timing_evidence["avg_gpu_utilization_percent"] is not None
 
 
 @pytest.mark.skipif(

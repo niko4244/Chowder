@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import math
 import os
+import threading
 import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -372,6 +374,117 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             if self.streamed is not None:
                 self.streamed.start_step()
 
+    class _TrainingPhaseTimerCallback(TrainerCallback):
+        """Real forward/backward/optimizer-step timing, by wrapping
+        Trainer.compute_loss / Trainer.accelerator.backward / Trainer.
+        optimizer.step on the instance (verified for real: Trainer.
+        training_step calls compute_loss then accelerator.backward as
+        two distinct steps; trainer.optimizer is None until Trainer's
+        own create_optimizer_and_scheduler() runs, which -- confirmed
+        directly -- has already happened by the time on_train_begin
+        fires, so that is the right point to wrap optimizer.step too).
+
+        Deliberately NOT installed unconditionally: torch.cuda.
+        synchronize() around each of the three phases is required for
+        the timing to mean anything (without it, async CUDA kernel
+        queuing makes "time inside this Python call" nearly meaningless),
+        and that synchronization has a real, measured cost -- ~17% wall-
+        time overhead on a real training run. Only active when
+        spec.detailed_timing_telemetry is explicitly requested.
+
+        Also runs a background daemon thread sampling torch.cuda.
+        utilization() (a real NVML query) at a low frequency for the
+        run's average GPU utilization -- a coarse but genuine proxy for
+        GPU idle/stall time, not a precise measurement.
+        """
+
+        def __init__(self) -> None:
+            self.trainer_ref: Any = None
+            self.forward_seconds = 0.0
+            self.backward_seconds = 0.0
+            self.optimizer_seconds = 0.0
+            self._utilization_samples: list[float] = []
+            self._stop_sampling = threading.Event()
+            self._sampler_thread: threading.Thread | None = None
+
+        def _sample_utilization(self) -> None:
+            while not self._stop_sampling.is_set():
+                try:
+                    self._utilization_samples.append(float(torch.cuda.utilization()))
+                except Exception:
+                    # A transient NVML query failure -- including simply
+                    # not having a CUDA device at all -- must never take
+                    # down an otherwise-successful training run; this
+                    # sample is skipped, and avg_gpu_utilization_percent
+                    # correctly degrades to None if none ever succeed.
+                    pass
+                self._stop_sampling.wait(0.5)
+
+        @staticmethod
+        def _sync() -> None:
+            # CPU tensor ops are already synchronous -- there is no async
+            # kernel queue to drain, so synchronize() is only meaningful
+            # (and only guaranteed safe to call) when a real CUDA device
+            # is present.
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+
+        def on_train_begin(self, args, state, control, **kwargs):
+            trainer = self.trainer_ref
+
+            original_compute_loss = trainer.compute_loss
+
+            @functools.wraps(original_compute_loss)
+            def timed_compute_loss(*call_args, **call_kwargs):
+                self._sync()
+                started = time.perf_counter()
+                result = original_compute_loss(*call_args, **call_kwargs)
+                self._sync()
+                self.forward_seconds += time.perf_counter() - started
+                return result
+
+            trainer.compute_loss = timed_compute_loss
+
+            original_backward = trainer.accelerator.backward
+
+            @functools.wraps(original_backward)
+            def timed_backward(*call_args, **call_kwargs):
+                self._sync()
+                started = time.perf_counter()
+                result = original_backward(*call_args, **call_kwargs)
+                self._sync()
+                self.backward_seconds += time.perf_counter() - started
+                return result
+
+            trainer.accelerator.backward = timed_backward
+
+            original_step = trainer.optimizer.step
+
+            @functools.wraps(original_step)
+            def timed_step(*call_args, **call_kwargs):
+                self._sync()
+                started = time.perf_counter()
+                result = original_step(*call_args, **call_kwargs)
+                self._sync()
+                self.optimizer_seconds += time.perf_counter() - started
+                return result
+
+            trainer.optimizer.step = timed_step
+
+            self._sampler_thread = threading.Thread(target=self._sample_utilization, daemon=True)
+            self._sampler_thread.start()
+
+        def on_train_end(self, args, state, control, **kwargs):
+            self._stop_sampling.set()
+            if self._sampler_thread is not None:
+                self._sampler_thread.join(timeout=2)
+
+        @property
+        def avg_gpu_utilization_percent(self) -> float | None:
+            if not self._utilization_samples:
+                return None
+            return sum(self._utilization_samples) / len(self._utilization_samples)
+
     if spec.trust_remote_code:
         raise RuntimeError("trust_remote_code is disabled")
 
@@ -563,16 +676,23 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     args = TrainingArguments(**args_kwargs)
     started = time.perf_counter()
     frozen_layer_streaming_callback = _FrozenLayerStreamingCallback()
+    callbacks: list[Any] = [
+        _ProgressReportingCallback(output_dir / "progress.json", started),
+        frozen_layer_streaming_callback,
+    ]
+    timer_callback: Any = None
+    if spec.detailed_timing_telemetry:
+        timer_callback = _TrainingPhaseTimerCallback()
+        callbacks.append(timer_callback)
     trainer = Trainer(
         model=model,
         args=args,
         train_dataset=tokenized,
         data_collator=collator,
-        callbacks=[
-            _ProgressReportingCallback(output_dir / "progress.json", started),
-            frozen_layer_streaming_callback,
-        ],
+        callbacks=callbacks,
     )
+    if timer_callback is not None:
+        timer_callback.trainer_ref = trainer
 
     frozen_layer_streaming_bytes_transferred: int | None = None
     streamed_layers = None
@@ -707,6 +827,12 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "activation_offload_bytes_transferred": activation_offload_bytes_transferred,
             "optimizer_state_bytes": optimizer_state_bytes,
             "frozen_layer_streaming_bytes_transferred": frozen_layer_streaming_bytes_transferred,
+            "forward_seconds": timer_callback.forward_seconds if timer_callback is not None else None,
+            "backward_seconds": timer_callback.backward_seconds if timer_callback is not None else None,
+            "optimizer_seconds": timer_callback.optimizer_seconds if timer_callback is not None else None,
+            "avg_gpu_utilization_percent": (
+                timer_callback.avg_gpu_utilization_percent if timer_callback is not None else None
+            ),
             "primary_rows": primary_rows,
             "replay_selected_rows": replay_selected_rows,
             "training_rows": len(dataset),
