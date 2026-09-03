@@ -744,7 +744,13 @@ class TransformersPeftExecutor:
         return count
 
     @staticmethod
-    def _tail(path: Path, lines: int = 30) -> str:
+    def _tail(path: Path, lines: int = 200) -> str:
+        # 30 was enough for a single-process worker's own traceback, but
+        # under accelerate-launch DDP a crashed rank's real traceback is
+        # followed by torchrun's own ChildFailedError summary (its
+        # boilerplate alone runs ~20-25 lines per failed rank) -- a short
+        # tail can show only that summary and crowd out the one thing a
+        # developer actually needs: what the worker itself raised.
         if not path.exists():
             return ""
         return "\n".join(
