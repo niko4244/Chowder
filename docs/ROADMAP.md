@@ -53,7 +53,7 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
   independently re-evaluate → gate → promote-or-not
   (`test_autonomous_repair.py::test_single_hop_autonomous_repair_runs_rejected_candidate_to_promoted_repair`)
 
-**Adaptive Memory Fabric — Priority 1**
+**Adaptive Memory Fabric — Priority 1 (complete)**
 - real measured memory dry-run preflight (not just post-hoc telemetry) — PR #62
 - Phase 7A: real per-layer/optimizer runtime telemetry, forward hooks +
   direct tensor introspection — PR #64
@@ -63,6 +63,59 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
 - Phase 7C: optimizer-state tiering — real bitsandbytes paged-optimizer
   experiment (PR #66) **and** production wiring, including the
   checkpoint-incompatibility discovery below (PR #68)
+- Phase 7D: frozen-layer streaming — a first real Memory Fabric runtime
+  (`memory_fabric.py`), experiment (PR #70) **and** production wiring
+  (PR #71). The obvious approach was tried first and rejected on real
+  evidence: `accelerate.hooks.AlignDevicesHook` (the same primitive
+  `cpu_offload()`/`dispatch_model()` use for big-model inference)
+  offloads frozen PEFT `base_layer` weights correctly for forward+backward,
+  but gives **zero real peak-VRAM savings during training** — measured
+  directly, an offloaded run used *more* peak VRAM than a resident one,
+  because autograd's own saved-tensor references keep every layer's
+  forward-time GPU weight alive until that layer's own backward node
+  runs. The fix (`_FrozenLinearRestream`, the same principle gradient
+  checkpointing uses for activations, applied here to weights): a
+  custom `torch.autograd.Function` whose forward does not save the GPU
+  weight for backward, whose backward re-streams it fresh from pinned
+  CPU RAM instead. Proven bit-identical to resident training, real
+  13.5% peak-VRAM reduction on a synthetic stack, working one-layer-
+  ahead async prefetch via a dedicated CUDA stream. Two more real bugs
+  found and fixed along the way: a meta-tensor placeholder that crashed
+  inside HF's own `Trainer`/`accelerate` internals (`model.to(device)`
+  is called at more than one point this module doesn't control), and a
+  CPU-only CI gap (this mechanism genuinely requires CUDA, unlike
+  `activation_offload`'s graceful no-op).
+
+**Telemetry/calibration — Priority 2 (single-GPU-verifiable slice complete)**
+- production-training timing breakdown — `_TrainingPhaseTimerCallback`
+  (`transformers_worker.py`) wraps `Trainer.compute_loss`/`Trainer.
+  accelerator.backward`/`Trainer.optimizer.step` on the instance for
+  real forward/backward/optimizer-step timing, plus a background
+  `torch.cuda.utilization()` sampler thread (PR #72). A real, measured
+  finding shaped the design: the `torch.cuda.synchronize()` calls
+  needed for accurate timing cost ~17% real wall-time overhead, so
+  this is an explicit opt-in (`backend.training.detailed_timing_telemetry`,
+  default off), unlike Phase 7A's dry-run telemetry which runs in an
+  isolated subprocess with no production cost. Verified to coexist
+  safely with activation_offload/optimizer_tiering/frozen_layer_streaming.
+- persisted aggregate telemetry for future placement learning — **already
+  satisfied by pre-existing infrastructure**, not new code:
+  `RunRegistry.record_training_artifact()` (`registry.py`), wired up at
+  `cycle.py:417`, already persists every real training run's full
+  `telemetry_json`/`evidence_json` immutably to SQLite — which now
+  automatically includes the new Priority 1/2 fields (activation_offload/
+  optimizer_tiering/frozen_layer_streaming/production_timing evidence)
+  since they're just additional keys in the same dicts `TrainingArtifact`
+  already carries. `RunRegistry.list_training_artifacts()` already
+  provides read access. 7E's future placement engine has a real,
+  queryable execution history to build on without needing a new store.
+- **deferred, not skipped**: real GPU↔GPU bandwidth/topology measurement
+  and PCIe/NVLink capability measurement genuinely need 2+ GPUs to
+  produce any real data, which the development machine this work was
+  done on does not have — a real hardware-access constraint (the same
+  class of gap Phase 5's DDP acceptance had before Kaggle 2×T4 access
+  was arranged), confirmed with the user rather than silently stubbed
+  or faked.
 
 **Unlisted but real: incident-remediation benchmark harness** —
 `benchmark.py`, `investigation.py`, `hypothesis_generation.py`, `probes.py`,
@@ -87,6 +140,18 @@ treated as fully proven:
   PCIe-bytes-transferred instrumentation exists (bitsandbytes' CUDA-unified-
   memory paging happens inside the driver, not through a Python-hookable
   tensor copy) — `actual_optimizer_state_bytes` is reported instead.
+- **Frozen-layer streaming (production)** — same shape again: real,
+  merged, single-GPU only, DDP explicitly rejected (the custom autograd.
+  Function's dedicated CUDA prefetch stream has only been verified on
+  single-GPU hardware). Backward-direction prefetch is not yet
+  implemented (backward re-streams synchronously; correctness does not
+  depend on it, only backward-pass overlap does).
+- **Production timing telemetry** — real, merged, but its own real ~17%
+  measured overhead means it is opt-in and mostly unused by default;
+  does not separately measure all-reduce time under DDP (folded into
+  `backward_seconds`) or true GPU idle/stall time (approximated by
+  average sampled utilization instead) — both would need real multi-GPU
+  verification this instrumentation has not had.
 - **Auto-revert on failed canary** — achieved structurally, not as a
   dedicated feature: `engine.py::promote()` only overwrites the baseline
   when `GateDecision.accepted` is true, so a repair that fails its
@@ -100,31 +165,22 @@ treated as fully proven:
 
 ## NEXT
 
-**Adaptive Memory Fabric, remaining (Priority 1)**
-- 7D — frozen-layer streaming: a first real Memory Fabric runtime.
-  Hot/current layer resident on GPU, other frozen layers in pinned CPU RAM,
-  next layer prefetched asynchronously one layer ahead, double buffering
-  where useful. No correctness change to gradients or LoRA weights. Measure
-  compute/transfer overlap and GPU stalls against normal resident training;
-  promote only when it enables otherwise-impossible models or gives
-  acceptable throughput. NVMe streaming stays out of scope until RAM↔GPU
-  streaming is proven. *(Investigation in progress: `accelerate.hooks.
-  AlignDevicesHook` — the same primitive `cpu_offload()`/`dispatch_model()`
-  use for inference — offloads frozen PEFT `base_layer` submodules
-  correctly for forward+backward with LoRA adapters kept GPU-resident, but
-  is synchronous with no prefetch overlap by default; a hand-built
-  next-layer prefetch on top of it is the current design direction.)*
-- 7E — adaptive placement policy: a deterministic, evidence-based placement
-  engine using hardware topology, model/layer sizes, and the real telemetry
-  7B–7D generate. Blocked on 7D producing real execution history; learned
-  placement stays out of scope until then.
+**Adaptive placement policy — 7E (Priority 1, final piece)**
+A deterministic, evidence-based placement engine using hardware topology,
+model/layer sizes, and the real telemetry 7B–7D now generate (all four now
+have real experiment + production data flowing into `RunRegistry` per run,
+per the persistence finding above). Not yet started. Real GPU↔GPU bandwidth
+data (deferred above) would sharpen this once available, but is not
+strictly required to begin: a first version can reason from the real
+per-mechanism telemetry already being persisted (peak VRAM saved, wall-time
+penalty ratios, bytes transferred) without it. Learned placement stays out
+of scope until enough real execution history exists — start deterministic/
+evidence-based.
 
-**Telemetry/calibration (Priority 2)**
-- real GPU↔GPU bandwidth/topology measurement
-- PCIe/NVLink capability measurement
-- production-training timing breakdown: forward/backward/optimizer/
-  all-reduce time, transfer wait, GPU idle/stall time, utilization
-- persisted aggregate telemetry for future placement learning
+**Multi-GPU telemetry (Priority 2, deferred slice)**
+Real GPU↔GPU bandwidth/topology measurement and PCIe/NVLink capability
+measurement — blocked on 2+ GPU hardware access (see above). Revisit if/when
+that access is arranged, the same way Phase 5's DDP acceptance was.
 
 **Memory preflight policy (Priority 3)**
 - `memory_preflight = auto | always | cached | off`, where `auto` uses
