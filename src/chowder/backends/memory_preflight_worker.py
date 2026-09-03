@@ -23,31 +23,17 @@ def _leaf_modules(model: Any):
             yield name, module
 
 
-def dry_run(spec: TransformersPeftRunSpec) -> dict[str, Any]:
-    """Load the real model (with the configured quantization/precision/LoRA
-    recipe) and run two tiny forward+backward steps -- batch size 1 and 2,
-    both at the configured max_length -- to measure real peak VRAM twice.
-
-    Two real measurements, not one, on purpose: the difference between them
-    is the actual per-example activation cost this exact model/recipe/
-    hardware combination produces, which the caller can then extrapolate to
-    any configured batch size linearly. That's a measured, empirical slope,
-    not a theoretical estimate of how attention/activation memory should
-    scale -- deliberately avoiding having to model architecture-specific
-    scaling behavior (flash attention vs. not, sequence-length quadratic
-    terms, etc.) that would be a guess dressed up as a formula.
-
-    Also collects, on the batch-size-2 pass, real per-leaf-module telemetry
-    (real forward-hook-measured activation output size plus that module's
-    own direct trainable/frozen parameter count) via
-    `_leaf_modules`/forward hooks, and a real optimizer-state footprint: a
-    genuine `torch.optim.AdamW` over the trainable parameters, stepped
-    once, then the actual state tensors it allocated (exp_avg, exp_avg_sq,
-    ...) are summed directly -- not inferred from a memory-delta
-    measurement, which would report 0 on CPU (no CUDA allocation to
-    measure a delta in) and would fold in CUDA-allocator block-rounding
-    noise on GPU. Reading the real tensors PyTorch created is exact and
-    device-agnostic.
+def load_dry_run_model(spec: TransformersPeftRunSpec) -> tuple[Any, Any, Any, int, int]:
+    """Load the real model with the configured quantization/precision/LoRA
+    recipe -- the exact same real loading path `dry_run` uses -- and return
+    (model, tokenizer, device, frozen_params, trainable_params). Shared by
+    every dry-run-style worker in this module (memory/telemetry dry_run,
+    the activation-offload experiment) so each one measures against an
+    identical real model construction rather than a slightly-diverged copy
+    of the same loading logic. Deliberately NOT shared with the real
+    training path in transformers_worker.py -- that code is battle-tested
+    production logic and refactoring it to share with dry-run experiments
+    would be a real regression risk for no benefit.
 
     Never trains anything and never touches the configured dataset --
     accepts a full TransformersPeftRunSpec (the same shape the real trainer
@@ -129,6 +115,46 @@ def dry_run(spec: TransformersPeftRunSpec) -> dict[str, Any]:
 
     frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return model, tokenizer, device, frozen_params, trainable_params
+
+
+def dry_run(spec: TransformersPeftRunSpec) -> dict[str, Any]:
+    """Load the real model (with the configured quantization/precision/LoRA
+    recipe) and run two tiny forward+backward steps -- batch size 1 and 2,
+    both at the configured max_length -- to measure real peak VRAM twice.
+
+    Two real measurements, not one, on purpose: the difference between them
+    is the actual per-example activation cost this exact model/recipe/
+    hardware combination produces, which the caller can then extrapolate to
+    any configured batch size linearly. That's a measured, empirical slope,
+    not a theoretical estimate of how attention/activation memory should
+    scale -- deliberately avoiding having to model architecture-specific
+    scaling behavior (flash attention vs. not, sequence-length quadratic
+    terms, etc.) that would be a guess dressed up as a formula.
+
+    Also collects, on the batch-size-2 pass, real per-leaf-module telemetry
+    (real forward-hook-measured activation output size plus that module's
+    own direct trainable/frozen parameter count) via
+    `_leaf_modules`/forward hooks, and a real optimizer-state footprint: a
+    genuine `torch.optim.AdamW` over the trainable parameters, stepped
+    once, then the actual state tensors it allocated (exp_avg, exp_avg_sq,
+    ...) are summed directly -- not inferred from a memory-delta
+    measurement, which would report 0 on CPU (no CUDA allocation to
+    measure a delta in) and would fold in CUDA-allocator block-rounding
+    noise on GPU. Reading the real tensors PyTorch created is exact and
+    device-agnostic.
+
+    Never trains anything and never touches the configured dataset --
+    accepts a full TransformersPeftRunSpec (the same shape the real trainer
+    uses) purely for convenience/consistency, but `dataset`/checkpoint/
+    save-strategy fields on it are irrelevant here and ignored.
+    """
+    model, tokenizer, device, frozen_params, trainable_params = load_dry_run_model(spec)
+    # Safe to import bare here (no try/except needed): load_dry_run_model
+    # already imported torch successfully -- if it hadn't, it would have
+    # raised its own RuntimeError with a clear message before reaching
+    # this line, and Python caches the successful import.
+    import torch
 
     layer_telemetry: list[dict[str, Any]] = []
 
