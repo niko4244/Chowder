@@ -40,13 +40,14 @@ def dry_run(spec: TransformersPeftRunSpec) -> dict[str, Any]:
     Also collects, on the batch-size-2 pass, real per-leaf-module telemetry
     (real forward-hook-measured activation output size plus that module's
     own direct trainable/frozen parameter count) via
-    `_leaf_modules`/forward hooks, and a real (not formula-derived)
-    optimizer-state footprint: a genuine `torch.optim.AdamW` over the
-    trainable parameters, stepped once, with the CUDA-allocated-memory
-    delta immediately around that single `.step()` call measured directly
-    -- AdamW only allocates its exp_avg/exp_avg_sq state tensors on the
-    first step, so this is a real measurement of this exact model's
-    optimizer footprint, not an assumption about AdamW's internals.
+    `_leaf_modules`/forward hooks, and a real optimizer-state footprint: a
+    genuine `torch.optim.AdamW` over the trainable parameters, stepped
+    once, then the actual state tensors it allocated (exp_avg, exp_avg_sq,
+    ...) are summed directly -- not inferred from a memory-delta
+    measurement, which would report 0 on CPU (no CUDA allocation to
+    measure a delta in) and would fold in CUDA-allocator block-rounding
+    noise on GPU. Reading the real tensors PyTorch created is exact and
+    device-agnostic.
 
     Never trains anything and never touches the configured dataset --
     accepts a full TransformersPeftRunSpec (the same shape the real trainer
@@ -192,14 +193,19 @@ def dry_run(spec: TransformersPeftRunSpec) -> dict[str, Any]:
         attention_mask = torch.ones_like(input_ids)
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
         outputs.loss.backward()
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-            before_bytes = torch.cuda.memory_allocated(device)
-            optimizer.step()
-            torch.cuda.synchronize(device)
-            optimizer_state_bytes = max(0, torch.cuda.memory_allocated(device) - before_bytes)
-        else:
-            optimizer.step()
+        optimizer.step()
+        # Sum the actual state tensors PyTorch allocated (exp_avg,
+        # exp_avg_sq, ...) rather than inferring a byte count from a
+        # memory-delta measurement: this is exact and device-agnostic --
+        # it works identically on CPU and CUDA, where a CUDA-allocated-
+        # memory-delta trick would report 0 on CPU (there is no CUDA
+        # allocation to measure a delta in).
+        optimizer_state_bytes = sum(
+            tensor.numel() * tensor.element_size()
+            for state in optimizer.state.values()
+            for tensor in state.values()
+            if torch.is_tensor(tensor)
+        )
         optimizer.zero_grad(set_to_none=True)
         model.zero_grad(set_to_none=True)
 
