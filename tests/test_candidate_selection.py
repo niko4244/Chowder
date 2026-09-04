@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from chowder.candidate_selection import _ArmStatistics, _dotted_paths, _ucb1_score, prioritize_candidates
+from chowder.candidate_selection import _ArmStatistics, _ucb1_score, dotted_paths, prioritize_candidates
 from chowder.models import Experiment, ExperimentResult, Goal, Hypothesis, MetricTarget
 
 
@@ -25,13 +25,13 @@ def baseline():
 
 
 def test_dotted_paths_flattens_nested_config_patch():
-    paths = _dotted_paths({"backend": {"training": {"learning_rate": 1e-3}, "lora": {"r": 8}}})
+    paths = dotted_paths({"backend": {"training": {"learning_rate": 1e-3}, "lora": {"r": 8}}})
     assert paths == frozenset({"backend.training.learning_rate", "backend.lora.r"})
 
 
 def test_dotted_paths_ignores_leaf_values():
-    a = _dotted_paths({"backend": {"training": {"learning_rate": 1e-3}}})
-    b = _dotted_paths({"backend": {"training": {"learning_rate": 5e-5}}})
+    a = dotted_paths({"backend": {"training": {"learning_rate": 1e-3}}})
+    b = dotted_paths({"backend": {"training": {"learning_rate": 5e-5}}})
     assert a == b
 
 

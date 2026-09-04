@@ -27,18 +27,24 @@ from .models import Experiment, ExperimentResult, Goal
 _EXPLORATION_WEIGHT = 2.0
 
 
-def _dotted_paths(config_patch: Mapping[str, Any], prefix: str = "") -> frozenset[str]:
+def dotted_paths(config_patch: Mapping[str, Any], prefix: str = "") -> frozenset[str]:
     """Flatten a config_patch into the dotted leaf key-paths it touches.
 
     Two experiments that both set ``backend.training.learning_rate`` (to
     different values) are the same *arm* -- the bandit tracks which knobs
     are being turned, not which values were tried for them.
+
+    Public because this is now the single definition of an "arm" shared
+    with `intervention_outcomes.py`, which groups historical outcomes by
+    the same arm this module bandits over -- two definitions that silently
+    drifted apart would make the two modules disagree about which
+    experiments were the same intervention.
     """
     paths: set[str] = set()
     for key, value in config_patch.items():
         path = f"{prefix}.{key}" if prefix else key
         if isinstance(value, Mapping):
-            paths |= _dotted_paths(value, prefix=path)
+            paths |= dotted_paths(value, prefix=path)
         else:
             paths.add(path)
     return frozenset(paths)
@@ -70,7 +76,7 @@ def prioritize_candidates(
     """Reorder not-yet-run *candidates* by UCB1 score over historical arms.
 
     Each arm is the set of dotted config_patch key-paths an experiment
-    touches (see `_dotted_paths`). Reward is the same gpu-hour-normalized
+    touches (see `dotted_paths`). Reward is the same gpu-hour-normalized
     gate score `tournament.rank_candidates` uses (`decision.score /
     gpu_hours`), replayed against *history* through the same hard gate every
     real candidate goes through -- this function never grants promotion or
@@ -89,14 +95,14 @@ def prioritize_candidates(
     for experiment, result in history:
         decision = evaluate_candidate(goal=goal, baseline=baseline, candidate=result)
         reward = decision.score / max(result.gpu_hours, 1e-9)
-        arm = arms[_dotted_paths(experiment.config_patch)]
+        arm = arms[dotted_paths(experiment.config_patch)]
         arm.pulls += 1
         arm.total_reward += reward
 
     total_pulls = max(sum(arm.pulls for arm in arms.values()), 1)
 
     def score(experiment: Experiment) -> float:
-        arm = arms.get(_dotted_paths(experiment.config_patch))
+        arm = arms.get(dotted_paths(experiment.config_patch))
         if arm is None:
             return float("inf")
         return _ucb1_score(arm, total_pulls=total_pulls)
