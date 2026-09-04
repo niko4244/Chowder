@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .engine import EvolutionEngine
-from .failures import FailureCluster, RepairPlan
+from .failures import RepairPlan
 from .models import Experiment
 from .registry import RunRegistry
 from .repair_candidates import (
@@ -23,7 +23,6 @@ from .repair_requests import (
     RepairRequest,
     RepairSourceProposal,
     RepairSourceProvider,
-    build_repair_request,
     materialize_repair_proposal,
     request_repair_sources,
 )
@@ -60,7 +59,7 @@ def prepare_and_propose_repair_population(
     engine: EvolutionEngine,
     parent_id: str,
     plan: RepairPlan,
-    cluster: FailureCluster,
+    request: RepairRequest,
     provider: RepairSourceProvider,
     holdout_fingerprint_files: Iterable[str | Path],
     variants: Iterable[RepairVariant],
@@ -70,6 +69,12 @@ def prepare_and_propose_repair_population(
     parent_adapter: VerifiedParentAdapter | None = None,
 ) -> RepairPopulationOutcome:
     """Prepare provenance-safe repair data and reserve candidate experiments.
+
+    ``request`` is the leak-resistant repair request the caller has already
+    built (e.g. ``build_repair_request`` for eval-gate failures, or an
+    analogous adapter for other diagnostic sources such as training-data
+    regression clusters) -- this function is generic over where the request
+    came from and never inspects raw failure/training-example content itself.
 
     ``replay`` protects prior capabilities while ``parent_adapter`` binds the
     repair to the exact rejected weights being repaired. Neither is exposed to
@@ -114,7 +119,6 @@ def prepare_and_propose_repair_population(
             f"holdout fingerprint indexes not found: {missing}"
         )
 
-    request = build_repair_request(plan=plan, cluster=cluster)
     proposal = request_repair_sources(provider=provider, request=request)
 
     root = Path(work_dir).resolve() / ".chowder" / "repairs"
