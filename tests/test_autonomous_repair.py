@@ -306,6 +306,36 @@ def test_repair_coordinator_rejects_lora_topology_variant_before_provider(tmp_pa
     assert runner.engine.outstanding_candidates == 0
 
 
+def test_continue_from_parent_false_allows_lora_topology_change_with_no_parent_adapter(
+    tmp_path,
+):
+    runner = _runner(tmp_path)
+    source = _source_experiment()
+    runner.engine.propose((source,))
+    source_generation = runner.run_generation((source,))
+    assert source_generation.promoted is None
+
+    outcome = run_single_hop_autonomous_repair(
+        runner=runner,
+        source_generation=source_generation,
+        provider=_provider(tmp_path),
+        variants=(RepairVariant("fresh-start-rank8", 0.3, lora_patch={"r": 8}),),
+        continue_from_parent=False,
+    )
+
+    assert len(outcome.population.proposed_candidates) == 1
+    candidate = outcome.population.proposed_candidates[0]
+    backend = candidate.config_patch["backend"]
+    assert backend["lora"] == {"r": 8}
+    assert "parent_adapter" not in backend
+    assert candidate.config_patch["repair"]["continuation"] is False
+    assert candidate.config_patch["repair"]["parent_adapter_sha256"] is None
+    # replay (data rehearsal) is orthogonal to adapter continuation -- a
+    # fresh-start repair still gets the parent's training history rehearsed
+    assert "replay" in backend
+    assert outcome.promoted is not None
+
+
 def test_repair_coordinator_rejects_non_rejected_source_candidate(tmp_path):
     runner = _runner(tmp_path)
     source = _source_experiment()
