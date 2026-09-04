@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from chowder.activation_offload import ActivationOffloadExperiment
+from chowder.combined_mechanism_experiment import CombinedMechanismExperiment
 from chowder.executors import ExecutionContext
 from chowder.frozen_layer_streaming import FrozenLayerStreamingExperiment
 from chowder.memory import HardwareProfile
@@ -119,6 +120,45 @@ def _patch_experiments(offload=None, tiering=None, streaming=None):
     )
 
 
+def _combined_exp(mechanisms, **overrides):
+    fields = dict(
+        experiment_key="test-key",
+        mechanisms=tuple(sorted(mechanisms)),
+        baseline_peak_vram_gb=20.0,
+        predicted_combined_peak_vram_gb=15.0,
+        actual_combined_peak_vram_gb=15.0,
+        prediction_error_gb=0.0,
+        baseline_wall_seconds=1.0,
+        combined_wall_seconds=1.2,
+        wall_time_penalty_ratio=1.2,
+        per_mechanism_predicted_savings_gb={},
+        forward_seconds=0.4,
+        backward_seconds=0.2,
+        optimizer_seconds=0.05,
+        avg_gpu_utilization_percent=15.0,
+        optimizer_state_bytes=0.0,
+        frozen_layer_streaming_bytes_transferred=None,
+        activation_offload_bytes_transferred=None,
+    )
+    fields.update(overrides)
+    return CombinedMechanismExperiment(**fields)
+
+
+def _patch_validated_combinations(mapping):
+    """mapping: {frozenset of mechanism names: CombinedMechanismExperiment}.
+    Patches the source function (combined_mechanism_experiment.py), not a
+    placement_policy-local name -- build_placement_plan imports it locally
+    (`from .combined_mechanism_experiment import read_validated_combination`)
+    to avoid a module import cycle, so patching the definition site is what
+    actually takes effect on the next call. Any combination not present in
+    `mapping` returns None -- unvalidated, matching a real cold cache."""
+
+    def _fake(*, mechanisms, resolved_config, context, work_dir):
+        return mapping.get(frozenset(mechanisms))
+
+    return patch("chowder.combined_mechanism_experiment.read_validated_combination", _fake)
+
+
 # --- baseline already fits / DDP short-circuits ------------------------------
 
 
@@ -188,10 +228,12 @@ def test_recommends_the_single_mechanism_that_alone_makes_it_fit():
     assert plan.predicted_combined_estimate_gb == pytest.approx(15.0)
 
 
-def test_combines_two_mechanisms_when_neither_alone_is_enough():
+def test_combines_two_mechanisms_when_a_real_validated_measurement_exists():
     """Each mechanism alone saves only 2.5 GB (17.5 GB, still over the
-    15.5 fit boundary) -- only a combination of two reaches 15 GB,
-    fitting."""
+    15.5 fit boundary). A REAL, validated combined-mechanism measurement
+    for activation_offload+frozen_layer_streaming (actual_combined_peak_
+    vram_gb=15.0) exists in the cache, so this combination is eligible
+    for auto-selection and reaches the fit boundary."""
     offload = _offload_exp(baseline_peak_vram_gb=20.0, offload_peak_vram_gb=17.5, vram_saved_gb=2.5)
     streaming = _streaming_exp(baseline_peak_vram_gb=20.0, streamed_peak_vram_gb=17.5, vram_saved_gb=2.5)
     tiering = _tiering_exp(
@@ -200,10 +242,13 @@ def test_combines_two_mechanisms_when_neither_alone_is_enough():
             OptimizerVariantMeasurement(name="paged_adamw", step_seconds=0.06, state_bytes=int(0.001 * 1024**3)),
         )
     )
+    validated = _combined_exp(
+        ("activation_offload", "frozen_layer_streaming"), actual_combined_peak_vram_gb=15.0
+    )
     with patch(
         "chowder.placement_policy.estimate_memory_requirements",
         return_value=_estimate(estimated_peak_gb=20.0, per_rank_available_gb=16.0, fits=False),
-    ):
+    ), _patch_validated_combinations({frozenset({"activation_offload", "frozen_layer_streaming"}): validated}):
         p1, p2, p3 = _patch_experiments(offload=offload, tiering=tiering, streaming=streaming)
         with p1, p2, p3:
             plan = build_placement_plan(resolved_config=_config(), context=_context(), work_dir=".")
@@ -212,6 +257,54 @@ def test_combines_two_mechanisms_when_neither_alone_is_enough():
     assert plan.enable_frozen_layer_streaming is True
     assert plan.enable_optimizer_tiering is False  # negligible real savings, excluded
     assert plan.predicted_combined_estimate_gb == pytest.approx(15.0)
+    assert plan.combination_validated is True
+
+
+def test_unvalidated_multi_mechanism_combination_is_never_auto_selected():
+    """Same setup as the validated case above, but with NO real combined-
+    mechanism measurement cached: the additive sum would predict 15.0 GB
+    (fitting), but "do not auto-apply an unvalidated combination" means
+    this combo must be excluded entirely -- the plan falls back to the
+    best single mechanism instead, even though it does not fit."""
+    offload = _offload_exp(baseline_peak_vram_gb=20.0, offload_peak_vram_gb=17.5, vram_saved_gb=2.5)
+    streaming = _streaming_exp(baseline_peak_vram_gb=20.0, streamed_peak_vram_gb=17.5, vram_saved_gb=2.5)
+    with patch(
+        "chowder.placement_policy.estimate_memory_requirements",
+        return_value=_estimate(estimated_peak_gb=20.0, per_rank_available_gb=16.0, fits=False),
+    ), _patch_validated_combinations({}):
+        p1, p2, p3 = _patch_experiments(offload=offload, streaming=streaming)
+        with p1, p2, p3:
+            plan = build_placement_plan(resolved_config=_config(), context=_context(), work_dir=".")
+    assert plan.fits_with_plan is False
+    assert not (plan.enable_activation_offload and plan.enable_frozen_layer_streaming)
+    reasoning_text = " ".join(plan.reasoning)
+    assert "no real combined-mechanism measurement cached" in reasoning_text
+    assert "excluded from auto-selection" in reasoning_text
+
+
+def test_validated_combination_uses_real_measured_estimate_not_additive_sum():
+    """The naive additive sum (2.5 + 2.5 = 5.0 savings -> 15.0 GB) would
+    predict fitting, but the REAL validated measurement shows the combined
+    run only reached 19.0 GB (this module's own real finding: combined
+    mechanisms can deliver far less than the sum of their isolated
+    savings) -- the plan must use the REAL number, not silently trust the
+    additive prediction, and correctly conclude this combination does not
+    actually help enough to fit."""
+    offload = _offload_exp(baseline_peak_vram_gb=20.0, offload_peak_vram_gb=17.5, vram_saved_gb=2.5)
+    streaming = _streaming_exp(baseline_peak_vram_gb=20.0, streamed_peak_vram_gb=17.5, vram_saved_gb=2.5)
+    validated = _combined_exp(
+        ("activation_offload", "frozen_layer_streaming"), actual_combined_peak_vram_gb=19.0
+    )
+    with patch(
+        "chowder.placement_policy.estimate_memory_requirements",
+        return_value=_estimate(estimated_peak_gb=20.0, per_rank_available_gb=16.0, fits=False),
+    ), _patch_validated_combinations({frozenset({"activation_offload", "frozen_layer_streaming"}): validated}):
+        p1, p2, p3 = _patch_experiments(offload=offload, streaming=streaming)
+        with p1, p2, p3:
+            plan = build_placement_plan(resolved_config=_config(), context=_context(), work_dir=".")
+    # 19.0 GB does not fit within 16.0 - 0.5 safety margin, so the combo
+    # must not be reported as fitting even though it was considered
+    assert plan.fits_with_plan is False
 
 
 def test_prefers_fewer_mechanisms_when_multiple_combinations_fit():
@@ -259,7 +352,8 @@ def test_no_combination_fits_reports_the_closest_one_honestly():
     """Every mechanism's real measured savings, even combined, is not
     enough -- fits_with_plan must be False, and the plan should still
     report the best (maximum-savings) combination as "free insurance"
-    rather than silently recommending nothing."""
+    rather than silently recommending nothing. A real validated
+    measurement for the full triple exists, so it remains eligible."""
     offload = _offload_exp(vram_saved_gb=1.0)
     tiering = _tiering_exp(
         variants=(
@@ -268,10 +362,17 @@ def test_no_combination_fits_reports_the_closest_one_honestly():
         )
     )
     streaming = _streaming_exp(vram_saved_gb=1.0)
+    validated_triple = _combined_exp(
+        ("activation_offload", "optimizer_tiering", "frozen_layer_streaming"),
+        actual_combined_peak_vram_gb=27.5,
+    )
+    validated_pairs = {
+        frozenset({"activation_offload", "optimizer_tiering", "frozen_layer_streaming"}): validated_triple,
+    }
     with patch(
         "chowder.placement_policy.estimate_memory_requirements",
         return_value=_estimate(estimated_peak_gb=30.0, per_rank_available_gb=16.0, fits=False),
-    ):
+    ), _patch_validated_combinations(validated_pairs):
         p1, p2, p3 = _patch_experiments(offload=offload, tiering=tiering, streaming=streaming)
         with p1, p2, p3:
             plan = build_placement_plan(resolved_config=_config(), context=_context(), work_dir=".")
@@ -397,3 +498,45 @@ def test_real_placement_plan_runs_real_experiments_when_baseline_does_not_fit(tm
     assert plan.ddp_active is False
     assert plan.predicted_combined_estimate_gb is not None
     assert len(plan.reasoning) >= 2
+
+
+@_REAL_ML_SMOKE
+def test_real_plan_never_auto_selects_an_unvalidated_multi_mechanism_combination(tmp_path):
+    """With a cold cache (no prior run_combined_mechanism_experiment call
+    for this model+recipe+hardware), the plan must never enable more than
+    one mechanism at once -- "do not auto-apply an unvalidated
+    combination" -- regardless of what the naive additive sum of each
+    mechanism's own independent savings would have predicted. This is the
+    core safety property this module's combined-effect finding motivated
+    (see combined_mechanism_experiment.py's module docstring)."""
+    from chowder.hardware import detect_hardware
+    from chowder.project_runner import hardware_profile_from_snapshot
+
+    hardware = hardware_profile_from_snapshot(detect_hardware(str(tmp_path)))
+    if hardware.accelerator_vram_gb == () and hardware.vram_gb <= 0:
+        pytest.skip("no CUDA device available for a real placement-plan comparison")
+    tiny_hardware = HardwareProfile(
+        0.05, hardware.ram_gb, hardware.nvme_gb, hardware.pcie_gbps,
+        hardware.ram_gbps, hardware.nvme_gbps, accelerator_vram_gb=(0.05,),
+    )
+    context = ExecutionContext(tiny_hardware, str(tmp_path), seed=7)
+    config = {
+        "backend": {
+            "type": "transformers-peft",
+            "base_model": _TINY_MODEL,
+            "dataset": "unused.jsonl",
+            "max_length": 64,
+            "quantization": "none",
+            "precision": "fp32",
+            "lora": {"r": 4, "alpha": 8, "target_modules": ["q_proj", "v_proj"]},
+            "training": {"batch_size": 2},
+        }
+    }
+    assert not (tmp_path / ".chowder" / "combined_mechanism_experiments.json").exists()
+    plan = build_placement_plan(resolved_config=config, context=context, work_dir=str(tmp_path))
+    enabled_count = sum(
+        [plan.enable_activation_offload, plan.enable_optimizer_tiering, plan.enable_frozen_layer_streaming]
+    )
+    assert enabled_count <= 1, (
+        f"expected at most 1 mechanism enabled with no validated combined-mechanism cache, got {enabled_count}"
+    )

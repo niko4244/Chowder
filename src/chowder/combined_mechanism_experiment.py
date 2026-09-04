@@ -52,6 +52,7 @@ from .placement_policy import _MECHANISM_NAMES, _mechanism_savings_gb
 
 _DEFAULT_MAX_STEPS = 4
 _DEFAULT_TIMEOUT_SECONDS = 300.0
+_CACHE_FILENAME = "combined_mechanism_experiments.json"
 
 
 @dataclass(frozen=True)
@@ -84,11 +85,21 @@ class CombinedMechanismExperiment:
     optimizer_state_bytes: float | None
     frozen_layer_streaming_bytes_transferred: float | None
     activation_offload_bytes_transferred: float | None
+    from_cache: bool = False
 
 
 def _combined_calibration_key(
-    *, mechanisms: tuple[str, ...], spec: "TransformersPeftRunSpec", max_steps: int, context: ExecutionContext
+    *, mechanisms: tuple[str, ...], spec: "TransformersPeftRunSpec", context: ExecutionContext
 ) -> str:
+    """Deliberately excludes max_steps and any other training-length field
+    (epochs/logging_steps/...) -- matching memory_preflight's own
+    calibration key -- since what this key identifies is "has this
+    mechanism combination been empirically validated for this model+recipe
+    +hardware", not "at exactly N steps". A caller with a cached real
+    measurement from a 4-step run and one wanting to know whether the same
+    combination is validated for an 8-step run should get the same cache
+    hit -- peak VRAM is set by per-step steady-state, not step count.
+    """
     payload = {
         "mechanisms": sorted(mechanisms),
         "base_model": spec.base_model,
@@ -99,11 +110,121 @@ def _combined_calibration_key(
         "batch_size": spec.batch_size,
         "lora_r": spec.lora_r,
         "lora_alpha": spec.lora_alpha,
-        "max_steps": max_steps,
         "hardware": _hardware_signature(context),
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _cache_path(work_dir: str | Path) -> Path:
+    return Path(work_dir) / ".chowder" / _CACHE_FILENAME
+
+
+def _read_cache_entry(work_dir: str | Path, key: str) -> Mapping[str, Any] | None:
+    path = _cache_path(work_dir)
+    if not path.is_file():
+        return None
+    try:
+        cache = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cache, Mapping):
+        return None
+    entry = cache.get(key)
+    return entry if isinstance(entry, Mapping) else None
+
+
+def _write_cache_entry(work_dir: str | Path, key: str, entry: Mapping[str, Any]) -> None:
+    path = _cache_path(work_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        cache = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        if not isinstance(cache, dict):
+            cache = {}
+    except (OSError, ValueError):
+        cache = {}
+    cache[key] = dict(entry)
+    path.write_text(json.dumps(cache, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+
+def _experiment_to_cache_entry(experiment: CombinedMechanismExperiment) -> dict[str, Any]:
+    return {
+        "mechanisms": list(experiment.mechanisms),
+        "baseline_peak_vram_gb": experiment.baseline_peak_vram_gb,
+        "predicted_combined_peak_vram_gb": experiment.predicted_combined_peak_vram_gb,
+        "actual_combined_peak_vram_gb": experiment.actual_combined_peak_vram_gb,
+        "prediction_error_gb": experiment.prediction_error_gb,
+        "baseline_wall_seconds": experiment.baseline_wall_seconds,
+        "combined_wall_seconds": experiment.combined_wall_seconds,
+        "wall_time_penalty_ratio": experiment.wall_time_penalty_ratio,
+        "per_mechanism_predicted_savings_gb": dict(experiment.per_mechanism_predicted_savings_gb),
+        "forward_seconds": experiment.forward_seconds,
+        "backward_seconds": experiment.backward_seconds,
+        "optimizer_seconds": experiment.optimizer_seconds,
+        "avg_gpu_utilization_percent": experiment.avg_gpu_utilization_percent,
+        "optimizer_state_bytes": experiment.optimizer_state_bytes,
+        "frozen_layer_streaming_bytes_transferred": experiment.frozen_layer_streaming_bytes_transferred,
+        "activation_offload_bytes_transferred": experiment.activation_offload_bytes_transferred,
+    }
+
+
+def _cache_entry_to_experiment(*, key: str, entry: Mapping[str, Any]) -> CombinedMechanismExperiment:
+    return CombinedMechanismExperiment(
+        experiment_key=key,
+        mechanisms=tuple(entry["mechanisms"]),
+        baseline_peak_vram_gb=entry["baseline_peak_vram_gb"],
+        predicted_combined_peak_vram_gb=entry["predicted_combined_peak_vram_gb"],
+        actual_combined_peak_vram_gb=entry["actual_combined_peak_vram_gb"],
+        prediction_error_gb=entry["prediction_error_gb"],
+        baseline_wall_seconds=entry["baseline_wall_seconds"],
+        combined_wall_seconds=entry["combined_wall_seconds"],
+        wall_time_penalty_ratio=entry["wall_time_penalty_ratio"],
+        per_mechanism_predicted_savings_gb=entry["per_mechanism_predicted_savings_gb"],
+        forward_seconds=entry.get("forward_seconds"),
+        backward_seconds=entry.get("backward_seconds"),
+        optimizer_seconds=entry.get("optimizer_seconds"),
+        avg_gpu_utilization_percent=entry.get("avg_gpu_utilization_percent"),
+        optimizer_state_bytes=entry.get("optimizer_state_bytes"),
+        frozen_layer_streaming_bytes_transferred=entry.get("frozen_layer_streaming_bytes_transferred"),
+        activation_offload_bytes_transferred=entry.get("activation_offload_bytes_transferred"),
+        from_cache=True,
+    )
+
+
+def read_validated_combination(
+    *,
+    mechanisms: tuple[str, ...],
+    resolved_config: Mapping[str, Any],
+    context: ExecutionContext,
+    work_dir: str | Path,
+) -> CombinedMechanismExperiment | None:
+    """A pure, cheap, side-effect-free cache read: has this exact
+    mechanism combination already been empirically measured (via
+    `run_combined_mechanism_experiment`, cached with `use_cache=True`) for
+    this model+recipe+hardware? Returns None -- never runs anything -- if
+    not, so callers that must stay cheap (like
+    `placement_policy.build_placement_plan()`, which is itself called from
+    `TransformersPeftExecutor`'s own cheap "auto" resolution path) can
+    safely call this without risking a real subprocess launch.
+    """
+    try:
+        spec = TransformersPeftRunSpec.from_resolved_config(
+            resolved_config,
+            work_dir=work_dir,
+            output_dir=Path(work_dir) / ".chowder" / "_combined_mechanism_scratch",
+            seed=context.seed,
+            hardware=context.hardware,
+        )
+    except Exception:
+        return None
+    key = _combined_calibration_key(mechanisms=mechanisms, spec=spec, context=context)
+    entry = _read_cache_entry(work_dir, key)
+    if entry is None:
+        return None
+    try:
+        return _cache_entry_to_experiment(key=key, entry=entry)
+    except (KeyError, TypeError):
+        return None
 
 
 def _config_with_mechanisms(
@@ -138,11 +259,20 @@ def run_combined_mechanism_experiment(
     work_dir: str | Path,
     max_steps: int = _DEFAULT_MAX_STEPS,
     mechanism_experiment_timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    use_cache: bool = True,
 ) -> CombinedMechanismExperiment:
     """Run one real baseline and one real combined training run and
     compare the combined run's real measured peak VRAM/timing against
     what naively summing each mechanism's own independent experiment
     would have predicted.
+
+    Cached per (mechanisms+model+recipe+hardware) combination under
+    `work_dir/.chowder/combined_mechanism_experiments.json`, the same
+    convention `activation_offload.py`/`optimizer_tiering.py`/
+    `frozen_layer_streaming.py` already use -- this is what lets
+    `placement_policy.build_placement_plan()` cheaply check "has this
+    combination been empirically validated" via `read_validated_combination`
+    without spawning a real training run itself.
 
     A throwaway warmup run is NOT performed here -- unlike this module's
     own hands-on verification (which needed one to separate real
@@ -173,7 +303,15 @@ def run_combined_mechanism_experiment(
         seed=context.seed,
         hardware=context.hardware,
     )
-    key = _combined_calibration_key(mechanisms=mechanisms, spec=spec, max_steps=max_steps, context=context)
+    key = _combined_calibration_key(mechanisms=mechanisms, spec=spec, context=context)
+
+    if use_cache:
+        cached_entry = _read_cache_entry(work_dir, key)
+        if cached_entry is not None:
+            try:
+                return _cache_entry_to_experiment(key=key, entry=cached_entry)
+            except (KeyError, TypeError):
+                pass
 
     trainer = TransformersPeftExecutor()
     baseline_experiment = Experiment(
@@ -221,7 +359,7 @@ def run_combined_mechanism_experiment(
     )
     predicted_combined_peak = baseline_peak - sum(per_mechanism_savings[name] for name in mechanisms)
 
-    return CombinedMechanismExperiment(
+    result = CombinedMechanismExperiment(
         experiment_key=key,
         mechanisms=tuple(sorted(mechanisms)),
         baseline_peak_vram_gb=baseline_peak,
@@ -244,3 +382,6 @@ def run_combined_mechanism_experiment(
             "activation_offload_bytes_transferred"
         ),
     )
+    if use_cache:
+        _write_cache_entry(work_dir, key, _experiment_to_cache_entry(result))
+    return result

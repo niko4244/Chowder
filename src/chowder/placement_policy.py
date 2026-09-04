@@ -36,27 +36,27 @@ class PlacementPlan:
     already measures -- something none of them do alone today, since
     each only decides whether *it alone* is worth enabling.
 
-    Deliberately informational, not yet auto-applied: this plan is
-    surfaced in a training run's evidence for predicted-vs-actual
-    comparison (the "compare predicted vs actual performance" the
-    roadmap's own Phase 7E description asks for), but does not itself
-    override spec.activation_offload/optimizer_tiering/
-    frozen_layer_streaming -- those keep resolving independently via
-    their own existing "auto" logic. Wiring this plan to actually drive
-    those settings is a deliberate follow-up, once enough real
-    predicted-vs-actual comparisons exist to trust it -- the same
-    "only add learned placement after enough real execution history
-    exists" caution the roadmap itself asks for, applied here to a
-    deterministic combination policy rather than a learned one.
+    combined-effect caveat: a chosen combination of 2+ mechanisms is only
+    ever considered when a REAL, empirically-measured
+    `combined_mechanism_experiment.CombinedMechanismExperiment` for that
+    exact combination+model+recipe+hardware has been cached (see
+    `combination_validated` and `read_validated_combination`) -- an
+    unvalidated multi-mechanism combination is never auto-selected, only
+    reported as informational context in `reasoning`. Single mechanisms
+    remain always-eligible, since each is already independently real-
+    measured by its own always-run experiment. This is a real, deliberate
+    safety choice, not an oversight: this module's own development found
+    the naive additive assumption can be meaningfully wrong (a real
+    combined run can show far less benefit than summing each mechanism's
+    own isolated savings implies) -- see combined_mechanism_experiment.py's
+    module docstring for the measured finding.
 
-    combined-effect caveat: predicted_combined_estimate_gb sums each
-    mechanism's own independently-measured savings. No experiment in
-    this codebase has measured what happens when two of these mechanisms
-    are *simultaneously* active against each other (each experiment
-    compares its own mechanism alone against resident baseline) -- so
-    this additive combination is a real, honest first approximation,
-    not a directly measured combined effect. That is exactly what the
-    predicted-vs-actual comparison this plan enables is for.
+    Auto-applied by `TransformersPeftExecutor.resolved_activation_offload`/
+    `resolved_optimizer_tiering`/`resolved_frozen_layer_streaming` when a
+    mechanism's own config value is `"auto"` -- an explicit `"always"`/
+    `"off"`/boolean on any individual mechanism always wins regardless of
+    what this plan would have chosen for it, since those staticmethods
+    only consult this plan inside their own `"auto"` branch.
     """
 
     fits_without_intervention: bool
@@ -69,6 +69,7 @@ class PlacementPlan:
     enable_frozen_layer_streaming: bool
     predicted_combined_estimate_gb: float | None
     fits_with_plan: bool
+    combination_validated: bool
     reasoning: tuple[str, ...]
 
 
@@ -145,6 +146,7 @@ def build_placement_plan(
             enable_frozen_layer_streaming=False,
             predicted_combined_estimate_gb=baseline.estimated_peak_gb,
             fits_with_plan=True,
+            combination_validated=True,
             reasoning=(
                 f"baseline recipe already fits: estimated "
                 f"{baseline.estimated_peak_gb:.2f} GB vs {available_gb:.2f} GB "
@@ -165,6 +167,7 @@ def build_placement_plan(
             enable_frozen_layer_streaming=False,
             predicted_combined_estimate_gb=None,
             fits_with_plan=False,
+            combination_validated=True,
             reasoning=(
                 f"baseline recipe does not fit ({baseline.estimated_peak_gb:.2f} GB "
                 f"estimated vs {available_gb:.2f} GB available per device), but "
@@ -197,12 +200,34 @@ def build_placement_plan(
         name for name in _MECHANISM_NAMES if savings[name] >= _MEANINGFUL_SAVINGS_GB
     ]
 
+    # A validated multi-mechanism combo uses its REAL measured
+    # actual_combined_peak_vram_gb instead of the naive additive sum.
+    # Unvalidated multi-mechanism combos are excluded entirely from
+    # consideration -- "do not auto-apply an unvalidated combination" --
+    # single mechanisms remain always-eligible since each is already
+    # independently real-measured. Imported locally to avoid a module
+    # import cycle (combined_mechanism_experiment.py imports from this
+    # module for _MECHANISM_NAMES/_mechanism_savings_gb).
+    from .combined_mechanism_experiment import read_validated_combination
+
+    skipped_unvalidated: list[tuple[str, ...]] = []
     fitting_combinations: list[tuple[str, ...]] = []
+    combination_estimates: dict[tuple[str, ...], float] = {}
     best_combination: tuple[str, ...] = ()
     best_combination_estimate = baseline.estimated_peak_gb
     for size in range(len(available_mechanisms) + 1):
         for combo in itertools.combinations(available_mechanisms, size):
-            estimate = baseline.estimated_peak_gb - sum(savings[name] for name in combo)
+            if size >= 2:
+                validated = read_validated_combination(
+                    mechanisms=combo, resolved_config=resolved_config, context=context, work_dir=work_dir,
+                )
+                if validated is None:
+                    skipped_unvalidated.append(combo)
+                    continue
+                estimate = validated.actual_combined_peak_vram_gb
+            else:
+                estimate = baseline.estimated_peak_gb - sum(savings[name] for name in combo)
+            combination_estimates[combo] = estimate
             if estimate < best_combination_estimate:
                 best_combination_estimate = estimate
                 best_combination = combo
@@ -220,6 +245,12 @@ def build_placement_plan(
             if savings[name] >= _MEANINGFUL_SAVINGS_GB
             else f"{name}: unavailable or no meaningful real measured savings on this hardware"
         )
+    for combo in skipped_unvalidated:
+        reasoning.append(
+            f"{'+'.join(combo)}: no real combined-mechanism measurement cached -- excluded "
+            "from auto-selection (run combined_mechanism_experiment.run_combined_mechanism_"
+            "experiment to validate this combination before it can be auto-applied)"
+        )
 
     if fitting_combinations:
         # Fewest mechanisms enabled first (least overhead/complexity for
@@ -233,9 +264,10 @@ def build_placement_plan(
                 max((penalty_ratios[name] for name in combo), default=0.0),
             ),
         )
-        chosen_estimate = baseline.estimated_peak_gb - sum(savings[name] for name in chosen)
+        chosen_estimate = combination_estimates[chosen]
+        validated_note = "real measured" if len(chosen) >= 2 else "predicted"
         reasoning.append(
-            f"chosen combination {chosen or '(none)'}: predicted combined estimate "
+            f"chosen combination {chosen or '(none)'}: {validated_note} combined estimate "
             f"{chosen_estimate:.2f} GB, fits within {available_gb:.2f} GB available"
         )
         return PlacementPlan(
@@ -249,6 +281,7 @@ def build_placement_plan(
             enable_frozen_layer_streaming="frozen_layer_streaming" in chosen,
             predicted_combined_estimate_gb=chosen_estimate,
             fits_with_plan=True,
+            combination_validated=True,
             reasoning=tuple(reasoning),
         )
 
@@ -270,5 +303,6 @@ def build_placement_plan(
         enable_frozen_layer_streaming="frozen_layer_streaming" in best_combination,
         predicted_combined_estimate_gb=best_combination_estimate,
         fits_with_plan=False,
+        combination_validated=True,
         reasoning=tuple(reasoning),
     )
