@@ -96,11 +96,11 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
   A real finding shaped the threshold logic: measured `vram_saved_gb` is
   rarely exactly 0.0 even with no genuine benefit (allocator noise), so
   a documented `_MEANINGFUL_SAVINGS_GB = 0.01` floor keeps negligible
-  "savings" from being folded into a combination. Deliberately
-  informational for this first slice, not yet auto-applied to
-  `spec.activation_offload`/etc. — wiring the plan to actually drive
-  those settings, and persisting it in a run's evidence for real
-  predicted-vs-actual comparison over time, are intentional follow-ups.
+  "savings" from being folded into a combination. This first slice was
+  deliberately informational only, not yet auto-applied — see "Adaptive
+  placement policy (7E)" under In Production Hardening below for how it
+  was later actually wired to drive real training (PRs #81, #82), and why
+  it still isn't the final Memory Fabric acceptance milestone.
 
 **Telemetry/calibration — Priority 2 (single-GPU-verifiable slice complete)**
 - production-training timing breakdown — `_TrainingPhaseTimerCallback`
@@ -132,6 +132,68 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
   class of gap Phase 5's DDP acceptance had before Kaggle 2×T4 access
   was arranged), confirmed with the user rather than silently stubbed
   or faked.
+
+**Scientific search controller — Priority 4 (complete)**
+- successive halving — `successive_halving.py` (PR #77). `cycle.py::
+  run_generation()` was one flat train-all → evaluate-all → rank pass with
+  no budget-elimination or staged rounds; `run_successive_halving()` runs
+  real rounds at an increasing `max_steps` budget, keeps the top
+  `survival_fraction` of gate-accepted candidates (tracked separately from
+  gate-rejected ones — real provenance, never conflated), and chains each
+  survivor into the next round via a REAL checkpoint resume built through
+  the existing parent/child config-patch lineage (`ExperimentGraph.
+  resolve_config`, not hand-reconstructed). Only the last round actually
+  run is ever promoted. `cycle.py::run_generation()` is now a thin
+  `run_round(experiments, promote=True)` wrapper — zero behavior change
+  for every existing caller. Verified end to end on real hardware: 4 real
+  candidates trained cheaply, 2 real survivors correctly separated from 2
+  real cutoff-eliminations, round 2 genuinely resumed the real winner's
+  checkpoint and trained additional real steps on top of it (proven by
+  `global_step`, not a restart from scratch).
+- bandit candidate ordering — `candidate_selection.py` (PR #78).
+  `prioritize_candidates()` reorders a pool of not-yet-run candidates by
+  UCB1 score over "arms" (the frozenset of dotted `config_patch` key-paths
+  an experiment touches), reward = `decision.score / gpu_hours` (reusing
+  `tournament.py`'s own efficiency formula) replayed against real
+  `(Experiment, ExperimentResult)` history through the real hard gate.
+  Never bypasses or duplicates the gate — only decides which not-yet-run
+  candidate gets GPU-hours first. Cold start (no history) provably
+  preserves input order (untried arms score `+inf`, `sorted` is stable).
+  `RunRegistry.list_experiments()` was added as the missing join key to
+  reconstruct historical `(Experiment, ExperimentResult)` pairs.
+- regression-tested together: `test_cycle.py`/`test_successive_halving.py`
+  exercise the promote=False deferral, gate-rejection vs cutoff-elimination
+  provenance, and exact GPU-hour accounting across chained rounds.
+
+**Regression Surgeon extensions — Priority 5 (2 of 4 slices complete)**
+- checkpoint bisect — `checkpoint_bisect.py` (PR #79). The existing
+  autonomous repair loop only ever asked "was the final checkpoint of a
+  rejected run good enough" — `evaluate_all_checkpoints()` independently
+  re-evaluates every real checkpoint a rejected run wrote and gates each
+  one against the same baseline the final candidate was gated against, to
+  find the earliest checkpoint that already regresses. Reuses the real
+  production training/evaluation path rather than inventing new
+  measurement code (a checkpoint is just a real `TrainingArtifact` with
+  its own real sha256 content digest, independently re-evaluated).
+  Deliberately a linear scan, not binary search, by design (checkpoint
+  counts are typically single digits; cost is dominated by evaluation
+  subprocess launches, not comparison count). `checkpoint_discovery.py`
+  solves a different problem (resume-compatibility validation for a NEW
+  run) and was deliberately not reused for enumeration.
+- non-continuation repair variants — `autonomous_repair.py` (PR #80). The
+  repair loop always continued training from the rejected adapter's exact
+  hashed weights, which is why it hard-blocked any variant from changing
+  LoRA topology. `run_single_hop_autonomous_repair(..., continue_from_
+  parent=False)` skips parent-adapter verification and lifts that
+  restriction for a fresh-start variant, which has no parent weights a new
+  topology could conflict with — a pure integration change, plumbing into
+  the `parent_adapter=None` path `repair_candidates.py::
+  build_repair_candidate` already implemented and already tested (data
+  model was already correct; only the single call site was missing the
+  option). Replay stays orthogonal to continuation by design.
+- **not yet implemented**: dataset influence approximation, offending-
+  training-sample clustering, independent counterexample generation — see
+  Research below.
 
 **Unlisted but real: incident-remediation benchmark harness** —
 `benchmark.py`, `investigation.py`, `hypothesis_generation.py`, `probes.py`,
@@ -178,53 +240,91 @@ treated as fully proven:
 - `checkpoint_discovery.py` is real and tested, but solves *resume
   compatibility validation* for the TUI, not bisection — don't confuse it
   with "checkpoint bisect" under Research below.
-- **Adaptive placement policy (7E)** — real and merged, but deliberately
-  informational only: `build_placement_plan()`'s output does not yet
-  drive `spec.activation_offload`/`optimizer_tiering`/
-  `frozen_layer_streaming`, which keep resolving independently. Its
-  combined-effect estimate is additive (each mechanism's savings summed),
-  not a directly measured combined effect — no experiment here has run
-  two mechanisms simultaneously against each other.
+- **Adaptive placement policy (7E) — now wired to real training, still
+  not fully production-proven** — `build_placement_plan()` (PR #75) now
+  actually drives `spec.activation_offload`/`optimizer_tiering`/
+  `frozen_layer_streaming` when a mechanism's config value is `"auto"`
+  and the recipe needs intervention to fit (`resolved_activation_offload`
+  /etc. in `transformers_peft.py`, PR #82). Its combination search is no
+  longer purely additive for 2+-mechanism combinations: `combined_
+  mechanism_experiment.py` (PR #81) runs one real baseline and one real
+  SIMULTANEOUS multi-mechanism training run and persists the actual
+  measured combined effect (`.chowder/combined_mechanism_experiments.json`,
+  work-dir-scoped cache, same convention every other mechanism experiment
+  uses); `build_placement_plan()` only ever selects a 2+-mechanism
+  combination when a real, empirically-validated measurement exists for
+  it — an unvalidated combination is excluded entirely from
+  auto-selection, never merely deprioritized. A real, measured finding
+  from that module's own development: a full training run combining
+  activation_offload + frozen_layer_streaming showed **zero net peak-VRAM
+  reduction** despite genuinely moving real data through both mechanisms'
+  hooks, while the naive additive prediction implied real savings — proof
+  the safety gate is not theoretical caution, it caught a real case where
+  the old additive assumption would have been wrong. Single mechanisms
+  remain always-eligible (each is independently real-measured by its own
+  always-run experiment) and a mechanism's own opportunistic "worthwhile
+  even though not strictly required" recommendation is preserved via a
+  two-tier fallback when the recipe already fits resident (the plan
+  itself is scoped to "recipe does not fit", so it recommends nothing in
+  that case — a real regression the pre-existing real-ML smoke suite
+  caught during PR #82's own development, before merge). **Still not
+  fully production-proven**: no real resident-OOM → Memory-Fabric-success
+  acceptance run exists yet (see Next below) — do not treat Memory Fabric
+  as validated end-to-end until that exists.
 
 ## NEXT
 
-**Wire the placement plan to actually drive settings (Priority 1 follow-up)**
-`build_placement_plan()` (7E) currently only reports what it would
-recommend. Once enough real predicted-vs-actual comparisons exist (the
-plan is not yet persisted anywhere for that comparison to happen against),
-a natural next step is having "auto" mode on all three mechanisms defer to
-the combined plan instead of each deciding in isolation — but only after
-validating the additive-combination assumption against real measured
-combined runs, not before.
+**Final Memory Fabric acceptance test (Priority 1 follow-up)**
+The remaining milestone before Memory Fabric can be called production-
+proven: a real workload that genuinely CUDA-OOMs under normal resident
+training, then genuinely succeeds under the same model/recipe with Memory
+Fabric's real placement plan applied — not faked by lowering the reported
+VRAM budget. Must record the exact model/revision, GPU, the real resident
+failure, the chosen placement plan, real peak VRAM, throughput penalty,
+and a successful training/evaluation result. `combined_mechanism_experiment.py`
+(PR #81) and the auto-wiring (PR #82) are the prerequisites this now
+builds on.
+
+**Backward prefetch for frozen-layer streaming (Priority 1 follow-up)**
+`memory_fabric.py`'s backward re-streams each frozen layer's weight
+synchronously today (correctness does not depend on overlap, only
+throughput does). Prefetching layer N-1's weight while layer N's backward
+is still running is the next real improvement to prove and measure —
+whether the overlap actually improves throughput on real hardware, not
+assumed.
 
 **Multi-GPU telemetry (Priority 2, deferred slice)**
-Real GPU↔GPU bandwidth/topology measurement and PCIe/NVLink capability
-measurement — blocked on 2+ GPU hardware access (see above). Revisit if/when
-that access is arranged, the same way Phase 5's DDP acceptance was.
+Real GPU↔GPU bandwidth/topology measurement, PCIe/NVLink capability
+measurement, P2P availability, all-reduce timing, and DDP communication
+share of backward — blocked on **matched** multi-GPU hardware access (a
+locally available but asymmetric 2-GPU box does not substitute for this;
+inferring symmetric-pool numbers from mismatched cards would misrepresent
+real DDP behavior). Revisit if/when Kaggle-2×T4-class access is arranged,
+the same way Phase 5's DDP acceptance was.
 
 ## RESEARCH
 
 Explicitly gated on the above being stable — no design work has started on
 any of these:
 
-- **Scientific search controller** (Priority 4) — successive halving is
-  **not implemented**: `cycle.py::run_generation()` is one flat
-  train-all → evaluate-all → rank pass, with no budget-elimination or
-  staged rounds. Bandit/Bayesian experiment selection is also **not
-  implemented** — `tournament.py`/`ranking.py` are deterministic sorts
-  (probe-evidence count, gate score + efficiency), not adaptive selection
-  policies.
-- **Regression Surgeon extensions** (Priority 5) — checkpoint bisect
-  (**not implemented**, despite the similarly-named `checkpoint_discovery.py`
-  solving a different problem), dataset influence approximation (**not
-  implemented**), offending-*training*-sample clustering (**not
-  implemented** — distinct from the already-shipped eval-failure
-  clustering), independent counterexample generation, targeted repair
-  adapters beyond the existing parent-adapter continuation.
-- **Meta-controller** (Priority 6) — persisted intervention/result dataset,
-  expected-improvement model, GPU-hour-aware experiment policy, cross-model
-  transfer of successful training strategies. Only claim learned-policy
-  improvement once validated against held-out experiments.
+- **Regression Surgeon extensions, remaining slices** (Priority 5) —
+  dataset influence approximation (**not implemented**: which training
+  examples most likely contributed to a regression; start with a
+  practical approximation such as leave-cluster-out re-training measured
+  via the real independent evaluator, not a claim of exact causal
+  influence), offending-*training*-sample clustering (**not implemented**
+  — distinct from the already-shipped eval-failure clustering, and gated
+  on influence scores existing first), independent counterexample
+  generation from sources independent of the protected holdout (**not
+  implemented** — must never expose holdout answers to the generator).
+- **Meta-controller** (Priority 6) — persisted intervention/result dataset
+  (model, hardware, dataset/failure cluster, intervention, Memory Fabric
+  placement, training recipe, cost, score delta, regression delta,
+  throughput, peak VRAM), expected-improvement model, GPU-hour-aware
+  experiment policy, cross-model transfer of successful training
+  strategies. Only claim learned-policy improvement once validated
+  against held-out experiments — a durable historical dataset is not
+  itself a learned policy.
 - **Elastic MoE research** (Priority 7) — per-expert load/gradient
   statistics, expert specialization diagnostics, safe expert clone/split
   experiments, router retraining/distillation, architecture-change
