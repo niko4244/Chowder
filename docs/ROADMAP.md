@@ -267,23 +267,36 @@ treated as fully proven:
   two-tier fallback when the recipe already fits resident (the plan
   itself is scoped to "recipe does not fit", so it recommends nothing in
   that case — a real regression the pre-existing real-ML smoke suite
-  caught during PR #82's own development, before merge). **Still not
-  fully production-proven**: no real resident-OOM → Memory-Fabric-success
-  acceptance run exists yet (see Next below) — do not treat Memory Fabric
-  as validated end-to-end until that exists.
+  caught during PR #82's own development, before merge). A follow-up real
+  bug, found while attempting the acceptance run below and fixed
+  separately: the calibration subprocess calls inside `build_placement_
+  plan()`/`run_combined_mechanism_experiment()` used a hardcoded 300s
+  timeout regardless of the recipe's own batch size, which a genuinely
+  large-batch recipe's calibration run can legitimately exceed — now
+  derived from the recipe's own `backend.runtime.timeout_seconds`
+  instead. **Still not fully production-proven**: no real resident-OOM →
+  Memory-Fabric-success acceptance run exists yet (see Next below) — do
+  not treat Memory Fabric as validated end-to-end until that exists.
 
 ## NEXT
 
-**Final Memory Fabric acceptance test (Priority 1 follow-up)**
+**Final Memory Fabric acceptance test (Priority 1 follow-up) — attempted for
+real, not yet demonstrated cleanly**
 The remaining milestone before Memory Fabric can be called production-
 proven: a real workload that genuinely CUDA-OOMs under normal resident
 training, then genuinely succeeds under the same model/recipe with Memory
 Fabric's real placement plan applied — not faked by lowering the reported
-VRAM budget. Must record the exact model/revision, GPU, the real resident
-failure, the chosen placement plan, real peak VRAM, throughput penalty,
-and a successful training/evaluation result. `combined_mechanism_experiment.py`
-(PR #81) and the auto-wiring (PR #82) are the prerequisites this now
-builds on.
+VRAM budget. Full real-hardware attempt log, findings, and next steps:
+[`docs/MEMORY_FABRIC_ACCEPTANCE.md`](MEMORY_FABRIC_ACCEPTANCE.md). Short
+version: a real production calibration-timeout bug was found and fixed
+along the way; a real, reproducible `activation_offload` crash was found
+and flagged separately (not fixed here); this development machine's
+driver-level VRAM-to-system-RAM paging fallback and shared-desktop-GPU
+contention make a clean pass hard to reach on this specific hardware; and
+a mechanism's isolated single-forward+backward savings not reliably
+predicting a full training run's real peak VRAM was confirmed a third
+time. Revisiting this needs either a dedicated/isolated GPU or the
+`activation_offload` bug fixed first.
 
 **Backward prefetch for frozen-layer streaming (Priority 1 follow-up)**
 `memory_fabric.py`'s backward re-streams each frozen layer's weight

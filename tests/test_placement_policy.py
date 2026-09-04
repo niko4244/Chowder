@@ -12,7 +12,11 @@ from chowder.frozen_layer_streaming import FrozenLayerStreamingExperiment
 from chowder.memory import HardwareProfile
 from chowder.memory_preflight import MemoryEstimate
 from chowder.optimizer_tiering import OptimizerTieringExperiment, OptimizerVariantMeasurement
-from chowder.placement_policy import PlacementPlan, build_placement_plan
+from chowder.placement_policy import (
+    PlacementPlan,
+    _effective_mechanism_experiment_timeout_seconds,
+    build_placement_plan,
+)
 
 _REAL_ML_SMOKE = pytest.mark.skipif(
     os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
@@ -423,6 +427,49 @@ def test_reasoning_is_non_empty_and_mentions_every_mechanism():
     assert "optimizer_tiering" in reasoning_text
     assert "frozen_layer_streaming" in reasoning_text
     assert len(plan.reasoning) >= 2
+
+
+# --- calibration timeout scales with the recipe's own configured timeout ----
+
+
+def test_effective_timeout_falls_back_to_default_when_runtime_timeout_unset():
+    assert _effective_mechanism_experiment_timeout_seconds(_config()) == 300.0
+
+
+def test_effective_timeout_uses_configured_runtime_timeout_when_larger():
+    config = _config(runtime={"timeout_seconds": 900.0})
+    assert _effective_mechanism_experiment_timeout_seconds(config) == 900.0
+
+
+def test_effective_timeout_never_goes_below_the_default():
+    """A recipe with a short configured runtime timeout must not shrink the
+    calibration timeout below the existing default -- calibration is a much
+    cheaper operation than the full production run, so a short production
+    timeout says nothing about how long calibration should be allowed."""
+    config = _config(runtime={"timeout_seconds": 30.0})
+    assert _effective_mechanism_experiment_timeout_seconds(config) == 300.0
+
+
+def test_build_placement_plan_passes_the_effective_timeout_to_every_experiment():
+    """A real, previously-undiscovered production gap: a large-batch recipe's
+    own calibration forward+backward can genuinely take longer than the
+    module-level 300s default (confirmed directly against real hardware --
+    a batch=96 calibration run against a real 1.5B model exceeded 300s from
+    Windows' driver-level VRAM-to-system-RAM paging fallback, with no crash
+    to short-circuit it). build_placement_plan() must pass a timeout derived
+    from the recipe's own backend.runtime.timeout_seconds through to every
+    real experiment call, not silently cap every recipe at 300s regardless
+    of what the user already told Chowder to expect."""
+    config = _config(runtime={"timeout_seconds": 900.0})
+    with patch(
+        "chowder.placement_policy.estimate_memory_requirements",
+        return_value=_estimate(estimated_peak_gb=20.0, per_rank_available_gb=16.0, fits=False),
+    ):
+        p1, p2, p3 = _patch_experiments()
+        with p1 as mock_offload, p2 as mock_tiering, p3 as mock_streaming:
+            build_placement_plan(resolved_config=config, context=_context(), work_dir=".")
+    for mock in (mock_offload, mock_tiering, mock_streaming):
+        assert mock.call_args.kwargs["timeout_seconds"] == 900.0
 
 
 # --- real end-to-end (actual model load + real experiments) -----------------

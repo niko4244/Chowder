@@ -271,6 +271,52 @@ def test_baseline_run_has_every_mechanism_off(tmp_path, monkeypatch):
     assert combined_call["frozen_layer_streaming"] == "off"
 
 
+def test_mechanism_experiment_timeout_derives_from_the_recipes_own_runtime_timeout(tmp_path, monkeypatch):
+    """A large-batch recipe's own calibration forward+backward can genuinely
+    take longer than the 300s default (confirmed against real hardware --
+    see the module docstring's real finding). When the caller does not pass
+    an explicit override, the timeout used for every single-mechanism
+    calibration call must derive from the recipe's own backend.runtime.
+    timeout_seconds, not silently cap every recipe at 300s."""
+    config = _base_resolved_config(tmp_path)
+    config["backend"]["runtime"] = {"timeout_seconds": 900.0}
+    seen_timeouts = {}
+
+    def _capture(name):
+        def _fake(**kwargs):
+            seen_timeouts[name] = kwargs.get("timeout_seconds")
+            ao, ot, fls = _fake_experiments()
+            return {"activation_offload": ao, "optimizer_tiering": ot, "frozen_layer_streaming": fls}[name]
+        return _fake
+
+    monkeypatch.setattr(
+        "chowder.combined_mechanism_experiment.run_activation_offload_experiment", _capture("activation_offload")
+    )
+    monkeypatch.setattr(
+        "chowder.combined_mechanism_experiment.run_optimizer_tiering_experiment", _capture("optimizer_tiering")
+    )
+    monkeypatch.setattr(
+        "chowder.combined_mechanism_experiment.run_frozen_layer_streaming_experiment",
+        _capture("frozen_layer_streaming"),
+    )
+    _patch_trainer(
+        monkeypatch,
+        [
+            {"peak_vram_gb": 1.0, "train_runtime_seconds": 1.0},
+            {"peak_vram_gb": 1.0, "train_runtime_seconds": 1.0},
+        ],
+    )
+
+    run_combined_mechanism_experiment(
+        mechanisms=("activation_offload", "optimizer_tiering"),
+        resolved_config=config, context=_context(tmp_path, config), work_dir=tmp_path,
+    )
+
+    assert seen_timeouts == {
+        "activation_offload": 900.0, "optimizer_tiering": 900.0, "frozen_layer_streaming": 900.0
+    }
+
+
 @_REAL_ML_SMOKE
 def test_real_combined_activation_offload_and_frozen_layer_streaming(tmp_path):
     """End-to-end with a REAL tiny model: one real baseline training run
