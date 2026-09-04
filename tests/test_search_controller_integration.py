@@ -26,9 +26,15 @@ Invariants proven here:
     the working baseline;
   * cancellation mid-search leaving an exact ledger, and a real
     checkpoint resume afterwards;
-  * immutable provenance -- recorded evidence is never mutated after the
-    fact, and a hash recorded at training time still verifies at the end
-    of the loop.
+  * immutable provenance -- the exact effective round is persisted before
+    compute is reserved, recorded evidence is never mutated afterwards,
+    and a hash recorded at training time still verifies at the end.
+
+The final tests are regressions for a real production bug these seam
+tests found: `run_successive_halving()` never persisted the round-1+ child
+experiments it invents, so any search with a registry attached died at the
+start of round 1 and stranded that round's reservations. See their own
+section comment for the details.
 
 Test names deliberately avoid the substring "real": this suite is often run
 with `-k "not real"` to exclude the GPU-only smoke tests, and none of these
@@ -52,7 +58,7 @@ from chowder.cycle import ExperimentCycleRunner
 from chowder.engine import EvolutionEngine
 from chowder.executors import EvaluationOutcome, ExecutionContext, TrainingArtifact
 from chowder.failures import FailureRecord, FailureSourceRole
-from chowder.graph import GraphInvariantError
+from chowder.graph import GraphInvariantError, deep_merge_config
 from chowder.local_corpus_provider import LocalCorpusRepairProvider
 from chowder.memory import HardwareProfile
 from chowder.models import (
@@ -360,6 +366,26 @@ def _experiment(experiment_id, patch=None, *, hours=0.2, parent=None) -> Experim
     )
 
 
+def _two_step_experiment(experiment_id, patch=None, *, hours=0.2, parent=None) -> Experiment:
+    return _experiment(
+        experiment_id,
+        deep_merge_config(
+            patch or {},
+            {
+                "backend": {
+                    "training": {
+                        "max_steps": 2,
+                        "save_strategy": "steps",
+                        "save_steps": 1,
+                    }
+                }
+            },
+        ),
+        hours=hours,
+        parent=parent,
+    )
+
+
 def _assert_ledger_balances(engine, *, spent: float) -> None:
     """The whole point of the accounting invariant: nothing is left
     reserved, nothing was lost, and spent + remaining is the budget."""
@@ -441,13 +467,10 @@ def test_full_search_loop_from_history_to_promotion_balances_the_gpu_hour_ledger
     real checkpoint resume -> hard gate -> promotion, with the GPU-hour
     ledger balancing exactly at the end.
 
-    A registry is deliberately NOT attached to the halving runner: doing so
-    currently crashes, which
-    `test_successive_halving_persists_the_child_experiments_it_creates`
-    documents as a real bug. The registry seam is still exercised for real
-    here (the historical campaign writes to it, and the prioritizer reads
-    its history straight back out of it) and again in the repair tests
-    below.
+    One registry spans both campaigns: the historical one writes to it, the
+    prioritizer reads its history straight back out of it, and the search
+    itself persists every round it runs -- including the round-1 children
+    successive halving invents on its own.
     """
     holdout_index = _seed_work_dir(tmp_path)
 
@@ -486,7 +509,7 @@ def test_full_search_loop_from_history_to_promotion_balances_the_gpu_hour_ledger
             holdout_index,
             {"lr-tune": 0.90, "warmup": 0.85, "decay": 0.80, "lora-rank": 0.55},
         )
-        runner = _runner(tmp_path, engine, trainer, evaluator)
+        runner = _runner(tmp_path, engine, trainer, evaluator, registry=registry)
 
         pool = (
             # Deliberately worst-first on input: the historically bad arm
@@ -515,6 +538,30 @@ def test_full_search_loop_from_history_to_promotion_balances_the_gpu_hour_ledger
             step_multiplier=2.0,
             survival_fraction=0.5,
             min_survivors=1,
+        )
+
+        # -- every round the search really ran is durably persisted, with
+        # real lineage -- including the round-1 children successive halving
+        # invents itself, which no caller ever had a chance to record --
+        statuses = {e.experiment_id: e.status for e in registry.list_experiments()}
+        for experiment_id in ("lr-tune", "warmup", "decay", "lora-rank"):
+            assert experiment_id in statuses
+        assert registry.lineage("lr-tune-r1") == ("lr-tune",)
+        assert registry.lineage("warmup-r1") == ("warmup",)
+        assert statuses["lr-tune-r1"] is ExperimentStatus.PASSED
+        assert statuses["lora-rank"] is ExperimentStatus.REJECTED
+        # ...and this campaign's ledger agrees with what it persisted (the
+        # two historical results belong to the earlier engine, so they are
+        # excluded by name rather than by assuming the table is empty).
+        search_ids = {
+            "lr-tune", "warmup", "decay", "lora-rank", "lr-tune-r1", "warmup-r1",
+        }
+        assert engine.spent_gpu_hours == pytest.approx(
+            sum(
+                result.gpu_hours
+                for result in registry.list_results()
+                if result.experiment_id in search_ids
+            )
         )
 
     # -- the gate, not the priority order, decides who wins --
@@ -889,33 +936,32 @@ def test_recorded_evidence_is_immutable_and_its_hashes_still_verify_afterwards(t
         )
 
 
-# --- 6. a real bug this integration test found --------------------------------
+# --- 6/7. regressions for the bug this integration test found -----------------
+#
+# Found by test 1 above: run_successive_halving() invented the round-1+ child
+# experiments itself and proposed them to the engine, but never recorded them
+# in the RunRegistry. ExperimentCycleRunner._record_status() then called
+# RunRegistry.update_experiment_status(), which hard-refuses an unknown id --
+# and it does so outside any try block, so the whole search died at the start
+# of round 1 with RegistryInvariantError("unknown persisted experiment id:
+# lr-tune-r1") and left every round-1 reservation outstanding forever
+# (measured: spent=1.0, reserved=1.05, outstanding=2 against a 10.0 budget).
+# Neither module's own tests caught it: test_successive_halving.py never
+# attaches a registry, and test_cycle.py never runs a multi-round search.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "REAL BUG (production, not test): run_successive_halving() creates the "
-        "round-1+ child experiments itself and proposes them to the engine, but "
-        "never records them in the RunRegistry. ExperimentCycleRunner._record_status"
-        "() then calls RunRegistry.update_experiment_status(), which raises "
-        "RegistryInvariantError('unknown persisted experiment id: <parent>-r1') "
-        "outside any try block -- so any successive-halving search with a registry "
-        "attached dies at the start of round 1, leaving every round-1 reservation "
-        "outstanding and unsettled (a permanently leaked GPU-hour reservation). "
-        "Neither module's own tests catch it: test_successive_halving.py never "
-        "attaches a registry, and test_cycle.py never runs a multi-round search. "
-        "Remove this marker once the fix lands."
-    ),
-)
-def test_successive_halving_persists_the_child_experiments_it_creates(tmp_path):
+def test_successive_halving_persists_each_effective_round_before_proposal(
+    tmp_path, monkeypatch
+):
+    """Every effective experiment is durable before it can reserve compute."""
     holdout_index = _seed_work_dir(tmp_path)
     with RunRegistry(tmp_path / "runs.db") as registry:
         engine = _engine(budget=10.0)
+        trainer = FakeTrainer(tmp_path)
         runner = _runner(
             tmp_path,
             engine,
-            FakeTrainer(tmp_path),
+            trainer,
             FakeEvaluator(
                 holdout_index,
                 {"lr-tune": 0.90, "warmup": 0.85, "decay": 0.80, "lora-rank": 0.55},
@@ -928,8 +974,21 @@ def test_successive_halving_persists_the_child_experiments_it_creates(tmp_path):
             _experiment("decay", {"backend": {"training": {"weight_decay": 0.01}}}),
             _experiment("lora-rank", {"backend": {"lora": {"r": 8}}}),
         )
-        for experiment in pool:
-            registry.record_experiment(experiment)
+
+        propose = engine.propose
+
+        def assert_persisted_then_propose(experiments):
+            rows = tuple(experiments)
+            persisted = {row.experiment_id: row for row in registry.list_experiments()}
+            for experiment in rows:
+                recorded = persisted[experiment.experiment_id]
+                assert recorded.parent_id == experiment.parent_id
+                assert recorded.hypothesis == experiment.hypothesis
+                assert recorded.config_patch == experiment.config_patch
+                assert recorded.estimated_gpu_hours == experiment.estimated_gpu_hours
+            return propose(rows)
+
+        monkeypatch.setattr(engine, "propose", assert_persisted_then_propose)
 
         outcome = run_successive_halving(
             runner, pool, initial_max_steps=2, survival_fraction=0.5, min_survivors=1
@@ -938,8 +997,231 @@ def test_successive_halving_persists_the_child_experiments_it_creates(tmp_path):
         assert outcome.total_rounds == 2
         assert outcome.promoted is not None
         assert outcome.promoted.experiment_id == "lr-tune-r1"
-        # The child a real round actually ran must be durably recorded, with
-        # its real lineage back to the candidate it continued.
-        assert registry.has_experiment("lr-tune-r1")
-        assert registry.lineage("lr-tune-r1") == ("lr-tune",)
+        persisted = {row.experiment_id: row for row in registry.list_experiments()}
+        for root in ("lr-tune", "warmup", "decay", "lora-rank"):
+            assert persisted[root].config_patch["backend"]["training"]["max_steps"] == 2
+        for child, parent in (("lr-tune-r1", "lr-tune"), ("warmup-r1", "warmup")):
+            assert registry.lineage(child) == (parent,)
+            call = next(row for row in trainer.calls if row["experiment_id"] == child)
+            assert persisted[child].config_patch["backend"]["resume_from_checkpoint"] == call[
+                "resume_from_checkpoint"
+            ]
+            assert persisted[child].status is ExperimentStatus.PASSED
+        assert len(persisted) == 6
         _assert_ledger_balances(engine, spent=6 * _CANDIDATE_COST)
+
+
+def test_exact_planned_round_zero_persistence_retry_accepts_json_normalization(tmp_path):
+    holdout_index = _seed_work_dir(tmp_path)
+    with RunRegistry(tmp_path / "runs.db") as registry:
+        engine = _engine(budget=10.0)
+        trainer = FakeTrainer(tmp_path)
+        runner = _runner(
+            tmp_path,
+            engine,
+            trainer,
+            FakeEvaluator(holdout_index, {"candidate": 0.90}),
+            registry=registry,
+        )
+        candidate = _two_step_experiment(
+            "candidate",
+            {"backend": {"lora": {"target_modules": ("q_proj", "v_proj")}}},
+        )
+        registry.record_experiment(candidate)
+
+        outcome = run_successive_halving(
+            runner, (candidate,), initial_max_steps=2, min_survivors=1
+        )
+
+        assert outcome.promoted is not None
+        assert outcome.promoted.experiment_id == "candidate"
+        assert len(tuple(registry.list_experiments())) == 1
+        persisted = next(iter(registry.list_experiments()))
+        assert persisted.config_patch["backend"]["lora"]["target_modules"] == [
+            "q_proj",
+            "v_proj",
+        ]
+        assert [row["experiment_id"] for row in trainer.calls] == ["candidate"]
+        _assert_ledger_balances(engine, spent=_CANDIDATE_COST)
+
+
+def test_raw_persisted_round_zero_is_rejected_before_proposal(tmp_path):
+    """The controller owns its effective budget patch; stale evidence is refused."""
+    holdout_index = _seed_work_dir(tmp_path)
+    with RunRegistry(tmp_path / "runs.db") as registry:
+        engine = _engine(budget=10.0)
+        trainer = FakeTrainer(tmp_path)
+        runner = _runner(
+            tmp_path,
+            engine,
+            trainer,
+            FakeEvaluator(holdout_index, {"candidate": 0.90}),
+            registry=registry,
+        )
+        raw = _experiment("candidate")
+        registry.record_experiment(raw)
+
+        with pytest.raises(RegistryInvariantError, match="already exists with different content"):
+            run_successive_halving(
+                runner, (raw,), initial_max_steps=2, min_survivors=1
+            )
+
+        recorded = tuple(registry.list_experiments())
+        assert recorded == (raw,)
+    assert engine.graph.nodes == {}
+    assert trainer.calls == []
+    _assert_ledger_balances(engine, spent=0.0)
+
+
+def test_terminal_round_is_not_reexecuted_as_an_idempotent_replay(tmp_path):
+    holdout_index = _seed_work_dir(tmp_path)
+    candidate = _two_step_experiment("candidate")
+    with RunRegistry(tmp_path / "runs.db") as registry:
+        first_engine = _engine(budget=10.0)
+        first_runner = _runner(
+            tmp_path,
+            first_engine,
+            FakeTrainer(tmp_path),
+            FakeEvaluator(holdout_index, {"candidate": 0.90}),
+            registry=registry,
+        )
+        registry.record_experiment(candidate)
+        run_successive_halving(
+            first_runner, (candidate,), initial_max_steps=2, min_survivors=1
+        )
+        results_before = tuple(registry.list_results())
+
+        replay_engine = _engine(budget=10.0)
+        replay_trainer = FakeTrainer(tmp_path)
+        replay_runner = _runner(
+            tmp_path,
+            replay_engine,
+            replay_trainer,
+            FakeEvaluator(holdout_index, {"candidate": 0.90}),
+            registry=registry,
+        )
+        with pytest.raises(RegistryInvariantError, match="non-planned status passed"):
+            run_successive_halving(
+                replay_runner, (candidate,), initial_max_steps=2, min_survivors=1
+            )
+
+        recorded = tuple(registry.list_experiments())
+        assert recorded[0].status is ExperimentStatus.PASSED
+        assert tuple(registry.list_results()) == results_before
+    assert replay_engine.graph.nodes == {}
+    assert replay_trainer.calls == []
+    _assert_ledger_balances(replay_engine, spent=0.0)
+
+
+@pytest.mark.parametrize(
+    "status",
+    tuple(status for status in ExperimentStatus if status is not ExperimentStatus.PLANNED),
+)
+def test_incoming_non_planned_round_is_rejected_before_persistence(tmp_path, status):
+    holdout_index = _seed_work_dir(tmp_path)
+    with RunRegistry(tmp_path / "runs.db") as registry:
+        engine = _engine(budget=10.0)
+        trainer = FakeTrainer(tmp_path)
+        runner = _runner(
+            tmp_path,
+            engine,
+            trainer,
+            FakeEvaluator(holdout_index, {"candidate": 0.90}),
+            registry=registry,
+        )
+        candidate = replace(_two_step_experiment("candidate"), status=status)
+
+        with pytest.raises(RegistryInvariantError, match="must be planned"):
+            run_successive_halving(
+                runner, (candidate,), initial_max_steps=2, min_survivors=1
+            )
+
+        assert tuple(registry.list_experiments()) == ()
+    assert engine.graph.nodes == {}
+    assert trainer.calls == []
+    _assert_ledger_balances(engine, spent=0.0)
+
+
+@pytest.mark.parametrize(
+    "changed_field",
+    ("parent_id", "hypothesis", "config_patch", "estimated_gpu_hours"),
+)
+def test_divergent_persisted_round_is_rejected_before_proposal(tmp_path, changed_field):
+    """Each immutable field independently guards same-ID scientific evidence."""
+    holdout_index = _seed_work_dir(tmp_path)
+    with RunRegistry(tmp_path / "runs.db") as registry:
+        engine = _engine(budget=10.0)
+        trainer = FakeTrainer(tmp_path)
+        runner = _runner(
+            tmp_path,
+            engine,
+            trainer,
+            FakeEvaluator(
+                holdout_index,
+                {"lr-tune": 0.90, "warmup": 0.85, "decay": 0.80, "lora-rank": 0.55},
+            ),
+            registry=registry,
+        )
+        pool = (
+            _two_step_experiment(
+                "lr-tune", {"backend": {"training": {"learning_rate": 5e-5}}}
+            ),
+            _two_step_experiment(
+                "warmup", {"backend": {"training": {"warmup_ratio": 0.1}}}
+            ),
+            _two_step_experiment(
+                "decay", {"backend": {"training": {"weight_decay": 0.01}}}
+            ),
+            _two_step_experiment("lora-rank", {"backend": {"lora": {"r": 8}}}),
+        )
+        registry.record_experiments(pool)
+        exact_child = _experiment(
+            "lr-tune-r1",
+            {
+                "backend": {
+                    "training": {
+                        "max_steps": 4,
+                        "save_strategy": "steps",
+                        "save_steps": 2,
+                    },
+                    "resume_from_checkpoint": str(
+                        tmp_path / "artifacts" / "lr-tune" / "trainer" / "checkpoint-2"
+                    ),
+                }
+            },
+            hours=2 * _CANDIDATE_COST,
+            parent="lr-tune",
+        )
+        changes = {
+            "parent_id": {"parent_id": "warmup"},
+            "hypothesis": {
+                "hypothesis": Hypothesis("different", "different", "different")
+            },
+            "config_patch": {
+                "config_patch": deep_merge_config(exact_child.config_patch, {"wrong": True})
+            },
+            "estimated_gpu_hours": {"estimated_gpu_hours": 0.999},
+        }
+        divergent = replace(exact_child, **changes[changed_field])
+        registry.record_experiment(divergent)
+
+        with pytest.raises(RegistryInvariantError, match="already exists with different content"):
+            run_successive_halving(
+                runner, pool, initial_max_steps=2, survival_fraction=0.5, min_survivors=1
+            )
+
+        assert registry.has_experiment("lr-tune-r1")
+        assert not registry.has_experiment("warmup-r1")
+        recorded = next(
+            row for row in registry.list_experiments() if row.experiment_id == "lr-tune-r1"
+        )
+        assert recorded == divergent
+
+    _assert_ledger_balances(engine, spent=4 * _CANDIDATE_COST)
+    assert set(engine.graph.nodes) == {experiment.experiment_id for experiment in pool}
+    assert [row["experiment_id"] for row in trainer.calls] == [
+        "lr-tune",
+        "warmup",
+        "decay",
+        "lora-rank",
+    ]
