@@ -9,7 +9,7 @@ from typing import Any, Iterable, Sequence
 from .database import connect_database
 from .executors import EvaluationOutcome, TrainingArtifact
 from .failures import FailureRecord, FailureSourceRole, RepairPlan
-from .models import Experiment, ExperimentResult
+from .models import Experiment, ExperimentResult, ExperimentStatus, Hypothesis
 from .provenance import EvidenceManifest
 from .run_events import RunEventPayload, event_experiment_id, event_payload, event_type_name
 
@@ -191,6 +191,32 @@ class RunRegistry:
             "SELECT 1 FROM experiments WHERE experiment_id = ?", (experiment_id,)
         ).fetchone()
         return row is not None
+
+    def list_experiments(self) -> Iterable[Experiment]:
+        """Read back every persisted Experiment, in the order they were
+        recorded -- the join key candidate_selection.py needs to connect
+        a historical result back to the config_patch that produced it
+        (results/list_results() alone has no way to recover *what was
+        tried*, only what it scored).
+
+        Note: Experiment.tags is not part of the persisted schema (no
+        tags_json column ever existed) and always round-trips as ()
+        here -- a pre-existing limitation of this table, not something
+        this method silently papers over.
+        """
+        rows = self._conn.execute(
+            """SELECT experiment_id, parent_id, estimated_gpu_hours, hypothesis_json, config_json, status
+               FROM experiments ORDER BY rowid"""
+        )
+        for experiment_id, parent_id, estimated_gpu_hours, hypothesis_json, config_json, status in rows:
+            yield Experiment(
+                experiment_id=experiment_id,
+                parent_id=parent_id,
+                hypothesis=Hypothesis(**json.loads(hypothesis_json)),
+                config_patch=json.loads(config_json),
+                estimated_gpu_hours=estimated_gpu_hours,
+                status=ExperimentStatus(status),
+            )
 
     def record_training_artifact(self, artifact: TrainingArtifact) -> None:
         columns = (
