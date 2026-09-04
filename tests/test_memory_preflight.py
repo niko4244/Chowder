@@ -225,6 +225,68 @@ def test_estimate_extrapolates_linearly_from_two_real_measurements(tmp_path):
     assert estimate.from_cache is False
 
 
+def test_estimate_prefers_a_direct_measurement_over_extrapolation(tmp_path):
+    """A real, measured finding: extrapolating linearly from two tiny
+    points to a much larger configured batch size can be badly wrong
+    (confirmed directly against real hardware -- see MemoryEstimate's own
+    docstring). When the worker took a real, direct measurement at the
+    configured batch size, it must be used as-is, not overridden by the
+    extrapolation formula."""
+    with patch(
+        "chowder.memory_preflight._run_dry_run_worker",
+        return_value=_fake_measured(
+            peak_vram_gb_bs1=1.0, peak_vram_gb_bs2=1.5,
+            peak_vram_gb_at_configured_batch_size=9.5,  # real number, not 1.0 + 0.5*4=3.0
+        ),
+    ) as mock_worker:
+        config = _config(training={"batch_size": 5})
+        estimate = estimate_memory_requirements(
+            resolved_config=config, context=_context(), work_dir=tmp_path, use_cache=False
+        )
+    mock_worker.assert_called_once()
+    assert estimate.estimated_peak_gb == pytest.approx(9.5)
+    assert estimate.measured_peak_gb_at_configured_batch_size == pytest.approx(9.5)
+    assert estimate.configured_batch_size_confirmed_oom is False
+
+
+def test_estimate_falls_back_to_extrapolation_when_no_direct_measurement_present(tmp_path):
+    """An older cache entry (written before the direct-measurement fix
+    existed) has neither new key -- must not KeyError, must fall back to
+    the pre-existing linear-extrapolation behavior exactly."""
+    with patch(
+        "chowder.memory_preflight._run_dry_run_worker", return_value=_fake_measured()
+    ):
+        config = _config(training={"batch_size": 5})
+        estimate = estimate_memory_requirements(
+            resolved_config=config, context=_context(), work_dir=tmp_path, use_cache=False
+        )
+    assert estimate.estimated_peak_gb == pytest.approx(3.0)
+    assert estimate.measured_peak_gb_at_configured_batch_size is None
+    assert estimate.configured_batch_size_confirmed_oom is False
+
+
+def test_estimate_confirmed_oom_at_configured_batch_size_forces_does_not_fit(tmp_path):
+    """A real, direct measurement at the configured batch size genuinely
+    CUDA-OOM'd -- this must force fits=False unconditionally, even if the
+    (necessarily incomplete) extrapolation would have technically guessed
+    it fits."""
+    with patch(
+        "chowder.memory_preflight._run_dry_run_worker",
+        return_value=_fake_measured(
+            peak_vram_gb_bs1=0.1, peak_vram_gb_bs2=0.1,  # extrapolation alone would say "fits"
+            peak_vram_gb_at_configured_batch_size=None,
+            configured_batch_size_oom=True,
+        ),
+    ):
+        config = _config(training={"batch_size": 5})
+        context = _context(_hardware(vram_gb=16.0, pools=(16.0,)))
+        estimate = estimate_memory_requirements(
+            resolved_config=config, context=context, work_dir=tmp_path, use_cache=False
+        )
+    assert estimate.fits is False
+    assert estimate.configured_batch_size_confirmed_oom is True
+
+
 def test_estimate_at_batch_size_one_uses_the_bs1_measurement_directly(tmp_path):
     with patch("chowder.memory_preflight._run_dry_run_worker", return_value=_fake_measured()):
         config = _config(training={"batch_size": 1})
@@ -486,3 +548,49 @@ def test_real_estimate_memory_requirements_spawns_worker_and_caches(tmp_path):
     assert second.from_cache is True
     assert second.estimated_peak_gb == first.estimated_peak_gb
     assert second.frozen_params == first.frozen_params
+
+
+@_REAL_ML_SMOKE
+def test_real_dry_run_measures_directly_at_a_configured_batch_size_other_than_one_or_two():
+    """The real fix this module's own docstring documents: when the
+    configured batch size differs from the two always-measured tiny
+    points, dry_run() must take one more real measurement AT that batch
+    size rather than leaving the caller to extrapolate from batch=1/2 --
+    proven for real, not just asserted against a mocked worker."""
+    from chowder.backends.memory_preflight_worker import dry_run
+
+    spec = _spec(base_model=_TINY_MODEL, dataset="unused.jsonl", max_length=32, batch_size=4)
+    result = dry_run(spec)
+
+    assert result["peak_vram_gb_at_configured_batch_size"] is not None
+    assert result["configured_batch_size_oom"] is False
+    # The real, directly measured batch=4 peak must be at least as large as
+    # the real batch=2 measurement -- more real activation memory, never less.
+    assert result["peak_vram_gb_at_configured_batch_size"] >= result["peak_vram_gb_bs2"]
+
+
+@_REAL_ML_SMOKE
+def test_real_estimate_uses_the_real_direct_measurement_end_to_end(tmp_path):
+    from chowder.hardware import detect_hardware
+    from chowder.project_runner import hardware_profile_from_snapshot
+
+    hardware = hardware_profile_from_snapshot(detect_hardware(str(tmp_path)))
+    context = ExecutionContext(hardware, str(tmp_path), seed=7)
+    config = {
+        "backend": {
+            "type": "transformers-peft",
+            "base_model": _TINY_MODEL,
+            "dataset": "unused.jsonl",
+            "max_length": 32,
+            "quantization": "none",
+            "precision": "fp32",
+            "lora": {"r": 4, "alpha": 8, "target_modules": ["q_proj", "v_proj"]},
+            "training": {"batch_size": 4},
+        }
+    }
+
+    estimate = estimate_memory_requirements(resolved_config=config, context=context, work_dir=tmp_path)
+    assert estimate.measured_peak_gb_at_configured_batch_size is not None
+    assert estimate.configured_batch_size_confirmed_oom is False
+    assert estimate.estimated_peak_gb == pytest.approx(estimate.measured_peak_gb_at_configured_batch_size)
+    assert estimate.fits is True  # a tiny model always fits real hardware

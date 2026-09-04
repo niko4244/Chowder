@@ -25,6 +25,27 @@ _ALLOWED_MEMORY_PREFLIGHT_MODES = {"auto", "always", "cached", "off"}
 _AUTO_REFRESH_PRESSURE_RATIO = 0.9
 
 
+def _effective_timeout_seconds(resolved_config: Mapping[str, Any]) -> float:
+    """Never shrinks below `_DEFAULT_TIMEOUT_SECONDS`; only extends it when
+    the recipe's own configured production-run timeout implies the user
+    already expects operations at this scale to take longer. Duplicated
+    (not imported) from the identical helper in placement_policy.py /
+    combined_mechanism_experiment.py: that module imports FROM this one at
+    module level, so importing back here would be a circular import --
+    this logic is small enough that duplicating it is the right tradeoff.
+    """
+    backend = resolved_config.get("backend", {}) if isinstance(resolved_config, Mapping) else {}
+    runtime = backend.get("runtime", {}) if isinstance(backend, Mapping) else {}
+    configured = runtime.get("timeout_seconds") if isinstance(runtime, Mapping) else None
+    if configured is None:
+        return _DEFAULT_TIMEOUT_SECONDS
+    try:
+        configured = float(configured)
+    except (TypeError, ValueError):
+        return _DEFAULT_TIMEOUT_SECONDS
+    return max(configured, _DEFAULT_TIMEOUT_SECONDS)
+
+
 def _resolve_memory_preflight_policy(backend: Mapping[str, Any]) -> str:
     """Parse backend.memory_preflight into one of auto/always/cached/off.
 
@@ -59,8 +80,24 @@ def _resolve_memory_preflight_policy(backend: Mapping[str, Any]) -> str:
 @dataclass(frozen=True)
 class MemoryEstimate:
     """A real, measured (not theoretical) VRAM estimate for one base_model +
-    recipe + hardware combination, extrapolated from two tiny real
-    forward+backward passes to the configured batch size.
+    recipe + hardware combination.
+
+    `estimated_peak_gb` is a REAL, DIRECTLY MEASURED peak at the configured
+    batch size whenever that differs from the two always-measured tiny
+    points (batch 1 and 2) -- not a linear extrapolation. A real, measured
+    finding motivated this: extrapolating from two tiny points to a much
+    larger production batch size can be badly wrong (confirmed directly: a
+    real Qwen2.5-1.5B run at batch_size=8 measured a real peak roughly 3x
+    what the linear slope from batch=1/batch=2 would have predicted, and
+    the real peak was reached entirely within the first training step, not
+    a gradual multi-step climb). `measured_peak_gb_at_configured_batch_size`
+    and `configured_batch_size_confirmed_oom` carry that direct measurement
+    (or the fact that it genuinely CUDA-OOM'd) when it was taken; the
+    linear-extrapolation fields (`measured_peak_gb_at_batch_1/2`,
+    `per_example_activation_gb`) remain for callers wanting the
+    per-example slope, and are the only thing `estimated_peak_gb` falls
+    back to when the configured batch size happens to already be 1 or 2,
+    or a real direct measurement is otherwise unavailable.
 
     `per_rank_available_gb` is deliberately the smallest single accelerator's
     VRAM, not the sum across accelerators -- under DDP each rank holds a
@@ -81,6 +118,8 @@ class MemoryEstimate:
     fits: bool
     recommendations: tuple[str, ...] = ()
     from_cache: bool = False
+    measured_peak_gb_at_configured_batch_size: float | None = None
+    configured_batch_size_confirmed_oom: bool = False
 
 
 def _hardware_signature(context: ExecutionContext) -> str:
@@ -177,18 +216,30 @@ def estimate_memory_requirements(
     context: ExecutionContext,
     work_dir: str | Path,
     use_cache: bool = True,
-    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = None,
 ) -> MemoryEstimate:
     """Real, measured VRAM estimate for the given config on the given
-    hardware -- never a full training run, but a genuine model load plus
-    two tiny forward+backward passes in an isolated subprocess, the same
-    isolation discipline every other real-ML worker in this codebase uses.
+    hardware -- never a full training run, but a genuine model load, two
+    tiny forward+backward passes, and (when the configured batch size
+    differs from those two tiny points) one real forward+backward pass at
+    the actual configured batch size, all in an isolated subprocess, the
+    same isolation discipline every other real-ML worker in this codebase
+    uses.
+
+    `timeout_seconds` defaults to whichever is larger: the module's own
+    300s floor, or the recipe's own configured `backend.runtime.
+    timeout_seconds` -- a real, large-batch direct measurement can
+    legitimately take longer than 300s (confirmed directly: this is the
+    same real production-timeout bug found and fixed in placement_policy.py
+    /combined_mechanism_experiment.py for their own calibration calls).
 
     Cached per (model+recipe+hardware) combination under work_dir/.chowder,
     since the same combination measures the same way every time -- repeat
     preflight checks on an unchanged recipe don't need to pay for another
     real model load.
     """
+    if timeout_seconds is None:
+        timeout_seconds = _effective_timeout_seconds(resolved_config)
     spec = TransformersPeftRunSpec.from_resolved_config(
         resolved_config,
         work_dir=work_dir,
@@ -212,8 +263,30 @@ def estimate_memory_requirements(
     peak_bs1 = float(measured["peak_vram_gb_bs1"])
     peak_bs2 = float(measured["peak_vram_gb_bs2"])
     per_example = max(0.0, peak_bs2 - peak_bs1)
-    estimated_peak = peak_bs1 + per_example * max(0, spec.batch_size - 1)
-    fits = estimated_peak <= available_gb - _SAFETY_MARGIN_GB or measured["device"] != "cuda"
+    extrapolated_peak = peak_bs1 + per_example * max(0, spec.batch_size - 1)
+
+    # .get(...) with a safe default, not measured[...]: an older cache
+    # entry written before this direct-measurement fix existed has neither
+    # key, and a stale cache hit must not KeyError.
+    direct_peak_raw = measured.get("peak_vram_gb_at_configured_batch_size")
+    direct_peak = float(direct_peak_raw) if direct_peak_raw is not None else None
+    confirmed_oom = bool(measured.get("configured_batch_size_oom", False))
+
+    if confirmed_oom:
+        # A real, direct measurement at the configured batch size genuinely
+        # CUDA-OOM'd -- this recipe definitively does not fit, regardless
+        # of what the linear extrapolation alone would have guessed.
+        estimated_peak = max(extrapolated_peak, available_gb + _SAFETY_MARGIN_GB)
+        fits = False
+    elif direct_peak is not None:
+        # Real, directly measured at the actual configured batch size --
+        # see MemoryEstimate's own docstring for why this is preferred
+        # over the linear extrapolation whenever it was taken.
+        estimated_peak = direct_peak
+        fits = estimated_peak <= available_gb - _SAFETY_MARGIN_GB or measured["device"] != "cuda"
+    else:
+        estimated_peak = extrapolated_peak
+        fits = estimated_peak <= available_gb - _SAFETY_MARGIN_GB or measured["device"] != "cuda"
 
     return MemoryEstimate(
         device=str(measured["device"]),
@@ -231,6 +304,8 @@ def estimate_memory_requirements(
             () if fits else _recommendations(estimate_gb=estimated_peak, available_gb=available_gb, spec=spec)
         ),
         from_cache=from_cache,
+        measured_peak_gb_at_configured_batch_size=direct_peak,
+        configured_batch_size_confirmed_oom=confirmed_oom,
     )
 
 
@@ -239,7 +314,7 @@ def resolve_memory_fit(
     resolved_config: Mapping[str, Any],
     context: ExecutionContext,
     work_dir: str | Path,
-    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = None,
 ) -> MemoryEstimate | None:
     """The real preflight decision this policy governs: whether/how to
     call estimate_memory_requirements before a run, based on

@@ -209,6 +209,27 @@ def dry_run(spec: TransformersPeftRunSpec) -> dict[str, Any]:
     peak_gb_bs1 = _measure_peak_gb(1)
     peak_gb_bs2 = _measure_peak_gb(2, collect_layers=True)
 
+    # Real, measured finding (not theoretical): extrapolating linearly from
+    # these two tiny points to a much larger configured batch size can be
+    # badly wrong. A real Qwen2.5-1.5B run at batch_size=8 measured a real
+    # peak of ~18.6 GB entirely within the first training step -- roughly
+    # 3x what a linear slope from batch=1/batch=2 would have predicted.
+    # When the configured batch size differs from both already-measured
+    # points, measure it directly instead of trusting an extrapolation
+    # that a 4x-48x scale-up factor has no business being trusted at.
+    # A genuine CUDA OOM here is itself real, valuable information -- the
+    # recipe definitively does not fit at this batch size -- not a reason
+    # to let the whole dry-run crash.
+    peak_gb_at_configured_batch_size: float | None = None
+    configured_batch_size_oom = False
+    if spec.batch_size not in (1, 2):
+        try:
+            peak_gb_at_configured_batch_size = _measure_peak_gb(spec.batch_size)
+        except torch.cuda.OutOfMemoryError:
+            configured_batch_size_oom = True
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
     optimizer_state_bytes = 0
     trainable_param_list = [p for p in model.parameters() if p.requires_grad]
     if trainable_param_list:
@@ -242,6 +263,8 @@ def dry_run(spec: TransformersPeftRunSpec) -> dict[str, Any]:
         "max_length": spec.max_length,
         "peak_vram_gb_bs1": peak_gb_bs1,
         "peak_vram_gb_bs2": peak_gb_bs2,
+        "peak_vram_gb_at_configured_batch_size": peak_gb_at_configured_batch_size,
+        "configured_batch_size_oom": configured_batch_size_oom,
         "layer_telemetry": layer_telemetry,
         "optimizer_state_bytes": optimizer_state_bytes,
     }
