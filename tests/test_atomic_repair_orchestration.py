@@ -11,6 +11,7 @@ from chowder.models import Experiment, ExperimentResult, Goal, Hypothesis, Metri
 from chowder.registry import RegistryInvariantError, RunRegistry
 from chowder.repair_candidates import RepairVariant
 from chowder.repair_orchestrator import prepare_and_propose_repair_population
+from chowder.repair_requests import build_repair_request
 
 
 def _write_jsonl(path, rows):
@@ -119,7 +120,7 @@ def test_registry_failure_withdraws_engine_proposals_and_removes_repair_artifact
                 engine=engine,
                 parent_id="parent",
                 plan=_plan(),
-                cluster=_cluster(),
+                request=build_repair_request(plan=_plan(), cluster=_cluster()),
                 provider=_provider(tmp_path),
                 holdout_fingerprint_files=(_holdout(tmp_path),),
                 variants=_variants(),
@@ -143,7 +144,7 @@ def test_successful_registry_batch_matches_engine_proposals(tmp_path):
             engine=engine,
             parent_id="parent",
             plan=_plan(),
-            cluster=_cluster(),
+            request=build_repair_request(plan=_plan(), cluster=_cluster()),
             provider=_provider(tmp_path),
             holdout_fingerprint_files=(_holdout(tmp_path),),
             variants=_variants(),

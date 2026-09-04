@@ -11,6 +11,7 @@ from chowder.models import Experiment, ExperimentResult, Goal, Hypothesis, Metri
 from chowder.provenance import sha256_file
 from chowder.repair_candidates import RepairVariant, VerifiedReplayDataset
 from chowder.repair_orchestrator import prepare_and_propose_repair_population
+from chowder.repair_requests import build_repair_request
 
 
 def _write_jsonl(path, rows):
@@ -130,7 +131,7 @@ def test_orchestrator_materializes_verified_data_and_reserves_budgeted_populatio
         engine=engine,
         parent_id="parent",
         plan=_plan(),
-        cluster=_cluster(),
+        request=build_repair_request(plan=_plan(), cluster=_cluster()),
         provider=_provider(tmp_path),
         holdout_fingerprint_files=(_holdout(tmp_path),),
         variants=variants,
@@ -161,7 +162,7 @@ def test_replay_adjusts_reserved_compute_upper_bound(tmp_path):
         engine=engine,
         parent_id="parent",
         plan=_plan(),
-        cluster=_cluster(),
+        request=build_repair_request(plan=_plan(), cluster=_cluster()),
         provider=_provider(tmp_path),
         holdout_fingerprint_files=(_holdout(tmp_path),),
         variants=(RepairVariant("default", 0.25),),
@@ -183,7 +184,7 @@ def test_contaminated_provider_is_rejected_before_engine_mutation_and_retry_dir_
             engine=engine,
             parent_id="parent",
             plan=_plan(),
-            cluster=_cluster(),
+            request=build_repair_request(plan=_plan(), cluster=_cluster()),
             provider=_provider(tmp_path, contaminated=True),
             holdout_fingerprint_files=(_holdout(tmp_path),),
             variants=(RepairVariant("default", 0.2),),
@@ -204,7 +205,7 @@ def test_orchestrator_refuses_work_when_no_variant_fits_remaining_budget(tmp_pat
             engine=engine,
             parent_id="parent",
             plan=_plan(),
-            cluster=_cluster(),
+            request=build_repair_request(plan=_plan(), cluster=_cluster()),
             provider=_provider(tmp_path),
             holdout_fingerprint_files=(_holdout(tmp_path),),
             variants=(RepairVariant("too-large", 0.2),),
@@ -220,7 +221,7 @@ def test_orchestrator_refuses_variant_that_only_fits_without_replay(tmp_path):
             engine=engine,
             parent_id="parent",
             plan=_plan(),
-            cluster=_cluster(),
+            request=build_repair_request(plan=_plan(), cluster=_cluster()),
             provider=_provider(tmp_path),
             holdout_fingerprint_files=(_holdout(tmp_path),),
             variants=(RepairVariant("repair-only-fits", 0.2),),
