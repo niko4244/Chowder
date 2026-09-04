@@ -65,6 +65,27 @@ def test_generation_combines_training_and_evaluation_cost_before_adjudication(tm
     assert outcome.promoted.evidence["compute"]["evaluation_gpu_hours"] == 0.1
 
 
+def test_run_round_with_promote_false_settles_reservation_but_does_not_promote(tmp_path):
+    """run_generation's own real behavior (promote=True by default) is
+    unchanged; run_round(promote=False) exists for successive halving,
+    which must not let an early, cheap-budget round's winner become the
+    new baseline just because it passed the real hard gate."""
+    engine = _engine()
+    exp = _experiment()
+    assert engine.propose([exp]) == (exp,)
+    runner = ExperimentCycleRunner(engine, Trainer(), Evaluator(), _context(tmp_path))
+    outcome = runner.run_round([exp], promote=False)
+    assert outcome.promoted is None
+    assert engine.baseline.experiment_id == "base"
+    # The real gate/settlement still happened for real -- reservation
+    # settled, real GPU-hours charged, real gate decision applied.
+    assert engine.spent_gpu_hours == 0.5
+    assert not engine.has_reservation("e1")
+    assert engine.graph.nodes["e1"].status is ExperimentStatus.PASSED
+    assert len(outcome.ranking) == 1
+    assert outcome.ranking[0].decision.accepted is True
+
+
 def test_generation_rejects_nonfinite_metrics_and_conservatively_charges_failure(tmp_path):
     class BadEvaluator(Evaluator):
         def evaluate(self, *, experiment, artifact, context):
