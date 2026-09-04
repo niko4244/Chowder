@@ -40,7 +40,7 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
   builds a deduplicated, content-hashed rehearsal corpus at a configurable
   ratio, wired into repair candidate generation
 
-**Regression Surgeon (partial — see hardening below for what's missing)**
+**Regression Surgeon — core repair loop complete; hardening limits below**
 - repair dataset generation — `contamination.py` builds a new SFT dataset
   from independent sources and hard-refuses any prompt/answer overlap with
   holdout (`example_fingerprints()`)
@@ -133,7 +133,7 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
   was arranged), confirmed with the user rather than silently stubbed
   or faked.
 
-**Scientific search controller — Priority 4 (complete)**
+**Scientific search controller — Priority 4 (library slice complete)**
 - successive halving — `successive_halving.py` (PR #77). `cycle.py::
   run_generation()` was one flat train-all → evaluate-all → rank pass with
   no budget-elimination or staged rounds; `run_successive_halving()` runs
@@ -176,7 +176,32 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
   reconstruct historical `(Experiment, ExperimentResult)` pairs.
 - regression-tested together: `test_cycle.py`/`test_successive_halving.py`
   exercise the promote=False deferral, gate-rejection vs cutoff-elimination
-  provenance, and exact GPU-hour accounting across chained rounds.
+  provenance, and exact GPU-hour accounting across chained rounds;
+  `test_search_controller_integration.py` (PR #90) proves the registry,
+  scheduler, selector, repair path, hard gate, checkpoints, provenance, and
+  ledger hold together across their real seams.
+
+These are proven package capabilities, not yet Chowder's default operational
+controller: no production caller under `src/chowder/` invokes
+`run_successive_halving()` or `prioritize_candidates()` today. Wiring them
+into `project_runner.py` remains open and must not be inferred from the
+library implementation or its integration tests.
+
+**Meta-controller evidence foundation — Priority 6 (dataset slice complete)**
+- `intervention_outcomes.py` (PR #89) builds a normalized, queryable
+  `InterventionOutcome` view by joining the immutable experiment, result,
+  and training-artifact records the registry already stores. It reuses
+  `candidate_selection.dotted_paths()` for intervention-arm identity, reads
+  historical gate acceptance from persisted status, and refuses ambiguous
+  artifact provenance instead of guessing a producing run.
+- The honesty boundary is explicit: missing evidence stays `None`; only
+  experiments with a scored result become rows, so crashes, cancellations,
+  and preflight failures are absent. The current view also lacks complete
+  hardware and dataset context. Those omissions would create survivor bias
+  in an unrestricted learned selector and must be addressed or explicitly
+  scoped before policy training.
+- This is a durable evidence view, not an expected-improvement model,
+  candidate selector, learned policy, or claim of cross-model transfer.
 
 **Regression Surgeon extensions — Priority 5 (4 of 4 slices complete)**
 - checkpoint bisect — `checkpoint_bisect.py` (PR #79). The existing
@@ -368,6 +393,13 @@ is still running is the next real improvement to prove and measure —
 whether the overlap actually improves throughput on real hardware, not
 assumed.
 
+No checked-in raw benchmark artifact currently supports a throughput or
+break-even claim for this idea. Keep local exploratory numbers out of roadmap
+truth until a reproducible benchmark records the exact workload, separate
+forward/backward timings, and per-row peak VRAM. Promotion then requires
+identical loss and gradients, a meaningful end-to-end throughput gain, no
+peak-VRAM regression, and retention of the synchronous fallback.
+
 **Multi-GPU telemetry (Priority 2, deferred slice)**
 Real GPU↔GPU bandwidth/topology measurement, PCIe/NVLink capability
 measurement, P2P availability, all-reduce timing, and DDP communication
@@ -379,17 +411,17 @@ the same way Phase 5's DDP acceptance was.
 
 ## RESEARCH
 
-Explicitly gated on the above being stable — no design work has started on
-any of these:
+Remaining policy and architecture research is gated on the proven foundations
+above being stable:
 
-- **Meta-controller** (Priority 6) — persisted intervention/result dataset
-  (model, hardware, dataset/failure cluster, intervention, Memory Fabric
-  placement, training recipe, cost, score delta, regression delta,
-  throughput, peak VRAM), expected-improvement model, GPU-hour-aware
-  experiment policy, cross-model transfer of successful training
-  strategies. Only claim learned-policy improvement once validated
-  against held-out experiments — a durable historical dataset is not
-  itself a learned policy.
+- **Meta-controller policy learning** (Priority 6) — the evidence-view slice
+  is complete above; the expected-improvement model, GPU-hour-aware
+  experiment policy, and cross-model transfer of successful training
+  strategies have not started. Before training a selector, define how
+  censored failures/cancellations enter the dataset (or constrain the claim),
+  close the required context gaps, and validate against held-out experiments
+  versus the existing UCB1 baseline with zero hard-gate violations. A durable
+  historical dataset is not itself a learned policy.
 - **Elastic MoE research** (Priority 7) — per-expert load/gradient
   statistics, expert specialization diagnostics, safe expert clone/split
   experiments, router retraining/distillation, architecture-change
