@@ -285,8 +285,20 @@ def test_real_combined_activation_offload_and_frozen_layer_streaming(tmp_path):
     the entire point of this module, so the real test only requires the
     real numbers to be internally consistent, not that the additive
     prediction turns out to be correct.
+
+    frozen_layer_streaming="always" (this test forces it on, unlike "auto"
+    which would gracefully decline) hard-requires CUDA by design -- see
+    memory_fabric.py's own explicit device guard -- so this test skips
+    cleanly on CPU-only CI rather than letting that real, correct guard
+    surface as a test failure, mirroring test_frozen_layer_streaming.py's
+    own real tests.
     """
     import json
+
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device available in this environment for a real combined-mechanism run")
 
     train_path = tmp_path / "train.jsonl"
     rows = [{"text": f"Question: what is {i}? Answer: {i * 2}"} for i in range(20)]
