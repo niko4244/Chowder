@@ -1,7 +1,10 @@
+import pytest
+
+from chowder.combined_mechanism_experiment import CombinedMechanismExperiment
 from chowder.executors import TrainingArtifact
 from chowder.models import Experiment, ExperimentResult, ExperimentStatus, Hypothesis
 from chowder.provenance import EvidenceManifest
-from chowder.registry import RunRegistry
+from chowder.registry import RegistryInvariantError, RunRegistry
 from chowder.run_events import PromotionEvent, RepairEvent, RunEvent
 
 
@@ -97,3 +100,56 @@ def test_registry_list_experiments_round_trips_config_and_lineage(tmp_path):
     assert listed[1].hypothesis == Hypothesis("o2", "c2", "i2")
     # tags are not part of the persisted schema and always round-trip empty
     assert listed[1].tags == ()
+
+
+def _combined_mechanism_experiment(**overrides) -> CombinedMechanismExperiment:
+    defaults = dict(
+        experiment_key="combo-key",
+        mechanisms=("activation_offload", "frozen_layer_streaming"),
+        baseline_peak_vram_gb=1.0,
+        predicted_combined_peak_vram_gb=0.5,
+        actual_combined_peak_vram_gb=0.6,
+        prediction_error_gb=-0.1,
+        baseline_wall_seconds=1.0,
+        combined_wall_seconds=1.3,
+        wall_time_penalty_ratio=1.3,
+        per_mechanism_predicted_savings_gb={"activation_offload": 0.3, "frozen_layer_streaming": 0.2},
+        forward_seconds=0.4,
+        backward_seconds=0.2,
+        optimizer_seconds=0.05,
+        avg_gpu_utilization_percent=12.5,
+        optimizer_state_bytes=4096.0,
+        frozen_layer_streaming_bytes_transferred=3072.0,
+        activation_offload_bytes_transferred=12345.0,
+    )
+    defaults.update(overrides)
+    return CombinedMechanismExperiment(**defaults)
+
+
+def test_registry_round_trips_combined_mechanism_experiment(tmp_path):
+    db = tmp_path / "runs.db"
+    experiment = _combined_mechanism_experiment()
+    with RunRegistry(db) as registry:
+        registry.record_combined_mechanism_experiment(experiment)
+        listed = list(registry.list_combined_mechanism_experiments())
+    assert listed == [experiment]
+
+
+def test_registry_combined_mechanism_experiment_replay_is_idempotent(tmp_path):
+    db = tmp_path / "runs.db"
+    experiment = _combined_mechanism_experiment()
+    with RunRegistry(db) as registry:
+        registry.record_combined_mechanism_experiment(experiment)
+        registry.record_combined_mechanism_experiment(experiment)
+        listed = list(registry.list_combined_mechanism_experiments())
+    assert len(listed) == 1
+
+
+def test_registry_rejects_divergent_combined_mechanism_experiment_replay(tmp_path):
+    db = tmp_path / "runs.db"
+    first = _combined_mechanism_experiment()
+    second = _combined_mechanism_experiment(actual_combined_peak_vram_gb=0.99)
+    with RunRegistry(db) as registry:
+        registry.record_combined_mechanism_experiment(first)
+        with pytest.raises(RegistryInvariantError, match="different content"):
+            registry.record_combined_mechanism_experiment(second)

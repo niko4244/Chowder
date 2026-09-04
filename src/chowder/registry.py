@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from .combined_mechanism_experiment import CombinedMechanismExperiment
 from .database import connect_database
 from .executors import EvaluationOutcome, TrainingArtifact
 from .failures import FailureRecord, FailureSourceRole, RepairPlan
@@ -89,6 +90,19 @@ CREATE TABLE IF NOT EXISTS run_events (
     event_type TEXT NOT NULL,
     occurred_at TEXT NOT NULL,
     payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS combined_mechanism_experiments (
+    experiment_key TEXT PRIMARY KEY,
+    mechanisms_json TEXT NOT NULL,
+    baseline_peak_vram_gb REAL NOT NULL,
+    predicted_combined_peak_vram_gb REAL NOT NULL,
+    actual_combined_peak_vram_gb REAL NOT NULL,
+    prediction_error_gb REAL NOT NULL,
+    baseline_wall_seconds REAL NOT NULL,
+    combined_wall_seconds REAL NOT NULL,
+    wall_time_penalty_ratio REAL NOT NULL,
+    per_mechanism_predicted_savings_gb_json TEXT NOT NULL,
+    telemetry_json TEXT NOT NULL
 );
 """
 
@@ -249,6 +263,79 @@ class RunRegistry:
                 gpu_hours=gpu_hours,
                 telemetry=json.loads(telemetry),
                 evidence=json.loads(evidence),
+            )
+
+    def record_combined_mechanism_experiment(self, experiment: CombinedMechanismExperiment) -> None:
+        columns = (
+            "experiment_key", "mechanisms_json", "baseline_peak_vram_gb",
+            "predicted_combined_peak_vram_gb", "actual_combined_peak_vram_gb",
+            "prediction_error_gb", "baseline_wall_seconds", "combined_wall_seconds",
+            "wall_time_penalty_ratio", "per_mechanism_predicted_savings_gb_json", "telemetry_json",
+        )
+        values = (
+            experiment.experiment_key,
+            self._json(list(experiment.mechanisms)),
+            experiment.baseline_peak_vram_gb,
+            experiment.predicted_combined_peak_vram_gb,
+            experiment.actual_combined_peak_vram_gb,
+            experiment.prediction_error_gb,
+            experiment.baseline_wall_seconds,
+            experiment.combined_wall_seconds,
+            experiment.wall_time_penalty_ratio,
+            self._json(dict(experiment.per_mechanism_predicted_savings_gb)),
+            self._json(
+                {
+                    "forward_seconds": experiment.forward_seconds,
+                    "backward_seconds": experiment.backward_seconds,
+                    "optimizer_seconds": experiment.optimizer_seconds,
+                    "avg_gpu_utilization_percent": experiment.avg_gpu_utilization_percent,
+                    "optimizer_state_bytes": experiment.optimizer_state_bytes,
+                    "frozen_layer_streaming_bytes_transferred": (
+                        experiment.frozen_layer_streaming_bytes_transferred
+                    ),
+                    "activation_offload_bytes_transferred": experiment.activation_offload_bytes_transferred,
+                }
+            ),
+        )
+        with self._conn:
+            self._insert_immutable(
+                table="combined_mechanism_experiments", key_column="experiment_key",
+                key=experiment.experiment_key, columns=columns, values=values,
+            )
+
+    def list_combined_mechanism_experiments(self) -> Iterable[CombinedMechanismExperiment]:
+        rows = self._conn.execute(
+            """SELECT experiment_key, mechanisms_json, baseline_peak_vram_gb,
+                      predicted_combined_peak_vram_gb, actual_combined_peak_vram_gb,
+                      prediction_error_gb, baseline_wall_seconds, combined_wall_seconds,
+                      wall_time_penalty_ratio, per_mechanism_predicted_savings_gb_json, telemetry_json
+               FROM combined_mechanism_experiments ORDER BY rowid"""
+        )
+        for (
+            experiment_key, mechanisms_json, baseline_peak_vram_gb,
+            predicted_combined_peak_vram_gb, actual_combined_peak_vram_gb,
+            prediction_error_gb, baseline_wall_seconds, combined_wall_seconds,
+            wall_time_penalty_ratio, savings_json, telemetry_json,
+        ) in rows:
+            telemetry = json.loads(telemetry_json)
+            yield CombinedMechanismExperiment(
+                experiment_key=experiment_key,
+                mechanisms=tuple(json.loads(mechanisms_json)),
+                baseline_peak_vram_gb=baseline_peak_vram_gb,
+                predicted_combined_peak_vram_gb=predicted_combined_peak_vram_gb,
+                actual_combined_peak_vram_gb=actual_combined_peak_vram_gb,
+                prediction_error_gb=prediction_error_gb,
+                baseline_wall_seconds=baseline_wall_seconds,
+                combined_wall_seconds=combined_wall_seconds,
+                wall_time_penalty_ratio=wall_time_penalty_ratio,
+                per_mechanism_predicted_savings_gb=json.loads(savings_json),
+                forward_seconds=telemetry["forward_seconds"],
+                backward_seconds=telemetry["backward_seconds"],
+                optimizer_seconds=telemetry["optimizer_seconds"],
+                avg_gpu_utilization_percent=telemetry["avg_gpu_utilization_percent"],
+                optimizer_state_bytes=telemetry["optimizer_state_bytes"],
+                frozen_layer_streaming_bytes_transferred=telemetry["frozen_layer_streaming_bytes_transferred"],
+                activation_offload_bytes_transferred=telemetry["activation_offload_bytes_transferred"],
             )
 
     def record_evaluation_outcome(self, outcome: EvaluationOutcome) -> None:
