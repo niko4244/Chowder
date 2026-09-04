@@ -352,7 +352,48 @@ synchronously today (correctness does not depend on overlap, only
 throughput does). Prefetching layer N-1's weight while layer N's backward
 is still running is the next real improvement to prove and measure —
 whether the overlap actually improves throughput on real hardware, not
-assumed.
+assumed. **Not implemented; measurement started, not finished.**
+
+Real measurement so far (RTX 5060 Ti, Qwen2.5-0.5B, seq 512, fp32,
+forward and backward timed *separately* — the existing
+`frozen_layer_streaming_worker.py` only times the combined step, which
+cannot separate forward-prefetch overlap from backward re-stream cost):
+
+| tokens/step | forward penalty | backward penalty |
+|---|---|---|
+| 512  | +0.0268s | +0.0588s |
+| 2048 | **-0.0018s** | **+0.0300s** |
+
+The 2048-token row is the informative one and is a clean positive
+control: the *prefetched* forward path costs nothing, while the
+*synchronous* backward path still costs ~0.030s (~4% of step time) on
+the same workload. So the one-layer-ahead prefetch mechanism demonstrably
+can hide a transfer once there is compute to hide it behind, and the
+backward gap is exactly what it does not yet cover. Analytically the
+compute/transfer ratio scales with tokens-per-step and is independent of
+model size, crossing over near ~2300 tokens on this card — which is why
+the 512-token row shows both phases paying.
+
+Two cautions recorded so the next attempt does not repeat them:
+- The same sweep's 8192- and 16384-token rows were **discarded as
+  contaminated**, not reported: raw times went non-monotonic (8192-token
+  forward 20.97s vs 16384-token forward 10.61s), the signature of this
+  machine's VRAM→system-RAM paging fallback (see
+  `MEMORY_FABRIC_ACCEPTANCE.md`). At fp32 the logits alone are
+  `tokens × 151936 × 4` bytes, ~5GB at 8192 tokens. Any retry must report
+  per-row peak VRAM so a paging-contaminated row is visible rather than
+  believed.
+- Backward prefetch holds two frozen weights resident where one sufficed,
+  in a module whose entire purpose is *reducing* peak VRAM. That trade
+  must be measured, not assumed away — though note the forward path
+  already holds two, so the step's peak may already be set there.
+
+Bar for promotion is unchanged and deliberately high: bit-identical loss
+and LoRA gradients versus the current synchronous path (the existing
+`test_memory_fabric.py` equivalence tests are the standard), a measured
+throughput improvement rather than a theoretical one, no peak-VRAM
+regression, and a synchronous fallback retained if the async path is not
+measurably better.
 
 **Multi-GPU telemetry (Priority 2, deferred slice)**
 Real GPU↔GPU bandwidth/topology measurement, PCIe/NVLink capability
@@ -368,14 +409,31 @@ the same way Phase 5's DDP acceptance was.
 Explicitly gated on the above being stable — no design work has started on
 any of these:
 
-- **Meta-controller** (Priority 6) — persisted intervention/result dataset
-  (model, hardware, dataset/failure cluster, intervention, Memory Fabric
-  placement, training recipe, cost, score delta, regression delta,
-  throughput, peak VRAM), expected-improvement model, GPU-hour-aware
-  experiment policy, cross-model transfer of successful training
-  strategies. Only claim learned-policy improvement once validated
-  against held-out experiments — a durable historical dataset is not
-  itself a learned policy.
+- **Meta-controller** (Priority 6) — the persisted intervention/result
+  **dataset slice is done** (`intervention_outcomes.py`, PR #89): a
+  normalized `InterventionOutcome` row per historical experiment that
+  actually ran, joining experiments/results/training_runs the registry
+  already stores, plus `filter_outcomes()`/`group_by_arm()`. It shares
+  one definition of an "arm" with `candidate_selection.py` (the now-public
+  `dotted_paths`) so the two cannot drift apart about which experiments
+  were the same intervention. Every field is read from real stored
+  evidence or is `None`; nothing is imputed, and the module docstring
+  names each frequently-`None` field and why. Two deliberate refusals
+  worth keeping: gate *acceptance* is read from the persisted status
+  rather than replayed through the gate (replaying answers "would this be
+  accepted now", not "was this accepted", and the two diverge once the
+  baseline moves), and an experiment with several training artifacts and
+  no recorded producing run-id joins **nothing** rather than picking one.
+  No throughput *rate* is stored — `train_runtime_seconds` and
+  `global_step` are the measured numbers; the division is the caller's.
+  **Still open:** the expected-improvement model, the GPU-hour-aware
+  experiment policy, and cross-model transfer of successful strategies.
+  Only claim learned-policy improvement once validated against held-out
+  experiments — a durable historical dataset is not itself a learned
+  policy. Note `HardwareProfile` is never persisted, so
+  `min_device_vram_gb`/`active_accelerator_count` are the only hardware
+  facts actually recoverable from stored evidence today; a richer
+  hardware-conditioned policy would need that gap closed first.
 - **Elastic MoE research** (Priority 7) — per-expert load/gradient
   statistics, expert specialization diagnostics, safe expert clone/split
   experiments, router retraining/distillation, architecture-change
