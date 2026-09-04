@@ -128,12 +128,62 @@ tractable again:
    activation memory is a more controllable, more reliably-scaled lever than
    frozen-weight residency turned out to be at the scales tested here.
 
-Separately, worth investigating on its own merits (not blocking this
-specific acceptance test): *why* a full training run's peak VRAM doesn't
-reflect an isolated mechanism experiment's real measured savings, now that
-this has been observed three times. Understanding that gap could improve
-`build_placement_plan()`'s prediction accuracy regardless of which hardware
-this acceptance test eventually runs on.
+## Follow-up investigation: the calibration-vs-production peak mismatch
+
+A dedicated real-hardware investigation into *why* a full training run's
+peak VRAM doesn't reflect an isolated mechanism experiment's measured
+savings (observed three times above). Two competing hypotheses were tested:
+
+**Hypothesis A (extrapolation error) — tested and disproven.**
+`memory_preflight_worker.py`'s dry-run measured peak at batch_size=1 and
+batch_size=2 only, then extrapolated linearly to the configured batch size.
+A real Qwen2.5-1.5B `Trainer.train()` run at batch_size=8/max_length=256
+measured a real peak of **18.6 GB**, reached entirely within the first
+training step (confirmed via per-step logging with a real `TrainerCallback`
+— not a gradual multi-step climb), while the linear extrapolation from
+batch=1/2 predicted only ~10.8 GB. The natural hypothesis: a 4×-48× scale-up
+extrapolation from two tiny points is unreliable, and directly measuring at
+the real configured batch size would close the gap. **Implemented and
+tested directly against real hardware: it did not.** A real, direct
+forward+backward measurement at batch_size=8 (bypassing extrapolation
+entirely) measured ~10.75 GB — nearly identical to what the old
+extrapolation already predicted, and still ~7.9 GB short of the real
+`Trainer.train()` peak. This conclusively rules out extrapolation error as
+the (or at least the sole) cause.
+
+**Hypothesis B (Trainer-specific overhead) — plausible, not yet confirmed.**
+Since a bare `model(...); loss.backward()` measurement — at the *same*
+batch size, *same* sequence length, *same* model — lands nowhere near the
+real `Trainer.train()` peak, whatever accounts for the ~8 GB gap must come
+from something specific to the real `Trainer`/`accelerate` machinery that a
+hand-rolled forward+backward loop never exercises: candidates include
+gradient-clipping's norm computation, `accelerate`'s own gradient/backward
+wrapping, `TrainerState`/callback bookkeeping, or the real `DataLoader`'s
+collation path (as opposed to the dry-run's synthetic `torch.randint`
+input). None of these were isolated or confirmed as the specific cause —
+this would need its own dedicated investigation (e.g. bisecting by
+progressively wrapping the bare loop with each piece of real `Trainer`
+machinery until the gap reproduces) which was not completed here.
+
+**What was still shipped**: `memory_preflight_worker.py`/`memory_preflight.py`
+now take one real, direct measurement at the actual configured batch size
+instead of only ever extrapolating from batch=1/2 (see
+`MemoryEstimate.measured_peak_gb_at_configured_batch_size`), and a genuine
+CUDA OOM during that direct measurement is now treated as a confirmed
+non-fit rather than crashing the whole preflight check. This is a real,
+defensible improvement in its own right (a direct measurement is always at
+least as trustworthy as an extrapolation, and it now catches real
+per-batch-size OOMs directly) — but, per the finding above, it does **not**
+close the calibration-vs-production gap, and must not be described as
+having fixed it. The calibration-timeout derivation fix (see above) was
+also applied to this module's own dry-run calls for consistency.
+
+Honest status: the root cause of the ~8 GB Trainer-specific gap remains
+unresolved. Any future placement decision built on `estimate_memory_
+requirements()` should treat its `estimated_peak_gb` as a real, measured
+lower bound for a bare forward+backward pass at the configured batch size,
+not a reliable prediction of a full multi-step `Trainer.train()` run's
+actual peak.
 
 ## How to retry
 
