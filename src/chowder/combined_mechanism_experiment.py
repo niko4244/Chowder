@@ -48,10 +48,13 @@ from .frozen_layer_streaming import run_frozen_layer_streaming_experiment
 from .memory_preflight import _hardware_signature
 from .models import Experiment, Hypothesis
 from .optimizer_tiering import run_optimizer_tiering_experiment
-from .placement_policy import _MECHANISM_NAMES, _mechanism_savings_gb
+from .placement_policy import (
+    _MECHANISM_NAMES,
+    _effective_mechanism_experiment_timeout_seconds,
+    _mechanism_savings_gb,
+)
 
 _DEFAULT_MAX_STEPS = 4
-_DEFAULT_TIMEOUT_SECONDS = 300.0
 _CACHE_FILENAME = "combined_mechanism_experiments.json"
 
 
@@ -258,7 +261,7 @@ def run_combined_mechanism_experiment(
     context: ExecutionContext,
     work_dir: str | Path,
     max_steps: int = _DEFAULT_MAX_STEPS,
-    mechanism_experiment_timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    mechanism_experiment_timeout_seconds: float | None = None,
     use_cache: bool = True,
 ) -> CombinedMechanismExperiment:
     """Run one real baseline and one real combined training run and
@@ -291,6 +294,10 @@ def run_combined_mechanism_experiment(
         raise ValueError("mechanisms must not repeat")
     if len(mechanisms) < 2:
         raise ValueError("a combined-mechanism experiment needs at least 2 mechanisms")
+    if mechanism_experiment_timeout_seconds is None:
+        mechanism_experiment_timeout_seconds = _effective_mechanism_experiment_timeout_seconds(
+            resolved_config
+        )
 
     mechanism_set = frozenset(mechanisms)
     baseline_config = _config_with_mechanisms(resolved_config, mechanisms=frozenset(), max_steps=max_steps)

@@ -13,6 +13,30 @@ from .memory_preflight import _SAFETY_MARGIN_GB, estimate_memory_requirements
 from .optimizer_tiering import run_optimizer_tiering_experiment
 
 _MECHANISM_NAMES = ("activation_offload", "optimizer_tiering", "frozen_layer_streaming")
+# Every single-mechanism experiment module (activation_offload.py,
+# optimizer_tiering.py, frozen_layer_streaming.py) defaults its own
+# calibration subprocess to this same timeout. A real, large-batch recipe's
+# calibration forward+backward can genuinely take longer than this on
+# memory-constrained hardware (confirmed directly: a batch=96 calibration
+# run against a real 1.5B model exceeded 300s from Windows' driver-level
+# VRAM-to-system-RAM paging fallback alone, with no crash to short-circuit
+# it) -- so this floor is not raised, only ever extended when the recipe's
+# own configured production-run timeout (backend.runtime.timeout_seconds)
+# implies the user already expects operations at this scale to take longer.
+_DEFAULT_MECHANISM_EXPERIMENT_TIMEOUT_SECONDS = 300.0
+
+
+def _effective_mechanism_experiment_timeout_seconds(resolved_config: Mapping[str, Any]) -> float:
+    backend = resolved_config.get("backend", {}) if isinstance(resolved_config, Mapping) else {}
+    runtime = backend.get("runtime", {}) if isinstance(backend, Mapping) else {}
+    configured = runtime.get("timeout_seconds") if isinstance(runtime, Mapping) else None
+    if configured is None:
+        return _DEFAULT_MECHANISM_EXPERIMENT_TIMEOUT_SECONDS
+    try:
+        configured = float(configured)
+    except (TypeError, ValueError):
+        return _DEFAULT_MECHANISM_EXPERIMENT_TIMEOUT_SECONDS
+    return max(configured, _DEFAULT_MECHANISM_EXPERIMENT_TIMEOUT_SECONDS)
 # A documented starting point, not a claimed-optimal constant, matching
 # every other threshold in this codebase's placement mechanisms. Real
 # measured vram_saved_gb is rarely exactly 0.0 -- allocator noise/
@@ -177,14 +201,18 @@ def build_placement_plan(
             ),
         )
 
+    calibration_timeout_seconds = _effective_mechanism_experiment_timeout_seconds(resolved_config)
     activation_offload_exp = run_activation_offload_experiment(
-        resolved_config=resolved_config, context=context, work_dir=work_dir
+        resolved_config=resolved_config, context=context, work_dir=work_dir,
+        timeout_seconds=calibration_timeout_seconds,
     )
     optimizer_tiering_exp = run_optimizer_tiering_experiment(
-        resolved_config=resolved_config, context=context, work_dir=work_dir
+        resolved_config=resolved_config, context=context, work_dir=work_dir,
+        timeout_seconds=calibration_timeout_seconds,
     )
     frozen_layer_streaming_exp = run_frozen_layer_streaming_experiment(
-        resolved_config=resolved_config, context=context, work_dir=work_dir
+        resolved_config=resolved_config, context=context, work_dir=work_dir,
+        timeout_seconds=calibration_timeout_seconds,
     )
     savings = _mechanism_savings_gb(
         activation_offload_exp=activation_offload_exp,
