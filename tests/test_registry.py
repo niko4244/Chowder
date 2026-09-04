@@ -1,5 +1,5 @@
 from chowder.executors import TrainingArtifact
-from chowder.models import Experiment, ExperimentResult, Hypothesis
+from chowder.models import Experiment, ExperimentResult, ExperimentStatus, Hypothesis
 from chowder.provenance import EvidenceManifest
 from chowder.registry import RunRegistry
 from chowder.run_events import PromotionEvent, RepairEvent, RunEvent
@@ -70,3 +70,30 @@ def test_registry_filters_events_by_experiment_id(tmp_path):
         e1_events = list(registry.list_events(experiment_id="e1"))
 
     assert [e.payload["message"] for e in e1_events] == ["a", "c"]
+
+
+def test_registry_list_experiments_round_trips_config_and_lineage(tmp_path):
+    db = tmp_path / "runs.db"
+    root = Experiment(
+        "root", None, Hypothesis("o", "c", "i"),
+        {"backend": {"training": {"learning_rate": 1e-3}}}, 1.0,
+    )
+    child = Experiment(
+        "child", "root", Hypothesis("o2", "c2", "i2"),
+        {"backend": {"lora": {"r": 8}}}, 2.0,
+        status=ExperimentStatus.PASSED,
+    )
+    with RunRegistry(db) as registry:
+        registry.record_experiments((root, child))
+        listed = list(registry.list_experiments())
+
+    assert [e.experiment_id for e in listed] == ["root", "child"]
+    assert listed[0].parent_id is None
+    assert listed[0].config_patch == {"backend": {"training": {"learning_rate": 1e-3}}}
+    assert listed[0].status == ExperimentStatus.PLANNED
+    assert listed[1].parent_id == "root"
+    assert listed[1].config_patch == {"backend": {"lora": {"r": 8}}}
+    assert listed[1].status == ExperimentStatus.PASSED
+    assert listed[1].hypothesis == Hypothesis("o2", "c2", "i2")
+    # tags are not part of the persisted schema and always round-trip empty
+    assert listed[1].tags == ()
