@@ -603,10 +603,23 @@ class ExperimentCycleRunner:
             )
 
     def run_generation(self, experiments: Iterable[Experiment]) -> GenerationOutcome:
+        return self.run_round(experiments, promote=True)
+
+    def run_round(self, experiments: Iterable[Experiment], *, promote: bool = True) -> GenerationOutcome:
+        """The real work behind run_generation, with promotion made
+        optional. run_generation always promotes (its own, unchanged,
+        pre-existing behavior); this method exists so a caller that needs
+        to run several REAL rounds before any of them is eligible to
+        become the new baseline -- successive halving, in particular --
+        can adjudicate each round's real results (settling reservations,
+        applying the same hard regression gate every candidate always
+        goes through) without an early, cheap-budget round's winner ever
+        being promoted over the real current baseline.
+        """
         candidates = tuple(self._run_candidate(experiment) for experiment in experiments)
         results = tuple(candidate.result for candidate in candidates if candidate.result is not None)
         ranking = self.engine.adjudicate(results) if results else ()
-        promoted = self.engine.promote(ranking)
+        promoted = self.engine.promote(ranking) if promote else None
 
         if self.registry is not None:
             for candidate in candidates:
