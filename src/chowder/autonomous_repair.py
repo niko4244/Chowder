@@ -305,12 +305,28 @@ def run_single_hop_autonomous_repair(
     variants: tuple[RepairVariant, ...],
     candidate_id: str | None = None,
     replay_ratio: float | None = 1.0,
+    continue_from_parent: bool = True,
 ) -> AutonomousRepairOutcome:
-    """Repair one rejected adapter with cumulative, provenance-bound rehearsal."""
+    """Repair one rejected adapter with cumulative, provenance-bound rehearsal.
+
+    ``continue_from_parent=True`` (default, unchanged behavior) continues
+    training from the rejected adapter's exact hashed weights, which is why
+    LoRA topology may not change -- there is no way to keep training the
+    same adapter tensors under a different topology.
+
+    ``continue_from_parent=False`` builds a fresh-start repair population
+    instead: no parent adapter is required or verified, and variants may
+    freely set ``lora_patch`` (a new topology, since there are no parent
+    weights it would conflict with). ``build_repair_candidate`` already
+    branches on ``parent_adapter is None`` this same way and records
+    ``continuation: False`` in each candidate's own provenance evidence --
+    this flag only decides which of that function's two already-supported
+    paths this call takes.
+    """
 
     if not variants:
         raise ValueError("autonomous repair requires at least one repair variant")
-    if any(variant.lora_patch for variant in variants):
+    if continue_from_parent and any(variant.lora_patch for variant in variants):
         raise ValueError(
             "autonomous continuation repair cannot change LoRA topology"
         )
@@ -330,7 +346,7 @@ def run_single_hop_autonomous_repair(
         if replay_ratio is not None
         else None
     )
-    parent_adapter = _verified_parent_adapter(target)
+    parent_adapter = _verified_parent_adapter(target) if continue_from_parent else None
 
     population = prepare_and_propose_repair_population(
         engine=runner.engine,
