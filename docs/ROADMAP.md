@@ -165,7 +165,7 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
   exercise the promote=False deferral, gate-rejection vs cutoff-elimination
   provenance, and exact GPU-hour accounting across chained rounds.
 
-**Regression Surgeon extensions — Priority 5 (2 of 4 slices complete)**
+**Regression Surgeon extensions — Priority 5 (4 of 4 slices complete)**
 - checkpoint bisect — `checkpoint_bisect.py` (PR #79). The existing
   autonomous repair loop only ever asked "was the final checkpoint of a
   rejected run good enough" — `evaluate_all_checkpoints()` independently
@@ -191,9 +191,52 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
   build_repair_candidate` already implemented and already tested (data
   model was already correct; only the single call site was missing the
   option). Replay stays orthogonal to continuation by design.
-- **not yet implemented**: dataset influence approximation, offending-
-  training-sample clustering, independent counterexample generation — see
-  Research below.
+- dataset influence approximation — `dataset_influence.py` (PR #85). Forward-
+  only (no backward/training), per-example cross-entropy loss computed in an
+  isolated subprocess per checkpoint, reusing the exact model+adapter load
+  path from the real transformers-text evaluator. Ranks
+  `TrainingExampleInfluence` records by `bad_checkpoint_loss -
+  good_checkpoint_loss` between a run's last-good and first-regressing
+  checkpoints (from `checkpoint_bisect.py`'s `CheckpointBisectOutcome`), with
+  `confidence` as a z-score against the population of measured deltas -
+  deliberately separate from ranking position, not a causal claim. Verified
+  real end-to-end: correctly ranked genuinely "odd" training rows above
+  repetitive "easy" ones after real training on a mixed dataset.
+- offending-training-sample clustering — `training_sample_clusters.py`
+  (PR #87). Pure, deterministic, dependency-free greedy single-link
+  clustering of `TrainingExampleInfluence` records by token-set Jaccard text
+  similarity — distinct from the already-shipped eval-failure clustering in
+  `failures.py`, which clusters by exact-match evaluation metadata, not
+  training-example text similarity. Needs no GPU or additional real-hardware
+  measurement; operates entirely on already-computed influence records.
+  Non-suspicious examples (`influence_score <= 0`) are excluded before
+  clustering starts.
+- independent counterexample generation + targeted repair —
+  `dataset_regression_repair.py` (PR #88). Bridges a `TrainingSampleCluster`
+  into the existing, already-hardened repair machinery
+  (`repair_orchestrator.py`, `repair_candidates.py`, `contamination.py`)
+  rather than rebuilding a parallel system: `build_training_regression_
+  repair_request`/`_plan` adapt the cluster into the same `RepairRequest`/
+  `RepairPlan` shapes the eval-gate repair path uses, with honest sentinel
+  `evaluator`/`suite` values (`"dataset-influence"` / `"training-corpus"`)
+  since there is no real eval suite for a training-corpus regression.
+  `direct_training_allowed` is always `False` and
+  `requires_independent_source` always `True`, so the hard rule (protected
+  holdout must never enter generation/repair training) is enforced by the
+  same contamination-audit path the eval-gate flow already uses.
+  `verified_last_good_checkpoint_adapter` binds continuation to the real
+  content hash of the LAST-GOOD checkpoint specifically, never the regressed
+  one. `prepare_and_propose_repair_population` was refactored
+  (behavior-preserving) to take an already-built `RepairRequest` instead of
+  building one internally from a `FailureCluster`, so both repair paths
+  share one real orchestration function instead of duplicating budget/
+  replay/parent-adapter/holdout-audit logic. The repair population is gated
+  by the real, unmodified promotion gate - no separate "did this fix the
+  target regression" check exists; a repair that doesn't clear the gate is
+  rejected exactly like any other candidate. Includes an explicit test
+  proving a repair that fails to improve is correctly refused promotion even
+  when every other step (real counterexamples, real contamination audit,
+  real continuation from the last-good checkpoint) succeeds.
 
 **Unlisted but real: incident-remediation benchmark harness** —
 `benchmark.py`, `investigation.py`, `hypothesis_generation.py`, `probes.py`,
@@ -233,13 +276,18 @@ treated as fully proven:
 - **Auto-revert on failed canary** — achieved structurally, not as a
   dedicated feature: `engine.py::promote()` only overwrites the baseline
   when `GateDecision.accepted` is true, so a repair that fails its
-  independent holdout eval simply never replaces the working baseline. No
-  test currently drives a *failing* repair through this exact path end to
-  end, and there is no monitored post-promotion rollback (Chowder never
-  "deploys" before evaluating, so there is nothing to roll back from yet).
+  independent holdout eval simply never replaces the working baseline.
+  `test_dataset_regression_repair.py::test_training_regression_repair_that_
+  fails_to_improve_is_not_promoted` (PR #88) now drives a *failing* repair
+  through this exact path end to end for the training-regression repair
+  flow specifically — no equivalent test exists yet for the older eval-gate
+  repair flow (`autonomous_repair.py`), and there is still no monitored
+  post-promotion rollback (Chowder never "deploys" before evaluating, so
+  there is nothing to roll back from yet).
 - `checkpoint_discovery.py` is real and tested, but solves *resume
   compatibility validation* for the TUI, not bisection — don't confuse it
-  with "checkpoint bisect" under Research below.
+  with checkpoint bisect (`checkpoint_bisect.py`, PR #79, now PROVEN under
+  Priority 5 above).
 - **Adaptive placement policy (7E) — now wired to real training, still
   not fully production-proven** — `build_placement_plan()` (PR #75) now
   actually drives `spec.activation_offload`/`optimizer_tiering`/
@@ -320,16 +368,6 @@ the same way Phase 5's DDP acceptance was.
 Explicitly gated on the above being stable — no design work has started on
 any of these:
 
-- **Regression Surgeon extensions, remaining slices** (Priority 5) —
-  dataset influence approximation (**not implemented**: which training
-  examples most likely contributed to a regression; start with a
-  practical approximation such as leave-cluster-out re-training measured
-  via the real independent evaluator, not a claim of exact causal
-  influence), offending-*training*-sample clustering (**not implemented**
-  — distinct from the already-shipped eval-failure clustering, and gated
-  on influence scores existing first), independent counterexample
-  generation from sources independent of the protected holdout (**not
-  implemented** — must never expose holdout answers to the generator).
 - **Meta-controller** (Priority 6) — persisted intervention/result dataset
   (model, hardware, dataset/failure cluster, intervention, Memory Fabric
   placement, training recipe, cost, score delta, regression delta,

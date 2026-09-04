@@ -16,7 +16,7 @@ from .repair_orchestrator import (
     RepairPopulationOutcome,
     prepare_and_propose_repair_population,
 )
-from .repair_requests import RepairSourceProvider
+from .repair_requests import RepairSourceProvider, build_repair_request
 from .replay_history import ReplayHistorySource, materialize_replay_history
 
 
@@ -352,7 +352,7 @@ def run_single_hop_autonomous_repair(
         engine=runner.engine,
         parent_id=target.candidate.experiment_id,
         plan=target.plan,
-        cluster=target.cluster,
+        request=build_repair_request(plan=target.plan, cluster=target.cluster),
         provider=provider,
         holdout_fingerprint_files=holdout_files,
         variants=variants,
