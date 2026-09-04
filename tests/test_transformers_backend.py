@@ -61,6 +61,43 @@ def _config(dataset: str):
     }
 
 
+def _fake_plan(**overrides):
+    """A controllable PlacementPlan for testing resolved_activation_offload/
+    resolved_optimizer_tiering/resolved_frozen_layer_streaming's "auto"
+    wiring in isolation -- these staticmethods now defer to
+    TransformersPeftExecutor._placement_plan (see that method's own
+    docstring), which itself wraps a real memory dry-run and up to three
+    real experiment subprocesses; mocking at this seam tests "does
+    resolved_* correctly read the plan's enable_* verdict" without needing
+    a fully-realistic recipe or chasing the plan's own internal call chain
+    (already exhaustively covered by test_placement_policy.py)."""
+    from chowder.placement_policy import PlacementPlan
+
+    fields = dict(
+        fits_without_intervention=False,
+        ddp_active=False,
+        active_accelerator_count=1,
+        baseline_estimate_gb=1.0,
+        per_rank_available_gb=16.0,
+        enable_activation_offload=False,
+        enable_optimizer_tiering=False,
+        enable_frozen_layer_streaming=False,
+        predicted_combined_estimate_gb=0.8,
+        fits_with_plan=True,
+        combination_validated=True,
+        reasoning=("test plan",),
+    )
+    fields.update(overrides)
+    return PlacementPlan(**fields)
+
+
+def _patch_placement_plan(plan):
+    return patch(
+        "chowder.backends.transformers_peft.TransformersPeftExecutor._placement_plan",
+        return_value=plan,
+    )
+
+
 def test_spec_is_built_from_resolved_config_and_workdir(tmp_path):
     data = tmp_path / "train.jsonl"
     data.write_text('{"text":"hello"}\n')
@@ -1058,27 +1095,41 @@ def _fake_offload_experiment(recommended: bool, **overrides):
     return ActivationOffloadExperiment(**fields)
 
 
-def test_resolved_activation_offload_auto_uses_the_real_experiments_recommendation():
+def test_resolved_activation_offload_auto_uses_the_placement_plans_recommendation():
     config = {"backend": {"training": {"activation_offload": "auto"}}}
     context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
-    with patch(
-        "chowder.activation_offload.run_activation_offload_experiment",
-        return_value=_fake_offload_experiment(recommended=True),
-    ) as mock_experiment:
+    with _patch_placement_plan(_fake_plan(enable_activation_offload=True)) as mock_plan:
         result = TransformersPeftExecutor.resolved_activation_offload(context)
-    mock_experiment.assert_called_once()
+    mock_plan.assert_called_once()
     assert result is True
 
 
-def test_resolved_activation_offload_auto_declines_when_not_recommended():
+def test_resolved_activation_offload_auto_declines_when_plan_does_not_recommend_it():
     config = {"backend": {"training": {"activation_offload": "auto"}}}
     context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
-    with patch(
-        "chowder.activation_offload.run_activation_offload_experiment",
-        return_value=_fake_offload_experiment(recommended=False),
-    ):
+    with _patch_placement_plan(_fake_plan(enable_activation_offload=False)):
         result = TransformersPeftExecutor.resolved_activation_offload(context)
     assert result is False
+
+
+def test_resolved_activation_offload_auto_falls_back_to_single_mechanism_verdict_when_plan_fits():
+    """The placement plan itself never recommends any mechanism once the
+    recipe already fits resident (PlacementPlan is scoped to "recipe does
+    not fit"). "auto" must not silently lose activation_offload's own
+    opportunistic recommendation (worthwhile even though not required) in
+    that case -- it must fall back to the mechanism's own single-
+    mechanism experiment, exactly as "auto" resolved before this
+    combination-search wiring existed."""
+    config = {"backend": {"training": {"activation_offload": "auto"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    with _patch_placement_plan(
+        _fake_plan(fits_without_intervention=True, enable_activation_offload=False)
+    ), patch(
+        "chowder.activation_offload.run_activation_offload_experiment",
+        return_value=_fake_offload_experiment(recommended=True),
+    ):
+        result = TransformersPeftExecutor.resolved_activation_offload(context)
+    assert result is True
 
 
 def test_run_rejects_activation_offload_under_multi_gpu_ddp(tmp_path):
@@ -1193,7 +1244,7 @@ def test_evidence_records_predicted_vs_actual_for_auto(tmp_path, monkeypatch):
         "chowder.backends.transformers_peft.subprocess.Popen",
         _fake_process_factory(observed_spec),
     )
-    with patch(
+    with _patch_placement_plan(_fake_plan(enable_activation_offload=True)), patch(
         "chowder.activation_offload.run_activation_offload_experiment",
         return_value=_fake_offload_experiment(recommended=True),
     ):
@@ -1350,27 +1401,39 @@ def _fake_tiering_experiment(recommended: bool, **overrides):
     return OptimizerTieringExperiment(**fields)
 
 
-def test_resolved_optimizer_tiering_auto_uses_the_real_experiments_recommendation():
+def test_resolved_optimizer_tiering_auto_uses_the_placement_plans_recommendation():
     config = {"backend": {"training": {"optimizer_tiering": "auto"}}}
     context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
-    with patch(
-        "chowder.optimizer_tiering.run_optimizer_tiering_experiment",
-        return_value=_fake_tiering_experiment(recommended=True),
-    ) as mock_experiment:
+    with _patch_placement_plan(_fake_plan(enable_optimizer_tiering=True)) as mock_plan:
         result = TransformersPeftExecutor.resolved_optimizer_tiering(context)
-    mock_experiment.assert_called_once()
+    mock_plan.assert_called_once()
     assert result is True
 
 
-def test_resolved_optimizer_tiering_auto_declines_when_not_recommended():
+def test_resolved_optimizer_tiering_auto_declines_when_plan_does_not_recommend_it():
     config = {"backend": {"training": {"optimizer_tiering": "auto"}}}
     context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
-    with patch(
-        "chowder.optimizer_tiering.run_optimizer_tiering_experiment",
-        return_value=_fake_tiering_experiment(recommended=False),
-    ):
+    with _patch_placement_plan(_fake_plan(enable_optimizer_tiering=False)):
         result = TransformersPeftExecutor.resolved_optimizer_tiering(context)
     assert result is False
+
+
+def test_resolved_optimizer_tiering_auto_falls_back_to_single_mechanism_verdict_when_plan_fits():
+    """See resolved_activation_offload's analogous test: the plan
+    recommends nothing once the recipe already fits, so "auto" must fall
+    back to optimizer_tiering's own single-mechanism experiment rather
+    than silently losing a real, worthwhile-even-though-not-required
+    recommendation."""
+    config = {"backend": {"training": {"optimizer_tiering": "auto"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    with _patch_placement_plan(
+        _fake_plan(fits_without_intervention=True, enable_optimizer_tiering=False)
+    ), patch(
+        "chowder.optimizer_tiering.run_optimizer_tiering_experiment",
+        return_value=_fake_tiering_experiment(recommended=True),
+    ):
+        result = TransformersPeftExecutor.resolved_optimizer_tiering(context)
+    assert result is True
 
 
 def test_run_rejects_optimizer_tiering_under_multi_gpu_ddp(tmp_path):
@@ -1483,7 +1546,7 @@ def test_evidence_records_predicted_vs_actual_for_optimizer_tiering_auto(tmp_pat
         "chowder.backends.transformers_peft.subprocess.Popen",
         _fake_process_factory(observed_spec),
     )
-    with patch(
+    with _patch_placement_plan(_fake_plan(enable_optimizer_tiering=True)), patch(
         "chowder.optimizer_tiering.run_optimizer_tiering_experiment",
         return_value=_fake_tiering_experiment(recommended=True),
     ):
@@ -1636,27 +1699,39 @@ def _fake_streaming_experiment(recommended: bool, **overrides):
     return FrozenLayerStreamingExperiment(**fields)
 
 
-def test_resolved_frozen_layer_streaming_auto_uses_the_real_experiments_recommendation():
+def test_resolved_frozen_layer_streaming_auto_uses_the_placement_plans_recommendation():
     config = {"backend": {"training": {"frozen_layer_streaming": "auto"}}}
     context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
-    with patch(
-        "chowder.frozen_layer_streaming.run_frozen_layer_streaming_experiment",
-        return_value=_fake_streaming_experiment(recommended=True),
-    ) as mock_experiment:
+    with _patch_placement_plan(_fake_plan(enable_frozen_layer_streaming=True)) as mock_plan:
         result = TransformersPeftExecutor.resolved_frozen_layer_streaming(context)
-    mock_experiment.assert_called_once()
+    mock_plan.assert_called_once()
     assert result is True
 
 
-def test_resolved_frozen_layer_streaming_auto_declines_when_not_recommended():
+def test_resolved_frozen_layer_streaming_auto_declines_when_plan_does_not_recommend_it():
     config = {"backend": {"training": {"frozen_layer_streaming": "auto"}}}
     context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
-    with patch(
-        "chowder.frozen_layer_streaming.run_frozen_layer_streaming_experiment",
-        return_value=_fake_streaming_experiment(recommended=False),
-    ):
+    with _patch_placement_plan(_fake_plan(enable_frozen_layer_streaming=False)):
         result = TransformersPeftExecutor.resolved_frozen_layer_streaming(context)
     assert result is False
+
+
+def test_resolved_frozen_layer_streaming_auto_falls_back_to_single_mechanism_verdict_when_plan_fits():
+    """See resolved_activation_offload's analogous test: the plan
+    recommends nothing once the recipe already fits, so "auto" must fall
+    back to frozen_layer_streaming's own single-mechanism experiment
+    rather than silently losing a real, worthwhile-even-though-not-
+    required recommendation."""
+    config = {"backend": {"training": {"frozen_layer_streaming": "auto"}}}
+    context = ExecutionContext(_hardware(), ".", 1, resolved_config=config)
+    with _patch_placement_plan(
+        _fake_plan(fits_without_intervention=True, enable_frozen_layer_streaming=False)
+    ), patch(
+        "chowder.frozen_layer_streaming.run_frozen_layer_streaming_experiment",
+        return_value=_fake_streaming_experiment(recommended=True),
+    ):
+        result = TransformersPeftExecutor.resolved_frozen_layer_streaming(context)
+    assert result is True
 
 
 def test_run_rejects_frozen_layer_streaming_under_multi_gpu_ddp(tmp_path):
@@ -1770,7 +1845,7 @@ def test_evidence_records_predicted_vs_actual_for_frozen_layer_streaming_auto(tm
         "chowder.backends.transformers_peft.subprocess.Popen",
         _fake_process_factory(observed_spec),
     )
-    with patch(
+    with _patch_placement_plan(_fake_plan(enable_frozen_layer_streaming=True)), patch(
         "chowder.frozen_layer_streaming.run_frozen_layer_streaming_experiment",
         return_value=_fake_streaming_experiment(recommended=True),
     ):

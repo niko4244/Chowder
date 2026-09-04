@@ -10,7 +10,10 @@ import threading
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
+
+if TYPE_CHECKING:
+    from ..placement_policy import PlacementPlan
 from uuid import uuid4
 
 from ..cancellation import CancellationToken
@@ -851,6 +854,37 @@ class TransformersPeftExecutor:
         return _default_quantization(context.hardware)
 
     @staticmethod
+    def _placement_plan(context: ExecutionContext) -> "PlacementPlan":
+        """The shared Memory Fabric placement decision every "auto"-valued
+        mechanism defers to (see resolved_activation_offload/
+        resolved_optimizer_tiering/resolved_frozen_layer_streaming).
+        Reuses `placement_policy.build_placement_plan`, which itself only
+        ever recommends a 2+-mechanism combination when a REAL,
+        empirically-validated `combined_mechanism_experiment.
+        CombinedMechanismExperiment` exists for it -- "do not auto-apply
+        an unvalidated combination" -- and returns every `enable_*=False`
+        for multi-GPU DDP (each mechanism's own DDP-rejection stays the
+        real fail-closed backstop regardless).
+
+        Known limitation: this plan is computed as if all three mechanisms
+        were free to choose from scratch, even if the caller has some of
+        them explicitly pinned ("always"/"off") rather than "auto" -- a
+        pinned mechanism's own resolved_* method never consults this
+        (explicit values resolve directly, before this is ever called),
+        but a DIFFERENT mechanism left on "auto" alongside it still gets
+        a plan computed without knowledge of that pin. This matches
+        today's existing behavior for a lone "auto" mechanism (always
+        decided in isolation) and only improves the case this slice
+        targets: multiple mechanisms simultaneously left on "auto".
+        """
+        from ..placement_policy import build_placement_plan
+
+        config = context.resolved_config
+        return build_placement_plan(
+            resolved_config=config, context=context, work_dir=context.work_dir
+        )
+
+    @staticmethod
     def resolved_activation_offload(context: ExecutionContext) -> bool:
         """The activation_offload value this executor will actually train
         with. "always"/"off"/an explicit boolean resolve directly, with no
@@ -858,10 +892,18 @@ class TransformersPeftExecutor:
         "auto" is resolved for real here (unlike inside
         TransformersPeftRunSpec.from_resolved_config, which must stay
         cheap and side-effect-free -- see _resolve_activation_offload_flag)
-        by running the real, cached activation-offload experiment and
-        using its `recommended` verdict: only promote offload
-        automatically when it's required to fit or empirically
-        worthwhile, never as a blanket default.
+        by deferring to the shared Memory Fabric placement plan (see
+        _placement_plan) when the recipe actually needs an intervention to
+        fit. When the plan reports fits_without_intervention (the recipe
+        already fits resident), the plan itself recommends nothing for
+        ANY mechanism -- see PlacementPlan's own docstring, this was
+        always scoped to "recipe does not fit" -- so this falls back to
+        activation_offload's own single-mechanism experiment and its
+        `recommended` verdict, exactly as "auto" resolved before this
+        combination-search wiring existed: real, measured, worthwhile-
+        even-though-not-required savings (e.g. free insurance under an
+        acceptable wall-time penalty) must not be silently lost just
+        because the recipe would technically fit without it.
         """
         config = context.resolved_config
         backend = config.get("backend", {}) if isinstance(config, Mapping) else {}
@@ -879,6 +921,10 @@ class TransformersPeftExecutor:
                 f"backend.training.activation_offload must be one of "
                 f"{sorted(_ALLOWED_ACTIVATION_OFFLOAD_MODES)} or a boolean, got {raw!r}"
             )
+        plan = TransformersPeftExecutor._placement_plan(context)
+        if not plan.fits_without_intervention:
+            return plan.enable_activation_offload
+
         from ..activation_offload import run_activation_offload_experiment
 
         experiment = run_activation_offload_experiment(
@@ -890,10 +936,14 @@ class TransformersPeftExecutor:
     def resolved_optimizer_tiering(context: ExecutionContext) -> bool:
         """The optimizer_tiering value this executor will actually train
         with. Structurally identical to resolved_activation_offload:
-        "always"/"off"/an explicit boolean resolve directly; "auto" runs
-        the real, cached optimizer-tiering experiment
-        (chowder.optimizer_tiering.run_optimizer_tiering_experiment) and
-        uses its `recommended` verdict.
+        "always"/"off"/an explicit boolean resolve directly; "auto" defers
+        to the shared Memory Fabric placement plan's enable_optimizer_
+        tiering verdict when the recipe needs intervention to fit, falling
+        back to this mechanism's own single-mechanism `recommended`
+        verdict when it already fits -- see resolved_activation_offload's
+        docstring for why (the plan itself recommends nothing when
+        fits_without_intervention, but a mechanism can still be real,
+        measured, worthwhile insurance even when not strictly required).
         """
         config = context.resolved_config
         backend = config.get("backend", {}) if isinstance(config, Mapping) else {}
@@ -911,6 +961,10 @@ class TransformersPeftExecutor:
                 f"backend.training.optimizer_tiering must be one of "
                 f"{sorted(_ALLOWED_OPTIMIZER_TIERING_MODES)} or a boolean, got {raw!r}"
             )
+        plan = TransformersPeftExecutor._placement_plan(context)
+        if not plan.fits_without_intervention:
+            return plan.enable_optimizer_tiering
+
         from ..optimizer_tiering import run_optimizer_tiering_experiment
 
         experiment = run_optimizer_tiering_experiment(
@@ -923,10 +977,14 @@ class TransformersPeftExecutor:
         """The frozen_layer_streaming value this executor will actually
         train with. Structurally identical to resolved_activation_offload
         /resolved_optimizer_tiering: "always"/"off"/an explicit boolean
-        resolve directly; "auto" runs the real, cached frozen-layer-
-        streaming experiment (chowder.frozen_layer_streaming.
-        run_frozen_layer_streaming_experiment) and uses its `recommended`
-        verdict.
+        resolve directly; "auto" defers to the shared Memory Fabric
+        placement plan's enable_frozen_layer_streaming verdict when the
+        recipe needs intervention to fit, falling back to this
+        mechanism's own single-mechanism `recommended` verdict when it
+        already fits -- see resolved_activation_offload's docstring for
+        why (the plan itself recommends nothing when
+        fits_without_intervention, but a mechanism can still be real,
+        measured, worthwhile insurance even when not strictly required).
         """
         config = context.resolved_config
         backend = config.get("backend", {}) if isinstance(config, Mapping) else {}
@@ -948,6 +1006,10 @@ class TransformersPeftExecutor:
                 f"backend.training.frozen_layer_streaming must be one of "
                 f"{sorted(_ALLOWED_FROZEN_LAYER_STREAMING_MODES)} or a boolean, got {raw!r}"
             )
+        plan = TransformersPeftExecutor._placement_plan(context)
+        if not plan.fits_without_intervention:
+            return plan.enable_frozen_layer_streaming
+
         from ..frozen_layer_streaming import run_frozen_layer_streaming_experiment
 
         experiment = run_frozen_layer_streaming_experiment(
