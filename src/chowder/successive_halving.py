@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -7,7 +8,8 @@ from typing import Any
 
 from .cycle import CandidateCycleOutcome, ExperimentCycleRunner, GenerationOutcome
 from .graph import deep_merge_config
-from .models import Experiment, ExperimentResult
+from .models import Experiment, ExperimentResult, ExperimentStatus
+from .registry import RegistryInvariantError
 
 _DEFAULT_CHECKPOINT_FRACTION = 0.5
 
@@ -134,6 +136,45 @@ def _next_round_experiment(
     )
 
 
+def _persist_round_experiments(
+    runner: ExperimentCycleRunner, experiments: tuple[Experiment, ...]
+) -> None:
+    """Persist the exact effective round before it can reserve compute."""
+    registry = runner.registry
+    if registry is None:
+        return
+    # ponytail: scan once/round. Ceiling: huge histories. Upgrade: add RunRegistry.get_experiment().
+    persisted = {row.experiment_id: row for row in registry.list_experiments()}
+    missing: list[Experiment] = []
+    for experiment in experiments:
+        if experiment.status is not ExperimentStatus.PLANNED:
+            raise RegistryInvariantError(
+                f"successive-halving experiment {experiment.experiment_id!r} "
+                f"must be planned, got {experiment.status.value}"
+            )
+        existing = persisted.get(experiment.experiment_id)
+        if existing is None:
+            missing.append(experiment)
+            continue
+        if existing.status is not ExperimentStatus.PLANNED:
+            raise RegistryInvariantError(
+                f"persisted experiment {experiment.experiment_id!r} already has "
+                f"non-planned status {existing.status.value}"
+            )
+        if (
+            existing.parent_id != experiment.parent_id
+            or existing.hypothesis != experiment.hypothesis
+            or json.dumps(existing.config_patch, sort_keys=True)
+            != json.dumps(experiment.config_patch, sort_keys=True)
+            or existing.estimated_gpu_hours != experiment.estimated_gpu_hours
+        ):
+            raise RegistryInvariantError(
+                f"immutable experiment record {experiment.experiment_id!r} "
+                "already exists with different content"
+            )
+    registry.record_experiments(missing)
+
+
 def run_successive_halving(
     runner: ExperimentCycleRunner,
     experiments: tuple[Experiment, ...],
@@ -168,6 +209,12 @@ def run_successive_halving(
     function to inject on round 0 -- see the round-0 handling below,
     which applies the same config_patch shape every later round uses,
     so round 0 is not a structurally different case from round 1+).
+
+    When the runner has a registry, this controller owns persistence of
+    each effective round. Callers must not pre-record a differently shaped
+    round-0 row; an exact PLANNED row is accepted only to resume a crash
+    between persistence and proposal. Non-PLANNED same-ID rows are never
+    re-executed as a shortcut for replaying their existing outcome.
     """
     if not 0 < survival_fraction < 1:
         raise ValueError("survival_fraction must be strictly between 0 and 1")
@@ -198,6 +245,7 @@ def run_successive_halving(
             else experiment
             for experiment in current_experiments.values()
         )
+        _persist_round_experiments(runner, round_input)
         accepted = runner.engine.propose(round_input)
         generation = runner.run_round(accepted, promote=False)
 

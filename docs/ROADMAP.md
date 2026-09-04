@@ -149,7 +149,20 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
   candidates trained cheaply, 2 real survivors correctly separated from 2
   real cutoff-eliminations, round 2 genuinely resumed the real winner's
   checkpoint and trained additional real steps on top of it (proven by
-  `global_step`, not a restart from scratch).
+  `global_step`, not a restart from scratch). **A real registry-persistence
+  gap was later found by integration testing and fixed (PR #90)**: the
+  round-1+ child experiments `run_successive_halving()` invents itself were
+  proposed to the engine but never recorded in the `RunRegistry`, so
+  `ExperimentCycleRunner._record_status()` hard-refused the unknown id and
+  any search with a registry attached died at the start of round 1, leaving
+  that round's reservations outstanding forever (measured: `spent=1.0`,
+  `reserved=1.05`, `outstanding=2` against a 10.0 budget). Neither module's
+  own tests caught it — `test_successive_halving.py` never attached a
+  registry and `test_cycle.py` never ran a multi-round search. Every exact
+  effective round (including the controller's round-0 budget patch) is now
+  validated or atomically recorded before proposal can create a reservation;
+  same-ID divergent or terminal evidence is refused, while an exact PLANNED
+  persistence retry is idempotent (`test_search_controller_integration.py`).
 - bandit candidate ordering — `candidate_selection.py` (PR #78).
   `prioritize_candidates()` reorders a pool of not-yet-run candidates by
   UCB1 score over "arms" (the frozenset of dotted `config_patch` key-paths
@@ -280,10 +293,11 @@ treated as fully proven:
   `test_dataset_regression_repair.py::test_training_regression_repair_that_
   fails_to_improve_is_not_promoted` (PR #88) now drives a *failing* repair
   through this exact path end to end for the training-regression repair
-  flow specifically — no equivalent test exists yet for the older eval-gate
-  repair flow (`autonomous_repair.py`), and there is still no monitored
-  post-promotion rollback (Chowder never "deploys" before evaluating, so
-  there is nothing to roll back from yet).
+  flow specifically, and `test_search_controller_integration.py::test_a_
+  repair_that_fails_its_own_gate_never_replaces_the_baseline` (PR #90) does
+  the same for the older eval-gate repair flow (`autonomous_repair.py`).
+  There is still no monitored post-promotion rollback (Chowder never
+  "deploys" before evaluating, so there is nothing to roll back from yet).
 - `checkpoint_discovery.py` is real and tested, but solves *resume
   compatibility validation* for the TUI, not bisection — don't confuse it
   with checkpoint bisect (`checkpoint_bisect.py`, PR #79, now PROVEN under
