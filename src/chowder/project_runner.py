@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .backends.transformers_peft import TransformersPeftExecutor
+from .backend_selection import create_training_executor, normalize_training_config_for_executor
 from .cancellation import CancellationToken
 from .cycle import ExperimentCycleRunner, GenerationOutcome
 from .engine import EvolutionEngine
@@ -261,12 +261,13 @@ def run_project(
             baseline = project.baseline
             training_config = project.config
 
+        training_config = normalize_training_config_for_executor(training_config)
         engine = EvolutionEngine(
             goal=project.goal,
             baseline=baseline,
             spent_gpu_hours=baseline.gpu_hours,
         )
-        trainer = TransformersPeftExecutor()
+        trainer = create_training_executor(training_config)
         evaluator = TransformersTextEvaluator()
         runner = ExperimentCycleRunner(
             engine=engine,
