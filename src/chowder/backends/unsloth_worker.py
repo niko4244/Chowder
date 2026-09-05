@@ -22,6 +22,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# Unlike plain PEFT's LoraConfig(target_modules=None), Unsloth's own
+# FastLanguageModel.get_peft_model does not auto-detect target modules --
+# confirmed directly on real hardware (RTX 5060 Ti): passing None raises
+# `TypeError: 'NoneType' object is not iterable` inside unsloth's own
+# get_peft_model (it iterates target_modules unconditionally, with no
+# None-means-auto-detect path the way plain PEFT's LoraConfig has). This
+# is Unsloth's own documented default target list for its supported
+# Llama-family architectures (Llama/Mistral/Qwen/Gemma), used here only
+# when the recipe does not specify one explicitly.
+_DEFAULT_TARGET_MODULES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+
 
 @dataclass(frozen=True)
 class _Spec:
@@ -98,7 +117,7 @@ def train(spec: _Spec) -> dict[str, Any]:
     model = FastLanguageModel.get_peft_model(
         model,
         r=spec.lora_r,
-        target_modules=list(spec.target_modules) or None,
+        target_modules=list(spec.target_modules) or list(_DEFAULT_TARGET_MODULES),
         lora_alpha=spec.lora_alpha,
         lora_dropout=spec.lora_dropout,
         bias="none",
