@@ -32,6 +32,22 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
 - independent holdout/evidence evaluator (`evaluators/`) — reloads
   base+adapter independently and verifies adapter SHA/protocol evidence
   rather than trusting the training process's own claim
+- **real generation-correctness bug fixed (PR #95)**: both evaluator
+  workers (`base_text_worker.py`, `transformers_text_worker.py`)
+  unconditionally overrode `model.generate()`'s `eos_token_id` with the
+  tokenizer's scalar id, discarding the model's own (often list-valued)
+  `generation_config.eos_token_id` — many instruction-tuned checkpoints
+  (Qwen2/Qwen3, Llama-3) list the chat template's real turn-end token
+  there alongside the base eos. On a checkpoint whose tokenizer config
+  has drifted from its generation config (observed on a real abliterated
+  Qwen3 checkpoint), this made the model ramble until `max_new_tokens`
+  under `use_chat_template: true`, failing `exact_match`/
+  `normalized_exact_match` even when the correct answer was present —
+  the real cause of a training campaign scoring `0.0` on both baseline
+  and candidate. `evaluators/generation.py::resolve_eos_token_ids()` now
+  prefers the model's own resolved generation config; confirmed on a real
+  model that this is a pure improvement (official Qwen2.5/Qwen3 keep
+  these in sync already) that fixes the drifted-config failure mode.
 - failure clustering — `failures.py::cluster_failures()` buckets eval
   failures by (evaluator, suite, protocol_sha256, source_role, failure_kind)
 - hypothesis templates from eval deltas — `failures.py::plan_repairs()`
@@ -293,7 +309,23 @@ treated as fully proven:
   explicitly rejected at config time, not silently allowed, because the
   interaction hasn't been verified on real multi-GPU hardware. The `"auto"`
   acceptance threshold (`_MAX_ACCEPTABLE_PENALTY_RATIO = 1.2`) is a
-  documented starting point, not a measured-optimal constant.
+  documented starting point, not a measured-optimal constant. **A real
+  stride-corruption crash (found during the Memory Fabric OOM-acceptance
+  investigation below) is now fixed, PR #92**: `saved_tensors_hooks`'
+  pack/unpack intercepts *every* tensor autograd saves for backward, not
+  just a model's own activations — including transformers' expanded/
+  broadcast 4D attention bias (stride 0 on the head dim). The old hooks did
+  a naive `.to("cpu")`/`.to(device)` round trip, which silently
+  materializes a differently-strided dense tensor that PyTorch's memory-
+  efficient SDPA backward kernel rejects
+  (`attn_bias.stride(2) = 66, and should be a multiple of 4`) — reproduced
+  byte-for-byte on real hardware at the exact reported scale
+  (`batch_size=96`), never caught by this project's existing tests because
+  they all use batch sizes of 2-8. New shared
+  `activation_offload_hooks.py` preserves the exact original strides of a
+  non-contiguous saved tensor via `as_strided()` instead of guarding
+  against the scale/config combination — see
+  `docs/ACTIVATION_OFFLOAD_STRIDE_FIX.md`.
 - **Optimizer-state tiering (production)** — same shape as above: real,
   merged, single-GPU only, DDP explicitly rejected pending verification. No
   PCIe-bytes-transferred instrumentation exists (bitsandbytes' CUDA-unified-
@@ -364,6 +396,47 @@ treated as fully proven:
   instead. **Still not fully production-proven**: no real resident-OOM →
   Memory-Fabric-success acceptance run exists yet (see Next below) — do
   not treat Memory Fabric as validated end-to-end until that exists.
+- **Unsloth PEFT backend — minimal isolated executor, real-CUDA-
+  commissioned once, not yet production-proven** — an explicit PEFT
+  engine-selection seam (`backend_selection.py`, PR #93: `backend.type:
+  peft` + `backend.engine: transformers|unsloth`, no `auto` mode) plus a
+  real isolated Unsloth runtime: `chowder setup unsloth`/`chowder doctor
+  unsloth` (`unsloth_env.py`, PR #94) create/verify a separate `uv`-managed
+  Python 3.13 environment under `.chowder/envs/unsloth`, invoked only
+  through a subprocess — Unsloth, its patched Torch, TRL, bitsandbytes,
+  and Triton are never imported into Chowder's own controller process, by
+  design (different, incompatible dependency envelope from Chowder's
+  tested `[train]` stack). `training_data.py` (PR #96) extracted the
+  backend-neutral dataset-digest/replay/chat-tokenization contract out of
+  `transformers_worker.py` so a second training backend has a real
+  contract to share instead of a temptation to duplicate it. `unsloth_
+  peft.py`/`unsloth_worker.py` (PR #97) implement the actual isolated
+  executor against the existing `TrainingExecutor` contract (profile/run/
+  cancel, cancellation binding, progress polling) — text-format datasets
+  only in this slice (the isolated worker cannot import
+  `chowder.backends.training_data`, so chat support needs a deliberate
+  cross-environment data-handoff design, not a guess), and refuses
+  `activation_offload`/`optimizer_tiering`/`frozen_layer_streaming`
+  outright rather than risk an unverified interaction with Unsloth's own
+  patched attention/model implementation. **Real-CUDA-commissioned on
+  this project's own target hardware** (RTX 5060 Ti, Blackwell, Windows):
+  a real `chowder setup unsloth` produced a fully green `chowder doctor
+  unsloth` (real Unsloth/Torch/CUDA/bitsandbytes NF4 forward pass), and
+  the first real end-to-end training run caught one more real bug before
+  it could ship broken — unlike plain PEFT's `LoraConfig(target_modules=
+  None)`, Unsloth's own `FastLanguageModel.get_peft_model` does not
+  auto-detect target modules at all and crashes on `None` — fixed by
+  defaulting to Unsloth's own documented Llama-family target list (PR
+  #98). After the fix, a real training run completed real steps and
+  produced a genuine, standard, independently-loadable PEFT adapter.
+  **Not yet production-proven**: only a tiny model at a handful of steps
+  has been commissioned so far (`test_unsloth_peft_real.py`, gated behind
+  `CHOWDER_REAL_UNSLOTH_SMOKE=1` plus a real environment); checkpoint/
+  resume, real process-tree-safe cancellation, chat-format datasets,
+  continuing from a parent adapter, and independent-evaluator integration
+  are all explicitly deferred to follow-up slices, and no real target
+  -model (e.g. a real Qwen3 checkpoint) commissioning run has been
+  attempted yet.
 
 ## NEXT
 
@@ -377,13 +450,19 @@ VRAM budget. Full real-hardware attempt log, findings, and next steps:
 [`docs/MEMORY_FABRIC_ACCEPTANCE.md`](MEMORY_FABRIC_ACCEPTANCE.md). Short
 version: a real production calibration-timeout bug was found and fixed
 along the way; a real, reproducible `activation_offload` crash was found
-and flagged separately (not fixed here); this development machine's
-driver-level VRAM-to-system-RAM paging fallback and shared-desktop-GPU
-contention make a clean pass hard to reach on this specific hardware; and
-a mechanism's isolated single-forward+backward savings not reliably
-predicting a full training run's real peak VRAM was confirmed a third
-time. Revisiting this needs either a dedicated/isolated GPU or the
-`activation_offload` bug fixed first.
+and, unlike at the time this doc was first written, **is now fixed (PR
+#92, see above)** — the second of the two named blockers is resolved.
+The remaining blocker is this development machine's driver-level
+VRAM-to-system-RAM paging fallback and shared-desktop-GPU contention,
+which make a clean pass hard to reach on this specific hardware without
+either a dedicated/isolated GPU or an artificial VRAM ceiling via
+`torch.cuda.set_per_process_memory_fraction` (confirmed separately, on
+this same hardware, to produce a genuine `torch.cuda.OutOfMemoryError`
+that bypasses the driver's paging fallback entirely, without touching
+any system setting) — an in-progress investigation, not yet landed as
+the acceptance test itself. A mechanism's isolated single-forward+backward
+savings not reliably predicting a full training run's real peak VRAM was
+also confirmed a third time and remains an open, separate limitation.
 
 **Backward prefetch for frozen-layer streaming (Priority 1 follow-up)**
 `memory_fabric.py`'s backward re-streams each frozen layer's weight
