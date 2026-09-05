@@ -100,8 +100,7 @@ def create_training_executor(config: Mapping[str, Any]) -> TrainingExecutor:
 
         return TransformersPeftExecutor()
     if engine == UNSLOTH_ENGINE:
-        raise BackendSelectionError(
-            "backend.engine='unsloth' is recognized but its isolated executor "
-            "is not available yet"
-        )
+        from .backends.unsloth_peft import UnslothPeftExecutor
+
+        return UnslothPeftExecutor()
     raise AssertionError(f"unhandled training engine: {engine}")

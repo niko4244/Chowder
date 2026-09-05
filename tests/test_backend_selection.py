@@ -9,6 +9,7 @@ from chowder.backend_selection import (
     resolve_training_engine,
 )
 from chowder.backends.transformers_peft import TransformersPeftExecutor
+from chowder.backends.unsloth_peft import UnslothPeftExecutor
 
 
 def _config(backend):
@@ -66,12 +67,18 @@ def test_legacy_alias_cannot_silently_select_unsloth():
         )
 
 
-def test_unsloth_is_recognized_but_not_falsely_reported_available():
+def test_unsloth_engine_is_recognized_and_left_untouched_by_normalization():
     config = _config({"type": "peft", "engine": "unsloth"})
     assert resolve_training_engine(config) == "unsloth"
     assert normalize_training_config_for_executor(config) == config
-    with pytest.raises(BackendSelectionError, match="isolated executor"):
-        create_training_executor(config)
+
+
+def test_factory_constructs_the_isolated_unsloth_executor_for_canonical_config():
+    executor = create_training_executor(
+        _config({"type": "peft", "engine": "unsloth", "base_model": "x", "dataset": "y"})
+    )
+    assert isinstance(executor, UnslothPeftExecutor)
+    assert executor.name == "unsloth-peft"
 
 
 def test_factory_constructs_existing_transformers_executor_for_canonical_config():

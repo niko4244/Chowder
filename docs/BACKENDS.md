@@ -23,7 +23,7 @@ backend:
 
 It resolves to the Transformers engine without requiring an `engine` key. `backend.type: peft` requires an explicit engine so a project cannot silently change training implementations.
 
-`engine: unsloth` is reserved and recognized by the selector, but is not reported as runnable until the isolated Unsloth environment and executor are implemented and accepted. Selecting it before then fails during project validation rather than falling through to Transformers.
+`engine: unsloth` runs through an isolated executor (`chowder/backends/unsloth_peft.py` + `unsloth_worker.py`), never imported into Chowder's normal process -- see [`docs/UNSLOTH.md`](UNSLOTH.md) for the isolated-environment setup (`chowder setup unsloth` / `chowder doctor unsloth`) it requires first. This initial slice is deliberately minimal: one NVIDIA GPU, PEFT LoRA/QLoRA, text-format datasets only, standard PEFT adapter output. Chat-format datasets, checkpoint/resume, replay, and continuing from a parent adapter are not yet supported under this engine. Chowder's `activation_offload`/`optimizer_tiering`/`frozen_layer_streaming` are refused outright (unverified against Unsloth's own patched model/attention implementation) rather than silently no-op'd. Implemented and CI-verified (mocked subprocess, no real Unsloth/CUDA in ordinary CI); real-CUDA acceptance against actual Unsloth training is a separate, not-yet-completed phase.
 
 ## Transformers + PEFT
 
