@@ -10,6 +10,7 @@ from typing import Any
 from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
 from .base_text import BaseTextEvalSpec
+from .generation import resolve_eos_token_ids
 from .transformers_text import EvalSuiteSpec
 
 
@@ -133,6 +134,7 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
         model = model.to(device_name)
     model.eval()
     device = next(model.parameters()).device
+    resolved_eos_token_id = resolve_eos_token_ids(tokenizer, model)
 
     output_dir = Path(spec.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -174,7 +176,7 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
                         max_new_tokens=suite.max_new_tokens,
                         do_sample=False,
                         pad_token_id=tokenizer.pad_token_id,
-                        eos_token_id=tokenizer.eos_token_id,
+                        eos_token_id=resolved_eos_token_id,
                     )
                     prompt_tokens = encoded["input_ids"].shape[1]
                     prediction = tokenizer.decode(
@@ -201,6 +203,7 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
                 "predictions_file": str(predictions_path),
                 "holdout_fingerprints_file": str(fingerprint_path),
                 "holdout_fingerprints_sha256": fingerprint_sha,
+                "resolved_eos_token_id": resolved_eos_token_id,
             }
 
     return {
