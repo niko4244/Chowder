@@ -6,6 +6,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from .backend_selection import (
+    BackendSelectionError,
+    UNSLOTH_ENGINE,
+    normalize_training_config_for_executor,
+    resolve_training_engine,
+)
 from .backends.transformers_peft import TransformersPeftRunSpec
 from .config_validation import validate_transformers_backend_config
 from .evaluators.base_text import BaseTextEvalSpec
@@ -132,13 +138,24 @@ class ProjectSpec:
                 "evaluation suite names must exactly match goal metric names"
             )
 
+        try:
+            training_engine = resolve_training_engine(self.config)
+        except BackendSelectionError as exc:
+            raise ProjectValidationError(str(exc)) from exc
+        if training_engine == UNSLOTH_ENGINE:
+            raise ProjectValidationError(
+                "backend.engine='unsloth' is recognized but its isolated executor "
+                "is not available yet"
+            )
+        training_config = normalize_training_config_for_executor(self.config)
+
         # Validate both the strict namespace and the actual executable spec at
         # project-load time. This catches semantically invalid precision,
         # quantization, LoRA, timeout, and evaluation settings before compute.
-        validate_transformers_backend_config(self.config)
+        validate_transformers_backend_config(training_config)
         try:
             TransformersPeftRunSpec.from_resolved_config(
-                self.config,
+                training_config,
                 work_dir=self.work_dir,
                 output_dir=self.work_dir / ".chowder" / "validation-adapter",
                 seed=self.seed,

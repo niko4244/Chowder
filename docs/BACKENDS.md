@@ -2,6 +2,29 @@
 
 Chowder keeps scientific decision-making separate from framework execution. A training backend produces a `TrainingArtifact`; only a separate evaluator may produce an `ExperimentResult` that can enter a promotion gate.
 
+## Engine selection
+
+New PEFT projects select the training implementation explicitly:
+
+```yaml
+backend:
+  type: peft
+  engine: transformers
+```
+
+There is intentionally no `engine: auto` mode. Chowder should not learn or guess an engine preference until both implementations have real apples-to-apples evidence.
+
+The historical spelling remains fully supported for backward compatibility:
+
+```yaml
+backend:
+  type: transformers-peft
+```
+
+It resolves to the Transformers engine without requiring an `engine` key. `backend.type: peft` requires an explicit engine so a project cannot silently change training implementations.
+
+`engine: unsloth` is reserved and recognized by the selector, but is not reported as runnable until the isolated Unsloth environment and executor are implemented and accepted. Selecting it before then fails during project validation rather than falling through to Transformers.
+
 ## Transformers + PEFT
 
 Install the optional training stack:
@@ -24,7 +47,8 @@ The first backend supports causal-language-model SFT with LoRA or CUDA QLoRA. He
 {
   "seed": 17,
   "backend": {
-    "type": "transformers-peft",
+    "type": "peft",
+    "engine": "transformers",
     "base_model": "Qwen/Qwen3-8B",
     "revision": "optional-hub-revision",
     "dataset": "data/train.jsonl",
@@ -54,7 +78,7 @@ The first backend supports causal-language-model SFT with LoRA or CUDA QLoRA. He
 }
 ```
 
-The experiment graph may store only child patches. `ExperimentGraph.resolve_config()` resolves root-to-child patches before the backend sees the configuration.
+The experiment graph may store only child patches. `ExperimentGraph.resolve_config()` resolves root-to-child patches before the backend sees the configuration. The project runner normalizes canonical `peft + transformers` selection at the executor boundary so the existing strict Transformers executor contract remains unchanged internally.
 
 ### Evidence captured for every successful run
 
