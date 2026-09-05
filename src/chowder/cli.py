@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import asdict
 
 from .calibration import calibrate_hardware
@@ -10,6 +11,14 @@ from .memory import HardwareProfile, WorkloadProfile, plan_memory
 from .project import load_project
 from .project_runner import run_project
 from .run_events import RunEventPayload, format_event
+from .unsloth_env import (
+    DEFAULT_UNSLOTH_PYTHON,
+    DEFAULT_UNSLOTH_VERSION,
+    UnslothEnvironmentError,
+    doctor_unsloth_environment,
+    format_unsloth_doctor,
+    setup_unsloth_environment,
+)
 
 
 def _memory_plan(args: argparse.Namespace) -> int:
@@ -94,6 +103,35 @@ def _tui(args: argparse.Namespace) -> int:
     return 0
 
 
+def _setup_unsloth(args: argparse.Namespace) -> int:
+    try:
+        result = setup_unsloth_environment(
+            args.root,
+            python_request=args.python,
+            unsloth_version=args.unsloth_version,
+        )
+    except (UnslothEnvironmentError, OSError) as exc:
+        print(f"Unsloth setup failed: {exc}", file=sys.stderr)
+        return 1
+    print(format_unsloth_doctor(result.doctor))
+    print(f"Manifest: {result.manifest_path}")
+    if not result.ok:
+        print(
+            "Unsloth was installed but failed one or more required capability checks.",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def _doctor_unsloth(args: argparse.Namespace) -> int:
+    report = doctor_unsloth_environment(args.root)
+    print(format_unsloth_doctor(report))
+    if report.stderr_tail and not report.ok:
+        print(report.stderr_tail, file=sys.stderr)
+    return 0 if report.ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chowder",
@@ -116,6 +154,40 @@ def build_parser() -> argparse.ArgumentParser:
     validate = sub.add_parser("project-validate", help="Validate a project without training")
     validate.add_argument("project", help="Path to a Chowder project JSON file")
     validate.set_defaults(func=_project_validate)
+
+    setup = sub.add_parser("setup", help="Prepare an optional isolated training runtime")
+    setup_targets = setup.add_subparsers(dest="setup_target", required=True)
+    setup_unsloth = setup_targets.add_parser(
+        "unsloth", help="Create or update the isolated Unsloth runtime"
+    )
+    setup_unsloth.add_argument(
+        "--root",
+        default=".",
+        help="Project/workspace root that will contain .chowder/envs/unsloth",
+    )
+    setup_unsloth.add_argument(
+        "--python",
+        default=DEFAULT_UNSLOTH_PYTHON,
+        help="Python version for the isolated runtime",
+    )
+    setup_unsloth.add_argument(
+        "--unsloth-version",
+        default=DEFAULT_UNSLOTH_VERSION,
+        help="Exact Unsloth version to install into the isolated runtime",
+    )
+    setup_unsloth.set_defaults(func=_setup_unsloth)
+
+    doctor = sub.add_parser("doctor", help="Inspect an optional isolated training runtime")
+    doctor_targets = doctor.add_subparsers(dest="doctor_target", required=True)
+    doctor_unsloth = doctor_targets.add_parser(
+        "unsloth", help="Verify Unsloth, CUDA, and 4-bit runtime capability"
+    )
+    doctor_unsloth.add_argument(
+        "--root",
+        default=".",
+        help="Project/workspace root containing .chowder/envs/unsloth",
+    )
+    doctor_unsloth.set_defaults(func=_doctor_unsloth)
 
     memory = sub.add_parser("memory-plan", help="Plan tensor residency across VRAM/RAM/NVMe")
     memory.add_argument("--vram", type=float, required=True)
