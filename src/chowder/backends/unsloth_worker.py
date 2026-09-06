@@ -65,6 +65,10 @@ class _Spec:
     seed: int
     timeout_seconds: float | None
     offline: bool
+    save_strategy: str
+    save_steps: int
+    save_total_limit: int | None
+    resume_from_checkpoint: str | None
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -171,19 +175,24 @@ def train(spec: _Spec) -> dict[str, Any]:
             tmp_path.write_text(json.dumps(payload), encoding="utf-8")
             tmp_path.replace(progress_path)
 
-    training_args = TrainingArguments(
-        output_dir=str(output_dir / "trainer"),
-        num_train_epochs=spec.epochs,
-        max_steps=spec.max_steps,
-        per_device_train_batch_size=spec.batch_size,
-        gradient_accumulation_steps=spec.gradient_accumulation_steps,
-        learning_rate=spec.learning_rate,
-        logging_steps=spec.logging_steps,
-        save_strategy="no",
-        report_to="none",
-        seed=spec.seed,
-        data_seed=spec.seed,
-    )
+    args_kwargs: dict[str, Any] = {
+        "output_dir": str(output_dir / "trainer"),
+        "num_train_epochs": spec.epochs,
+        "max_steps": spec.max_steps,
+        "per_device_train_batch_size": spec.batch_size,
+        "gradient_accumulation_steps": spec.gradient_accumulation_steps,
+        "learning_rate": spec.learning_rate,
+        "logging_steps": spec.logging_steps,
+        "save_strategy": spec.save_strategy,
+        "report_to": "none",
+        "seed": spec.seed,
+        "data_seed": spec.seed,
+    }
+    if spec.save_strategy == "steps":
+        args_kwargs["save_steps"] = spec.save_steps
+    if spec.save_total_limit is not None:
+        args_kwargs["save_total_limit"] = spec.save_total_limit
+    training_args = TrainingArguments(**args_kwargs)
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -191,7 +200,7 @@ def train(spec: _Spec) -> dict[str, Any]:
         data_collator=collator,
         callbacks=[_ProgressReportingCallback()],
     )
-    train_output = trainer.train()
+    train_output = trainer.train(resume_from_checkpoint=spec.resume_from_checkpoint)
     runtime = time.perf_counter() - started
 
     model.save_pretrained(output_dir)
@@ -269,6 +278,10 @@ def main() -> int:
         seed=int(raw.get("seed", 1)),
         timeout_seconds=raw.get("timeout_seconds"),
         offline=bool(raw.get("offline", False)),
+        save_strategy=raw.get("save_strategy", "no"),
+        save_steps=int(raw.get("save_steps", 0)),
+        save_total_limit=raw.get("save_total_limit"),
+        resume_from_checkpoint=raw.get("resume_from_checkpoint"),
     )
     result = train(spec)
     Path(args.result).write_text(

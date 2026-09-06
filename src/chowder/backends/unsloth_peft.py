@@ -6,7 +6,7 @@ import math
 import subprocess
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from uuid import uuid4
@@ -14,7 +14,7 @@ from uuid import uuid4
 from ..cancellation import CancellationToken
 from ..executors import CostEstimate, ExecutionContext, TrainingArtifact
 from ..models import Experiment
-from ..provenance import sha256_directory
+from ..provenance import sha256_directory, sha256_file
 from ..resources import ResourceUsage
 from ..run_events import TrainingProgressEvent
 from ..unsloth_env import unsloth_env_dir, unsloth_python
@@ -22,16 +22,26 @@ from .training_data import _verify_bound_input
 
 # Initial, minimal scope (see docs -- the isolated Unsloth executor plan):
 # one NVIDIA GPU, PEFT LoRA/QLoRA, standard PEFT adapter output, text-format
-# datasets only. Chat-format datasets, checkpoint/resume, replay, and
-# continuing from a parent adapter are deliberately out of scope here and
-# land in a follow-up slice once the cross-environment data-handoff question
-# (the isolated env cannot import chowder.backends.training_data directly)
-# is resolved. Chowder's own activation_offload/optimizer_tiering/
-# frozen_layer_streaming are refused outright under this engine -- none of
-# them have been verified against Unsloth's own patched model/attention
-# implementation, and a silent no-op would misrepresent what actually ran.
+# datasets only. Chat-format datasets and continuing from a parent adapter
+# are deliberately out of scope here and land in a follow-up slice once the
+# cross-environment data-handoff question (the isolated env cannot import
+# chowder.backends.training_data directly) is resolved. Chowder's own
+# activation_offload/optimizer_tiering/frozen_layer_streaming are refused
+# outright under this engine -- none of them have been verified against
+# Unsloth's own patched model/attention implementation, and a silent no-op
+# would misrepresent what actually ran.
+#
+# Checkpoint/resume (this slice): a distinct manifest filename from
+# Transformers' own _CHECKPOINT_MANIFEST_NAME in transformers_peft.py is
+# the whole mechanism for "reject a Transformers checkpoint resumed under
+# engine='unsloth' or vice versa" -- a Transformers checkpoint directory
+# has no chowder-unsloth-checkpoint-manifest.json file (and an Unsloth one
+# has no chowder-checkpoint-manifest.json), so each engine's own resume
+# check already fails closed on the other engine's checkpoint with no
+# extra cross-engine detection code needed.
 
 _ALLOWED_QUANTIZATION = {"none", "4bit"}
+_CHECKPOINT_MANIFEST_NAME = "chowder-unsloth-checkpoint-manifest.json"
 
 
 class UnslothConfigError(ValueError):
@@ -63,6 +73,10 @@ class UnslothPeftRunSpec:
     seed: int = 1
     timeout_seconds: float | None = None
     offline: bool = False
+    save_strategy: str = "no"
+    save_steps: int = 0
+    save_total_limit: int | None = None
+    resume_from_checkpoint: str | None = None
 
     def __post_init__(self) -> None:
         if not self.base_model.strip():
@@ -93,6 +107,14 @@ class UnslothPeftRunSpec:
             raise ValueError(f"unsupported quantization: {self.quantization}")
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if self.save_strategy not in {"no", "steps", "epoch"}:
+            raise ValueError(f"unsupported save_strategy: {self.save_strategy}")
+        if self.save_strategy == "steps" and self.save_steps <= 0:
+            raise ValueError("save_steps must be positive when save_strategy='steps'")
+        if self.save_total_limit is not None and self.save_total_limit <= 0:
+            raise ValueError("save_total_limit must be positive")
+        if self.resume_from_checkpoint is not None and not self.resume_from_checkpoint.strip():
+            raise ValueError("resume_from_checkpoint cannot be empty")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -139,6 +161,14 @@ class UnslothPeftRunSpec:
         dataset = str(dataset_raw.resolve())
         target_modules = tuple(lora.get("target_modules", ()) or ())
 
+        resume_raw = backend.get("resume_from_checkpoint")
+        resume_from_checkpoint: str | None = None
+        if resume_raw is not None:
+            resume_path = Path(str(resume_raw))
+            if not resume_path.is_absolute():
+                resume_path = Path(work_dir) / resume_path
+            resume_from_checkpoint = str(resume_path.resolve())
+
         return cls(
             base_model=str(backend.get("base_model", "")),
             dataset=dataset,
@@ -161,6 +191,14 @@ class UnslothPeftRunSpec:
             seed=seed,
             timeout_seconds=(backend.get("runtime", {}) or {}).get("timeout_seconds"),
             offline=bool(backend.get("offline", False)),
+            save_strategy=str(training.get("save_strategy", "no")),
+            save_steps=int(training.get("save_steps", 0)),
+            save_total_limit=(
+                int(training["save_total_limit"])
+                if training.get("save_total_limit") is not None
+                else None
+            ),
+            resume_from_checkpoint=resume_from_checkpoint,
         )
 
 
@@ -239,6 +277,99 @@ class UnslothPeftExecutor:
     def _worker_script_path() -> Path:
         return Path(__file__).with_name("unsloth_worker.py")
 
+    @staticmethod
+    def _environment_manifest_sha256(work_dir: str | Path) -> str | None:
+        manifest_path = unsloth_env_dir(work_dir) / "chowder-unsloth-manifest.json"
+        if not manifest_path.is_file():
+            return None
+        return sha256_file(manifest_path)
+
+    @staticmethod
+    def _bound_inputs(spec: UnslothPeftRunSpec, *, environment_manifest_sha256: str | None) -> dict[str, Any]:
+        """The training inputs an Unsloth checkpoint is bound to -- same
+        principle as TransformersPeftExecutor._bound_inputs, plus the
+        isolated environment's own manifest digest, since an Unsloth
+        checkpoint's optimizer/scheduler state is only meaningful for the
+        exact Unsloth/Torch/PEFT/TRL versions that produced it. epochs and
+        max_steps are excluded on purpose (extending training length is the
+        point of resuming); everything else that could invalidate optimizer
+        state is included.
+        """
+        recipe = spec.to_dict()
+        for key in (
+            "output_dir",
+            "dataset",
+            "timeout_seconds",
+            "offline",
+            "save_strategy",
+            "save_steps",
+            "save_total_limit",
+            "resume_from_checkpoint",
+            "epochs",
+            "max_steps",
+        ):
+            recipe.pop(key, None)
+        recipe_payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
+        return {
+            "checkpoint_recipe_sha256": hashlib.sha256(recipe_payload.encode("utf-8")).hexdigest(),
+            "base_model": spec.base_model,
+            "revision": spec.revision,
+            "dataset_sha256": spec.dataset_sha256,
+            "environment_manifest_sha256": environment_manifest_sha256,
+        }
+
+    @staticmethod
+    def _write_checkpoint_manifest(trainer_dir: Path, bound_inputs: Mapping[str, Any]) -> None:
+        trainer_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = trainer_dir / _CHECKPOINT_MANIFEST_NAME
+        payload = json.dumps(dict(bound_inputs), sort_keys=True, indent=2) + "\n"
+        existing = manifest_path.read_text(encoding="utf-8") if manifest_path.is_file() else None
+        if existing is not None and existing != payload:
+            raise RuntimeError(
+                f"checkpoint manifest {manifest_path} already exists with different bound "
+                "inputs -- this run directory was not produced by the current spec"
+            )
+        manifest_path.write_text(payload, encoding="utf-8")
+
+    @classmethod
+    def _verify_resume_checkpoint(
+        cls, spec: UnslothPeftRunSpec, bound_inputs: Mapping[str, Any]
+    ) -> None:
+        """Reject a resume if any bound training input (including the
+        isolated environment itself) has changed since this checkpoint was
+        produced -- an Unsloth checkpoint's optimizer/scheduler state is
+        only trustworthy for the exact recipe, model, data, and Unsloth
+        environment it came from. A checkpoint directory with no manifest
+        at all (e.g. a Transformers checkpoint pointed at under
+        engine='unsloth' by mistake) is refused the same way -- there is
+        no recorded bound inputs to verify against, so it cannot be
+        trusted rather than assumed compatible.
+        """
+        assert spec.resume_from_checkpoint is not None
+        checkpoint_dir = Path(spec.resume_from_checkpoint).resolve()
+        if not checkpoint_dir.is_dir():
+            raise FileNotFoundError(f"resume_from_checkpoint not found: {checkpoint_dir}")
+        manifest_path = checkpoint_dir.parent / _CHECKPOINT_MANIFEST_NAME
+        if not manifest_path.is_file():
+            raise RuntimeError(
+                f"no Unsloth checkpoint manifest found at {manifest_path} -- refusing to "
+                "resume from a checkpoint with no recorded bound inputs to verify against "
+                "(this may not be an Unsloth-produced checkpoint)"
+            )
+        recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(recorded, Mapping):
+            raise RuntimeError(f"checkpoint manifest {manifest_path} is not a JSON object")
+        changed = {
+            key: {"checkpoint": recorded.get(key), "requested": value}
+            for key, value in bound_inputs.items()
+            if recorded.get(key) != value
+        }
+        if changed:
+            raise ValueError(
+                f"refusing to resume from {checkpoint_dir}: bound training input(s) changed "
+                f"since this checkpoint was produced: {json.dumps(changed, sort_keys=True)}"
+            )
+
     def _spec_for(
         self, experiment: Experiment, context: ExecutionContext, *, run_dir: Path
     ) -> UnslothPeftRunSpec:
@@ -248,6 +379,15 @@ class UnslothPeftExecutor:
             output_dir=run_dir / "adapter",
             seed=context.seed,
         )
+        # Same convention as TransformersPeftExecutor._spec_for: bind the
+        # spec to the dataset's real, actually-measured digest immediately
+        # when the caller didn't already pin one, so every downstream use
+        # of spec.dataset_sha256 (the checkpoint manifest, evidence, the
+        # spec JSON sent to the worker) carries a concrete value rather
+        # than staying None.
+        primary_sha = _verify_bound_input(spec.dataset, spec.dataset_sha256, label="training")
+        if spec.dataset_sha256 is None:
+            spec = replace(spec, dataset_sha256=primary_sha)
         return spec
 
     def run(self, experiment: Experiment, context: ExecutionContext) -> TrainingArtifact:
@@ -257,7 +397,12 @@ class UnslothPeftExecutor:
         spec = self._spec_for(experiment, context, run_dir=run_dir)
         python_executable = self._isolated_python(context.work_dir)
 
-        primary_sha = _verify_bound_input(spec.dataset, spec.dataset_sha256, label="training")
+        environment_manifest_sha256 = self._environment_manifest_sha256(context.work_dir)
+        bound_inputs = self._bound_inputs(spec, environment_manifest_sha256=environment_manifest_sha256)
+        if spec.resume_from_checkpoint is not None:
+            self._verify_resume_checkpoint(spec, bound_inputs)
+        if spec.save_strategy != "no":
+            self._write_checkpoint_manifest(Path(spec.output_dir) / "trainer", bound_inputs)
 
         spec_path = run_dir / "run-spec.json"
         result_path = run_dir / "worker-result.json"
@@ -371,6 +516,18 @@ class UnslothPeftExecutor:
                     "visible_accelerator_count": usage.visible_accelerator_count,
                     "peak_vram_gb_by_accelerator": dict(usage.peak_vram_gb_by_accelerator),
                 },
+                "checkpoint": {
+                    "save_strategy": spec.save_strategy,
+                    "save_steps": spec.save_steps,
+                    "save_total_limit": spec.save_total_limit,
+                    "resumed_from_checkpoint": spec.resume_from_checkpoint,
+                    "trainer_dir": (
+                        str(Path(spec.output_dir) / "trainer")
+                        if spec.save_strategy != "no"
+                        else None
+                    ),
+                    "environment_manifest_sha256": environment_manifest_sha256,
+                },
             },
         )
 
@@ -403,6 +560,23 @@ class UnslothPeftExecutor:
         )
 
     def cancel(self, run_id: str) -> None:
+        """Terminate the tracked worker process, matching
+        TransformersPeftExecutor.cancel exactly. Confirmed sufficient on
+        real hardware (a real, mid-flight Unsloth training run, cancelled
+        after 8 real seconds): the worker's PID was fully gone afterward
+        (verified directly via the OS process table, not nvidia-smi's
+        --query-compute-apps, which was observed to report a stale,
+        unchanging process list on this Windows/WDDM machine and cannot be
+        trusted for this check here) and run() returned promptly with a
+        real RuntimeError, no hang. This worker never forks additional
+        child processes (HF Trainer's default dataloader_num_workers=0,
+        no other subprocess spawning in unsloth_worker.py), so there is no
+        process *tree* to kill in the current design -- if a future
+        real-hardware run is found to leave orphans (e.g. from a changed
+        worker that does spawn children), that would need real
+        process-tree termination (e.g. a Windows job object or
+        `taskkill /T /F`), not a preemptive, unverified addition here.
+        """
         process = self._processes.get(run_id)
         if process is None or process.poll() is not None:
             return
