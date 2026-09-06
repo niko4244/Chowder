@@ -47,6 +47,16 @@ and exactly why:
       these are `None` for such runs. They are also `None` when no
       training evidence could be located at all.
 
+  `training_engine`
+      Read from `evidence["engine"]` ("transformers" or "unsloth"), the
+      literal Priority-6-roadmap ask that this evidence view be able to
+      distinguish training engines. `None` for evidence recorded before
+      the Transformers executor started writing this key (it always wrote
+      "backend": "transformers-peft" but not a separate "engine" key) or
+      for any other executor that does not record it -- not inferred from
+      `backend`, so an older run's real absence of this evidence stays
+      visible rather than being backfilled by assumption.
+
   `gate_accepted`
       `True`/`False` only when the experiment's persisted status is
       `PASSED`/`REJECTED` -- the status `EvolutionEngine.adjudicate()`
@@ -120,6 +130,7 @@ class InterventionOutcome:
 
     # What it ran on.
     training_run_id: str | None
+    training_engine: str | None
     base_model: str | None
     recipe_sha256: str | None
     min_device_vram_gb: float | None
@@ -293,6 +304,11 @@ def build_intervention_outcomes(
                 arm=dotted_paths(experiment.config_patch),
                 intervention=experiment.hypothesis.intervention,
                 training_run_id=artifact.run_id if artifact is not None else None,
+                training_engine=(
+                    training_evidence.get("engine")
+                    if isinstance(training_evidence.get("engine"), str)
+                    else None
+                ),
                 base_model=base_model if isinstance(base_model, str) else None,
                 recipe_sha256=recipe_sha256 if isinstance(recipe_sha256, str) else None,
                 min_device_vram_gb=_number(hardware_defaults.get("min_device_vram_gb")),
@@ -319,6 +335,7 @@ def filter_outcomes(
     outcomes: Sequence[InterventionOutcome],
     *,
     base_model: str | None = None,
+    training_engine: str | None = None,
     touches_key_path: str | None = None,
     gate_accepted: bool | None = None,
     min_score_vs_baseline: float | None = None,
@@ -333,10 +350,17 @@ def filter_outcomes(
     (`gate_accepted is None`) is excluded by either value, and is reachable
     only by not passing this criterion at all. That is deliberate: "not on
     record" is not evidence of rejection.
+
+    `training_engine` matches only rows whose evidence recorded that exact
+    engine string -- a row with no recorded engine (`training_engine is
+    None`) is excluded by either value, same "not on record" rule as
+    `gate_accepted`.
     """
     selected = tuple(outcomes)
     if base_model is not None:
         selected = tuple(row for row in selected if row.base_model == base_model)
+    if training_engine is not None:
+        selected = tuple(row for row in selected if row.training_engine == training_engine)
     if touches_key_path is not None:
         selected = tuple(row for row in selected if touches_key_path in row.arm)
     if gate_accepted is not None:
