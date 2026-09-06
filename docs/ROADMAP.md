@@ -203,20 +203,46 @@ controller: no production caller under `src/chowder/` invokes
 into `project_runner.py` remains open and must not be inferred from the
 library implementation or its integration tests.
 
-**Meta-controller evidence foundation — Priority 6 (dataset slice complete)**
+**Meta-controller evidence foundation — Priority 6 (dataset slice complete, both halves)**
 - `intervention_outcomes.py` (PR #89) builds a normalized, queryable
   `InterventionOutcome` view by joining the immutable experiment, result,
   and training-artifact records the registry already stores. It reuses
   `candidate_selection.dotted_paths()` for intervention-arm identity, reads
   historical gate acceptance from persisted status, and refuses ambiguous
   artifact provenance instead of guessing a producing run.
-- The honesty boundary is explicit: missing evidence stays `None`; only
-  experiments with a scored result become rows, so crashes, cancellations,
-  and preflight failures are absent. The current view also lacks complete
+- The honesty boundary is explicit: missing evidence stays `None`. The
+  scored-result view once lacked the censored half of the dataset entirely;
+  `censored_outcomes.py` (this pass) now represents experiments that ended
+  without a scored result -- REJECTED-before-work and FAILED -- as
+  `CensoredOutcome` rows with the same arm identity, joining the structured
+  `execution_incidents` classification and its capture-time measured
+  GPU-hours when an incident was recorded and honestly `None` when none
+  was. It invents no score for an unobserved outcome and stores no
+  sub-cause the registry never kept. The view still lacks complete
   hardware and dataset context. Those omissions would create survivor bias
   in an unrestricted learned selector and must be addressed or explicitly
-  scoped before policy training.
-- This is a durable evidence view, not an expected-improvement model,
+  scoped before policy training; the censoring half, at least, is now
+  first-class rather than invisible.
+- `censored_outcomes.py` (this pass) is the censored half of that dataset:
+  `build_censored_outcomes()` emits a `CensoredOutcome` row for every
+  result-less REJECTED/FAILED experiment (never for PLANNED/RUNNING, and
+  never for a scored result -- gate-rejection is an *observed* outcome and
+  stays in `intervention_outcomes`), reuses the same
+  `candidate_selection.dotted_paths()` arm identity so a censored row and a
+  scored row name the same intervention arm, joins
+  `registry.list_execution_incidents()` for `signature_kind`/
+  `fingerprint_sha256`/executor and the incident's real capture-time
+  `gpu_hours_spent`, and reports `censoring_rate_by_arm()` as the
+  REJECTED-vs-FAILED shape within each arm's censored rows. Documented
+  policy position: per-arm censoring rate is a first-class signal, spent
+  compute on crashed runs is real cost, and any reward model over
+  `InterventionOutcome` alone is survivor-biased by construction -- how to
+  combine the two views is explicitly left to the policy layer. Known,
+  honestly-stated gap: no production caller persists executor-failure
+  analyses into `execution_incidents` yet (the recording path exists and
+  is tested; only fixtures call it), so most FAILED rows today carry no
+  classification -- visible as `None`, never imputed.
+- This remains a durable evidence view, not an expected-improvement model,
   candidate selector, learned policy, or claim of cross-model transfer.
 
 **Regression Surgeon extensions — Priority 5 (4 of 4 slices complete)**
@@ -582,13 +608,18 @@ Remaining policy and architecture research is gated on the proven foundations
 above being stable:
 
 - **Meta-controller policy learning** (Priority 6) — the evidence-view slice
-  is complete above; the expected-improvement model, GPU-hour-aware
-  experiment policy, and cross-model transfer of successful training
-  strategies have not started. Before training a selector, define how
-  censored failures/cancellations enter the dataset (or constrain the claim),
-  close the required context gaps, and validate against held-out experiments
-  versus the existing UCB1 baseline with zero hard-gate violations. A durable
-  historical dataset is not itself a learned policy.
+  is complete above, both halves: scored outcomes (`intervention_outcomes.py`)
+  and censored outcomes (`censored_outcomes.py`, this pass, which closes the
+  roadmap's own "define how censored failures/cancellations enter the
+  dataset" gate by representing them explicitly and documenting the policy
+  position rather than imputing scores). Still not started: the
+  expected-improvement model, GPU-hour-aware experiment policy, and
+  cross-model transfer of successful training strategies. Remaining before
+  training a selector: close the required hardware/dataset context gaps,
+  start persisting executor-failure incidents from production runs (the
+  censored view joins them when present), and validate against held-out
+  experiments versus the existing UCB1 baseline with zero hard-gate
+  violations. A durable historical dataset is not itself a learned policy.
 - **Elastic MoE research** (Priority 7) — per-expert load/gradient
   statistics, expert specialization diagnostics, safe expert clone/split
   experiments, router retraining/distillation, architecture-change
