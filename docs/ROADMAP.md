@@ -638,3 +638,22 @@ above being stable:
   named target is not yet commissioned — only the mechanism is proven, on a
   real architecturally-equivalent stand-in. Phases C–F (budget search,
   distillation, mixed precision, promotion gates) have not started.
+- **Teacher Fabric / Remote Intelligence Distillation** (Priority 8) —
+  architecture documented in
+  [`docs/TEACHER_FABRIC.md`](TEACHER_FABRIC.md) (provider-neutral design,
+  data contracts, integration map, threat model, benchmark protocol, open
+  research questions). **Slice A is implemented**:
+  `src/chowder/teacher_fabric.py` holds the signal taxonomy, capability
+  declaration/negotiation over a registry, request/signal/artifact schemas
+  with fail-closed validation and canonical digests, the
+  `TeacherProvider` protocol (mirroring `TrainingExecutor`'s
+  profile/query/cancel shape), and a deterministic offline
+  `FakeTeacherProvider` test double — with the tokenizer-compatibility
+  gate failing closed on every token-aligned signal kind (rejection or an
+  explicit caller-invoked downgrade, never approximation) and zero
+  network code. Slices B–J (signal store, black-box repair integration,
+  cost accounting/query controller, selected-token scorer, real remote
+  commissioning, remote jobs, microjobs, multi-teacher, selection
+  research) **have not started**; no real provider is commissioned and no
+  student-improvement claim exists — none has been measured. The hard
+  regression gate remains the sole promotion authority and is untouched.
