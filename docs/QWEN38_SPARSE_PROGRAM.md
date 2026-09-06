@@ -1,6 +1,6 @@
 # Chowder Qwen3.8 Native Sparse Program
 
-**Status: program defined (this document); all four revisions pinned; parent B's gate cleared and full architecture audit recorded; protected nine-dimension evaluation harness implemented (`src/chowder/parent_eval.py`); parent A download in flight with manifest machinery landed (`src/chowder/local_model_manifest.py`); no protected suite content authored; no evaluation run; no transformation run. Nothing here may be read as "the sparse-model project is underway" — see the milestone checklist at the end.**
+**Status: program defined (this document); all four revisions pinned; parent B's gate cleared and full architecture audit recorded; protected nine-dimension evaluation harness implemented (`src/chowder/parent_eval.py`); parent A download in flight with manifest machinery landed (`src/chowder/local_model_manifest.py`); Phase 6 conversion plan generated (`docs/PHASE6_CONVERSION_PLAN.md`, PR #120); no protected suite content authored; no evaluation run; no transformation executed. Nothing here may be read as "the sparse-model project is underway" — see the milestone checklist at the end.**
 
 This document retargets Chowder's primary model research from the prior
 Qwen3.6-35B-A3B commissioning branch to a **native-Qwen3.8-derived
@@ -243,7 +243,7 @@ document exists. Milestone 1 completes when:
 - [ ] results persisted
 - [ ] parent-selection decision recorded with evidence
 - [ ] selected parent cached locally (parent A *control* is downloading at its pin; selection itself awaits the Phase-4 tournament, so this box stays unchecked regardless of A's status)
-- [ ] first dense→MoE transformation plan generated
+- [x] first dense→MoE transformation plan generated (PR #120: docs/PHASE6_CONVERSION_PLAN.md — partition-conversion design against the audited qwen3_5/qwen3_5_moe module shapes, with the exactness harness and validation ladder specified; the transformation itself remains unexecuted)
 - [x] no distillation involved (lineage policy fixed above)
 
 Four checkboxes are pre-checked because this document and its

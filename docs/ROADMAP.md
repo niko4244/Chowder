@@ -695,7 +695,12 @@ above being stable:
   fail-closed tokenizer-identity gate, hash-only protected indexes, and
   FK-anchored persistence into `evaluation_runs`. Still open before the
   Phase-4 tournament: parent weights on disk, protected suite content,
-  and the evaluation runs themselves.
+  and the evaluation runs themselves. The Phase-6 conversion plan is
+  generated and merged
+  ([`docs/PHASE6_CONVERSION_PLAN.md`](PHASE6_CONVERSION_PLAN.md), PR
+  #120): partition-conversion of the dense FFN's intermediate dimension
+  into experts, bit-exact at init by construction and verified by a
+  tiny-random CI harness; the transformation itself has not run.
 - **Teacher Fabric / Remote Intelligence Distillation** (Priority 8) —
   architecture documented in
   [`docs/TEACHER_FABRIC.md`](TEACHER_FABRIC.md) (provider-neutral design,
