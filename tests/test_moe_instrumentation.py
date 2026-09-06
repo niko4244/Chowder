@@ -18,8 +18,6 @@ import json
 import math
 
 import pytest
-import torch
-from torch import nn
 
 from chowder.moe_instrumentation import (
     MoeArchitectureAuditError,
@@ -28,6 +26,9 @@ from chowder.moe_instrumentation import (
     write_expert_importance_jsonl,
 )
 from chowder.moe_planning import build_uniform_pruning_plan
+
+torch = pytest.importorskip("torch")
+nn = torch.nn
 
 
 class _FakeRouter(nn.Module):
