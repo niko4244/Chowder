@@ -48,6 +48,7 @@ def _experiment(experiment_id, config_patch, *, parent_id=None, status=None, hou
 # because this module reads persisted evidence -- it never needs a GPU.
 def _production_shaped_evidence():
     return {
+        "engine": "transformers",
         "recipe_sha256": "r" * 64,
         "model_provenance": {"requested_base_model": "sshleifer/tiny-gpt2"},
         "hardware_aware_defaults": {
@@ -140,6 +141,7 @@ def test_build_intervention_outcomes_from_cycle_populated_registry(tmp_path):
     assert row.arm == frozenset({"backend.training.learning_rate"})
     assert row.intervention == "intervention for e1"
     assert row.training_run_id == "train-e1"
+    assert row.training_engine == "transformers"
     assert row.base_model == "sshleifer/tiny-gpt2"
     assert row.recipe_sha256 == "r" * 64
     assert row.min_device_vram_gb == 16.0
@@ -173,6 +175,7 @@ def test_build_intervention_outcomes_reports_none_when_evidence_is_absent(tmp_pa
     assert len(rows) == 1
     row = rows[0]
     assert row.training_run_id is None
+    assert row.training_engine is None
     assert row.base_model is None
     assert row.recipe_sha256 is None
     assert row.min_device_vram_gb is None
@@ -410,6 +413,42 @@ def test_filter_outcomes_criteria_are_anded_together(tmp_path):
 def test_filter_outcomes_without_criteria_returns_every_row(tmp_path):
     rows = _rows_for_queries(tmp_path)
     assert filter_outcomes(rows) == rows
+
+
+def test_filter_outcomes_by_training_engine_excludes_rows_with_no_recorded_engine(tmp_path):
+    """Same 'not on record' rule as gate_accepted: a row whose evidence
+    never recorded an engine is excluded by either engine value, and is
+    reachable only by not passing this criterion at all."""
+    registry = RunRegistry(tmp_path / "runs.db")
+    registry.record_experiment(_experiment("via-unsloth", {"backend": {"lora": {"r": 8}}}))
+    registry.record_training_artifact(
+        TrainingArtifact("train-unsloth", "via-unsloth", "/a", 0.2, evidence={"engine": "unsloth"})
+    )
+    registry.record_result(ExperimentResult("via-unsloth", {"quality": 0.9}, 0.3))
+    registry.record_experiment(_experiment("via-transformers", {"backend": {"lora": {"r": 8}}}))
+    registry.record_training_artifact(
+        TrainingArtifact(
+            "train-transformers", "via-transformers", "/b", 0.2, evidence={"engine": "transformers"}
+        )
+    )
+    registry.record_result(ExperimentResult("via-transformers", {"quality": 0.9}, 0.3))
+    registry.record_experiment(_experiment("no-engine-recorded", {"backend": {"lora": {"r": 8}}}))
+    registry.record_result(ExperimentResult("no-engine-recorded", {"quality": 0.9}, 0.3))
+
+    rows = build_intervention_outcomes(registry, goal=_goal(), baseline=_baseline())
+    registry.close()
+
+    assert [row.experiment_id for row in filter_outcomes(rows, training_engine="unsloth")] == [
+        "via-unsloth"
+    ]
+    assert [row.experiment_id for row in filter_outcomes(rows, training_engine="transformers")] == [
+        "via-transformers"
+    ]
+    assert "no-engine-recorded" not in {
+        row.experiment_id
+        for row in filter_outcomes(rows, training_engine="unsloth")
+        + filter_outcomes(rows, training_engine="transformers")
+    }
 
 
 def test_group_by_arm_groups_same_key_paths_regardless_of_value(tmp_path):

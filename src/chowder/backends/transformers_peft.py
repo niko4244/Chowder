@@ -1613,6 +1613,7 @@ class TransformersPeftExecutor:
             resource_usage=usage,
             evidence={
                 "backend": self.name,
+                "engine": "transformers",
                 "execution_spec_sha256": spec.digest(),
                 "recipe_sha256": spec.recipe_digest(),
                 "dataset_sha256": primary_sha,
