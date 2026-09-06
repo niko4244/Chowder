@@ -218,11 +218,12 @@ library implementation or its integration tests.
   `execution_incidents` classification and its capture-time measured
   GPU-hours when an incident was recorded and honestly `None` when none
   was. It invents no score for an unobserved outcome and stores no
-  sub-cause the registry never kept. The view still lacks complete
-  hardware and dataset context. Those omissions would create survivor bias
-  in an unrestricted learned selector and must be addressed or explicitly
-  scoped before policy training; the censoring half, at least, is now
-  first-class rather than invisible.
+  sub-cause the registry never kept. The context gaps this section once
+  carried are now closed (see the dataset/hardware context slice below),
+  and per-arm censoring rate is a first-class signal; what would still
+  create survivor bias in an unrestricted learned selector -- and how the
+  two views must be combined -- is documented in the module rather than
+  left implicit.
 - `censored_outcomes.py` (this pass) is the censored half of that dataset:
   `build_censored_outcomes()` emits a `CensoredOutcome` row for every
   result-less REJECTED/FAILED experiment (never for PLANNED/RUNNING, and
@@ -242,6 +243,30 @@ library implementation or its integration tests.
   analyses into `execution_incidents` yet (the recording path exists and
   is tested; only fixtures call it), so most FAILED rows today carry no
   classification -- visible as `None`, never imputed.
+- Dataset and hardware context (this pass): `InterventionOutcome` now
+  carries the dataset identity and scale, and the hardware context beyond
+  the single `active_accelerator_count` number, that the Priority-6
+  context-gap item required -- read only from evidence the registry
+  already stores, under the same honesty rule. Dataset identity:
+  `dataset_sha256`/`replay_dataset_sha256` (both real executors verify the
+  dataset on disk and record the digest they trained on, so digest match
+  is what "same data" means across runs) and `filter_outcomes(
+  dataset_sha256=...)` as the same-dataset selector, with the same
+  "not on record" exclusion rule as every other criterion. Dataset scale
+  and shape (transformers-peft `data_provenance` only): `dataset_format`,
+  `primary_rows`, `replay_selected_rows`, `total_token_count`,
+  `assistant_token_count`. Hardware context: `visible_accelerator_count`
+  and the measured `peak_vram_gb_by_accelerator` map (both executors
+  record them; one malformed entry blocks the whole map rather than
+  serving a partial one), `requested_active_accelerator_count`
+  (transformers-peft only), and `base_model_revision` -- so a run on one
+  of two visible GPUs is now distinguishable from a single-GPU box, the
+  multi-GPU telemetry context the roadmap flagged. Known, honestly-stated
+  gaps: no dataset path or file name exists anywhere in the registry (a
+  content digest is the only dataset identity the evidence keeps), the
+  unsloth backend records no `data_provenance` block so its rows carry
+  scale/shape as `None`, and evidence recorded before the real executors
+  started writing these keys stays `None` -- never backfilled.
 - This remains a durable evidence view, not an expected-improvement model,
   candidate selector, learned policy, or claim of cross-model transfer.
 
@@ -614,12 +639,14 @@ above being stable:
   dataset" gate by representing them explicitly and documenting the policy
   position rather than imputing scores). Still not started: the
   expected-improvement model, GPU-hour-aware experiment policy, and
-  cross-model transfer of successful training strategies. Remaining before
-  training a selector: close the required hardware/dataset context gaps,
-  start persisting executor-failure incidents from production runs (the
-  censored view joins them when present), and validate against held-out
-  experiments versus the existing UCB1 baseline with zero hard-gate
-  violations. A durable historical dataset is not itself a learned policy.
+  cross-model transfer of successful training strategies. The required
+  hardware/dataset context gaps are closed (dataset identity/scale and
+  accelerator context now live in the evidence view); remaining before
+  training a selector: start persisting executor-failure incidents from
+  production runs (the censored view joins them when present), and
+  validate against held-out experiments versus the existing UCB1 baseline
+  with zero hard-gate violations. A durable historical dataset is not
+  itself a learned policy.
 - **Elastic MoE research** (Priority 7) — per-expert load/gradient
   statistics, expert specialization diagnostics, safe expert clone/split
   experiments, router retraining/distillation, architecture-change

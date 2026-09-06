@@ -20,7 +20,8 @@ Three registry tables are joined per row:
 Only experiments that actually ran to a persisted `ExperimentResult` become
 rows. An experiment that was preflight-rejected, cancelled, or crashed
 during training never produced a scored outcome, so it is skipped entirely
-rather than represented as a row full of `None`.
+rather than represented as a row full of `None` (see `censored_outcomes`
+for the parallel view over exactly those).
 
 Honesty rule
 ------------
@@ -38,14 +39,35 @@ and exactly why:
       whatever telemetry it measured, and only the real transformers-peft
       worker reports these three.
 
-  `base_model`, `recipe_sha256`, `min_device_vram_gb`,
-  `active_accelerator_count`, `memory_fabric_mechanisms`
+  `base_model`, `base_model_revision`, `recipe_sha256`,
+  `min_device_vram_gb`, `memory_fabric_mechanisms`
       Read out of the training artifact's `evidence` mapping, whose shape
       is set by whichever training backend produced it. The real
       transformers-peft executor writes all of them; any other executor
       (including every hand-written test double) generally writes none, so
       these are `None` for such runs. They are also `None` when no
       training evidence could be located at all.
+
+  `dataset_sha256`, `replay_dataset_sha256`
+      The content digest of the dataset the run actually trained on (and
+      of the replay selection, when one existed), read from the training
+      evidence. Both real executors (transformers-peft and unsloth)
+      verify the dataset on disk and record the digest they trained on,
+      so these are the dataset *identity* half of the Priority-6
+      "dataset context" gap: two runs shared training data exactly when
+      the recorded digests match. `None` for an executor that does not
+      record a digest, or when no training evidence could be located.
+      No dataset path or file name exists in this view because the
+      registry stores none -- a content digest is what "same data" means
+      across runs.
+
+  `dataset_format`, `primary_rows`, `replay_selected_rows`,
+  `total_token_count`, `assistant_token_count`
+      Dataset *scale and shape*, read from the training evidence's
+      `data_provenance` block, which only the real transformers-peft
+      worker writes. `None` for every other backend, for a run with no
+      joined training evidence, and when a recorded block simply does
+      not carry that key.
 
   `training_engine`
       Read from `evidence["engine"]` ("transformers" or "unsloth"), the
@@ -56,6 +78,21 @@ and exactly why:
       for any other executor that does not record it -- not inferred from
       `backend`, so an older run's real absence of this evidence stays
       visible rather than being backfilled by assumption.
+
+  `visible_accelerator_count`, `requested_active_accelerator_count`,
+  `peak_vram_gb_by_accelerator`
+      Hardware context beyond the single `active_accelerator_count`
+      number: how many accelerators the run could even see (both real
+      executors record it in `resource_usage`), how many the experiment
+      request asked to use (transformers-peft evidence only), and the
+      measured per-accelerator peak-VRAM map. The map is `None` unless
+      the evidence's `resource_usage` block carries a well-formed one --
+      the real executors always do; a block with any malformed entry is
+      recorded as `None` in full rather than served partially. A row can
+      legitimately show `active_accelerator_count=1` against
+      `visible_accelerator_count=2`: the box has two GPUs and this run
+      used one, which is exactly the multi-GPU telemetry context the
+      roadmap flagged as missing from this view.
 
   `gate_accepted`
       `True`/`False` only when the experiment's persisted status is
@@ -82,11 +119,16 @@ its own bandit history.
 Deliberately absent: any throughput *rate*. `train_runtime_seconds` and
 `global_step` are the two raw measured numbers the registry actually
 stores; a steps-per-second figure would be this module's arithmetic, not
-stored evidence, so it is left to the caller.
+stored evidence, so it is left to the caller. Likewise absent: any dataset
+path or file name (the registry stores content digests, not locations),
+any per-row or per-token derived rate, and any dataset-vs-replay mixture
+ratio beyond the two digests and counts themselves -- all arithmetic a
+caller can apply to the stored numbers, and none of it stored evidence.
 """
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -128,13 +170,26 @@ class InterventionOutcome:
     arm: frozenset[str]
     intervention: str
 
-    # What it ran on.
+    # What it ran on. The dataset fields are the Priority-6 "dataset
+    # context" ask; the accelerator fields beyond `active_accelerator_count`
+    # are the "hardware context" ask. All read from stored evidence.
     training_run_id: str | None
     training_engine: str | None
     base_model: str | None
+    base_model_revision: str | None
     recipe_sha256: str | None
+    dataset_sha256: str | None
+    replay_dataset_sha256: str | None
+    dataset_format: str | None
+    primary_rows: int | None
+    replay_selected_rows: int | None
+    total_token_count: int | None
+    assistant_token_count: int | None
     min_device_vram_gb: float | None
     active_accelerator_count: int | None
+    visible_accelerator_count: int | None
+    requested_active_accelerator_count: int | None
+    peak_vram_gb_by_accelerator: Mapping[str, float] | None
     memory_fabric_mechanisms: frozenset[str] | None
 
     # What it cost.
@@ -171,6 +226,61 @@ def _integer(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return int(value)
+
+
+def _string(value: object) -> str | None:
+    """A stored JSON value as a non-empty string, or None.
+
+    See `_number` for the honesty rules. A whitespace-only string is
+    treated as not recorded rather than preserved: it names nothing.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value
+
+
+def _digest(value: object) -> str | None:
+    """A stored JSON value as a SHA-256 hex digest string, or None.
+
+    Both real executors validate `dataset_sha256` to exactly this shape
+    before storing it, so anything else in that slot means the evidence
+    was not written by the real pipeline; serving it as a digest would
+    fabricate a join key that no real run produced. A passing value is
+    served verbatim -- never trimmed or case-normalized -- so what this
+    view returns is byte-for-byte what the run stored.
+    """
+    if not isinstance(value, str) or len(value) != 64:
+        return None
+    try:
+        int(value, 16)
+    except ValueError:
+        return None
+    return value
+
+
+def _number_mapping(value: object) -> Mapping[str, float] | None:
+    """A stored JSON object of finite non-negative numbers, or None.
+
+    Used for `resource_usage["peak_vram_gb_by_accelerator"]`, whose real
+    shape is validated by `ResourceUsage.__post_init__` before the
+    executor ever stores it. Any malformed entry (bool, string, negative,
+    non-finite, non-string key, empty key) poisons the whole block: the
+    evidence is then not the shape this view promises to serve, and `None`
+    records that honestly rather than silently dropping the bad entries
+    and passing the remainder off as complete. An empty mapping is a real
+    answer ("no per-accelerator peaks were recorded") and is kept.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    cleaned: dict[str, float] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key:
+            return None
+        number = _number(item)
+        if number is None or number < 0 or not math.isfinite(number):
+            return None
+        cleaned[key] = number
+    return cleaned
 
 
 def _mapping(value: object) -> Mapping[str, Any]:
@@ -285,6 +395,7 @@ def build_intervention_outcomes(
         recipe_sha256 = training_evidence.get("recipe_sha256")
         resource_usage = _mapping(training_evidence.get("resource_usage"))
         hardware_defaults = _mapping(training_evidence.get("hardware_aware_defaults"))
+        data_provenance = _mapping(training_evidence.get("data_provenance"))
 
         decision = evaluate_candidate(goal=goal, baseline=baseline, candidate=result)
         parent_result = (
@@ -310,10 +421,31 @@ def build_intervention_outcomes(
                     else None
                 ),
                 base_model=base_model if isinstance(base_model, str) else None,
+                base_model_revision=_string(provenance.get("requested_revision")),
                 recipe_sha256=recipe_sha256 if isinstance(recipe_sha256, str) else None,
+                dataset_sha256=_digest(training_evidence.get("dataset_sha256")),
+                replay_dataset_sha256=_digest(
+                    training_evidence.get("replay_dataset_sha256")
+                ),
+                dataset_format=_string(data_provenance.get("dataset_format")),
+                primary_rows=_integer(data_provenance.get("primary_rows")),
+                replay_selected_rows=_integer(data_provenance.get("replay_selected_rows")),
+                total_token_count=_integer(data_provenance.get("total_token_count")),
+                assistant_token_count=_integer(
+                    data_provenance.get("assistant_token_count")
+                ),
                 min_device_vram_gb=_number(hardware_defaults.get("min_device_vram_gb")),
                 active_accelerator_count=_integer(
                     resource_usage.get("active_accelerator_count")
+                ),
+                visible_accelerator_count=_integer(
+                    resource_usage.get("visible_accelerator_count")
+                ),
+                requested_active_accelerator_count=_integer(
+                    training_evidence.get("requested_active_accelerator_count")
+                ),
+                peak_vram_gb_by_accelerator=_number_mapping(
+                    resource_usage.get("peak_vram_gb_by_accelerator")
                 ),
                 memory_fabric_mechanisms=_memory_fabric_mechanisms(training_evidence),
                 gpu_hours=result.gpu_hours,
@@ -336,6 +468,7 @@ def filter_outcomes(
     *,
     base_model: str | None = None,
     training_engine: str | None = None,
+    dataset_sha256: str | None = None,
     touches_key_path: str | None = None,
     gate_accepted: bool | None = None,
     min_score_vs_baseline: float | None = None,
@@ -355,12 +488,20 @@ def filter_outcomes(
     engine string -- a row with no recorded engine (`training_engine is
     None`) is excluded by either value, same "not on record" rule as
     `gate_accepted`.
+
+    `dataset_sha256` matches only rows whose training evidence recorded
+    that exact dataset digest -- the same-dataset selector the
+    Priority-6 dataset context enables. A row whose evidence records no
+    digest (`dataset_sha256 is None`) is excluded by either value, same
+    "not on record" rule.
     """
     selected = tuple(outcomes)
     if base_model is not None:
         selected = tuple(row for row in selected if row.base_model == base_model)
     if training_engine is not None:
         selected = tuple(row for row in selected if row.training_engine == training_engine)
+    if dataset_sha256 is not None:
+        selected = tuple(row for row in selected if row.dataset_sha256 == dataset_sha256)
     if touches_key_path is not None:
         selected = tuple(row for row in selected if touches_key_path in row.arm)
     if gate_accepted is not None:

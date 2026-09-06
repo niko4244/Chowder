@@ -51,6 +51,9 @@ def _production_shaped_evidence():
         "engine": "transformers",
         "recipe_sha256": "r" * 64,
         "model_provenance": {"requested_base_model": "sshleifer/tiny-gpt2"},
+        "requested_active_accelerator_count": 1,
+        "dataset_sha256": "d" * 64,
+        "replay_dataset_sha256": "e" * 64,
         "hardware_aware_defaults": {
             "min_device_vram_gb": 16.0,
             "resolved_activation_offload": True,
@@ -58,6 +61,15 @@ def _production_shaped_evidence():
             "resolved_frozen_layer_streaming": True,
         },
         "resource_usage": {"active_accelerator_count": 1, "visible_accelerator_count": 2},
+        "data_provenance": {
+            "primary_dataset_sha256": "d" * 64,
+            "replay_dataset_sha256": "e" * 64,
+            "replay_selected_rows": 12,
+            "dataset_format": "jsonl-chat",
+            "primary_rows": 128,
+            "total_token_count": 9600,
+            "assistant_token_count": 4100,
+        },
     }
 
 
@@ -143,7 +155,19 @@ def test_build_intervention_outcomes_from_cycle_populated_registry(tmp_path):
     assert row.training_run_id == "train-e1"
     assert row.training_engine == "transformers"
     assert row.base_model == "sshleifer/tiny-gpt2"
+    # The fixture records no revision, so absence -- not a default -- shows.
+    assert row.base_model_revision is None
     assert row.recipe_sha256 == "r" * 64
+    assert row.dataset_sha256 == "d" * 64
+    assert row.replay_dataset_sha256 == "e" * 64
+    assert row.dataset_format == "jsonl-chat"
+    assert row.primary_rows == 128
+    assert row.replay_selected_rows == 12
+    assert row.total_token_count == 9600
+    assert row.assistant_token_count == 4100
+    assert row.visible_accelerator_count == 2
+    assert row.requested_active_accelerator_count == 1
+    assert row.peak_vram_gb_by_accelerator is None
     assert row.min_device_vram_gb == 16.0
     assert row.active_accelerator_count == 1
     assert row.memory_fabric_mechanisms == frozenset(
@@ -177,8 +201,19 @@ def test_build_intervention_outcomes_reports_none_when_evidence_is_absent(tmp_pa
     assert row.training_run_id is None
     assert row.training_engine is None
     assert row.base_model is None
+    assert row.base_model_revision is None
     assert row.recipe_sha256 is None
+    assert row.dataset_sha256 is None
+    assert row.replay_dataset_sha256 is None
+    assert row.dataset_format is None
+    assert row.primary_rows is None
+    assert row.replay_selected_rows is None
+    assert row.total_token_count is None
+    assert row.assistant_token_count is None
     assert row.min_device_vram_gb is None
+    assert row.visible_accelerator_count is None
+    assert row.requested_active_accelerator_count is None
+    assert row.peak_vram_gb_by_accelerator is None
     assert row.active_accelerator_count is None
     assert row.memory_fabric_mechanisms is None
     assert row.training_gpu_hours is None
@@ -464,3 +499,126 @@ def test_group_by_arm_groups_same_key_paths_regardless_of_value(tmp_path):
 
 def test_group_by_arm_of_no_outcomes_is_empty(tmp_path):
     assert group_by_arm(()) == {}
+
+def test_digest_shaped_dataset_evidence_is_served_verbatim_and_malformed_is_none(tmp_path):
+    """`dataset_sha256` is a join key: two runs shared training data exactly
+    when their recorded digests match. A value the real executors would
+    never store (wrong length, non-hex, not a string) is not a recorded
+    digest, so it is surfaced as None rather than served as one."""
+    registry = RunRegistry(tmp_path / "runs.db")
+    for experiment_id, stored in (
+        ("good", "d" * 64),
+        ("short", "d" * 63),
+        ("non-hex", "z" * 64),
+        ("not-a-string", 42),
+    ):
+        registry.record_experiment(_experiment(experiment_id, {}))
+        registry.record_training_artifact(
+            TrainingArtifact(
+                f"train-{experiment_id}", experiment_id, "/artifact", 0.2,
+                evidence={"dataset_sha256": stored},
+            )
+        )
+        registry.record_result(ExperimentResult(experiment_id, {"quality": 0.9}, 0.3))
+
+    rows = {
+        row.experiment_id: row
+        for row in build_intervention_outcomes(registry, goal=_goal(), baseline=_baseline())
+    }
+    registry.close()
+
+    assert rows["good"].dataset_sha256 == "d" * 64
+    assert rows["short"].dataset_sha256 is None
+    assert rows["non-hex"].dataset_sha256 is None
+    assert rows["not-a-string"].dataset_sha256 is None
+
+
+def test_per_accelerator_vram_map_round_trips_and_a_bad_entry_blocks_the_block(tmp_path):
+    """The measured per-accelerator peak-VRAM map is the multi-GPU telemetry
+    context the roadmap flagged. A well-formed map comes back exactly; one
+    malformed entry poisons the whole block (None), because serving the
+    surviving entries would pass off a partial map as the complete one."""
+    registry = RunRegistry(tmp_path / "runs.db")
+    for experiment_id, peaks in (
+        ("two-gpu", {"cuda:0": 3.25, "cuda:1": 4.5}),
+        ("poisoned", {"cuda:0": 2.0, "cuda:1": "n/a"}),
+        ("negative", {"cuda:0": -1.0}),
+        ("none-recorded", {}),
+    ):
+        registry.record_experiment(_experiment(experiment_id, {}))
+        registry.record_training_artifact(
+            TrainingArtifact(
+                f"train-{experiment_id}", experiment_id, "/artifact", 0.2,
+                evidence={"resource_usage": {"peak_vram_gb_by_accelerator": peaks}},
+            )
+        )
+        registry.record_result(ExperimentResult(experiment_id, {"quality": 0.9}, 0.3))
+
+    rows = {
+        row.experiment_id: row
+        for row in build_intervention_outcomes(registry, goal=_goal(), baseline=_baseline())
+    }
+    registry.close()
+
+    assert rows["two-gpu"].peak_vram_gb_by_accelerator == {"cuda:0": 3.25, "cuda:1": 4.5}
+    assert rows["poisoned"].peak_vram_gb_by_accelerator is None
+    assert rows["negative"].peak_vram_gb_by_accelerator is None
+    # An empty mapping is a real answer ("no per-accelerator peaks were
+    # recorded"), distinct from "the block was malformed".
+    assert rows["none-recorded"].peak_vram_gb_by_accelerator == {}
+
+
+def test_requested_and_visible_accelerator_counts_absent_when_not_recorded(tmp_path):
+    """`requested_active_accelerator_count` is transformers-peft evidence;
+    a backend that does not write it leaves the field None, and a
+    `resource_usage` block without `visible_accelerator_count` does not
+    get a default count either."""
+    registry = RunRegistry(tmp_path / "runs.db")
+    registry.record_experiment(_experiment("handwritten", {}))
+    registry.record_training_artifact(
+        TrainingArtifact(
+            "train-handwritten",
+            "handwritten",
+            "/artifact",
+            0.2,
+            evidence={"resource_usage": {"active_accelerator_count": 1}},
+        )
+    )
+    registry.record_result(ExperimentResult("handwritten", {"quality": 0.9}, 0.3))
+
+    rows = build_intervention_outcomes(registry, goal=_goal(), baseline=_baseline())
+    registry.close()
+
+    assert rows[0].active_accelerator_count == 1
+    assert rows[0].visible_accelerator_count is None
+    assert rows[0].requested_active_accelerator_count is None
+    assert rows[0].peak_vram_gb_by_accelerator is None
+
+
+def test_filter_outcomes_by_dataset_sha256_excludes_rows_with_no_recorded_digest(tmp_path):
+    """The same-dataset selector the Priority-6 dataset context enables:
+    rows sharing a recorded digest are selectable together, and a row
+    whose evidence records no digest is excluded by either value -- the
+    same "not on record" rule as every other filter criterion."""
+    registry = RunRegistry(tmp_path / "runs.db")
+    for experiment_id, digest in (
+        ("shared-a", "d" * 64),
+        ("shared-b", "d" * 64),
+        ("other-data", "e" * 64),
+        ("no-digest", None),
+    ):
+        registry.record_experiment(_experiment(experiment_id, {}))
+        evidence = {} if digest is None else {"dataset_sha256": digest}
+        registry.record_training_artifact(
+            TrainingArtifact(f"train-{experiment_id}", experiment_id, "/artifact", 0.2, evidence=evidence)
+        )
+        registry.record_result(ExperimentResult(experiment_id, {"quality": 0.9}, 0.3))
+
+    rows = build_intervention_outcomes(registry, goal=_goal(), baseline=_baseline())
+    registry.close()
+
+    selected = filter_outcomes(rows, dataset_sha256="d" * 64)
+    assert [row.experiment_id for row in selected] == ["shared-a", "shared-b"]
+    # A digest no run recorded matches nothing; "not on record" matches
+    # nothing either -- it is never treated as "any dataset".
+    assert filter_outcomes(rows, dataset_sha256="f" * 64) == ()
