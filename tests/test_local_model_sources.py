@@ -37,11 +37,6 @@ def test_cache_status_short_circuits_hub_for_local_model(tmp_path: Path, monkeyp
     model_dir = tmp_path / "model"
     model_dir.mkdir()
 
-    # If cache_status accidentally touches the Hub for a local model this
-    # import/call path should fail the test immediately.
-    def fail_import(*args, **kwargs):
-        raise AssertionError("local model must not be sent through Hub cache lookup")
-
     monkeypatch.setattr(
         "chowder.hf_resilience.is_local_model_source",
         lambda source: str(source) == str(model_dir),
