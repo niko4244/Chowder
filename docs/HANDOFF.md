@@ -22,6 +22,22 @@ for it:
   Fabric Slice A: `teacher_fabric.py` + `docs/TEACHER_FABRIC.md`),
   #112 (dataset identity/scale + accelerator context in
   `intervention_outcomes.py` — closed the Priority-6 context-gap item).
+- **Model program retarget (2026-09-06):** the primary model target is
+  now the Qwen3.8 Native Sparse Program
+  (`docs/QWEN38_SPARSE_PROGRAM.md`). Read that doc before any Qwen
+  work: it pins all four parent revisions (A control `1d4bf0f2...`,
+  B primary `404ea47a...`, C comparison `a58c3b53...`, D comparison
+  `81c73940...`, D resolved from the DavidAU GGUF card's base_model),
+  records the real architecture audit (all dense `qwen3_5`-family
+  Qwen3_5ForConditionalGeneration, 64L/5120h, 15 MTP tensors + 333
+  vision tensors preserved in every readable parent), and the blockers:
+  **B (orcarouter) is gated — 401 without authenticated access; no
+  weights are cached (~55 GB each, ~220 GB for all four vs ~239 GB
+  fragmented free); the protected 9-dimension evaluation suite does not
+  exist yet.** D's tokenizer class differs (TokenizersBackend vs
+  Qwen2Tokenizer) — compare tokenizer identity hashes, never class
+  names, and token-aligned signals against D fail closed. Milestone-1
+  checklist in the doc is the honest gate for "underway" claims.
 - Priority 6 evidence foundation: the production incident-persistence
   caller is DONE (`ExperimentCycleRunner._persist_executor_analysis`
   writes every non-cancelled crash's analysis to `execution_incidents`

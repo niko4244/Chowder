@@ -1,0 +1,224 @@
+# Chowder Qwen3.8 Native Sparse Program
+
+**Status: program defined (this document); revisions pinned for A/C/D; parent B gated; no weights cached; no evaluation run; no transformation run. Nothing here may be read as "the sparse-model project is underway" — see the milestone checklist at the end.**
+
+This document retargets Chowder's primary model research from the prior
+Qwen3.6-35B-A3B commissioning branch to a **native-Qwen3.8-derived
+sparse/MoE program**. The prior 8B QLoRA campaign and the
+`docs/MOE_DOWNSIZING.md` Qwen3.6 program remain in the repository as
+historical evidence — nothing in them is deleted or rewritten; they
+proved Unsloth setup, 4-bit QLoRA, checkpoint/resume, independent
+evaluation, real CUDA operation, and the MoE audit/instrumentation
+machinery this program will reuse.
+
+## Program statement
+
+Chowder's primary model research target is a directly
+native-Qwen3.8-derived uncensored sparse language model. Development
+begins from `orcarouter/Qwen3.8-27B-Uncensored`, with official
+Qwen3.8-27B as the untouched control and OBLITERATUS/DavidAU variants as
+comparison parents. The long-term target is approximately 3–4B **active
+parameters per token** without distilling Qwen3.8 into another
+architecture, while preserving as much reasoning, coding, knowledge,
+calibration, agentic performance and self-correction capability as
+empirical evidence allows. Every architecture and training intervention
+remains subject to Chowder's independent evaluation, provenance,
+regression and promotion gates.
+
+Shorthand: `Chowder-Qwen3.8-A4B`. **A3B/A4B always means active
+parameters per token, never total stored parameters.** Both are tracked
+separately (Phase 11 accounting); a model is not labeled "A4B" unless
+measured routing geometry supports the claim.
+
+## Target definition
+
+```yaml
+program: chowder-qwen3.8-native-sparse
+primary_parent: orcarouter/Qwen3.8-27B-Uncensored   # GATED — see blockers
+native_control: Qwen/Qwen3.8-27B
+comparison_parents:
+  - OBLITERATUS/Qwen3.8-27B-OBLITERATED
+  - DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NM-DAU
+lineage_policy:
+  native_qwen3_8_required: true
+  distillation_parent_allowed: false
+target:
+  architecture: sparse_moe
+  desired_active_parameters_b: "3-4"
+```
+
+`lineage_policy` is a hard rule, not a preference: the primary lineage is
+native Qwen3.8 weights → pruning / expert partitioning / routing /
+sparse upcycling / channel reduction / structured weight surgery /
+low-rank factorization / layer removal / continued training / SFT /
+preference-repair. A distillation construct (teacher → unrelated/smaller
+student initialization → imitation) may never be the model's primary
+lineage. Teacher-generated signal (Teacher Fabric, Slices A–B already
+landed) may repair or improve the native descendant later; it never
+redefines what the model descends from.
+
+## Parent manifest — pinned revisions (Phase 2)
+
+Resolved from the Hugging Face Hub API on 2026-09-06. Never run any
+tournament step against moving `main` revisions; every command that
+touches a parent pins the revision recorded here.
+
+| Branch | Repo | Pinned revision (sha) | Role |
+|---|---|---|---|
+| A | `Qwen/Qwen3.8-27B` | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | untouched native control |
+| B | `orcarouter/Qwen3.8-27B-Uncensored` | `404ea47aaa5d8a8b00049c9e9750089aca011ab2` | **PRIMARY development parent** |
+| C | `OBLITERATUS/Qwen3.8-27B-OBLITERATED` | `a58c3b53b3ce71551eafde2ed5ec8df48e0f4ff8` | aggressive-abliteration comparison |
+| D | `DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NM-DAU` | `81c73940f94023f7d64e3ae6abcc653fc837d415` | heavily-optimized comparison |
+
+**Comparison C resolution record (rule: "the GGUF is not the training
+parent").** The user-named repo
+`DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF`
+(sha `6408ab122688c54ba5b7cea19084307ef153410f`) contains only GGUF
+quantizations. Its model card's `base_model` metadata names the
+full-precision source this program pins as branch D above (13
+safetensors shards, config + tokenizer present, zero GGUF files at that
+revision). Resolution trail: GGUF card → `base_model` →
+Transformers/Safetensors repo, verified by direct file listing.
+
+## Architecture audit (Phase 3 evidence so far)
+
+From real `config.json` + `safetensors.index.json` reads at the pinned
+revisions (API metadata for B; full file reads for A/C/D):
+
+| Evidence | A (control) | C (OBLITERATUS) | D (DavidAU parent) | B (primary) |
+|---|---|---|---|---|
+| architecture | `Qwen3_5ForConditionalGeneration` | same | same | not readable (gated) |
+| model_type | `qwen3_5` | same | same | not readable (gated) |
+| nested text_config | yes | yes | yes | not readable |
+| layers / hidden / FFN | 64 / 5120 / 17408 | same | same | not readable |
+| dense vs MoE | dense (no expert keys) | dense | dense | not readable |
+| total tensors | 1199 | 1199 | 1199 | not readable |
+| **MTP tensors** | **15** (`mtp.fc.*`, `mtp.layers.*`) | **15** | **15** (plus an `mtp`-named file) | not readable |
+| **vision tensors** | **333** (`model.visual.*`) | **333** | **333** | not readable |
+| tokenizer class | `Qwen2Tokenizer` | `Qwen2Tokenizer` | **`TokenizersBackend`** ⚠ | not readable |
+| license (card) | apache-2.0 | apache-2.0 | apache-2.0 | unknown (gated) |
+
+Reading of the evidence:
+
+- **The family label is `qwen3_5`, not `qwen3_8`.** The Qwen3.8-27B
+  checkpoints are served under the existing Qwen3.5
+  `ForConditionalGeneration` architecture (multimodal-capable wrapper
+  with nested `text_config`). This matches Chowder's existing
+  `moe_instrumentation.py` experience: Qwen family members are loaded
+  through shared architecture classes, and the honest identification is
+  by config + tensor evidence, not by the marketing name.
+- **All three readable parents are dense** — no expert keys anywhere.
+  The dense→MoE conversion premise holds; none of them is already sparse.
+- **MTP is present in all three** (15 tensors, config keys
+  `mtp_num_hidden_layers` / `mtp_use_dedicated_embeddings`): Phase 17's
+  preserve-by-default policy applies from the first transformation, with
+  hashes recorded before/after.
+- **Vision tower is present in all three** (333 `model.visual.*`
+  tensors): Phase 18's boundary rule applies — the first sparse stage
+  operates on the language tower only, with the vision tower and
+  projector frozen/preserved and that boundary documented in every run.
+- **⚠ D's tokenizer class differs** (`TokenizersBackend` vs
+  `Qwen2Tokenizer`). Before any cross-parent comparison or Teacher
+  Fabric usage involving D, tokenizer *identity hashes* must be
+  compared, not class names. If D's vocab/merges diverge from A/B/C,
+  token-aligned teacher signals against D fail closed (already
+  enforced by `teacher_fabric.ensure_tokenizer_compatible`), and any
+  repair-data exchange with D must route through digest-only, not
+  token-text, comparison. This is exactly the structural divergence
+  Phase 3 says to fail closed on.
+
+## Blockers (honest, unresolved)
+
+1. **Branch B (primary parent) is gated.** API metadata is public but
+   file access returns 401 without an authenticated account that has
+   accepted the repo's access terms. `model_info` works, file downloads
+   do not. Required before Phase 2 completes for B: user authenticates
+   (`huggingface-cli login`) with an account holding access, or the
+   primary-parent prior is revisited. **The manifest above pins B's
+   current revision so the pin exists, but B cannot be audited, cached,
+   or evaluated until access exists.** No workaround (mirror, re-upload,
+   anonymous proxy) is acceptable — provenance is the point.
+2. **No weights are cached.** Every parent needs a full bf16 fetch
+   (~55 GB each, ~220 GB for all four). Viable free disk today: C: 49
+   GB, F: 80 GB, G: 80 GB, H: 30 GB (I: full). All four fit only by
+   spreading across volumes, and not comfortably. Per `LOCAL_MODELS.md`
+   policy this is download-once/hash-once/pin-once; the acquisition
+   order below starts with the readable parents. Clearing space (I: and
+   F: are >96% full) is a user decision.
+3. **Protected evaluation suite does not exist yet.** The prior
+   campaign's evaluation protocol covered the 8B model's task suite; the
+   Phase 4 tournament requires the nine-dimension suite (reasoning,
+   coding, knowledge, calibration, self-correction, instruction
+   following, agentic, thinking-efficiency, behavior) under one protocol
+   for all four parents, with capability and behavior scored separately.
+
+## Phase plan mapped onto Chowder's real machinery
+
+| Phase (mission) | Chowder reality |
+|---|---|
+| 0 rescan | done this pass (main, PRs, CI, docs, code inventory) |
+| 1 explicit target | this document + ROADMAP Priority 0 pointer |
+| 2 pin revisions | manifest above (B blocked by gate); extend `local_model` manifests with shard hashes at cache time |
+| 3 trainability audit | architecture table above; per-parent `AutoConfig`/`AutoModel` load checks and PEFT target-module audit at cache time, fail-closed (`MoeArchitectureAuditError` pattern) on surprises |
+| 4 parent tournament | new protected evaluation suite (see blockers); identical protocol across parents; multi-objective decision recorded with evidence |
+| 5 preserve baselines | every parent's tournament results become the frozen comparison set for all later architecture gates |
+| 6 first dense→MoE | weight-preserving FFN-partition conversion prototype; attention/DeltaNet/core untouched; success criterion is *working conversion machinery*, not size |
+| 7 instrumentation | `moe_instrumentation.py` (landed, #106) — router probabilities, activation frequency, entropy, dead/overloaded experts, persisted as evidence |
+| 8 router healing | bounded QLoRA/Unsloth recovery stage (`UNSLOTH.md` isolated env); expert weights stay native; isolates router problem from expert-weight problem |
+| 9 progressive sparsification | one compression change per experiment cycle; Chowder's cycle/gate machinery already enforces this |
+| 10 dense-floor attack | structured channel/layer/low-rank experiments, each with its own hypothesis + regression suite; never magnitude-only pruning |
+| 11 active-param accounting | measured routing geometry per output (total/active/shared/routed/MTP/vision/embedding split); a label unsupported by measurement is a false claim |
+| 12 A4B frontier | Pareto-preserving; A4B is unproven until measured, and A5–A9 results are preserved if they win |
+| 13–14 no gaming / Regression Surgeon | existing machinery (`contamination.py`, `repair_orchestrator.py`, recursive repair) applies unchanged |
+| 15 training engine | `UNSLOTH.md` isolated env for QLoRA recovery; Transformers/PyTorch stack for surgery; a transformed checkpoint must load independently before any backend is trusted with it |
+| 16 Memory Fabric | opt-in only; interaction tested explicitly first (per `MEMORY_FABRIC_ACCEPTANCE.md` evidence discipline) |
+| 17 MTP preservation | 15 tensors + config keys audited per transformation, hashes before/after |
+| 18 multimodal preservation | vision tower + projector frozen/preserved during language-tower stages; boundary documented per run |
+| 19 local-first | `LOCAL_MODELS.md` order already implemented; parent dirs cached once, `offline: true` for runs |
+| 20 Flash-Next note | research note below; not part of the current program |
+| 21 fractal control | reassess after every major experiment; a bottleneck invalidates the plan, not the plan the evidence |
+
+## Flash-Next research note (Phase 20 — future, not current)
+
+Qwen3.8-Flash-Next already ships the sparse geometry this program is
+trying to reach (large expert pools, high top-k). A future comparison
+route could profile its experts → prune the expert pool → reduce top-k →
+heal the router toward ~A4B. The blocker is its enormous stored
+footprint (hundreds of GB across experts), which this workstation cannot
+hold alongside the four 27B parents. Revisit only if the dense-27B path
+stalls at an active-parameter floor above target.
+
+## Acquisition order (once blockers clear)
+
+1. A `Qwen/Qwen3.8-27B` @ pinned sha — control, readable, apache-2.0.
+2. D DavidAU parent @ pinned sha — readable, carries the tokenizer
+   caveat; cache and hash its tokenizer assets immediately.
+3. C OBLITERATUS @ pinned sha — readable.
+4. B orcarouter @ pinned sha — only after authenticated access exists.
+
+Cache location per volume free space at download time; each cache entry
+recorded as a local-model manifest (repo, pinned sha, shard names/sizes,
+config/tokenizer hashes) so runs use `LOCAL_MODELS.md` local paths with
+full provenance. Local paths are the run-facing `base_model` values from
+then on.
+
+## Milestone 1 checklist (the honest gate)
+
+Do not call the sparse-model project underway merely because this
+document exists. Milestone 1 completes when:
+
+- [ ] OrcaRouter exact revision pinned **and accessible** (pinned yes; access blocked by gate)
+- [x] Official Qwen exact revision pinned (`1d4bf0f2…`)
+- [x] OBLITERATUS exact revision pinned (`a58c3b53…`)
+- [x] DavidAU trainable parent resolved and pinned (`81c73940…`, resolved from the GGUF card)
+- [ ] all four architecture manifests recorded (A/C/D partial — API-level evidence only; B blocked)
+- [ ] protected parent-evaluation suite established
+- [ ] all four evaluated under identical protocol
+- [ ] results persisted
+- [ ] parent-selection decision recorded with evidence
+- [ ] selected parent cached locally
+- [ ] first dense→MoE transformation plan generated
+- [x] no distillation involved (lineage policy fixed above)
+
+Three checkboxes are pre-checked because this document closed them; the
+rest require real downloads, real access, and real evaluation runs.
