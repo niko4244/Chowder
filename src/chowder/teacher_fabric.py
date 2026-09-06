@@ -524,6 +524,9 @@ class TeacherSignalArtifact:
                         "accelerator_seconds": self.signal.resource_usage.accelerator_seconds,
                         "active_accelerator_count": self.signal.resource_usage.active_accelerator_count,
                         "visible_accelerator_count": self.signal.resource_usage.visible_accelerator_count,
+                        "peak_vram_gb_by_accelerator": dict(
+                            self.signal.resource_usage.peak_vram_gb_by_accelerator
+                        ),
                     }
                     if self.signal.resource_usage is not None
                     else None

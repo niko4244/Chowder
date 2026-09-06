@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 # SQLite application_id is a 32-bit marker stored in the database header.
 # 0x43484F57 == ASCII "CHOW".
 CHOWDER_APPLICATION_ID = 0x43484F57
@@ -56,6 +56,39 @@ def _migration_2_execution_incidents(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_4_teacher_signals(connection: sqlite3.Connection) -> None:
+    """Append-only ledger of teacher signals (Teacher Fabric Slice B).
+
+    One row per *distinct* stored signal, keyed by the store's content
+    address (digest over request_digest + payload content hash). This is
+    the evidence record, not the cache: payload bytes live in the
+    TeacherSignalStore's content-addressed files, and this table records
+    what was stored, immutably (rows go in once via `_insert_immutable`;
+    cache eviction never rewrites or removes them).
+    """
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS teacher_signals (
+               entry_key TEXT PRIMARY KEY,
+               artifact_digest TEXT NOT NULL,
+               request_digest TEXT NOT NULL,
+               payload_file_sha256 TEXT NOT NULL,
+               signal_kind TEXT NOT NULL,
+               teacher_id TEXT NOT NULL,
+               model_revision TEXT NOT NULL,
+               tokenizer_identity_sha256 TEXT,
+               signal_id TEXT NOT NULL,
+               stored_at TEXT NOT NULL,
+               metadata_json TEXT NOT NULL
+           )"""
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_teacher_signals_request ON teacher_signals(request_digest)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_teacher_signals_teacher ON teacher_signals(teacher_id)"
+    )
+
+
 def _migration_3_recursive_recovery_claims(connection: sqlite3.Connection) -> None:
     """Fence recursive-repair recovery so only one controller may resume."""
 
@@ -85,6 +118,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline-version-marker", _migration_1_baseline),
     Migration(2, "execution-incidents", _migration_2_execution_incidents),
     Migration(3, "recursive-recovery-claims", _migration_3_recursive_recovery_claims),
+    Migration(4, "teacher-signals", _migration_4_teacher_signals),
 )
 
 

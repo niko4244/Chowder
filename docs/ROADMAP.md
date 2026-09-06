@@ -678,9 +678,19 @@ above being stable:
   `FakeTeacherProvider` test double — with the tokenizer-compatibility
   gate failing closed on every token-aligned signal kind (rejection or an
   explicit caller-invoked downgrade, never approximation) and zero
-  network code. Slices B–J (signal store, black-box repair integration,
-  cost accounting/query controller, selected-token scorer, real remote
-  commissioning, remote jobs, microjobs, multi-teacher, selection
-  research) **have not started**; no real provider is commissioned and no
-  student-improvement claim exists — none has been measured. The hard
+  network code. **Slice B is implemented**:
+  `src/chowder/teacher_signal_store.py` is the content-addressed,
+  budgeted signal store — atomic writes with interrupted-write recovery,
+  verified-or-absent reads (payloads re-hashed on every read; corruption
+  is refused, never served), exact dedup over
+  `(request_digest, payload_file_sha256)`, a required no-default
+  `local_cache_max_bytes` with a measured footprint, explicit caller
+  eviction only, and registry migration 4 adding the append-only
+  `teacher_signals` ledger (evidence survives cache eviction; identical
+  re-acquisition replays idempotently). Slices C–J (black-box repair
+  integration, cost accounting/query controller, selected-token scorer,
+  real remote commissioning, remote jobs, microjobs, multi-teacher,
+  selection research) **have not started**; no real provider is
+  commissioned and no student-improvement claim exists — none has been
+  measured. The hard
   regression gate remains the sole promotion authority and is untouched.

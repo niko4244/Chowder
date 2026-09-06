@@ -587,6 +587,106 @@ class RunRegistry:
                 "analysis": json.loads(row[8]),
             }
 
+    def record_teacher_signal(
+        self,
+        *,
+        entry_key: str,
+        artifact_digest: str,
+        request_digest: str,
+        payload_file_sha256: str,
+        signal_kind: str,
+        teacher_id: str,
+        model_revision: str,
+        tokenizer_identity_sha256: str | None,
+        signal_id: str,
+        stored_at: str,
+        metadata_json: str,
+    ) -> None:
+        """Append one teacher-signal ledger row (Teacher Fabric Slice B).
+
+        Immutably keyed by the store content address: an identical replay
+        is idempotent, a divergent one is a RegistryInvariantError -- the
+        same discipline as every other evidence table.
+        """
+        columns = (
+            "entry_key",
+            "artifact_digest",
+            "request_digest",
+            "payload_file_sha256",
+            "signal_kind",
+            "teacher_id",
+            "model_revision",
+            "tokenizer_identity_sha256",
+            "signal_id",
+            "stored_at",
+            "metadata_json",
+        )
+        values = (
+            entry_key,
+            artifact_digest,
+            request_digest,
+            payload_file_sha256,
+            signal_kind,
+            teacher_id,
+            model_revision,
+            tokenizer_identity_sha256,
+            signal_id,
+            stored_at,
+            metadata_json,
+        )
+        with self._conn:
+            self._insert_immutable(
+                table="teacher_signals", key_column="entry_key", key=entry_key,
+                columns=columns, values=values,
+            )
+
+    def list_teacher_signals(self) -> Iterable[dict[str, object]]:
+        rows = self._conn.execute(
+            """SELECT entry_key, artifact_digest, request_digest, payload_file_sha256,
+                      signal_kind, teacher_id, model_revision, tokenizer_identity_sha256,
+                      signal_id, stored_at, metadata_json
+               FROM teacher_signals ORDER BY rowid"""
+        )
+        for row in rows:
+            yield {
+                "entry_key": row[0],
+                "artifact_digest": row[1],
+                "request_digest": row[2],
+                "payload_file_sha256": row[3],
+                "signal_kind": row[4],
+                "teacher_id": row[5],
+                "model_revision": row[6],
+                "tokenizer_identity_sha256": row[7],
+                "signal_id": row[8],
+                "stored_at": row[9],
+                "metadata": json.loads(row[10]),
+            }
+
+    def teacher_signal_row(self, entry_key: str) -> dict[str, object] | None:
+        """The ledger row for *entry_key*, or None when never recorded."""
+        row = self._conn.execute(
+            """SELECT entry_key, artifact_digest, request_digest, payload_file_sha256,
+                      signal_kind, teacher_id, model_revision, tokenizer_identity_sha256,
+                      signal_id, stored_at, metadata_json
+               FROM teacher_signals WHERE entry_key = ?""",
+            (entry_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "entry_key": row[0],
+            "artifact_digest": row[1],
+            "request_digest": row[2],
+            "payload_file_sha256": row[3],
+            "signal_kind": row[4],
+            "teacher_id": row[5],
+            "model_revision": row[6],
+            "tokenizer_identity_sha256": row[7],
+            "signal_id": row[8],
+            "stored_at": row[9],
+            "metadata": json.loads(row[10]),
+        }
+
     def lineage(self, experiment_id: str) -> tuple[str, ...]:
         lineage: list[str] = []
         current = experiment_id
