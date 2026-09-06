@@ -22,12 +22,13 @@ for it:
   Fabric Slice A: `teacher_fabric.py` + `docs/TEACHER_FABRIC.md`),
   #112 (dataset identity/scale + accelerator context in
   `intervention_outcomes.py` — closed the Priority-6 context-gap item).
-- Priority 6 evidence foundation remaining, per ROADMAP's own list:
-  production caller that persists executor-failure incidents
-  (`record_execution_incident` exists, only tests call it), the
-  chronological backtest validator vs UCB1 (zero-hard-gate-violations
-  check required), the EI/GPU-hour-aware policy itself, and the
-  cross-model transfer mechanism.
+- Priority 6 evidence foundation: the production incident-persistence
+  caller is DONE (`ExperimentCycleRunner._persist_executor_analysis`
+  writes every non-cancelled crash's analysis to `execution_incidents`
+  after the failure settles; persistence failures become diagnostics).
+  Remaining, per ROADMAP's own list: the chronological backtest validator
+  vs UCB1 (zero-hard-gate-violations check required), the EI/GPU-hour-
+  aware policy itself, and the cross-model transfer mechanism.
 - Teacher Fabric: Slices A–B done; Slices C–J not started. Slice B
   (`src/chowder/teacher_signal_store.py`, `tests/test_teacher_signal_store.py`,
   34 tests) implemented the decisions the orientation had locked in:
@@ -83,8 +84,9 @@ for it:
   temp edit script (`_slice_b_*.py` pattern: assert every anchor, run,
   delete) for in-place multi-edits. Bash heredocs get CRLF-mangled in
   transit here — prefer the temp-script route for anything multiline.
-- Test count after Slice B: 1009 passed / 71 skipped on this worktree's
-  `main` (was 975/71 before).
+- Test count after the incident-persistence slice: 1016 passed / 71
+  skipped on this worktree's `main` (was 975/71 before Slice B, 1009/71
+  after it).
 - Commit messages end `Co-Authored-By: Claude Sonnet 5
   <noreply@anthropic.com>`; PR descriptions end with the Claude Code
   attribution line; branch naming `claude/<slug>`; one focused PR per

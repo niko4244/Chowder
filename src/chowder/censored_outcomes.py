@@ -64,12 +64,14 @@ that are frequently `None`, and exactly why:
 
   `signature_kind`, `fingerprint_sha256`, `incident_id`
       Read from the joined `execution_incidents` row, present only when
-      an incident was actually recorded for this experiment. Today no
-      production caller persists incident analyses into the registry
-      (the recording path exists and is tested, but only fixtures call
-      it), so a FAILED experiment genuinely may have no incident row --
-      that absence is reported as `None`, never approximated from the
-      status alone.
+      an incident was actually recorded for this experiment. The cycle
+      runner now persists every non-cancelled crash's analysis (the
+      production caller), so FAILED rows produced by current runs carry a
+      real classification; absence still happens -- runs before this
+      caller existed, runs with no registry attached, deliberate
+      cancellations (which construct no analysis), and crashes whose
+      persistence itself failed -- and that absence is reported as
+      `None`, never approximated from the status alone.
 
   `executor_name`
       The executor that crashed, from the incident row when joined;
@@ -81,8 +83,8 @@ that are frequently `None`, and exactly why:
       a genuine capture-time measurement when a crash was recorded.
       `None` when no incident was recorded, which is the honest state:
       the experiments table stores the *estimated* reservation (exposed
-      here as `estimated_gpu_hours`) but not the settled actual charge,
-      and no production path persists incidents yet. A REJECTED-before-
+      here as `estimated_gpu_hours`) but not the settled actual charge.
+      A REJECTED-before-
       start experiment spent no real compute by construction, but that
       is a semantic inference from the status, not a stored measurement,
       so it is still `None` here -- a policy may treat it as zero-cost
