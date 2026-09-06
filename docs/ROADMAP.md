@@ -684,7 +684,18 @@ above being stable:
 - **Qwen3.8 Native Sparse Program** (Priority 0 — the model program;
   see [`docs/QWEN38_SPARSE_PROGRAM.md`](QWEN38_SPARSE_PROGRAM.md) for the
   pinned parent manifest, the architecture audit, and the milestone-1
-  checklist that gates "underway" claims) —
+  checklist that gates "underway" claims). All four parent revisions are
+  pinned; parent B's auto-gate was accepted with the account's token and
+  its full architecture audit is recorded (dense `qwen3_5`, 64L/5120h,
+  MTP 15 tensors, vision 333 tensors, `Qwen2Tokenizer`, 18 shards /
+  51.7 GiB / zero GGUF). The protected nine-dimension evaluation harness
+  is implemented in `src/chowder/parent_eval.py` with real tests:
+  complete-coverage spec validation, capability/behavior separation by
+  construction, a protocol fingerprint excluding candidate identity, a
+  fail-closed tokenizer-identity gate, hash-only protected indexes, and
+  FK-anchored persistence into `evaluation_runs`. Still open before the
+  Phase-4 tournament: parent weights on disk, protected suite content,
+  and the evaluation runs themselves.
 - **Teacher Fabric / Remote Intelligence Distillation** (Priority 8) —
   architecture documented in
   [`docs/TEACHER_FABRIC.md`](TEACHER_FABRIC.md) (provider-neutral design,
