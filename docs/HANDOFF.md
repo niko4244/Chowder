@@ -114,6 +114,13 @@ for it:
   clean before recording A as cached; persist the manifest JSON next to
   the program evidence. Manifest module + 20 tests landed this session
   (see `tests/test_local_model_manifest.py`).
+- Phase 6 plan (PR #120, merged): docs/PHASE6_CONVERSION_PLAN.md is the
+  authority for dense→MoE conversion design. Verified module facts live
+  in its section 1 (dense `Qwen3_5MLP` → `Qwen3_5MoeSparseMoeBlock`,
+  fused 3D `Qwen3_5MoeExperts`, renormalizing `TopKRouter`); the
+  planned implementation modules are `dense_to_moe.py` and
+  `conversion_exactness.py`. Do not start the converter before parent A
+  verifies clean on disk.
 - Program state (2026-09-06): parent B
   (`orcarouter/Qwen3.8-27B-Uncensored`) auto-gate **cleared** via the
   account's HF token (account `NIKO42`, stored only in the local HF
