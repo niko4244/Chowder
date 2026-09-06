@@ -103,6 +103,17 @@ for it:
 - Test count after the parent-eval harness slice: 1082 passed / 71
   skipped on this worktree's `main` (was 1016/71 after incident
   persistence, 1009/71 after Slice B, 975/71 before it).
+- Parent A acquisition (started 2026-09-06): `Qwen/Qwen3.8-27B` @ pin
+  `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` is snapshot-downloading to
+  `F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B` (32 files, 51.77 GiB;
+  log at `%TEMP%\parent_a_download.log`). If interrupted, resume by
+  rerunning the same `snapshot_download(repo, revision=<pin>,
+  local_dir=<dest>)` — hf_hub resumes partial shards. When complete:
+  build a **full-mode** manifest with
+  `chowder.local_model_manifest.build_local_model_manifest` and verify it
+  clean before recording A as cached; persist the manifest JSON next to
+  the program evidence. Manifest module + 20 tests landed this session
+  (see `tests/test_local_model_manifest.py`).
 - Program state (2026-09-06): parent B
   (`orcarouter/Qwen3.8-27B-Uncensored`) auto-gate **cleared** via the
   account's HF token (account `NIKO42`, stored only in the local HF
