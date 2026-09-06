@@ -743,6 +743,31 @@ def _crash_rank_for_ddp_acceptance_test() -> None:
         )
 
 
+def _constrain_vram_for_memory_fabric_acceptance_test() -> None:
+    """Test-support only, inert unless a specific env var is explicitly set
+    (normal runs never set it): caps this process's real CUDA allocator
+    budget via torch.cuda.set_per_process_memory_fraction, so
+    tests/test_memory_fabric_acceptance.py can prove a genuine resident
+    CUDA-OOM -> Memory-Fabric-success pair on hardware whose driver-level
+    VRAM-to-system-RAM paging fallback otherwise silently absorbs an
+    overflow instead of raising (see docs/MEMORY_FABRIC_ACCEPTANCE.md).
+    Confirmed for real (see that doc) that this produces a genuine
+    torch.cuda.OutOfMemoryError raised by PyTorch's own allocator before
+    it ever asks the driver for more memory -- the driver's paging
+    fallback never gets a chance to engage, so the OOM this test needs is
+    real, not simulated by lying about the card's reported size. Same
+    principle as _crash_rank_for_ddp_acceptance_test above: the effect is
+    real, only its reproducibility is engineered.
+    """
+    fraction_raw = os.environ.get("_CHOWDER_MEMORY_FABRIC_ACCEPTANCE_VRAM_FRACTION")
+    if fraction_raw is None:
+        return
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.set_per_process_memory_fraction(float(fraction_raw), device=0)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--spec", required=True)
@@ -750,6 +775,7 @@ def main() -> int:
     args = parser.parse_args()
 
     _crash_rank_for_ddp_acceptance_test()
+    _constrain_vram_for_memory_fabric_acceptance_test()
 
     spec_data = json.loads(Path(args.spec).read_text(encoding="utf-8"))
     spec = TransformersPeftRunSpec(**spec_data)
