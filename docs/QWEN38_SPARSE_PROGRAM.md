@@ -1,6 +1,6 @@
 # Chowder Qwen3.8 Native Sparse Program
 
-**Status: program defined (this document); all four revisions pinned; parent B's gate cleared and full architecture audit recorded; protected nine-dimension evaluation harness implemented (`src/chowder/parent_eval.py`); parent A (control) cached at its pin with a verified full-mode content manifest (`d382d54f…`, 18/18 shards hashed, verification clean); Phase 6 conversion plan generated (`docs/PHASE6_CONVERSION_PLAN.md`, PR #120); no protected suite content authored; no evaluation run; no transformation executed. Nothing here may be read as "the sparse-model project is underway" — see the milestone checklist at the end.**
+**Status: program defined (this document); all four revisions pinned; parent B's gate cleared and full architecture audit recorded; protected nine-dimension evaluation harness implemented (`src/chowder/parent_eval.py`); parent A (control) cached at its pin with a verified full-mode content manifest and **Phase 11 accounting measured from its real tensor headers: 27,781,427,952 total parameters (27.78B), dense floor 9.78B active/token**; Phase 6 conversion plan generated (`docs/PHASE6_CONVERSION_PLAN.md`, PR #120); Phase 11 accounting machinery implemented (`src/chowder/parameter_accounting.py`); no protected suite content authored; no evaluation run; no transformation executed. Nothing here may be read as "the sparse-model project is underway" — see the milestone checklist at the end.**
 
 This document retargets Chowder's primary model research from the prior
 Qwen3.6-35B-A3B commissioning branch to a **native-Qwen3.8-derived
@@ -29,6 +29,35 @@ Shorthand: `Chowder-Qwen3.8-A4B`. **A3B/A4B always means active
 parameters per token, never total stored parameters.** Both are tracked
 separately (Phase 11 accounting); a model is not labeled "A4B" unless
 measured routing geometry supports the claim.
+
+## Phase 11 accounting of the cached control (measured 2026-09-06)
+
+`src/chowder/parameter_accounting.py` (with tests) accounts model
+directories from real safetensors headers — stdlib-only, no torch, no
+safetensors import, cross-checked against the shard index, failing closed
+on unknown dtypes, duplicate tensors, index/shard mismatch, and (for
+sparse models) missing `num_experts_per_tok`. The Phase 11 rule is
+mechanical there: `a_label()` refuses to exist without measured routing
+geometry. Parent A's measured split (evidence JSON beside the model
+directory):
+
+| Category | Parameters | Tensors | GiB |
+|---|---|---|---|
+| Total | **27,781,427,952** | 1199 | 51.75 |
+| embedding | 2,542,796,800 | 2 | 4.74 |
+| attention + GatedDeltaNet | 7,239,780,864 | 528 | 13.49 |
+| dense FFN | 17,112,760,320 | 192 | 31.88 |
+| MTP | 424,699,392 | 15 | 0.79 |
+| vision | 460,730,096 | 333 | 0.86 |
+| layernorms | 660,480 | 129 | 0.00 |
+
+Dense model, so active/token = total (the definition string is carried on
+the accounting object). No A-label exists for A — correctly, because
+there is no routing geometry to measure. **Correction this measurement
+forces on the Phase 6 plan's estimates:** the true dense floor is
+**9.78B active/token** (attention+DeltaNet+embeddings+norms), not the
+~10.55B the plan estimated by hand — and 10.21B with the MTP head. The
+routed share of the FFN at conversion remains 17,112,760,320 parameters.
 
 ## Target definition
 
