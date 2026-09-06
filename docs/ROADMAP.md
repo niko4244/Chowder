@@ -1,5 +1,17 @@
 # Roadmap
 
+> **Model program retargeted (2026-09-06):** Chowder's primary model
+> research target is now the **Qwen3.8 Native Sparse Program** — a
+> directly native-Qwen3.8-derived sparse/MoE model (~3–4B *active*
+> parameters/token), developed from `orcarouter/Qwen3.8-27B-Uncensored`
+> with `Qwen/Qwen3.8-27B` as untouched control and
+> OBLITERATUS/DavidAU variants as comparison parents. Definition, pinned
+> revisions, architecture audit, and honest blockers:
+> [`docs/QWEN38_SPARSE_PROGRAM.md`](QWEN38_SPARSE_PROGRAM.md). The prior
+> 8B commissioning campaign and the Qwen3.6 MoE-downsizing program
+> remain below as historical evidence. No distillation in the primary
+> lineage — ever.
+
 Reorganized around what's actually proven vs. still speculative, rather than
 version milestones — a checkbox next to a bullet doesn't distinguish "real
 code with real tests" from "a stub that returns a plausible-looking dict."
@@ -669,6 +681,10 @@ above being stable:
   named target is not yet commissioned — only the mechanism is proven, on a
   real architecturally-equivalent stand-in. Phases C–F (budget search,
   distillation, mixed precision, promotion gates) have not started.
+- **Qwen3.8 Native Sparse Program** (Priority 0 — the model program;
+  see [`docs/QWEN38_SPARSE_PROGRAM.md`](QWEN38_SPARSE_PROGRAM.md) for the
+  pinned parent manifest, the architecture audit, and the milestone-1
+  checklist that gates "underway" claims) —
 - **Teacher Fabric / Remote Intelligence Distillation** (Priority 8) —
   architecture documented in
   [`docs/TEACHER_FABRIC.md`](TEACHER_FABRIC.md) (provider-neutral design,
