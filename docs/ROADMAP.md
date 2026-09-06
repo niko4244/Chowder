@@ -701,6 +701,13 @@ above being stable:
   #120): partition-conversion of the dense FFN's intermediate dimension
   into experts, bit-exact at init by construction and verified by a
   tiny-random CI harness; the transformation itself has not run.
+  Phase 11 accounting is implemented
+  (`src/chowder/parameter_accounting.py`): real safetensors-header
+  census (stdlib-only, index cross-checked, fail-closed on unknown
+  dtypes and missing top-k), with `a_label()` refusing to exist without
+  measured routing geometry. Measured on the cached parent A: 27.78B
+  total parameters, dense floor 9.78B active/token — correcting the
+  plan's ~10.55B estimate.
 - **Teacher Fabric / Remote Intelligence Distillation** (Priority 8) —
   architecture documented in
   [`docs/TEACHER_FABRIC.md`](TEACHER_FABRIC.md) (provider-neutral design,

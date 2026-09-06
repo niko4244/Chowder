@@ -93,9 +93,12 @@ At top-1, per-token MLP compute drops to 1/E of dense plus the (zero)
 shared expert; at top-8 it is 8/E. Storage *grows* by the router
 (E·5120 per layer) and the zero shared expert — ~14.6 MB per layer set,
 ~0.93 GB total, on top of the 51.77 GiB parent. This plan deliberately
-does **not** reduce active parameters below the dense floor (10.55B
-attention + GatedDeltaNet + embeddings + norms + head); that is Phases
-9–10's work, after the machinery is proven.
+does **not** reduce active parameters below the dense floor — measured
+by Phase 11 accounting (`src/chowder/parameter_accounting.py`, PR #123)
+at **9.78B active/token** (attention 7.24B + embeddings 2.54B + norms),
+10.21B with the MTP head — correcting this plan's original ~10.55B
+hand estimate; that is what the accounting module is for. Attacking the
+floor is Phases 9–10's work, after the machinery is proven.
 
 ## 3. What this plan explicitly is NOT
 
@@ -214,10 +217,10 @@ recorded as such).
 - **Init-exact ≠ post-training-equal.** Everything this plan guarantees is
   at step 0. Whether healing preserves capability is an empirical question
   the gate answers; no claim is made here.
-- **A3B/A4B is not reached by this plan.** The dense floor stands at
-  ~10.55B active/token after conversion. Attacking attention/DeltaNet/
-  channels is Phase 10, with its own hypothesis and regression suite per
-  mechanism. If the honest frontier lands at A7B or A9B, that is a result,
+- **A3B/A4B is not reached by this plan.** The dense floor stands at a
+  measured 9.78B active/token after conversion (Phase 11 accounting).
+  Attacking attention/DeltaNet/channels is Phase 10, with its own
+  hypothesis and regression suite per mechanism. If the honest frontier lands at A7B or A9B, that is a result,
   not a failure (the program doc's Pareto rule).
 - **MTP/multimodal interplay**: conversion leaves them byte-identical and
   hash-verified, but the *loaded* model's MTP path has never executed on

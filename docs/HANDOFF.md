@@ -114,6 +114,12 @@ for it:
   (LOCAL_MODELS.md policy). If the directory ever changes, the manifest
   verifier will catch it — re-verify before trusting a new experiment.
   Parents B/C/D are still not acquired.
+- Phase 11 accounting (PR #123): `src/chowder/parameter_accounting.py`
+  measures model directories from safetensors headers (stdlib-only). Run
+  it on any converted checkpoint before claiming active-parameter
+  numbers; evidence JSON for parent A lives beside the model
+  (`Qwen3.8-27B.accounting.json`). Measured parent A truth: 27.78B
+  total; dense floor 9.78B active/token (10.21B with MTP).
 - Phase 6 plan (PR #120, merged): docs/PHASE6_CONVERSION_PLAN.md is the
   authority for dense→MoE conversion design. Verified module facts live
   in its section 1 (dense `Qwen3_5MLP` → `Qwen3_5MoeSparseMoeBlock`,
