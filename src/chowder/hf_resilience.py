@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+from pathlib import Path
 from typing import Callable, TypeVar
 
 _T = TypeVar("_T")
@@ -12,6 +13,51 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_ATTEMPTS = 5
 DEFAULT_BASE_DELAY_SECONDS = 1.0
 DEFAULT_MAX_DELAY_SECONDS = 30.0
+
+
+def resolve_model_source(
+    source: str,
+    *,
+    work_dir: str | Path | None = None,
+) -> str:
+    """Resolve an existing local model directory before treating ``source``
+    as a Hugging Face repository id.
+
+    ``transformers.from_pretrained`` already accepts both local directories
+    and Hub ids, but Chowder historically sent every value through Hub/cache
+    bookkeeping first. That made a perfectly valid local model path look like
+    a malformed repo id and could block a run before Transformers ever got a
+    chance to load it.
+
+    Relative paths are resolved against ``work_dir`` when supplied. A string
+    that does not identify an existing directory is returned unchanged so Hub
+    ids such as ``Qwen/Qwen3-...`` preserve their normal behavior.
+    """
+    raw = str(source).strip()
+    if not raw:
+        return str(source)
+
+    try:
+        path = Path(raw).expanduser()
+        if not path.is_absolute() and work_dir is not None:
+            path = Path(work_dir).expanduser() / path
+        if path.exists() and path.is_dir():
+            return str(path.resolve())
+    except (OSError, ValueError):
+        # A Hub id is allowed to contain path-like characters. Filesystem
+        # probing is therefore best-effort only; failure means "treat it as
+        # the original model id", not "reject the source".
+        pass
+    return str(source)
+
+
+def is_local_model_source(source: str) -> bool:
+    """Return True only when ``source`` currently names a local directory."""
+    try:
+        path = Path(str(source)).expanduser()
+        return path.exists() and path.is_dir()
+    except (OSError, ValueError):
+        return False
 
 
 def _permanent_hub_error_types() -> tuple[type[BaseException], ...]:
@@ -111,19 +157,22 @@ def is_retriable_hub_error(exc: BaseException) -> bool:
 
 
 def cache_status(repo_id: str, revision: str | None, *, filename: str = "config.json") -> str:
-    """"hit" if `filename` for repo_id/revision is already in the local HF
-    cache, "miss" otherwise (a download will be needed, or -- offline with
-    nothing cached -- the load is about to fail). Call this immediately
-    before the corresponding from_pretrained() call, since the answer is
-    only meaningful as a snapshot of cache state before that call may
-    populate it.
+    """Return ``"local"`` for an existing local model directory, otherwise
+    ``"hit"`` when ``filename`` is already in the local HF cache and
+    ``"miss"`` when a Hub fetch would be required.
 
-    A cheap, dependency-already-required proxy (huggingface_hub is a
-    transformers dependency) for "did this run need the network for this
-    model at all" -- not a byte-exact audit of every file the load will
-    actually touch, since a repo can have its config cached but not its
-    weights.
+    This function is intentionally safe to call before every model load. A
+    local model must never be handed to ``try_to_load_from_cache`` because a
+    filesystem path is not a Hub repository id and may be rejected by Hub id
+    validation before the real local load starts.
+
+    For Hub ids, this remains a cheap proxy for whether the run needs network
+    access at all; it is not a byte-exact audit of every file the load will
+    touch, since a repo can have its config cached but not its weights.
     """
+    if is_local_model_source(repo_id):
+        return "local"
+
     from huggingface_hub import try_to_load_from_cache
 
     cached = try_to_load_from_cache(repo_id=repo_id, filename=filename, revision=revision)
