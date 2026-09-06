@@ -334,9 +334,12 @@ treated as fully proven:
 - **Frozen-layer streaming (production)** — same shape again: real,
   merged, single-GPU only, DDP explicitly rejected (the custom autograd.
   Function's dedicated CUDA prefetch stream has only been verified on
-  single-GPU hardware). Backward-direction prefetch is not yet
-  implemented (backward re-streams synchronously; correctness does not
-  depend on it, only backward-pass overlap does).
+  single-GPU hardware). Backward-direction prefetch is now implemented and
+  real-hardware measured (a real 1.82x backward-wall-time speedup on a
+  synthetic stack, bit-identical loss/gradients, synchronous fallback
+  retained via `backward_prefetch=False`) — see the NEXT section below for
+  the full real numbers and what remains unverified (a production-model,
+  not synthetic-stack, throughput measurement).
 - **Production timing telemetry** — real, merged, but its own real ~17%
   measured overhead means it is opt-in and mostly unused by default;
   does not separately measure all-reduce time under DDP (folded into
@@ -504,20 +507,51 @@ independent of the specific VRAM ceiling. A mechanism's isolated single
 peak VRAM was also confirmed a third time and remains an open, separate
 limitation.
 
-**Backward prefetch for frozen-layer streaming (Priority 1 follow-up)**
-`memory_fabric.py`'s backward re-streams each frozen layer's weight
-synchronously today (correctness does not depend on overlap, only
-throughput does). Prefetching layer N-1's weight while layer N's backward
-is still running is the next real improvement to prove and measure —
-whether the overlap actually improves throughput on real hardware, not
-assumed.
+**Backward prefetch for frozen-layer streaming (Priority 1 follow-up) — done, real-hardware measured**
+`memory_fabric.py`'s backward now prefetches layer i-1's weight one layer
+ahead while layer i's backward is still computing, via
+`FrozenLayerPrefetchRuntime.start_backward`/`take_backward` (the same
+dedicated-CUDA-stream + `record_stream` design forward's existing prefetch
+uses, walked in decreasing index order since backward visits a sequential
+frozen-layer stack in that order regardless of what unrelated backward nodes
+run in between). `StreamedFrozenLayers`/`stream_frozen_layers` take a
+`backward_prefetch: bool = True` parameter; `False` retains this module's
+original synchronous re-stream verbatim as an explicit fallback. Wired into
+the real Trainer path in `transformers_worker.py` (`accelerator.backward` is
+wrapped to call `start_backward()` immediately before the real backward
+call) and into `frozen_layer_streaming_worker.py`'s calibration harness.
 
-No checked-in raw benchmark artifact currently supports a throughput or
-break-even claim for this idea. Keep local exploratory numbers out of roadmap
-truth until a reproducible benchmark records the exact workload, separate
-forward/backward timings, and per-row peak VRAM. Promotion then requires
-identical loss and gradients, a meaningful end-to-end throughput gain, no
-peak-VRAM regression, and retention of the synchronous fallback.
+Real measurements (`tests/test_memory_fabric.py`, `CHOWDER_REAL_ML_SMOKE=1`,
+RTX 5060 Ti), on a 12-layer synthetic PEFT-shaped stack sized so per-layer
+H2D transfer (64MB/layer at dim=4096, fp32) and per-layer backward compute
+are comparable (the production tiny smoke-test model is too small for
+either cost to be visible against the other, per
+`frozen_layer_streaming.py`'s own documented caveat):
+
+- **Throughput**: median backward wall time 124.7ms with prefetch vs.
+  226.4ms without — a real 1.82x speedup, not assumed.
+- **Correctness**: bit-identical loss and gradients between
+  `backward_prefetch=True`/`False` and a fully resident run, including
+  across 5 repeated iterations (checked for the same stream-reuse race
+  forward's prefetch already guards against).
+- **VRAM**: `backward_prefetch=True` uses one extra layer's weight
+  resident at a time versus `False` (a 64MB lookahead buffer at this size,
+  ~3% of this synthetic stack's ~1.9GB peak) — an expected, bounded cost of
+  the lookahead itself, not a regression relative to fully resident
+  training's 0.75GB frozen-weight-only footprint (streamed keeps at most 2
+  of 12 layers' weights resident either way). At this synthetic stack's
+  size, activation memory (~0.75GB, one relu output per layer, unrelated to
+  streaming) dominates the *total* peak enough that the original
+  forward-only design's 13.5%-total-peak-reduction claim (measured on a
+  different, activation-light synthetic stack) does not directly transfer
+  to a throughput-oriented, activation-heavy shape like this one; the
+  frozen-weight-only footprint reduction (~128MB streamed vs. 768MB
+  resident) is real and unchanged either way.
+
+Not yet done: a real Trainer-level (not synthetic-stack) throughput
+measurement, since the production tiny smoke-test model remains too small
+to show a meaningful signal (see above) and no larger production model has
+been benchmarked this way yet.
 
 **Multi-GPU telemetry (Priority 2, deferred slice)**
 Real GPU↔GPU bandwidth/topology measurement, PCIe/NVLink capability
