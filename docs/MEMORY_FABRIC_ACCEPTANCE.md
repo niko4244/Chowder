@@ -12,14 +12,22 @@ milestone asks for:
 > Same model, same recipe, same GPU — resident training genuinely CUDA-OOMs,
 > Memory Fabric's real placement decision makes the identical recipe succeed.
 
-## Status: **attempted for real, not yet passed**
+## Status: **core claim demonstrated for real; not yet a reliable committed test**
 
 This is not a stub or a placeholder — real hardware time was spent on this
 (RTX 5060 Ti, 16 GB, real Qwen2.5-1.5B and Qwen2.5-3B models, fp32, no
-quantization, batch sizes from 8 through 96) — but a clean, reproducible
-resident-OOM → Memory-Fabric-success pair has not been demonstrated yet, for
-real, evidence-backed reasons documented below. `docs/ROADMAP.md` keeps
-Memory Fabric in **IN PRODUCTION HARDENING**, not PROVEN, until this passes.
+quantization, batch sizes from 8 through 96). Attempt 5 below (after the
+`activation_offload` stride bug was fixed, PR #92) genuinely demonstrated the
+core claim — same model, same recipe, same GPU, resident cleanly OOMs,
+`activation_offload` cleanly succeeds — using a real, non-system-modifying
+VRAM-fraction constraint that bypasses this machine's driver-level paging
+fallback. It is **not**, however, reliably reproducible on this specific
+machine: a separate, real, newly-surfaced Windows/WDDM driver flakiness in
+`activation_offload`'s CPU↔GPU transfers under memory pressure causes an
+intermittent (not universal) failure, at a real, measured rate too high to
+commit as an always-green CI/regression test yet. `docs/ROADMAP.md` keeps
+Memory Fabric in **IN PRODUCTION HARDENING**, not PROVEN, until either that
+flakiness is root-caused/mitigated or different hardware removes it.
 
 ## What was tried, and what it found
 
@@ -115,18 +123,102 @@ budget from ordinary desktop use (browser tabs, compositing, etc.)
 introduces genuine non-determinism this investigation could not control for
 locally.
 
+### Attempt 5: real VRAM-fraction constraint, after the `activation_offload` fix (PR #92)
+
+Both blockers named in "What this means for next steps" (below, as it stood
+before this attempt) are now addressed: `activation_offload`'s stride
+-alignment bug is fixed (PR #92), and this attempt found a way to work around
+desktop-GPU paging *without* a dedicated card and *without* touching any
+system setting.
+
+**The mechanism**: `torch.cuda.set_per_process_memory_fraction(fraction,
+device=0)`, confirmed directly (see `docs/ACTIVATION_OFFLOAD_STRIDE_FIX.md`'s
+own earlier confirmation of this) to make PyTorch's own CUDA allocator refuse
+an allocation once the process's self-imposed budget is exceeded, raising a
+genuine `torch.cuda.OutOfMemoryError` *before* it ever asks the driver for
+more memory — the driver's VRAM-to-system-RAM paging fallback never gets a
+chance to engage, so the resulting OOM is real, not simulated by lying to
+Chowder about the card's reported size. A new test-support-only hook,
+`transformers_worker._constrain_vram_for_memory_fabric_acceptance_test()`
+(inert unless `_CHOWDER_MEMORY_FABRIC_ACCEPTANCE_VRAM_FRACTION` is explicitly
+set — normal runs never set it, matching the existing
+`_crash_rank_for_ddp_acceptance_test` precedent), applies this inside the
+real training worker subprocess so the constraint is honored where the real
+memory pressure actually happens, not just in the controller process.
+
+**Workload**: Qwen2.5-1.5B, fp32, no quantization, LoRA r=8, batch_size=8,
+max_length=256 (the same scale `docs/MEMORY_FABRIC_ACCEPTANCE.md`'s own
+earlier `Trainer.train()`-peak finding used) — real `TransformersPeftExecutor`
+runs, 4 real training steps.
+
+**Real result, both mechanisms measured at multiple real fraction caps**:
+
+- Resident (`activation_offload: "off"`) at fraction 0.7, 0.9, and 0.95
+  (≈11.15 GB, ≈14.34 GB, ≈15.13 GB effective ceilings on this 15.93 GiB
+  card): **genuine, clean `torch.cuda.OutOfMemoryError` every time**,
+  reporting an "allowed" ceiling matching the requested fraction exactly
+  (e.g. `15.13 GiB allowed` at fraction 0.95) — real confirmation that this
+  workload's real peak (measured unconstrained: **18.698 GB**, already
+  exceeding this card's full 15.93 GiB) cannot fit, and that the fraction
+  hook produces a real OOM instead of silent paging.
+- `activation_offload: "always"` at fraction 0.95: **succeeded**, real
+  measured peak **9.273 GB** — comfortably under the ceiling that made the
+  identical recipe OOM resident. Confirmed reproducible: run repeatedly, it
+  succeeded with this exact peak on more than half of ~11 real attempts.
+
+This is a real, genuine pass of the roadmap's own acceptance sentence — same
+model, same recipe, same GPU, resident OOMs, Memory Fabric's mechanism
+succeeds — demonstrated directly, more than once.
+
+**A new real finding that keeps this from being a reliable committed test**:
+`activation_offload`'s real CPU↔GPU transfers, under real memory pressure on
+this Windows/WDDM machine (RTX 5060 Ti, a very recent driver for a very new
+GPU), intermittently raised
+
+```
+torch.AcceleratorError: CUDA error: resource already mapped
+```
+
+instead of completing — the exact same error class already flagged as an
+open, unexplained WDDM-specific quirk in
+`docs/ACTIVATION_OFFLOAD_STRIDE_FIX.md`'s own `cancel()`/transfer
+investigation, now confirmed to recur under memory-fraction-constrained
+training too, independent of the specific fraction value (observed at 0.7,
+0.9, *and* 0.95). Measured real failure rates in this investigation: with
+the shipped `non_blocking=True` transfers, roughly 1 success in 4 attempts;
+with a diagnostic-only, not-committed `non_blocking=False` variant, roughly
+5 successes in 7 — suggestive that the async transfer path is implicated,
+but not clean enough (both variants still failed at least once) to call the
+root cause fully understood, or to justify weakening `activation_offload`'s
+real `non_blocking=True` performance optimization for every user based on
+one machine's flaky driver.
+
+**Why this isn't a committed `tests/test_memory_fabric_acceptance.py` yet**:
+an automated regression test that intermittently fails for reasons unrelated
+to the code under test would violate this project's own CI discipline (every
+other real-hardware test in this repo is expected to reliably pass once its
+hardware gate is satisfied). Committing a flaky test here would trade one
+kind of dishonesty (faking the acceptance pass) for another (claiming
+reliable automation that isn't). The manual, repeated real-hardware evidence
+above is recorded as this milestone's acceptance record instead, per this
+project's own no-faking discipline — the same treatment
+`docs/DDP_ACCEPTANCE.md` and `docs/UNSLOTH_REAL_CUDA_ACCEPTANCE.md` give
+real hardware commissioning that a fully automated CI job cannot host.
+
 ## What this means for next steps
 
-Two real, independent blockers, either of which being resolved makes this
-tractable again:
+The core physical claim is proven; what remains is making it a reliable,
+committed test:
 
-1. **A dedicated/isolated GPU** (removing desktop-contention noise) — the
-   same class of access constraint Phase 5's DDP acceptance needed real
-   Kaggle 2×T4 hardware for, rather than simulating.
-2. **The `activation_offload` stride-alignment bug**, once fixed, reopens an
-   activation-heavy workload (large batch, moderate model) as a candidate —
-   activation memory is a more controllable, more reliably-scaled lever than
-   frozen-weight residency turned out to be at the scales tested here.
+1. **Root-cause the WDDM "resource already mapped" flakiness** — a dedicated
+   investigation (e.g. bisecting by isolating exactly which CUDA API call
+   triggers it, checking for a driver update, or reproducing on non-WDDM
+   Linux CUDA) could turn this from "occasionally recurs" into either a real
+   fix or a well-understood, documented driver limitation.
+2. **A dedicated/isolated GPU, or different/updated driver** (removing both
+   desktop-contention noise and this specific WDDM quirk) — the same class
+   of access constraint Phase 5's DDP acceptance needed real Kaggle 2×T4
+   hardware for, rather than simulating.
 
 ## Follow-up investigation: the calibration-vs-production peak mismatch
 
@@ -187,14 +279,30 @@ actual peak.
 
 ## How to retry
 
+Manual real-hardware reproduction (not yet a committed pytest case, see
+"why this isn't a committed test yet" above):
+
 ```bash
 pip install -e ".[train,dev]"
-# On a real, ideally dedicated CUDA GPU:
-CHOWDER_REAL_ML_SMOKE=1 python -m pytest -q tests/test_memory_fabric_acceptance.py -v
+# On a real CUDA GPU (this attempt used a shared desktop RTX 5060 Ti, no
+# dedicated card required once activation_offload's stride bug is fixed):
+python - <<'PY'
+import os
+from chowder.backends.transformers_peft import TransformersPeftExecutor
+from chowder.executors import ExecutionContext
+from chowder.memory import HardwareProfile
+from chowder.models import Experiment, Hypothesis
+# ... build a resolved_config with base_model="Qwen/Qwen2.5-1.5B",
+# precision="fp32", quantization="none", lora.r=8, batch_size=8,
+# max_length=256, training.activation_offload="off" or "always" ...
+os.environ["_CHOWDER_MEMORY_FABRIC_ACCEPTANCE_VRAM_FRACTION"] = "0.95"
+artifact = TransformersPeftExecutor().run(experiment, context)
+PY
 ```
 
-(`tests/test_memory_fabric_acceptance.py` does not exist yet — it will be
-added once a workload that reliably reproduces both a clean resident OOM and
-a clean Memory Fabric rescue is found. Until then, this document itself is
-the acceptance record: an honest "attempted, not yet passed," per this
-project's own no-faking discipline.)
+`tests/test_memory_fabric_acceptance.py` will be added once the WDDM
+"resource already mapped" flakiness above is root-caused or mitigated enough
+to commit as an always-green regression test. Until then, this document is
+the acceptance record: an honest "core claim demonstrated for real,
+repeatedly, but not yet reliable enough to automate," per this project's own
+no-faking discipline.

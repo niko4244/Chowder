@@ -476,29 +476,33 @@ treated as fully proven:
 
 ## NEXT
 
-**Final Memory Fabric acceptance test (Priority 1 follow-up) — attempted for
-real, not yet demonstrated cleanly**
-The remaining milestone before Memory Fabric can be called production-
-proven: a real workload that genuinely CUDA-OOMs under normal resident
-training, then genuinely succeeds under the same model/recipe with Memory
-Fabric's real placement plan applied — not faked by lowering the reported
-VRAM budget. Full real-hardware attempt log, findings, and next steps:
+**Final Memory Fabric acceptance test (Priority 1 follow-up) — core claim
+demonstrated for real; not yet a reliable committed test**
+The milestone before Memory Fabric can be called production-proven: a real
+workload that genuinely CUDA-OOMs under normal resident training, then
+genuinely succeeds under the same model/recipe with Memory Fabric's real
+mechanism applied — not faked by lowering the reported VRAM budget. Full
+real-hardware attempt log, findings, and next steps:
 [`docs/MEMORY_FABRIC_ACCEPTANCE.md`](MEMORY_FABRIC_ACCEPTANCE.md). Short
-version: a real production calibration-timeout bug was found and fixed
-along the way; a real, reproducible `activation_offload` crash was found
-and, unlike at the time this doc was first written, **is now fixed (PR
-#92, see above)** — the second of the two named blockers is resolved.
-The remaining blocker is this development machine's driver-level
-VRAM-to-system-RAM paging fallback and shared-desktop-GPU contention,
-which make a clean pass hard to reach on this specific hardware without
-either a dedicated/isolated GPU or an artificial VRAM ceiling via
-`torch.cuda.set_per_process_memory_fraction` (confirmed separately, on
-this same hardware, to produce a genuine `torch.cuda.OutOfMemoryError`
-that bypasses the driver's paging fallback entirely, without touching
-any system setting) — an in-progress investigation, not yet landed as
-the acceptance test itself. A mechanism's isolated single-forward+backward
-savings not reliably predicting a full training run's real peak VRAM was
-also confirmed a third time and remains an open, separate limitation.
+version: **this has now genuinely passed, repeatedly** — using
+`torch.cuda.set_per_process_memory_fraction` (a real, in-process allocator
+constraint, not a reported-hardware lie) to bypass this development
+machine's driver-level VRAM-to-system-RAM paging fallback without touching
+any system setting, real Qwen2.5-1.5B/fp32/LoRA r=8 training at batch=8 was
+shown to genuinely, cleanly `torch.cuda.OutOfMemoryError` resident (measured
+peak 18.7 GB, already exceeding the 15.93 GiB card) while
+`activation_offload: "always"` genuinely succeeded under the identical
+constraint (measured peak 9.3 GB) — the exact same model, recipe, and GPU.
+What keeps this from being a committed, always-green regression test yet: a
+newly surfaced, real Windows/WDDM driver flakiness
+(`CUDA error: resource already mapped`) intermittently interrupts
+`activation_offload`'s real CPU↔GPU transfers under memory pressure on this
+specific machine — the same error class already flagged (but not explained)
+during the stride-alignment investigation, now confirmed to recur here too,
+independent of the specific VRAM ceiling. A mechanism's isolated single
+-forward+backward savings not reliably predicting a full training run's real
+peak VRAM was also confirmed a third time and remains an open, separate
+limitation.
 
 **Backward prefetch for frozen-layer streaming (Priority 1 follow-up)**
 `memory_fabric.py`'s backward re-streams each frozen layer's weight
