@@ -429,14 +429,35 @@ treated as fully proven:
   defaulting to Unsloth's own documented Llama-family target list (PR
   #98). After the fix, a real training run completed real steps and
   produced a genuine, standard, independently-loadable PEFT adapter.
-  **Not yet production-proven**: only a tiny model at a handful of steps
-  has been commissioned so far (`test_unsloth_peft_real.py`, gated behind
-  `CHOWDER_REAL_UNSLOTH_SMOKE=1` plus a real environment); checkpoint/
-  resume, real process-tree-safe cancellation, chat-format datasets,
-  continuing from a parent adapter, and independent-evaluator integration
-  are all explicitly deferred to follow-up slices, and no real target
-  -model (e.g. a real Qwen3 checkpoint) commissioning run has been
-  attempted yet.
+  Checkpoint/resume and cancellation are also real-CUDA-commissioned
+  (PR #100): `UnslothPeftRunSpec` gained `save_strategy`/`save_steps`/
+  `save_total_limit`/`resume_from_checkpoint`, with a checkpoint manifest
+  that additionally binds to the isolated environment's own manifest
+  digest (so a rebuilt/different-version environment is refused, not
+  silently trusted) and whose filename alone is the entire mechanism that
+  rejects a Transformers checkpoint resumed under `engine='unsloth'` or
+  vice versa. A real, mid-flight training run was cancelled after 8 real
+  seconds and confirmed fully gone from the OS process table (nvidia-smi
+  `--query-compute-apps` was found unreliable on this Windows/WDDM
+  machine for that specific check); a real second run then resumed
+  correctly from a real, earlier real checkpoint's saved step. Independent
+  -evaluator integration is proven end to end (PR #101): a real project
+  with `engine='unsloth'` runs through the unmodified `run_project()` ->
+  `TransformersTextEvaluator` -> hard gate -> registry pipeline, catching
+  two more real, previously-latent bugs in `project.py` along the way —
+  a stale hardcoded rejection of `engine='unsloth'` left over from before
+  the executor existed, and project validation unconditionally using the
+  Transformers-only config schema/spec for every engine regardless of
+  which one was actually selected. **Not yet production-proven**: only a
+  tiny model at a handful of steps has been commissioned so far
+  (`test_unsloth_peft_real.py`, gated behind `CHOWDER_REAL_UNSLOTH_SMOKE=1`
+  plus a real environment); chat-format datasets and continuing from a
+  parent adapter remain explicitly deferred (the isolated worker cannot
+  import `chowder.backends.training_data`), real process-tree-safe
+  cancellation hardening (e.g. a Windows job object) has not been added
+  since the current single-process worker has not been shown to need it,
+  and no real target-model (e.g. a real Qwen3 checkpoint) commissioning
+  run at meaningful scale has been attempted yet.
 
 ## NEXT
 
