@@ -479,6 +479,20 @@ treated as fully proven:
 
 ## NEXT
 
+**Status as of this section's last real-work pass**: every concrete item
+below that was actionable without new hardware has been closed for real
+(Qwen-shape MoE router/expert instrumentation and frozen-layer backward
+prefetch, both this pass; Unsloth integration, activation-offload stride
+fix, and Memory Fabric's core OOM-to-success claim, earlier passes). The
+one item still open in this section — matched multi-GPU telemetry — is
+blocked on hardware this machine does not have (an asymmetric 2-GPU box
+does not substitute; see that item for why substituting would misrepresent
+real DDP behavior) and is not something further engineering effort on this
+machine can close. The `## RESEARCH` section below (Priority 6 meta-
+controller, further Elastic MoE phases) is explicitly open-ended and, per
+its own header, gated on these proven foundations being stable rather than
+a precondition for that stability — it is not a shippability blocker.
+
 **Final Memory Fabric acceptance test (Priority 1 follow-up) — core claim
 demonstrated for real; not yet a reliable committed test**
 The milestone before Memory Fabric can be called production-proven: a real
