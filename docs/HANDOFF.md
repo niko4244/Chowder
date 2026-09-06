@@ -100,9 +100,18 @@ for it:
   temp edit script (`_slice_b_*.py` pattern: assert every anchor, run,
   delete) for in-place multi-edits. Bash heredocs get CRLF-mangled in
   transit here — prefer the temp-script route for anything multiline.
-- Test count after the incident-persistence slice: 1016 passed / 71
-  skipped on this worktree's `main` (was 975/71 before Slice B, 1009/71
-  after it).
+- Test count after the parent-eval harness slice: 1082 passed / 71
+  skipped on this worktree's `main` (was 1016/71 after incident
+  persistence, 1009/71 after Slice B, 975/71 before it).
+- Program state (2026-09-06): parent B
+  (`orcarouter/Qwen3.8-27B-Uncensored`) auto-gate **cleared** via the
+  account's HF token (account `NIKO42`, stored only in the local HF
+  token store — never in the repo; it was shared in plaintext once, so
+  rotation is advisable). Parent-eval harness landed in
+  `src/chowder/parent_eval.py`. Next executable steps: author the
+  protected nine-dimension suite content, then start parent weight
+  downloads (B alone is 51.7 GiB; ~239 GB fragmented free across
+  C/F/G/H — a user decision on placement).
 - Commit messages end `Co-Authored-By: Claude Sonnet 5
   <noreply@anthropic.com>`; PR descriptions end with the Claude Code
   attribution line; branch naming `claude/<slug>`; one focused PR per

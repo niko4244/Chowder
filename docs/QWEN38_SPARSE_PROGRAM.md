@@ -1,6 +1,6 @@
 # Chowder Qwen3.8 Native Sparse Program
 
-**Status: program defined (this document); revisions pinned for A/C/D; parent B gated; no weights cached; no evaluation run; no transformation run. Nothing here may be read as "the sparse-model project is underway" — see the milestone checklist at the end.**
+**Status: program defined (this document); all four revisions pinned; parent B's gate cleared and full architecture audit recorded; protected nine-dimension evaluation harness implemented (`src/chowder/parent_eval.py`); no weights cached; no protected suite content authored; no evaluation run; no transformation run. Nothing here may be read as "the sparse-model project is underway" — see the milestone checklist at the end.**
 
 This document retargets Chowder's primary model research from the prior
 Qwen3.6-35B-A3B commissioning branch to a **native-Qwen3.8-derived
@@ -83,20 +83,29 @@ Transformers/Safetensors repo, verified by direct file listing.
 ## Architecture audit (Phase 3 evidence so far)
 
 From real `config.json` + `safetensors.index.json` reads at the pinned
-revisions (API metadata for B; full file reads for A/C/D):
+revisions (full file reads for A/C/D; authenticated file reads for B
+after the auto-gate accepted the account's terms — B's revision
+`404ea47a…` verified byte-identical to the pin):
 
 | Evidence | A (control) | C (OBLITERATUS) | D (DavidAU parent) | B (primary) |
 |---|---|---|---|---|
-| architecture | `Qwen3_5ForConditionalGeneration` | same | same | not readable (gated) |
-| model_type | `qwen3_5` | same | same | not readable (gated) |
-| nested text_config | yes | yes | yes | not readable |
-| layers / hidden / FFN | 64 / 5120 / 17408 | same | same | not readable |
-| dense vs MoE | dense (no expert keys) | dense | dense | not readable |
-| total tensors | 1199 | 1199 | 1199 | not readable |
-| **MTP tensors** | **15** (`mtp.fc.*`, `mtp.layers.*`) | **15** | **15** (plus an `mtp`-named file) | not readable |
-| **vision tensors** | **333** (`model.visual.*`) | **333** | **333** | not readable |
-| tokenizer class | `Qwen2Tokenizer` | `Qwen2Tokenizer` | **`TokenizersBackend`** ⚠ | not readable |
-| license (card) | apache-2.0 | apache-2.0 | apache-2.0 | unknown (gated) |
+| architecture | `Qwen3_5ForConditionalGeneration` | same | same | `Qwen3_5ForConditionalGeneration` |
+| model_type | `qwen3_5` | same | same | `qwen3_5` (text: `qwen3_5_text`) |
+| nested text_config | yes | yes | yes | yes |
+| layers / hidden / FFN | 64 / 5120 / 17408 | same | same | 64 / 5120 / 17408 |
+| dense vs MoE | dense (no expert keys) | dense | dense | dense (no expert keys) |
+| total tensors | 1199 | 1199 | 1199 | 1199-equivalent footprint (392 tensors in shard 1 + 16 in shard 18 censused; full index verified) |
+| **MTP tensors** | **15** (`mtp.fc.*`, `mtp.layers.*`) | **15** | **15** (plus an `mtp`-named file) | **15** (`mtp.fc.*`, `mtp.layers.*` — last shard) |
+| **vision tensors** | **333** (`model.visual.*`) | **333** | **333** | **333** (`model.visual.*` — first shard) |
+| tokenizer class | `Qwen2Tokenizer` | `Qwen2Tokenizer` | **`TokenizersBackend`** ⚠ | `Qwen2Tokenizer` |
+| license (card) | apache-2.0 | apache-2.0 | apache-2.0 | apache-2.0 (gate mode: `auto`) |
+
+Parent B checkpoint form (authenticated `files_metadata` at the pin):
+**18 safetensors shards, 51.7 GiB total, zero GGUF files** — a true
+Transformers/Safetensors checkpoint, exactly what the lineage policy
+requires. Companion files present: `chat_template.jinja`,
+`preprocessor_config.json`, `video_preprocessor_config.json` (the
+multimodal stack), plus the full tokenizer trio.
 
 Reading of the evidence:
 
@@ -129,15 +138,15 @@ Reading of the evidence:
 
 ## Blockers (honest, unresolved)
 
-1. **Branch B (primary parent) is gated.** API metadata is public but
-   file access returns 401 without an authenticated account that has
-   accepted the repo's access terms. `model_info` works, file downloads
-   do not. Required before Phase 2 completes for B: user authenticates
-   (`huggingface-cli login`) with an account holding access, or the
-   primary-parent prior is revisited. **The manifest above pins B's
-   current revision so the pin exists, but B cannot be audited, cached,
-   or evaluated until access exists.** No workaround (mirror, re-upload,
-   anonymous proxy) is acceptable — provenance is the point.
+1. **~~Branch B (primary parent) is gated~~ RESOLVED (2026-09-06).**
+   The repo is auto-gated (`gated: auto`); the account's stored HF token
+   accepted the terms and authenticated file access was verified at the
+   pinned revision `404ea47a…` (config, tokenizer assets, shard
+   metadata, and safetensors headers all read successfully). Full
+   evidence is in the manifest above. Operational note: the token is
+   stored only in this machine's HF token store, never in the
+   repository — and because it was once shared in plaintext, rotate it
+   when convenient.
 2. **No weights are cached.** Every parent needs a full bf16 fetch
    (~55 GB each, ~220 GB for all four). Viable free disk today: C: 49
    GB, F: 80 GB, G: 80 GB, H: 30 GB (I: full). All four fit only by
@@ -145,7 +154,17 @@ Reading of the evidence:
    policy this is download-once/hash-once/pin-once; the acquisition
    order below starts with the readable parents. Clearing space (I: and
    F: are >96% full) is a user decision.
-3. **Protected evaluation suite does not exist yet.** The prior
+3. **Protected evaluation suite content does not exist yet — the
+   harness does.** `src/chowder/parent_eval.py` (with tests) implements
+   the nine-dimension suite schema with complete-coverage validation, the
+   protocol fingerprint over suite definitions (candidate identity
+   excluded), capability/behavior aggregation kept separate by
+   construction, a fail-closed tokenizer-identity gate, hash-only
+   protected-suite fingerprint indexes, the Phase-13 contamination audit
+   hook, and FK-anchored persistence into `evaluation_runs`. What still
+   does not exist is the protected *content*: the real prompts/answers
+   per dimension that the suite specs reference. Authoring and curating
+   that content is evidence work, not code, and it gates Phase 4. The prior
    campaign's evaluation protocol covered the 8B model's task suite; the
    Phase 4 tournament requires the nine-dimension suite (reasoning,
    coding, knowledge, calibration, self-correction, instruction
@@ -207,12 +226,12 @@ then on.
 Do not call the sparse-model project underway merely because this
 document exists. Milestone 1 completes when:
 
-- [ ] OrcaRouter exact revision pinned **and accessible** (pinned yes; access blocked by gate)
+- [x] OrcaRouter exact revision pinned **and accessible** (`404ea47a…`; auto-gate accepted, authenticated file reads verified)
 - [x] Official Qwen exact revision pinned (`1d4bf0f2…`)
 - [x] OBLITERATUS exact revision pinned (`a58c3b53…`)
 - [x] DavidAU trainable parent resolved and pinned (`81c73940…`, resolved from the GGUF card)
-- [ ] all four architecture manifests recorded (A/C/D partial — API-level evidence only; B blocked)
-- [ ] protected parent-evaluation suite established
+- [x] all four architecture manifests recorded (A/C/D full file reads; B authenticated reads at the pinned revision)
+- [ ] protected parent-evaluation suite established (harness implemented in `src/chowder/parent_eval.py`; protected suite *content* per dimension still to be authored)
 - [ ] all four evaluated under identical protocol
 - [ ] results persisted
 - [ ] parent-selection decision recorded with evidence
@@ -220,5 +239,6 @@ document exists. Milestone 1 completes when:
 - [ ] first dense→MoE transformation plan generated
 - [x] no distillation involved (lineage policy fixed above)
 
-Three checkboxes are pre-checked because this document closed them; the
-rest require real downloads, real access, and real evaluation runs.
+Four checkboxes are pre-checked because this document and its
+successors closed them with verified evidence; the rest require real
+protected content, real weight downloads, and real evaluation runs.
