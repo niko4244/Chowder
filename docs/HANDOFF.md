@@ -103,17 +103,17 @@ for it:
 - Test count after the parent-eval harness slice: 1082 passed / 71
   skipped on this worktree's `main` (was 1016/71 after incident
   persistence, 1009/71 after Slice B, 975/71 before it).
-- Parent A acquisition (started 2026-09-06): `Qwen/Qwen3.8-27B` @ pin
-  `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` is snapshot-downloading to
-  `F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B` (32 files, 51.77 GiB;
-  log at `%TEMP%\parent_a_download.log`). If interrupted, resume by
-  rerunning the same `snapshot_download(repo, revision=<pin>,
-  local_dir=<dest>)` — hf_hub resumes partial shards. When complete:
-  build a **full-mode** manifest with
-  `chowder.local_model_manifest.build_local_model_manifest` and verify it
-  clean before recording A as cached; persist the manifest JSON next to
-  the program evidence. Manifest module + 20 tests landed this session
-  (see `tests/test_local_model_manifest.py`).
+- Parent A acquisition (**complete and verified**, 2026-09-06):
+  `Qwen/Qwen3.8-27B` @ pin `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0`
+  fully downloaded to `F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B`
+  and verified by a **full-mode manifest**
+  (`d382d54f159f7b6c6b03afac88f7f445d03385684f77ae159fa5db07d7533f59`,
+  18/18 shards hashed, 51.75 GiB, verification clean; signed manifest
+  JSON at `F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B.manifest.json`).
+  Reference it as a local model source by that directory path
+  (LOCAL_MODELS.md policy). If the directory ever changes, the manifest
+  verifier will catch it — re-verify before trusting a new experiment.
+  Parents B/C/D are still not acquired.
 - Phase 6 plan (PR #120, merged): docs/PHASE6_CONVERSION_PLAN.md is the
   authority for dense→MoE conversion design. Verified module facts live
   in its section 1 (dense `Qwen3_5MLP` → `Qwen3_5MoeSparseMoeBlock`,

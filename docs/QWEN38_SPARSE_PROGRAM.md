@@ -1,6 +1,6 @@
 # Chowder Qwen3.8 Native Sparse Program
 
-**Status: program defined (this document); all four revisions pinned; parent B's gate cleared and full architecture audit recorded; protected nine-dimension evaluation harness implemented (`src/chowder/parent_eval.py`); parent A download in flight with manifest machinery landed (`src/chowder/local_model_manifest.py`); Phase 6 conversion plan generated (`docs/PHASE6_CONVERSION_PLAN.md`, PR #120); no protected suite content authored; no evaluation run; no transformation executed. Nothing here may be read as "the sparse-model project is underway" — see the milestone checklist at the end.**
+**Status: program defined (this document); all four revisions pinned; parent B's gate cleared and full architecture audit recorded; protected nine-dimension evaluation harness implemented (`src/chowder/parent_eval.py`); parent A (control) cached at its pin with a verified full-mode content manifest (`d382d54f…`, 18/18 shards hashed, verification clean); Phase 6 conversion plan generated (`docs/PHASE6_CONVERSION_PLAN.md`, PR #120); no protected suite content authored; no evaluation run; no transformation executed. Nothing here may be read as "the sparse-model project is underway" — see the milestone checklist at the end.**
 
 This document retargets Chowder's primary model research from the prior
 Qwen3.6-35B-A3B commissioning branch to a **native-Qwen3.8-derived
@@ -147,19 +147,21 @@ Reading of the evidence:
    stored only in this machine's HF token store, never in the
    repository — and because it was once shared in plaintext, rotate it
    when convenient.
-2. **Weights: acquisition started with parent A; nothing yet verified.**
-   Parent A (control, 51.77 GiB across 32 files at the pin) is
-   downloading to the established local-models home
-   `F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B` (F: had 80 GB free;
-   the directory convention follows the existing
-   `squ11z1/Mythos-nano` layout). The download is resumable — rerunning
-   the same pinned-revision `snapshot_download` continues it. Per
-   `LOCAL_MODELS.md` policy this counts as *cached* only once
-   `src/chowder/local_model_manifest.py` has taken a **full-mode
-   manifest** of the completed directory and `verify_local_model_manifest`
-   reports it clean. Parents B/C/D (51.7 / ~52 / ~52 GiB) still have no
+2. **Weights: parent A cached and verified; B/C/D not acquired.**
+   Parent A (control) completed its pinned-revision download (61
+   minutes) into the established local-models home
+   `F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B` and is **verified**:
+   full-mode manifest `d382d54f159f7b6c6b03afac88f7f445d03385684f77ae159fa5db07d7533f59`
+   (18/18 weight shards hashed, 55,563,006,776 bytes = 51.75 GiB; 10/12
+   semantic files hashed — `special_tokens_map.json` and
+   `added_tokens.json` are recorded-absent, which matches the repo's
+   file list), verification **clean**, zero divergences. The signed
+   manifest lives at `F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B.manifest.json`
+   (sha256 `401f8e7a…`). Per `LOCAL_MODELS.md` policy, use the local
+   directory path as the model source — no second copy, no silent
+   re-download. Parents B/C/D (51.7 / ~52 / ~52 GiB) still have no
    bytes on disk; G: (80 GB free, least-full volume) is the next
-   candidate target, or F: again after A lands. Clearing space (I: and
+   candidate target, or F: again (59 GB free). Clearing space (I: and
    F: are >96% full) remains a user decision.
 3. **Protected evaluation suite content does not exist yet — the
    harness does.** `src/chowder/parent_eval.py` (with tests) implements
@@ -242,7 +244,7 @@ document exists. Milestone 1 completes when:
 - [ ] all four evaluated under identical protocol
 - [ ] results persisted
 - [ ] parent-selection decision recorded with evidence
-- [ ] selected parent cached locally (parent A *control* is downloading at its pin; selection itself awaits the Phase-4 tournament, so this box stays unchecked regardless of A's status)
+- [ ] selected parent cached locally (parent A *control* is cached and manifest-verified at its pin; selection itself awaits the Phase-4 tournament, so this box stays unchecked regardless of A's status)
 - [x] first dense→MoE transformation plan generated (PR #120: docs/PHASE6_CONVERSION_PLAN.md — partition-conversion design against the audited qwen3_5/qwen3_5_moe module shapes, with the exactness harness and validation ladder specified; the transformation itself remains unexecuted)
 - [x] no distillation involved (lineage policy fixed above)
 
