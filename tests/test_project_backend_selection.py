@@ -89,12 +89,26 @@ def test_project_keeps_legacy_transformers_peft_backward_compatible(tmp_path):
     assert "engine" not in project.config["backend"]
 
 
-def test_project_recognizes_unsloth_but_refuses_to_fake_availability(tmp_path):
-    with pytest.raises(ProjectValidationError, match="isolated executor"):
-        project_from_mapping(
-            _payload(tmp_path, backend_type="peft", engine="unsloth"),
-            source_dir=tmp_path,
-        )
+def test_project_accepts_canonical_peft_unsloth_and_validates_with_the_unsloth_spec(tmp_path):
+    """Unsloth's isolated executor is real (PR #97) -- a project selecting
+    it must validate successfully, using UnslothPeftRunSpec's own
+    (narrower) schema rather than being rejected outright or silently
+    validated against the Transformers-only namespace/spec."""
+    project = project_from_mapping(
+        _payload(tmp_path, backend_type="peft", engine="unsloth"),
+        source_dir=tmp_path,
+    )
+    assert project.config["backend"]["type"] == "peft"
+    assert project.config["backend"]["engine"] == "unsloth"
+
+
+def test_project_rejects_an_unsloth_recipe_with_an_invalid_unsloth_field(tmp_path):
+    """Proves validation actually dispatches to UnslothPeftRunSpec, not
+    just skipping validation entirely for engine='unsloth'."""
+    payload = _payload(tmp_path, backend_type="peft", engine="unsloth")
+    payload["config"]["backend"]["quantization"] = "8bit"  # not in _ALLOWED_QUANTIZATION
+    with pytest.raises(ProjectValidationError, match="unsupported quantization"):
+        project_from_mapping(payload, source_dir=tmp_path)
 
 
 def test_project_requires_explicit_engine_for_canonical_peft(tmp_path):

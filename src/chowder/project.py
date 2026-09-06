@@ -8,11 +8,13 @@ from typing import Any, Mapping
 
 from .backend_selection import (
     BackendSelectionError,
+    TRANSFORMERS_ENGINE,
     UNSLOTH_ENGINE,
     normalize_training_config_for_executor,
     resolve_training_engine,
 )
 from .backends.transformers_peft import TransformersPeftRunSpec
+from .backends.unsloth_peft import UnslothPeftRunSpec
 from .config_validation import validate_transformers_backend_config
 from .evaluators.base_text import BaseTextEvalSpec
 from .models import (
@@ -142,24 +144,35 @@ class ProjectSpec:
             training_engine = resolve_training_engine(self.config)
         except BackendSelectionError as exc:
             raise ProjectValidationError(str(exc)) from exc
-        if training_engine == UNSLOTH_ENGINE:
-            raise ProjectValidationError(
-                "backend.engine='unsloth' is recognized but its isolated executor "
-                "is not available yet"
-            )
         training_config = normalize_training_config_for_executor(self.config)
 
         # Validate both the strict namespace and the actual executable spec at
         # project-load time. This catches semantically invalid precision,
         # quantization, LoRA, timeout, and evaluation settings before compute.
-        validate_transformers_backend_config(training_config)
+        # Dispatched by resolved engine -- Unsloth's recipe schema is
+        # deliberately narrower than Transformers' (e.g. no precision/
+        # gradient_checkpointing/replay/parent-adapter fields yet), so
+        # validating it against the Transformers-only namespace/spec would
+        # either reject valid Unsloth configs or silently validate the
+        # wrong schema's defaults.
         try:
-            TransformersPeftRunSpec.from_resolved_config(
-                training_config,
-                work_dir=self.work_dir,
-                output_dir=self.work_dir / ".chowder" / "validation-adapter",
-                seed=self.seed,
-            )
+            if training_engine == TRANSFORMERS_ENGINE:
+                validate_transformers_backend_config(training_config)
+                TransformersPeftRunSpec.from_resolved_config(
+                    training_config,
+                    work_dir=self.work_dir,
+                    output_dir=self.work_dir / ".chowder" / "validation-adapter",
+                    seed=self.seed,
+                )
+            elif training_engine == UNSLOTH_ENGINE:
+                UnslothPeftRunSpec.from_resolved_config(
+                    training_config,
+                    work_dir=self.work_dir,
+                    output_dir=self.work_dir / ".chowder" / "validation-adapter",
+                    seed=self.seed,
+                )
+            else:
+                raise AssertionError(f"unhandled training engine: {training_engine}")
             BaseTextEvalSpec.from_config(
                 self.config,
                 work_dir=self.work_dir,
