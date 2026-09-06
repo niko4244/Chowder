@@ -228,10 +228,32 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
 
         def __init__(self) -> None:
             self.streamed: Any = None
+            self.trainer_ref: Any = None
 
         def on_step_begin(self, args, state, control, **kwargs):
             if self.streamed is not None:
                 self.streamed.start_step()
+
+        def on_train_begin(self, args, state, control, **kwargs):
+            # Wrap accelerator.backward so start_backward() (kicking off the
+            # last frozen layer's backward prefetch) fires immediately
+            # before the real backward call, every step. self.trainer_ref
+            # is set externally right after Trainer() construction (same
+            # pattern _TrainingPhaseTimerCallback uses, for the same
+            # reason); by the time on_train_begin fires inside
+            # trainer.train(), both trainer_ref and streamed are already
+            # set. A no-op when frozen-layer streaming isn't enabled.
+            if self.streamed is None or self.trainer_ref is None:
+                return
+            trainer = self.trainer_ref
+            original_backward = trainer.accelerator.backward
+
+            @functools.wraps(original_backward)
+            def backward_with_prefetch(*call_args, **call_kwargs):
+                self.streamed.start_backward()
+                return original_backward(*call_args, **call_kwargs)
+
+            trainer.accelerator.backward = backward_with_prefetch
 
     class _TrainingPhaseTimerCallback(TrainerCallback):
         """Real forward/backward/optimizer-step timing, by wrapping
@@ -552,6 +574,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     )
     if timer_callback is not None:
         timer_callback.trainer_ref = trainer
+    frozen_layer_streaming_callback.trainer_ref = trainer
 
     frozen_layer_streaming_bytes_transferred: int | None = None
     streamed_layers = None
