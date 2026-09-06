@@ -286,3 +286,225 @@ def test_cancel_terminates_a_tracked_process(tmp_path, monkeypatch):
     monkeypatch.setattr("chowder.backends.unsloth_peft.subprocess.Popen", SlowProcess)
     executor.run(_experiment(), context)
     assert captured_run_id["run_id"] not in executor._processes
+
+
+# --- checkpoint / resume -----------------------------------------------------
+
+
+def test_spec_reads_save_strategy_from_training_and_resume_from_backend(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    checkpoint_dir = tmp_path / "prior" / "trainer" / "checkpoint-5"
+    checkpoint_dir.mkdir(parents=True)
+    config = _config(
+        "train.jsonl",
+        training={"epochs": 1.0, "save_strategy": "steps", "save_steps": 5, "save_total_limit": 2},
+        resume_from_checkpoint=str(checkpoint_dir),
+    )
+    spec = UnslothPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "adapter", seed=1
+    )
+    assert spec.save_strategy == "steps"
+    assert spec.save_steps == 5
+    assert spec.save_total_limit == 2
+    assert spec.resume_from_checkpoint == str(checkpoint_dir.resolve())
+
+
+def test_run_writes_a_checkpoint_manifest_when_save_strategy_enabled(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    _fake_isolated_python(tmp_path)
+    config = _config(
+        "train.jsonl", training={"epochs": 1.0, "save_strategy": "steps", "save_steps": 5}
+    )
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+
+    monkeypatch.setattr("chowder.backends.unsloth_peft.subprocess.Popen", _FakeProcess)
+    artifact = UnslothPeftExecutor().run(_experiment(), context)
+
+    manifest_path = Path(artifact.artifact_ref) / "trainer" / "chowder-unsloth-checkpoint-manifest.json"
+    assert manifest_path.is_file()
+    manifest = json.loads(manifest_path.read_text())
+    assert len(manifest["checkpoint_recipe_sha256"]) == 64
+    assert manifest["dataset_sha256"] == sha256_file(data)
+    # No isolated-environment manifest was actually installed by
+    # _fake_isolated_python -- an honest None, not a fabricated digest.
+    assert manifest["environment_manifest_sha256"] is None
+    assert artifact.evidence["checkpoint"]["save_strategy"] == "steps"
+    assert artifact.evidence["checkpoint"]["save_steps"] == 5
+
+
+def test_run_writes_no_manifest_when_save_strategy_is_default_no(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    _fake_isolated_python(tmp_path)
+    context = ExecutionContext(
+        _hardware(), str(tmp_path), 1, resolved_config=_config("train.jsonl")
+    )
+    monkeypatch.setattr("chowder.backends.unsloth_peft.subprocess.Popen", _FakeProcess)
+    artifact = UnslothPeftExecutor().run(_experiment(), context)
+    assert artifact.evidence["checkpoint"]["trainer_dir"] is None
+    assert not (Path(artifact.artifact_ref) / "trainer").exists()
+
+
+def test_resume_is_rejected_when_no_checkpoint_manifest_exists(tmp_path, monkeypatch):
+    """Also the mechanism that rejects a Transformers checkpoint resumed
+    under engine='unsloth' by mistake -- a Transformers checkpoint's
+    trainer dir has chowder-checkpoint-manifest.json, not chowder-unsloth-
+    checkpoint-manifest.json, so it is indistinguishable here from "no
+    manifest at all" and refused the same honest way."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    _fake_isolated_python(tmp_path)
+    checkpoint_dir = tmp_path / "prior" / "trainer" / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+    config = _config("train.jsonl", resume_from_checkpoint=str(checkpoint_dir))
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch for an unverifiable checkpoint")
+
+    monkeypatch.setattr("chowder.backends.unsloth_peft.subprocess.Popen", should_not_launch)
+    with pytest.raises(RuntimeError, match="no Unsloth checkpoint manifest found"):
+        UnslothPeftExecutor().run(_experiment(), context)
+
+
+def test_resume_is_rejected_when_dataset_changed_since_checkpoint(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"original"}\n')
+    original_sha = sha256_file(data)
+    _fake_isolated_python(tmp_path)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config("train.jsonl", dataset_sha256=original_sha)
+    spec_for_manifest = UnslothPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    bound_inputs = UnslothPeftExecutor._bound_inputs(
+        spec_for_manifest, environment_manifest_sha256=None
+    )
+    (checkpoint_trainer_dir / "chowder-unsloth-checkpoint-manifest.json").write_text(
+        json.dumps(bound_inputs)
+    )
+
+    data2 = tmp_path / "train2.jsonl"
+    data2.write_text('{"text":"different"}\n')
+    config2 = _config(
+        str(data2), dataset_sha256=sha256_file(data2), resume_from_checkpoint=str(checkpoint_dir)
+    )
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config2)
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch when bound inputs changed")
+
+    monkeypatch.setattr("chowder.backends.unsloth_peft.subprocess.Popen", should_not_launch)
+    with pytest.raises(ValueError, match="refusing to resume"):
+        UnslothPeftExecutor().run(_experiment(), context)
+
+
+def test_resume_is_rejected_when_environment_manifest_changed(tmp_path, monkeypatch):
+    """An Unsloth checkpoint's optimizer/scheduler state is only
+    trustworthy for the exact isolated-environment build it came from --
+    a rebuilt environment (different Unsloth/Torch/PEFT versions) must be
+    refused, not silently assumed compatible."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    _fake_isolated_python(tmp_path)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config("train.jsonl")
+    spec_for_manifest = UnslothPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    bound_inputs = UnslothPeftExecutor._bound_inputs(
+        spec_for_manifest, environment_manifest_sha256="a" * 64
+    )
+    (checkpoint_trainer_dir / "chowder-unsloth-checkpoint-manifest.json").write_text(
+        json.dumps(bound_inputs)
+    )
+
+    config2 = _config("train.jsonl", resume_from_checkpoint=str(checkpoint_dir))
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config2)
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch when the environment manifest changed")
+
+    monkeypatch.setattr("chowder.backends.unsloth_peft.subprocess.Popen", should_not_launch)
+    # The real environment at tmp_path has no manifest file (_fake_isolated_
+    # python only creates the interpreter stub), so its digest is None,
+    # differing from the recorded "a"*64 -- a real, detectable mismatch.
+    with pytest.raises(ValueError, match="refusing to resume"):
+        UnslothPeftExecutor().run(_experiment(), context)
+
+
+def test_resume_succeeds_when_bound_inputs_match(tmp_path, monkeypatch):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+    _fake_isolated_python(tmp_path)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config("train.jsonl", dataset_sha256=dataset_sha)
+    spec_for_manifest = UnslothPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    bound_inputs = UnslothPeftExecutor._bound_inputs(
+        spec_for_manifest, environment_manifest_sha256=None
+    )
+    (checkpoint_trainer_dir / "chowder-unsloth-checkpoint-manifest.json").write_text(
+        json.dumps(bound_inputs)
+    )
+
+    config2 = _config(
+        "train.jsonl", dataset_sha256=dataset_sha, resume_from_checkpoint=str(checkpoint_dir)
+    )
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config2)
+
+    monkeypatch.setattr("chowder.backends.unsloth_peft.subprocess.Popen", _FakeProcess)
+    artifact = UnslothPeftExecutor().run(_experiment(), context)
+    assert artifact.evidence["checkpoint"]["resumed_from_checkpoint"] == str(checkpoint_dir.resolve())
+
+
+def test_resume_allows_a_different_total_epoch_count(tmp_path, monkeypatch):
+    """epochs/max_steps are excluded from bound inputs on purpose --
+    extending training length is the whole point of resuming."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+    _fake_isolated_python(tmp_path)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config("train.jsonl", dataset_sha256=dataset_sha, training={"epochs": 1.0})
+    spec_for_manifest = UnslothPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    bound_inputs = UnslothPeftExecutor._bound_inputs(
+        spec_for_manifest, environment_manifest_sha256=None
+    )
+    (checkpoint_trainer_dir / "chowder-unsloth-checkpoint-manifest.json").write_text(
+        json.dumps(bound_inputs)
+    )
+
+    config2 = _config(
+        "train.jsonl",
+        dataset_sha256=dataset_sha,
+        resume_from_checkpoint=str(checkpoint_dir),
+        training={"epochs": 5.0},
+    )
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config2)
+
+    monkeypatch.setattr("chowder.backends.unsloth_peft.subprocess.Popen", _FakeProcess)
+    artifact = UnslothPeftExecutor().run(_experiment(), context)  # must not raise
+    assert artifact.evidence["checkpoint"]["resumed_from_checkpoint"] == str(checkpoint_dir.resolve())
