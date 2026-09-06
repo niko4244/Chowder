@@ -448,16 +448,31 @@ treated as fully proven:
   a stale hardcoded rejection of `engine='unsloth'` left over from before
   the executor existed, and project validation unconditionally using the
   Transformers-only config schema/spec for every engine regardless of
-  which one was actually selected. **Not yet production-proven**: only a
-  tiny model at a handful of steps has been commissioned so far
-  (`test_unsloth_peft_real.py`, gated behind `CHOWDER_REAL_UNSLOTH_SMOKE=1`
-  plus a real environment); chat-format datasets and continuing from a
-  parent adapter remain explicitly deferred (the isolated worker cannot
-  import `chowder.backends.training_data`), real process-tree-safe
-  cancellation hardening (e.g. a Windows job object) has not been added
-  since the current single-process worker has not been shown to need it,
-  and no real target-model (e.g. a real Qwen3 checkpoint) commissioning
-  run at meaningful scale has been attempted yet.
+  which one was actually selected. **Real-target-model commissioned**
+  (`docs/UNSLOTH_REAL_CUDA_ACCEPTANCE.md`): the actual model from the
+  real prior training campaign (resolved from this repo's own
+  `chowder-project.json`, not guessed from shorthand) --
+  `Goekdeniz-Guelmez/Josiefied-Qwen3-8B-abliterated-v1`, a real ~8B-param
+  Qwen3 model -- trained for real via 4-bit QLoRA on this hardware: a
+  25-step pilot (91s, 6.5 GB peak VRAM), then a real resume from that
+  pilot's own checkpoint to 150 total steps (loss 1.34 -> 0.34, genuine
+  continued learning), producing a real, standard, independently-loadable
+  PEFT adapter throughout. Uses a text-format pilot dataset rather than
+  the original campaign's chat-format one (chat support is still
+  deferred, see below), so this does not reproduce that campaign's exact
+  task -- it proves the real target model and real checkpoint/resume work
+  correctly through the Unsloth engine at real scale, which it does.
+  **Still not fully production-proven**: chat-format datasets and
+  continuing from a parent adapter remain explicitly deferred (the
+  isolated worker cannot import `chowder.backends.training_data`); real
+  process-tree-safe cancellation hardening (e.g. a Windows job object) has
+  not been added since the current single-process worker has not been
+  shown to need it; and a real, honest anomaly surfaced during the
+  150-step resume (the real on-disk checkpoint cadence didn't match the
+  requested `save_steps`, conservatively saving *more* often than asked,
+  likely an inherent `transformers.Trainer` resume characteristic rather
+  than anything Unsloth-specific) has not yet had a dedicated root-cause
+  investigation.
 
 ## NEXT
 
