@@ -55,6 +55,82 @@ Required evidence:
 
 Failure to identify a tensor/module is a hard stop, not a reason to guess a name.
 
+### Real findings (transformers==5.16.1, read from the installed source, not guessed)
+
+No local Qwen3.6-35B-A3B checkpoint exists on this machine as of this
+writing (an exhaustive search across every attached drive found only GGUF
+variants and dense, non-MoE Qwen HF checkpoints). The following was
+therefore verified by reading `transformers`' own installed modeling source
+for `Qwen3MoeSparseMoeBlock` / `Qwen3_5MoeSparseMoeBlock`, and confirmed
+identical for `OlmoeSparseMoeBlock` — the one real local MoE checkpoint this
+machine has (`OLMoE-1B-7B`). Qwen3.6 is presumed, not confirmed, to share
+this same transformers-version-level shape until an actual checkpoint is
+available to check.
+
+- **Experts are not separate submodules.** Both the router and the expert
+  bank are fused, batched tensors, not one `nn.Module` per expert:
+  - `layer.mlp.gate` — a `*TopKRouter` holding a single `weight` matrix of
+    shape `[num_experts, hidden_dim]`. Its forward returns
+    `(router_logits, router_scores, router_indices)`, where
+    `router_scores`/`router_indices` are `[tokens, top_k]`.
+  - `layer.mlp.experts` — a `*Experts` module holding one `gate_up_proj`
+    tensor `[num_experts, 2*intermediate_dim, hidden_dim]` and one
+    `down_proj` tensor `[num_experts, hidden_dim, intermediate_dim]`. Its
+    forward loops over the experts that were actually selected in the
+    current batch, indexing `gate_up_proj[e]`/`down_proj[e]` directly.
+  - Consequence for Phase C: "removing an expert" is a slice out of dim 0 of
+    `gate_up_proj`/`down_proj` (plus reindexing the router's `weight` rows
+    and `num_experts`), not deleting a child module.
+- **Qwen3.5Moe (closest real sibling to "Qwen3.6") adds a shared expert**
+  beyond the base Qwen3Moe shape: `layer.mlp.shared_expert` (a plain dense
+  MLP, always active) and `layer.mlp.shared_expert_gate` (a sigmoid-gated
+  scalar mixing weight). OLMoE has no shared expert. Whether Qwen3.6 keeps,
+  drops, or changes this is unverified without the real checkpoint.
+- **Not every layer is necessarily MoE.** Qwen3Moe supports a
+  `decoder_sparse_step` config field that interleaves dense layers among
+  sparse ones. OLMoE, by contrast, is uniformly sparse (all 16 layers are
+  MoE). The audit must check every layer rather than assume uniformity.
+- **Implementation**: `src/chowder/moe_instrumentation.py` implements this
+  audit (`audit_moe_architecture`, hard-stopping via
+  `MoeArchitectureAuditError` if zero layers match the verified shape) plus
+  the calibration recorder for Phase B (below).
+- **Local checkpoint repair note**: the local OLMoE-1B-7B directory
+  (`H:/Models/olmoe-1b-7b`) had real safetensors weight shards but was
+  missing `model.safetensors.index.json` (its own `.cache/huggingface/`
+  download sidecars show that file was simply never fetched), so
+  `from_pretrained` could not load it. The index was rebuilt losslessly by
+  reading each shard's own embedded safetensors header (tensor
+  name/shape/dtype) and writing the resulting `weight_map` — the same
+  computation `save_pretrained` performs when splitting shards, applied
+  after the fact. No weight data was read, moved, or modified.
+
+### Real findings — Phase B calibration capture
+
+`MoeCalibrationRecorder` (`src/chowder/moe_instrumentation.py`) hooks each
+audited layer's `mlp.gate` forward, which hands it the exact flattened
+hidden-state input plus `(router_scores, router_indices)` for every token.
+Because experts have no separate hookable submodule, `selected_tokens` and
+`router_mass` come directly from that router output, while
+`gated_activation` and `output_norm` are computed by re-deriving the same
+per-expert math `*Experts.forward` performs internally
+(`act_fn(gate) * up`, then `down_proj`) using the live model parameters and
+the real tokens routed to that expert — an exact per-expert quantity, not an
+approximation, just computed outside the fused loop so it can be attributed
+per expert.
+
+`run_calibration` + `write_expert_importance_jsonl` implement items 1–3 of
+the "First implementation slice" below; `chowder moe expert-importance`
+(CLI) plus `moe_planning.build_uniform_pruning_plan` implement item 4. All
+of this is real-hardware-validated end to end
+(`tests/test_moe_instrumentation_real.py`, `CHOWDER_REAL_MOE_SMOKE=1`)
+against the local OLMoE-1B-7B checkpoint: real weight loading, real CUDA
+forward passes, real per-(layer, expert) statistics for all 16×64 pairs, a
+real `expert_importance.jsonl`, and real dry-run 75%/50% pruning plans. This
+validates the *mechanism* against a real, architecturally-equivalent local
+MoE checkpoint. It is explicitly **not** a commissioning of the actual
+Qwen3.6-35B-A3B target, which remains blocked on that checkpoint's local
+availability.
+
 ## Phase B — Chowder Expert Importance Map
 
 Run Teacher-0 over a representative Chowder calibration corpus and capture statistics for every `layer x expert` pair.
@@ -208,7 +284,9 @@ This program substantially fills the design gap in Priority 7:
 
 It does **not** by itself close the following roadmap items:
 
-- final Memory Fabric OOM-to-success acceptance test;
+- Memory Fabric reliability (the core OOM-to-success claim is now real-hardware
+  demonstrated per docs/MEMORY_FABRIC_ACCEPTANCE.md; a committed automated
+  regression test remains blocked on this machine's WDDM driver flakiness);
 - backward prefetch throughput work;
 - matched multi-GPU topology/communication telemetry;
 - Priority 6 learned meta-controller / expected-improvement policy;
@@ -229,3 +307,18 @@ The smallest useful implementation should do exactly four things:
 4. generate a dry-run pruning plan for 75% and 50% expert retention without changing model weights.
 
 Only after that artifact is trustworthy should Chowder gain a writer that creates a pruned student checkpoint.
+
+**Status: items 2–4 are implemented and real-hardware-validated** —
+`src/chowder/moe_instrumentation.py` (`audit_moe_architecture`,
+`MoeCalibrationRecorder`, `run_calibration`, `write_expert_importance_jsonl`)
+plus `chowder moe expert-importance` (CLI) and the already-existing
+`moe_planning.build_uniform_pruning_plan`. Validated end to end against the
+real local OLMoE-1B-7B checkpoint (`tests/test_moe_instrumentation_real.py`,
+`CHOWDER_REAL_MOE_SMOKE=1`): real weight loading, real CUDA forward passes,
+exact per-(layer, expert) statistics for all 16×64 pairs, a real
+provenance-carrying `expert_importance.jsonl`, and real dry-run 75%/50%
+pruning plans, with zero model surgery. **Item 1 remains blocked**: no local
+Qwen3.6-35B-A3B checkpoint exists on this machine (confirmed by an
+exhaustive search across every attached drive), so the actual named target
+has not been loaded or profiled — only the mechanism has been proven, on a
+real, architecturally-equivalent local stand-in.
