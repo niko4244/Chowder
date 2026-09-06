@@ -338,6 +338,30 @@ class ExperimentCycleRunner:
         if callable(bind):
             bind(callback)
 
+    def _persist_executor_analysis(
+        self,
+        analysis: ExecutorFailureAnalysis | None,
+    ) -> str | None:
+        """Persist an executor-failure analysis as an `execution_incidents`
+        row -- the production caller the censored-outcome view documents.
+
+        Written once per real crash (analyses are only constructed on that
+        path); `_insert_immutable` makes an identical replay idempotent and
+        a divergent replay a `RegistryInvariantError`. Persistence runs
+        *after* the failure is settled (reservation charged, status
+        recorded): a ledger failure must not undo or mask the crash's own
+        control flow, so it is reported as a diagnostic instead of raised.
+        Returns the diagnostic text on failure, `None` on success or when
+        there is nothing to persist.
+        """
+        if analysis is None or self.registry is None:
+            return None
+        try:
+            self.registry.record_execution_incident(analysis)
+        except Exception as exc:
+            return f"incident persistence {type(exc).__name__}: {exc}"
+        return None
+
     def _run_candidate(self, experiment: Experiment) -> CandidateCycleOutcome:
         if experiment.experiment_id not in self.engine.graph.nodes:
             raise ValueError("experiment must be proposed before execution")
@@ -434,6 +458,11 @@ class ExperimentCycleRunner:
                         f"executor investigator {type(investigator_exc).__name__}: "
                         f"{investigator_exc}"
                     )
+            # Keep the investigator's own outcome distinct from any
+            # persistence diagnostic added below: the returned analysis is
+            # evidence of what was diagnosed, not of how the ledger write
+            # went.
+            first_analysis = analysis
 
             self.engine.fail(
                 experiment.experiment_id,
@@ -441,11 +470,21 @@ class ExperimentCycleRunner:
             )
             experiment.status = ExperimentStatus.FAILED
             self._record_status(experiment)
+            # Persist the incident evidence now that the failure is
+            # settled; a persistence failure becomes a diagnostic, never a
+            # mask over the crash itself or over an investigator error.
+            persistence_error = self._persist_executor_analysis(analysis)
+            if persistence_error is not None and diagnostic_error is None:
+                diagnostic_error = persistence_error
+            elif persistence_error is not None:
+                diagnostic_error = (
+                    f"{diagnostic_error}; {persistence_error}"
+                )
             error = f"{failure.cause_type}: {failure.cause_message}"
             return CandidateCycleOutcome(
                 experiment_id=experiment.experiment_id,
                 execution_failure=failure,
-                executor_analysis=analysis,
+                executor_analysis=first_analysis,
                 diagnostic_error=diagnostic_error,
                 error=f"cancelled: {error}" if was_cancelled else error,
             )
@@ -503,17 +542,27 @@ class ExperimentCycleRunner:
                         f"executor investigator {type(investigator_exc).__name__}: "
                         f"{investigator_exc}"
                     )
+            first_analysis = analysis
 
             known_compute = artifact.gpu_hours + (failure.gpu_hours_spent or 0.0)
             self.engine.fail(experiment.experiment_id, actual_gpu_hours=known_compute)
             experiment.status = ExperimentStatus.FAILED
             self._record_status(experiment)
+            # Same discipline as the training-stage handler: persistence
+            # after settlement, failures reported as diagnostics.
+            persistence_error = self._persist_executor_analysis(analysis)
+            if persistence_error is not None and diagnostic_error is None:
+                diagnostic_error = persistence_error
+            elif persistence_error is not None:
+                diagnostic_error = (
+                    f"{diagnostic_error}; {persistence_error}"
+                )
             error = f"{failure.cause_type}: {failure.cause_message}"
             return CandidateCycleOutcome(
                 experiment_id=experiment.experiment_id,
                 artifact=artifact,
                 execution_failure=failure,
-                executor_analysis=analysis,
+                executor_analysis=first_analysis,
                 diagnostic_error=diagnostic_error,
                 error=f"cancelled: {error}" if was_cancelled else error,
             )

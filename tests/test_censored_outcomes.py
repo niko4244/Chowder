@@ -168,11 +168,33 @@ def test_planned_and_running_experiments_are_not_outcomes_yet(tmp_path):
 
 
 def test_failed_experiment_without_persisted_incident_has_none_fields(tmp_path):
-    """The production crash path: the cycle runner marks the experiment
-    FAILED and builds the executor analysis, but today nothing persists
-    the incident into the registry. The view must report FAILED with
-    every incident-derived field honestly `None` -- a real absence, not
-    a classification gap to paper over."""
+    """A FAILED experiment whose crash was never recorded as an incident:
+    the view must report every incident-derived field honestly `None` --
+    a real absence, not a classification gap to paper over. (The
+    production path persists incidents now, so this state is constructed
+    directly: legacy registries from before the caller existed, registry-
+    less runs, or persistence failures.)"""
+    with RunRegistry(tmp_path / "runs.db") as registry:
+        registry.record_experiment(_experiment("e-crash", {"backend": {"training": {"learning_rate": 1e-3}}}))
+        registry.update_experiment_status("e-crash", ExperimentStatus.FAILED.value)
+
+        rows = build_censored_outcomes(registry)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.status is ExperimentStatus.FAILED
+    assert row.incident_id is None
+    assert row.signature_kind is None
+    assert row.fingerprint_sha256 is None
+    assert row.executor_name is None
+    assert row.gpu_hours is None
+
+
+def test_production_crash_path_joins_the_persisted_incident(tmp_path):
+    """The end-to-end production contract: a candidate that crashes in
+    training leaves a FAILED censored row carrying the incident's real
+    structured classification, fingerprint, executor, and measured
+    crash-time GPU-hours."""
     registry = RunRegistry(tmp_path / "runs.db")
     engine = EvolutionEngine(_goal(minimum=0.8), _baseline())
     experiment = _experiment("e-crash", {"backend": {"training": {"learning_rate": 1e-3}}})
@@ -187,6 +209,7 @@ def test_failed_experiment_without_persisted_incident_has_none_fields(tmp_path):
     ).run_generation([experiment])
     assert outcome.promoted is None
     assert outcome.candidates[0].error is not None
+    assert outcome.candidates[0].executor_analysis is not None
 
     rows = build_censored_outcomes(registry)
     registry.close()
@@ -194,11 +217,11 @@ def test_failed_experiment_without_persisted_incident_has_none_fields(tmp_path):
     assert len(rows) == 1
     row = rows[0]
     assert row.status is ExperimentStatus.FAILED
-    assert row.incident_id is None
-    assert row.signature_kind is None
-    assert row.fingerprint_sha256 is None
-    assert row.executor_name is None
-    assert row.gpu_hours is None
+    assert row.incident_id is not None
+    assert row.signature_kind == "cuda_execution_failed"
+    assert row.fingerprint_sha256 is not None
+    assert row.executor_name == "fake-trainer"
+    assert row.gpu_hours is not None and row.gpu_hours >= 0.0
 
 
 def test_failed_experiment_joins_recorded_incident_evidence(tmp_path):

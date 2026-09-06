@@ -238,11 +238,15 @@ library implementation or its integration tests.
   policy position: per-arm censoring rate is a first-class signal, spent
   compute on crashed runs is real cost, and any reward model over
   `InterventionOutcome` alone is survivor-biased by construction -- how to
-  combine the two views is explicitly left to the policy layer. Known,
-  honestly-stated gap: no production caller persists executor-failure
-  analyses into `execution_incidents` yet (the recording path exists and
-  is tested; only fixtures call it), so most FAILED rows today carry no
-  classification -- visible as `None`, never imputed.
+  combine the two views is explicitly left to the policy layer. The
+  once-documented gap is closed: `ExperimentCycleRunner` now persists every
+  non-cancelled crash's Executor-Investigator analysis into
+  `execution_incidents` (after the failure is settled; a persistence
+  failure becomes a diagnostic, never a mask over the crash), so FAILED
+  rows from current runs carry a real classification. Absence still
+  occurs -- pre-existing registries, registry-less runs, cancellations
+  (no analysis is built for a deliberate stop), persistence failures --
+  and is visible as `None`, never imputed.
 - Dataset and hardware context (this pass): `InterventionOutcome` now
   carries the dataset identity and scale, and the hardware context beyond
   the single `active_accelerator_count` number, that the Priority-6
@@ -642,10 +646,10 @@ above being stable:
   cross-model transfer of successful training strategies. The required
   hardware/dataset context gaps are closed (dataset identity/scale and
   accelerator context now live in the evidence view); remaining before
-  training a selector: start persisting executor-failure incidents from
-  production runs (the censored view joins them when present), and
-  validate against held-out experiments versus the existing UCB1 baseline
-  with zero hard-gate violations. A durable historical dataset is not
+  training a selector: validate against held-out experiments versus the
+  existing UCB1 baseline with zero hard-gate violations (production runs
+  now persist executor-failure incidents, so the censored view's crash
+  classifications are actual for current runs). A durable historical dataset is not
   itself a learned policy.
 - **Elastic MoE research** (Priority 7) — per-expert load/gradient
   statistics, expert specialization diagnostics, safe expert clone/split
