@@ -94,6 +94,7 @@ def test_supported_version_without_history_table_is_repaired_and_migrated(tmp_pa
             (1, "baseline-version-marker"),
             (2, "execution-incidents"),
             (3, "recursive-recovery-claims"),
+            (4, "teacher-signals"),
         ]
 
 

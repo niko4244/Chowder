@@ -1,6 +1,6 @@
 # Teacher Fabric / Remote Intelligence Distillation — Priority 8 design
 
-Status: **architecture documented; Slice A implemented; Slices B–J not
+Status: **architecture documented; Slices A–B implemented; Slices C–J not
 started.** This document is the design record for the mission brief
 (preserved verbatim at the time of writing in the PR that introduced it).
 Nothing in the "implemented" column may be read as "commissioned": Slice A
@@ -28,9 +28,9 @@ The seams Teacher Fabric composes with, all verified in source:
   Registry evidence rows are append-only (`_insert_immutable`).
 - **Persistence** (`registry.py`): SQLite, append-only tables
   (`experiments`, `training_runs`, `evaluation_runs`, `results`,
-  `execution_incidents`, `run_events`), schema-versioned with migration
-  history. No teacher-related tables exist; Slice B will need one
-  (`teacher_signals`) added through the existing migration path.
+  `execution_incidents`, `run_events`, `teacher_signals`), schema-versioned
+  with migration history. Slice B added `teacher_signals` (an append-only
+  ledger of stored signals, keyed by content address) as migration 4.
 - **Experiment lifecycle** (`cycle.py`, `engine.py`): propose → reserve →
   train → evaluate → `EvolutionEngine.adjudicate()` → hard gate. The gate
   (`gate.evaluate_candidate`) is the sole promotion authority;
@@ -138,7 +138,7 @@ depends on Teacher Fabric; the hard gate never consults it. A disabled
 | Slice | Module(s) | Status |
 |---|---|---|
 | A | `src/chowder/teacher_fabric.py`, `tests/test_teacher_fabric.py` | **implemented** |
-| B | `src/chowder/teacher_signal_store.py` + registry migration | not started |
+| B | `src/chowder/teacher_signal_store.py` + registry migration | **implemented** |
 | C | `src/chowder/teacher_blackbox.py` (Regression Surgeon integration) | not started |
 | D | `src/chowder/teacher_query_controller.py`, ledger extension | not started |
 | E | selected-token scorer protocol + objective-level tests | not started |
@@ -187,9 +187,12 @@ env-gated test class, per regression rules 11/12.
 - **Teacher revision drift** → model/revision is part of every artifact's
   identity and digest; a re-queried teacher at a new revision produces a
   distinguishable artifact, not a silent replacement.
-- **Late/partial results** → artifacts are complete-or-absent (Slice B
-  adds atomic writes + interrupted-write recovery); partial shards are
-  rejected by integrity hash, never merged speculatively.
+- **Late/partial results** → artifacts are complete-or-absent. Slice B
+  implements atomic writes (temp file + `os.replace`) and
+  interrupted-write recovery (temp files and unreferenced payloads swept
+  at store open); a payload that fails its content hash is never served
+  (`verified-or-absent`), and whole-payload integrity is the Slice B
+  primitive — streamed shard *transport* remains F/G work.
 - **Overclaimed capabilities** → negotiation trusts only the declared
   `TeacherCapabilities` block; a provider whose response does not match
   its declared signal kind is a hard error, not a best-effort parse.
@@ -208,11 +211,16 @@ env-gated test class, per regression rules 11/12.
 - Teacher **weights never download locally** as a side effect (rule 3);
   the disk preflight for teacher-enabled projects reasons about signal
   space, not model space.
-- Local cache ceiling is configurable (`teacher_fabric.local_cache_max_gb`);
-  the exact default is a genuine open question — see §16.
-- Artifacts are content-addressed (payload hash + request digest), so
-  dedup is exact, eviction is safe (a re-queried signal is re-derivable),
-  and streamed shards (Slice B) can be validated independently.
+- Local cache ceiling is configurable; Slice B takes it as a **required**
+  `local_cache_max_bytes` constructor argument with no default, and
+  measures its footprint (`disk_bytes`) rather than modeling it (rule 14).
+  The exact default remains a genuine open question — see §16.1.
+- Slice B implements the storage model for whole payloads: artifacts are
+  content-addressed (cache key = digest over request digest + payload-file
+  hash; payload files named by their own sha256), so dedup is exact and
+  eviction is safe (a re-queried signal is re-derivable). The ledger row
+  is evidence and survives eviction; the cache copy is bookkeeping.
+  Streamed shard *transport* is Slice F/G work.
 - Cost accounting is triple-dimension (monetary, token, GPU-hour where
   applicable) because teacher tiers differ in which resource dominates.
 
@@ -225,7 +233,7 @@ env-gated test class, per regression rules 11/12.
 | Tokenizer fail-closed rejection + explicit downgrade | ✔ | E (real scorer) |
 | Request/artifact digest determinism | ✔ | B (dedup), G (idempotency) |
 | Fake provider end-to-end artifact construction | ✔ | C (black-box ops), D (controller), I (multi-teacher) |
-| Local-cache budget/eviction/atomicity | — | B |
+| Local-cache budget/eviction/atomicity | — | B ✔ |
 | Real remote commissioning (env-gated) | — | F |
 | Network-free CI | ✔ (no network anywhere) | enforced every slice |
 
@@ -244,6 +252,23 @@ evidence-gated discipline as every other Chowder claim.
 ## 12–14. Implemented first safe slice (A), tests and results,
 documentation
 
+Slice B is `src/chowder/teacher_signal_store.py` +
+`tests/test_teacher_signal_store.py` (34 tests): the content-addressed,
+budgeted `TeacherSignalStore` with atomic writes, interrupted-write
+recovery, verified-or-absent reads (payload re-hashed on every read;
+corruption raises `SignalIntegrityError`, never serves), exact dedup over
+`(request_digest, payload_file_sha256)`, a required (no-default)
+`local_cache_max_bytes` with measured `disk_bytes()`, explicit
+caller-chosen `discard` (no silent eviction policy — that is Slice D's),
+registry migration 4 adding the append-only `teacher_signals` ledger
+(evidence survives cache eviction; re-acquiring identical evidence after
+eviction replays idempotently — `stored_at` is first-acquisition
+bookkeeping, and genuine divergence raises `RegistryInvariantError`), and
+lossless artifact round-trips including GPU-backed `ResourceUsage`
+(`canonical_payload` now carries `peak_vram_gb_by_accelerator`; nothing
+persisted artifacts before Slice B, so the canonical form change has no
+compatibility surface).
+
 Slice A is `src/chowder/teacher_fabric.py` + `tests/test_teacher_fabric.py`
 (see the introducing PR for exact counts): schemas with fail-closed
 validation, capability negotiation incl. the tokenizer identity gate,
@@ -256,7 +281,7 @@ RESEARCH, Slice A done, B–J not started).
 ## 15. Truthful roadmap status
 
 `docs/ROADMAP.md` RESEARCH section carries Priority 8 with exactly this
-status: Slice A implemented; B–J not started; nothing remote commissioned;
+status: Slices A–B implemented; C–J not started; nothing remote commissioned;
 no claim of student improvement exists anywhere — no student has been
 taught by a remote teacher yet.
 
@@ -265,10 +290,12 @@ taught by a remote teacher yet.
 1. **Local cache default size.** The brief requires a justified default
    for `local_cache_max_gb`. Honest answer: it depends on the user's disk
    pressure vs. re-query cost tradeoff, which we have no data for.
-   **Experiment to design (Slice B):** instrument hit-rate and re-query
-   cost across candidate ceilings (0.25 / 1 / 4 GB) on the Phase A
-   campaign workload once real queries exist; pick the knee, document it
-   as measured, not chosen.
+   Slice B therefore makes `local_cache_max_bytes` a required argument
+   (no default) and exposes the measured footprint (`disk_bytes()`) and
+   hit counters the experiment needs. **Experiment (unruns, not started):**
+   instrument hit-rate and re-query cost across candidate ceilings
+   (0.25 / 1 / 4 GB) on the Phase A campaign workload once real queries
+   exist; pick the knee, document it as measured, not chosen.
 2. **Hidden-projection distillation: now or deferred?** The brief's
    specialist perspectives genuinely disagree: the distillation-researcher
    view values dense representation-level signal; the
@@ -309,6 +336,6 @@ taught by a remote teacher yet.
 
 ## 17. Pull request
 
-The introducing PR contains the regression-safe changes only: Slice A +
+The introducing PRs contain the regression-safe changes only: Slice A +
 this document + the truthful roadmap update, with the full existing test
 suite green and no network code added.

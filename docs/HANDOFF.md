@@ -28,20 +28,29 @@ for it:
   chronological backtest validator vs UCB1 (zero-hard-gate-violations
   check required), the EI/GPU-hour-aware policy itself, and the
   cross-model transfer mechanism.
-- Teacher Fabric: Slice A done; Slices B–J not started. Slice B (teacher
-  signal store) orientation already established these decisions, from
-  `docs/TEACHER_FABRIC.md` §8/§9/§16 and the brief's regression rules:
-  registry migration 4 adds a `teacher_signals` ledger table (append-only
-  via `registry._insert_immutable`, mirroring `_migration_2_execution_
-  incidents`; `database.py` currently at `CURRENT_SCHEMA_VERSION = 3`);
-  payload files are content-addressed by digest with atomic writes and
-  interrupted-write recovery; dedup key = digest over
-  (`request_digest`, payload content hash); **verified-or-absent** (rule
-  #8: corruption is never served, recovery is explicit); `local_cache_
-  max_bytes` is a required argument (no default budget — §16.1 stays
-  genuinely open); streamed shard *transport* belongs to later slices —
-  Slice B implements complete-or-absent integrity only. New module home:
-  `src/chowder/teacher_signal_store.py` per the doc's file plan.
+- Teacher Fabric: Slices A–B done; Slices C–J not started. Slice B
+  (`src/chowder/teacher_signal_store.py`, `tests/test_teacher_signal_store.py`,
+  34 tests) implemented the decisions the orientation had locked in:
+  migration 4 (`teacher_signals` append-only ledger, `database.py` now at
+  `CURRENT_SCHEMA_VERSION = 4`), content-addressed payloads, atomic writes
+  + interrupted-write recovery, verified-or-absent reads, dedup over
+  `(request_digest, payload_file_sha256)`, required no-default
+  `local_cache_max_bytes` with measured `disk_bytes()`. Two refinements
+  the tests forced beyond the orientation decisions: (1) the ledger
+  append is *evidence-idempotent* — re-acquiring identical evidence after
+  cache eviction replays idempotently (`stored_at` stays first-acquisition;
+  genuine divergence raises `RegistryInvariantError`); (2) the store's
+  payload-file hash is named `payload_file_sha256`, deliberately distinct
+  from Slice A's `TeacherSignalArtifact.payload_content_sha256`
+  (signal-payload digest) — different identities must not share a name.
+  `canonical_payload()` now carries `peak_vram_gb_by_accelerator` so
+  GPU-backed artifacts round-trip losslessly (no compatibility surface:
+  nothing persisted artifacts before Slice B). Cache-lookups skip corrupt
+  entries; `load` fails loudly. Eviction is explicit `discard` only —
+  no silent policy (that is Slice D's decision). Next slice: C
+  (`teacher_blackbox.py`, Regression Surgeon integration) per the file
+  plan; §16.1's hit-rate experiment remains unruns until real queries
+  exist.
 - The expected-improvement selector (626-line module + 38 tests, honest
   "alternative selector, not shown to beat UCB1" status) is rescued on
   pushed branch `claude/expected-improvement-rescue` (`50170bd`, based on
@@ -69,6 +78,13 @@ for it:
   `gh pr merge <n> --squash --delete-branch` — never `--admin`, never
   bypass branch protection. Confirm post-merge CI on `main` before
   reporting a session done.
+- Editing files under this worktree: `read_files`/`str_replace` cannot
+  address dot-directory paths; use `write_file` with the full path, or a
+  temp edit script (`_slice_b_*.py` pattern: assert every anchor, run,
+  delete) for in-place multi-edits. Bash heredocs get CRLF-mangled in
+  transit here — prefer the temp-script route for anything multiline.
+- Test count after Slice B: 1009 passed / 71 skipped on this worktree's
+  `main` (was 975/71 before).
 - Commit messages end `Co-Authored-By: Claude Sonnet 5
   <noreply@anthropic.com>`; PR descriptions end with the Claude Code
   attribution line; branch naming `claude/<slug>`; one focused PR per
