@@ -545,3 +545,17 @@ above being stable:
   statistics, expert specialization diagnostics, safe expert clone/split
   experiments, router retraining/distillation, architecture-change
   promotion gates kept behind strict regression and compute-budget gates.
+  docs/MOE_DOWNSIZING.md's "First implementation slice" (Phase A/B: audit,
+  calibration capture, `expert_importance.jsonl`, dry-run pruning plan) is
+  now real code (`src/chowder/moe_instrumentation.py`,
+  `chowder moe expert-importance`), verified against the actual installed
+  transformers==5.16.1 Qwen3Moe/Qwen3_5Moe/Olmoe source (a fused
+  batched-expert design, not per-expert submodules — see that doc's Phase A
+  section) and real-hardware-validated end to end against the local
+  OLMoE-1B-7B checkpoint (16 layers × 64 experts, real router hooks, real
+  per-expert gated-activation/output-norm math, real dry-run 75%/50%
+  pruning plans). What remains genuinely open: no local Qwen3.6-35B-A3B
+  checkpoint exists on this machine (exhaustively searched), so the actual
+  named target is not yet commissioned — only the mechanism is proven, on a
+  real architecturally-equivalent stand-in. Phases C–F (budget search,
+  distillation, mixed precision, promotion gates) have not started.

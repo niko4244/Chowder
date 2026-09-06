@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from dataclasses import asdict
+from pathlib import Path
 
 from .calibration import calibrate_hardware
 from .hardware import detect_hardware
@@ -132,6 +133,87 @@ def _doctor_unsloth(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def _moe_expert_importance(args: argparse.Namespace) -> int:
+    import torch
+    import transformers
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from .hf_resilience import resolve_model_source
+    from .moe_instrumentation import (
+        DEFAULT_CALIBRATION_TEXTS,
+        run_calibration,
+        write_expert_importance_jsonl,
+    )
+    from .moe_planning import ImportanceWeights, build_uniform_pruning_plan
+
+    model_source = resolve_model_source(args.model)
+    device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
+    tokenizer = AutoTokenizer.from_pretrained(model_source)
+    model = AutoModelForCausalLM.from_pretrained(model_source, dtype=torch.bfloat16, device_map=device)
+
+    if args.calibration_file:
+        texts = [
+            line
+            for line in Path(args.calibration_file).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    else:
+        texts = list(DEFAULT_CALIBRATION_TEXTS)
+
+    audit, records = run_calibration(model, tokenizer, texts, device=device, max_length=args.max_length)
+    write_expert_importance_jsonl(
+        args.output,
+        audit=audit,
+        records=records,
+        model_source=model_source,
+        calibration_texts=texts,
+        transformers_version=transformers.__version__,
+    )
+
+    summary: dict[str, object] = {
+        "model_type": audit.model_type,
+        "num_hidden_layers": audit.num_hidden_layers,
+        "moe_layer_count": len(audit.moe_layers),
+        "dense_layer_indices": list(audit.dense_layer_indices),
+        "expert_importance_path": str(args.output),
+    }
+    if args.plan_dir:
+        plan_dir = Path(args.plan_dir)
+        plan_dir.mkdir(parents=True, exist_ok=True)
+        plan_paths: dict[str, str] = {}
+        for retention in args.retention:
+            plan = build_uniform_pruning_plan(
+                records,
+                retention_fraction=retention,
+                minimum_survivors_per_layer=args.minimum_survivors,
+                weights=ImportanceWeights(),
+            )
+            plan_path = plan_dir / f"pruning_plan_retention_{retention:.2f}.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "requested_retention_fraction": plan.requested_retention_fraction,
+                        "actual_retention_fraction": plan.actual_retention_fraction,
+                        "layers": [
+                            {
+                                "layer": layer.layer,
+                                "total_experts": layer.total_experts,
+                                "keep_experts": list(layer.keep_experts),
+                                "remove_experts": list(layer.remove_experts),
+                            }
+                            for layer in plan.layers
+                        ],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            plan_paths[str(retention)] = str(plan_path)
+        summary["pruning_plans"] = plan_paths
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chowder",
@@ -224,6 +306,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip optional CUDA transfer measurement",
     )
     calibrate.set_defaults(func=_hardware_calibrate)
+
+    moe = sub.add_parser("moe", help="Elastic MoE downsizing research tooling")
+    moe_targets = moe.add_subparsers(dest="moe_target", required=True)
+    expert_importance = moe_targets.add_parser(
+        "expert-importance",
+        help="Audit a local MoE checkpoint's router/expert structure and emit "
+        "expert_importance.jsonl plus dry-run pruning plans (no model surgery)",
+    )
+    expert_importance.add_argument("--model", required=True, help="Local model directory or HF repo id")
+    expert_importance.add_argument("--output", required=True, help="Path to write expert_importance.jsonl")
+    expert_importance.add_argument(
+        "--calibration-file",
+        default=None,
+        help="Optional file of one calibration text per line; defaults to a small built-in corpus",
+    )
+    expert_importance.add_argument("--max-length", type=int, default=512)
+    expert_importance.add_argument("--cpu", action="store_true", help="Force CPU even if CUDA is available")
+    expert_importance.add_argument(
+        "--plan-dir",
+        default=None,
+        help="Optional directory to write dry-run pruning plan JSON files",
+    )
+    expert_importance.add_argument("--retention", type=float, nargs="+", default=[0.75, 0.5])
+    expert_importance.add_argument("--minimum-survivors", type=int, default=1)
+    expert_importance.set_defaults(func=_moe_expert_importance)
     return parser
 
 
