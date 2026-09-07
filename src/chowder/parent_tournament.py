@@ -344,7 +344,7 @@ def evaluate_parent(
     output_root: str | Path,
     device: str = "cuda:0",
     quantization: str = "4bit",
-    precision: str = "bfloat16",
+    precision: str = "bf16",
     seed: int = 20260907,
     timeout_seconds: float | None = None,
 ) -> ParentRunResult:
@@ -464,7 +464,7 @@ def run_tournament(
     output_root: str | Path,
     device: str = "cuda:0",
     quantization: str = "4bit",
-    precision: str = "bfloat16",
+    precision: str = "bf16",
     seed: int = 20260907,
     timeout_seconds: float | None = None,
 ) -> dict[str, Any]:

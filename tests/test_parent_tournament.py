@@ -220,3 +220,33 @@ def test_real_worker_payload_mirrors_suite_fields(fake_torch_env, frozen_root, t
                 "use_chat_template",
             }
             assert suite["use_chat_template"] is True
+
+
+def test_worker_payload_defaults_are_accepted_by_the_real_base_text_spec(
+    fake_torch_env, frozen_root, tmp_path
+):
+    """Regression test for a real bug: run_tournament/evaluate_parent defaulted
+    precision="bfloat16", but BaseTextEvalSpec.__post_init__ only accepts
+    {"auto", "bf16", "fp16", "fp32"} (the convention every other backend/
+    evaluator in this codebase uses) -- so the very first real tournament
+    attempt failed inside the worker subprocess with `ValueError: unsupported
+    baseline precision: bfloat16`, before any model ever loaded. This test
+    round-trips the exact dict `_worker_spec_payload` builds through the real
+    `BaseTextEvalSpec` constructor (no GPU, no model, no subprocess) so a
+    future default drifting out of the accepted set fails fast in CI instead
+    of only surfacing after a real multi-GB model load."""
+    from chowder.evaluators.base_text import BaseTextEvalSpec
+    from chowder.evaluators.transformers_text import EvalSuiteSpec
+
+    parent_a, parent_b = fake_torch_env["parents"]
+    calls = fake_torch_env["calls"]
+    with RunRegistry(tmp_path / "registry.db") as registry:
+        pt.run_tournament(registry, (parent_a, parent_b), frozen_root, output_root=tmp_path / "runs")
+    assert calls, "fake worker never called"
+    for payload in calls:
+        raw = dict(payload)
+        # Exact conversion base_text_worker.main() performs before
+        # constructing BaseTextEvalSpec -- see that function for why suites
+        # must be real EvalSuiteSpec objects, not plain dicts, by this point.
+        raw["suites"] = tuple(EvalSuiteSpec(**row) for row in raw["suites"])
+        BaseTextEvalSpec(**raw)  # raises on an invalid precision/quantization/etc.
