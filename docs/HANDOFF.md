@@ -14,14 +14,62 @@ for it:
   [`TEACHER_FABRIC_BRIEF.md`](TEACHER_FABRIC_BRIEF.md) — read it before
   any Teacher Fabric slice; it is the source of the non-negotiable rules.
 
-## Current state (updated 2026-09-06)
+## Current state (updated 2026-09-07)
 
-- `main` = `ee9df2a`, CI green post-merge, zero open PRs.
-- Recent merges, this session: #109 (`training_engine` evidence field),
+- `main` = `a79e171` (PR #129 merged); PR #130 open with CI running
+  (chat-format Unsloth parity — expect it merged by the time you read
+  this, check `gh pr list`/`gh pr checks 130` for real).
+- **Real A/B parent tournament: in progress, not yet complete.** The
+  first real execution attempt (both 27B parents, frozen suite v1,
+  4-bit/cuda:0) failed at worker-spec-validation time before any model
+  loaded: `evaluate_parent`/`run_tournament` defaulted
+  `precision="bfloat16"`, but `BaseTextEvalSpec` only accepts
+  `{"auto","bf16","fp16","fp32"}` (the convention every other backend in
+  this repo already uses) — fixed and regression-tested in PR #129
+  (merged). A retry (`/tmp/run_tournament_ab.py`, output root
+  `C:\Users\nikma\Chowder-Protected\runs\ab-20260907-retry1`, registry
+  `C:\Users\nikma\Chowder-Protected\tournament-ab.registry.db`, log
+  `C:\Users\nikma\AppData\Local\Temp\tournament_ab.log`) was launched in
+  the background and was still running at last check (real, ongoing CPU
+  and GPU activity confirmed — not stalled — but this machine hashes two
+  ~52 GiB checkpoints' full manifests sequentially before any GPU work
+  even starts, so this genuinely takes a long time). **Check that log and
+  the output directory for real DONE/FAILED status before assuming
+  anything about the result** — if it's still running, let it finish or
+  relaunch it; if it failed with a new defect, fix it the same way (real
+  regression test, then rerun) rather than working around it.
+- **Track B (Unsloth chat-format parity) done, PR #130**: the isolated
+  Unsloth worker previously supported text-format datasets only. Now
+  `unsloth_peft.py` (controller-side) pre-renders every chat row through
+  the exact shared contract `transformers_worker.py` uses
+  (`training_data._validate_chat_messages`/`_build_chat_example`) into a
+  content-addressed, pretokenized JSONL handoff file *before* the
+  isolated worker ever starts — the worker's chat path is just "load
+  three already-tokenized columns," with zero chat-template/masking
+  logic of its own, so there is no code path where Unsloth's semantics
+  could drift from Transformers'. 15 new tests, including the exact
+  regression cases the Qwen3.8 program directive named (multi-turn,
+  system prompt, multiple assistant turns, empty-assistant-content — a
+  real finding: still produces real turn-marker labels, not "nothing to
+  train on" — Unicode, truncation before/inside the assistant response,
+  malformed role, no assistant turn, long conversation).
+- **Not started yet** (per the Qwen3.8 program directive's own PR
+  ordering): Track C (Unsloth parent-adapter continuation), Track D
+  (Unsloth replay/rehearsal), Track E (full recursive-repair acceptance
+  through Unsloth), Track F (campaign manifest/config). Do these next,
+  in that order, once the tournament run and PR #130 are confirmed
+  landed.
+- Recent merges, prior session: #109 (`training_engine` evidence field),
   #110 (censored-outcome view `censored_outcomes.py`), #111 (Teacher
   Fabric Slice A: `teacher_fabric.py` + `docs/TEACHER_FABRIC.md`),
   #112 (dataset identity/scale + accelerator context in
-  `intervention_outcomes.py` — closed the Priority-6 context-gap item).
+  `intervention_outcomes.py` — closed the Priority-6 context-gap item),
+  #113–#128 (Qwen3.8 program retarget, parent A/B acquisition, protected
+  nine-dimension suite content, campaign scoreboard + Fable reference,
+  Phase 6 dense→MoE converter, Phase 11 parameter accounting, the parent
+  tournament orchestrator itself — see `docs/ROADMAP.md`'s "Qwen3.8
+  Native Sparse Program" entry for the full, current, evidence-cited
+  state; this doc does not restate it).
 - **Model program retarget (2026-09-06):** the primary model target is
   now the Qwen3.8 Native Sparse Program
   (`docs/QWEN38_SPARSE_PROGRAM.md`). Read that doc before any Qwen

@@ -18,14 +18,25 @@ from ..provenance import sha256_directory, sha256_file
 from ..resources import ResourceUsage
 from ..run_events import TrainingProgressEvent
 from ..unsloth_env import unsloth_env_dir, unsloth_python
-from .training_data import _verify_bound_input
+from .training_data import (
+    _build_chat_example,
+    _chat_digest,
+    _validate_chat_messages,
+    _verify_bound_input,
+)
 
 # Initial, minimal scope (see docs -- the isolated Unsloth executor plan):
-# one NVIDIA GPU, PEFT LoRA/QLoRA, standard PEFT adapter output, text-format
-# datasets only. Chat-format datasets and continuing from a parent adapter
-# are deliberately out of scope here and land in a follow-up slice once the
-# cross-environment data-handoff question (the isolated env cannot import
-# chowder.backends.training_data directly) is resolved. Chowder's own
+# one NVIDIA GPU, PEFT LoRA/QLoRA, standard PEFT adapter output. Continuing
+# from a parent adapter is deliberately out of scope here and lands in a
+# follow-up slice. Chat-format datasets are supported via a deterministic
+# controller-side handoff (see _materialize_pretokenized_chat_dataset):
+# the isolated Unsloth worker cannot import chowder.backends.training_data
+# directly, so this module renders every row through that exact shared
+# contract *before* handoff and hands the worker already-tokenized
+# {input_ids, attention_mask, labels} rows instead of raw messages -- the
+# worker never sees a chat template or masking decision, so there is no
+# code path where it could drift from the Transformers backend's semantics.
+# Chowder's own
 # activation_offload/optimizer_tiering/frozen_layer_streaming are refused
 # outright under this engine -- none of them have been verified against
 # Unsloth's own patched model/attention implementation, and a silent no-op
@@ -57,7 +68,16 @@ class UnslothPeftRunSpec:
     output_dir: str
     dataset_sha256: str | None = None
     revision: str | None = None
+    dataset_format: str = "text"
     text_field: str = "text"
+    messages_field: str = "messages"
+    # Internal, never user-configured: True once _spec_for has replaced
+    # dataset/dataset_sha256 with the materialized pretokenized handoff
+    # file for a dataset_format="chat" run. Tells the worker the dataset
+    # already has {input_ids, attention_mask, labels} columns.
+    pretokenized: bool = False
+    chat_total_token_count: int | None = None
+    chat_assistant_token_count: int | None = None
     max_length: int = 512
     epochs: float = 1.0
     max_steps: int = -1
@@ -85,8 +105,12 @@ class UnslothPeftRunSpec:
             raise ValueError("backend.dataset is required")
         if self.dataset_sha256 is not None and len(self.dataset_sha256) != 64:
             raise ValueError("backend.dataset_sha256 must be a SHA-256 digest")
+        if self.dataset_format not in {"text", "chat"}:
+            raise ValueError(f"unsupported dataset_format: {self.dataset_format}")
         if not self.text_field.strip():
             raise ValueError("backend.text_field cannot be empty")
+        if self.dataset_format == "chat" and not self.messages_field.strip():
+            raise ValueError("backend.messages_field cannot be empty")
         if self.max_length <= 0:
             raise ValueError("backend.max_length must be positive")
         if self.epochs <= 0 or self.learning_rate <= 0:
@@ -175,7 +199,9 @@ class UnslothPeftRunSpec:
             output_dir=str(output_dir),
             dataset_sha256=backend.get("dataset_sha256"),
             revision=backend.get("revision"),
+            dataset_format=str(backend.get("dataset_format", "text")),
             text_field=str(backend.get("text_field", "text")),
+            messages_field=str(backend.get("messages_field", "messages")),
             max_length=int(backend.get("max_length", 512)),
             epochs=float(training.get("epochs", 1.0)),
             max_steps=int(training.get("max_steps", -1)),
@@ -200,6 +226,99 @@ class UnslothPeftRunSpec:
             ),
             resume_from_checkpoint=resume_from_checkpoint,
         )
+
+
+def _materialize_pretokenized_chat_dataset(
+    spec: UnslothPeftRunSpec, *, work_dir: str | Path
+) -> tuple[str, str, int, int]:
+    """Render every row of a dataset_format="chat" dataset into
+    {input_ids, attention_mask, labels} via the exact same shared contract
+    transformers_worker.py uses (chowder.backends.training_data's
+    _validate_chat_messages/_build_chat_example), then write it out as a
+    plain JSONL file the isolated worker can load with zero chat-template
+    or masking logic of its own.
+
+    Returns (pretokenized_path, pretokenized_sha256, total_token_count,
+    assistant_token_count). Content-addressed by (dataset content, base
+    model + revision, max_length): re-running with identical inputs reuses
+    the cached file rather than re-tokenizing, but any real change to any
+    of those inputs produces a different cache key -- never a stale hit.
+
+    Requires `transformers`/`datasets` to be importable in the *controller*
+    process (not the isolated Unsloth env) -- this is the deliberate
+    design this cross-environment handoff calls for: pre-render in the
+    environment that can import the shared tokenization contract, hand the
+    isolated environment already-tokenized rows it needs no chat-aware code
+    to consume.
+    """
+    from datasets import load_dataset
+    from transformers import AutoTokenizer
+
+    dataset_sha256 = _verify_bound_input(spec.dataset, spec.dataset_sha256, label="training")
+    cache_key = hashlib.sha256(
+        json.dumps(
+            {
+                "dataset_sha256": dataset_sha256,
+                "base_model": spec.base_model,
+                "revision": spec.revision,
+                "max_length": spec.max_length,
+                "messages_field": spec.messages_field,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    cache_dir = Path(work_dir) / ".chowder" / "_unsloth_chat_handoff"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{cache_key}.jsonl"
+    meta_path = cache_dir / f"{cache_key}.meta.json"
+    if cache_path.is_file() and meta_path.is_file():
+        cached_sha = sha256_file(cache_path)
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta.get("pretokenized_sha256") == cached_sha:
+            return (
+                str(cache_path),
+                cached_sha,
+                int(meta["total_token_count"]),
+                int(meta["assistant_token_count"]),
+            )
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        spec.base_model, revision=spec.revision, local_files_only=spec.offline
+    )
+    raw = load_dataset("json", data_files=spec.dataset, split="train")
+    if spec.messages_field not in raw.column_names:
+        raise UnslothConfigError(
+            f"chat dataset is missing messages field {spec.messages_field!r}; "
+            f"columns={raw.column_names}"
+        )
+    _chat_digest(raw, spec.messages_field)  # validated as a real digest input; not persisted here
+
+    total_token_count = 0
+    assistant_token_count = 0
+    tmp_path = cache_path.with_suffix(".jsonl.tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        for index in range(len(raw)):
+            messages = _validate_chat_messages(raw[index][spec.messages_field], row_index=index)
+            example = _build_chat_example(
+                tokenizer, messages, max_length=spec.max_length, row_index=index
+            )
+            total_token_count += len(example["input_ids"])
+            assistant_token_count += sum(1 for label in example["labels"] if label != -100)
+            handle.write(json.dumps(example) + "\n")
+    tmp_path.replace(cache_path)
+
+    pretokenized_sha256 = sha256_file(cache_path)
+    meta_path.write_text(
+        json.dumps(
+            {
+                "pretokenized_sha256": pretokenized_sha256,
+                "total_token_count": total_token_count,
+                "assistant_token_count": assistant_token_count,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(cache_path), pretokenized_sha256, total_token_count, assistant_token_count
 
 
 class UnslothPeftExecutor:
@@ -388,6 +507,24 @@ class UnslothPeftExecutor:
         primary_sha = _verify_bound_input(spec.dataset, spec.dataset_sha256, label="training")
         if spec.dataset_sha256 is None:
             spec = replace(spec, dataset_sha256=primary_sha)
+        if spec.dataset_format == "chat":
+            # Pre-render every row into {input_ids, attention_mask, labels}
+            # in this (controller) process, then repoint the spec at that
+            # materialized file -- every downstream consumer (checkpoint
+            # manifest binding, bound_inputs, the worker's own re-verify,
+            # evidence) now sees the pretokenized file's own real digest,
+            # with no special-casing needed anywhere else in this class.
+            path, sha, total_tokens, assistant_tokens = _materialize_pretokenized_chat_dataset(
+                spec, work_dir=context.work_dir
+            )
+            spec = replace(
+                spec,
+                dataset=path,
+                dataset_sha256=sha,
+                pretokenized=True,
+                chat_total_token_count=total_tokens,
+                chat_assistant_token_count=assistant_tokens,
+            )
         return spec
 
     def run(self, experiment: Experiment, context: ExecutionContext) -> TrainingArtifact:
@@ -496,7 +633,11 @@ class UnslothPeftExecutor:
                 "backend": self.name,
                 "engine": "unsloth",
                 "execution_spec_sha256": spec.digest(),
+                "dataset_format": spec.dataset_format,
                 "dataset_sha256": primary_sha,
+                "pretokenized": spec.pretokenized,
+                "chat_total_token_count": spec.chat_total_token_count,
+                "chat_assistant_token_count": spec.chat_assistant_token_count,
                 "artifact_sha256": sha256_directory(spec.output_dir),
                 "resolved_config_sha256": hashlib.sha256(
                     json.dumps(context.resolved_config, sort_keys=True, default=str).encode(
