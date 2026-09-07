@@ -699,8 +699,16 @@ above being stable:
   generated and merged
   ([`docs/PHASE6_CONVERSION_PLAN.md`](PHASE6_CONVERSION_PLAN.md), PR
   #120): partition-conversion of the dense FFN's intermediate dimension
-  into experts, bit-exact at init by construction and verified by a
-  tiny-random CI harness; the transformation itself has not run.
+  into experts. The converter and exactness harness are implemented
+  (`src/chowder/dense_to_moe.py`, `src/chowder/conversion_exactness.py`;
+  validation-ladder stages 1–2 done — tiny-fixture forward measured
+  within the documented association gate, f32 max_abs 1.341e-07 / bf16
+  1.953e-03, bitwise dense recovery, exactly uniform routers — and the
+  real fusion code path exercised on parent A's actual layer-0 bytes).
+  Two plan claims were corrected as implementation errata (top-k = E is
+  required for init exactness; only down_proj carries the ×E scaling).
+  The full parent-A conversion has not run (~52 GiB output; a disk
+  decision).
   Phase 11 accounting is implemented
   (`src/chowder/parameter_accounting.py`): real safetensors-header
   census (stdlib-only, index cross-checked, fail-closed on unknown

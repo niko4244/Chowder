@@ -100,9 +100,13 @@ for it:
   temp edit script (`_slice_b_*.py` pattern: assert every anchor, run,
   delete) for in-place multi-edits. Bash heredocs get CRLF-mangled in
   transit here — prefer the temp-script route for anything multiline.
-- Test count after the parent-eval harness slice: 1082 passed / 71
-  skipped on this worktree's `main` (was 1016/71 after incident
-  persistence, 1009/71 after Slice B, 975/71 before it).
+- Test count after the dense→MoE conversion slice: 1145 passed / 76
+  skipped on this worktree's `main` (was 1124/71 after Phase 11
+  accounting, 1082/71 after the parent-eval harness slice, 1016/71
+  after incident persistence). The +5 gated skips are
+  `tests/test_conversion_exactness.py` (run locally with
+  `CHOWDER_REAL_ML_SMOKE=1`; all 5 pass on this box, including the
+  real-parent-A stage-2 test).
 - Parent A acquisition (**complete and verified**, 2026-09-06):
   `Qwen/Qwen3.8-27B` @ pin `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0`
   fully downloaded to `F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B`
@@ -120,13 +124,19 @@ for it:
   numbers; evidence JSON for parent A lives beside the model
   (`Qwen3.8-27B.accounting.json`). Measured parent A truth: 27.78B
   total; dense floor 9.78B active/token (10.21B with MTP).
-- Phase 6 plan (PR #120, merged): docs/PHASE6_CONVERSION_PLAN.md is the
-  authority for dense→MoE conversion design. Verified module facts live
-  in its section 1 (dense `Qwen3_5MLP` → `Qwen3_5MoeSparseMoeBlock`,
-  fused 3D `Qwen3_5MoeExperts`, renormalizing `TopKRouter`); the
-  planned implementation modules are `dense_to_moe.py` and
-  `conversion_exactness.py`. Do not start the converter before parent A
-  verifies clean on disk.
+- Phase 6 conversion implemented (stages 1–2 of the plan's validation
+  ladder): `src/chowder/dense_to_moe.py` (stdlib-only byte-surgery
+  converter; multi-shard MLP triples — parent A layer 15 straddles
+  shards, 63/64 co-locate) and `src/chowder/conversion_exactness.py`
+  (torch-gated harness). Two plan claims were disproven by
+  implementation and are recorded as errata in
+  docs/PHASE6_CONVERSION_PLAN.md: top-1 rungs are NOT init-exact
+  (top-k = E is required with the stock router), and only down_proj may
+  carry the ×E scaling (silu is not positively homogeneous). Measured
+  init-forward deviation: f32 max_abs 1.341e-07, bf16 1.953e-03, with
+  bitwise dense recovery and exactly uniform routers in both. The full
+  parent-A conversion (stage 3/4, ~52 GiB output) has NOT run — that is
+  a disk-acquisition decision.
 - Program state (2026-09-06): parent B
   (`orcarouter/Qwen3.8-27B-Uncensored`) auto-gate **cleared** via the
   account's HF token (account `NIKO42`, stored only in the local HF

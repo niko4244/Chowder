@@ -129,6 +129,39 @@ identical across rungs** and only routing granularity changes:
 | P6-B | 16 | 1 | 1088 | bit-exact | +0.96 GB |
 | P6-C | 32 | 1 | 544 | bit-exact | +1.04 GB |
 
+### Errata from implementation (stages 1–2, measured — do not trust the table's last column above)
+
+Implementation (stages 1–2 below) proved two claims in this plan wrong,
+and the honest corrections change the init geometry:
+
+1. **Top-1 rungs are NOT init-output-preserving (erratum to §2 rule 2).**
+   A dense FFN output is the sum over ALL intermediate channels, so any
+   top-k < E drops the unselected groups' contributions. Init exactness
+   with the stock `TopKRouter` requires **top-k = E** (zero router →
+   exactly uniform 1/E selection). Per-channel token-conditional routing
+   (selecting the groups owning a token's largest channels) requires a
+   custom router — deferred to the healing phase, not assumed.
+2. **Only the linear leg may be pre-scaled (silu is not positively
+   homogeneous).** Scaling gate rows by E would scale `silu(E·a) ≠
+   E·silu(a)` — a different function. The implemented exact scheme:
+   gate/up slices fused **verbatim**, down columns scaled ×E by exact
+   exponent shift (bf16/f16) or value multiply (f32/f64). Then
+   `Σ_e (1/E)·down_e·(silu(gate_e·x)·(up_e·x)) = Σ_j down[:,j]·silu(gate_j·x)·(up_j·x)`
+   — the dense sum, exactly, channel partition being disjoint.
+
+**Measured init forward deviation** (tiny fixture, E=8, documented gate
+parameter per §5.2 — float association, since the MoE sums E partial
+reductions where the dense path does one):
+
+| dtype | max_abs | max_rel | router uniform | dense recovery |
+|---|---|---|---|---|
+| float32 | 1.341e-07 (~1 ulp) | 2.6e-04 | exact (0.0) | bitwise |
+| bfloat16 | 1.953e-03 (~½ ulp) | 1.1e+00 | exact (0.0) | bitwise |
+
+The init-exact claim therefore holds **up to float-association noise on
+the forward**, with weights recovering from the converted checkpoint to
+the dense source **bit for bit** (the stronger, must-hold property).
+
 (The real Qwen3.5-MoE geometry — 256 experts × 512, top-8 — is the
 far end of the same axis and stays out of scope until the machinery is
 proven; jumping there first would confound routing discovery with
@@ -168,20 +201,29 @@ guesses (`MoeArchitectureAuditError` pattern), and no fabricated evidence.
    - CLI: `chowder moe dense-to-moe --source <dir> --experts 8 --out <dir>
      [--profile-only]` (profile-only plans and budgets without writing).
 2. **`src/chowder/conversion_exactness.py`** — the proof harness.
-   Builds a **tiny random dense** `qwen3_5` (2 layers, H=64, FFN=192 — no
-   download needed, CI-runnable), converts it, loads both on CPU, and
-   asserts output equality on fixed inputs, plus dense-recovery from the
-   partition map. Any drift raises `ConversionExactnessError` — hard stop,
-   never a tolerance widened to make a test pass. If bf16 CPU arithmetic
-   turns out to be non-bitwise across paths (to be measured, not assumed),
-   the harness records the observed max deviation and it becomes an
-   explicit, documented gate parameter.
+   Builds a **tiny random composite** `qwen3_5` (2 text layers + a tiny
+   real vision tower, matching the real checkpoints' key layout —
+   `model.language_model.layers.*` / `mtp.*` / `model.visual.*`), converts
+   it, loads both through the real transformers classes, and **measures**
+   forward equality on fixed inputs plus dense recovery compared directly
+   against the dense source checkpoint. Must-holds (recovery bitwise,
+   router exactly uniform at zero logits) raise `ConversionExactnessError`
+   — hard stop, never a tolerance widened to make a test pass. Forward
+   deviation is *reported*, and gated by the documented association bound
+   recorded in the errata above (a fixture test enforces the gate).
 3. **Validation ladder** (each stage persisted in the registry):
-   1. tiny-random conversion in CI (exactness + invertibility),
-   2. small real dense checkpoint → conversion → exactness on CPU,
-   3. parent A profile-only dry run (budgets, no writes),
+   1. tiny-random conversion in CI (exactness + invertibility) — **DONE**
+      (`tests/test_conversion_exactness.py`, gated on CHOWDER_REAL_ML_SMOKE;
+      measured numbers in the errata table above),
+   2. real dense checkpoint → conversion machinery on real weights →
+      exactness — **DONE at layer-0 scope**: `plan_conversion` runs on the
+      real cached parent A and the gated stage-2 test exercises the real
+      fusion code path on real layer-0 bytes (multi-shard-capable since
+      parent A layer 15 straddles shards — 63/64 co-locate),
+   3. parent A profile-only dry run (budgets, no writes) — not started,
    4. parent A real conversion → full manifest → `audit_moe_architecture`
-      on the loaded result → loading smoke on the RTX 5060 Ti.
+      on the loaded result → loading smoke on the RTX 5060 Ti — not started
+      (~52 GiB output; a real disk-acquisition decision).
 4. **Reuse, not re-invention**: `moe_instrumentation.audit_moe_architecture`
    validates the converted model's shape before it is trusted;
    `MoeCalibrationRecorder` + `chowder moe expert-importance` instrument
