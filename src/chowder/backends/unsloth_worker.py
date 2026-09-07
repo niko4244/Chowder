@@ -7,10 +7,14 @@ environment intentionally shares no packages with Chowder's own tested
 Transformers/PEFT/TRL stack). It is invoked by absolute file path
 (`<isolated-python> unsloth_worker.py --spec ... --result ...`), never as
 `-m chowder.backends.unsloth_worker`, and must not import anything from the
-`chowder` package. This is why it cannot yet reuse
-chowder.backends.training_data's chat-tokenization contract -- text-format
-datasets only in this initial slice; chat-format support is a follow-up
-once that cross-environment handoff is designed.
+`chowder` package. This is why chat-format datasets are never tokenized
+here: `unsloth_peft.py` (controller-side, where `chowder.backends.
+training_data`'s chat-tokenization contract IS importable) pre-renders
+every row into `{input_ids, attention_mask, labels}` using that exact
+shared contract before handoff, so this worker's chat path is just
+"load already-tokenized rows" -- spec.pretokenized=True means the dataset
+file has those three columns already and no chat template, message
+validation, or assistant-masking logic exists in this file at all.
 """
 from __future__ import annotations
 
@@ -50,6 +54,7 @@ class _Spec:
     dataset_sha256: str | None
     revision: str | None
     text_field: str
+    pretokenized: bool
     max_length: int
     epochs: float
     max_steps: int
@@ -98,6 +103,7 @@ def train(spec: _Spec) -> dict[str, Any]:
     from datasets import load_dataset
     from transformers import (
         DataCollatorForLanguageModeling,
+        DataCollatorForSeq2Seq,
         Trainer,
         TrainerCallback,
         TrainingArguments,
@@ -134,25 +140,43 @@ def train(spec: _Spec) -> dict[str, Any]:
     resolved_target_modules = sorted(model.peft_config[model.active_adapter].target_modules)
 
     dataset = load_dataset("json", data_files=spec.dataset, split="train")
-    if spec.text_field not in dataset.column_names:
-        raise RuntimeError(
-            f"dataset is missing text field {spec.text_field!r}; "
-            f"columns={dataset.column_names}"
-        )
-    dataset = dataset.select_columns([spec.text_field])
     if len(dataset) == 0:
         raise RuntimeError("training dataset contains no rows")
 
-    def tokenize(batch: dict[str, Any]) -> dict[str, Any]:
-        return tokenizer(
-            batch[spec.text_field],
-            truncation=True,
-            max_length=spec.max_length,
-            padding=False,
+    if spec.pretokenized:
+        # Chat-format handoff: unsloth_peft.py already rendered every row
+        # through chowder.backends.training_data's shared chat-tokenization
+        # contract (the same one transformers_worker.py uses), so these
+        # columns are already real input_ids/attention_mask/completion-only
+        # labels -- no text_field, no chat template, no masking logic here.
+        required = {"input_ids", "attention_mask", "labels"}
+        if not required.issubset(dataset.column_names):
+            raise RuntimeError(
+                f"pretokenized dataset is missing required columns; "
+                f"need {sorted(required)}, have {dataset.column_names}"
+            )
+        tokenized = dataset.select_columns(sorted(required))
+        collator = DataCollatorForSeq2Seq(
+            tokenizer=tokenizer, model=None, label_pad_token_id=-100, padding=True
         )
+    else:
+        if spec.text_field not in dataset.column_names:
+            raise RuntimeError(
+                f"dataset is missing text field {spec.text_field!r}; "
+                f"columns={dataset.column_names}"
+            )
+        dataset = dataset.select_columns([spec.text_field])
 
-    tokenized = dataset.map(tokenize, batched=True, remove_columns=dataset.column_names)
-    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+        def tokenize(batch: dict[str, Any]) -> dict[str, Any]:
+            return tokenizer(
+                batch[spec.text_field],
+                truncation=True,
+                max_length=spec.max_length,
+                padding=False,
+            )
+
+        tokenized = dataset.map(tokenize, batched=True, remove_columns=dataset.column_names)
+        collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
     output_dir = Path(spec.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -263,6 +287,7 @@ def main() -> int:
         dataset_sha256=raw.get("dataset_sha256"),
         revision=raw.get("revision"),
         text_field=raw.get("text_field", "text"),
+        pretokenized=bool(raw.get("pretokenized", False)),
         max_length=int(raw.get("max_length", 512)),
         epochs=float(raw.get("epochs", 1.0)),
         max_steps=int(raw.get("max_steps", -1)),
