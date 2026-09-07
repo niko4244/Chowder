@@ -148,6 +148,57 @@ def _verify_bound_adapter(path: str, expected_sha: str) -> str:
     return actual
 
 
+def _load_text_dataset_with_replay(dataset: Any, spec: _Spec) -> tuple[Any, int, int]:
+    """Select spec.text_field from the already-loaded primary `dataset`,
+    then mix in a sampled replay slice before tokenization -- exactly
+    mirroring transformers_worker.py's text path (sample up to
+    replay_ratio * primary_rows real replay rows, never more than are
+    actually available, concatenate, then reshuffle so replay rows are not
+    clustered at the end of an epoch).
+
+    Extracted from train() as its own pure function (real `datasets`
+    objects in, real `datasets` objects out -- no torch/unsloth/transformers
+    needed) specifically so this real row-mixing logic is testable without
+    driving the full Trainer lifecycle: `datasets` is an ordinary, directly
+    importable package, unlike `transformers`, whose top-level `Trainer`
+    resolution is guarded by a `_LazyModule` that caches its first real
+    resolution process-wide -- confirmed for real to make monkeypatching
+    `transformers.Trainer` order-dependent on whatever other tests already
+    ran in the same process, which is not a foundation to build a test on.
+
+    Returns (dataset, replay_available_rows, replay_selected_rows).
+    """
+    from datasets import concatenate_datasets, load_dataset
+
+    if spec.text_field not in dataset.column_names:
+        raise RuntimeError(
+            f"dataset is missing text field {spec.text_field!r}; columns={dataset.column_names}"
+        )
+    primary = dataset.select_columns([spec.text_field])
+    primary_rows = len(primary)
+
+    merged = primary
+    replay_available_rows = 0
+    replay_selected_rows = 0
+    if spec.replay_dataset is not None:
+        replay = load_dataset("json", data_files=spec.replay_dataset, split="train")
+        if spec.text_field not in replay.column_names:
+            raise RuntimeError(
+                f"replay dataset is missing text field {spec.text_field!r}; "
+                f"columns={replay.column_names}"
+            )
+        replay = replay.select_columns([spec.text_field])
+        replay_available_rows = len(replay)
+        replay_selected_rows = _replay_sample_count(
+            primary_rows, replay_available_rows, spec.replay_ratio
+        )
+        if replay_selected_rows:
+            selected_replay = replay.shuffle(seed=spec.seed).select(range(replay_selected_rows))
+            merged = concatenate_datasets([primary, selected_replay]).shuffle(seed=spec.seed)
+
+    return merged, replay_available_rows, replay_selected_rows
+
+
 def train(spec: _Spec) -> dict[str, Any]:
     from unsloth import FastLanguageModel
 
@@ -159,7 +210,7 @@ def train(spec: _Spec) -> dict[str, Any]:
         _verify_bound_input(spec.replay_dataset, spec.replay_sha256, label="replay")
 
     import torch
-    from datasets import concatenate_datasets, load_dataset
+    from datasets import load_dataset
     from transformers import (
         DataCollatorForLanguageModeling,
         DataCollatorForSeq2Seq,
@@ -244,31 +295,9 @@ def train(spec: _Spec) -> dict[str, Any]:
                 f"dataset is missing text field {spec.text_field!r}; "
                 f"columns={dataset.column_names}"
             )
-        primary = dataset.select_columns([spec.text_field])
-        primary_rows = len(primary)
-
-        # Replay/rehearsal: mixed into the raw text rows before
-        # tokenization, exactly mirroring transformers_worker.py's text
-        # path -- sample up to replay_ratio * primary_rows real replay
-        # rows (never more than are actually available), concatenate, then
-        # reshuffle so replay rows are not clustered at the end of an
-        # epoch.
-        dataset = primary
-        if spec.replay_dataset is not None:
-            replay = load_dataset("json", data_files=spec.replay_dataset, split="train")
-            if spec.text_field not in replay.column_names:
-                raise RuntimeError(
-                    f"replay dataset is missing text field {spec.text_field!r}; "
-                    f"columns={replay.column_names}"
-                )
-            replay = replay.select_columns([spec.text_field])
-            replay_available_rows = len(replay)
-            replay_selected_rows = _replay_sample_count(
-                primary_rows, replay_available_rows, spec.replay_ratio
-            )
-            if replay_selected_rows:
-                selected_replay = replay.shuffle(seed=spec.seed).select(range(replay_selected_rows))
-                dataset = concatenate_datasets([primary, selected_replay]).shuffle(seed=spec.seed)
+        dataset, replay_available_rows, replay_selected_rows = _load_text_dataset_with_replay(
+            dataset, spec
+        )
 
         def tokenize(batch: dict[str, Any]) -> dict[str, Any]:
             return tokenizer(

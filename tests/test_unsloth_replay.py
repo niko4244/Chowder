@@ -338,30 +338,49 @@ def test_text_replay_sample_count_matches_the_shared_contract():
         )
 
 
-def test_text_format_replay_rows_are_mixed_and_reported(tmp_path, monkeypatch):
-    """Drives unsloth_worker.train()'s real text-format replay-merging logic
-    with unsloth/torch/peft/transformers fully mocked -- proves the row
-    mixing and reported counts, not the (untestable-without-real-hardware)
-    model training itself."""
+def test_text_format_replay_rows_are_actually_mixed(tmp_path):
+    """Drives unsloth_worker._load_text_dataset_with_replay -- the real
+    row-mixing logic train()'s text-format path uses -- directly, with real
+    datasets objects, no torch/unsloth/transformers/Trainer involved.
+
+    Deliberately does *not* drive train() end to end: an earlier version of
+    this test tried to monkeypatch transformers.Trainer to prove the same
+    thing, and it worked in isolation but failed for real in the full CI
+    suite. Root cause, confirmed for real: transformers' top-level package
+    is a _LazyModule whose __getattr__ caches each name's first real
+    resolution directly into the module's own __dict__; once any other test
+    in the same process has ever touched `transformers.Trainer` first (as
+    many real ML tests in this suite do), a later `from transformers import
+    Trainer` returns that cached real class from __dict__ directly and never
+    calls __getattr__ again -- so patching transformers.trainer.Trainer (or
+    even overwriting transformers.__dict__['Trainer'] directly, confirmed
+    ineffective too) has no effect, and which behavior you observe depends
+    on unrelated test execution order. That is not a foundation to build a
+    test on, so the row-mixing logic was extracted into its own pure
+    function specifically so it never needs to go anywhere near Trainer to
+    be verified for real.
+    """
     worker = _load_worker_module()
 
-    primary = tmp_path / "primary.jsonl"
-    _write_text_dataset(primary, ["p1"])
-    replay = tmp_path / "replay.jsonl"
-    _write_text_dataset(replay, ["r1", "r2", "r3"])
+    primary_path = tmp_path / "primary.jsonl"
+    _write_text_dataset(primary_path, ["p1"])
+    replay_path = tmp_path / "replay.jsonl"
+    _write_text_dataset(replay_path, ["r1", "r2", "r3"])
 
-    import chowder.provenance as _prov  # only to compute a real sha, not imported by the worker itself
+    from datasets import load_dataset
+
+    raw_primary = load_dataset("json", data_files=str(primary_path), split="train")
 
     spec = worker._Spec(
         base_model="org/model",
-        dataset=str(primary),
+        dataset=str(primary_path),
         output_dir=str(tmp_path / "adapter"),
-        dataset_sha256=_prov.sha256_file(primary),
+        dataset_sha256=None,
         revision=None,
         parent_adapter=None,
         parent_adapter_sha256=None,
-        replay_dataset=str(replay),
-        replay_sha256=_prov.sha256_file(replay),
+        replay_dataset=str(replay_path),
+        replay_sha256=None,
         replay_ratio=10.0,  # request more than available -> capped to 3
         text_field="text",
         pretokenized=False,
@@ -386,73 +405,59 @@ def test_text_format_replay_rows_are_mixed_and_reported(tmp_path, monkeypatch):
         resume_from_checkpoint=None,
     )
 
-    captured = {}
+    merged, replay_available, replay_selected = worker._load_text_dataset_with_replay(
+        raw_primary, spec
+    )
 
-    class _FakeTokenizerObj:
-        pad_token_id = 0
-        eos_token_id = 0
-        pad_token = None
+    assert replay_available == 3
+    assert replay_selected == 3  # capped to what's available
+    assert len(merged) == 1 + 3
+    texts = sorted(row["text"] for row in merged)
+    assert texts == ["p1", "r1", "r2", "r3"]
 
-        def __call__(self, texts, *, truncation, max_length, padding):
-            return {"input_ids": [[1, 2, 3] for _ in texts]}
 
-        def save_pretrained(self, path):
-            Path(path).mkdir(parents=True, exist_ok=True)
+def test_text_format_replay_missing_field_fails_closed(tmp_path):
+    worker = _load_worker_module()
+    primary_path = tmp_path / "primary.jsonl"
+    _write_text_dataset(primary_path, ["p1"])
+    replay_path = tmp_path / "replay.jsonl"
+    replay_path.write_text(json.dumps({"messages": []}) + "\n", encoding="utf-8")
 
-    class _FakePeftConfig:
-        target_modules = ["q_proj"]
+    from datasets import load_dataset
 
-    class _FakeModel:
-        active_adapter = "default"
-        peft_config = {"default": _FakePeftConfig()}
-        config = type("cfg", (), {"use_cache": True})()
-
-        def save_pretrained(self, path):
-            Path(path).mkdir(parents=True, exist_ok=True)
-
-    class _FakeFastLanguageModel:
-        @staticmethod
-        def from_pretrained(**kwargs):
-            return _FakeModel(), _FakeTokenizerObj()
-
-        @staticmethod
-        def get_peft_model(model, **kwargs):
-            return model
-
-    class _FakeTrainerOutput:
-        training_loss = 0.1
-
-    class _FakeTrainerState:
-        global_step = 1
-
-    class _FakeTrainer:
-        def __init__(self, *, model, args, train_dataset, data_collator, callbacks):
-            captured["train_dataset_len"] = len(train_dataset)
-            self.state = _FakeTrainerState()
-
-        def train(self, resume_from_checkpoint=None):
-            return _FakeTrainerOutput()
-
-    fake_unsloth = type(sys)("unsloth")
-    fake_unsloth.FastLanguageModel = _FakeFastLanguageModel
-    monkeypatch.setitem(sys.modules, "unsloth", fake_unsloth)
-
-    # transformers' top-level package is a _LazyModule: setting an
-    # attribute directly on `transformers` does not affect what a later
-    # `from transformers import Trainer` resolves (confirmed for real --
-    # its __getattr__ re-resolves from the real submodule regardless).
-    # The actual class lives at transformers.trainer.Trainer; patch it there.
-    import transformers.trainer as real_transformers_trainer
-
-    monkeypatch.setattr(real_transformers_trainer, "Trainer", _FakeTrainer, raising=False)
-
-    import torch as real_torch
-
-    monkeypatch.setattr(real_torch.cuda, "is_available", lambda: False, raising=False)
-
-    result = worker.train(spec)
-
-    assert result["telemetry"]["replay_available_rows"] == 3
-    assert result["telemetry"]["replay_selected_rows"] == 3  # capped to what's available
-    assert result["telemetry"]["training_rows"] == 1 + 3
-    assert captured["train_dataset_len"] == 1 + 3
+    raw_primary = load_dataset("json", data_files=str(primary_path), split="train")
+    spec = worker._Spec(
+        base_model="org/model",
+        dataset=str(primary_path),
+        output_dir=str(tmp_path / "adapter"),
+        dataset_sha256=None,
+        revision=None,
+        parent_adapter=None,
+        parent_adapter_sha256=None,
+        replay_dataset=str(replay_path),
+        replay_sha256=None,
+        replay_ratio=1.0,
+        text_field="text",
+        pretokenized=False,
+        max_length=64,
+        epochs=1.0,
+        max_steps=1,
+        learning_rate=1e-4,
+        batch_size=1,
+        gradient_accumulation_steps=1,
+        logging_steps=1,
+        lora_r=8,
+        lora_alpha=16,
+        lora_dropout=0.0,
+        target_modules=[],
+        quantization="none",
+        seed=1,
+        timeout_seconds=None,
+        offline=False,
+        save_strategy="no",
+        save_steps=0,
+        save_total_limit=None,
+        resume_from_checkpoint=None,
+    )
+    with pytest.raises(RuntimeError, match="replay dataset is missing text field"):
+        worker._load_text_dataset_with_replay(raw_primary, spec)
