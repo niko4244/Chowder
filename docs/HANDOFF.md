@@ -14,51 +14,141 @@ for it:
   [`TEACHER_FABRIC_BRIEF.md`](TEACHER_FABRIC_BRIEF.md) — read it before
   any Teacher Fabric slice; it is the source of the non-negotiable rules.
 
-## Current state (updated 2026-09-07)
+## Current state (updated 2026-09-07, later same day)
 
-- `main` = `a79e171` (PR #129 merged); PR #130 open with CI running
-  (chat-format Unsloth parity — expect it merged by the time you read
-  this, check `gh pr list`/`gh pr checks 130` for real).
-- **Real A/B parent tournament: in progress, not yet complete.** The
-  first real execution attempt (both 27B parents, frozen suite v1,
-  4-bit/cuda:0) failed at worker-spec-validation time before any model
-  loaded: `evaluate_parent`/`run_tournament` defaulted
-  `precision="bfloat16"`, but `BaseTextEvalSpec` only accepts
-  `{"auto","bf16","fp16","fp32"}` (the convention every other backend in
-  this repo already uses) — fixed and regression-tested in PR #129
-  (merged). A retry (`/tmp/run_tournament_ab.py`, output root
-  `C:\Users\nikma\Chowder-Protected\runs\ab-20260907-retry1`, registry
-  `C:\Users\nikma\Chowder-Protected\tournament-ab.registry.db`, log
-  `C:\Users\nikma\AppData\Local\Temp\tournament_ab.log`) was launched in
-  the background and was still running at last check (real, ongoing CPU
-  and GPU activity confirmed — not stalled — but this machine hashes two
-  ~52 GiB checkpoints' full manifests sequentially before any GPU work
-  even starts, so this genuinely takes a long time). **Check that log and
-  the output directory for real DONE/FAILED status before assuming
-  anything about the result** — if it's still running, let it finish or
-  relaunch it; if it failed with a new defect, fix it the same way (real
-  regression test, then rerun) rather than working around it.
-- **Track B (Unsloth chat-format parity) done, PR #130**: the isolated
-  Unsloth worker previously supported text-format datasets only. Now
-  `unsloth_peft.py` (controller-side) pre-renders every chat row through
-  the exact shared contract `transformers_worker.py` uses
+- `main` = `e2a144b` (#129 precision fix, #130 chat parity, #132 parent-adapter
+  continuation, #133 replay/rehearsal all merged — Tracks B, C, and D are
+  now all done on `main`). PR #133's CI re-run (after the `_LazyModule`
+  test-fragility fix below) came back green including the previously
+  failing `real transformers peft cpu smoke` job, confirming the fix was
+  real; merged (squash, branch deleted).
+- **Squash-merge branch-history gotcha, hit twice this session (#131→#132,
+  and again for Track D): a feature branch built by `git checkout -b` from
+  another *unmerged* feature branch, after that parent branch later gets
+  squash-merged, phantom-conflicts against `main` and — worse — its PR's
+  CI silently never triggers at all (observed for real, `gh pr checks`
+  reports "no checks reported" indefinitely).** Symptom: `gh pr view
+  <n> --json mergeable` shows `"CONFLICTING"` even though the real file
+  content is compatible. Fix: `git branch -f <name>-v2 origin/main &&
+  git checkout <name>-v2 && git cherry-pick <original-commit-sha>` — a
+  clean cherry-pick onto current main, verified to trigger CI immediately.
+  Close the broken PR, delete its branch, open a fresh PR from the `-v2`
+  branch. **Always start a new Unsloth-track branch from a fresh
+  `git checkout -b <name> origin/main` (never from another in-flight
+  feature branch) to avoid this entirely.**
+- **Real A/B parent tournament: still not complete — now blocked on a
+  real, confirmed-reproducible system resource constraint, not a code
+  defect.** Three real defects found and fixed along the way (each with
+  its own regression test where the defect was a real code bug):
+  1. `precision="bfloat16"` default (`BaseTextEvalSpec` only accepts
+     `{"auto","bf16","fp16","fp32"}`) — fixed, PR #129 (merged).
+  2. The driver script's `sys.path.insert()` (controller-process-only)
+     didn't propagate to the worker subprocess, which fell back to
+     whatever `chowder` `.venv-repro` was editable-installed from (the
+     **stale main checkout**, `C:\Users\nikma\Chowder\src`, which predates
+     the local-model-source fix and crashed calling
+     `try_to_load_from_cache` on a raw filesystem path) — fixed by setting
+     `PYTHONPATH` as a real env var in `/tmp/run_tournament_ab.py` (not a
+     chowder source bug; this was a scratch-script gotcha, no PR).
+  3. **`OSError: The paging file is too small for this operation to
+     complete. (os error 1455)`, raised inside `safetensors`' `safe_open`
+     while `AutoModelForCausalLM.from_pretrained` loads parent A's first
+     shard.** Reproduced identically on **two separate real attempts**
+     (retry2 and retry3), each after ~25-30 real minutes of the
+     integrity-hashing phase completing successfully first — this is not
+     transient noise, it is a real, repeatable failure at the same step.
+     Diagnosis (real numbers, not guessed): the page file itself is
+     already substantial (`Win32_PageFileUsage.AllocatedBaseSize` ≈
+     65,439 MiB ≈ 64 GiB) so "just increase the page file" is not
+     obviously the fix; `\Memory\Commit Limit` is ≈127.8 GiB and
+     `\Memory\Committed Bytes` was measured at 83.6 GiB, then 89.8 GiB,
+     then 97.1 GiB across three checks over roughly an hour — a real,
+     **growing** trend, not a one-off spike, on a machine running **571
+     processes** at last count (many concurrent Claude/agent sessions and
+     Hermes services, confirmed via `Get-CimInstance Win32_Process`). Safe
+     mmap'ing an 18-shard/51.75 GiB checkpoint via `safe_open` needs a
+     real chunk of committed virtual-memory headroom that this
+     increasingly-loaded shared machine may simply not have free at the
+     moment of the attempt. **This is a genuine system-resource
+     constraint, not something further Chowder code changes can fix** —
+     modifying the page file size or killing other processes are both
+     system-setting/user-owned actions outside what an agent session
+     should do unilaterally. Do not keep blindly retrying without either
+     (a) confirming real free commit headroom is meaningfully higher than
+     the ~30-40 GiB observed at each failure, or (b) the user's own
+     action. Retry script (still valid, just bump the `retryN` output dir
+     name to avoid the `run_dir.mkdir(..., exist_ok=False)` collision):
+     `/tmp/run_tournament_ab.py`, registry
+     `C:\Users\nikma\Chowder-Protected\tournament-ab.registry.db`, log
+     `C:\Users\nikma\AppData\Local\Temp\tournament_ab.log`.
+- **Track B (Unsloth chat-format parity) done, merged, PR #130**: the
+  isolated Unsloth worker previously supported text-format datasets only.
+  Now `unsloth_peft.py` (controller-side) pre-renders every chat row
+  through the exact shared contract `transformers_worker.py` uses
   (`training_data._validate_chat_messages`/`_build_chat_example`) into a
   content-addressed, pretokenized JSONL handoff file *before* the
   isolated worker ever starts — the worker's chat path is just "load
   three already-tokenized columns," with zero chat-template/masking
   logic of its own, so there is no code path where Unsloth's semantics
-  could drift from Transformers'. 15 new tests, including the exact
+  could drift from Transformers'. 15 tests, including the exact
   regression cases the Qwen3.8 program directive named (multi-turn,
   system prompt, multiple assistant turns, empty-assistant-content — a
   real finding: still produces real turn-marker labels, not "nothing to
   train on" — Unicode, truncation before/inside the assistant response,
   malformed role, no assistant turn, long conversation).
+- **Track C (Unsloth parent-adapter continuation) done, merged, PR #132**:
+  `spec.parent_adapter` loads via plain PEFT's `PeftModel.from_pretrained`
+  directly onto the Unsloth-loaded base model (an Unsloth model is a real
+  transformers-compatible model underneath) instead of a fresh
+  `get_peft_model` adapter — mirrors `transformers_worker.py`'s identical
+  continuation path. `parent_adapter_sha256` is a real bound-input (resume
+  against a different parent adapter fails closed). A real bug this PR's
+  own parity test caught before it ever reached hardware: the isolated
+  worker's local `sha256_directory` mirror (it cannot import
+  `chowder.provenance` in the isolated env) was missing a trailing
+  `digest.update(b"\0")` separator the real implementation has — would
+  have made the worker's own adapter re-verification silently disagree
+  with the controller's on every real run.
+- **Track D (Unsloth replay/rehearsal) done, merged, PR #133** (chat + text
+  format both — chat merges replay in the controller before
+  tokenization inside `_materialize_pretokenized_chat_dataset`; text
+  merges it inside the isolated worker via a new pure
+  `_load_text_dataset_with_replay(dataset, spec)` helper). **A real,
+  CI-only test failure and its fix are worth reading before touching this
+  area again**: an earlier version of the text-format test tried to
+  monkeypatch `transformers.Trainer` to drive `unsloth_worker.train()` end
+  to end. It passed in an isolated single-file local run but failed for
+  real in the full CI suite. Root cause, confirmed for real (not
+  guessed): `transformers`' top-level package is a `_LazyModule` whose
+  `__getattr__` caches each name's *first* real resolution directly into
+  the module's own `__dict__`. Once any *other* real-ML test in the same
+  process had already touched `transformers.Trainer` first (many do,
+  across 1200+ tests), a later `from transformers import Trainer` found
+  that cached real class in `__dict__` directly and never called
+  `__getattr__` again — so patching `transformers.trainer.Trainer`, and
+  even directly overwriting `transformers.__dict__['Trainer']`, both
+  confirmed ineffective once that caching had already happened. Which
+  behavior you observed depended on unrelated test execution order — not
+  a foundation to build a test on. Fix: extracted the real row-mixing
+  logic into `_load_text_dataset_with_replay`, a pure function over real
+  `datasets` objects with zero `torch`/`unsloth`/`transformers`/`Trainer`
+  involvement, and test that directly. **If you ever need to fake a
+  `transformers` class again, do not trust that patching it once in
+  isolation means it will hold in a full suite run — verify with
+  `CHOWDER_REAL_ML_SMOKE=1 pytest tests/ -q` (the whole suite, not just
+  your file) before considering it done.**
 - **Not started yet** (per the Qwen3.8 program directive's own PR
-  ordering): Track C (Unsloth parent-adapter continuation), Track D
-  (Unsloth replay/rehearsal), Track E (full recursive-repair acceptance
-  through Unsloth), Track F (campaign manifest/config). Do these next,
-  in that order, once the tournament run and PR #130 are confirmed
-  landed.
+  ordering): Track E (full recursive-repair acceptance through Unsloth —
+  the real end-to-end loop: baseline → train → evaluate → fail → harvest
+  → cluster → repair → contamination-audit → replay → continue → retrain
+  → evaluate → gate → promote, all through the Unsloth engine, on real
+  small-model hardware before ever touching the 27B parent), Track F
+  (Qwen3.8 campaign manifest/config). Track E is a large, multi-subsystem
+  real-hardware integration task (`autonomous_repair.py`,
+  `checkpoint_bisect.py`, `contamination.py`, `replay_history.py`,
+  `failures.py`, all composed through Unsloth for the first time) — do
+  not attempt it without enough real session/hardware time budgeted to
+  see a real run through to a real promote-or-reject outcome.
 - Recent merges, prior session: #109 (`training_engine` evidence field),
   #110 (censored-outcome view `censored_outcomes.py`), #111 (Teacher
   Fabric Slice A: `teacher_fabric.py` + `docs/TEACHER_FABRIC.md`),
