@@ -14,8 +14,12 @@ for it:
   [`TEACHER_FABRIC_BRIEF.md`](TEACHER_FABRIC_BRIEF.md) — read it before
   any Teacher Fabric slice; it is the source of the non-negotiable rules.
 
-## Current state (updated 2026-09-07, later same day)
+## Current state (updated 2026-09-07, evening)
 
+- `main` = `d29b9c5` (everything below plus #139 commit-headroom gate +
+  native-crash retry, #140 parent-eval protocol v2: thinking-aware
+  final-answer extraction, 256-token budget, protocol-version digest —
+  post-merge CI 6/6 green on both)
 - `main` = `6b4f98e` (#129 precision fix, #130 chat parity, #132
   parent-adapter continuation, #133 replay/rehearsal, #134/#137 doc
   updates, #135 Track E real Unsloth recursive-repair acceptance, #136
