@@ -149,12 +149,23 @@ for it:
   byte-identical manifest; verified the Contamination Guard catches a
   verbatim protected prompt). Parent-eval harness:
   `src/chowder/parent_eval.py`. Parent B
-  (`orcarouter/Qwen3.8-27B-Uncensored`, pin `404ea47a`) downloaded
-  complete to `G:\Local Models\HuggingFace\orcarouter\
-  Qwen3.8-27B-Uncensored` (18 shards, 52 GiB) — its full-mode manifest
-  treatment is still pending, as is parent A/B tournament execution.
-  Next executable steps: parent B full-mode manifest, then run the
-  Phase-4 tournament with suite content materialized.
+  (`orcarouter/Qwen3.8-27B-Uncensored`, pin `404ea47a`) downloaded and
+  **fully verified** at `G:\Local Models\HuggingFace\orcarouter\
+  Qwen3.8-27B-Uncensored`: all 18 shards' sha256 match the Hub's LFS
+  digests at the pin, all small files byte-compare, zero divergence
+  (`Qwen3.8-27B-Uncensored.verification.json` beside the dir; full-mode
+  manifest sha `fab432f1…`, 18/18 shards hashed). Phase 11 accounting
+  measured from its real headers: **27,781,427,952 total parameters /
+  1199 tensors — byte-identical census to parent A** (same architecture,
+  different weights), honest dense no-a-label. The protected suite v1 is
+  frozen at `C:\Users\nikma\Chowder-Protected\suites\v1` (manifest
+  sha `7946d8c9…`; never mutate — a content change is suite v2). The
+  public-benchmark campaign scoreboard (`src/chowder/campaign_scoreboard.py`,
+  historical targets MMLU>0.90 / GSM8K>0.90 / HumanEval>0.60 / MATH>0.40,
+  signed digests, Fable standing reference with parity gated on full
+  measurement) is implemented with tests. Next executable steps: the
+  Phase-4 A/B tournament run (suite materialized, both parents trusted
+  locally), then C/D acquisition.
 - Commit messages end `Co-Authored-By: Claude Sonnet 5
   <noreply@anthropic.com>`; PR descriptions end with the Claude Code
   attribution line; branch naming `claude/<slug>`; one focused PR per

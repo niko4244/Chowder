@@ -696,9 +696,17 @@ above being stable:
   FK-anchored persistence into `evaluation_runs`. The protected suite
   content is authored (`src/chowder/parent_suite_content.py`, 54 items
   / 6 per dimension, contamination-guard round trip verified) and
-  parent B's weights are on disk at their pinned revision. Still open
-  before the Phase-4 tournament: parent B's full-mode manifest, parent
-  C/D acquisition, and the evaluation runs themselves. The Phase-6 conversion plan is
+  **frozen** on disk (manifest sha `7946d8c9…`; a content change is
+  suite v2, never a silent mutation of v1). Parent B is fully verified
+  at its pinned revision (all 18 shards match Hub LFS digests, zero
+  divergence, full-mode manifest `fab432f1…`; accounting: 27,781,427,952
+  params / 1199 tensors, identical census to parent A). The
+  public-benchmark campaign scoreboard
+  (`src/chowder/campaign_scoreboard.py`) records the historical targets
+  (MMLU>0.90, GSM8K>0.90, HumanEval>0.60, MATH>0.40) with signed
+  digests plus the Fable standing reference (parity claim gated on full
+  measurement). Still open before the Phase-4 tournament: the A/B
+  evaluation runs themselves, then parent C/D acquisition. The Phase-6 conversion plan is
   generated and merged
   ([`docs/PHASE6_CONVERSION_PLAN.md`](PHASE6_CONVERSION_PLAN.md), PR
   #120): partition-conversion of the dense FFN's intermediate dimension
