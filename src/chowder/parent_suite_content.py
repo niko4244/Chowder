@@ -555,6 +555,13 @@ def build_tournament_spec(protected_root: str | Path) -> ParentEvalSpec:
                     name=suite_name,
                     dimension=dimension,
                     dataset=str(dataset_path).replace("\\", "/"),
+                    # Protocol decision, finalized before the first real run:
+                    # the parents are chat models and the items are
+                    # instruction-framed, so prompts render through each
+                    # model's own chat template. This is part of the
+                    # protocol fingerprint; changing it after a real run is
+                    # suite-v2 territory, not a silent edit.
+                    use_chat_template=True,
                 )
             )
     return ParentEvalSpec(suites=tuple(suites))
