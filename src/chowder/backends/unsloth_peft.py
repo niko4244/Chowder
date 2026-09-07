@@ -22,6 +22,7 @@ from .training_data import (
     _build_chat_example,
     _chat_digest,
     _validate_chat_messages,
+    _verify_bound_adapter,
     _verify_bound_input,
 )
 
@@ -68,6 +69,8 @@ class UnslothPeftRunSpec:
     output_dir: str
     dataset_sha256: str | None = None
     revision: str | None = None
+    parent_adapter: str | None = None
+    parent_adapter_sha256: str | None = None
     dataset_format: str = "text"
     text_field: str = "text"
     messages_field: str = "messages"
@@ -105,6 +108,17 @@ class UnslothPeftRunSpec:
             raise ValueError("backend.dataset is required")
         if self.dataset_sha256 is not None and len(self.dataset_sha256) != 64:
             raise ValueError("backend.dataset_sha256 must be a SHA-256 digest")
+        has_parent_path = self.parent_adapter is not None
+        has_parent_sha = self.parent_adapter_sha256 is not None
+        if has_parent_path != has_parent_sha:
+            raise ValueError("backend parent adapter path and SHA must be supplied together")
+        if has_parent_path:
+            assert self.parent_adapter is not None
+            assert self.parent_adapter_sha256 is not None
+            if not self.parent_adapter.strip():
+                raise ValueError("backend parent adapter path cannot be empty")
+            if len(self.parent_adapter_sha256) != 64:
+                raise ValueError("backend parent adapter SHA must be a SHA-256 digest")
         if self.dataset_format not in {"text", "chat"}:
             raise ValueError(f"unsupported dataset_format: {self.dataset_format}")
         if not self.text_field.strip():
@@ -193,12 +207,26 @@ class UnslothPeftRunSpec:
                 resume_path = Path(work_dir) / resume_path
             resume_from_checkpoint = str(resume_path.resolve())
 
+        parent_adapter_cfg = backend.get("parent_adapter", {})
+        parent_adapter_cfg = parent_adapter_cfg if isinstance(parent_adapter_cfg, Mapping) else {}
+        parent_adapter_path: str | None = None
+        if parent_adapter_cfg.get("path") is not None:
+            resolved_parent = Path(str(parent_adapter_cfg.get("path")))
+            if not resolved_parent.is_absolute():
+                resolved_parent = Path(work_dir) / resolved_parent
+            parent_adapter_path = str(resolved_parent.resolve())
+        parent_adapter_sha = parent_adapter_cfg.get("sha256")
+
         return cls(
             base_model=str(backend.get("base_model", "")),
             dataset=dataset,
             output_dir=str(output_dir),
             dataset_sha256=backend.get("dataset_sha256"),
             revision=backend.get("revision"),
+            parent_adapter=parent_adapter_path,
+            parent_adapter_sha256=(
+                str(parent_adapter_sha) if parent_adapter_sha is not None else None
+            ),
             dataset_format=str(backend.get("dataset_format", "text")),
             text_field=str(backend.get("text_field", "text")),
             messages_field=str(backend.get("messages_field", "messages")),
@@ -418,6 +446,7 @@ class UnslothPeftExecutor:
         for key in (
             "output_dir",
             "dataset",
+            "parent_adapter",
             "timeout_seconds",
             "offline",
             "save_strategy",
@@ -434,6 +463,7 @@ class UnslothPeftExecutor:
             "base_model": spec.base_model,
             "revision": spec.revision,
             "dataset_sha256": spec.dataset_sha256,
+            "parent_adapter_sha256": spec.parent_adapter_sha256,
             "environment_manifest_sha256": environment_manifest_sha256,
         }
 
@@ -525,6 +555,9 @@ class UnslothPeftExecutor:
                 chat_total_token_count=total_tokens,
                 chat_assistant_token_count=assistant_tokens,
             )
+        if spec.parent_adapter is not None:
+            assert spec.parent_adapter_sha256 is not None
+            _verify_bound_adapter(spec.parent_adapter, spec.parent_adapter_sha256, label="parent")
         return spec
 
     def run(self, experiment: Experiment, context: ExecutionContext) -> TrainingArtifact:
@@ -638,6 +671,8 @@ class UnslothPeftExecutor:
                 "pretokenized": spec.pretokenized,
                 "chat_total_token_count": spec.chat_total_token_count,
                 "chat_assistant_token_count": spec.chat_assistant_token_count,
+                "parent_adapter_sha256": spec.parent_adapter_sha256,
+                "continued_from_parent_adapter": spec.parent_adapter_sha256 is not None,
                 "artifact_sha256": sha256_directory(spec.output_dir),
                 "resolved_config_sha256": hashlib.sha256(
                     json.dumps(context.resolved_config, sort_keys=True, default=str).encode(

@@ -53,6 +53,8 @@ class _Spec:
     output_dir: str
     dataset_sha256: str | None
     revision: str | None
+    parent_adapter: str | None
+    parent_adapter_sha256: str | None
     text_field: str
     pretokenized: bool
     max_length: int
@@ -94,10 +96,48 @@ def _verify_bound_input(path: str, expected_sha: str | None) -> str:
     return actual
 
 
+def _sha256_directory(path: str | Path) -> str:
+    """Local mirror of chowder.provenance.sha256_directory -- this file is
+    deliberately self-contained (see module docstring) and cannot import
+    chowder in the isolated environment."""
+    root = Path(path).resolve()
+    if not root.is_dir():
+        raise NotADirectoryError(root)
+    digest = hashlib.sha256()
+    entries = sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())
+    for entry in entries:
+        if entry.is_symlink():
+            raise ValueError(f"artifact directory contains unsupported symlink: {entry}")
+        if not entry.is_file():
+            continue
+        relative = entry.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(b"\0")
+        with entry.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _verify_bound_adapter(path: str, expected_sha: str) -> str:
+    resolved = Path(path).resolve()
+    if not resolved.is_dir():
+        raise FileNotFoundError(f"parent adapter not found: {resolved}")
+    actual = _sha256_directory(resolved)
+    if actual != expected_sha:
+        raise RuntimeError("parent adapter digest changed before worker load")
+    return actual
+
+
 def train(spec: _Spec) -> dict[str, Any]:
     from unsloth import FastLanguageModel
 
     _verify_bound_input(spec.dataset, spec.dataset_sha256)
+    if spec.parent_adapter is not None:
+        assert spec.parent_adapter_sha256 is not None
+        _verify_bound_adapter(spec.parent_adapter, spec.parent_adapter_sha256)
 
     import torch
     from datasets import load_dataset
@@ -124,19 +164,33 @@ def train(spec: _Spec) -> dict[str, Any]:
             raise RuntimeError("tokenizer has neither pad_token nor eos_token")
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=spec.lora_r,
-        target_modules=list(spec.target_modules) or list(_DEFAULT_TARGET_MODULES),
-        lora_alpha=spec.lora_alpha,
-        lora_dropout=spec.lora_dropout,
-        bias="none",
-        use_gradient_checkpointing="unsloth",
-        random_state=spec.seed,
-    )
+    if spec.parent_adapter is not None:
+        # Continuation: load the exact verified parent adapter onto the
+        # Unsloth-loaded base model instead of creating a fresh LoRA adapter.
+        # An Unsloth-loaded model is a real transformers-compatible model
+        # underneath, so plain PEFT's own loader works on it directly --
+        # mirrors transformers_worker.py's identical
+        # PeftModel.from_pretrained(base_model, spec.parent_adapter,
+        # is_trainable=True) continuation path exactly, so both backends
+        # continue a lineage the same way.
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, spec.parent_adapter, is_trainable=True)
+    else:
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=spec.lora_r,
+            target_modules=list(spec.target_modules) or list(_DEFAULT_TARGET_MODULES),
+            lora_alpha=spec.lora_alpha,
+            lora_dropout=spec.lora_dropout,
+            bias="none",
+            use_gradient_checkpointing="unsloth",
+            random_state=spec.seed,
+        )
     # Audit the actual trainable module names Unsloth/PEFT resolved for this
     # model, rather than assuming a preset -- recorded in evidence so a
     # config that silently matched zero real modules is visible, not silent.
+    # Populated identically by get_peft_model and PeftModel.from_pretrained.
     resolved_target_modules = sorted(model.peft_config[model.active_adapter].target_modules)
 
     dataset = load_dataset("json", data_files=spec.dataset, split="train")
@@ -263,6 +317,8 @@ def train(spec: _Spec) -> dict[str, Any]:
         "model_provenance": {
             "requested_base_model": spec.base_model,
             "requested_revision": spec.revision,
+            "continued_from_parent_adapter": spec.parent_adapter is not None,
+            "parent_adapter_sha256": spec.parent_adapter_sha256,
         },
         "versions": {
             "unsloth": _package_version("unsloth"),
@@ -286,6 +342,8 @@ def main() -> int:
         output_dir=raw["output_dir"],
         dataset_sha256=raw.get("dataset_sha256"),
         revision=raw.get("revision"),
+        parent_adapter=raw.get("parent_adapter"),
+        parent_adapter_sha256=raw.get("parent_adapter_sha256"),
         text_field=raw.get("text_field", "text"),
         pretokenized=bool(raw.get("pretokenized", False)),
         max_length=int(raw.get("max_length", 512)),
