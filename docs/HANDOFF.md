@@ -141,15 +141,20 @@ for it:
   bitwise dense recovery and exactly uniform routers in both. The full
   parent-A conversion (stage 3/4, ~52 GiB output) has NOT run — that is
   a disk-acquisition decision.
-- Program state (2026-09-06): parent B
-  (`orcarouter/Qwen3.8-27B-Uncensored`) auto-gate **cleared** via the
-  account's HF token (account `NIKO42`, stored only in the local HF
-  token store — never in the repo; it was shared in plaintext once, so
-  rotation is advisable). Parent-eval harness landed in
-  `src/chowder/parent_eval.py`. Next executable steps: author the
-  protected nine-dimension suite content, then start parent weight
-  downloads (B alone is 51.7 GiB; ~239 GB fragmented free across
-  C/F/G/H — a user decision on placement).
+- Program state (2026-09-06): the protected nine-dimension suite
+  content **exists** — `src/chowder/parent_suite_content.py` (54
+  original hand-authored items, 6 per dimension, deterministic
+  materialization to datasets + hash-only fingerprint indexes via the
+  canonical `parent_eval.build_protected_suite_dir` path, root-free
+  byte-identical manifest; verified the Contamination Guard catches a
+  verbatim protected prompt). Parent-eval harness:
+  `src/chowder/parent_eval.py`. Parent B
+  (`orcarouter/Qwen3.8-27B-Uncensored`, pin `404ea47a`) downloaded
+  complete to `G:\Local Models\HuggingFace\orcarouter\
+  Qwen3.8-27B-Uncensored` (18 shards, 52 GiB) — its full-mode manifest
+  treatment is still pending, as is parent A/B tournament execution.
+  Next executable steps: parent B full-mode manifest, then run the
+  Phase-4 tournament with suite content materialized.
 - Commit messages end `Co-Authored-By: Claude Sonnet 5
   <noreply@anthropic.com>`; PR descriptions end with the Claude Code
   attribution line; branch naming `claude/<slug>`; one focused PR per

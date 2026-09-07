@@ -693,9 +693,12 @@ above being stable:
   complete-coverage spec validation, capability/behavior separation by
   construction, a protocol fingerprint excluding candidate identity, a
   fail-closed tokenizer-identity gate, hash-only protected indexes, and
-  FK-anchored persistence into `evaluation_runs`. Still open before the
-  Phase-4 tournament: parent weights on disk, protected suite content,
-  and the evaluation runs themselves. The Phase-6 conversion plan is
+  FK-anchored persistence into `evaluation_runs`. The protected suite
+  content is authored (`src/chowder/parent_suite_content.py`, 54 items
+  / 6 per dimension, contamination-guard round trip verified) and
+  parent B's weights are on disk at their pinned revision. Still open
+  before the Phase-4 tournament: parent B's full-mode manifest, parent
+  C/D acquisition, and the evaluation runs themselves. The Phase-6 conversion plan is
   generated and merged
   ([`docs/PHASE6_CONVERSION_PLAN.md`](PHASE6_CONVERSION_PLAN.md), PR
   #120): partition-conversion of the dense FFN's intermediate dimension
