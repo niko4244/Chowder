@@ -33,11 +33,31 @@ Design constraints (each closes a specific honesty hazard):
   peak VRAM, and the per-item prediction files' digests, then persists
   an FK-anchored `evaluation_runs` row via
   `record_parent_tournament_result`.
+- **Commit headroom before the load, not a segfault after.** The 4-bit
+  load path (transformers 5.16.1 + bitsandbytes 0.50.2 staging a
+  ~52 GiB checkpoint) drives Windows commit charge up by ~68-71 GiB
+  above its launch baseline, and when that requirement crosses the
+  system commit limit the process dies as a silent native access
+  violation (exit 3221225477) with no Python traceback -- measured,
+  not inferred (2026-09-07 differential, see docs/HANDOFF.md
+  "4-bit load crash" and the evidence files under
+  `C:/Users/nikma/Chowder-Protected/diagnostics/`): 5/5 crashes
+  under insufficient headroom (44 GiB -> early crash; ~55-60 GiB ->
+  mid-load crash; 49 GiB forced in a controlled stress test ->
+  crash at 414 s), 5/5 completions at ~90 GiB headroom. Before every
+  worker launch this module measures commit headroom and refuses to
+  start the load below `CHOWDER_MIN_COMMIT_HEADROOM_GIB` (default 80),
+  with the measured numbers in the error, because a fail-fast with
+  actionable numbers beats a seven-minute silent segfault. A worker
+  that still dies natively (e.g. headroom consumed concurrently) is
+  retried up to `_NATIVE_CRASH_RETRIES` times after re-checking the
+  gate -- the crash is environment-transient, not deterministic.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -271,6 +291,65 @@ def _peak_vram_sampler(stop: threading.Event, result: dict[str, Any]) -> None:
         stop.wait(5.0)
 
 
+_NATIVE_CRASH_RETRIES = 2
+_NATIVE_CRASH_EXIT_CODES = {3221225477, 139}  # Windows access violation; POSIX SIGSEGV
+_MIN_COMMIT_HEADROOM_GIB = float(
+    os.environ.get("CHOWDER_MIN_COMMIT_HEADROOM_GIB", "80")
+)
+
+
+def _commit_state() -> tuple[float, float] | None:
+    """Return (used_gib, limit_gib) of Windows commit charge, or None when
+    unmeasurable (non-Windows). Read from the OS, never estimated."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    class _MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    stat = _MemoryStatusEx()
+    stat.dwLength = ctypes.sizeof(_MemoryStatusEx)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+        return None
+    used = (stat.ullTotalPageFile - stat.ullAvailPageFile) / 2**30
+    return used, stat.ullTotalPageFile / 2**30
+
+
+def _enforce_commit_headroom() -> float:
+    """Fail fast when commit headroom cannot safely hold a 4-bit load.
+
+    Returns the measured headroom in GiB. On non-Windows platforms the
+    measurement is unavailable and the gate passes (the crash class it
+    guards against was only observed on Windows/WDDM).
+    """
+    state = _commit_state()
+    if state is None:
+        return float("nan")
+    used, limit = state
+    headroom = limit - used
+    if headroom < _MIN_COMMIT_HEADROOM_GIB:
+        raise ParentTournamentError(
+            f"refusing to start a 4-bit load with {headroom:.1f} GiB of commit "
+            f"headroom ({used:.1f}/{limit:.1f} GiB used); the 4-bit staging path "
+            f"needs ~68-71 GiB above its baseline and dies as a silent native "
+            f"access violation when it hits the commit limit. Close memory-heavy "
+            f"applications or raise the pagefile, or override with "
+            f"CHOWDER_MIN_COMMIT_HEADROOM_GIB."
+        )
+    return headroom
+
+
 def _run_worker(spec_payload: dict[str, Any], run_dir: Path, *, timeout_seconds: float | None) -> dict[str, Any]:
     """Launch `base_text_worker` on a serialized spec and return its result."""
     spec_path = run_dir / "eval-spec.json"
@@ -295,26 +374,53 @@ def _run_worker(spec_payload: dict[str, Any], run_dir: Path, *, timeout_seconds:
     sampler: dict[str, Any] = {"peak_mib": 0}
     thread = threading.Thread(target=_peak_vram_sampler, args=(stop, sampler), daemon=True)
     thread.start()
+    # Unbuffered stderr so a native crash cannot swallow the tqdm position
+    # (the pre-fix runs appeared to crash at "0%" only because buffered
+    # stderr was lost with the process).
+    worker_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    commit_headroom = _enforce_commit_headroom()
+    attempts = 0
     started = time.perf_counter()
     try:
-        with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
-            "w", encoding="utf-8"
-        ) as stderr:
-            proc = subprocess.run(
-                command, stdout=stdout, stderr=stderr, text=True, timeout=timeout_seconds
+        proc = None
+        while True:
+            attempts += 1
+            with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
+                "w", encoding="utf-8"
+            ) as stderr:
+                proc = subprocess.run(
+                    command,
+                    stdout=stdout,
+                    stderr=stderr,
+                    text=True,
+                    timeout=timeout_seconds,
+                    env=worker_env,
+                )
+            if proc.returncode == 0 and result_path.is_file():
+                break
+            if proc.returncode in _NATIVE_CRASH_EXIT_CODES and attempts <= _NATIVE_CRASH_RETRIES:
+                # Native crashes of this class are environment-transient
+                # (commit pressure), not deterministic: re-check the gate
+                # so a retry under worse pressure fails loudly instead of
+                # segfaulting again, then relaunch from scratch.
+                _enforce_commit_headroom()
+                continue
+            tail = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+            raise ParentTournamentError(
+                f"evaluation worker failed (exit {proc.returncode}, "
+                f"attempt {attempts}); stderr tail:\n{tail}"
             )
         elapsed = time.perf_counter() - started
     finally:
         stop.set()
         thread.join(timeout=15)
-    if proc.returncode != 0 or not result_path.is_file():
-        tail = stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
-        raise ParentTournamentError(
-            f"evaluation worker failed (exit {proc.returncode}); stderr tail:\n{tail}"
-        )
     result = json.loads(result_path.read_text(encoding="utf-8"))
     result["wall_seconds"] = round(elapsed, 1)
     result["peak_gpu_mib_sampled"] = sampler.get("peak_mib", 0)
+    result["commit_headroom_gib_at_launch"] = (
+        round(commit_headroom, 1) if commit_headroom == commit_headroom else None
+    )
+    result["worker_attempts"] = attempts
     return result
 
 
