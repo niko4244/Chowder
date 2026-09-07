@@ -16,12 +16,46 @@ for it:
 
 ## Current state (updated 2026-09-07, later same day)
 
-- `main` = `e2a144b` (#129 precision fix, #130 chat parity, #132 parent-adapter
-  continuation, #133 replay/rehearsal all merged — Tracks B, C, and D are
-  now all done on `main`). PR #133's CI re-run (after the `_LazyModule`
+- `main` = `ddf22c3` (#129 precision fix, #130 chat parity, #132 parent-adapter
+  continuation, #133 replay/rehearsal, #134 this doc update all merged —
+  Tracks B, C, and D are done on `main`). PR #135 (Track E real Unsloth
+  recursive-repair acceptance) is open — check `gh pr checks 135` before
+  trusting it's landed. PR #133's CI re-run (after the `_LazyModule`
   test-fragility fix below) came back green including the previously
   failing `real transformers peft cpu smoke` job, confirming the fix was
   real; merged (squash, branch deleted).
+- **Track E (full recursive-repair acceptance through Unsloth) done for
+  real, PR #135**: a real isolated Unsloth environment was provisioned for
+  the first time this session (`chowder setup unsloth --root
+  C:\Users\nikma\Chowder-Protected\unsloth-real-smoke` — keep reusing this
+  location, it's outside any worktree so it survives worktree/branch
+  churn; `chowder doctor unsloth` reports every check OK including a real
+  4-bit `bitsandbytes.nn.Linear4bit` CUDA forward pass on the RTX 5060 Ti).
+  `tests/test_project_runner_repair_unsloth.py` then ran the exact same
+  `run_project()` recursive-repair path already proven for Transformers in
+  `test_project_runner_repair.py`, changing only `backend.engine='unsloth'`
+  in the project config — **no new orchestration code was needed**, because
+  `backend_selection.py`'s `create_training_executor` and
+  `repair_candidates.py`'s `build_repair_candidate` were already
+  engine-neutral (built as part of Tracks B/C/D's own field additions:
+  `backend.parent_adapter`, `backend.replay`, `text_field`). Passed for
+  real in 125s: baseline trained and evaluated, the initial candidate was
+  deterministically rejected (an impossible `minimum_promotion_gain: 2.0`
+  gate), a real failure was harvested and clustered, a real repair dataset
+  passed contamination audit against the holdout, and a real second
+  Unsloth training hop ran — with real evidence
+  (`continued_from_parent_adapter: True`, `parent_adapter_sha256` present)
+  that it continued from the rejected candidate's *exact* hashed adapter
+  weights rather than a fresh-initialized one. Gated behind
+  `CHOWDER_REAL_UNSLOTH_SMOKE=1` plus a new optional
+  `CHOWDER_REAL_UNSLOTH_ENV_ROOT` env var (points the test at the
+  persistent env above instead of pytest's throwaway `tmp_path`, which is
+  what made `test_unsloth_peft_real.py`'s equivalent real-smoke test
+  impractical to actually run before now — that env var is the fix, kept
+  local to the new test rather than touching the older file). Contamination
+  coverage under Unsloth needed no separate work either: the audit runs on
+  repair-dataset content before `build_repair_candidate` ever branches on
+  engine, so it was already backend-neutral.
 - **Squash-merge branch-history gotcha, hit twice this session (#131→#132,
   and again for Track D): a feature branch built by `git checkout -b` from
   another *unmerged* feature branch, after that parent branch later gets
@@ -137,18 +171,16 @@ for it:
   isolation means it will hold in a full suite run — verify with
   `CHOWDER_REAL_ML_SMOKE=1 pytest tests/ -q` (the whole suite, not just
   your file) before considering it done.**
-- **Not started yet** (per the Qwen3.8 program directive's own PR
-  ordering): Track E (full recursive-repair acceptance through Unsloth —
-  the real end-to-end loop: baseline → train → evaluate → fail → harvest
-  → cluster → repair → contamination-audit → replay → continue → retrain
-  → evaluate → gate → promote, all through the Unsloth engine, on real
-  small-model hardware before ever touching the 27B parent), Track F
-  (Qwen3.8 campaign manifest/config). Track E is a large, multi-subsystem
-  real-hardware integration task (`autonomous_repair.py`,
-  `checkpoint_bisect.py`, `contamination.py`, `replay_history.py`,
-  `failures.py`, all composed through Unsloth for the first time) — do
-  not attempt it without enough real session/hardware time budgeted to
-  see a real run through to a real promote-or-reject outcome.
+- **Not started yet**: Track F (Qwen3.8 campaign manifest/config —
+  binding the selected parent, controls, comparisons, suite versions,
+  engine/repair/replay/contamination policy, model/tokenizer/dataset
+  identities, sparse/MoE target, promotion rules; hash the manifest;
+  explicitly enable bounded recursive repair with real limits so a run
+  can't silently degrade into train→evaluate→stop). The real A/B parent
+  tournament (Track A, still blocked on the page-file constraint above)
+  can and should proceed independently once real headroom is available —
+  its infrastructure has been merged since PR #128 and needs no Track
+  E/F work first.
 - Recent merges, prior session: #109 (`training_engine` evidence field),
   #110 (censored-outcome view `censored_outcomes.py`), #111 (Teacher
   Fabric Slice A: `teacher_fabric.py` + `docs/TEACHER_FABRIC.md`),
