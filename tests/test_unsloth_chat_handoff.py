@@ -25,6 +25,16 @@ from pathlib import Path
 
 import pytest
 
+# Every test in this file exercises real chat materialization, which needs
+# transformers + datasets in the *controller* process (see
+# _materialize_pretokenized_chat_dataset's docstring). The base CI jobs
+# install only chowder[dev], not chowder[train], so importing these
+# unconditionally at module level would break collection for the whole
+# file there -- matches this repo's existing convention (see
+# test_moe_instrumentation.py) for a torch/transformers-needing test file.
+pytest.importorskip("transformers")
+pytest.importorskip("datasets")
+
 from chowder.backends.unsloth_peft import (
     UnslothConfigError,
     UnslothPeftExecutor,
