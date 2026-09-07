@@ -21,6 +21,7 @@ from ..unsloth_env import unsloth_env_dir, unsloth_python
 from .training_data import (
     _build_chat_example,
     _chat_digest,
+    _replay_sample_count,
     _validate_chat_messages,
     _verify_bound_adapter,
     _verify_bound_input,
@@ -71,6 +72,9 @@ class UnslothPeftRunSpec:
     revision: str | None = None
     parent_adapter: str | None = None
     parent_adapter_sha256: str | None = None
+    replay_dataset: str | None = None
+    replay_sha256: str | None = None
+    replay_ratio: float = 0.0
     dataset_format: str = "text"
     text_field: str = "text"
     messages_field: str = "messages"
@@ -81,6 +85,8 @@ class UnslothPeftRunSpec:
     pretokenized: bool = False
     chat_total_token_count: int | None = None
     chat_assistant_token_count: int | None = None
+    chat_replay_available_rows: int | None = None
+    chat_replay_selected_rows: int | None = None
     max_length: int = 512
     epochs: float = 1.0
     max_steps: int = -1
@@ -119,6 +125,22 @@ class UnslothPeftRunSpec:
                 raise ValueError("backend parent adapter path cannot be empty")
             if len(self.parent_adapter_sha256) != 64:
                 raise ValueError("backend parent adapter SHA must be a SHA-256 digest")
+        has_replay_dataset = self.replay_dataset is not None
+        has_replay_sha = self.replay_sha256 is not None
+        if has_replay_dataset != has_replay_sha:
+            raise ValueError("backend replay dataset and SHA must be supplied together")
+        replay_ratio = float(self.replay_ratio)
+        if has_replay_dataset:
+            assert self.replay_dataset is not None
+            assert self.replay_sha256 is not None
+            if not self.replay_dataset.strip():
+                raise ValueError("backend replay dataset cannot be empty")
+            if len(self.replay_sha256) != 64:
+                raise ValueError("backend replay SHA must be a SHA-256 digest")
+            if not math.isfinite(replay_ratio) or replay_ratio <= 0 or replay_ratio > 10:
+                raise ValueError("backend replay ratio must be finite and in (0, 10]")
+        elif replay_ratio != 0.0:
+            raise ValueError("backend replay ratio requires a replay dataset")
         if self.dataset_format not in {"text", "chat"}:
             raise ValueError(f"unsupported dataset_format: {self.dataset_format}")
         if not self.text_field.strip():
@@ -217,6 +239,16 @@ class UnslothPeftRunSpec:
             parent_adapter_path = str(resolved_parent.resolve())
         parent_adapter_sha = parent_adapter_cfg.get("sha256")
 
+        replay_cfg = backend.get("replay", {})
+        replay_cfg = replay_cfg if isinstance(replay_cfg, Mapping) else {}
+        replay_dataset_path: str | None = None
+        if replay_cfg.get("dataset") is not None:
+            resolved_replay = Path(str(replay_cfg.get("dataset")))
+            if not resolved_replay.is_absolute():
+                resolved_replay = Path(work_dir) / resolved_replay
+            replay_dataset_path = str(resolved_replay.resolve())
+        replay_sha = replay_cfg.get("sha256")
+
         return cls(
             base_model=str(backend.get("base_model", "")),
             dataset=dataset,
@@ -227,6 +259,9 @@ class UnslothPeftRunSpec:
             parent_adapter_sha256=(
                 str(parent_adapter_sha) if parent_adapter_sha is not None else None
             ),
+            replay_dataset=replay_dataset_path,
+            replay_sha256=(str(replay_sha) if replay_sha is not None else None),
+            replay_ratio=(float(replay_cfg.get("ratio", 1.0)) if replay_dataset_path is not None else 0.0),
             dataset_format=str(backend.get("dataset_format", "text")),
             text_field=str(backend.get("text_field", "text")),
             messages_field=str(backend.get("messages_field", "messages")),
@@ -258,19 +293,28 @@ class UnslothPeftRunSpec:
 
 def _materialize_pretokenized_chat_dataset(
     spec: UnslothPeftRunSpec, *, work_dir: str | Path
-) -> tuple[str, str, int, int]:
-    """Render every row of a dataset_format="chat" dataset into
+) -> tuple[str, str, int, int, int, int]:
+    """Render every row of a dataset_format="chat" dataset (primary, plus
+    a sampled replay slice when spec.replay_dataset is set) into
     {input_ids, attention_mask, labels} via the exact same shared contract
     transformers_worker.py uses (chowder.backends.training_data's
-    _validate_chat_messages/_build_chat_example), then write it out as a
-    plain JSONL file the isolated worker can load with zero chat-template
-    or masking logic of its own.
+    _validate_chat_messages/_build_chat_example/_replay_sample_count), then
+    write it out as a plain JSONL file the isolated worker can load with
+    zero chat-template, masking, or replay-mixing logic of its own.
+
+    Replay merging happens on raw rows *before* tokenization -- the same
+    order transformers_worker.py uses -- so a token that came from a replay
+    row is indistinguishable from a primary row's token by the time the
+    worker sees it; only this function's returned counts, and the caller's
+    evidence, know the split.
 
     Returns (pretokenized_path, pretokenized_sha256, total_token_count,
-    assistant_token_count). Content-addressed by (dataset content, base
+    assistant_token_count, replay_available_rows, replay_selected_rows).
+    Content-addressed by (primary content, replay content + ratio, base
     model + revision, max_length): re-running with identical inputs reuses
     the cached file rather than re-tokenizing, but any real change to any
-    of those inputs produces a different cache key -- never a stale hit.
+    of those inputs -- including a replay dataset edit or ratio change --
+    produces a different cache key, never a stale hit.
 
     Requires `transformers`/`datasets` to be importable in the *controller*
     process (not the isolated Unsloth env) -- this is the deliberate
@@ -279,18 +323,26 @@ def _materialize_pretokenized_chat_dataset(
     isolated environment already-tokenized rows it needs no chat-aware code
     to consume.
     """
-    from datasets import load_dataset
+    from datasets import concatenate_datasets, load_dataset
     from transformers import AutoTokenizer
 
     dataset_sha256 = _verify_bound_input(spec.dataset, spec.dataset_sha256, label="training")
+    replay_sha256 = (
+        _verify_bound_input(spec.replay_dataset, spec.replay_sha256, label="replay")
+        if spec.replay_dataset is not None
+        else None
+    )
     cache_key = hashlib.sha256(
         json.dumps(
             {
                 "dataset_sha256": dataset_sha256,
+                "replay_sha256": replay_sha256,
+                "replay_ratio": spec.replay_ratio,
                 "base_model": spec.base_model,
                 "revision": spec.revision,
                 "max_length": spec.max_length,
                 "messages_field": spec.messages_field,
+                "seed": spec.seed,
             },
             sort_keys=True,
         ).encode("utf-8")
@@ -308,25 +360,49 @@ def _materialize_pretokenized_chat_dataset(
                 cached_sha,
                 int(meta["total_token_count"]),
                 int(meta["assistant_token_count"]),
+                int(meta["replay_available_rows"]),
+                int(meta["replay_selected_rows"]),
             )
 
     tokenizer = AutoTokenizer.from_pretrained(
         spec.base_model, revision=spec.revision, local_files_only=spec.offline
     )
-    raw = load_dataset("json", data_files=spec.dataset, split="train")
-    if spec.messages_field not in raw.column_names:
+    primary = load_dataset("json", data_files=spec.dataset, split="train")
+    if spec.messages_field not in primary.column_names:
         raise UnslothConfigError(
             f"chat dataset is missing messages field {spec.messages_field!r}; "
-            f"columns={raw.column_names}"
+            f"columns={primary.column_names}"
         )
-    _chat_digest(raw, spec.messages_field)  # validated as a real digest input; not persisted here
+    primary = primary.select_columns([spec.messages_field])
+    primary_rows = len(primary)
+
+    replay_available_rows = 0
+    replay_selected_rows = 0
+    rows = primary
+    if spec.replay_dataset is not None:
+        replay = load_dataset("json", data_files=spec.replay_dataset, split="train")
+        if spec.messages_field not in replay.column_names:
+            raise UnslothConfigError(
+                f"chat replay dataset is missing messages field {spec.messages_field!r}; "
+                f"columns={replay.column_names}"
+            )
+        replay = replay.select_columns([spec.messages_field])
+        replay_available_rows = len(replay)
+        replay_selected_rows = _replay_sample_count(
+            primary_rows, replay_available_rows, spec.replay_ratio
+        )
+        if replay_selected_rows:
+            selected_replay = replay.shuffle(seed=spec.seed).select(range(replay_selected_rows))
+            rows = concatenate_datasets([primary, selected_replay]).shuffle(seed=spec.seed)
+
+    _chat_digest(rows, spec.messages_field)  # validated as a real digest input; not persisted here
 
     total_token_count = 0
     assistant_token_count = 0
     tmp_path = cache_path.with_suffix(".jsonl.tmp")
     with tmp_path.open("w", encoding="utf-8") as handle:
-        for index in range(len(raw)):
-            messages = _validate_chat_messages(raw[index][spec.messages_field], row_index=index)
+        for index in range(len(rows)):
+            messages = _validate_chat_messages(rows[index][spec.messages_field], row_index=index)
             example = _build_chat_example(
                 tokenizer, messages, max_length=spec.max_length, row_index=index
             )
@@ -342,11 +418,20 @@ def _materialize_pretokenized_chat_dataset(
                 "pretokenized_sha256": pretokenized_sha256,
                 "total_token_count": total_token_count,
                 "assistant_token_count": assistant_token_count,
+                "replay_available_rows": replay_available_rows,
+                "replay_selected_rows": replay_selected_rows,
             }
         ),
         encoding="utf-8",
     )
-    return str(cache_path), pretokenized_sha256, total_token_count, assistant_token_count
+    return (
+        str(cache_path),
+        pretokenized_sha256,
+        total_token_count,
+        assistant_token_count,
+        replay_available_rows,
+        replay_selected_rows,
+    )
 
 
 class UnslothPeftExecutor:
@@ -447,6 +532,7 @@ class UnslothPeftExecutor:
             "output_dir",
             "dataset",
             "parent_adapter",
+            "replay_dataset",
             "timeout_seconds",
             "offline",
             "save_strategy",
@@ -464,6 +550,7 @@ class UnslothPeftExecutor:
             "revision": spec.revision,
             "dataset_sha256": spec.dataset_sha256,
             "parent_adapter_sha256": spec.parent_adapter_sha256,
+            "replay_dataset_sha256": spec.replay_sha256,
             "environment_manifest_sha256": environment_manifest_sha256,
         }
 
@@ -537,16 +624,33 @@ class UnslothPeftExecutor:
         primary_sha = _verify_bound_input(spec.dataset, spec.dataset_sha256, label="training")
         if spec.dataset_sha256 is None:
             spec = replace(spec, dataset_sha256=primary_sha)
+
+        if spec.replay_dataset is not None:
+            # Same convention as TransformersPeftExecutor._spec_for: verify
+            # the replay dataset's own digest up front, and refuse a replay
+            # file that's literally the same file as the primary dataset --
+            # that would double-count every row rather than genuinely
+            # rehearsing prior capability.
+            _verify_bound_input(spec.replay_dataset, spec.replay_sha256, label="replay")
+            if Path(spec.replay_dataset).resolve() == Path(spec.dataset).resolve():
+                raise ValueError("training and replay datasets must be different files")
+
         if spec.dataset_format == "chat":
-            # Pre-render every row into {input_ids, attention_mask, labels}
-            # in this (controller) process, then repoint the spec at that
+            # Pre-render every row (primary + a sampled replay slice, if
+            # configured) into {input_ids, attention_mask, labels} in this
+            # (controller) process, then repoint the spec at that
             # materialized file -- every downstream consumer (checkpoint
             # manifest binding, bound_inputs, the worker's own re-verify,
             # evidence) now sees the pretokenized file's own real digest,
             # with no special-casing needed anywhere else in this class.
-            path, sha, total_tokens, assistant_tokens = _materialize_pretokenized_chat_dataset(
-                spec, work_dir=context.work_dir
-            )
+            (
+                path,
+                sha,
+                total_tokens,
+                assistant_tokens,
+                replay_available,
+                replay_selected,
+            ) = _materialize_pretokenized_chat_dataset(spec, work_dir=context.work_dir)
             spec = replace(
                 spec,
                 dataset=path,
@@ -554,6 +658,8 @@ class UnslothPeftExecutor:
                 pretokenized=True,
                 chat_total_token_count=total_tokens,
                 chat_assistant_token_count=assistant_tokens,
+                chat_replay_available_rows=replay_available,
+                chat_replay_selected_rows=replay_selected,
             )
         if spec.parent_adapter is not None:
             assert spec.parent_adapter_sha256 is not None
@@ -655,6 +761,17 @@ class UnslothPeftExecutor:
 
         usage = self._resource_usage_from_worker(worker_result, wall_seconds=elapsed)
 
+        # Chat-format replay was merged (and counted) by this controller
+        # before handoff; text-format replay is merged by the worker
+        # itself, which reports its own counts in telemetry. Exactly one
+        # of these is the real source for a given run.
+        replay_available_rows = spec.chat_replay_available_rows
+        replay_selected_rows = spec.chat_replay_selected_rows
+        if replay_available_rows is None:
+            replay_available_rows = telemetry.get("replay_available_rows")
+        if replay_selected_rows is None:
+            replay_selected_rows = telemetry.get("replay_selected_rows")
+
         return TrainingArtifact(
             run_id=run_id,
             experiment_id=experiment.experiment_id,
@@ -673,6 +790,10 @@ class UnslothPeftExecutor:
                 "chat_assistant_token_count": spec.chat_assistant_token_count,
                 "parent_adapter_sha256": spec.parent_adapter_sha256,
                 "continued_from_parent_adapter": spec.parent_adapter_sha256 is not None,
+                "replay_dataset_sha256": spec.replay_sha256,
+                "replay_ratio": spec.replay_ratio,
+                "replay_available_rows": replay_available_rows,
+                "replay_selected_rows": replay_selected_rows,
                 "artifact_sha256": sha256_directory(spec.output_dir),
                 "resolved_config_sha256": hashlib.sha256(
                     json.dumps(context.resolved_config, sort_keys=True, default=str).encode(

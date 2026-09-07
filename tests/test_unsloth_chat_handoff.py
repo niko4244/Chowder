@@ -109,7 +109,7 @@ def test_materialized_rows_are_byte_identical_to_the_shared_contract(tmp_path):
     _write_chat_dataset(dataset, rows)
     spec = _spec(tmp_path, dataset)
 
-    path, sha, total_tokens, assistant_tokens = _materialize_pretokenized_chat_dataset(
+    path, sha, total_tokens, assistant_tokens, _, _ = _materialize_pretokenized_chat_dataset(
         spec, work_dir=tmp_path
     )
 
@@ -135,8 +135,8 @@ def test_materialization_is_content_addressed_and_reused(tmp_path):
     _write_chat_dataset(dataset, rows)
     spec = _spec(tmp_path, dataset)
 
-    path1, sha1, _, _ = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
-    path2, sha2, _, _ = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
+    path1, sha1, _, _, _, _ = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
+    path2, sha2, _, _, _, _ = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
     assert path1 == path2
     assert sha1 == sha2
 
@@ -153,8 +153,8 @@ def test_materialization_cache_key_changes_with_real_inputs(tmp_path, mutate):
     dataset = tmp_path / "chat.jsonl"
     _write_chat_dataset(dataset, rows)
     spec = _spec(tmp_path, dataset)
-    path1, _, _, _ = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
-    path2, _, _, _ = _materialize_pretokenized_chat_dataset(mutate(spec), work_dir=tmp_path)
+    path1, _, _, _, _, _ = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
+    path2, _, _, _, _, _ = _materialize_pretokenized_chat_dataset(mutate(spec), work_dir=tmp_path)
     assert path1 != path2
 
 
@@ -164,12 +164,12 @@ def test_changed_dataset_content_invalidates_the_cache(tmp_path):
         dataset, [[{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]]
     )
     spec = _spec(tmp_path, dataset)
-    path1, sha1, _, _ = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
+    path1, sha1, _, _, _, _ = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
 
     _write_chat_dataset(
         dataset, [[{"role": "user", "content": "bye"}, {"role": "assistant", "content": "later"}]]
     )
-    path2, sha2, _, _ = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
+    path2, sha2, _, _, _, _ = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
     assert path1 != path2
     assert sha1 != sha2
 
@@ -190,7 +190,7 @@ def test_multi_turn_multiple_assistant_turns_and_system_prompt(tmp_path):
     dataset = tmp_path / "chat.jsonl"
     _write_chat_dataset(dataset, rows)
     spec = _spec(tmp_path, dataset)
-    path, _, _, assistant_tokens = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
+    path, _, _, assistant_tokens, _, _ = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
     row = json.loads(Path(path).read_text(encoding="utf-8"))
     labeled = [label for label in row["labels"] if label != -100]
     assert labeled, "no assistant tokens labeled across two assistant turns"
@@ -206,7 +206,7 @@ def test_unicode_content_round_trips(tmp_path):
     dataset = tmp_path / "chat.jsonl"
     _write_chat_dataset(dataset, rows)
     spec = _spec(tmp_path, dataset)
-    path, _, _, assistant_tokens = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
+    path, _, _, assistant_tokens, _, _ = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
     row = json.loads(Path(path).read_text(encoding="utf-8"))
     assert assistant_tokens > 0
     assert any(label != -100 for label in row["labels"])
@@ -229,12 +229,12 @@ def test_truncation_inside_assistant_response_keeps_a_labeled_prefix(tmp_path):
     dataset = tmp_path / "chat.jsonl"
     _write_chat_dataset(dataset, rows)
     full_spec = _spec(tmp_path, dataset, max_length=256)
-    full_path, _, _, _ = _materialize_pretokenized_chat_dataset(full_spec, work_dir=tmp_path)
+    full_path, _, _, _, _, _ = _materialize_pretokenized_chat_dataset(full_spec, work_dir=tmp_path)
     full_row = json.loads(Path(full_path).read_text(encoding="utf-8"))
 
     truncated_len = len(full_row["input_ids"]) - 2
     truncated_spec = _spec(tmp_path, dataset, max_length=truncated_len)
-    truncated_path, _, _, _ = _materialize_pretokenized_chat_dataset(
+    truncated_path, _, _, _, _, _ = _materialize_pretokenized_chat_dataset(
         truncated_spec, work_dir=tmp_path
     )
     truncated_row = json.loads(Path(truncated_path).read_text(encoding="utf-8"))
@@ -254,7 +254,7 @@ def test_empty_assistant_content_still_labels_the_real_turn_markers(tmp_path):
     dataset = tmp_path / "chat.jsonl"
     _write_chat_dataset(dataset, rows)
     spec = _spec(tmp_path, dataset)
-    path, _, _, assistant_tokens = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
+    path, _, _, assistant_tokens, _, _ = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
     row = json.loads(Path(path).read_text(encoding="utf-8"))
     assert assistant_tokens > 0
     assert any(label != -100 for label in row["labels"])
@@ -298,7 +298,7 @@ def test_long_conversation_all_assistant_turns_get_real_labels(tmp_path):
     dataset = tmp_path / "chat.jsonl"
     _write_chat_dataset(dataset, rows)
     spec = _spec(tmp_path, dataset, max_length=4096)
-    _, _, _, assistant_tokens = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
+    _, _, _, assistant_tokens, _, _ = _materialize_pretokenized_chat_dataset(spec, work_dir=tmp_path)
     assert assistant_tokens > 8  # at least one real token per assistant turn
 
 

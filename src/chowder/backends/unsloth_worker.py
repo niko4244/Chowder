@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +56,9 @@ class _Spec:
     revision: str | None
     parent_adapter: str | None
     parent_adapter_sha256: str | None
+    replay_dataset: str | None
+    replay_sha256: str | None
+    replay_ratio: float
     text_field: str
     pretokenized: bool
     max_length: int
@@ -86,14 +90,27 @@ def _sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def _verify_bound_input(path: str, expected_sha: str | None) -> str:
+def _verify_bound_input(path: str, expected_sha: str | None, *, label: str = "training") -> str:
     resolved = Path(path).resolve()
     if not resolved.is_file():
-        raise FileNotFoundError(f"training dataset not found: {resolved}")
+        raise FileNotFoundError(f"{label} dataset not found: {resolved}")
     actual = _sha256_file(resolved)
     if expected_sha is not None and actual != expected_sha:
-        raise RuntimeError("training dataset digest changed before worker load")
+        raise RuntimeError(f"{label} dataset digest changed before worker load")
     return actual
+
+
+def _replay_sample_count(primary_rows: int, replay_rows: int, ratio: float) -> int:
+    """Local mirror of chowder.backends.training_data._replay_sample_count
+    -- see that module for the exact rationale; this file cannot import it
+    in the isolated environment."""
+    if primary_rows < 0 or replay_rows < 0:
+        raise ValueError("dataset row counts cannot be negative")
+    if replay_rows == 0 or primary_rows == 0:
+        return 0
+    if not math.isfinite(float(ratio)) or ratio <= 0:
+        raise ValueError("replay ratio must be finite and positive")
+    return min(replay_rows, max(1, math.ceil(primary_rows * float(ratio))))
 
 
 def _sha256_directory(path: str | Path) -> str:
@@ -138,9 +155,11 @@ def train(spec: _Spec) -> dict[str, Any]:
     if spec.parent_adapter is not None:
         assert spec.parent_adapter_sha256 is not None
         _verify_bound_adapter(spec.parent_adapter, spec.parent_adapter_sha256)
+    if spec.replay_dataset is not None:
+        _verify_bound_input(spec.replay_dataset, spec.replay_sha256, label="replay")
 
     import torch
-    from datasets import load_dataset
+    from datasets import concatenate_datasets, load_dataset
     from transformers import (
         DataCollatorForLanguageModeling,
         DataCollatorForSeq2Seq,
@@ -197,6 +216,12 @@ def train(spec: _Spec) -> dict[str, Any]:
     if len(dataset) == 0:
         raise RuntimeError("training dataset contains no rows")
 
+    # Chat-format replay is already merged into this file by unsloth_peft.py
+    # before handoff; these stay 0 in that branch on purpose -- only the
+    # text-format branch below performs its own replay merging.
+    replay_available_rows = 0
+    replay_selected_rows = 0
+
     if spec.pretokenized:
         # Chat-format handoff: unsloth_peft.py already rendered every row
         # through chowder.backends.training_data's shared chat-tokenization
@@ -219,7 +244,31 @@ def train(spec: _Spec) -> dict[str, Any]:
                 f"dataset is missing text field {spec.text_field!r}; "
                 f"columns={dataset.column_names}"
             )
-        dataset = dataset.select_columns([spec.text_field])
+        primary = dataset.select_columns([spec.text_field])
+        primary_rows = len(primary)
+
+        # Replay/rehearsal: mixed into the raw text rows before
+        # tokenization, exactly mirroring transformers_worker.py's text
+        # path -- sample up to replay_ratio * primary_rows real replay
+        # rows (never more than are actually available), concatenate, then
+        # reshuffle so replay rows are not clustered at the end of an
+        # epoch.
+        dataset = primary
+        if spec.replay_dataset is not None:
+            replay = load_dataset("json", data_files=spec.replay_dataset, split="train")
+            if spec.text_field not in replay.column_names:
+                raise RuntimeError(
+                    f"replay dataset is missing text field {spec.text_field!r}; "
+                    f"columns={replay.column_names}"
+                )
+            replay = replay.select_columns([spec.text_field])
+            replay_available_rows = len(replay)
+            replay_selected_rows = _replay_sample_count(
+                primary_rows, replay_available_rows, spec.replay_ratio
+            )
+            if replay_selected_rows:
+                selected_replay = replay.shuffle(seed=spec.seed).select(range(replay_selected_rows))
+                dataset = concatenate_datasets([primary, selected_replay]).shuffle(seed=spec.seed)
 
         def tokenize(batch: dict[str, Any]) -> dict[str, Any]:
             return tokenizer(
@@ -305,6 +354,8 @@ def train(spec: _Spec) -> dict[str, Any]:
             "train_runtime_seconds": float(runtime),
             "peak_vram_gb": peak_vram_gb,
             "training_rows": len(dataset),
+            "replay_available_rows": replay_available_rows,
+            "replay_selected_rows": replay_selected_rows,
         },
         "resolved_target_modules": resolved_target_modules,
         "resource_usage": {
@@ -344,6 +395,9 @@ def main() -> int:
         revision=raw.get("revision"),
         parent_adapter=raw.get("parent_adapter"),
         parent_adapter_sha256=raw.get("parent_adapter_sha256"),
+        replay_dataset=raw.get("replay_dataset"),
+        replay_sha256=raw.get("replay_sha256"),
+        replay_ratio=float(raw.get("replay_ratio", 0.0)),
         text_field=raw.get("text_field", "text"),
         pretokenized=bool(raw.get("pretokenized", False)),
         max_length=int(raw.get("max_length", 512)),
