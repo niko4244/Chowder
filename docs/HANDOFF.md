@@ -204,6 +204,29 @@ for it:
        attempt count recorded in each run's evidence. The speculative
        per-conversion hygiene hook was NOT shipped — its mechanism does
        not address the proven cause.
+    6. **retry6 result: the load fix worked; the run was then discarded for
+       a protocol defect — protocol v2 replaces it.** With the headroom
+       gate in place, both parents' integrity verification passed and
+       **parent A loaded all 851 weight tensors in 10:51 on the first
+       attempt** — the phase that killed retries 1-5. Evaluation ran to
+       completion, but every item scored 0.0. The predictions show why:
+       Qwen3.8 emits visible chain-of-thought, closes it with `</think>`,
+       and then answers correctly (e.g. the tungsten item ends
+       `...</think>\n\nW` against expected `w`) — but `max_new_tokens`
+       was 64 and `_score` matched the *whole* raw generation against the
+       expected value, so every thinking-model item failed. This is a
+       protocol defect, not a model result: **all retry6 rows are invalid
+       as parent evidence** and are retained on disk only as the negative
+       evidence that motivated protocol v2. Fixes (protocol v2, applied
+       identically to every parent): (a) worker `_score` now extracts the
+       final answer after the last `</think>` (no marker → whole
+       prediction; unclosed `<think>` → empty → honest miss), with the
+       real retry6 item pinned as a regression test; (b)
+       `ParentSuiteSpec.max_new_tokens` default 64 → 256 (observed
+       thinking ~40-150 tokens + answer headroom); (c)
+       `ParentEvalSpec.protocol_version = "v2"` participates in the
+       protocol digest, so v1 and v2 rows can never be compared as
+       commensurable. Tournament relaunched as retry7 under v2.
 - **Track B (Unsloth chat-format parity) done, merged, PR #130**: the
   isolated Unsloth worker previously supported text-format datasets only.
   Now `unsloth_peft.py` (controller-side) pre-renders every chat row
