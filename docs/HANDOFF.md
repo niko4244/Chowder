@@ -16,14 +16,12 @@ for it:
 
 ## Current state (updated 2026-09-07, later same day)
 
-- `main` = `ddf22c3` (#129 precision fix, #130 chat parity, #132 parent-adapter
-  continuation, #133 replay/rehearsal, #134 this doc update all merged —
-  Tracks B, C, and D are done on `main`). PR #135 (Track E real Unsloth
-  recursive-repair acceptance) is open — check `gh pr checks 135` before
-  trusting it's landed. PR #133's CI re-run (after the `_LazyModule`
-  test-fragility fix below) came back green including the previously
-  failing `real transformers peft cpu smoke` job, confirming the fix was
-  real; merged (squash, branch deleted).
+- `main` = `d1a3c69` (#129 precision fix, #130 chat parity, #132
+  parent-adapter continuation, #133 replay/rehearsal, #134 doc update,
+  #135 Track E real Unsloth recursive-repair acceptance all merged —
+  Tracks B, C, D, and E are done on `main`). PR for Track F (campaign
+  manifest, `src/chowder/qwen38_campaign.py`) is open next — check
+  `gh pr checks` on it before trusting it's landed.
 - **Track E (full recursive-repair acceptance through Unsloth) done for
   real, PR #135**: a real isolated Unsloth environment was provisioned for
   the first time this session (`chowder setup unsloth --root
@@ -171,12 +169,33 @@ for it:
   isolation means it will hold in a full suite run — verify with
   `CHOWDER_REAL_ML_SMOKE=1 pytest tests/ -q` (the whole suite, not just
   your file) before considering it done.**
-- **Not started yet**: Track F (Qwen3.8 campaign manifest/config —
-  binding the selected parent, controls, comparisons, suite versions,
-  engine/repair/replay/contamination policy, model/tokenizer/dataset
-  identities, sparse/MoE target, promotion rules; hash the manifest;
-  explicitly enable bounded recursive repair with real limits so a run
-  can't silently degrade into train→evaluate→stop). The real A/B parent
+- **Track F (Qwen3.8 campaign manifest) implemented, PR open**:
+  `src/chowder/qwen38_campaign.py` adds `Qwen38CampaignManifest` — binds
+  the primary parent (orcarouter, pinned), native control (official Qwen),
+  both comparison parents, the frozen protected-suite version (`v1`,
+  digest `7946d8c9…`, cross-checked in a real machine-local test against
+  the actual file at `C:\Users\nikma\Chowder-Protected\suites\v1\manifest.json`),
+  lineage policy (native-required, distillation hard-rejected), the sparse
+  target range, training engine, a real `RecursiveRepairPolicy` (reusing
+  the existing type, not reinventing it — `max_depth`,
+  `min_score_improvement`, `max_failure_signature_occurrences`,
+  `replay_ratio` already covered every knob the program directive named),
+  and promotion rules, into one object with a real `manifest_sha256()`
+  content hash. `__post_init__` fails closed on exactly the failure mode
+  the directive warned about: a manifest with an empty repair corpus or
+  empty repair-variant list, or `require_protocol_match=False`, is
+  rejected outright — a campaign literally cannot be constructed in a
+  shape that would silently degrade into train→evaluate→stop.
+  `default_qwen38_campaign_manifest()` is the real, concrete factory
+  (exact pinned revisions and suite digest, not placeholders) but takes
+  `repair_corpus_files`/`repair_variant_names`/`gpu_hour_budget` as
+  required keyword arguments — there is no safe default for those, by
+  design. 25 tests, all passing for real (`pytest
+  tests/test_qwen38_campaign.py`), including a hash-changes-with-every-real-
+  input-change sweep and every fail-closed rule. This module does not
+  touch contamination auditing (already backend/campaign-neutral — see
+  Track E) or replay (already a real `RecursiveRepairPolicy` field); it
+  only binds identities that had no home before. The real A/B parent
   tournament (Track A, still blocked on the page-file constraint above)
   can and should proceed independently once real headroom is available —
   its infrastructure has been merged since PR #128 and needs no Track
