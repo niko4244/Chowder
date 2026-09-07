@@ -98,19 +98,32 @@ class LocalParent:
         )
 
 
-#: The program's documented parents (docs/QWEN38_SPARSE_PROGRAM.md pins).
-PARENT_A = LocalParent(
-    label="parent-a-qwen38-27b-official",
-    revision="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
-    local_path=r"F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B",
-    manifest_path=r"F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B.manifest.json",
-)
-PARENT_B = LocalParent(
-    label="parent-b-orcarouter-uncensored",
-    revision="404ea47aaa5d8a8b00049c9e9750089aca011ab2",
-    local_path=r"G:\Local Models\HuggingFace\orcarouter\Qwen3.8-27B-Uncensored",
-    manifest_path=r"G:\Local Models\HuggingFace\orcarouter\Qwen3.8-27B-Uncensored.manifest.json",
-)
+#: The program's documented parents (docs/QWEN38_SPARSE_PROGRAM.md pins),
+#: as lazy factories: the paths are machine-specific, so they are validated
+#: only when a caller on this machine actually asks for a parent — never at
+#: import time, which would break collection on any machine without the
+#: local-models volumes (CI). The fail-closed check still happens, exactly
+#: where execution begins.
+
+
+def parent_a() -> LocalParent:
+    """Parent A (official control) on this machine; raises if absent."""
+    return LocalParent(
+        label="parent-a-qwen38-27b-official",
+        revision="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        local_path=r"F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B",
+        manifest_path=r"F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B.manifest.json",
+    )
+
+
+def parent_b() -> LocalParent:
+    """Parent B (OrcaRouter prior) on this machine; raises if absent."""
+    return LocalParent(
+        label="parent-b-orcarouter-uncensored",
+        revision="404ea47aaa5d8a8b00049c9e9750089aca011ab2",
+        local_path=r"G:\Local Models\HuggingFace\orcarouter\Qwen3.8-27B-Uncensored",
+        manifest_path=r"G:\Local Models\HuggingFace\orcarouter\Qwen3.8-27B-Uncensored.manifest.json",
+    )
 
 #: Tokenizer asset files whose content defines tokenizer identity.
 _TOKENIZER_ASSETS = (
