@@ -16,12 +16,13 @@ for it:
 
 ## Current state (updated 2026-09-07, later same day)
 
-- `main` = `d1a3c69` (#129 precision fix, #130 chat parity, #132
+- `main` = `503a221` (#129 precision fix, #130 chat parity, #132
   parent-adapter continuation, #133 replay/rehearsal, #134 doc update,
-  #135 Track E real Unsloth recursive-repair acceptance all merged —
-  Tracks B, C, D, and E are done on `main`). PR for Track F (campaign
-  manifest, `src/chowder/qwen38_campaign.py`) is open next — check
-  `gh pr checks` on it before trusting it's landed.
+  #135 Track E real Unsloth recursive-repair acceptance, #136 Track F
+  campaign manifest all merged — **Tracks B through F are all done on
+  `main`**). Only Track A (the real tournament execution itself, see
+  below) and the eventual real Qwen3.8 27B campaign run remain from the
+  Qwen3.8 program directive's PR order.
 - **Track E (full recursive-repair acceptance through Unsloth) done for
   real, PR #135**: a real isolated Unsloth environment was provisioned for
   the first time this session (`chowder setup unsloth --root
@@ -113,6 +114,34 @@ for it:
      `/tmp/run_tournament_ab.py`, registry
      `C:\Users\nikma\Chowder-Protected\tournament-ab.registry.db`, log
      `C:\Users\nikma\AppData\Local\Temp\tournament_ab.log`.
+  4. **retry4, a different real failure, only observed once so far — do
+     not conflate with #3 above.** Commit charge had genuinely improved
+     (85.3 GiB used / 127.8 GiB limit, ~42.5 GiB headroom vs. the ~30 GiB
+     seen at #3's failures; 567 processes) and retry4 got *past* the
+     integrity-hashing phase and into real weight loading this time
+     (`Loading weights: 0%|...`) before the worker crashed with
+     `exit 3221225477` (`0xC0000005` = `STATUS_ACCESS_VIOLATION`, a native
+     access violation, not a Python exception). Checking `nvidia-smi`
+     immediately after: the RTX 5060 Ti showed **11.2 GiB of 16.3 GiB
+     VRAM in use, only ~5.1 GiB free**, with `C:\Users\nikma\AppData\Local\
+     Programs\Ollama\lib\ollama\llama-server.exe` listed as an active
+     compute process — a real local service, unrelated to Chowder, that
+     was not consuming meaningful VRAM (558 MiB total GPU usage) at the
+     moment retry4 was launched but had evidently loaded a model onto the
+     *same* GPU partway through the run. ~5 GiB free is not enough
+     headroom for a 27B 4-bit-quantized parent load, and a low-level
+     access violation (rather than a clean `torch.cuda.OutOfMemoryError`)
+     is a plausible symptom of a bitsandbytes/CUDA kernel hitting severe
+     VRAM pressure under Windows WDDM. **This was not treated as a
+     reproducible Chowder defect and not retried again immediately** —
+     unlike #3 (reproduced twice under stable conditions), this is a
+     single occurrence with an immediate, concrete, non-Chowder
+     explanation (GPU contention from the user's own Ollama service).
+     Killing another user process without being asked is outside an
+     agent session's authority here. **Next real attempt should first
+     confirm `nvidia-smi` shows the RTX 5060 Ti mostly free** (Ollama
+     stopped or otherwise not resident), then rerun with a fresh
+     `retryN` output dir.
 - **Track B (Unsloth chat-format parity) done, merged, PR #130**: the
   isolated Unsloth worker previously supported text-format datasets only.
   Now `unsloth_peft.py` (controller-side) pre-renders every chat row
