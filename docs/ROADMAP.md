@@ -710,7 +710,8 @@ above being stable:
   The full parent-A conversion has not run (~52 GiB output; a disk
   decision).
   Phase 11 accounting is implemented
-  (`src/chowder/parameter_accounting.py`): real safetensors-header
+  (`src/chowder/parameter_accounting.py`, exposed as
+  `chowder moe account-parameters`): real safetensors-header
   census (stdlib-only, index cross-checked, fail-closed on unknown
   dtypes and missing top-k), with `a_label()` refusing to exist without
   measured routing geometry. Measured on the cached parent A: 27.78B

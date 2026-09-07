@@ -214,6 +214,52 @@ def _moe_expert_importance(args: argparse.Namespace) -> int:
     return 0
 
 
+
+
+def _moe_account_parameters(args: argparse.Namespace) -> int:
+    """Phase 11 evidence: account a local model directory from its headers.
+
+    Writes the accounting JSON via `write_accounting_json` (whose sha256
+    lands in the summary) and prints a JSON summary — the same shape of
+    workflow as `moe expert-importance`. Errors from the accounting
+    module (missing config, no shards, unmeasurable geometry) propagate:
+    a failed accounting writes nothing, invents nothing.
+    """
+    from .parameter_accounting import (
+        ParameterAccountingError,
+        account_parameters,
+        write_accounting_json,
+    )
+
+    accounting = account_parameters(args.model)
+    evidence_sha256 = write_accounting_json(accounting, args.output)
+
+    summary: dict[str, object] = {
+        "model_dir": accounting.model_dir,
+        "model_type": accounting.model_type,
+        "total_parameters": accounting.total_parameters,
+        "total_bytes": accounting.total_bytes,
+        "num_tensors": accounting.num_tensors,
+        "is_sparse": accounting.is_sparse,
+        "active_parameters": accounting.active_parameters,
+        "routing_geometry": (
+            accounting.router_geometry.to_dict()
+            if accounting.router_geometry is not None
+            else None
+        ),
+        "accounting_path": str(args.output),
+        "accounting_sha256": evidence_sha256,
+    }
+    try:
+        summary["a_label"] = accounting.a_label()
+    except ParameterAccountingError as exc:
+        # Honest absence, not a swallowed error: a dense model has no
+        # a-label by construction, and the reason is recorded verbatim.
+        summary["a_label"] = None
+        summary["a_label_error"] = str(exc)
+    print(json.dumps(summary, indent=2))
+    return 0
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chowder",
@@ -331,6 +377,19 @@ def build_parser() -> argparse.ArgumentParser:
     expert_importance.add_argument("--retention", type=float, nargs="+", default=[0.75, 0.5])
     expert_importance.add_argument("--minimum-survivors", type=int, default=1)
     expert_importance.set_defaults(func=_moe_expert_importance)
+    account_parameters = moe_targets.add_parser(
+        "account-parameters",
+        help="Account a local model directory's total/active/shared/routed/MTP/"
+        "vision parameter split from its safetensors headers and write the "
+        "evidence JSON (Phase 11; no model load, header reads only)",
+    )
+    account_parameters.add_argument(
+        "--model", required=True, help="Local model directory containing config.json and *.safetensors"
+    )
+    account_parameters.add_argument(
+        "--output", required=True, help="Path to write the accounting evidence JSON"
+    )
+    account_parameters.set_defaults(func=_moe_account_parameters)
     return parser
 
 

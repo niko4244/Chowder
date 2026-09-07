@@ -14,6 +14,7 @@ import struct
 
 import pytest
 
+from chowder.cli import build_parser
 from chowder.parameter_accounting import (
     CategoryTotals,
     ParameterAccountingError,
@@ -361,3 +362,96 @@ def test_accounting_sums_are_inconstructibly_wrong(tmp_path):
     payload["total_parameters"] += 1
     with pytest.raises(ParameterAccountingError, match="sum to"):
         type(accounting).from_dict(payload)
+
+
+# ---------------------------------------------------------------------------
+# `chowder moe account-parameters` CLI wiring
+# ---------------------------------------------------------------------------
+
+
+def _run_account_parameters(args):
+    from chowder.cli import main
+
+    argv = ["chowder", "moe", "account-parameters", *args]
+    parser = build_parser()
+    parsed = parser.parse_args(argv[1:])
+    assert parsed.func is not None
+    import contextlib
+    import io as _io
+
+    buffer = _io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = parsed.func(parsed)
+    return code, buffer.getvalue()
+
+
+def test_cli_account_parameters_dense_model(tmp_path):
+    """The command accounts a dense model, writes hash-recorded evidence,
+    and honestly reports the absent a-label with the module's reason."""
+    root = _write_dense_model(tmp_path / "dense")
+    out = tmp_path / "evidence" / "accounting.json"
+    code, printed = _run_account_parameters(
+        ["--model", str(root), "--output", str(out)]
+    )
+    assert code == 0
+    summary = json.loads(printed)
+    assert summary["model_type"] == "qwen3_5"
+    assert summary["total_parameters"] > 0
+    assert summary["num_tensors"] > 0
+    assert summary["is_sparse"] is False
+    assert summary["active_parameters"] == summary["total_parameters"]
+    assert summary["routing_geometry"] is None
+    assert summary["accounting_path"] == str(out)
+    assert len(summary["accounting_sha256"]) == 64
+    assert summary["a_label"] is None
+    assert "no a-label is constructible" in summary["a_label_error"]
+
+    # the evidence file exists and its sha256 matches the summary's record
+    evidence = json.loads(out.read_text(encoding="utf-8"))
+    assert evidence["total_parameters"] == summary["total_parameters"]
+    import hashlib
+
+    assert hashlib.sha256(out.read_bytes()).hexdigest() == summary["accounting_sha256"]
+
+
+def test_cli_account_parameters_sparse_model(tmp_path):
+    """A sparse model's evidence carries measured routing geometry and a
+    real a-label — the Phase 11 gate working through the CLI."""
+    root = _write_sparse_model(tmp_path / "sparse")
+    out = tmp_path / "sparse_accounting.json"
+    code, printed = _run_account_parameters(
+        ["--model", str(root), "--output", str(out)]
+    )
+    assert code == 0
+    summary = json.loads(printed)
+    assert summary["is_sparse"] is True
+    assert summary["routing_geometry"] == {
+        "num_experts": 4,
+        "moe_intermediate_size": 2,
+        "top_k": 2,
+    }
+    assert summary["active_parameters"] < summary["total_parameters"]
+    assert summary["a_label"].startswith("A0.0B")
+    assert "top-2 of 4" in summary["a_label"]
+    assert "a_label_error" not in summary
+    assert out.is_file()
+
+
+def test_cli_account_parameters_fails_closed_without_writing(tmp_path):
+    """A bad directory must exit non-zero and leave no evidence file —
+    a failed accounting invents nothing."""
+    out = tmp_path / "never.json"
+    with pytest.raises(ParameterAccountingError):
+        _run_account_parameters(["--model", str(tmp_path / "missing"), "--output", str(out)])
+    assert not out.exists()
+
+
+def test_cli_account_parameters_requires_arguments():
+    """The subcommand exists under `moe` with the documented arguments."""
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["moe", "account-parameters"])
+    parsed = parser.parse_args(
+        ["moe", "account-parameters", "--model", "m", "--output", "o.json"]
+    )
+    assert parsed.model == "m" and parsed.output == "o.json"
