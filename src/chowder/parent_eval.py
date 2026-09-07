@@ -155,7 +155,11 @@ class ParentSuiteSpec:
     prompt_field: str = "prompt"
     expected_field: str = "expected"
     scoring: str = "normalized_exact_match"
-    max_new_tokens: int = 64
+    # v2 (2026-09-07): thinking models spend generation budget on visible
+    # chain-of-thought before answering; 64 tokens truncated the answer on
+    # every retry6 item. 256 covers observed thinking (~40-150 tokens) plus
+    # the answer with headroom. The budget is protocol identity (hashed).
+    max_new_tokens: int = 256
     use_chat_template: bool = False
 
     def __post_init__(self) -> None:
@@ -200,7 +204,7 @@ class ParentSuiteSpec:
             prompt_field=data.get("prompt_field", "prompt"),
             expected_field=data.get("expected_field", "expected"),
             scoring=data.get("scoring", "normalized_exact_match"),
-            max_new_tokens=data.get("max_new_tokens", 64),
+            max_new_tokens=data.get("max_new_tokens", 256),
             use_chat_template=bool(data.get("use_chat_template", False)),
         )
 
@@ -222,6 +226,11 @@ class ParentEvalSpec:
     quantization: str = "none"
     max_model_len: int | None = None
     require_thinking_efficiency_telemetry: bool = True
+    # Explicit protocol semantics version. The digest already hashes the
+    # budget; this marker additionally captures scorer-side semantics that
+    # are not per-suite fields -- v2 = thinking-aware answer extraction
+    # (score against the text after the last "</think>") in the worker.
+    protocol_version: str = "v2"
 
     def __post_init__(self) -> None:
         if not self.suites:
@@ -256,6 +265,7 @@ class ParentEvalSpec:
             "quantization": self.quantization,
             "max_model_len": self.max_model_len,
             "require_thinking_efficiency_telemetry": self.require_thinking_efficiency_telemetry,
+            "protocol_version": self.protocol_version,
         }
 
     def canonical_json(self) -> str:

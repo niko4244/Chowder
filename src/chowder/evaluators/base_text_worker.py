@@ -25,11 +25,31 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().casefold()
 
 
+def _final_answer(prediction: str) -> str:
+    """Extract a thinking model's final answer from its raw generation.
+
+    Qwen3-style reasoning models emit chain-of-thought, then a ``</think>``
+    close marker, then the answer. The answer is everything after the LAST
+    close marker; without any marker the whole prediction is the answer
+    (non-thinking models, or thinking disabled). An *unclosed* ``<think>``
+    means the generation budget was exhausted mid-reasoning -- there is no
+    answer yet, so the extraction is empty and the item scores as a miss.
+    That is honest: failing to finish thinking within budget is a real
+    capability limit of the configured protocol, not a scoring artifact.
+    """
+    if "</think>" in prediction:
+        return prediction.rsplit("</think>", 1)[1]
+    if "<think>" in prediction:
+        return ""
+    return prediction
+
+
 def _score(prediction: str, expected: str, scoring: str) -> float:
+    answer = _final_answer(prediction)
     if scoring == "exact_match":
-        return float(prediction.strip() == expected.strip())
+        return float(answer.strip() == expected.strip())
     if scoring == "normalized_exact_match":
-        return float(_normalize(prediction) == _normalize(expected))
+        return float(_normalize(answer) == _normalize(expected))
     raise ValueError(f"unsupported scoring: {scoring}")
 
 
