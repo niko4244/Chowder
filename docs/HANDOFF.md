@@ -16,12 +16,13 @@ for it:
 
 ## Current state (updated 2026-09-07, later same day)
 
-- `main` = `503a221` (#129 precision fix, #130 chat parity, #132
-  parent-adapter continuation, #133 replay/rehearsal, #134 doc update,
-  #135 Track E real Unsloth recursive-repair acceptance, #136 Track F
-  campaign manifest all merged — **Tracks B through F are all done on
-  `main`**). Only Track A (the real tournament execution itself, see
-  below) and the eventual real Qwen3.8 27B campaign run remain from the
+- `main` = `6b4f98e` (#129 precision fix, #130 chat parity, #132
+  parent-adapter continuation, #133 replay/rehearsal, #134/#137 doc
+  updates, #135 Track E real Unsloth recursive-repair acceptance, #136
+  Track F campaign manifest all merged — **Tracks B through F are all
+  done on `main`**). Only Track A (the real tournament execution itself,
+  now blocked on a confirmed-reproducible 4-bit-load segfault — see
+  below, item 4) and the eventual real Qwen3.8 27B campaign run remain from the
   Qwen3.8 program directive's PR order.
 - **Track E (full recursive-repair acceptance through Unsloth) done for
   real, PR #135**: a real isolated Unsloth environment was provisioned for
@@ -114,34 +115,60 @@ for it:
      `/tmp/run_tournament_ab.py`, registry
      `C:\Users\nikma\Chowder-Protected\tournament-ab.registry.db`, log
      `C:\Users\nikma\AppData\Local\Temp\tournament_ab.log`.
-  4. **retry4, a different real failure, only observed once so far — do
-     not conflate with #3 above.** Commit charge had genuinely improved
-     (85.3 GiB used / 127.8 GiB limit, ~42.5 GiB headroom vs. the ~30 GiB
-     seen at #3's failures; 567 processes) and retry4 got *past* the
-     integrity-hashing phase and into real weight loading this time
+  4. **retry4/retry5: a NEW, now CONFIRMED-REPRODUCIBLE crash, distinct
+     from #3, and the GPU-contention theory below is REFUTED — read this
+     whole item before touching the tournament again.** retry4 got past
+     the integrity-hashing phase into real weight loading
      (`Loading weights: 0%|...`) before the worker crashed with
-     `exit 3221225477` (`0xC0000005` = `STATUS_ACCESS_VIOLATION`, a native
-     access violation, not a Python exception). Checking `nvidia-smi`
-     immediately after: the RTX 5060 Ti showed **11.2 GiB of 16.3 GiB
-     VRAM in use, only ~5.1 GiB free**, with `C:\Users\nikma\AppData\Local\
-     Programs\Ollama\lib\ollama\llama-server.exe` listed as an active
-     compute process — a real local service, unrelated to Chowder, that
-     was not consuming meaningful VRAM (558 MiB total GPU usage) at the
-     moment retry4 was launched but had evidently loaded a model onto the
-     *same* GPU partway through the run. ~5 GiB free is not enough
-     headroom for a 27B 4-bit-quantized parent load, and a low-level
-     access violation (rather than a clean `torch.cuda.OutOfMemoryError`)
-     is a plausible symptom of a bitsandbytes/CUDA kernel hitting severe
-     VRAM pressure under Windows WDDM. **This was not treated as a
-     reproducible Chowder defect and not retried again immediately** —
-     unlike #3 (reproduced twice under stable conditions), this is a
-     single occurrence with an immediate, concrete, non-Chowder
-     explanation (GPU contention from the user's own Ollama service).
-     Killing another user process without being asked is outside an
-     agent session's authority here. **Next real attempt should first
-     confirm `nvidia-smi` shows the RTX 5060 Ti mostly free** (Ollama
-     stopped or otherwise not resident), then rerun with a fresh
-     `retryN` output dir.
+     `exit 3221225477` (`0xC0000005` = `STATUS_ACCESS_VIOLATION`). At the
+     time, `nvidia-smi` showed the RTX 5060 Ti at 11.2/16.3 GiB VRAM used
+     (Ollama's `llama-server.exe` was an active compute process), so GPU
+     contention looked like the explanation and retry4 was **not**
+     initially treated as a reproducible Chowder defect. **That theory is
+     now refuted**: retry5 was relaunched only after confirming, for
+     real, that the GPU was clear (`nvidia-smi`: 527 MiB used / 15.5 GiB
+     free, Ollama no longer listed as a compute process) and commit
+     charge was healthy (83.7/127.8 GiB, ~44 GiB headroom) — and it
+     crashed **identically**, same exit code, same exact point
+     (`Loading weights: 0%|          | 0/851 [00:00<?, ?it/s]`), zero
+     bytes of additional stderr either time (`worker-stderr.log` in each
+     run's parent-a subdirectory has exactly those two lines and nothing
+     else — this is a silent native crash, no Python traceback, no CUDA
+     error text). A **third, direct, non-tournament reproduction**
+     (bypassing `_run_worker`'s subprocess wrapper entirely, with
+     `CUDA_LAUNCH_BLOCKING=1` for synchronous CUDA errors, script saved
+     durably at
+     `C:\Users\nikma\Chowder-Protected\repro_parent_a_load_4bit_segfault.py`
+     — rerun with `PYTHONPATH=<worktree>/src python
+     repro_parent_a_load_4bit_segfault.py`) reproduced it a third time, again at
+     the identical point, confirmed via Bash as a real `Segmentation
+     fault` (exit 139) — so this is **not** wrapper-related and **not**
+     resource-contention-related; it reproduces 3/3 under materially
+     different system conditions. Environment at reproduction: `torch
+     2.11.0+cu128`, `transformers 5.16.1`, parent A
+     (`F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B`), `quantization_config=
+     BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+     bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)`,
+     `device_map={"": 0}` — i.e. it crashes inside
+     `AutoModelForCausalLM.from_pretrained` right as NF4 4-bit weight
+     quantization/loading begins on this exact 18-shard/51.75 GiB
+     checkpoint. No corresponding entry appears in the Windows
+     Application (WER, event ID 1000) or System (nvlddmkm/display/TDR)
+     event logs at either crash timestamp — ruled out a driver-level GPU
+     reset. **Leading real hypothesis, not yet confirmed**: a
+     bitsandbytes/torch/CUDA version incompatibility specific to 4-bit
+     NF4 quantization of a checkpoint this large on this exact hardware
+     (RTX 5060 Ti, Blackwell, cu128 torch build) — not something narrowed
+     down further yet. **Next steps for a future session, in order**:
+     (a) try `quantization="none"` with plain bf16 (no bitsandbytes at
+     all) as a differential diagnostic — if that loads cleanly, the fault
+     is bitsandbytes-specific, not a generic OOM/driver issue; (b) check
+     for a newer/older `bitsandbytes` release with known Blackwell fixes;
+     (c) only after (a)/(b) narrow it down, decide whether this becomes a
+     real Chowder-level workaround (e.g. an alternate quantization path)
+     or stays an upstream-dependency bug to track. Do not blindly retry
+     retry6 expecting a different result — this is now a confirmed,
+     reproducible defect, not transient contention.
 - **Track B (Unsloth chat-format parity) done, merged, PR #130**: the
   isolated Unsloth worker previously supported text-format datasets only.
   Now `unsloth_peft.py` (controller-side) pre-renders every chat row
