@@ -119,9 +119,13 @@ for it:
   verifier will catch it — re-verify before trusting a new experiment.
   Parents B/C/D are still not acquired.
 - Phase 11 accounting (PR #123): `src/chowder/parameter_accounting.py`
-  measures model directories from safetensors headers (stdlib-only). Run
-  it on any converted checkpoint before claiming active-parameter
-  numbers; evidence JSON for parent A lives beside the model
+  measures model directories from safetensors headers (stdlib-only).
+  `chowder moe account-parameters --model <dir> --output <json>` runs it
+  from the CLI (writes hash-recorded evidence, prints a JSON summary;
+  dense models honestly report the absent a-label with the module's
+  reason). Run it on any converted checkpoint before claiming
+  active-parameter numbers; evidence JSON for parent A lives beside the
+  model
   (`Qwen3.8-27B.accounting.json`). Measured parent A truth: 27.78B
   total; dense floor 9.78B active/token (10.21B with MTP).
 - Phase 6 conversion implemented (stages 1–2 of the plan's validation

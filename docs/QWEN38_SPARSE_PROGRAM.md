@@ -32,7 +32,8 @@ measured routing geometry supports the claim.
 
 ## Phase 11 accounting of the cached control (measured 2026-09-06)
 
-`src/chowder/parameter_accounting.py` (with tests) accounts model
+`src/chowder/parameter_accounting.py` (with tests; exposed as
+`chowder moe account-parameters`) accounts model
 directories from real safetensors headers — stdlib-only, no torch, no
 safetensors import, cross-checked against the shard index, failing closed
 on unknown dtypes, duplicate tensors, index/shard mismatch, and (for
