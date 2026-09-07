@@ -169,6 +169,41 @@ for it:
      or stays an upstream-dependency bug to track. Do not blindly retry
      retry6 expecting a different result — this is now a confirmed,
      reproducible defect, not transient contention.
+  5. **RESOLVED (2026-09-07): root cause found and gated — it was Windows
+     commit exhaustion, not a bitsandbytes/torch/CUDA version defect.**
+     Full differential evidence (scripts + JSON results) preserved in
+     `C:/Users/nikma/Chowder-Protected/diagnostics/`. The decisive facts:
+     - The checkpoint and the bnb kernels are innocent: 8/8 representative
+       tensors read cleanly via safetensors alone, and every real
+       parent-A tensor shape x {NF4, FP4} x {double-quant on/off} plus a
+       size ladder to 680M elements passed 35/35 direct-kernel
+       quantize+dequantize round-trips on the RTX 5060 Ti.
+     - The load drives Windows commit charge up ~68-71 GiB above its
+       launch baseline (instrumented run: 28.2 -> 96.6 GiB of 119 limit).
+       When launch headroom is below that requirement, the process dies
+       as the silent `STATUS_ACCESS_VIOLATION` — inside a native
+       allocation path, so no Python OOM/traceback is ever raised.
+     - Crash/success now fully correlates with headroom: 5/5 crashes
+       under low headroom (retry4/retry5 at 44 GiB -> early death; two
+       instrumented runs at intermediate headroom -> mid-load death at
+       conversion ~#186; a controlled stress test holding 45 GiB of
+       commit in a side process, leaving 49.4 GiB -> crash at 414 s),
+       and 5/5 completions at ~90 GiB headroom — including a bare,
+       un-hooked load (675 s, SUCCESS). The earlier per-conversion
+       sync/empty-cache "rescues" were confounded by the same
+       time-correlated headroom change; no hook is needed.
+     - The apparent "crash at 0%" positions in retry4/retry5 were an
+       artifact of tqdm's `\r` updates sitting in block-buffered stderr
+       when the process died; worker stderr is now launched with
+       PYTHONUNBUFFERED=1 so future crash positions are real.
+     - Fix (in `parent_tournament.py`): a commit-headroom preflight gate
+       before every worker launch (default 80 GiB, env
+       `CHOWDER_MIN_COMMIT_HEADROOM_GIB`, measured numbers in the error),
+       bounded retry (2) on native-crash exit codes with the gate
+       re-checked before each relaunch, and the measured headroom +
+       attempt count recorded in each run's evidence. The speculative
+       per-conversion hygiene hook was NOT shipped — its mechanism does
+       not address the proven cause.
 - **Track B (Unsloth chat-format parity) done, merged, PR #130**: the
   isolated Unsloth worker previously supported text-format datasets only.
   Now `unsloth_peft.py` (controller-side) pre-renders every chat row
