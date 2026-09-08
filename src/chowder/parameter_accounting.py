@@ -461,12 +461,23 @@ def account_parameters(model_dir: str | Path) -> ParameterAccounting:
         )
 
     geometry = _measure_router_geometry(root, category_tensors, text_config)
-    router = categories.get("router", CategoryTotals(0, 0, 0))
-    active = total_parameters - routed.parameters - router.parameters
+    # Routed experts' per-token share: top_k of num_experts experts are
+    # computed for every token. Routed capacity is always divisible by
+    # num_experts (it IS num_experts equal experts), so the share is an
+    # exact integer -- anything else means mis-shaped tensors.
+    routed_active = routed.parameters * geometry.top_k
+    if routed_active % geometry.num_experts != 0:
+        raise ParameterAccountingError(
+            f"routed capacity {routed.parameters:,} is not divisible by "
+            f"num_experts {geometry.num_experts}; experts are mis-shaped"
+        )
+    routed_active //= geometry.num_experts
+    active = total_parameters - routed.parameters + routed_active
     definition = (
-        "total - routed_experts - router "
-        f"(-{routed.parameters:,} routed, -{router.parameters:,} router); "
-        "shared expert, attention/GatedDeltaNet, embeddings, MTP, vision and "
+        "total - routed_experts * (1 - top_k/num_experts) "
+        f"(-{routed.parameters - routed_active:,} dormant routed share, "
+        f"+{routed_active:,} routed active); the router itself, shared "
+        "expert, attention/GatedDeltaNet, embeddings, MTP, vision and "
         "norms run on every token and count as active"
     )
     return ParameterAccounting(

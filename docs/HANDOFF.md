@@ -502,6 +502,52 @@ for it:
   harness (`backtest_selectors`) is the natural base for the roadmap's
   held-out validator.
 
+## Sparse-architecture research track (TurboSparse/PowerInfer) — 2026-09-08
+
+Research directive: investigate activation-informed sparse architecture
+WITHOUT touching the live parent tournament or frozen protocol. Landed
+on this branch (all tested, full suite green, ruff clean):
+
+1. **Research note** `docs/TURBOSPARSE_POWERINFER_RESEARCH.md` — grounded
+   in both papers (read directly, not summaries): dReLU needs ~150B-token
+   continued pretraining (nothing transfers free at conversion time);
+   PowerInfer's CPU-direct-beats-PCIe-below-batch-32 law makes offloading
+   a measured decision, not an assumption; transfer/inference-only/
+   retraining/conflict/speculative classifications recorded.
+2. **Phase 3 census** `src/chowder/activation_census.py` — forward-hook
+   only, never modifies the model; dReLU-counterfactual activity
+   `(gate>0)&(up>0)` from captured pre-activations (the initial
+   `gated != 0` inference was a real bug — SwiGLU output is never exactly
+   zero — fixed and regression-pinned); frequency/magnitude/contribution,
+   Gini, exact hot-set co-occurrence + 256-dim JL sketch, mark_split
+   held-out halves, concurrent-census guard, atomic profile artifacts.
+3. **Phase 4 structure evaluation** `src/chowder/activation_experiments.py`
+   — contiguous/random/frequency/sketch-cluster/sketch+contribution
+   groupings; held-out half-B metrics; 3-part verdict (absolute held-out
+   ratio >= 2.0 AND split-half stability >= 0.90 AND >= 1.10x random
+   null). Planted-structure fixture is deliberately NON-contiguous
+   (round-robin) so the mechanical baseline cannot trivially equal it.
+   The Phase 4 checkpoint (real parent) has NOT run yet — GPU belongs to
+   the tournament first.
+4. **Phase 9 hierarchy** `src/chowder/sparse_accounting.py` —
+   total = always-on + dense/shared + routed-active (top_k/E) ->
+   neuron-active = routed-active x (1 - MEASURED sparsity), fail-closed
+   on census evidence (digest + per-layer sparsities all-or-nothing),
+   explicit definition ids for cross-paper normalization.
+5. **Base-module defect fixed** `parameter_accounting.py`: the Phase 11
+   active formula `total - routed - router` excluded the routed top-k
+   share that IS computed every token and subtracted the always-on
+   router. Now `total - routed x (1 - top_k/num_experts)` (exact integer
+   division with a divisibility gate). Pinned test updated; every sparse
+   A-label in future conversions is corrected by this.
+
+**Next checkpoints:** (a) C/D tournaments complete -> four-parent packet
+(consolidation machinery already validated, auto-refresh wired);
+(b) Phase 4 real-parent census run when the GPU frees — calibration
+corpus must NOT be protected tournament content.
+
+---
+
 ## Environment facts (not written anywhere else in the repo)
 
 - Primary working directory:
