@@ -98,6 +98,47 @@ PARENT_D_PIN = ParentPin(
     role="comparison",
 )
 
+#: Parents A and B, already cached locally, restated here (same pins as
+#: qwen38_campaign.default_qwen38_campaign_manifest's native_control/
+#: primary_parent) so a Kaggle acquisition of *any* of the four parents --
+#: including re-acquiring A for the Phase 3 equivalence qualification
+#: run -- can use this module's one acquisition path instead of a second,
+#: Kaggle-specific pin table.
+PARENT_A_PIN = ParentPin(
+    repo="Qwen/Qwen3.8-27B",
+    revision="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    role="control",
+)
+PARENT_B_PIN = ParentPin(
+    repo="orcarouter/Qwen3.8-27B-Uncensored",
+    revision="404ea47aaa5d8a8b00049c9e9750089aca011ab2",
+    role="primary",
+)
+
+#: Every pinned parent, keyed by the program's A/B/C/D role letters.
+ALL_PARENT_PINS: dict[str, ParentPin] = {
+    "A": PARENT_A_PIN,
+    "B": PARENT_B_PIN,
+    "C": PARENT_C_PIN,
+    "D": PARENT_D_PIN,
+}
+
+#: Tournament labels (== `parent_tournament.LocalParent.label` /
+#: `ParentEvalReport.base_model`) for every role. A and B match the exact
+#: strings `parent_tournament.parent_a()`/`parent_b()` already use --
+#: C and D have no equivalent factory yet in that off-limits file (only A
+#: and B are defined there today), so this module names them here as its
+#: own explicit, citable convention rather than leaving every caller to
+#: invent one independently. If `parent_tournament.py` later grows
+#: `parent_c()`/`parent_d()` factories, whoever adds them should match
+#: these exact strings so existing evidence keyed on them stays joinable.
+PARENT_LABELS: dict[str, str] = {
+    "A": "parent-a-qwen38-27b-official",
+    "B": "parent-b-orcarouter-uncensored",
+    "C": "parent-c-obliteratus",
+    "D": "parent-d-davidau-turbo-fable",
+}
+
 #: Conservative padding over the raw remote file total: local staging
 #: files during a Hub download, filesystem block-size rounding, and a
 #: safety margin against an under-reported remote size.

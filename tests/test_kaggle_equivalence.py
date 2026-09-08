@@ -414,6 +414,14 @@ def test_empty_comparison_not_qualified():
     assert record.item_total_count == 0
 
 
+def test_backend_fingerprint_from_dict_round_trips():
+    from chowder.kaggle_equivalence import BackendFingerprint
+
+    original = _fingerprint(gpu_models=("Tesla T4", "Tesla T4"), gpu_count=2)
+    reloaded = BackendFingerprint.from_dict(json.loads(json.dumps(original.to_dict())))
+    assert reloaded == original
+
+
 def test_backend_fingerprint_validates_commit_sha():
     with pytest.raises(ValueError):
         _fingerprint(chowder_commit_sha="not-a-sha")

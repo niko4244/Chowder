@@ -136,6 +136,24 @@ class BackendFingerprint:
             "chowder_commit_sha": self.chowder_commit_sha,
         }
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "BackendFingerprint":
+        return cls(
+            python_version=data["python_version"],
+            torch_version=data["torch_version"],
+            transformers_version=data["transformers_version"],
+            bitsandbytes_version=data["bitsandbytes_version"],
+            accelerate_version=data["accelerate_version"],
+            cuda_runtime_version=data.get("cuda_runtime_version"),
+            gpu_models=tuple(data.get("gpu_models") or ()),
+            gpu_count=data["gpu_count"],
+            device_map_summary=data["device_map_summary"],
+            quantization=data["quantization"],
+            dtype=data["dtype"],
+            tokenizer_identity_sha256=data.get("tokenizer_identity_sha256"),
+            chowder_commit_sha=data["chowder_commit_sha"],
+        )
+
 
 @dataclass(frozen=True)
 class ItemComparison:

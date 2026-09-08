@@ -16,8 +16,12 @@ import pytest
 
 from chowder.parent_eval import ParentTokenizerEvidence
 from chowder.qwen38_acquisition import (
+    ALL_PARENT_PINS,
+    PARENT_A_PIN,
+    PARENT_B_PIN,
     PARENT_C_PIN,
     PARENT_D_PIN,
+    PARENT_LABELS,
     AcquisitionError,
     RemoteFileInfo,
     acquire_parent,
@@ -71,6 +75,28 @@ def test_pins_are_exact_and_reuse_parentpin_validation():
         ParentPin(repo="OBLITERATUS/Qwen3.8-27B-OBLITERATED", revision="main", role="comparison")
     with pytest.raises(CampaignManifestError):
         ParentPin(repo="OBLITERATUS/Qwen3.8-27B-OBLITERATED", revision="latest", role="comparison")
+
+
+def test_all_parent_pins_covers_exactly_abcd():
+    assert set(ALL_PARENT_PINS) == {"A", "B", "C", "D"}
+    assert ALL_PARENT_PINS["A"] is PARENT_A_PIN
+    assert ALL_PARENT_PINS["B"] is PARENT_B_PIN
+    assert ALL_PARENT_PINS["C"] is PARENT_C_PIN
+    assert ALL_PARENT_PINS["D"] is PARENT_D_PIN
+    assert PARENT_A_PIN.repo == "Qwen/Qwen3.8-27B"
+    assert PARENT_A_PIN.revision == "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    assert PARENT_B_PIN.repo == "orcarouter/Qwen3.8-27B-Uncensored"
+    assert PARENT_B_PIN.revision == "404ea47aaa5d8a8b00049c9e9750089aca011ab2"
+
+
+def test_parent_labels_match_existing_parent_tournament_convention():
+    # parent_tournament.parent_a()/parent_b() require real local drive
+    # paths to exist on this machine to construct, so this compares
+    # against their documented label strings directly rather than
+    # calling them (see parent_tournament.py's own docstrings/source).
+    assert set(PARENT_LABELS) == {"A", "B", "C", "D"}
+    assert PARENT_LABELS["A"] == "parent-a-qwen38-27b-official"
+    assert PARENT_LABELS["B"] == "parent-b-orcarouter-uncensored"
 
 
 def test_refuse_gguf_only_revision():
