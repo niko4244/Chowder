@@ -281,6 +281,24 @@ for it:
     hub transport died. Corollary guard: both acquire scripts now pass
     `ignore_patterns=["*.gguf", "*.GGUF"]` so snapshot_download can
     never start pulling C's GGUF variants at the acquire stage.
+  - **Four-parent consolidation ready and validated (partial packet
+    already produced):** `Temp/consolidate_four_parent.py` idempotently
+    adopts A/B's experiment + evaluation_run rows verbatim from
+    `tournament-retry7.registry.db` into `tournament-cd.registry.db`
+    (`_insert_immutable` treats identical replays as no-ops -- registry
+    verified clean, 2 experiments + 2 evaluation_runs, no duplicates),
+    then runs `parent_freeze.build_selection_packet` over roles
+    A/B/C/D with per-role tokenizer evidence measured from the local
+    model dirs. First real run: A/B gates all PASS (dimension coverage,
+    revision pins, protocol digest `c5e964df...`, suite content,
+    tokenizer identity), C/D recorded as `missing_roles`, dimension
+    comparisons match the retry7 A/B result (7 ties + calibration
+    clear-difference). Packet persisted at
+    `Chowder-Protected/runs/four-parent-selection-packet.json`. Both
+    tournament runners now refresh the packet automatically after
+    their evaluation completes, so whichever of C/D finishes last
+    produces the full four-parent packet; only `all_roles_present`
+    still fails, and the freeze decision waits for it.
   - **Orchestrators (detached, survive agent-session restarts):**
     `orchestrate_c.py` chains C fetch-complete -> acquire -> protocol-v2
     tournament; `orchestrate_d.py` chains D fetch-complete -> acquire
