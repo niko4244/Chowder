@@ -264,6 +264,32 @@ for it:
     first real result from it. A P100-class accelerator or a
     deliberately-justified margin change are the only honest routes to
     re-enable it; neither is needed while C/D run locally.
+  - **C's real size is 103.5 GiB, not ~52** (48 root-level safetensors
+    shards in two series -- an 18-shard and a 28-shard set -- plus 8
+    GGUF files that are NOT downloaded; D is the standard 51.8 GiB /
+    12 shards). F: holds both plus the existing A/B and the future
+    converted checkpoint (~321 GiB free at acquisition start).
+  - **Transport finding (real, diagnosed, fixed): long-lived HF download
+    sessions wedge on this network** -- xet stalled at 0 MB/s twice,
+    plain HTTP and hf_transfer too, each after ~20-40 min, always
+    without erroring (process alive, zero bytes); fresh short-lived
+    connections verified healthy throughout. Fix:
+    `robust_fetch.py` downloads every file in 512 MiB chunks, each
+    chunk a fresh curl connection (`--max-time 900`, per-chunk retry
+    with backoff, 6-way parallel, atomic per-shard assembly into the
+    target path). Stable for hours at ~4-8 MB/s combined where every
+    hub transport died. Corollary guard: both acquire scripts now pass
+    `ignore_patterns=["*.gguf", "*.GGUF"]` so snapshot_download can
+    never start pulling C's GGUF variants at the acquire stage.
+  - **Orchestrators (detached, survive agent-session restarts):**
+    `orchestrate_c.py` chains C fetch-complete -> acquire -> protocol-v2
+    tournament; `orchestrate_d.py` chains D fetch-complete -> acquire
+    (CPU, overlaps C's GPU work) -> **tournament queued behind C's
+    chain** (proceeds only when orchestrate_c.log records parent C
+    complete, C's chain reports a failure, or no C-chain process is
+    alive). Logs: `Temp\orchestrate_{c,d}.log` (+ per-stage .out/.err),
+    `Temp\fetch_{c,d}.log`. First-shard assembly verified on both
+    parents before the long haul.
 
 - **A/B result (retry7, protocol v2) — both parents complete and persisted.
   `C:\Users\nikma\Chowder-Protected\tournament-retry7.registry.db`
