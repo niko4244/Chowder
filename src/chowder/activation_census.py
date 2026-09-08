@@ -62,6 +62,20 @@ HOT_FRACTION = 0.10
 
 #: top-N active neurons per token for the exact co-occurrence matrix.
 COOCCURRENCE_TOPN = 64
+# Cap on neurons included in the exact co-occurrence tables (top-k by
+# frequency). At parent scale (I~17k) an uncapped hot-set table would be
+# O(hot^2) per layer and multi-GB in JSON; 256 keeps it bounded while
+# covering the neurons PowerInfer-style placement actually pins.
+CO_HOT_CAP = 256
+# Reservoir size for per-token top-N sets (per layer, CPU int64 rows).
+TOKEN_SET_RESERVOIR = 50_000
+# Fraction of tokens whose top-N set is considered for the reservoir.
+TOKEN_SET_SAMPLE_RATE = 0.10
+# Inline sketch lists only below this intermediate size; larger models
+# get the binary sidecar (float64 .npy, one block per layer).
+INLINE_SKETCH_MAX = 4096
+# -1 sentinel for unused reservoir slots.
+RESERVOIR_SENTINEL = -1
 
 #: Cap on buffered per-token active sets (memory bound).
 MAX_TOKEN_SETS = 200_000
@@ -85,10 +99,18 @@ class _LayerCensus:
     elements_seen: int = 0
     # Per-token active counts (dReLU counterfactual), sampled:
     token_active_counts: list[int] = field(default_factory=list)
-    # (global_token_index, top-N active neuron set) buffers:
-    token_active_sets: list[tuple[int, set[int]]] = field(default_factory=list)
+    # Reservoir of per-token top-N sets: CPU int64 (TOKEN_SET_RESERVOIR,
+    # COOCCURRENCE_TOPN + 1); last column = global token index, -1 pad.
+    set_buf: Any = None
+    set_buf_rows: int = 0
+    set_buf_seen: int = 0
     # JL sketch: one (I, SKETCH_DIM) accumulator over sign profiles.
     sketch: list[list[float]] = field(default_factory=list)
+    # Parallel torch float64 accumulator for fast per-batch updates;
+    # drained into `sketch` at finalize. Python floats are float64 and
+    # per-batch addition order is unchanged, so the serialized (round-5)
+    # sketch and digest match the pure-Python path bit-for-bit.
+    sketch_tensor: Any = None
     # down-column magnitude (I,), captured once from the live weight:
     down_mag: list[float] | None = None
     # Hot neurons fixed at finalize() from active_count:
@@ -191,6 +213,8 @@ class ActivationCensus:
         self._cooccurrence_topn = cooccurrence_topn
         self._token_active_sample_rate = token_active_sample_rate
         self._rng = random.Random(seed)
+        # NOTE: the reservoir uses a *derived* stream (advance the same
+        # rng) -- determinism is per-seed, not per-config.
         self._handles: list[Any] = []
         self._layers: dict[int, _LayerCensus] = {}
         self._token_index = 0
@@ -330,12 +354,32 @@ class ActivationCensus:
                     per_token = active_mask.sum(dim=1)
                     lc.token_active_counts.extend(int(v) for v in per_token.tolist())
 
-                if len(lc.token_active_sets) < MAX_TOKEN_SETS:
-                    topn = min(self._cooccurrence_topn, I)
-                    _, top_idx = torch.topk(two_d.abs(), topn, dim=1)
-                    base_index = self._token_index - n_tokens
-                    for r, row in enumerate(top_idx.tolist()):
-                        lc.token_active_sets.append((base_index + r, set(row)))
+                topn = min(self._cooccurrence_topn, I)
+                base_index = self._token_index - n_tokens
+                take = [r for r in range(n_tokens) if self._rng.random() < TOKEN_SET_SAMPLE_RATE]
+                if take:
+                    if lc.set_buf is None:
+                        lc.set_buf = torch.full(
+                            (TOKEN_SET_RESERVOIR, topn + 1),
+                            RESERVOIR_SENTINEL, dtype=torch.int64,
+                        )
+                    sel = torch.tensor(take, dtype=torch.long)
+                    _, top_idx = torch.topk(two_d.abs()[sel], topn, dim=1)
+                    gidx = torch.tensor(
+                        [base_index + r for r in take], dtype=torch.int64
+                    ).unsqueeze(1)
+                    rows = torch.cat([top_idx.to(torch.int64), gidx], dim=1)
+                    for row in rows.tolist():
+                        lc.set_buf_seen += 1
+                        if lc.set_buf_rows < TOKEN_SET_RESERVOIR:
+                            lc.set_buf[lc.set_buf_rows] = torch.tensor(
+                                row, dtype=torch.int64
+                            )
+                            lc.set_buf_rows += 1
+                        else:
+                            j = self._rng.randrange(lc.set_buf_seen)
+                            if j < TOKEN_SET_RESERVOIR:
+                                lc.set_buf[j] = torch.tensor(row, dtype=torch.int64)
 
                 # JL sketch update: sign profiles projected by per-batch
                 # shared random vectors. Each batch's projection is an
@@ -347,12 +391,11 @@ class ActivationCensus:
                 proj = torch.randn(n_tokens, self._sketch_dim, generator=g)
                 proj = (proj / math.sqrt(self._sketch_dim)).to(device)
                 update = signs.t() @ proj  # (I, D)
-                update_list = update.tolist()
-                for i in range(I):
-                    row = lc.sketch[i]
-                    upd = update_list[i]
-                    for d in range(self._sketch_dim):
-                        row[d] += upd[d]
+                if lc.sketch_tensor is None:
+                    lc.sketch_tensor = torch.zeros(
+                        (I, self._sketch_dim), dtype=torch.float64, device=device
+                    )
+                lc.sketch_tensor += update.to(torch.float64)
 
                 lc.tokens_seen += n_tokens
                 for i in range(I):
@@ -398,6 +441,8 @@ class ActivationCensus:
     def finalize(self, *, provenance: Mapping[str, Any]) -> dict[str, Any]:
         """Aggregate everything the hooks saw into the machine-readable
         activation profile. The model is never modified."""
+        import torch  # local: the module imports torch lazily by design
+
         out: dict[str, Any] = {
             "census_version": CENSUS_VERSION,
             "sketch_dim": self._sketch_dim,
@@ -408,6 +453,23 @@ class ActivationCensus:
             "layers": {},
         }
         for idx, lc in sorted(self._layers.items()):
+            # -- sketch drain -> inline lists (small I) or sidecar flag ----
+            inline_sketch = lc.intermediate_size <= INLINE_SKETCH_MAX
+            sidecar_bytes: bytes | None = None
+            if lc.sketch_tensor is not None:
+                if inline_sketch:
+                    drained = lc.sketch_tensor.tolist()
+                    if not lc.sketch:
+                        lc.sketch = [[0.0] * self._sketch_dim for _ in range(lc.intermediate_size)]
+                    for i, row in enumerate(lc.sketch):
+                        upd = drained[i]
+                        for d in range(self._sketch_dim):
+                            row[d] += upd[d]
+                else:
+                    import numpy as np
+
+                    sidecar_bytes = lc.sketch_tensor.detach().cpu().numpy().astype("<f8").tobytes()
+                lc.sketch_tensor = None
             n = max(lc.tokens_seen, 1)
             freq = [c / n for c in lc.active_count]
             mag = [m / n for m in lc.magnitude_sum]
@@ -418,24 +480,42 @@ class ActivationCensus:
             n_hot = max(1, int(self._hot_fraction * lc.intermediate_size))
             hot = tuple(sorted(order[:n_hot]))
             lc.hot_neurons = hot
-            hot_set = set(hot)
+            # Co-occurrence is counted over the top CO_HOT_CAP hottest
+            # neurons only -- bounded tables at any intermediate size.
+            co_ids = order[: min(CO_HOT_CAP, lc.intermediate_size)]
+            co_pos = {n_id: p for p, n_id in enumerate(co_ids)}
 
             boundary = self._split_boundary
-            co: dict[int, dict[int, int]] = {h: {} for h in hot}
-            co_a: dict[int, dict[int, int]] = {h: {} for h in hot}
-            co_b: dict[int, dict[int, int]] = {h: {} for h in hot}
-            for tok_i, tset in lc.token_active_sets:
-                hit = sorted(tset & hot_set)
-                target = co_a if (boundary and tok_i < boundary) else co_b
-                for a_i in range(len(hit)):
-                    for b_i in range(a_i + 1, len(hit)):
-                        a, b = hit[a_i], hit[b_i]
-                        co[a][b] = co[a].get(b, 0) + 1
-                        co[b][a] = co[b].get(a, 0) + 1
-                        target[a][b] = target[a].get(b, 0) + 1
-                        target[b][a] = target[b].get(a, 0) + 1
 
-            out["layers"][str(idx)] = {
+            def _count(buf, rows_seen: int):
+                co_full: dict[int, dict[int, int]] = {h: {} for h in co_ids}
+                co_a: dict[int, dict[int, int]] = {h: {} for h in co_ids}
+                co_b: dict[int, dict[int, int]] = {h: {} for h in co_ids}
+                if buf is None or rows_seen == 0:
+                    return co_full, co_a, co_b
+                valid = buf[:rows_seen]
+                for r in range(valid.shape[0]):
+                    ids = valid[r, :topn_view].tolist()
+                    hit = sorted(
+                        co_pos[i] for i in ids if i in co_pos
+                    )
+                    if len(hit) < 2:
+                        continue
+                    tok_i = int(valid[r, -1].item())
+                    target = co_a if (boundary and tok_i < boundary) else co_b
+                    for a_i in range(len(hit)):
+                        for b_i in range(a_i + 1, len(hit)):
+                            a, b = co_ids[hit[a_i]], co_ids[hit[b_i]]
+                            co_full[a][b] = co_full[a].get(b, 0) + 1
+                            co_full[b][a] = co_full[b].get(a, 0) + 1
+                            target[a][b] = target[a].get(b, 0) + 1
+                            target[b][a] = target[b].get(a, 0) + 1
+                return co_full, co_a, co_b
+
+            topn_view = (lc.set_buf.shape[1] - 1) if lc.set_buf is not None else 0
+            co, co_a, co_b = _count(lc.set_buf, lc.set_buf_rows)
+
+            layer_out = {
                 **lc.to_summary(),
                 "per_neuron_top100_frequency": {
                     str(i): round(freq[i], 6) for i in order[:100]
@@ -447,6 +527,9 @@ class ActivationCensus:
                     )[:100]
                 },
                 "hot_neuron_ids": list(hot),
+                "cooccurrence_cap": CO_HOT_CAP,
+                "reservoir_rows": lc.set_buf_rows,
+                "reservoir_seen": lc.set_buf_seen,
                 "hotset_cooccurrence": {str(k): v for k, v in co.items()},
                 "hotset_cooccurrence_half_a": {str(k): v for k, v in co_a.items()},
                 "hotset_cooccurrence_half_b": {str(k): v for k, v in co_b.items()},
@@ -454,13 +537,38 @@ class ActivationCensus:
                 "hotset_pair_stats_half_a": _pair_stats(co_a),
                 "hotset_pair_stats_half_b": _pair_stats(co_b),
                 "cooccurrence_split_boundary": boundary,
-                "sketch": [[round(v, 5) for v in row] for row in lc.sketch],
-                "sketch_sha256": _sketch_digest(lc.sketch),
             }
+            if inline_sketch:
+                layer_out["sketch"] = [[round(v, 5) for v in row] for row in lc.sketch]
+                layer_out["sketch_sha256"] = _sketch_digest(lc.sketch)
+                layer_out["sketch_inline"] = True
+            else:
+                if sidecar_bytes is None:
+                    raise ActivationCensusError(
+                        f"layer {idx}: large-I census produced no sidecar bytes"
+                    )
+                out_dir = Path(str(provenance.get("output_dir", ".")))
+                out_dir.mkdir(parents=True, exist_ok=True)
+                sidecar_path = out_dir / f"sketch_layer_{idx}.f64.npy"
+                tmp = sidecar_path.with_suffix(".npy.tmp")
+                import numpy as np
+
+                arr = np.frombuffer(sidecar_bytes, dtype="<f8").reshape(
+                    lc.intermediate_size, self._sketch_dim
+                )
+                with open(tmp, "wb") as fh:
+                    np.save(fh, arr, allow_pickle=False)
+                tmp.replace(sidecar_path)
+                layer_out["sketch_inline"] = False
+                layer_out["sketch_dtype"] = "<f8"
+                layer_out["sketch_shape"] = [lc.intermediate_size, self._sketch_dim]
+                layer_out["sketch_sidecar"] = str(sidecar_path)
+                layer_out["sketch_sha256"] = hashlib.sha256(sidecar_bytes).hexdigest()
+            out["layers"][str(idx)] = layer_out
         out["totals"] = {
             "num_layers": len(self._layers),
             "total_tokens": max((l.tokens_seen for l in self._layers.values()), default=0),
-            "total_token_sets": sum(len(l.token_active_sets) for l in self._layers.values()),
+            "total_token_sets": sum(l.set_buf_rows for l in self._layers.values()),
             "split_boundary": self._split_boundary,
         }
         return out
