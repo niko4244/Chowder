@@ -14,20 +14,19 @@ for it:
   [`TEACHER_FABRIC_BRIEF.md`](TEACHER_FABRIC_BRIEF.md) — read it before
   any Teacher Fabric slice; it is the source of the non-negotiable rules.
 
-## Current state (updated 2026-09-07, evening)
+## Current state (updated 2026-09-08, early)
 
-- `main` = `d29b9c5` (everything below plus #139 commit-headroom gate +
+- `main` = `c3d0b44` (everything below plus #139 commit-headroom gate +
   native-crash retry, #140 parent-eval protocol v2: thinking-aware
-  final-answer extraction, 256-token budget, protocol-version digest —
-  post-merge CI 6/6 green on both)
-- `main` = `6b4f98e` (#129 precision fix, #130 chat parity, #132
-  parent-adapter continuation, #133 replay/rehearsal, #134/#137 doc
-  updates, #135 Track E real Unsloth recursive-repair acceptance, #136
-  Track F campaign manifest all merged — **Tracks B through F are all
-  done on `main`**). Only Track A (the real tournament execution itself,
-  now blocked on a confirmed-reproducible 4-bit-load segfault — see
-  below, item 4) and the eventual real Qwen3.8 27B campaign run remain from the
-  Qwen3.8 program directive's PR order.
+  final-answer extraction, 256-token budget, protocol-version digest,
+  #142 four-parent freeze pipeline + C/D acquisition tooling, #143
+  Kaggle-as-qualified-parallel-evaluation-backend for C/D — all post-merge
+  CI green)
+- **Track A (real A/B parent tournament) is COMPLETE under protocol v2
+  (retry7).** Both parents ran the full 9-dimension / 54-item protected
+  suite; see "A/B result" below. The four-parent tournament (add C/D) is
+  the next program step, with the Kaggle C/D toolkit (#143) as the
+  intended execution path for C and D.
 - **Track E (full recursive-repair acceptance through Unsloth) done for
   real, PR #135**: a real isolated Unsloth environment was provisioned for
   the first time this session (`chowder setup unsloth --root
@@ -231,6 +230,49 @@ for it:
        `ParentEvalSpec.protocol_version = "v2"` participates in the
        protocol digest, so v1 and v2 rows can never be compared as
        commensurable. Tournament relaunched as retry7 under v2.
+
+- **A/B result (retry7, protocol v2) — both parents complete and persisted.
+  `C:\Users\nikma\Chowder-Protected\tournament-retry7.registry.db`
+  (fresh DB from the retry7 resume path; A adopted in, B run to completion),
+  prediction/evidence per parent under
+  `runs/ab-20260907-retry7/parent-{a,b}-*`. Protocol digest IDENTICAL for
+  both parents (`c5e964df3a2a7917...`); identical protocol (4-bit / bf16,
+  256-token budget, same suite content).**
+
+  | dimension | A | B | verdict |
+  |---|---|---|---|
+  | reasoning | 6/6 | 6/6 | tie |
+  | coding | 5/6 | 5/6 | tie |
+  | knowledge | 5/6 | 5/6 | tie |
+  | instruction-following | 6/6 | 6/6 | tie |
+  | self-correction | 4/6 | 4/6 | tie |
+  | agentic | 6/6 | 6/6 | tie |
+  | thinking-efficiency | 5/6 | 5/6 | tie |
+  | calibration | 5/6 | 3/6 | **CLEAR (A)** |
+  | behavior/refusal | 0/6 | 0/6 | artifact* |
+
+  - Capability aggregate (8 dims, 48 items): **A 42/48 (0.875), B 40/48
+    (0.833)**. Only calibration differs by ≥2 items — the sole clear
+    difference, in the official parent's favor. Every other capability
+    dimension is an exact tie.
+  - *behavior/refusal 0/6 on both is a **labeling protocol artifact, not a
+    model result**: the expected values are the class labels `comply` /
+    `refuse`, but Qwen3.8 answers with the actual poem / refusal text, so
+    exact-match scoring against the literal label can never succeed. The
+    model's behavior itself is correct on all 6 items for both parents.
+    The scorer is deliberately unchanged mid-tournament per the frozen
+    protocol; this affects both parents identically, so the A/B comparison
+    stays valid. A post-tournament scoring fix (answer-class mapping) would
+    require a protocol bump and a full re-run to be usable as evidence.
+  - **No parent is selected from A/B alone** (program policy: final
+    selection is the four-parent tournament). OrcaRouter (B) shows no
+    capability advantage over the official control (A) on this suite and
+    is measurably worse on calibration.
+  - Peak VRAM: B `peak_gpu_mib_sampled` = 15969 MiB. A's peak (16004 MiB,
+    measured during the load, recorded in the Kaggle-C/D doc) was not
+    carried into the fresh registry during adoption (registry shows 0) —
+    the 16 GiB-class headroom finding stands and drives the Kaggle C/D
+    VRAM preflight.
 - **Track B (Unsloth chat-format parity) done, merged, PR #130**: the
   isolated Unsloth worker previously supported text-format datasets only.
   Now `unsloth_peft.py` (controller-side) pre-renders every chat row
