@@ -33,7 +33,7 @@ from chowder.parent_freeze import (
     RoleBinding,
     SuiteContentMismatchError,
     TokenizerComparabilityError,
-    _classify_delta,
+    classify_delta,
     build_selection_packet,
     default_decision_rule,
     freeze_selected_parent,
@@ -406,12 +406,12 @@ def test_revision_mismatch_fails_closed(tmp_path):
 
 def test_item_unit_classification_tie_weak_signal_clear_difference():
     # Item-unit thresholds: |delta| * 6 < 0.5 -> tie; < 1.5 -> weak-signal; else clear-difference.
-    assert _classify_delta(0.5, 0.5)["classification"] == "tie"
-    assert _classify_delta(0.5, 0.5 + (0.4 / 6))["classification"] == "tie"
-    assert _classify_delta(0.5, 0.5 + (1.0 / 6))["classification"] == "weak-signal"
-    assert _classify_delta(0.5, 0.5 + (1.4 / 6))["classification"] == "weak-signal"
-    assert _classify_delta(0.5, 0.5 + (2.0 / 6))["classification"] == "clear-difference"
-    assert _classify_delta(None, 0.5)["classification"] == "unmeasured"
+    assert classify_delta(0.5, 0.5)["classification"] == "tie"
+    assert classify_delta(0.5, 0.5 + (0.4 / 6))["classification"] == "tie"
+    assert classify_delta(0.5, 0.5 + (1.0 / 6))["classification"] == "weak-signal"
+    assert classify_delta(0.5, 0.5 + (1.4 / 6))["classification"] == "weak-signal"
+    assert classify_delta(0.5, 0.5 + (2.0 / 6))["classification"] == "clear-difference"
+    assert classify_delta(None, 0.5)["classification"] == "unmeasured"
 
 
 def test_deterministic_digest_and_freeze_changes_with_material_evidence(tmp_path):

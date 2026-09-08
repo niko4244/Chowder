@@ -324,7 +324,7 @@ class DimensionComparison:
         }
 
 
-def _classify_delta(left: float | None, right: float | None) -> dict[str, Any]:
+def classify_delta(left: float | None, right: float | None) -> dict[str, Any]:
     if left is None or right is None:
         return {"delta": None, "classification": "unmeasured"}
     delta = round(right - left, 6)
@@ -355,7 +355,7 @@ def compare_parents(evidence_by_role: Mapping[str, ParentEvidence]) -> tuple[Dim
         for i, left_role in enumerate(roles):
             for right_role in roles[i + 1 :]:
                 key = f"{left_role}_vs_{right_role}"
-                pairwise[key] = _classify_delta(values[left_role], values[right_role])
+                pairwise[key] = classify_delta(values[left_role], values[right_role])
         comparisons.append(DimensionComparison(dimension=dimension, values=values, pairwise=pairwise))
     return tuple(comparisons)
 
@@ -851,7 +851,7 @@ def default_decision_rule(packet: ParentSelectionPacket) -> tuple[str | None, st
             # `reference` ("A") sorts first alphabetically among A/B/C/D, so
             # `compare_parents`'s pairwise key is always f"A_vs_{candidate}"
             # with delta = candidate_value - reference_value (see
-            # `_classify_delta`'s left/right convention) -- never the
+            # `classify_delta`'s left/right convention) -- never the
             # reverse pairing.
             key = f"{reference}_vs_{candidate}"
             entry = comparison.pairwise.get(key)
