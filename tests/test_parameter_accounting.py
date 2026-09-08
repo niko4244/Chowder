@@ -184,9 +184,16 @@ def test_sparse_measured_geometry_and_active_split(tmp_path):
     assert categories["shared_expert"].tensors == 8  # 2 layers x 4 tensors
     assert categories["shared_expert"].parameters > 0
 
-    # active = total - routed - router, with the definition saying so
-    assert accounting.active_parameters == accounting.total_parameters - routed_params - router_params
-    assert "shared expert" in accounting.active_definition
+    # active = total - routed * (1 - top_k/num_experts): the top-k routed
+    # share runs every token; the router itself also runs every token.
+    # (2026-09-08 fix: the old `total - routed - router` formula excluded
+    # the computed expert share and the router entirely.)
+    assert accounting.active_parameters == (
+        accounting.total_parameters
+        - routed_params
+        + routed_params * 2 // 4
+    )
+    assert "routed active" in accounting.active_definition
 
     label = accounting.a_label()
     assert label.startswith("A0.0B")
