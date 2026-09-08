@@ -16,17 +16,24 @@ for it:
 
 ## Current state (updated 2026-09-08, early)
 
-- `main` = `c3d0b44` (everything below plus #139 commit-headroom gate +
+- `main` = `af3e1f1` (everything below plus #139 commit-headroom gate +
   native-crash retry, #140 parent-eval protocol v2: thinking-aware
   final-answer extraction, 256-token budget, protocol-version digest,
   #142 four-parent freeze pipeline + C/D acquisition tooling, #143
-  Kaggle-as-qualified-parallel-evaluation-backend for C/D — all post-merge
-  CI green)
+  Kaggle-as-qualified-parallel-evaluation-backend for C/D, #144 docs:
+  completed protocol-v2 A/B tournament — all post-merge CI green)
 - **Track A (real A/B parent tournament) is COMPLETE under protocol v2
   (retry7).** Both parents ran the full 9-dimension / 54-item protected
-  suite; see "A/B result" below. The four-parent tournament (add C/D) is
-  the next program step, with the Kaggle C/D toolkit (#143) as the
-  intended execution path for C and D.
+  suite; see "A/B result" below.
+- **C/D execution decision (2026-09-08): the Kaggle T4 preflight was run
+  for real and REFUSED** — parent A's measured 16004 MiB peak × 1.10
+  margin = 17.19 GiB required vs the 14.8 GiB usable T4 ceiling
+  (KAGGLE_T4_USABLE_VRAM_GIB). A single T4 cannot hold this workload
+  under the frozen protocol; the tooling refuses by design rather than
+  diverge (no budget/quantization/precision changes). Per explicit user
+  decision, **parents C and D now run LOCALLY on F:** (336 GiB free —
+  both ~52 GiB + the future converted checkpoint fit). See "C/D
+  acquisition and evaluation" below.
 - **Track E (full recursive-repair acceptance through Unsloth) done for
   real, PR #135**: a real isolated Unsloth environment was provisioned for
   the first time this session (`chowder setup unsloth --root
@@ -230,6 +237,33 @@ for it:
        `ParentEvalSpec.protocol_version = "v2"` participates in the
        protocol digest, so v1 and v2 rows can never be compared as
        commensurable. Tournament relaunched as retry7 under v2.
+
+- **C/D acquisition and evaluation (2026-09-08, in flight).** Both
+  comparison parents are being acquired locally to F: with the exact
+  A/B standard (pinned revision, full-mode manifest, Phase 11 parameter
+  accounting, tokenizer gate vs parent A):
+  - C = `OBLITERATUS/Qwen3.8-27B-OBLITERATED` @
+    `a58c3b53b3ce71551eafde2ed5ec8df48e0f4ff8` →
+    `F:\Local Models\HuggingFace\OBLITERATUS\Qwen3.8-27B-OBLITERATED`
+    (70 files; download launched 2026-09-08 ~08:10).
+  - D = `DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-    Uncensored-NM-DAU` @ `81c73940f94023f7d64e3ae6abcc653fc837d415` →
+    `F:\Local Models\HuggingFace\DavidAU\...` (26 files; download
+    launched 2026-09-08 ~08:14). The GGUF variant is not the training
+    parent; the pinned Safetensors/Transformers checkpoint is used.
+  - The frozen protocol-v2 sequence is applied exactly as retry7:
+    integrity verification -> tokenizer gate (A vs C, A vs D) ->
+    4-bit/bf16 load -> 9-suite protected evaluation (seed 20260907,
+    256-token budget, digest `c5e964df...`). Orchestration scripts are
+    one-off Temp files (established pattern): `acquire_parent_c.py`,
+    `acquire_parent_d.py`, `run_parent_c.py`, `run_parent_d.py`; both
+    parents share `Chowder-Protected\tournament-cd.registry.db` and
+    `runs\cd-20260908\` so the #142 four-parent freeze pipeline can
+    consume all four parents' evidence from one registry.
+  - Kaggle remains qualified-but-unused: the #143 toolkit is tested and
+    merged, and the preflight refusal above is the honest, recorded
+    first real result from it. A P100-class accelerator or a
+    deliberately-justified margin change are the only honest routes to
+    re-enable it; neither is needed while C/D run locally.
 
 - **A/B result (retry7, protocol v2) — both parents complete and persisted.
   `C:\Users\nikma\Chowder-Protected\tournament-retry7.registry.db`
