@@ -147,6 +147,9 @@ def make_grouping_sketch_cluster(
 
     def build(I: int, layer: Mapping[str, Any], rng: random.Random) -> list[int]:
         sketch = layer.get("sketch")
+        if not sketch and layer.get("sketch_inline", True) is False:
+            # Large-I layer: sketch lives in the float64 sidecar .npy.
+            return _cluster_from_matrix(I, layer, num_experts)
         if not sketch or len(sketch) != I:
             raise ActivationExperimentError(
                 "layer profile lacks a full sketch; re-run the census"
@@ -208,6 +211,81 @@ def make_grouping_sketch_cluster(
         return assignment
 
     return build
+
+
+# Sidecar cache: path -> float32 unit-normalized sketch matrix. Loaded
+# once per path; a 64-layer parent profile is ~1.1 GiB as float32.
+_SIDECAR_CACHE: dict[str, Any] = {}
+
+
+def _sketch_matrix(layer: Mapping[str, Any]) -> Any:
+    """Unit-normalized float32 (I, D) sketch matrix for a sidecar layer."""
+    import numpy as np
+
+    path = layer.get("sketch_sidecar")
+    if not path:
+        raise ActivationExperimentError("sidecar layer lacks sketch_sidecar path")
+    cached = _SIDECAR_CACHE.get(path)
+    if cached is None:
+        arr = np.load(path, allow_pickle=False)
+        expected = layer.get("sketch_shape")
+        if expected and list(arr.shape) != list(expected):
+            raise ActivationExperimentError(
+                f"sketch sidecar shape {arr.shape} != profile {expected}"
+            )
+        digest = layer.get("sketch_sha256")
+        if digest:
+            import hashlib
+
+            h = hashlib.sha256()
+            h.update(arr.astype("<f8").tobytes())
+            if h.hexdigest() != digest:
+                raise ActivationExperimentError(
+                    f"sketch sidecar digest mismatch for {path}"
+                )
+        norm = np.linalg.norm(arr, axis=1, keepdims=True)
+        norm[norm == 0.0] = 1.0
+        cached = (arr / norm).astype(np.float32)
+        _SIDECAR_CACHE[path] = cached
+    return cached
+
+
+def _cluster_from_matrix(I: int, layer: Mapping[str, Any], num_experts: int) -> list[int]:
+    """Numpy path: identical semantics to the list path (farthest-point
+    seeds by max cosine to nearest seed, then argmax assignment), O(I*D)
+    per seed via matrix ops instead of Python loops."""
+    import numpy as np
+
+    mat = _sketch_matrix(layer)
+    if mat.shape[0] != I:
+        raise ActivationExperimentError(
+            f"sketch matrix rows {mat.shape[0]} != intermediate_size {I}"
+        )
+    freq_map = {int(k): v for k, v in layer.get("per_neuron_top100_frequency", {}).items()}
+    contrib_map = {
+        int(k): v for k, v in layer.get("per_neuron_top100_contribution", {}).items()
+    }
+    hot_ids = set(layer.get("hot_neuron_ids", []))
+
+    def score(i: int) -> float:
+        return freq_map.get(i, 0.0)
+
+    seed_order = sorted(range(I), key=lambda i: -score(i))
+    seeds = [seed_order[0]]
+    nearest = mat @ mat[seeds[0]]  # (I,) cosine to first seed
+    while len(seeds) < min(num_experts, I):
+        nxt = min(
+            (i for i in range(I) if i not in seeds),
+            key=lambda i: float(nearest[i]),
+        )
+        seeds.append(nxt)
+        nearest = np.maximum(nearest, mat @ mat[nxt])
+    seed_mat = mat[seeds, :]  # (E, D)
+    sims = mat @ seed_mat.T  # (I, E) cosine to each seed
+    assignment_arr = np.argmax(sims, axis=1)
+    for s_i, s in enumerate(seeds):
+        assignment_arr[s] = s_i
+    return [int(x) for x in assignment_arr]
 
 
 GROUPING_BUILDERS: Mapping[str, Callable[[], GroupingFn]] = {

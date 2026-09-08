@@ -573,6 +573,53 @@ corpus must NOT be protected tournament content.
 
 ---
 
+## Phase 4 census prepared + D acquired (2026-09-08 14:20)
+
+**Phase 4 real-parent census (armed, fires when the GPU frees):**
+- **Calibration corpus built + hashed**: 10 public-domain Gutenberg books
+  (narrative/gothic/detective/science/philosophy/economics/political/
+  translated/nonsense/dialect), 1162 interleaved passages (~628k tokens),
+  round-robin so the midpoint split keeps every domain in both halves.
+  Digest `a05451e901d819a5...`; manifest with per-source sha256 at
+  `Chowder-Protected/calibration/phase4-parent-a/corpus_manifest.json`.
+  NOT protected tournament content.
+- **Census scaled to real parents** (I=17408 x 64 layers would have been
+  ~91 GB inline): sketch accumulators moved to torch float64 tensors
+  (bit-identical round-5 output, vectorized), per-token sets now a
+  50k-row reservoir (10% sampling), co-occurrence capped to top-256
+  hottest neurons (bounded tables), sketches >4096 intermediate written
+  as verified float64 `.npy` sidecars; numpy clustering path (farthest-
+  point + argmax, sidecar digest-verified) for large-I layers.
+- **Runner** `Temp/run_phase4_census.py`: corpus hash verified BEFORE any
+  GPU work; parent A loaded tournament-identical (4-bit NF4 double-quant,
+  bf16 compute, device_map cuda:0); census consumes half A ->
+  mark_split -> half B; artifacts (profile + sidecars + verdicts at
+  E in {8,16,32}) to `Chowder-Protected/runs/phase4-census-parent-a/`.
+- **Watcher** `Temp/watch_gpu_phase4.py` armed (PID detached): fires the
+  census only when C AND D chains are complete AND no chain process is
+  alive, with an immediate pre-launch re-check. Refuses on corpus digest
+  mismatch. Log: `Temp/watch_gpu_phase4.log`.
+
+**Parent D acquisition COMPLETE (with two material findings):**
+- Manifest `dcfa6c63d407dc9f...` (51.75 GiB) verified; acquisition
+  standard identical to A/B (full-mode manifest, accounting, gate).
+- **Finding 1 -- D is DENSE**: 27,781,427,952 total = active parameters,
+  no routed experts, no top-k. "TURBO" refers to inference optimization,
+  not sparsity; D contributes no MoE-sparsity comparison to the
+  tournament and its effective-active number is simply its total.
+- **Finding 2 -- D's tokenizer gate FAILS (by design)**: class
+  `TokenizersBackend` vs A's `Qwen2Tokenizer` (same vocab 248077 but
+  different serialized-asset identity `79ee8b68...` vs `3b0d6337...`).
+  `ensure_parent_tokenizer_compatible` fail-closes: direct A-vs-D score
+  comparison is refused by the machinery, exactly as the protocol
+  requires. D's tournament (queued behind C) will fail fast at the gate,
+  pre-GPU; its evidence rows record the refusal as the result.
+- Bug fixed in passing: acquire scripts logged
+  `TokenizerGateResult.passed` (attr is `.compatible`); the crash was
+  post-acquisition, so D needed no re-hash. C's script fixed too.
+
+---
+
 ## Environment facts (not written anywhere else in the repo)
 
 - Primary working directory:
