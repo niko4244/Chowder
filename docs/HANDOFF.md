@@ -548,6 +548,31 @@ corpus must NOT be protected tournament content.
 
 ---
 
+## C/D acquisition: crash + resume (2026-09-08 13:38)
+
+- **D fetch COMPLETE** (chunked-curl transport, `ALL FILES PRESENT` 12:48).
+  **C fetch in progress** (22/62 files, second shard series; ~2-4h left).
+- **D acquire crashed** at the tokenizer-gate step: my acquire scripts
+  passed `tokenizer_evidence` directly as `measure_tokenizer_fn`, but
+  `acquire_parent` invokes that callable with a bare destination `Path`
+  while `tokenizer_evidence` expects a `LocalParent`
+  (`AttributeError: 'WindowsPath' object has no attribute 'local_path'`).
+  Fix: adapter lambda constructing `LocalParent(label, revision,
+  local_path, manifest_path)` from pin + destination. Patched BOTH
+  acquire scripts (C would have crashed identically at its gate step).
+- **Manifest + verification of D completed BEFORE the crash point** (the
+  crash was post-manifest), so the retry took the fast
+  `check_already_acquired` path -- re-hashing 52 GiB was avoided.
+- The crash also killed the D orchestrator; replacement
+  `orchestrate_d_resume.py` waits for `ACQUIRE DONE` from the running
+  acquire retry, then queues D's tournament behind C on the GPU
+  (identical c_holds_gpu fallback logic), then runs `run_parent_d.py`.
+- **Research track merged**: PR #148 (`3fc077f`) -- census, structure
+  evaluation, hierarchical accounting, Phase 11 active-formula fix, all
+  6/6 CI green. Live tournament untouched.
+
+---
+
 ## Environment facts (not written anywhere else in the repo)
 
 - Primary working directory:
