@@ -166,8 +166,9 @@ def tokenizer_behavior_evidence(parent: LocalParent) -> dict[str, Any]:
     never tournament content), so the evidence is reproducible by anyone
     holding the corpus.
     """
-    from transformers import AutoTokenizer
-
+    # Corpus integrity FIRST: the pinned probe must be the exact hashed
+    # bytes before any tokenizer is loaded (and before the heavy
+    # transformers import, which CI environments do not carry).
     root = Path(parent.local_path)
     corpus = Path(_V3_PROBE_CORPUS_PATH)
     digest = hashlib.sha256(corpus.read_bytes()).hexdigest()
@@ -176,6 +177,8 @@ def tokenizer_behavior_evidence(parent: LocalParent) -> dict[str, Any]:
             "v3 tokenizer probe corpus hash mismatch: expected "
             f"{_V3_PROBE_CORPUS_SHA256}, got {digest}"
         )
+    from transformers import AutoTokenizer
+
     rows = corpus.read_text(encoding="utf-8").splitlines()
     texts = []
     for i in _V3_PROBE_PASSAGES:
