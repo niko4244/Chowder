@@ -361,6 +361,13 @@ class TransformersTextEvaluator:
                     "scoring": suite.scoring,
                     "max_new_tokens": suite.max_new_tokens,
                     "use_chat_template": suite.use_chat_template,
+                    # Digest-additive canonical rendering marker; see the
+                    # matching comment in evaluators/base_text.py.
+                    **(
+                        {"canonical_rendering": True}
+                        if suite.canonical_rendering
+                        else {}
+                    ),
                 }
                 for suite in spec.suites
             ],
