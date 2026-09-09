@@ -16,7 +16,7 @@ for it:
 
 ## Current state (updated 2026-09-08, early)
 
-- `main` = `738564b` (everything below plus #139 commit-headroom gate +
+- `main` = `cf94a30` (everything below plus #139 commit-headroom gate +
   native-crash retry, #140 parent-eval protocol v2: thinking-aware
   final-answer extraction, 256-token budget, protocol-version digest,
   #142 four-parent freeze pipeline + C/D acquisition tooling, #143
@@ -25,7 +25,9 @@ for it:
   orchestrators / four-parent consolidation, #148 sparse-research
   foundation, #149 D-acquire crash docs, #150 Phase 4 census prep,
   #151 census batching + 4-bit-dequant fixes, #152 protocol v3 (canonical
-  rendering + behavioral tokenizer gate) — all post-merge CI green)
+  rendering + behavioral tokenizer gate; 3 CI fixups: sys.modules
+  transformers fake, integrity-first gate ordering, symmetric
+  digest-additive fingerprints) — all post-merge CI green)
 - **Track A (real A/B parent tournament) is COMPLETE under protocol v2
   (retry7).** Both parents ran the full 9-dimension / 54-item protected
   suite; see "A/B result" below.
