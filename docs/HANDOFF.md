@@ -16,12 +16,15 @@ for it:
 
 ## Current state (updated 2026-09-08, early)
 
-- `main` = `af3e1f1` (everything below plus #139 commit-headroom gate +
+- `main` = `f57307c` (everything below plus #139 commit-headroom gate +
   native-crash retry, #140 parent-eval protocol v2: thinking-aware
   final-answer extraction, 256-token budget, protocol-version digest,
   #142 four-parent freeze pipeline + C/D acquisition tooling, #143
   Kaggle-as-qualified-parallel-evaluation-backend for C/D, #144 docs:
-  completed protocol-v2 A/B tournament — all post-merge CI green)
+  completed protocol-v2 A/B tournament, #145-#147 C/D local decision /
+  orchestrators / four-parent consolidation, #148 sparse-research
+  foundation, #149 D-acquire crash docs, #150 Phase 4 census prep,
+  #151 census batching + 4-bit-dequant fixes — all post-merge CI green)
 - **Track A (real A/B parent tournament) is COMPLETE under protocol v2
   (retry7).** Both parents ran the full 9-dimension / 54-item protected
   suite; see "A/B result" below.
@@ -238,10 +241,12 @@ for it:
        protocol digest, so v1 and v2 rows can never be compared as
        commensurable. Tournament relaunched as retry7 under v2.
 
-- **C/D acquisition and evaluation (2026-09-08, in flight).** Both
-  comparison parents are being acquired locally to F: with the exact
-  A/B standard (pinned revision, full-mode manifest, Phase 11 parameter
-  accounting, tokenizer gate vs parent A):
+- **C/D acquisition and evaluation (2026-09-08): acquisitions COMPLETE;
+  both tournaments RAN and FAILED CLOSED at the tokenizer gate — the
+  fail-closed design worked; the protocol is untouched.** Both parents
+  were acquired locally to F: with the exact A/B standard (pinned
+  revision, full-mode manifest, Phase 11 parameter accounting,
+  tokenizer gate vs parent A):
   - C = `OBLITERATUS/Qwen3.8-27B-OBLITERATED` @
     `a58c3b53b3ce71551eafde2ed5ec8df48e0f4ff8` →
     `F:\Local Models\HuggingFace\OBLITERATUS\Qwen3.8-27B-OBLITERATED`
@@ -308,6 +313,40 @@ for it:
     alive). Logs: `Temp\orchestrate_{c,d}.log` (+ per-stage .out/.err),
     `Temp\fetch_{c,d}.log`. First-shard assembly verified on both
     parents before the long haul.
+  - **Tournament outcome (2026-09-08 ~16:50 C, ~17:14 D): both refused at
+    `ensure_parent_tokenizer_compatible` before any GPU work (fail closed,
+    pre-load, no scores produced). C: identity `a0f5fa9cdb67f0d1` vs A's
+    `3b0d63376fde773a` (same Qwen2Tokenizer class, same vocab 248077). D:
+    identity `79ee8b68c2354772`, class `TokenizersBackend` vs A's
+    `Qwen2Tokenizer` (same vocab 248077). Registry
+    `tournament-cd.registry.db` records both acquisitions + refused runs;
+    no prediction files were produced (correct).**
+  - **Tokenizer diagnosis (2026-09-09, real behavioral probe on
+    public-domain Phase 4 corpus text — never tournament content): C and
+    D tokenize IDENTICALLY to A** (17,232-token probe interleaved across
+    all ten Gutenberg books, exact ID-sequence match for both). Asset
+    diff vs A: C differs only in `tokenizer_config.json` (re-serialized;
+    A carries the vision-aware chat template, C a text-only chat
+    template); C's `tokenizer.json`/`vocab.json`/`merges.txt` are
+    byte-identical to A's. D additionally has a different
+    `tokenizer.json` (D-specific serialization) and the
+    `TokenizersBackend` class identity. The refusal is **serialization
+    hygiene, not behavioral divergence** on this probe.
+  - **Why the gate still refuses correctly: the frozen protocol renders
+    every suite prompt through each model's OWN chat template
+    (`use_chat_template=True`, parent_suite_content.py, part of the
+    protocol fingerprint). C's chat template genuinely differs from A's,
+    so prompt rendering — not base tokenization — would differ between
+    parents; A-vs-C scores would not be protocol-comparable. Resolving
+    this honestly requires a protocol v3 (pin ONE canonical chat-template
+    rendering for all parents, re-run everyone) — suite-v3 territory, not
+    a silent edit; per protocol discipline nothing was changed.**
+  - **Decision required (user): (a) freeze protocol v2 as the A/B-only
+    result and record C/D as excluded-on-evidence (honest, no protocol
+    change), (b) author protocol v3 with a canonical rendering template
+    and re-run all four parents (retry7 preserved as v2 evidence), or
+    (c) treat C/D as research-only references outside the tournament. No
+    unilateral choice was made.**
 
 - **A/B result (retry7, protocol v2) — both parents complete and persisted.
   `C:\Users\nikma\Chowder-Protected\tournament-retry7.registry.db`

@@ -235,3 +235,149 @@ def test_gini_bounds():
     assert gini([]) == 0.0
     assert gini([1.0] * 10) == 0.0
     assert gini([0.0] * 99 + [100.0]) == pytest.approx(0.99, abs=1e-6)
+
+
+class _FakeDenseModelBatched(_FakeDenseModel):
+    """Same per-token math as `_FakeDenseModel`, but the forward accepts a
+    real (B, T) batch (no attention mixing, so a padded row's real tokens
+    are computed identically whether batched or not -- this isolates the
+    census hook's own mask-filtering correctness from any model-internal
+    padding behavior, which is a separate, real-model concern argued
+    separately from Qwen3.5's plain-arange position ids + causal masking).
+    """
+
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None, **_: object):
+        B, T = input_ids.shape
+        rows = []
+        for b in range(B):
+            ids = input_ids[b]
+            x = self.language_model.layers[0].mlp.up_proj.weight.new_zeros(T, HIDDEN)
+            for r in range(T):
+                for c in range(HIDDEN):
+                    x[r, c] = float((ids[r].item() + c) % 7)
+            rows.append(x)
+        x = torch.stack(rows, dim=0)  # (B, T, H)
+        for layer in self.language_model.layers:
+            mlp = layer.mlp
+            gated = nn.functional.silu(mlp.gate_proj(x)) * mlp.up_proj(x)
+            x = mlp.down_proj(gated)
+        return {"logits": x}
+
+
+class _PaddingTok:
+    """Deterministic variable-length tokenizer: text i gets (i % 4) + 2
+    tokens. Supports both the single-text call (`consume_texts`
+    batch_size=1) and the list+padding=True call (batch_size>1)."""
+
+    pad_token_id = 0
+    padding_side = "right"
+
+    def _ids_for(self, text: str) -> list[int]:
+        n = (hash(text) % 4) + 2
+        return [(hash((text, i)) % 6) + 1 for i in range(n)]
+
+    def __call__(
+        self,
+        text,
+        return_tensors="pt",
+        truncation=False,
+        max_length=None,
+        padding=False,
+    ):
+        if isinstance(text, str):
+            return {"input_ids": torch.tensor([self._ids_for(text)])}
+        rows = [self._ids_for(t) for t in text]
+        width = max(len(r) for r in rows)
+        input_ids = torch.zeros(len(rows), width, dtype=torch.long)
+        attention_mask = torch.zeros(len(rows), width, dtype=torch.long)
+        for i, r in enumerate(rows):
+            input_ids[i, : len(r)] = torch.tensor(r)
+            attention_mask[i, : len(r)] = 1
+        return {"input_ids": input_ids, "attention_mask": attention_mask}
+
+
+def test_census_dequantizes_4bit_down_proj_for_contribution(monkeypatch, fake_model_and_texts):
+    """Regression for the real crash: bitsandbytes' Params4bit stores raw
+    packed 4-bit bytes on `.weight`, not the logical (hidden, I) float
+    matrix -- and both `.detach()` and `.data` strip the `.quant_state`
+    marker that would otherwise flag it. Summing the packed placeholder
+    directly gives the wrong length and finalize() dies with
+    `IndexError: list index out of range` on the very first real 4-bit
+    run (every earlier run had crashed before reaching finalize(), so
+    this path was never actually exercised until then)."""
+    bitsandbytes = pytest.importorskip("bitsandbytes")
+    model, tok, texts = fake_model_and_texts
+
+    real_down_proj = model.language_model.layers[0].mlp.down_proj
+    real_weight = real_down_proj.weight.detach().clone()
+
+    class _FakeQuantizedDownProj(nn.Module):
+        """Mirrors real bitsandbytes behavior: forward() still computes
+        correctly (via its own internal unpack), but the `.weight`
+        attribute exposes only packed storage -- reading it naively (as
+        the old buggy code did) gives the wrong length."""
+
+        def __init__(self, real_linear: nn.Linear) -> None:
+            super().__init__()
+            self._real = real_linear
+            placeholder = torch.nn.Parameter(torch.zeros(3), requires_grad=False)
+            placeholder.quant_state = "fake-quant-state"
+            self.weight = placeholder
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self._real(x)
+
+    model.language_model.layers[0].mlp.down_proj = _FakeQuantizedDownProj(real_down_proj)
+
+    def fake_dequantize_4bit(data, quant_state):
+        assert quant_state == "fake-quant-state"
+        return real_weight
+
+    monkeypatch.setattr(
+        bitsandbytes.functional, "dequantize_4bit", fake_dequantize_4bit, raising=False
+    )
+
+    census = ActivationCensus(model, tok, seed=1, device="cpu", hot_fraction=0.25)
+    with census:
+        census.consume_texts(texts)
+    profile = census.finalize(provenance={"dataset": "quantized-down-proj"})
+
+    lp = profile["layers"]["0"]
+    assert len(lp["per_neuron_top100_contribution"]) > 0
+    # Contribution values must reflect the DEQUANTIZED real weight, not
+    # the placeholder (which would make every contribution 0).
+    assert any(v > 0 for v in lp["per_neuron_top100_contribution"].values())
+
+
+def test_census_batched_consume_matches_sequential():
+    texts = [f"passage {i} of varied token length" for i in range(7)]
+
+    model_seq = _FakeDenseModelBatched()
+    tok = _PaddingTok()
+    census_seq = ActivationCensus(model_seq, tok, seed=20260908, device="cpu", hot_fraction=0.25)
+    with census_seq:
+        census_seq.consume_texts(texts, batch_size=1)
+    profile_seq = census_seq.finalize(provenance={"mode": "sequential"})
+
+    model_batched = _FakeDenseModelBatched()
+    # Same initial weights: both models seeded identically in __init__.
+    census_batched = ActivationCensus(
+        model_batched, tok, seed=20260908, device="cpu", hot_fraction=0.25
+    )
+    with census_batched:
+        census_batched.consume_texts(texts, batch_size=3)
+    profile_batched = census_batched.finalize(provenance={"mode": "batched"})
+
+    assert profile_seq["totals"]["total_tokens"] == profile_batched["totals"]["total_tokens"]
+    for lid in profile_seq["layers"]:
+        lp_seq = profile_seq["layers"][lid]
+        lp_batched = profile_batched["layers"][lid]
+        assert lp_seq["tokens_seen"] == lp_batched["tokens_seen"]
+        # Deterministic (non-RNG) per-neuron accumulators must match
+        # exactly: padding must never leak into active/magnitude counts.
+        assert lp_seq["per_neuron_top100_frequency"] == pytest.approx(
+            lp_batched["per_neuron_top100_frequency"]
+        )
+        assert lp_seq["activation_sparsity_swiglu_near_zero"] == pytest.approx(
+            lp_batched["activation_sparsity_swiglu_near_zero"]
+        )

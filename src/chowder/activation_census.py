@@ -226,6 +226,11 @@ class ActivationCensus:
         self._preacts: dict[int, tuple[Any, Any]] = {}
         # Calibration split boundary (0 = no split recorded).
         self._split_boundary = 0
+        # Set for the duration of one batched forward call to the flat
+        # (B*T,) boolean validity mask (True = real token, False = right
+        # padding); None outside a batched call (the batch_size=1 path
+        # never pads, so no filtering is needed there).
+        self._batch_mask: Any | None = None
 
     # -- layer discovery (dense qwen3_5 layout; refuse surprises) ---------
 
@@ -315,7 +320,22 @@ class ActivationCensus:
         def hook(module: Any, args: tuple[Any, ...]) -> None:
             gated = args[0].detach()  # (B, T, I): silu(gate)*up
             two_d = gated.reshape(-1, gated.shape[-1])
+            pre = self._preacts.pop(layer_idx, None)
+            if pre is None or pre[0] is None or pre[1] is None:
+                raise ActivationCensusError(
+                    f"layer {layer_idx}: gate/up pre-activations were not captured"
+                )
             I = two_d.shape[-1]
+            gate_pre = pre[0].reshape(-1, I)
+            up_pre = pre[1].reshape(-1, I)
+            valid = self._batch_mask
+            if valid is not None:
+                # Batched consume: drop right-padded positions before any
+                # statistic sees them (padding never contributes counts,
+                # magnitudes, sketch, or reservoir entries).
+                two_d = two_d[valid]
+                gate_pre = gate_pre[valid]
+                up_pre = up_pre[valid]
             n_tokens = two_d.shape[0]
             lc = self._layers[layer_idx]
             if lc.intermediate_size == 0:
@@ -327,13 +347,6 @@ class ActivationCensus:
                 raise ActivationCensusError(
                     f"layer {layer_idx} intermediate size changed mid-census"
                 )
-            pre = self._preacts.pop(layer_idx, None)
-            if pre is None or pre[0] is None or pre[1] is None:
-                raise ActivationCensusError(
-                    f"layer {layer_idx}: gate/up pre-activations were not captured"
-                )
-            gate_pre = pre[0].reshape(-1, I)
-            up_pre = pre[1].reshape(-1, I)
             if gate_pre.shape[0] != n_tokens:
                 raise ActivationCensusError(
                     f"layer {layer_idx}: pre-activation token count mismatch "
@@ -363,10 +376,10 @@ class ActivationCensus:
                             (TOKEN_SET_RESERVOIR, topn + 1),
                             RESERVOIR_SENTINEL, dtype=torch.int64,
                         )
-                    sel = torch.tensor(take, dtype=torch.long)
+                    sel = torch.tensor(take, dtype=torch.long, device=device)
                     _, top_idx = torch.topk(two_d.abs()[sel], topn, dim=1)
                     gidx = torch.tensor(
-                        [base_index + r for r in take], dtype=torch.int64
+                        [base_index + r for r in take], dtype=torch.int64, device=device
                     ).unsqueeze(1)
                     rows = torch.cat([top_idx.to(torch.int64), gidx], dim=1)
                     for row in rows.tolist():
@@ -385,7 +398,7 @@ class ActivationCensus:
                 # shared random vectors. Each batch's projection is an
                 # independent unbiased estimator of the sign-profile
                 # inner products; per-batch seeds decorrelate noise.
-                signs = torch.sign(two_d)  # (n_tokens, I)
+                signs = torch.sign(two_d).to(torch.float32)  # (n_tokens, I)
                 g = torch.Generator(device="cpu")
                 g.manual_seed(self._seed + self._token_index)
                 proj = torch.randn(n_tokens, self._sketch_dim, generator=g)
@@ -398,12 +411,33 @@ class ActivationCensus:
                 lc.sketch_tensor += update.to(torch.float64)
 
                 lc.tokens_seen += n_tokens
-                for i in range(I):
-                    lc.active_count[i] += int(active_counts[i].item())
-                    lc.magnitude_sum[i] += float(mags[i].item())
+                active_counts_list = active_counts.tolist()
+                mags_list = mags.tolist()
+                lc.active_count = [
+                    a + b for a, b in zip(lc.active_count, active_counts_list)
+                ]
+                lc.magnitude_sum = [
+                    a + b for a, b in zip(lc.magnitude_sum, mags_list)
+                ]
                 # down-column magnitude captured once (contribution term)
                 if lc.down_mag is None:
-                    w = mlp.down_proj.weight.detach()  # (hidden, I)
+                    weight_param = mlp.down_proj.weight
+                    # quant_state lives only on the Params4bit parameter
+                    # itself -- both .detach() and .data strip it (verified
+                    # empirically), so it must be read before either.
+                    quant_state = getattr(weight_param, "quant_state", None)
+                    if quant_state is not None:
+                        # A bitsandbytes Params4bit stores raw packed 4-bit
+                        # bytes, not the logical (hidden, I) float matrix --
+                        # summing the packed storage silently produces the
+                        # wrong length (crashes finalize() later). Dequantize
+                        # first, mirroring bitsandbytes' own
+                        # Embedding4bit.forward dequantize pattern.
+                        import bitsandbytes as bnb
+
+                        w = bnb.functional.dequantize_4bit(weight_param.data, quant_state)
+                    else:
+                        w = weight_param.detach()  # (hidden, I)
                     lc.down_mag = w.abs().sum(dim=0).tolist()
 
         return hook
@@ -419,7 +453,7 @@ class ActivationCensus:
             raise ActivationCensusError("mark_split requires an active census")
         self._split_boundary = self._token_index
 
-    def consume_texts(self, texts: Sequence[str]) -> None:
+    def consume_texts(self, texts: Sequence[str], *, batch_size: int = 1) -> None:
         import torch
 
         if not self._active:
@@ -427,14 +461,42 @@ class ActivationCensus:
                 "enter the census context before consuming texts "
                 "(and not after exit)"
             )
-        for text in texts:
+        if batch_size <= 1:
+            for text in texts:
+                enc = self._tokenizer(
+                    text, return_tensors="pt", truncation=True, max_length=self._max_length
+                )
+                enc = {k: v.to(self._device) for k, v in enc.items()}
+                self._token_index += int(enc["input_ids"].shape[-1])
+                with torch.no_grad():
+                    self._model(**enc)
+            return
+
+        # Batched path: right-pad so real tokens keep the exact position
+        # ids and causal-attention behavior they'd get unbatched (padding
+        # only ever trails real content, so it's never attended to and
+        # never shifts a real token's position). The hook strips padded
+        # rows via self._batch_mask before any statistic sees them.
+        self._tokenizer.padding_side = "right"
+        for start in range(0, len(texts), batch_size):
+            chunk = list(texts[start : start + batch_size])
             enc = self._tokenizer(
-                text, return_tensors="pt", truncation=True, max_length=self._max_length
+                chunk,
+                return_tensors="pt",
+                truncation=True,
+                max_length=self._max_length,
+                padding=True,
             )
             enc = {k: v.to(self._device) for k, v in enc.items()}
-            self._token_index += int(enc["input_ids"].shape[-1])
-            with torch.no_grad():
-                self._model(**enc)
+            attn = enc["attention_mask"]
+            valid = attn.reshape(-1).bool()
+            self._token_index += int(attn.sum().item())
+            self._batch_mask = valid
+            try:
+                with torch.no_grad():
+                    self._model(**enc)
+            finally:
+                self._batch_mask = None
 
     # -- finalization -----------------------------------------------------
 
