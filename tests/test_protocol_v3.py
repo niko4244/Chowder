@@ -202,7 +202,15 @@ def probe_corpus(tmp_path, monkeypatch):
 
 @pytest.fixture
 def fake_auto_tokenizer(monkeypatch):
-    """Fake AutoTokenizer returning per-parent token ID sequences."""
+    """Fake AutoTokenizer returning per-parent token ID sequences.
+
+    The gate resolves ``from transformers import AutoTokenizer`` lazily at
+    call time, so the fake is injected as a ``sys.modules`` entry: CI runs
+    without transformers installed and these tests must still exercise the
+    gate everywhere (no importorskip, no skip).
+    """
+    import types
+
     state = {}
 
     class FakeAuto:
@@ -211,16 +219,9 @@ def fake_auto_tokenizer(monkeypatch):
             assert kwargs.get("local_files_only") is True
             return state[str(path)]
 
-    import chowder.parent_tournament as pt_module
-
-    monkeypatch.setattr(
-        pt_module, "AutoTokenizer", FakeAuto, raising=False
-    ) if hasattr(pt_module, "AutoTokenizer") else None
-    # tokenizer_behavior_evidence imports AutoTokenizer inside the function;
-    # patch transformers.AutoTokenizer at the source.
-    import transformers
-
-    monkeypatch.setattr(transformers, "AutoTokenizer", FakeAuto)
+    fake_mod = types.ModuleType("transformers")
+    fake_mod.AutoTokenizer = FakeAuto
+    monkeypatch.setitem(sys.modules, "transformers", fake_mod)
     return state
 
 
