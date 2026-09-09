@@ -218,8 +218,11 @@ def test_real_worker_payload_mirrors_suite_fields(fake_torch_env, frozen_root, t
                 "scoring",
                 "max_new_tokens",
                 "use_chat_template",
+                "canonical_rendering",
             }
             assert suite["use_chat_template"] is True
+            # v2 tournament: canonical rendering off (own-template behavior).
+            assert suite["canonical_rendering"] is False
 
 
 def test_worker_payload_defaults_are_accepted_by_the_real_base_text_spec(

@@ -99,6 +99,7 @@ class BaseTextEvalSpec:
                             evaluation.get("use_chat_template", False),
                         )
                     ),
+                    canonical_rendering=bool(raw.get("canonical_rendering", False)),
                 )
             )
 
@@ -272,6 +273,7 @@ class BaseModelTextEvaluator:
                     "scoring": suite.scoring,
                     "max_new_tokens": suite.max_new_tokens,
                     "use_chat_template": suite.use_chat_template,
+                    "canonical_rendering": suite.canonical_rendering,
                 }
                 for suite in spec.suites
             ],

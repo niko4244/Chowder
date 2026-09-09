@@ -230,7 +230,19 @@ class ParentEvalSpec:
     # budget; this marker additionally captures scorer-side semantics that
     # are not per-suite fields -- v2 = thinking-aware answer extraction
     # (score against the text after the last "</think>") in the worker.
+    # v3 (2026-09-09) = canonical chat-template rendering: every parent's
+    # prompts render through ONE pinned template (the official
+    # Qwen/Qwen3.8-27B one, digest-pinned in canonical_chat_template.py)
+    # instead of each parent's own re-serialized template. Motivated by the
+    # real C/D gate outcome: C/D tokenize identically to A but carry
+    # different templates, so v2's own-template rendering broke
+    # comparability in a way no tokenizer-identity gate could see.
     protocol_version: str = "v2"
+    # v3 digest-additive fields: absent from to_dict() unless enabled, so
+    # every v2 spec's canonical JSON (and therefore its recorded digest,
+    # including retry7's c5e964df...) reproduces byte-for-byte.
+    canonical_rendering: bool = False
+    canonical_template_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not self.suites:
@@ -253,13 +265,36 @@ class ParentEvalSpec:
                 f"missing: {', '.join(missing)}. A partial suite produces a "
                 "tournament row that looks like evidence but is not."
             )
+        if self.canonical_rendering:
+            # Fail closed at construction: a v3 spec must pin exactly the
+            # canonical template the module embeds, and must say v3.
+            from chowder.canonical_chat_template import canonical_template_sha256
+
+            pinned = canonical_template_sha256()
+            if self.canonical_template_sha256 != pinned:
+                raise ParentSuiteValidationError(
+                    "canonical_rendering requires canonical_template_sha256 "
+                    f"== the embedded canonical template digest ({pinned}); "
+                    f"got {self.canonical_template_sha256!r}. A template "
+                    "change is a protocol change."
+                )
+            if self.protocol_version != "v3":
+                raise ParentSuiteValidationError(
+                    "canonical_rendering is a v3 protocol feature; set "
+                    "protocol_version='v3'"
+                )
+        elif self.canonical_template_sha256 is not None:
+            raise ParentSuiteValidationError(
+                "canonical_template_sha256 without canonical_rendering is "
+                "meaningless; enable canonical_rendering or drop the pin"
+            )
 
     def suites_for_dimension(self, dimension: str) -> tuple[ParentSuiteSpec, ...]:
         ParentDimension(dimension)  # validates
         return tuple(suite for suite in self.suites if suite.dimension == dimension)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "suites": [suite.to_dict() for suite in self.suites],
             "precision": self.precision,
             "quantization": self.quantization,
@@ -267,6 +302,12 @@ class ParentEvalSpec:
             "require_thinking_efficiency_telemetry": self.require_thinking_efficiency_telemetry,
             "protocol_version": self.protocol_version,
         }
+        if self.canonical_rendering:
+            # v3-only keys: their absence from v2 JSON keeps every v2
+            # digest byte-identical to its recorded value.
+            data["canonical_rendering"] = True
+            data["canonical_template_sha256"] = self.canonical_template_sha256
+        return data
 
     def canonical_json(self) -> str:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -291,6 +332,12 @@ class ParentEvalSpec:
             require_thinking_efficiency_telemetry=bool(
                 data.get("require_thinking_efficiency_telemetry", True)
             ),
+            # Fix (2026-09-09): protocol_version was silently dropped on
+            # round-trip (re-defaulted to v2) -- a recorded v3 spec reloaded
+            # from JSON would have claimed v2. Also restores the v3 fields.
+            protocol_version=data.get("protocol_version", "v2"),
+            canonical_rendering=bool(data.get("canonical_rendering", False)),
+            canonical_template_sha256=data.get("canonical_template_sha256"),
         )
 
 

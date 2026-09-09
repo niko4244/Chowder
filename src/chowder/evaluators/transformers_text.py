@@ -29,6 +29,11 @@ class EvalSuiteSpec:
     scoring: str = "normalized_exact_match"
     max_new_tokens: int = 64
     use_chat_template: bool = False
+    # v3 parent protocol: when True (and use_chat_template is set), the
+    # worker renders prompts through the ONE canonical template
+    # (canonical_chat_template.py) instead of the tokenizer's own. Part of
+    # the suite fingerprint.
+    canonical_rendering: bool = False
 
     def __post_init__(self) -> None:
         if not self.name.strip():

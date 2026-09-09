@@ -77,7 +77,7 @@ from .parent_eval import (
     aggregate_parent_result,
     ensure_parent_tokenizer_compatible,
     record_parent_tournament_result,
-)
+    ParentTokenizerMismatch,)
 from .parent_suite_content import build_tournament_spec
 
 
@@ -146,6 +146,95 @@ def parent_b() -> LocalParent:
     )
 
 #: Tokenizer asset files whose content defines tokenizer identity.
+_V3_PROBE_CORPUS_SHA256 = (
+    "a05451e901d819a5b81b2fedb3fe991761eec28c3b0ef730d5c39166bcf909e4"
+)
+_V3_PROBE_CORPUS_PATH = (
+    r"C:/Users/nikma/Chowder-Protected/calibration/phase4-parent-a/corpus.jsonl"
+)
+_V3_PROBE_PASSAGES = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 370, 371, 740, 741, 1160, 1161)
+
+
+def tokenizer_behavior_evidence(parent: LocalParent) -> dict[str, Any]:
+    """Behavioral tokenizer evidence: token IDs on the pinned public-domain probe.
+
+    Protocol v3's comparability question is not "are the serialization bytes
+    equal" (v2's question) but "does this parent tokenize the tournament's
+    inputs identically to the reference". The probe is a fixed passage
+    selection from the hashed Phase 4 calibration corpus (public-domain
+    Gutenberg text, `not_protected_suite_content: true` in its manifest --
+    never tournament content), so the evidence is reproducible by anyone
+    holding the corpus.
+    """
+    from transformers import AutoTokenizer
+
+    root = Path(parent.local_path)
+    corpus = Path(_V3_PROBE_CORPUS_PATH)
+    digest = hashlib.sha256(corpus.read_bytes()).hexdigest()
+    if digest != _V3_PROBE_CORPUS_SHA256:
+        raise ParentTournamentError(
+            "v3 tokenizer probe corpus hash mismatch: expected "
+            f"{_V3_PROBE_CORPUS_SHA256}, got {digest}"
+        )
+    rows = corpus.read_text(encoding="utf-8").splitlines()
+    texts = []
+    for i in _V3_PROBE_PASSAGES:
+        texts.append(str(json.loads(rows[i])["text"]))
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(root), trust_remote_code=False, local_files_only=True
+    )
+    token_ids: list[list[int]] = []
+    for text in texts:
+        encoded = tokenizer(text, add_special_tokens=False)["input_ids"]
+        token_ids.append([int(x) for x in encoded])
+    token_count = sum(len(ids) for ids in token_ids)
+    if token_count < 1000:
+        raise ParentTournamentError(
+            f"v3 tokenizer probe produced only {token_count} tokens for "
+            f"parent {parent.label!r}; probe coverage is too small to be evidence"
+        )
+    return {"token_ids": token_ids, "token_count": token_count}
+
+
+def ensure_parent_tokenizer_behavior_compatible(
+    reference: LocalParent, candidate: LocalParent
+) -> dict[str, Any]:
+    """v3 gate: fail closed unless the parents tokenize the probe identically.
+
+    Replaces v2's asset-identity equality (which refused C and D despite
+    behaviorally identical tokenization -- serialization hygiene, not
+    substance). Class and vocab size are still recorded via
+    `tokenizer_evidence`; the returned evidence goes into the run record.
+    """
+    ref = tokenizer_behavior_evidence(reference)
+    cand = tokenizer_behavior_evidence(candidate)
+    if ref["token_ids"] != cand["token_ids"]:
+        first = None
+        for i, (a, b) in enumerate(zip(ref["token_ids"], cand["token_ids"])):
+            for j in range(min(len(a), len(b))):
+                if a[j] != b[j]:
+                    first = (i, j)
+                    break
+            if first is not None:
+                break
+        raise ParentTokenizerMismatch(
+            "v3 tokenizer behavior mismatch: parent "
+            f"{candidate.label!r} does not tokenize the pinned public-domain "
+            f"probe identically to {reference.label!r} "
+            f"(first divergence at passage/position {first}); cross-parent "
+            "score comparability requires provably shared tokenization."
+        )
+    return {
+        "mode": "behavior",
+        "probe_corpus_sha256": _V3_PROBE_CORPUS_SHA256,
+        "passages": list(_V3_PROBE_PASSAGES),
+        "token_count": ref["token_count"],
+        "reference_label": reference.label,
+        "candidate_label": candidate.label,
+        "identical": True,
+    }
+
+
 _TOKENIZER_ASSETS = (
     "tokenizer.json",
     "tokenizer_config.json",
@@ -235,6 +324,8 @@ _EVAL_SUITE_FIELDS = (
     "scoring",
     "max_new_tokens",
     "use_chat_template",
+    # v3: the worker renders through the canonical template when set.
+    "canonical_rendering",
 )
 
 
@@ -248,13 +339,24 @@ def _worker_spec_payload(
     precision: str,
     seed: int,
     timeout_seconds: float | None,
+    canonical_rendering: bool = False,
 ) -> dict[str, Any]:
-    """The flat `BaseTextEvalSpec` payload `base_text_worker.main` parses."""
+    """The flat `BaseTextEvalSpec` payload `base_text_worker.main` parses.
+
+    `canonical_rendering` is spec-level on `ParentEvalSpec` (not a per-suite
+    field), so it is injected into every suite dict explicitly — passing it
+    through the per-suite dicts alone would silently drop it and the worker
+    would fall back to each parent's own template (the exact v2 behavior v3
+    exists to remove).
+    """
     return {
         "base_model": parent.local_path,
         "output_dir": str(run_dir),
         "suites": [
-            {key: value for key, value in suite.to_dict().items() if key in _EVAL_SUITE_FIELDS}
+            {
+                **{key: value for key, value in suite.to_dict().items() if key in _EVAL_SUITE_FIELDS},
+                "canonical_rendering": bool(canonical_rendering),
+            }
             for suite in suites
         ],
         "revision": None,
@@ -475,6 +577,7 @@ def evaluate_parent(
             precision=precision,
             seed=seed,
             timeout_seconds=timeout_seconds,
+            canonical_rendering=spec.canonical_rendering,
         ),
         run_dir,
         timeout_seconds=timeout_seconds,
@@ -573,16 +676,20 @@ def run_tournament(
     precision: str = "bf16",
     seed: int = 20260907,
     timeout_seconds: float | None = None,
+    protocol_version: str = "v2",
 ) -> dict[str, Any]:
     """Execute the protected tournament over `parents` in order.
 
-    Raises before any GPU work if integrity or tokenizer identity fails
-    for any participant. Returns the full evidence bundle including the
-    honest comparison table.
+    Raises before any GPU work if integrity or tokenizer comparability
+    fails for any participant. `protocol_version` selects the protocol
+    generation: v2 (own-template rendering, asset-identity tokenizer
+    gate) or v3 (canonical-template rendering, behavioral tokenizer
+    gate). Returns the full evidence bundle including the honest
+    comparison table.
     """
     if len(parents) < 2:
         raise ParentTournamentError("a tournament needs at least two parents")
-    spec = build_tournament_spec(frozen_root)
+    spec = build_tournament_spec(frozen_root, protocol_version=protocol_version)
 
     # Gates before any model load: integrity for everyone, then tokenizer
     # identity pairwise against the first parent (the comparability gate).
@@ -590,12 +697,24 @@ def run_tournament(
     for parent in parents:
         integrity_by_parent[parent.label] = verify_parent_integrity(parent)
     tokenizer_by_parent: dict[str, ParentTokenizerEvidence] = {}
+    behavior_evidence: dict[str, Any] = {}
     reference = parents[0]
     tokenizer_by_parent[reference.label] = tokenizer_evidence(reference)
-    for parent in parents[1:]:
-        evidence = tokenizer_evidence(parent)
-        ensure_parent_tokenizer_compatible(tokenizer_by_parent[reference.label], evidence)
-        tokenizer_by_parent[parent.label] = evidence
+    if spec.protocol_version == "v3":
+        # v3 comparability: identical tokenization BEHAVIOR on the pinned
+        # public-domain probe (serialization may differ; behavior may not).
+        behavior_evidence[reference.label] = {"mode": "reference"}
+        for parent in parents[1:]:
+            behavior_evidence[parent.label] = ensure_parent_tokenizer_behavior_compatible(
+                reference, parent
+            )
+            tokenizer_by_parent[parent.label] = tokenizer_evidence(parent)
+    else:
+        # v2 comparability: byte-identical serialized tokenizer assets.
+        for parent in parents[1:]:
+            evidence = tokenizer_evidence(parent)
+            ensure_parent_tokenizer_compatible(tokenizer_by_parent[reference.label], evidence)
+            tokenizer_by_parent[parent.label] = evidence
 
     results: dict[str, ParentRunResult] = {}
     for parent in parents:
@@ -616,6 +735,7 @@ def run_tournament(
         "protocol_sha256": spec.digest(),
         "suite_count": len(spec.suites),
         "seed": seed,
+        "tokenizer_behavior_evidence": behavior_evidence,
         "tokenizer_evidence": {
             label: tok.to_dict()
             if hasattr(tok, "to_dict")
