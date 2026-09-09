@@ -65,6 +65,7 @@ from typing import Any
 from .parent_eval import (
     ParentEvalSpec,
     ParentSuiteSpec,
+    ParentSuiteValidationError,
     build_protected_suite_dir,
 )
 
@@ -529,7 +530,9 @@ def materialize_protected_suites(protected_root: str | Path) -> dict[str, Any]:
     return manifest
 
 
-def build_tournament_spec(protected_root: str | Path) -> ParentEvalSpec:
+def build_tournament_spec(
+    protected_root: str | Path, *, protocol_version: str = "v2"
+) -> ParentEvalSpec:
     """The complete nine-dimension tournament spec against a materialized root.
 
     Dataset references point at the materialized JSONL files (resolved by
@@ -544,6 +547,12 @@ def build_tournament_spec(protected_root: str | Path) -> ParentEvalSpec:
             f"protected suites not materialized at {root}; run "
             "materialize_protected_suites first"
         )
+    if protocol_version not in {"v2", "v3"}:
+        raise ParentSuiteValidationError(
+            f"unknown protocol version {protocol_version!r}; supported: v2, v3"
+        )
+    from chowder.canonical_chat_template import canonical_template_sha256
+
     suites = []
     for dimension, named in PROTECTED_SUITES.items():
         for suite_name, _items in named.items():
@@ -557,11 +566,20 @@ def build_tournament_spec(protected_root: str | Path) -> ParentEvalSpec:
                     dataset=str(dataset_path).replace("\\", "/"),
                     # Protocol decision, finalized before the first real run:
                     # the parents are chat models and the items are
-                    # instruction-framed, so prompts render through each
-                    # model's own chat template. This is part of the
-                    # protocol fingerprint; changing it after a real run is
-                    # suite-v2 territory, not a silent edit.
+                    # instruction-framed, so prompts render through a chat
+                    # template. v2 rendered through each parent's OWN
+                    # template; v3 renders every parent through the ONE
+                    # canonical template (canonical_chat_template.py). This
+                    # is part of the protocol fingerprint; changing it after
+                    # a real run is a new protocol version, not a silent edit.
                     use_chat_template=True,
                 )
             )
+    if protocol_version == "v3":
+        return ParentEvalSpec(
+            suites=tuple(suites),
+            protocol_version="v3",
+            canonical_rendering=True,
+            canonical_template_sha256=canonical_template_sha256(),
+        )
     return ParentEvalSpec(suites=tuple(suites))

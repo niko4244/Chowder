@@ -99,6 +99,7 @@ class BaseTextEvalSpec:
                             evaluation.get("use_chat_template", False),
                         )
                     ),
+                    canonical_rendering=bool(raw.get("canonical_rendering", False)),
                 )
             )
 
@@ -272,6 +273,15 @@ class BaseModelTextEvaluator:
                     "scoring": suite.scoring,
                     "max_new_tokens": suite.max_new_tokens,
                     "use_chat_template": suite.use_chat_template,
+                    # Digest-additive: the key exists only when canonical
+                    # rendering is enabled, so non-canonical protocols hash
+                    # exactly as before #152 and both evaluators stay
+                    # symmetric (the smoke test's baseline==candidate check).
+                    **(
+                        {"canonical_rendering": True}
+                        if suite.canonical_rendering
+                        else {}
+                    ),
                 }
                 for suite in spec.suites
             ],

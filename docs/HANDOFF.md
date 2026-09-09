@@ -16,7 +16,7 @@ for it:
 
 ## Current state (updated 2026-09-08, early)
 
-- `main` = `f57307c` (everything below plus #139 commit-headroom gate +
+- `main` = `738564b` (everything below plus #139 commit-headroom gate +
   native-crash retry, #140 parent-eval protocol v2: thinking-aware
   final-answer extraction, 256-token budget, protocol-version digest,
   #142 four-parent freeze pipeline + C/D acquisition tooling, #143
@@ -24,7 +24,8 @@ for it:
   completed protocol-v2 A/B tournament, #145-#147 C/D local decision /
   orchestrators / four-parent consolidation, #148 sparse-research
   foundation, #149 D-acquire crash docs, #150 Phase 4 census prep,
-  #151 census batching + 4-bit-dequant fixes — all post-merge CI green)
+  #151 census batching + 4-bit-dequant fixes, #152 protocol v3 (canonical
+  rendering + behavioral tokenizer gate) — all post-merge CI green)
 - **Track A (real A/B parent tournament) is COMPLETE under protocol v2
   (retry7).** Both parents ran the full 9-dimension / 54-item protected
   suite; see "A/B result" below.
@@ -347,6 +348,39 @@ for it:
     and re-run all four parents (retry7 preserved as v2 evidence), or
     (c) treat C/D as research-only references outside the tournament. No
     unilateral choice was made.**
+  - **Decision made (2026-09-09, user): protocol v3.** Authored and
+    shipped (#152): `canonical_chat_template.py` embeds the official
+    Qwen/Qwen3.8-27B chat template (8,952 chars, digest-pinned
+    `c3cf9e34abf4...`, base64-embedded, verify-at-load, fail-closed);
+    `ParentEvalSpec` gains digest-additive `canonical_rendering` +
+    `canonical_template_sha256` (v2 canonical JSON unchanged — retry7's
+    digest `c5e964df...` reproduces byte-for-byte, verified against the
+    frozen suites root; v3 digest = `6a18a4e4f03df8ca...`); v3 tokenizer
+    gate is BEHAVIORAL (`ensure_parent_tokenizer_behavior_compatible`):
+    parents must produce identical token-ID sequences on a pinned probe
+    (16 passages from the hashed public-domain Phase 4 corpus
+    `a05451e9...`, never tournament content) — serialization may differ,
+    behavior may not. Worker renders v3 prompts through the canonical
+    template only (`render_canonical`); the per-parent own-template path
+    stays for v2 replay. `run_tournament(protocol_version=...)` selects
+    the generation; default stays v2. Also fixed: `ParentEvalSpec.from_dict`
+    dropped `protocol_version` on round-trip.
+  - **Phase 4 census launch evidence (2026-09-09): the reduced-scope
+    parent-A census run (subset40) crashed with the documented signature —
+    silent native access violation, rc=3221225477, during 4-bit weight
+    staging at 70.4 GiB measured commit headroom** (inside the ~68-71 GiB
+    staging band from the PR #139 evidence; the runner had skipped the
+    tournament's preflight). Fix + hardening: the runner now runs the
+    commit-headroom preflight (correct 64-byte MEMORYSTATUSEX struct —
+    the first probe used a 56-byte struct and silently returned nan) and
+    a supervisor (`Temp/supervise_phase4_census.py`) relaunches it with
+    bounded native-crash retries and the SAME 80 GiB headroom gate as the
+    tournament (no override; nan = fail closed). The supervisor waits
+    (5-min polls) until commit headroom clears 80 GiB, then fires the
+    census automatically. Current machine commit usage (~48 GiB held by
+    other apps) keeps headroom at ~71 GiB, so the run is legitimately
+    gated until apps are closed or the pagefile grows — recorded, not
+    bypassed.
 
 - **A/B result (retry7, protocol v2) — both parents complete and persisted.
   `C:\Users\nikma\Chowder-Protected\tournament-retry7.registry.db`

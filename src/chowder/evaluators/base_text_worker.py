@@ -11,6 +11,7 @@ from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
 from .base_text import BaseTextEvalSpec
 from .generation import resolve_eos_token_ids
+from chowder.canonical_chat_template import render_canonical
 from .transformers_text import EvalSuiteSpec
 
 
@@ -180,15 +181,23 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
                     expected = str(row[suite.expected_field])
                     rendered = prompt
                     if suite.use_chat_template:
-                        if not getattr(tokenizer, "chat_template", None):
-                            raise RuntimeError(
-                                f"suite {suite.name!r} requested chat template but tokenizer has none"
+                        if suite.canonical_rendering:
+                            # v3 protocol: render through the ONE canonical
+                            # template (digest-pinned in
+                            # canonical_chat_template.py), never the
+                            # tokenizer's own -- this is what makes
+                            # cross-parent prompts byte-identical.
+                            rendered = render_canonical(tokenizer, prompt)
+                        else:
+                            if not getattr(tokenizer, "chat_template", None):
+                                raise RuntimeError(
+                                    f"suite {suite.name!r} requested chat template but tokenizer has none"
+                                )
+                            rendered = tokenizer.apply_chat_template(
+                                [{"role": "user", "content": prompt}],
+                                tokenize=False,
+                                add_generation_prompt=True,
                             )
-                        rendered = tokenizer.apply_chat_template(
-                            [{"role": "user", "content": prompt}],
-                            tokenize=False,
-                            add_generation_prompt=True,
-                        )
                     encoded = tokenizer(rendered, return_tensors="pt")
                     encoded = {key: value.to(device) for key, value in encoded.items()}
                     generated = model.generate(
