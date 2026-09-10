@@ -14,7 +14,178 @@ for it:
   [`TEACHER_FABRIC_BRIEF.md`](TEACHER_FABRIC_BRIEF.md) — read it before
   any Teacher Fabric slice; it is the source of the non-negotiable rules.
 
-## Current state (updated 2026-09-08, early)
+## Current state (updated 2026-09-10) — protocol-v3 A/B/C tournament,
+parent A frozen by explicit decision, first real dense→MoE conversion
+
+**Headline: the sparse program has its first real artifact.** Parent A
+(native Qwen3.8-27B control) was converted dense→MoE at E=16, loaded for
+real on the RTX 5060 Ti under 4-bit NF4, passed `audit_moe_architecture`
+(64/64 layers converted, `num_experts=16`, `num_experts_per_tok=16` —
+every expert still fires, exactness-preserving as designed), and generated
+coherent real text (`"The capital of France is Paris. The capital of
+Germany is Berlin..."`). This is NOT yet a sparse/efficient model — top_k
+still equals E, so there is zero compute saving yet. Router healing
+(below, "Next steps") is what would actually make it sparse.
+
+- **Protocol v3 tournament (PR #151 census fixes, #152 canonical-rendering
+  + behavioral tokenizer gate, #153 this doc's prior sha update — all
+  merged, CI green at `beffd23e`):**
+  - **A, B, C all COMPLETE under v3** — real 9-dimension/54-item evaluation,
+    protocol digest `6a18a4e4f03df8ca...` identical across all three,
+    behavioral tokenizer gate passed for B and C against A (proves C's
+    genuinely-different serialized tokenizer identity is behaviorally
+    irrelevant — exactly what v3 was built to establish). Registry:
+    `Chowder-Protected/tournament-v3.registry.db`, runs under
+    `Chowder-Protected/runs/v3-20260909/`.
+  - **D never produced scored evidence.** Attempt 1 correctly refused by
+    the 80 GiB commit-headroom preflight (79.1 GiB measured) — the gate
+    working as designed. Attempt 2 crashed on `FileExistsError`: the
+    relaunch reused attempt 1's `run_dir`, and `evaluate_parent`'s
+    `mkdir(..., exist_ok=False)` collided with its stale `eval-spec.json`.
+    Real driver-script bug (scratch script, not `src/chowder/`), not a
+    protocol or model defect — D's behavioral tokenizer gate DID pass
+    before the crash, so D remains a plausible future candidate, just
+    without scored evidence. By explicit user decision, D was not
+    relaunched; the tournament proceeded on A/B/C.
+  - **v2-vs-v3 A/B diagnostic** (`Chowder-Protected/runs/v3-20260909/
+    v2-vs-v3-ab-diagnostic.md`): zero movement anywhere — every dimension
+    mean, all 54 per-item scores, and even the raw generated text are
+    byte-identical between v2 and v3 for A and B. Root cause confirmed
+    (not inferred): B's own `chat_template.jinja` hashes to the exact
+    canonical-template digest (`c3cf9e34abf4f9e3...`), so v3's canonical
+    rendering was a no-op for A/B specifically. v3's real value is
+    admitting C (and would have admitted D) via the behavioral gate, not
+    anything it changed for A/B. The prior calibration gap (B 0.500 vs A
+    0.833) and the `behavior`-dimension scoring artifact (raw scorer
+    literal-matches `"comply"`/`"refuse"` against free-text generation,
+    so both score 0.0 regardless of actual refusal quality) both persist
+    identically in v2 and v3 — separately diagnosed via
+    `behavior-rescore-v4-parent-{a,b,c}.json` (rescoring the SAME
+    predictions with a refusal classifier, not re-running inference):
+    real separation found there, A=1.0, B=C=0.5.
+  - **Real gap found and fixed in the freeze machinery**: `parent_freeze.py`
+    (PR #142) predates v3 (PR #152) and its `_tokenizer_gate` still did the
+    v2-era byte-identity check — would have wrongly fail-closed C/D despite
+    proven behavioral equivalence. Fixed in
+    **[PR #154](https://github.com/niko4244/Chowder/pull/154) (open, NOT
+    merged)**: a v3-aware branch that accepts behavioral-equivalence
+    evidence in place of byte-identity when every role carries it; falls
+    back to the original strict check otherwise (v2 packets unaffected).
+    19/19 tests green (16 existing + 3 new), lint clean. **Merge this
+    before the next time D rejoins a freeze packet** — A/B/C alone didn't
+    strictly need it (their tokenizers already matched byte-for-byte
+    apart from C, which the fix does cover), but a real four-parter will.
+  - **No automatic parent selection exists.** `freeze_selected_parent`
+    was run against the real A/B/C packet and correctly raised
+    `MissingParentEvidenceError: missing evidence for role(s): ('D',)`
+    rather than inventing a winner — exactly the fail-closed behavior the
+    mission requires. Full decision state:
+    `Chowder-Protected/runs/v3-20260909/four-parent-decision-state.md`.
+    Real A/B/C evidence: **A holds the only clear-difference advantage
+    anywhere (calibration, over both B and C, who tie each other there)**;
+    no dimension favors B or C over A; C is weak-signal softer on
+    coding/agentic, weak-signal stronger on self_correction. B's
+    historical "primary development parent" label played no role.
+  - **Parent A selected by explicit user decision, recorded as a manual
+    override — not an automatic tournament outcome.**
+    `Chowder-Protected/runs/v3-20260909/parent-freeze-manual-override.json`.
+    Reopenable: if D's real evidence is later obtained and shows a
+    clear-difference advantage over A, revisit.
+
+- **Phase 6 conversion (ladder item 3 + 4 in `PHASE6_CONVERSION_PLAN.md`,
+  both now done with real evidence — the plan doc's own top banner
+  claiming "no conversion code exists yet" / "parent A still downloading"
+  is STALE, left over from before the module existed; ignore it, the code
+  and evidence below are real):**
+  - **Profile-only dry run** (no writes) clean for E=8/16/32 on parent A:
+    64/64 layers have complete gate/up/down triples, BF16 confirmed
+    exactly-scalable, 55.56 GiB source -> ~56.58-56.59 GiB estimated
+    output depending on E. `Chowder-Protected/runs/v3-20260909/
+    phase6-parent-a-profile-only-dry-run.json`.
+  - **Real conversion run, E=16** (user's explicit choice — lands near the
+    3-4B active-FFN-param target at top_k=3 of 16):
+    `F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B-MoE-E16`, 71 minutes,
+    18 shards streamed (never loaded 55 GB into RAM), output
+    **byte-exact to the dry-run estimate** (56,580,780,856 bytes,
+    `scheme_digest c8ad351ab048cc46...`). `conversion.provenance.json` +
+    `conversion.manifest.json` + full `local_model_manifest` all written
+    into the output dir itself.
+  - **Loading smoke test, real and passed**: 4-bit NF4 load on the RTX
+    5060 Ti (~10 min, 1107 weight tensors vs 851 dense), `audit_moe_
+    architecture` confirmed 64/64 layers converted (0 dense layers left),
+    `num_experts=16`/`num_experts_per_tok=16` (top_k=E, exactness-preserving
+    as designed — **no compute savings yet, that's router healing's job**),
+    real `model.generate()` produced coherent, factually correct text.
+    **Genuinely tight resource moment during this load**: commit headroom
+    dropped to 0.9 GiB free system-wide mid-load (process RAM peaked
+    ~47 GB, well above the dense tournament loads' ~13-14 GB — the extra
+    router/expert/shared-expert tensors add real overhead). User explicitly
+    chose to let it ride rather than kill it; it completed without
+    crashing, headroom recovered to 83+ GiB the moment the process exited.
+    **If this load is repeated, expect the same tight window — the gate's
+    80 GiB gate is necessary but was not sufficient headroom margin here.**
+  - `peak_gpu_mib: 41991.3` (~41 GiB) is NOT a real VRAM measurement — the
+    RTX 5060 Ti only has 16.3 GiB. Same already-documented
+    Windows-driver VRAM-to-system-RAM paging fallback from a prior
+    session's Memory Fabric work (`torch.cuda.max_memory_allocated()`
+    reports inflated numbers under this fallback rather than raising a
+    clean OOM on this machine) — not a new anomaly, not evidence the
+    conversion is wrong.
+  - **Not yet done, deliberately out of scope today**: a full-scale
+    numerical-exactness comparison (dense parent A vs the E=16 conversion,
+    both unquantized, on real inputs) — `conversion_exactness.py`'s
+    bit-exactness proof so far only covers a **tiny random composite**
+    fixture, never the real 27B checkpoint. The plan doc flags this
+    explicitly as "the verification is the deliverable, not the math."
+    Real next step if picked up.
+
+- **Phase 4 census: reduced-scope checkpoint (subset40) COMPLETE this
+  session, full-scale run still pending.** Do not confuse the two — this
+  HANDOFF's 2026-09-08 entry below describes the FULL 1162-passage
+  two-half census as "armed, fires when GPU frees"; that full run has
+  still never executed. What DID run and complete (2026-09-09/10): the
+  reduced 40-passage checkpoint (`REDUCED SCOPE` logged explicitly, "not
+  the full-fidelity run"), via `Temp/run_phase4_census.py` +
+  `Temp/supervise_phase4_census.py`, output at
+  `Chowder-Protected/runs/phase4-census-parent-a-subset40/`. **Negative
+  result, honestly recorded**: for E in {8, 16, 32}, every clustering
+  strategy tested (contiguous, frequency-stratified, sketch-cluster,
+  sketch-cluster+contribution) showed `ratio_adv` ~x1.0-1.2 vs random
+  partitioning, all flagged "no signal." Verdict line: "NO material
+  advantage over random partitioning; record the negative result and
+  retain the mechanical converter." This is WHY today's E=16 conversion
+  used the default contiguous `PartitionScheme` rather than an
+  activation-derived grouping — the census gave no evidence to justify
+  anything else, on this reduced subset. Whether the FULL 1162-passage
+  census would reverse this is open; see Next steps.
+
+**Next steps, in rough priority order:**
+1. **Merge PR #154** (tokenizer-gate fix) before D (or any future parent)
+   re-enters a freeze packet.
+2. **Router healing** (Phase 8, `PHASE6_CONVERSION_PLAN.md` sec 6): the
+   real unlock — train only `gate.weight` + `shared_expert_gate` on the
+   E=16 checkpoint with expert weights frozen, bounded budget, success
+   gated on the existing hard regression gate against the protected
+   suite. This is what actually reduces `num_experts_per_tok` below 16
+   and produces a real compute saving; nothing today reduced compute yet.
+3. **Full-scale conversion-exactness check** against the real E=16
+   output (not just the tiny fixture) — measure forward-pass numerical
+   agreement between dense parent A and the converted model on real
+   inputs, unquantized if resources allow.
+4. **D's evidence gap remains open and reopenable**: if D's driver-script
+   bug gets fixed and a real v3 run completes, redo the A/B/C/D packet
+   (now with PR #154 merged) and check whether D changes the calibration
+   picture or anything else before treating A's selection as final.
+5. **Full 1162-passage Phase 4 census** (not just the 40-passage
+   reduced checkpoint) remains unrun — would need to confirm whether the
+   negative result holds at full scale before fully retiring the idea of
+   activation-derived expert grouping for future conversions (E=8/32 or a
+   second model).
+6. GPU is free as of this writing — nothing is currently running.
+
+---
+
+## Prior state (2026-09-08, early) — protocol-v2 tournament, C/D acquisition
 
 - `main` = `cf94a30` (everything below plus #139 commit-headroom gate +
   native-crash retry, #140 parent-eval protocol v2: thinking-aware
