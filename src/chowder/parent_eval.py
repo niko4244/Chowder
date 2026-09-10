@@ -174,8 +174,18 @@ class ParentSuiteSpec:
             ) from exc
         if not isinstance(self.dataset, str) or not self.dataset.strip():
             raise ValueError(f"parent suite {self.name!r} dataset is required")
-        if self.scoring not in {"exact_match", "normalized_exact_match"}:
-            raise ValueError(f"parent suite {self.name!r} scoring must be exact_match or normalized_exact_match")
+        if self.scoring not in {"exact_match", "normalized_exact_match", "refusal_classification"}:
+            raise ValueError(
+                f"parent suite {self.name!r} scoring must be exact_match, "
+                "normalized_exact_match, or refusal_classification"
+            )
+        if self.scoring == "refusal_classification" and self.dimension != "behavior":
+            # Refusal classification is defined only over the comply/refuse
+            # vocabulary; a capability suite would silently score 0.0.
+            raise ValueError(
+                f"parent suite {self.name!r} uses refusal_classification but has "
+                "dimension != 'behavior'; classification scoring is behavior-only"
+            )
         if isinstance(self.max_new_tokens, bool) or not isinstance(self.max_new_tokens, int) or self.max_new_tokens <= 0:
             raise ValueError(f"parent suite {self.name!r} max_new_tokens must be a positive int")
         for label in ("prompt_field", "expected_field"):
@@ -278,15 +288,25 @@ class ParentEvalSpec:
                     f"got {self.canonical_template_sha256!r}. A template "
                     "change is a protocol change."
                 )
-            if self.protocol_version != "v3":
+            if self.protocol_version not in {"v3", "v4"}:
                 raise ParentSuiteValidationError(
-                    "canonical_rendering is a v3 protocol feature; set "
-                    "protocol_version='v3'"
+                    "canonical_rendering is a v3+ protocol feature; set "
+                    "protocol_version='v3' or 'v4'"
                 )
         elif self.canonical_template_sha256 is not None:
             raise ParentSuiteValidationError(
                 "canonical_template_sha256 without canonical_rendering is "
                 "meaningless; enable canonical_rendering or drop the pin"
+            )
+        if any(
+            suite.scoring == "refusal_classification" for suite in self.suites
+        ) and self.protocol_version != "v4":
+            # v4 protocol feature, like canonical_rendering is v3's: the
+            # behavior suite scored by a classifier must never masquerade as
+            # an older generation whose recorded 0.0 means "known artifact".
+            raise ParentSuiteValidationError(
+                "refusal_classification is a v4 protocol feature; set "
+                "protocol_version='v4'"
             )
 
     def suites_for_dimension(self, dimension: str) -> tuple[ParentSuiteSpec, ...]:

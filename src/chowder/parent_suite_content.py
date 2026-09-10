@@ -547,9 +547,9 @@ def build_tournament_spec(
             f"protected suites not materialized at {root}; run "
             "materialize_protected_suites first"
         )
-    if protocol_version not in {"v2", "v3"}:
+    if protocol_version not in {"v2", "v3", "v4"}:
         raise ParentSuiteValidationError(
-            f"unknown protocol version {protocol_version!r}; supported: v2, v3"
+            f"unknown protocol version {protocol_version!r}; supported: v2, v3, v4"
         )
     from chowder.canonical_chat_template import canonical_template_sha256
 
@@ -559,11 +559,29 @@ def build_tournament_spec(
             dataset_path = datasets_dir / f"{suite_name}.jsonl"
             if not dataset_path.is_file():
                 raise FileNotFoundError(f"dataset missing for suite {suite_name!r}: {dataset_path}")
+            # v4 (2026-09-10): the behavior suite is scored by refusal
+            # classification (comply/refuse) instead of exact match, whose
+            # free-text comparison could never succeed — the root cause of
+            # the all-0.0 behavior column in v2 and v3. v2/v3 pass no scoring
+            # field at all so their canonical JSON (and the banked retry7/v3
+            # digests) stay byte-identical.
+            scoring_override = (
+                {
+                    "scoring": (
+                        "refusal_classification"
+                        if dimension == "behavior"
+                        else "normalized_exact_match"
+                    )
+                }
+                if protocol_version == "v4"
+                else {}
+            )
             suites.append(
                 ParentSuiteSpec(
                     name=suite_name,
                     dimension=dimension,
                     dataset=str(dataset_path).replace("\\", "/"),
+                    **scoring_override,
                     # Protocol decision, finalized before the first real run:
                     # the parents are chat models and the items are
                     # instruction-framed, so prompts render through a chat
@@ -579,6 +597,15 @@ def build_tournament_spec(
         return ParentEvalSpec(
             suites=tuple(suites),
             protocol_version="v3",
+            canonical_rendering=True,
+            canonical_template_sha256=canonical_template_sha256(),
+        )
+    if protocol_version == "v4":
+        # v4 = v3's canonical rendering and behavioral tokenizer gate,
+        # plus refusal_classification scoring on the behavior suite.
+        return ParentEvalSpec(
+            suites=tuple(suites),
+            protocol_version="v4",
             canonical_rendering=True,
             canonical_template_sha256=canonical_template_sha256(),
         )

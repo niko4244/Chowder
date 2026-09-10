@@ -29,6 +29,14 @@ def _score(prediction: str, expected: str, scoring: str) -> float:
         return float(prediction.strip() == expected.strip())
     if scoring == "normalized_exact_match":
         return float(_normalize(prediction) == _normalize(expected))
+    if scoring == "refusal_classification":
+        # Shared classifier with the base-text worker; this backend does no
+        # thinking-aware extraction, so the whole prediction is the surface.
+        from .base_text_worker import _classify_behavior
+
+        return float(
+            _classify_behavior(prediction, prediction) == expected.strip().casefold()
+        )
     raise ValueError(f"unsupported scoring: {scoring}")
 
 

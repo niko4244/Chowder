@@ -703,8 +703,8 @@ def run_tournament(
     behavior_evidence: dict[str, Any] = {}
     reference = parents[0]
     tokenizer_by_parent[reference.label] = tokenizer_evidence(reference)
-    if spec.protocol_version == "v3":
-        # v3 comparability: identical tokenization BEHAVIOR on the pinned
+    if spec.protocol_version in {"v3", "v4"}:
+        # v3/v4 comparability: identical tokenization BEHAVIOR on the pinned
         # public-domain probe (serialization may differ; behavior may not).
         behavior_evidence[reference.label] = {"mode": "reference"}
         for parent in parents[1:]:
