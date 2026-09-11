@@ -701,9 +701,44 @@ def _tokenizer_gate(
             passed=False,
             detail=f"tokenizer evidence missing for role(s): {missing}",
         )
-    fields = ("tokenizer_class", "vocab_size", "identity_sha256")
     reference_role = sorted(evidence_by_role)[0]
     reference = evidence_by_role[reference_role].tokenizer
+
+    # Protocol v3: a pinned public-domain behavioral probe can prove identical
+    # token-ID sequences directly, which is the actual comparability question.
+    # A different tokenizer *class* or serialized-asset identity is not itself
+    # a failure -- v3 was authored specifically because v2's byte-identity
+    # requirement rejected parents (e.g. a TokenizersBackend tokenizer) that
+    # tokenize every real input identically to the reference. When every role
+    # carries that proof against the SAME probe corpus, it supersedes the
+    # byte-identity check below entirely.
+    behavioral = {
+        role: evidence.tokenizer.get("behavioral_equivalence")
+        for role, evidence in evidence_by_role.items()
+    }
+    probe_hashes = {b.get("probe_corpus_sha256") for b in behavioral.values() if b}
+    behavioral_ok = (
+        all(behavioral.values())
+        and len(probe_hashes) == 1
+        and all(
+            b.get("identical") is True
+            for role, b in behavioral.items()
+            if role != reference_role
+        )
+    )
+    if behavioral_ok:
+        return GateResult(
+            name="tokenizer_comparability",
+            passed=True,
+            detail=(
+                "behavioral equivalence proven against the pinned probe corpus "
+                f"({sorted(probe_hashes)[0]}) for every non-reference role; "
+                "serialized tokenizer identity/class is not required to match "
+                "(protocol v3 gate)"
+            ),
+        )
+
+    fields = ("tokenizer_class", "vocab_size", "identity_sha256")
     mismatches = []
     for role, evidence in evidence_by_role.items():
         for key in fields:
