@@ -82,7 +82,76 @@ propagate these:**
 *uncensored* model and names B its primary development parent, but the
 frozen parent is **A**, the official control — which scores as the parent
 that refuses *most* (v4 rescore: A=1.0 vs B=C=0.5). Nothing records that
-the uncensored objective was superseded. It may simply be wrong for the
+the uncensored objective was superseded.
+
+### Chowder now trains this workload end to end (2026-09-11, measured)
+
+The gap an audit named — "the only working healing run was a standalone
+Temp script that recorded no experiment, accounted no GPU-hours, and never
+reached the gate" — is closed. `router_healing_orchestrator.
+run_router_healing_experiment` drives a healing experiment through the
+existing registry/gate/budget lifecycle, and a **bounded engineering run
+on real hardware proved it**: experiment `exp-router-healing-
+25f3a7b390dcf546`, own registry at `Chowder-Protected/
+engineering-healing.registry.db`, artifacts under
+`Chowder-Protected/runs/engineering-healing-20260911/`.
+
+This run's purpose was to prove the PATH, not to improve the model, and
+its success criterion was explicitly "trustworthy lifecycle even if the
+model fails the gate".
+
+| acceptance condition | evidence |
+|---|---|
+| 1. preflight measures real formats/memory | 38.455 GiB resident, **quantized_fraction 0.1091** |
+| 2. intended tensors can receive gradient | `nonzero-grad tensors=64/64` on both steps |
+| 3. delta + resumable state saved | 118 MB delta + `.resume.json`, written pre-evaluation |
+| 4. independent reload, versioned protocol | delta re-read from disk, base manifest `ff9c0e84…` verified |
+| 5. cost/outcome/verdict in the registry | `status=rejected`, `gpu_hours=0.277221` measured |
+
+- **The "4-bit" label is now measured as misleading, not just argued.**
+  Only **10.91%** of resident bytes are quantized: `routed_expert` is
+  **31.88 GiB of bfloat16** (128 tensors) on a 16 GiB card, because
+  bitsandbytes replaces `nn.Linear` only and `Qwen3_5MoeExperts` holds
+  `gate_up_proj`/`down_proj` as raw `nn.Parameter`. Attention/embedding
+  *are* largely uint8. This is the real budget and the reason steps cost
+  ~5 min (310.5s and 308.2s measured).
+- **Scope was narrowed honestly, not bypassed.** Trained
+  `ROUTER_ONLY_SUFFIXES` (64 × `mlp.gate.weight` = 5,242,880 params;
+  `layers_with_trainable_shared_expert_gate: 0`) against 22,893,387,264
+  frozen. The shared-expert gate is provably unlearnable on this
+  checkpoint (zero-init frozen shared expert ⇒ exactly zero derivative;
+  CPU-probed 0.0 vs 0.16 with non-zero weights), so designating it would
+  correctly trip the new reachability check. `require_reachable=False`
+  exists but was NOT used.
+- **The gate rejected, and that is condition 5 passing.** Evaluation was
+  held-out perplexity (passages 200-204, 1020 tokens, **5.7057**) rather
+  than the ~2h 54-item suite, so the gate returned `rejected: evaluation
+  evidence is incomplete` and named all nine missing protected dimensions.
+  A promotion authority that cannot be satisfied by partial evidence is
+  the property we want; do not "fix" this by loosening the goal.
+- **No quality claim.** Two steps is a lifecycle proof. Perplexity moved
+  5.4436 → 5.7057, which at this step count is noise, not a result, and
+  the 5.4436 reference itself still lacks a matched dense-parent
+  comparison (see the corrections above).
+
+**Defect found and fixed in the same cycle**, by an independent audit of
+this branch's own work: `freeze_for_router_healing` designated 64
+shared-expert gates that could never learn, and the earlier pilot's
+proof-of-life (one *global* grad-norm plus the router's weight norm, both
+dominated by `mlp.gate.weight`) was structurally incapable of noticing.
+Per-tensor reachability is now a precondition of the freeze rather than
+something a human might spot in a log.
+
+**Next, per the roadmap** (`docs/superpowers/plans/
+2026-09-11-chowder-training-first-9b-a35b.md`): the ≤10B-total/≤3.5B-active
+north star belongs to the **9B successor line**, not this 27B conversion —
+and it is not reachable by FFN routing alone there either. The measured 9B
+always-on floor is 4.578B (4.122B text-only), of which embeddings are
+2.034B and vision 0.456B, so the plan needs an **always-on reduction
+axis** beside init/granularity/routing. A candidate shape that does fit
+(32 layers, backbone 4096→3072, E=16 @ width 768, top-2, 512 shared) was
+shape-checked at 6.477B total / 3.306B active — a viable budget, NOT a
+trained model. It may simply be wrong for the
 program's purpose.
 
 ---
