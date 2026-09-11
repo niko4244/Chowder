@@ -118,6 +118,27 @@ class RouterHealingArtifact:
         }
 
 
+def enforce_healing_preflight() -> float:
+    """Refuse to start a healing load without safe commit headroom.
+
+    Deliberately delegates to `parent_tournament`'s gate rather than carrying a
+    second copy: that implementation is the proven root-cause fix for repeated
+    silent `STATUS_ACCESS_VIOLATION` (0xC0000005) crashes during 4-bit staging
+    on this machine, it honours `CHOWDER_MIN_COMMIT_HEADROOM_GIB`, and a
+    safety gate with two implementations is a safety gate that will drift.
+    It is imported privately on purpose -- one gate, one definition.
+
+    Healing loads a checkpoint LARGER than the tournament's parents (the
+    converted MoE adds a router and shared expert, and its expert tensors are
+    raw `nn.Parameter`, so bitsandbytes leaves them in BF16), so it needs this
+    gate at least as much as the path it was written for. Returns the measured
+    headroom in GiB; NaN where the measurement is unavailable.
+    """
+    from .parent_tournament import _enforce_commit_headroom
+
+    return _enforce_commit_headroom()
+
+
 def healing_experiment_id(spec: RouterHealingSpec) -> str:
     """Stable, spec-derived id so a replayed identical run is not a new row."""
     return f"exp-router-healing-{spec.digest()[:16]}"

@@ -604,8 +604,20 @@ def convert_checkpoint(
             "source_bytes": plan.source_bytes,
             "estimated_output_bytes": plan.estimated_output_bytes,
             "storage_delta_bytes": plan.storage_delta_bytes,
+            # Measured, not estimated. The estimate is pure shape arithmetic and
+            # does NOT include safetensors header padding, so it runs a few tens
+            # of KiB light -- recorded here so "the output matched the estimate"
+            # can be checked instead of assumed (it was once asserted as
+            # byte-exact on the strength of the estimate alone, which was wrong).
+            "actual_output_bytes": sum(
+                (out / name).stat().st_size for name in file_hashes
+            ),
         },
     }
+    storage = provenance["storage"]
+    storage["actual_minus_estimated_bytes"] = (
+        storage["actual_output_bytes"] - storage["estimated_output_bytes"]
+    )
     manifest = build_local_model_manifest(out, mode="full")
     write_manifest_file(manifest, out / "conversion.manifest.json")
     provenance["output_manifest_sha256"] = manifest.manifest_sha256
@@ -616,7 +628,9 @@ def convert_checkpoint(
     return provenance
 
 
-def set_experts_per_token(model_dir: str | Path, top_k: int) -> dict[str, Any]:
+def set_experts_per_token(
+    model_dir: str | Path, top_k: int, *, rebuild_manifest: bool = True
+) -> dict[str, Any]:
     """Set `num_experts_per_tok` on an already-converted MoE checkpoint.
 
     **This is deliberately NOT a conversion-time option.** `convert_checkpoint`
@@ -648,6 +662,22 @@ def set_experts_per_token(model_dir: str | Path, top_k: int) -> dict[str, Any]:
     `exactness_broken_by` provenance in the checkpoint's
     `conversion.provenance.json` when one is present. Returns the applied
     change for logging.
+
+    **Why `rebuild_manifest` defaults to True.** `convert_checkpoint` signs the
+    output directory with a full-mode `local_model_manifest`, and that manifest
+    covers `config.json` -- the very file this function rewrites. Leaving it
+    alone silently invalidates `output_manifest_sha256`, which then trips
+    `router_healing_run.load_router_delta`'s base-manifest check: the natural
+    workflow (convert -> lower top_k -> heal -> load delta) would fail closed
+    against itself. Rebuilding re-hashes the whole directory (~56 GiB for a
+    27B checkpoint, minutes not seconds), so pass `rebuild_manifest=False`
+    only when you are about to rebuild it yourself -- in that case the
+    staleness is recorded explicitly in provenance rather than left implied,
+    so nothing downstream trusts a digest that no longer describes the files.
+
+    For cheap experiments, do not use this function at all: mutate each
+    router's `top_k` attribute in memory instead. Nothing on disk changes and
+    no manifest is disturbed.
     """
     root = Path(model_dir)
     config_path = root / "config.json"
@@ -688,6 +718,18 @@ def set_experts_per_token(model_dir: str | Path, top_k: int) -> dict[str, Any]:
         "active_expert_fraction": top_k / num_experts,
         "routed_rescale_factor": num_experts / top_k,
     }
+    # Re-sign the directory BEFORE recording provenance, so provenance never
+    # advertises a manifest digest that was not actually produced.
+    new_manifest_sha256: str | None = None
+    if rebuild_manifest:
+        manifest = build_local_model_manifest(root, mode="full")
+        write_manifest_file(manifest, root / "conversion.manifest.json")
+        new_manifest_sha256 = manifest.manifest_sha256
+        change["output_manifest_sha256"] = new_manifest_sha256
+        change["manifest_rebuilt"] = True
+    else:
+        change["manifest_rebuilt"] = False
+
     provenance_path = root / "conversion.provenance.json"
     if provenance_path.is_file():
         provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
@@ -696,6 +738,17 @@ def set_experts_per_token(model_dir: str | Path, top_k: int) -> dict[str, Any]:
             history.append(change)
             provenance["exactness_broken_by"] = history
         provenance["num_experts_per_tok"] = top_k
+        if new_manifest_sha256 is not None:
+            provenance["output_manifest_sha256"] = new_manifest_sha256
+            provenance.pop("manifest_stale", None)
+            provenance.pop("manifest_stale_reason", None)
+        else:
+            provenance["manifest_stale"] = True
+            provenance["manifest_stale_reason"] = (
+                "config.json was rewritten by set_experts_per_token with "
+                "rebuild_manifest=False; output_manifest_sha256 no longer describes "
+                "this directory and must not be trusted until the manifest is rebuilt"
+            )
         provenance_path.write_text(
             json.dumps(provenance, indent=2, sort_keys=True, ensure_ascii=False),
             encoding="utf-8",

@@ -45,7 +45,7 @@ def _top_k_on_disk(path) -> int:
 
 def test_lowering_top_k_updates_config_and_reports_the_rescale(tmp_path):
     root = _write_checkpoint(tmp_path, num_experts=16)
-    change = set_experts_per_token(root, 3)
+    change = set_experts_per_token(root, 3, rebuild_manifest=False)
     assert _top_k_on_disk(root) == 3
     assert change["previous_num_experts_per_tok"] == 16
     assert change["exact_at_init"] is False
@@ -56,29 +56,29 @@ def test_lowering_top_k_updates_config_and_reports_the_rescale(tmp_path):
 
 def test_top_k_equal_to_num_experts_is_still_exact(tmp_path):
     root = _write_checkpoint(tmp_path, num_experts=16, top_k=3)
-    change = set_experts_per_token(root, 16)
+    change = set_experts_per_token(root, 16, rebuild_manifest=False)
     assert change["exact_at_init"] is True
     assert change["routed_rescale_factor"] == pytest.approx(1.0)
 
 
 def test_breaking_exactness_is_recorded_in_provenance(tmp_path):
     root = _write_checkpoint(tmp_path, num_experts=16)
-    set_experts_per_token(root, 4)
+    set_experts_per_token(root, 4, rebuild_manifest=False)
     provenance = json.loads((root / "conversion.provenance.json").read_text(encoding="utf-8"))
     assert provenance["num_experts_per_tok"] == 4
     assert len(provenance["exactness_broken_by"]) == 1
     assert provenance["exactness_broken_by"][0]["num_experts_per_tok"] == 4
 
     # a second reduction appends rather than overwriting the history
-    set_experts_per_token(root, 2)
+    set_experts_per_token(root, 2, rebuild_manifest=False)
     provenance = json.loads((root / "conversion.provenance.json").read_text(encoding="utf-8"))
     assert len(provenance["exactness_broken_by"]) == 2
 
 
 def test_restoring_exactness_does_not_append_a_break_record(tmp_path):
     root = _write_checkpoint(tmp_path, num_experts=16)
-    set_experts_per_token(root, 4)
-    set_experts_per_token(root, 16)
+    set_experts_per_token(root, 4, rebuild_manifest=False)
+    set_experts_per_token(root, 16, rebuild_manifest=False)
     provenance = json.loads((root / "conversion.provenance.json").read_text(encoding="utf-8"))
     assert provenance["num_experts_per_tok"] == 16
     assert len(provenance["exactness_broken_by"]) == 1  # only the reduction
@@ -87,7 +87,7 @@ def test_restoring_exactness_does_not_append_a_break_record(tmp_path):
 def test_top_k_above_num_experts_is_refused(tmp_path):
     root = _write_checkpoint(tmp_path, num_experts=16)
     with pytest.raises(DenseToMoeError):
-        set_experts_per_token(root, 17)
+        set_experts_per_token(root, 17, rebuild_manifest=False)
     assert _top_k_on_disk(root) == 16  # unchanged
 
 
@@ -95,7 +95,7 @@ def test_top_k_above_num_experts_is_refused(tmp_path):
 def test_non_positive_or_non_integer_top_k_is_refused(tmp_path, bad):
     root = _write_checkpoint(tmp_path, num_experts=16)
     with pytest.raises(DenseToMoeError):
-        set_experts_per_token(root, bad)
+        set_experts_per_token(root, bad, rebuild_manifest=False)
     assert _top_k_on_disk(root) == 16
 
 
@@ -105,17 +105,46 @@ def test_non_moe_checkpoint_is_refused(tmp_path):
         encoding="utf-8",
     )
     with pytest.raises(DenseToMoeError):
-        set_experts_per_token(tmp_path, 4)
+        set_experts_per_token(tmp_path, 4, rebuild_manifest=False)
 
 
 def test_missing_config_is_refused(tmp_path):
     with pytest.raises(DenseToMoeError):
-        set_experts_per_token(tmp_path, 4)
+        set_experts_per_token(tmp_path, 4, rebuild_manifest=False)
 
 
 def test_works_without_a_provenance_sidecar(tmp_path):
     root = _write_checkpoint(tmp_path, num_experts=8, provenance=False)
-    change = set_experts_per_token(root, 2)
+    change = set_experts_per_token(root, 2, rebuild_manifest=False)
     assert _top_k_on_disk(root) == 2
     assert change["exact_at_init"] is False
     assert not (root / "conversion.provenance.json").exists()
+
+
+def test_rebuild_manifest_false_marks_provenance_stale(tmp_path):
+    """The audit found the original version silently invalidated the signed
+    manifest. Opting out must now record staleness loudly, never imply it."""
+    root = _write_checkpoint(tmp_path, num_experts=16)
+    change = set_experts_per_token(root, 4, rebuild_manifest=False)
+    assert change["manifest_rebuilt"] is False
+    provenance = json.loads((root / "conversion.provenance.json").read_text(encoding="utf-8"))
+    assert provenance["manifest_stale"] is True
+    assert "must not be trusted" in provenance["manifest_stale_reason"]
+
+
+def test_rebuild_manifest_true_resigns_and_clears_staleness(tmp_path):
+    """A rebuild must publish the NEW digest and clear any prior stale flag,
+    so load_router_delta's base-manifest check can succeed again."""
+    root = _write_checkpoint(tmp_path, num_experts=16)
+    # a minimal real weight file so the full-mode manifest has something to sign
+    (root / "model-00001-of-00001.safetensors").write_bytes(b"" * 64)
+    set_experts_per_token(root, 4, rebuild_manifest=False)
+    assert json.loads((root / "conversion.provenance.json").read_text(encoding="utf-8"))["manifest_stale"] is True
+
+    change = set_experts_per_token(root, 2, rebuild_manifest=True)
+    assert change["manifest_rebuilt"] is True
+    assert len(change["output_manifest_sha256"]) == 64
+    provenance = json.loads((root / "conversion.provenance.json").read_text(encoding="utf-8"))
+    assert provenance["output_manifest_sha256"] == change["output_manifest_sha256"]
+    assert "manifest_stale" not in provenance
+    assert (root / "conversion.manifest.json").is_file()
