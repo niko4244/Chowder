@@ -89,15 +89,94 @@ here, and it remains **unclaimed**. This pilot does not close it:
 * the cleaner held-out measurement says it bought most of a 24% improvement;
 * the two disagree, and one pilot at lr 1e-3 over 24.8k tokens cannot settle it.
 
+## Addendum — the eval-B static reference, measured
+
+Follow-up #2 is done (`evidence/hot-core-upcycling/static-prune-evalb.json`). The
+same saved ranking artifact that built the checkpoint (digest `df207741fdcc`) was
+used, masking the dense parent in activation space on eval B's 64 prompts at the
+same `max_length` 384 and nf4 load.
+
+| arm on eval B | active | ppl | ×dense |
+|---|---:|---:|---:|
+| dense | 12,288 | **4.3044** | 1.000× |
+| **static hot prune — THE REFERENCE** | 3,440 | **15.6918** | 3.646× |
+| converted init channel set (as a mask) | 3,440 | 18.9474 | 4.402× |
+| hot core alone | 2,176 | 31.6221 | 7.347× |
+| arbitrary subset (control) | 3,440 | 2879.3025 | 668.9× |
+
+### The ranking does not generalise, and that is the finding
+
+Static hot pruning at f=0.28 costs **1.677×** on eval A but **3.646×** on eval B —
+**2.17× worse** out of distribution. The ranking was measured on the even-index
+half of the first 64 prompts, i.e. adjacent to eval A; eval B comes from a
+different region of the corpus. One static channel set is simply a worse fit
+there.
+
+That reframes the whole pilot. Routing's value is **conditional on how badly the
+static set fits the data**, which is exactly the static→oracle gap argument: the
+gap is largest where the single best static choice is weakest.
+
+### Against each split's own reference, at equal active compute
+
+Negative = beats the static prune.
+
+| variant | eval A | eval B |
+|---|---:|---:|
+| converted init | +10.49% | +23.79% |
+| **trained, step 150** | **+3.62%** | **−4.85%** |
+| router only | +10.83% | **−0.77%** |
+| gate only | +1.98% | +11.04% |
+
+**On eval B the trained model beats the best static choice at equal active compute
+by 4.85%** — the first time anything in this program has done so. Step 150 is the
+predetermined end of the run, so that is the unbiased estimate; the step-125 "best"
+(14.7491, −6.39%) was selected by looking at eval B and should not be quoted as
+the headline.
+
+And **neither component alone suffices**: gate-only *loses* to static by 11.04%,
+router-only beats it by only 0.77%. Together they beat it by 4.85%. So the router
+is necessary but not sufficient on its own — which is a different claim from
+either "routing works" or the eval-A verdict's "routing bought nothing".
+
+### Revised status
+
+The pre-registered verdict on eval A stands and is not retracted: there, routing
+bought nothing and a scalar gate recalibration tied the static prune. But with the
+eval-B reference now in hand, the coherent reading across both splits is:
+
+* where the static ranking fits the data, static pruning is strong (1.677×) and
+  routing adds nothing;
+* where it fits poorly (3.646×), router + gate together beat it by 4.85%.
+
+This is support for the thesis, but narrow and conditional: one pilot, one split,
+lr too high, 24.8k training tokens, and perplexity rather than GSM8K. It is not
+the 4.30× static→oracle gap being closed — it is ~5% of a much larger available
+gap, under distribution shift.
+
+One loose end: the converted init channel set masked onto the dense model scores
+18.9474 against the converted checkpoint's own measured 19.4255 (drift 0.478,
+2.5%). Most likely the two checkpoints' different tensor layouts quantise
+differently under nf4, but it could also mean the zero-router tie-break does not
+select experts 0 and 1. **Unverified either way** — it does not affect the
+reference above, which is measured entirely on the dense model.
+
 ## Designated follow-ups, in order
 
-1. **Re-run with eval B as the pre-registered primary** and a third fresh split,
-   at lr 1e-4–3e-4 with fewer epochs. The instability at step 75 and the tiny
-   corpus are both fixable, and the split question has to be settled before any
-   attribution claim means anything.
-2. **Measure the static-prune reference on eval B.** It exists only for eval A,
-   so the equal-active-compute comparison cannot currently be made on the split
-   that favours the router. Without it, eval B's +3.85 has no baseline to beat.
-3. **Router-only arm** (`ROUTER_ONLY_SUFFIXES`), so the gate cannot launder the
-   result either way.
-4. **A larger hot core**, since the gate spent its capacity asking for one.
+1. ~~Measure the static-prune reference on eval B.~~ **Done — see the addendum.**
+   It produced the program's first equal-active-compute win (−4.85%) and the
+   ranking-generalisation finding.
+2. **Rank channels on a corpus-wide split, not a contiguous one.** This is now the
+   highest-value fix: the ranking costs 1.677× in distribution and 3.646× out of
+   it, so a ranking measured across the whole corpus should cut the out-of-
+   distribution penalty directly — and it would also shrink the very gap routing
+   is currently being credited with closing. Both effects matter and they pull in
+   opposite directions, which is exactly why it should be measured.
+3. **Re-run with eval B pre-registered as primary** plus a third fresh split, at
+   lr 1e-4–3e-4 with fewer epochs. The step-75 instability and the 24.8k-token
+   corpus are both fixable.
+4. **Router-only arm** (`ROUTER_ONLY_SUFFIXES`), so the gate cannot launder the
+   result either way. Router-only already sits at −0.77% on eval B; a clean arm
+   would say whether that is real.
+5. **A larger hot core**, since the gate spent its capacity asking for one — and
+   the core alone at 2,176 channels costs 7.347× on eval B, so the routed half is
+   doing substantial work there.
