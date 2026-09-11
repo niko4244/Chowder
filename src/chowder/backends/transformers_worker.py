@@ -10,6 +10,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from ..target_coverage import adapted_modules_by_leaf
 from ..adapter_guard import assert_adapter_is_live
 from ..hf_resilience import cache_status, with_hub_retries
 from .activation_offload_hooks import offload_pack, offload_unpack
@@ -443,6 +444,10 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         model = get_peft_model(base_model, lora_config)
 
     resolved_target_modules = sorted(model.peft_config[model.active_adapter].target_modules)
+    # What was actually ADAPTED, not what was configured: PEFT matches by suffix
+    # and silently adapts only the subset that matches. The controller turns this
+    # into a coverage verdict against the requested list.
+    adapted_by_leaf = adapted_modules_by_leaf(model)
 
     if spec.gradient_checkpointing:
         model.config.use_cache = False
@@ -740,6 +745,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "resolved_model_commit": getattr(model.config, "_commit_hash", None),
             "model_type": getattr(model.config, "model_type", None),
             "resolved_target_modules": resolved_target_modules,
+            "adapted_modules_by_leaf": adapted_by_leaf,
             "continued_from_parent_adapter": parent_adapter_sha is not None,
             "parent_adapter_sha256": parent_adapter_sha,
         },

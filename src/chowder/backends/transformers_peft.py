@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from ..placement_policy import PlacementPlan
 from uuid import uuid4
 
+from ..target_coverage import assert_targets_covered
 from ..worker_env import worker_env
 from ..cancellation import CancellationToken
 from ..dependency_preflight import check_dependencies
@@ -240,6 +241,9 @@ class TransformersPeftRunSpec:
     lora_dropout: float = 0.05
     target_modules: tuple[str, ...] = ()
     target_preset: str = "auto"
+    #: Accept a requested target module that adapts nothing. Off by default:
+    #: silent partial coverage trains a smaller model than asked for.
+    allow_unmatched_target_modules: bool = False
     use_rslora: bool = False
     quantization: str = "none"
     precision: str = "auto"
@@ -522,6 +526,9 @@ class TransformersPeftRunSpec:
             lora_dropout=float(lora.get("dropout", 0.05)),
             target_modules=tuple(str(x) for x in lora.get("target_modules", ())),
             target_preset=str(lora.get("target_preset", "auto")),
+            allow_unmatched_target_modules=bool(
+                lora.get("allow_unmatched_target_modules", False)
+            ),
             use_rslora=bool(lora.get("use_rslora", False)),
             quantization=(
                 str(backend["quantization"]).lower()
@@ -1570,6 +1577,16 @@ class TransformersPeftExecutor:
         versions = worker_result.get("versions", {})
         worker_provenance = worker_result.get("provenance", {})
         data_provenance = worker_result.get("data_provenance", {})
+        # Coverage is policy, so it lives controller-side: the worker reports what
+        # it adapted, this decides whether that honoured the request. A requested
+        # name matching nothing means training silently shrank.
+        target_coverage = assert_targets_covered(
+            spec.target_modules,
+            # this worker reports it inside "provenance", beside
+            # resolved_target_modules; absent means unknown, not zero
+            worker_provenance.get("adapted_modules_by_leaf"),
+            allow_unmatched=spec.allow_unmatched_target_modules,
+        )
         if (
             not isinstance(telemetry, Mapping)
             or not isinstance(versions, Mapping)
@@ -1620,6 +1637,7 @@ class TransformersPeftExecutor:
                 "dataset_sha256": primary_sha,
                 "replay_dataset_sha256": replay_sha,
                 "replay_ratio": spec.replay_ratio,
+                "target_coverage": target_coverage,
                 "parent_adapter_sha256": parent_adapter_sha,
                 "continued_from_parent_adapter": parent_adapter_sha is not None,
                 "data_provenance": dict(data_provenance),

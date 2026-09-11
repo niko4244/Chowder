@@ -301,6 +301,21 @@ def train(spec: _Spec) -> dict[str, Any]:
     # config that silently matched zero real modules is visible, not silent.
     # Populated identically by get_peft_model and PeftModel.from_pretrained.
     resolved_target_modules = sorted(model.peft_config[model.active_adapter].target_modules)
+    # Counted the same way chowder.target_coverage does, inlined because this
+    # file must not import from the chowder package (see the module docstring).
+    # Keys off ".lora_A" so the adapter name does not matter. The controller
+    # compares this against the requested list: Unsloth rewrites the list into a
+    # regex, which on a hybrid model silently missed 72 linear_attn modules.
+    _targets: set[str] = set()
+    for _name, _ in model.named_modules():
+        _i = _name.find(".lora_A")
+        if _i > 0:
+            _targets.add(_name[:_i])
+    _adapted: dict[str, int] = {}
+    for _t in _targets:
+        _leaf = _t.rsplit(".", 1)[-1]
+        if _leaf:
+            _adapted[_leaf] = _adapted.get(_leaf, 0) + 1
 
     dataset = load_dataset("json", data_files=spec.dataset, split="train")
     if len(dataset) == 0:
@@ -426,6 +441,7 @@ def train(spec: _Spec) -> dict[str, Any]:
             "replay_selected_rows": replay_selected_rows,
         },
         "resolved_target_modules": resolved_target_modules,
+        "adapted_modules_by_leaf": _adapted,
         # Whether the text-decoder class was requested. False means this
         # Unsloth build predates the parameter, and an adapter trained on a
         # VLM-wrapped model will not load into Chowder's evaluator.

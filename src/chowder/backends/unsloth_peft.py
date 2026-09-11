@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
+from ..target_coverage import assert_targets_covered
 from ..worker_env import worker_env
 from ..cancellation import CancellationToken
 from ..executors import CostEstimate, ExecutionContext, TrainingArtifact
@@ -99,6 +100,8 @@ class UnslothPeftRunSpec:
     lora_alpha: int = 32
     lora_dropout: float = 0.05
     target_modules: tuple[str, ...] = ()
+    #: See TransformersPeftRunSpec: off by default so partial coverage is loud.
+    allow_unmatched_target_modules: bool = False
     quantization: str = "none"
     seed: int = 1
     timeout_seconds: float | None = None
@@ -221,6 +224,9 @@ class UnslothPeftRunSpec:
             dataset_raw = Path(work_dir) / dataset_raw
         dataset = str(dataset_raw.resolve())
         target_modules = tuple(lora.get("target_modules", ()) or ())
+        allow_unmatched_target_modules = bool(
+            lora.get("allow_unmatched_target_modules", False)
+        )
 
         resume_raw = backend.get("resume_from_checkpoint")
         resume_from_checkpoint: str | None = None
@@ -277,6 +283,7 @@ class UnslothPeftRunSpec:
             lora_alpha=int(lora.get("alpha", 32)),
             lora_dropout=float(lora.get("dropout", 0.05)),
             target_modules=target_modules,
+            allow_unmatched_target_modules=allow_unmatched_target_modules,
             quantization=str(backend.get("quantization", "none")),
             seed=seed,
             timeout_seconds=(backend.get("runtime", {}) or {}).get("timeout_seconds"),
@@ -753,6 +760,14 @@ class UnslothPeftExecutor:
         telemetry = worker_result.get("telemetry", {})
         versions = worker_result.get("versions", {})
         model_provenance = worker_result.get("model_provenance", {})
+        # Coverage is policy, so it lives controller-side: the worker reports what
+        # it adapted, this decides whether that honoured the request. A requested
+        # name matching nothing means training silently shrank.
+        target_coverage = assert_targets_covered(
+            spec.target_modules,
+            worker_result.get("adapted_modules_by_leaf"),
+            allow_unmatched=spec.allow_unmatched_target_modules,
+        )
         if (
             not isinstance(telemetry, Mapping)
             or not isinstance(versions, Mapping)
@@ -807,6 +822,7 @@ class UnslothPeftExecutor:
                 "versions": dict(versions),
                 "model_provenance": dict(model_provenance),
                 "resolved_target_modules": worker_result.get("resolved_target_modules"),
+                "target_coverage": target_coverage,
                 # False means the isolated Unsloth predates `text_only`, so a
                 # VLM-wrapped base was loaded and the saved adapter will not load
                 # into the evaluator's AutoModelForCausalLM -- the liveness guard
