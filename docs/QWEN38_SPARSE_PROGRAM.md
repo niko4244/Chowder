@@ -17,18 +17,61 @@ Chowder's primary model research target is a directly
 native-Qwen3.8-derived uncensored sparse language model. Development
 begins from `orcarouter/Qwen3.8-27B-Uncensored`, with official
 Qwen3.8-27B as the untouched control and OBLITERATUS/DavidAU variants as
-comparison parents. The long-term target is approximately 3–4B **active
-parameters per token** without distilling Qwen3.8 into another
-architecture, while preserving as much reasoning, coding, knowledge,
-calibration, agentic performance and self-correction capability as
-empirical evidence allows. Every architecture and training intervention
-remains subject to Chowder's independent evaluation, provenance,
-regression and promotion gates.
+comparison parents. The target is to minimise **active parameters per
+token** without distilling Qwen3.8 into another architecture, while
+preserving as much reasoning, coding, knowledge, calibration, agentic
+performance and self-correction capability as empirical evidence allows.
+Every architecture and training intervention remains subject to Chowder's
+independent evaluation, provenance, regression and promotion gates.
 
-Shorthand: `Chowder-Qwen3.8-A4B`. **A3B/A4B always means active
-parameters per token, never total stored parameters.** Both are tracked
-separately (Phase 11 accounting); a model is not labeled "A4B" unless
-measured routing geometry supports the claim.
+> **TARGET RELABELLED 2026-09-11 — the original 3–4B figure was
+> unreachable and is retired.** It was stated here without the caveat
+> that it is incompatible with this model's own measured geometry. Two
+> independent measurements retired it:
+>
+> 1. **Parameter arithmetic.** Phase 11 on the real E=16 conversion
+>    (`Qwen3.8-27B-MoE-E16.accounting.json`) measures an always-on floor
+>    of **11.17B** active/token — attention + GatedDeltaNet + embeddings
+>    + norms + MTP + vision + shared expert, none of it routed. The
+>    routed FFN is 17.11B across 16 experts (1.07B each), so active/token
+>    floors at **12.24B at top_k=1** and is **14.38B at top_k=3**. No
+>    choice of routing reaches 4B; FFN-only sparsification cannot, even
+>    in principle. Reaching 4B would require deleting ~59% of
+>    attention+embeddings, which is Phase 10 — a table row with no
+>    mechanism, no plan and no hypothesis anywhere in this repo.
+> 2. **Measured quality.** The top_k ladder screen
+>    (`runs/v3-20260909/topk-ladder-finding.md`) shows the partition does
+>    not survive sparsification at all: perplexity 5.44 at top_k=16,
+>    67.8 at k=8, and 243,981 at k=3. Those floors are therefore not
+>    merely high, they are unreachable at usable quality.
+>
+> **Honest labels.** Measured today: `Chowder-Qwen3.8-A28B` — the only
+> quality-preserving setting is top_k=16, where active == total
+> (28.29B) and the MoE structure buys no compute at all. Best case if
+> the redundancy problem below is solved: **A12–A14B**. The program's
+> frontier is an A12B-class model, not an A4B one.
+>
+> **Root cause, for anyone tempted to retry top_k reduction.** This
+> conversion partitions one FFN into 16 *disjoint* channel slices, so
+> the experts are **complementary**, not redundant: the dense output is
+> a sum over all 17,408 channels and any subset is a partial sum of a
+> single computation, not an alternative computation. A natively-trained
+> MoE's experts are individually competent; these are not. Router
+> healing with frozen experts can only choose which slices to keep, so
+> its ceiling is fixed by construction — the mechanism cannot work here,
+> independent of training budget. Partial sums would only suffice under
+> genuine activation sparsity, and Qwen3.8 is SiLU (`hidden_act: silu`,
+> verified on parent A): no hard zeros, every channel contributes. That
+> also independently explains the Phase 4 census negative result — there
+> was no sparsity structure for any clustering strategy to exploit.
+
+Shorthand: `Chowder-Qwen3.8-A12B` is the aspirational label; the measured
+artifact today is `A28B`. **An A-label always means active parameters per
+token, never total stored parameters.** Both are tracked separately
+(Phase 11 accounting); a model is not labeled with an A-figure unless
+measured routing geometry *and* measured quality at that geometry support
+the claim. The retired A4B label is kept in this document's history
+deliberately — negative evidence is preserved, not deleted.
 
 ## Phase 11 accounting of the cached control (measured 2026-09-06)
 
@@ -64,7 +107,16 @@ routed share of the FFN at conversion remains 17,112,760,320 parameters.
 
 ```yaml
 program: chowder-qwen3.8-native-sparse
-primary_parent: orcarouter/Qwen3.8-27B-Uncensored   # GATED — see blockers
+# B's gate cleared 2026-09-06 (verified at its pin, zero shard divergence).
+# But the FROZEN parent is A, by explicit user decision 2026-09-10, because
+# A held the only clear-difference advantage in the protocol-v3 tournament
+# (calibration) and D never produced evidence. NOTE THE UNRESOLVED TENSION:
+# this program's stated aim is an *uncensored* model and named B its primary
+# development parent, yet A is the official control and scores as the parent
+# that refuses MOST (behaviour rescore v4: A=1.0 vs B=C=0.5). Whether the
+# uncensored aim still stands is an open user decision, not a settled change.
+primary_parent: orcarouter/Qwen3.8-27B-Uncensored
+frozen_parent: Qwen/Qwen3.8-27B                     # A — see tension above
 native_control: Qwen/Qwen3.8-27B
 comparison_parents:
   - OBLITERATUS/Qwen3.8-27B-OBLITERATED
@@ -74,7 +126,15 @@ lineage_policy:
   distillation_parent_allowed: false
 target:
   architecture: sparse_moe
-  desired_active_parameters_b: "3-4"
+  # RETIRED 2026-09-11: was "3-4". Unreachable — the measured always-on
+  # floor alone is 11.17B active/token. See the relabel note above.
+  retired_desired_active_parameters_b: "3-4"
+  measured_active_parameters_b: "28.29"   # E=16 at top_k=16, the only
+                                          # setting with validated quality
+  aspirational_active_parameters_b: "12-14"  # requires solving the
+                                             # complementary-experts problem
+  measured_floor_active_parameters_b: "12.24"  # top_k=1, quality NOT viable
+  sparsity_blocker: complementary_experts_under_silu_dense_activations
 ```
 
 `lineage_policy` is a hard rule, not a preference: the primary lineage is

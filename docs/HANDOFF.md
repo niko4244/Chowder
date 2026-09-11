@@ -14,7 +14,80 @@ for it:
   [`TEACHER_FABRIC_BRIEF.md`](TEACHER_FABRIC_BRIEF.md) — read it before
   any Teacher Fabric slice; it is the source of the non-negotiable rules.
 
-## Current state (updated 2026-09-10) — protocol-v3 A/B/C tournament,
+## Current state (updated 2026-09-11) — READ THE HEADLINE FIRST
+
+**The sparse program's central mechanism does not work, and this is now
+measured, not suspected.** The dense→MoE conversion itself is validated
+(perplexity 5.44 at top_k=16, a healthy number — the first numerical
+proof the conversion is sound on the real 27B checkpoint). But reducing
+top_k to buy compute destroys the model: 67.8 at k=8, 51,030 at k=4,
+**243,981 at k=3** — the setting the program was aiming for. Full
+measurement: `Chowder-Protected/runs/v3-20260909/topk-ladder-finding.md`
+and `topk-ladder-screen.json`.
+
+**Root cause (structural, not a tuning problem).** The conversion
+partitions one FFN into 16 *disjoint* channel slices, so the experts are
+**complementary, not redundant**: the dense output is a sum over all
+17,408 channels, and any k<16 subset is a partial sum of one computation
+rather than an alternative computation. A natively-trained MoE's experts
+are each individually competent; these are not. **Therefore router
+healing with frozen experts cannot work here regardless of training
+budget** — it can only choose which slices to keep, and the ceiling is
+fixed by construction. Partial sums would only suffice under genuine
+activation sparsity, and Qwen3.8 is SiLU (no hard zeros, every channel
+contributes). That also independently explains the Phase 4 census
+negative result: there was no sparsity structure to exploit, which is why
+no clustering strategy beat random.
+
+**Target relabelled.** A3B/A4B is retired as unreachable on two
+independent grounds — parameter arithmetic (always-on floor 11.17B, so
+12.24B at top_k=1 / 14.38B at top_k=3) and measured quality. Honest
+labels: **A28B measured today**, **A12–A14B aspirational** if the
+redundancy problem is solved. See `QWEN38_SPARSE_PROGRAM.md`'s relabel
+note. Phase 11 accounting now exists beside the artifact
+(`Qwen3.8-27B-MoE-E16.accounting.json`) — it previously could not be
+produced at all, because `parameter_accounting.py` demanded a `.weight`
+suffix the real raw-`nn.Parameter` expert tensors do not carry.
+
+**Four honest paths, none chosen, none cheap:** (1) train the expert
+weights — real MoE upcycling, makes experts individually competent;
+(2) convert activations to dReLU first to create the sparsity the
+partition needs (~150B tokens per the research note); (3) a conversion
+yielding redundant rather than complementary experts, trading storage for
+droppability; (4) accept a dense ~28B model with MoE structure and no
+sparsity win.
+
+**Corrections to earlier claims in this document's history — do not
+propagate these:**
+- "Byte-exact to the dry-run estimate" was **false**. Real output is
+  56,580,816,384 bytes vs the 56,580,780,856 estimate: **+35,528 bytes**
+  of safetensors header padding the shape arithmetic does not model. No
+  byte-check had ever been performed — provenance recorded only the
+  estimate. `convert_checkpoint` now records `actual_output_bytes`.
+- "D's tokenizer gate passed — real, recorded evidence" was
+  **overstated**. That result exists only in an ephemeral Temp log, not in
+  any persisted artifact, and the selection packet covers only A/B/C.
+- "Behavior 0.0 is a scorer bug, not bad behaviour" holds **for A only**.
+  The v4 rescore shows **B and C verdict "comply" on all three harmful
+  prompts** — for them the 0.0 partly reflects genuinely permissive
+  behaviour. Also A's 1.0 is softer than it looks: one of its six items
+  scored via the classifier's `empty_generation_verdict: "refuse"` default
+  on a truncated empty answer, not an observed refusal.
+- "retry7 was never modified" was **unverifiable** — no baseline hash
+  existed, and the DB's mtime did move (a WAL-mode read-write open;
+  content verified intact). Now sealed:
+  `Chowder-Protected/registry-baseline-hashes.json`.
+
+**Unresolved, needs a user decision:** this program's stated aim is an
+*uncensored* model and names B its primary development parent, but the
+frozen parent is **A**, the official control — which scores as the parent
+that refuses *most* (v4 rescore: A=1.0 vs B=C=0.5). Nothing records that
+the uncensored objective was superseded. It may simply be wrong for the
+program's purpose.
+
+---
+
+## Prior entry (2026-09-10) — protocol-v3 A/B/C tournament,
 parent A frozen by explicit decision, first real dense→MoE conversion
 
 **Headline: the sparse program has its first real artifact.** Parent A
@@ -106,7 +179,9 @@ still equals E, so there is zero compute saving yet. Router healing
     3-4B active-FFN-param target at top_k=3 of 16):
     `F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B-MoE-E16`, 71 minutes,
     18 shards streamed (never loaded 55 GB into RAM), output
-    **byte-exact to the dry-run estimate** (56,580,780,856 bytes,
+    matching the dry-run estimate to within safetensors header padding
+    (+35,528 bytes; actual 56,580,816,384 vs estimated 56,580,780,856 --
+    see the corrections in the current-state entry above),
     `scheme_digest c8ad351ab048cc46...`). `conversion.provenance.json` +
     `conversion.manifest.json` + full `local_model_manifest` all written
     into the output dir itself.
@@ -162,7 +237,9 @@ still equals E, so there is zero compute saving yet. Router healing
 **Next steps, in rough priority order:**
 1. **Merge PR #154** (tokenizer-gate fix) before D (or any future parent)
    re-enters a freeze packet.
-2. **Router healing** (Phase 8, `PHASE6_CONVERSION_PLAN.md` sec 6): the
+2. **Router healing** (Phase 8) -- SUPERSEDED, see the current-state entry:
+   measurement shows frozen-expert healing cannot work on a
+   complementary-expert partition. Originally described as the
    real unlock — train only `gate.weight` + `shared_expert_gate` on the
    E=16 checkpoint with expert weights frozen, bounded budget, success
    gated on the existing hard regression gate against the protected
