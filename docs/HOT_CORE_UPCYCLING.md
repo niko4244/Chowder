@@ -1,5 +1,11 @@
 # Hot-core upcycling
 
+> **Outcome first:** this init works as designed and is validated twice, but it
+> **loses to plain static hot pruning at equal active compute** — 3.008× vs 2.366×
+> dense, 27% worse, on a corpus-wide ranking. See
+> [`HOT_CORE_VS_STATIC_PRUNE.md`](HOT_CORE_VS_STATIC_PRUNE.md). Read the rest as
+> the record of a negative result, not a recommendation.
+
 `src/chowder/channel_importance.py` + `src/chowder/hot_core_upcycle.py`.
 A second dense→MoE init, beside `dense_to_moe`'s exactness-preserving partition
 (which is untouched and still the right thing when exactness is the requirement).
