@@ -29,6 +29,7 @@ from chowder.project_runner import run_project
 from chowder.recursive_repair import RecursiveRepairStopReason
 from chowder.run_events import FailureEvent, RepairEvent, RunEventPayload
 from chowder.unsloth_env import unsloth_env_dir, unsloth_python
+from unsloth_env_link import link_persistent_unsloth_env
 
 _REAL_UNSLOTH_SMOKE = pytest.mark.skipif(
     os.environ.get("CHOWDER_REAL_UNSLOTH_SMOKE") != "1",
@@ -43,15 +44,18 @@ _ENV_ROOT_VAR = "CHOWDER_REAL_UNSLOTH_ENV_ROOT"
 def test_real_run_project_autonomously_repairs_a_rejected_candidate_through_unsloth(
     tmp_path: Path,
 ):
-    env_root_raw = os.environ.get(_ENV_ROOT_VAR)
-    work_dir = Path(env_root_raw).expanduser().resolve() if env_root_raw else tmp_path
-    env_dir = unsloth_env_dir(work_dir)
+    # A FRESH work dir every run, with the persistent environment linked in.
+    # Using the persistent root itself as work_dir (the previous approach) wrote
+    # this run's registry into it, so the test passed once and then failed on
+    # every rerun with a duplicate-experiment-id error. See unsloth_env_link.
+    work_dir = tmp_path
+    env_dir = link_persistent_unsloth_env(work_dir) or unsloth_env_dir(work_dir)
     python_executable = unsloth_python(env_dir)
     if not python_executable.is_file():
         pytest.skip(
             f"no isolated Unsloth environment at {env_dir}; run "
-            f"`chowder setup unsloth --root {work_dir}` first, or point "
-            f"{_ENV_ROOT_VAR} at an existing one"
+            "`chowder setup unsloth --root <dir>` once and point "
+            f"{_ENV_ROOT_VAR} at that dir"
         )
 
     train_path = work_dir / "train.jsonl"
