@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..worker_env import worker_env
 from ..cancellation import CancellationToken
 from ..executors import CostEstimate, EvaluationOutcome, ExecutionContext, TrainingArtifact
 from ..models import Experiment
@@ -273,6 +274,7 @@ class TransformersTextEvaluator:
                 stdout=stdout,
                 stderr=stderr,
                 text=True,
+                env=worker_env(),
             )
             self._processes[eval_id] = process
             if self._cancellation is not None:

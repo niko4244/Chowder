@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
+from ..worker_env import worker_env
 from ..cancellation import CancellationToken
 from ..executors import CostEstimate, ExecutionContext, TrainingArtifact
 from ..models import Experiment
@@ -698,7 +699,7 @@ class UnslothPeftExecutor:
         with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
             "w", encoding="utf-8"
         ) as stderr:
-            process = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True)
+            process = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True, env=worker_env())
             self._processes[run_id] = process
             if self._cancellation is not None:
                 self._cancellation._register_active(self, run_id)

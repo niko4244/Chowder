@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .worker_env import worker_env
 from .backends.transformers_peft import TransformersPeftRunSpec, _min_device_vram_gb
 from .executors import ExecutionContext
 from .memory_preflight import _hardware_signature
@@ -225,7 +226,7 @@ def _run_offload_worker(
         "--batch-size",
         str(batch_size),
     ]
-    process = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds)
+    process = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds, env=worker_env())
     if process.returncode != 0:
         raise RuntimeError(
             f"activation offload experiment worker failed with exit code {process.returncode}:\n"

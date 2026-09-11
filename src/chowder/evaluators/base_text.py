@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
+from ..worker_env import worker_env
 from ..executors import EvaluationOutcome, ExecutionContext
 from ..protocol import protocol_fingerprint
 from ..provenance import sha256_file
@@ -196,6 +197,7 @@ class BaseModelTextEvaluator:
                 stdout=stdout,
                 stderr=stderr,
                 text=True,
+                env=worker_env(),
             )
             try:
                 process.wait(timeout=spec.timeout_seconds)

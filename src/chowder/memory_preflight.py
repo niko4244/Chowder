@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .worker_env import worker_env
 from .backends.transformers_peft import TransformersPeftRunSpec, _min_device_vram_gb
 from .executors import ExecutionContext
 
@@ -407,7 +408,8 @@ def _run_dry_run_worker(
         str(result_path),
     ]
     process = subprocess.run(
-        command, capture_output=True, text=True, timeout=timeout_seconds
+        command, capture_output=True, text=True, timeout=timeout_seconds,
+        env=worker_env(),
     )
     if process.returncode != 0:
         raise RuntimeError(
