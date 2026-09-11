@@ -10,6 +10,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from ..adapter_guard import assert_adapter_is_live
 from ..hf_resilience import cache_status, with_hub_retries
 from .activation_offload_hooks import offload_pack, offload_unpack
 from .training_data import (
@@ -423,6 +424,9 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             spec.parent_adapter,
             is_trainable=True,
         )
+        # A parent adapter that silently fails to load would make a
+        # 'continued' run a fresh one, with provenance claiming otherwise.
+        assert_adapter_is_live(model, spec.parent_adapter)
     else:
         target_modules = _resolve_target_modules(
             base_model, explicit=spec.target_modules, preset=spec.target_preset

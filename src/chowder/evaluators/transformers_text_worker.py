@@ -7,6 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from ..adapter_guard import assert_adapter_is_live
 from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
 from .generation import resolve_eos_token_ids
@@ -129,10 +130,14 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
     resolved_commit = getattr(base.config, "_commit_hash", None)
     if spec.quantization == "none":
         base = base.to(device_name)
+    adapter_liveness: dict[str, Any] | None = None
     if spec.adapter_dir is None:
         model = base
     else:
         model = PeftModel.from_pretrained(base, spec.adapter_dir, is_trainable=False)
+        # Refuse to score an adapter that cannot change the model. PEFT only
+        # warns when no saved key matches, leaving every LoRA B at zero.
+        adapter_liveness = assert_adapter_is_live(model, spec.adapter_dir)
     model.eval()
     device = next(model.parameters()).device
     resolved_eos_token_id = resolve_eos_token_ids(tokenizer, model)
@@ -221,7 +226,12 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
             "requested_revision": spec.revision,
             "model_cache_status": model_cache_status,
             "resolved_model_commit": resolved_commit,
-            "adapter_loaded": spec.adapter_dir is not None,
+            # "an adapter directory was requested" is NOT "an adapter is in
+            # effect": PeftModel.from_pretrained succeeds on a total key mismatch.
+            # This now reports the measured check, not the request.
+            "adapter_requested": spec.adapter_dir is not None,
+            "adapter_loaded": adapter_liveness is not None,
+            "adapter_liveness": adapter_liveness,
         },
         "versions": {
             "torch": _package_version("torch"),

@@ -246,6 +246,18 @@ def train(spec: _Spec) -> dict[str, Any]:
         from peft import PeftModel
 
         model = PeftModel.from_pretrained(model, spec.parent_adapter, is_trainable=True)
+        # Same guard as chowder.adapter_guard, inlined: this file must not
+        # import from the chowder package (see the module docstring), and a
+        # parent adapter that silently fails to load would turn a "continued"
+        # run into a fresh one while provenance claimed continuity. PEFT only
+        # warns on a total key mismatch and leaves every LoRA B at zero.
+        _b = [q for n, q in model.named_parameters() if "lora_B" in n]
+        if _b and not any(float(q.detach().float().abs().max()) > 0.0 for q in _b):
+            raise RuntimeError(
+                f"parent adapter {spec.parent_adapter} loaded but all "
+                f"{len(_b)} LoRA B matrices are exactly zero, so it is an "
+                "identity and this run would silently start from scratch"
+            )
     else:
         model = FastLanguageModel.get_peft_model(
             model,

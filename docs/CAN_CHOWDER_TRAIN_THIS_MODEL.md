@@ -112,10 +112,39 @@ before it is believed.
 3. normalise adapter keys on save or load (strip/insert the `language_model`
    segment) — cheapest, but a remap that silently guesses is the kind of thing
    that produced this bug;
-4. at minimum, **fail loudly**: if PEFT reports missing adapter keys, or an
-   adapter produces a zero logit delta on a probe input, the evaluation should
-   refuse rather than report a number. This is worth doing regardless of which of
-   1–3 is chosen, and is the one I would land first.
+4. at minimum, **fail loudly** rather than report a number. **This one is now
+   landed** — see below. It does not make the Unsloth path work; it makes the
+   Unsloth path stop lying.
+
+## The loud-failure guard (landed)
+
+`chowder/adapter_guard.py`, called at **all four** adapter load sites: the text
+evaluator, both parent-adapter continuation paths, and the dataset-influence
+worker. Two checks, neither needing a forward pass:
+
+1. **Key overlap** — at least one saved tensor must name a real adapter parameter
+   on the live model. Zero overlap means nothing loaded.
+2. **A non-zero `lora_B`** — PEFT zero-initialises `B`, so an all-zero `B` is an
+   identity transform no matter how the key bookkeeping looks.
+
+On the real artifacts: the Transformers adapter is **accepted** (400 keys matched,
+200 non-zero `B`); the Unsloth adapter is **refused** — *"shares NO parameter names
+with the loaded model: 400 saved tensors, 256 adapter parameters on the model, 0
+matched"*, with the `language_model.` prefix explanation in the message so the
+cause is actionable without re-running anything.
+
+Also fixed: `adapter_loaded` in evaluation provenance was literally
+`spec.adapter_dir is not None` — "a directory was requested", not "an adapter is in
+effect". That is why the inert run reported `adapter_loaded: true`. Provenance now
+records `adapter_requested`, a measured `adapter_loaded`, and the full liveness
+report.
+
+Two deliberate design points. `unsloth_worker.py` carries the check **inlined**,
+because its docstring forbids importing from the `chowder` package; a test asserts
+both that the inline guard is present and that the file still imports nothing from
+chowder. And an unreadable `B` matrix (quantised or exotic storage) counts as live
+rather than dead — a measurement gap must not be reported as a defect, so the
+key-overlap check carries that decision.
 
 ## Status
 
