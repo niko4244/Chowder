@@ -34,6 +34,15 @@ Honesty constraints this module enforces
   later used to score the converted model is selection-on-test; v1 of this
   measurement did exactly that and read ~0.02-0.09x optimistic. Callers that
   evaluate must pass a disjoint split.
+* **The split must be spread across the corpus, not a contiguous slice of it.**
+  Disjoint is necessary but not sufficient. Measured on the 9B: ranking on 32
+  contiguous prompts cost 1.691x on a nearby eval split but 3.646x on a distant
+  one, a 2.16x spread. Re-ranking on 32 prompts evenly spread over the same corpus
+  moved those to 1.859x and 3.011x -- worse nearby, **17.4% better far away**, and
+  the spread fell to 1.62x. Only 73.5% of the top-3,440 channels were shared
+  between the two rankings, so this is a real change in what gets kept, not noise.
+  Prefer `spread_across` over a head slice; a parochial ranking produces a
+  checkpoint that looks fine on whatever you ranked near and degrades elsewhere.
 * **The ranking is bound to one checkpoint.** `source_manifest_sha256` is
   recorded so `hot_core_upcycle` can refuse a ranking measured on a different
   model, which would otherwise produce a plausible-looking and wrong conversion.
@@ -288,6 +297,41 @@ def split_disjoint(texts: Iterable[str]) -> tuple[list[str], list[str]]:
     Offered as a named convention so the two halves cannot drift apart between
     a ranking run and a scoring run. Selection-on-test is the one methodological
     error this measurement is known to make when left to chance.
+
+    Note this interleaves within whatever it is given. Applied to a head slice it
+    still yields a *parochial* ranking split -- see `spread_across`, and the
+    module docstring for what that cost when measured.
     """
     rows = list(texts)
     return rows[0::2], rows[1::2]
+
+
+def spread_across(texts: Iterable[str], count: int, *, exclude: Iterable[str] = ()) -> list[str]:
+    """Pick `count` texts evenly spread over the whole corpus, deduplicated.
+
+    The ranking split's *location* matters as much as its disjointness: a
+    contiguous slice produced a ranking that cost 1.691x near it and 3.646x far
+    away, while the same number of prompts spread over the corpus cost 1.859x and
+    3.011x. Use this to choose a ranking split, and pass the eval splits as
+    `exclude` so selection-on-test is structurally impossible rather than merely
+    intended.
+
+    Deduplicates on text because identical prompts recur in real corpora -- the
+    9B's 696-row calibration file holds 690 distinct texts, so disjoint *index*
+    ranges were not disjoint splits.
+    """
+    blocked = set(exclude)
+    pool: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        if text in blocked or text in seen:
+            continue
+        seen.add(text)
+        pool.append(text)
+    if not pool:
+        raise ChannelImportanceError("no eligible texts left after exclusions")
+    if count >= len(pool):
+        return pool
+    stride = len(pool) / count
+    picked = [pool[min(len(pool) - 1, int(round(k * stride)))] for k in range(count)]
+    return list(dict.fromkeys(picked))

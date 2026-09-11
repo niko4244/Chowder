@@ -128,7 +128,8 @@ Negative = beats the static prune.
 | gate only | +1.98% | +11.04% |
 
 **On eval B the trained model beats the best static choice at equal active compute
-by 4.85%** — the first time anything in this program has done so. Step 150 is the
+by 4.85%.** **[SUPERSEDED — see Addendum 2: against a corpus-wide-ranked static
+baseline it loses by 13.20%.]** Step 150 is the
 predetermined end of the run, so that is the unbiased estimate; the step-125 "best"
 (14.7491, −6.39%) was selected by looking at eval B and should not be quoted as
 the headline.
@@ -138,20 +139,17 @@ router-only beats it by only 0.77%. Together they beat it by 4.85%. So the route
 is necessary but not sufficient on its own — which is a different claim from
 either "routing works" or the eval-A verdict's "routing bought nothing".
 
-### Revised status
+### Status as of this addendum — itself later superseded
 
-The pre-registered verdict on eval A stands and is not retracted: there, routing
-bought nothing and a scalar gate recalibration tied the static prune. But with the
-eval-B reference now in hand, the coherent reading across both splits is:
+At this point the reading was: where the static ranking fits the data, static
+pruning is strong and routing adds nothing; where it fits poorly, router + gate
+together beat it by 4.85%. That looked like narrow, conditional support for the
+thesis.
 
-* where the static ranking fits the data, static pruning is strong (1.677×) and
-  routing adds nothing;
-* where it fits poorly (3.646×), router + gate together beat it by 4.85%.
-
-This is support for the thesis, but narrow and conditional: one pilot, one split,
-lr too high, 24.8k training tokens, and perplexity rather than GSM8K. It is not
-the 4.30× static→oracle gap being closed — it is ~5% of a much larger available
-gap, under distribution shift.
+**Addendum 2 removes it.** The "where it fits poorly" clause was the weakness of a
+parochial ranking, not a property of static pruning, and fixing the ranking beats
+the trained model outright. The paragraph is kept here so the sequence of
+reasoning stays legible, not because it still holds.
 
 One loose end: the converted init channel set masked onto the dense model scores
 18.9474 against the converted checkpoint's own measured 19.4255 (drift 0.478,
@@ -160,17 +158,76 @@ differently under nf4, but it could also mean the zero-router tie-break does not
 select experts 0 and 1. **Unverified either way** — it does not affect the
 reference above, which is measured entirely on the dense model.
 
+## Addendum 2 — the 4.85% win does not survive a better baseline
+
+Follow-up #2 above is now also done
+(`evidence/hot-core-upcycling/corpus-wide-ranking.json`). It was run specifically
+because the eval-B reference looked suspiciously weak, and the suspicion was
+correct.
+
+The ranking split was rebuilt at **the same size** (32 prompts) but spread evenly
+across the whole corpus instead of taken from `rows[0:64:2]`, excluding both eval
+splits. Only the *location* of the ranking data changed.
+
+| static hot prune, 3,440 active | eval A | eval B | A→B spread |
+|---|---:|---:|---:|
+| contiguous ranking | 8.9111 (1.691×) | 15.6918 (3.646×) | 2.16× |
+| **corpus-wide ranking** | 9.7968 (1.859×) | **12.9605 (3.011×)** | **1.62×** |
+| change | +9.9% worse | **−17.4% better** | |
+
+The two rankings share only **73.5%** of their top-3,440 channels (min 62.1%, max
+92.9%), so this is a real change in what gets kept. Concentration is essentially
+unchanged (0.226 → 0.209), so it is not a sharper ranking — just a less parochial
+one. Note also that eval A's contiguous number reproduces the independently
+measured 8.9096 to within 0.0015.
+
+### The consequence
+
+| | eval B ppl |
+|---|---:|
+| pilot's trained MoE, step 150 (built on the **contiguous** ranking) | 14.9314 |
+| contiguous static reference | 15.6918 → **beat by 4.85%** |
+| **corpus-wide static reference** | **12.9605 → LOSES by 13.20%** |
+
+**Fixing the ranking beats adding routing.** The pilot's equal-active-compute win
+was an artifact of a weak baseline, and it is withdrawn as a headline result. A
+better static channel set, obtained from a 40-second ranking run with **no
+training at all**, beats the trained MoE by 13.2% on the same split at the same
+active compute.
+
+### What this does and does not establish
+
+It does **not** show routing is worthless. The comparison is across checkpoints:
+the trained MoE was built on the contiguous ranking, and a MoE converted from the
+corpus-wide ranking would start from a better place and has never been tried. What
+it establishes is an ordering of effort:
+
+1. **Ranking quality is the larger and far cheaper lever** — 17.4% out of
+   distribution, for one forward pass over 32 prompts.
+2. Any future routing claim must be measured against a **corpus-wide-ranked**
+   static baseline, not a parochial one. Measured against the right baseline, this
+   pilot's routing contribution is negative.
+3. The A→B spread narrowed from 2.16× to 1.62× but did not close, so some of the
+   difficulty difference between the splits is real rather than an artifact of
+   where the ranking came from. (Worth noting the dense model finds eval B
+   *easier* — 4.3044 vs 5.2707 — yet it is much harder to prune. Whatever explains
+   the residual spread has to be consistent with that, and nothing here does.)
+
+Acted on in code: `channel_importance.spread_across` now exists to pick a
+corpus-wide ranking split with the eval splits excluded structurally, and the
+module docstring carries these numbers so the next caller does not repeat it.
+
 ## Designated follow-ups, in order
 
 1. ~~Measure the static-prune reference on eval B.~~ **Done — see the addendum.**
    It produced the program's first equal-active-compute win (−4.85%) and the
    ranking-generalisation finding.
-2. **Rank channels on a corpus-wide split, not a contiguous one.** This is now the
-   highest-value fix: the ranking costs 1.677× in distribution and 3.646× out of
-   it, so a ranking measured across the whole corpus should cut the out-of-
-   distribution penalty directly — and it would also shrink the very gap routing
-   is currently being credited with closing. Both effects matter and they pull in
-   opposite directions, which is exactly why it should be measured.
+2. ~~Rank channels on a corpus-wide split, not a contiguous one.~~ **Done — see
+   Addendum 2.** Both predicted effects occurred, and the second dominated: the
+   OOD penalty fell 17.4%, and the routing win it was credited with vanished.
+   **Re-convert from the corpus-wide ranking** and re-run the pilot against the
+   corrected baseline — that is now the only way a routing claim can mean
+   anything here.
 3. **Re-run with eval B pre-registered as primary** plus a third fresh split, at
    lr 1e-4–3e-4 with fewer epochs. The step-75 instability and the 24.8k-token
    corpus are both fixable.

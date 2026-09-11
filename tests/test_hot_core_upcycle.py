@@ -564,3 +564,50 @@ def test_split_disjoint_halves_share_nothing():
     rank, evaluate = split_disjoint([f"p{i}" for i in range(10)])
     assert len(rank) == len(evaluate) == 5
     assert not set(rank) & set(evaluate)
+
+
+# ---------------------------------------------------------------------------
+# ranking split selection: location matters, not just disjointness
+# ---------------------------------------------------------------------------
+
+
+def test_spread_across_covers_the_whole_corpus_not_a_head_slice():
+    """A contiguous ranking split cost 1.691x near it and 3.646x far away; the
+    same count spread over the corpus cost 1.859x / 3.011x. So the picker must
+    actually spread, and a head slice is the thing it exists to avoid."""
+    from chowder.channel_importance import spread_across
+
+    corpus = [f"p{i}" for i in range(600)]
+    picked = spread_across(corpus, 32)
+    assert len(picked) == 32
+    positions = [corpus.index(p) for p in picked]
+    assert positions == sorted(positions)
+    # reaches both ends and is not a head slice
+    assert positions[0] < 20 and positions[-1] > 560
+    assert positions != list(range(32))
+    # roughly even: no gap wildly larger than the mean stride
+    gaps = [b - a for a, b in zip(positions, positions[1:])]
+    assert max(gaps) <= 2 * (600 / 32)
+
+
+def test_spread_across_excludes_eval_splits_and_dedups():
+    from chowder.channel_importance import spread_across
+
+    corpus = [f"p{i % 50}" for i in range(200)]   # every text repeats 4x
+    held = {"p0", "p1", "p2"}
+    picked = spread_across(corpus, 20, exclude=held)
+    assert not (set(picked) & held), "an excluded text was selected"
+    assert len(picked) == len(set(picked)), "duplicates selected"
+
+
+def test_spread_across_refuses_when_everything_is_excluded():
+    from chowder.channel_importance import ChannelImportanceError, spread_across
+
+    with pytest.raises(ChannelImportanceError, match="no eligible texts"):
+        spread_across(["a", "b"], 2, exclude={"a", "b"})
+
+
+def test_spread_across_returns_all_when_asked_for_more_than_exists():
+    from chowder.channel_importance import spread_across
+
+    assert spread_across(["a", "b", "c"], 10) == ["a", "b", "c"]

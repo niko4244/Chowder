@@ -29,6 +29,14 @@ saving. This converter gives that up deliberately.
    consumes) over a calibration split, via a forward hook on the unmodified
    parent. The ranking is an artifact with its own digest, bound to one
    checkpoint by `source_manifest_sha256`.
+   **The split must be spread across the corpus** — use
+   `channel_importance.spread_across`. Disjoint from the eval set is necessary but
+   not sufficient: a 32-prompt *contiguous* split cost 1.691× near it and 3.646×
+   far away, while 32 prompts spread over the same corpus cost 1.859× and 3.011×
+   (17.4% better out of distribution, A→B spread 2.16× → 1.62×), sharing only
+   73.5% of their top-3,440 channels. See
+   `HOT_CORE_HEALING_PILOT_RESULT.md` Addendum 2 — this mattered more than
+   routing did.
 2. **Hot core → `shared_expert`**, which `dense_to_moe` fills with zeros.
    Replicating a core inside every routed expert is never better than a plain
    static prune at equal active compute, because `top_k = k` recomputes it k
