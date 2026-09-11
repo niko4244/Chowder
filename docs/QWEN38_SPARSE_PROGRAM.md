@@ -1,6 +1,6 @@
 # Chowder Qwen3.8 Native Sparse Program
 
-**Status: program defined (this document); all four revisions pinned; parent B's gate cleared and full architecture audit recorded; protected nine-dimension evaluation harness implemented (`src/chowder/parent_eval.py`); parent A (control) cached at its pin with a verified full-mode content manifest and **Phase 11 accounting measured from its real tensor headers: 27,781,427,952 total parameters (27.78B), dense floor 9.78B active/token**; Phase 6 conversion plan generated (`docs/PHASE6_CONVERSION_PLAN.md`, PR #120); Phase 11 accounting machinery implemented (`src/chowder/parameter_accounting.py`); protected suite content authored (`src/chowder/parent_suite_content.py`, 54 items / 6 per dimension, contamination-guard round trip verified) and **frozen** (materialized at `C:\Users\nikma\Chowder-Protected\suites\v1`, manifest sha `7946d8c9…`); parent B verified at its pin (all shards match Hub LFS digests, zero divergence, full-mode manifest `fab432f1…`) with **Phase 11 accounting: 27,781,427,952 parameters / 1199 tensors — identical census to parent A**; public-benchmark campaign scoreboard with the historical targets implemented (`src/chowder/campaign_scoreboard.py`); no evaluation run; no transformation executed. Nothing here may be read as "the sparse-model project is underway" — see the milestone checklist at the end.**
+**Status: program defined (this document); all four revisions pinned; parent B's gate cleared and full architecture audit recorded; protected nine-dimension evaluation harness implemented (`src/chowder/parent_eval.py`); parent A (control) cached at its pin with a verified full-mode content manifest and **Phase 11 accounting measured from its real tensor headers: 27,781,427,952 total parameters (27.78B), dense floor 9.78B active/token**; Phase 6 conversion plan generated (`docs/PHASE6_CONVERSION_PLAN.md`, PR #120); Phase 11 accounting machinery implemented (`src/chowder/parameter_accounting.py`); protected suite content authored (`src/chowder/parent_suite_content.py`, 54 items / 6 per dimension, contamination-guard round trip verified) and **frozen** (materialized at `C:\Users\nikma\Chowder-Protected\suites\v1`, manifest sha `7946d8c9…`); parent B verified at its pin (all shards match Hub LFS digests, zero divergence, full-mode manifest `fab432f1…`) with **Phase 11 accounting: 27,781,427,952 parameters / 1199 tensors — identical census to parent A**; public-benchmark campaign scoreboard with the historical targets implemented (`src/chowder/campaign_scoreboard.py`). **Updated 2026-09-10**: A, B, and C evaluated for real under protocol v3 (D crashed pre-evaluation, evidence gap still open — see `docs/HANDOFF.md`'s current-state entry); parent A selected by explicit user decision (not an automatic four-parent outcome, since D's evidence is missing); the first real dense→MoE transformation executed for real (parent A, E=16, loaded and smoke-tested successfully on the RTX 5060 Ti — `audit_moe_architecture` confirmed 64/64 layers converted, real coherent generation). The model is NOT yet sparse in practice (`num_experts_per_tok` still equals E at this stage, by the conversion's own exactness-preserving design) — router healing is what would make it sparse. Full detail: `docs/HANDOFF.md`. See the milestone checklist at the end for exact status.**
 
 This document retargets Chowder's primary model research from the prior
 Qwen3.6-35B-A3B commissioning branch to a **native-Qwen3.8-derived
@@ -17,18 +17,61 @@ Chowder's primary model research target is a directly
 native-Qwen3.8-derived uncensored sparse language model. Development
 begins from `orcarouter/Qwen3.8-27B-Uncensored`, with official
 Qwen3.8-27B as the untouched control and OBLITERATUS/DavidAU variants as
-comparison parents. The long-term target is approximately 3–4B **active
-parameters per token** without distilling Qwen3.8 into another
-architecture, while preserving as much reasoning, coding, knowledge,
-calibration, agentic performance and self-correction capability as
-empirical evidence allows. Every architecture and training intervention
-remains subject to Chowder's independent evaluation, provenance,
-regression and promotion gates.
+comparison parents. The target is to minimise **active parameters per
+token** without distilling Qwen3.8 into another architecture, while
+preserving as much reasoning, coding, knowledge, calibration, agentic
+performance and self-correction capability as empirical evidence allows.
+Every architecture and training intervention remains subject to Chowder's
+independent evaluation, provenance, regression and promotion gates.
 
-Shorthand: `Chowder-Qwen3.8-A4B`. **A3B/A4B always means active
-parameters per token, never total stored parameters.** Both are tracked
-separately (Phase 11 accounting); a model is not labeled "A4B" unless
-measured routing geometry supports the claim.
+> **TARGET RELABELLED 2026-09-11 — the original 3–4B figure was
+> unreachable and is retired.** It was stated here without the caveat
+> that it is incompatible with this model's own measured geometry. Two
+> independent measurements retired it:
+>
+> 1. **Parameter arithmetic.** Phase 11 on the real E=16 conversion
+>    (`Qwen3.8-27B-MoE-E16.accounting.json`) measures an always-on floor
+>    of **11.17B** active/token — attention + GatedDeltaNet + embeddings
+>    + norms + MTP + vision + shared expert, none of it routed. The
+>    routed FFN is 17.11B across 16 experts (1.07B each), so active/token
+>    floors at **12.24B at top_k=1** and is **14.38B at top_k=3**. No
+>    choice of routing reaches 4B; FFN-only sparsification cannot, even
+>    in principle. Reaching 4B would require deleting ~59% of
+>    attention+embeddings, which is Phase 10 — a table row with no
+>    mechanism, no plan and no hypothesis anywhere in this repo.
+> 2. **Measured quality.** The top_k ladder screen
+>    (`runs/v3-20260909/topk-ladder-finding.md`) shows the partition does
+>    not survive sparsification at all: perplexity 5.44 at top_k=16,
+>    67.8 at k=8, and 243,981 at k=3. Those floors are therefore not
+>    merely high, they are unreachable at usable quality.
+>
+> **Honest labels.** Measured today: `Chowder-Qwen3.8-A28B` — the only
+> quality-preserving setting is top_k=16, where active == total
+> (28.29B) and the MoE structure buys no compute at all. Best case if
+> the redundancy problem below is solved: **A12–A14B**. The program's
+> frontier is an A12B-class model, not an A4B one.
+>
+> **Root cause, for anyone tempted to retry top_k reduction.** This
+> conversion partitions one FFN into 16 *disjoint* channel slices, so
+> the experts are **complementary**, not redundant: the dense output is
+> a sum over all 17,408 channels and any subset is a partial sum of a
+> single computation, not an alternative computation. A natively-trained
+> MoE's experts are individually competent; these are not. Router
+> healing with frozen experts can only choose which slices to keep, so
+> its ceiling is fixed by construction — the mechanism cannot work here,
+> independent of training budget. Partial sums would only suffice under
+> genuine activation sparsity, and Qwen3.8 is SiLU (`hidden_act: silu`,
+> verified on parent A): no hard zeros, every channel contributes. That
+> also independently explains the Phase 4 census negative result — there
+> was no sparsity structure for any clustering strategy to exploit.
+
+Shorthand: `Chowder-Qwen3.8-A12B` is the aspirational label; the measured
+artifact today is `A28B`. **An A-label always means active parameters per
+token, never total stored parameters.** Both are tracked separately
+(Phase 11 accounting); a model is not labeled with an A-figure unless
+measured routing geometry *and* measured quality at that geometry support
+the claim. The retired A4B label is kept in this document's history
+deliberately — negative evidence is preserved, not deleted.
 
 ## Phase 11 accounting of the cached control (measured 2026-09-06)
 
@@ -64,7 +107,16 @@ routed share of the FFN at conversion remains 17,112,760,320 parameters.
 
 ```yaml
 program: chowder-qwen3.8-native-sparse
-primary_parent: orcarouter/Qwen3.8-27B-Uncensored   # GATED — see blockers
+# B's gate cleared 2026-09-06 (verified at its pin, zero shard divergence).
+# But the FROZEN parent is A, by explicit user decision 2026-09-10, because
+# A held the only clear-difference advantage in the protocol-v3 tournament
+# (calibration) and D never produced evidence. NOTE THE UNRESOLVED TENSION:
+# this program's stated aim is an *uncensored* model and named B its primary
+# development parent, yet A is the official control and scores as the parent
+# that refuses MOST (behaviour rescore v4: A=1.0 vs B=C=0.5). Whether the
+# uncensored aim still stands is an open user decision, not a settled change.
+primary_parent: orcarouter/Qwen3.8-27B-Uncensored
+frozen_parent: Qwen/Qwen3.8-27B                     # A — see tension above
 native_control: Qwen/Qwen3.8-27B
 comparison_parents:
   - OBLITERATUS/Qwen3.8-27B-OBLITERATED
@@ -74,7 +126,15 @@ lineage_policy:
   distillation_parent_allowed: false
 target:
   architecture: sparse_moe
-  desired_active_parameters_b: "3-4"
+  # RETIRED 2026-09-11: was "3-4". Unreachable — the measured always-on
+  # floor alone is 11.17B active/token. See the relabel note above.
+  retired_desired_active_parameters_b: "3-4"
+  measured_active_parameters_b: "28.29"   # E=16 at top_k=16, the only
+                                          # setting with validated quality
+  aspirational_active_parameters_b: "12-14"  # requires solving the
+                                             # complementary-experts problem
+  measured_floor_active_parameters_b: "12.24"  # top_k=1, quality NOT viable
+  sparsity_blocker: complementary_experts_under_silu_dense_activations
 ```
 
 `lineage_policy` is a hard rule, not a preference: the primary lineage is
@@ -276,12 +336,12 @@ document exists. Milestone 1 completes when:
 - [x] OBLITERATUS exact revision pinned (`a58c3b53…`)
 - [x] DavidAU trainable parent resolved and pinned (`81c73940…`, resolved from the GGUF card)
 - [x] all four architecture manifests recorded (A/C/D full file reads; B authenticated reads at the pinned revision)
-- [ ] protected parent-evaluation suite established (harness in `src/chowder/parent_eval.py`; content authored in `src/chowder/parent_suite_content.py` v1 — 54 original items, 6 per dimension, hash-only indexes, contamination audit verified — and **frozen** on disk at `C:\Users\nikma\Chowder-Protected\suites\v1`, manifest sha `7946d8c9…`; the box stays unchecked until the suite has actually scored a real parent run)
-- [ ] all four evaluated under identical protocol
-- [ ] results persisted
-- [ ] parent-selection decision recorded with evidence
-- [ ] selected parent cached locally (parent A *control* is cached and manifest-verified at its pin; selection itself awaits the Phase-4 tournament, so this box stays unchecked regardless of A's status)
-- [x] first dense→MoE transformation plan generated (PR #120: docs/PHASE6_CONVERSION_PLAN.md — partition-conversion design against the audited qwen3_5/qwen3_5_moe module shapes, with the exactness harness and validation ladder specified; the transformation itself remains unexecuted)
+- [x] protected parent-evaluation suite established and has actually scored real parent runs (harness `src/chowder/parent_eval.py`; content `src/chowder/parent_suite_content.py` v1, frozen at `C:\Users\nikma\Chowder-Protected\suites\v1`, manifest sha `7946d8c9…`; real protocol-v3 runs for A/B/C persisted at `Chowder-Protected/runs/v3-20260909/`)
+- [ ] all four evaluated under identical protocol (A/B/C done under v3, protocol digest `6a18a4e4f03df8ca…` identical across them; **D still missing** — crashed pre-evaluation on a driver-script bug, not relaunched by explicit user decision; D's behavioral tokenizer gate DID pass before the crash, so D remains a plausible future candidate)
+- [x] results persisted (`Chowder-Protected/tournament-v3.registry.db`, runs under `Chowder-Protected/runs/v3-20260909/`)
+- [x] parent-selection decision recorded with evidence — **but as an explicit manual override, not an automatic four-parent outcome**: `freeze_selected_parent` correctly refused (`MissingParentEvidenceError`, D missing) rather than inventing a winner; the user explicitly selected A from the real A/B/C evidence (A holds the only clear-difference advantage anywhere, calibration; no dimension favors B or C over A). Decision state + rationale: `Chowder-Protected/runs/v3-20260909/four-parent-decision-state.md` and `parent-freeze-manual-override.json`. Reopenable if D's evidence later changes the picture.
+- [x] selected parent cached locally — parent A, selected per above, already cached and manifest-verified at its pin
+- [x] first dense→MoE transformation plan generated AND executed for real (PR #120 plan; real execution 2026-09-10: parent A converted at E=16, `Chowder-Protected/runs/v3-20260909/phase6-parent-a-profile-only-dry-run.json` dry run + `F:\Local Models\HuggingFace\Qwen\Qwen3.8-27B-MoE-E16\conversion.provenance.json` real conversion, both byte-exact to each other; `audit_moe_architecture` + a real `model.generate()` smoke test passed on the RTX 5060 Ti. **Not yet sparse in practice** — `num_experts_per_tok == num_experts` at this stage by design; router healing, not yet started, is what would change that)
 - [x] no distillation involved (lineage policy fixed above)
 
 Four checkboxes are pre-checked because this document and its
