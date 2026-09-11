@@ -68,7 +68,67 @@ def select_trainable_parameter_names(named_parameters: Any) -> list[str]:
     return [name for name, _ in named_parameters if name.endswith(_TRAINABLE_SUFFIXES)]
 
 
-def freeze_for_router_healing(model: Any) -> RouterHealingFreezeSummary:
+def assert_trainable_gradients_reachable(model: Any, trainable_names: Any) -> dict[str, Any]:
+    """Refuse a freeze plan whose 'trainable' tensors cannot receive gradient.
+
+    This exists because a real defect shipped past review without it. The
+    conversion writes the shared expert's gate/up/down projections as ZEROS
+    (exactness: a zero shared expert contributes nothing at init), and the
+    block computes ``sigmoid(shared_expert_gate(x)) * shared_expert(x)``. With
+    `shared_expert(x)` identically zero AND its projections frozen, the
+    derivative w.r.t. `shared_expert_gate` is exactly zero -- forever. So
+    64 tensors were marked trainable, consumed optimizer state, and could
+    never learn. Verified by CPU probe: grad 0.0 as converted vs 0.16 with a
+    non-zero shared expert.
+
+    The original pilot missed it because its proof-of-life was a single
+    *global* grad-norm plus the router's own weight norm, both dominated by
+    `mlp.gate.weight`, which does learn. A per-tensor reachability check is
+    the thing that would have caught it, so it is now a precondition rather
+    than an observation.
+
+    Structural, not a forward pass: a tensor multiplied by an all-zero frozen
+    factor is unreachable by construction, and detecting that costs a weight
+    read instead of a 27B backward. Returns the reachability report; raises
+    `RouterHealingError` when a designated-trainable tensor is dead.
+    """
+    names = list(trainable_names)
+    modules = dict(model.named_modules())
+    dead: list[dict[str, Any]] = []
+
+    for name in names:
+        if not name.endswith("mlp.shared_expert_gate.weight"):
+            continue
+        # the sibling shared expert whose output this gate scales
+        prefix = name[: -len("shared_expert_gate.weight")]
+        blockers = []
+        for leaf in ("gate_proj", "up_proj", "down_proj"):
+            mod = modules.get(f"{prefix}shared_expert.{leaf}")
+            weight = getattr(mod, "weight", None) if mod is not None else None
+            if weight is None:
+                continue
+            try:
+                all_zero = bool(weight.detach().eq(0).all().item())
+            except Exception:  # pragma: no cover - exotic/quantized storage
+                all_zero = False
+            if all_zero and not weight.requires_grad:
+                blockers.append(f"shared_expert.{leaf} is all-zero and frozen")
+        if blockers:
+            dead.append({"parameter": name, "reasons": blockers})
+
+    if dead:
+        raise RouterHealingError(
+            "these parameters are marked trainable but cannot receive gradient, "
+            "so training them would burn compute and optimizer state for nothing:\n  "
+            + "\n  ".join(f"{d['parameter']}: {'; '.join(d['reasons'])}" for d in dead)
+            + "\nFix the init or stop designating them trainable -- do not train a "
+            "dead path. A zero shared expert multiplied by its gate has zero "
+            "derivative w.r.t. that gate."
+        )
+    return {"checked": len(names), "dead": []}
+
+
+def freeze_for_router_healing(model: Any, *, require_reachable: bool = True) -> RouterHealingFreezeSummary:
     """Freeze everything except the router + shared-expert gates.
 
     Hard-stops (no guessing a different module layout) if nothing matched --
@@ -95,6 +155,9 @@ def freeze_for_router_healing(model: Any) -> RouterHealingFreezeSummary:
             trainable_count += numel
         else:
             frozen_count += numel
+
+    if require_reachable:
+        assert_trainable_gradients_reachable(model, trainable_names)
 
     gate_layers = sum(1 for n in trainable_names if n.endswith("mlp.gate.weight"))
     shared_gate_layers = sum(1 for n in trainable_names if n.endswith("mlp.shared_expert_gate.weight"))

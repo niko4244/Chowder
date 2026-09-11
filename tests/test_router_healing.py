@@ -12,6 +12,7 @@ import pytest
 
 from chowder.router_healing import (
     RouterHealingError,
+    assert_trainable_gradients_reachable,
     freeze_for_router_healing,
     select_trainable_parameter_names,
 )
@@ -96,3 +97,66 @@ def test_freeze_for_router_healing_hard_stops_on_no_match():
 
     with pytest.raises(RouterHealingError):
         freeze_for_router_healing(_EmptyModel())
+
+
+class _ZeroSharedMlp(nn.Module):
+    """The converted shape: shared expert written as zeros, gate zero too."""
+
+    def __init__(self, hidden: int, num_experts: int, moe_intermediate: int, *, zero_shared: bool) -> None:
+        super().__init__()
+        self.gate = nn.Module()
+        self.gate.weight = nn.Parameter(torch.zeros(num_experts, hidden))
+        self.experts = nn.Module()
+        self.experts.gate_up_proj = nn.Parameter(torch.zeros(num_experts, 2 * moe_intermediate, hidden))
+        self.experts.down_proj = nn.Parameter(torch.zeros(num_experts, hidden, moe_intermediate))
+        self.shared_expert = nn.Module()
+        for leaf, shape in (
+            ("gate_proj", (moe_intermediate, hidden)),
+            ("up_proj", (moe_intermediate, hidden)),
+            ("down_proj", (hidden, moe_intermediate)),
+        ):
+            lin = nn.Linear(shape[1], shape[0], bias=False)
+            if zero_shared:
+                nn.init.zeros_(lin.weight)
+            setattr(self.shared_expert, leaf, lin)
+        self.shared_expert_gate = nn.Linear(hidden, 1, bias=False)
+
+
+class _ZeroSharedLayer(nn.Module):
+    def __init__(self, **kw) -> None:
+        super().__init__()
+        self.mlp = _ZeroSharedMlp(**kw)
+
+
+class _ZeroSharedModel(nn.Module):
+    def __init__(self, *, zero_shared: bool, layers: int = 2) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList(
+            _ZeroSharedLayer(hidden=8, num_experts=4, moe_intermediate=2, zero_shared=zero_shared)
+            for _ in range(layers)
+        )
+
+
+def test_zero_init_shared_expert_makes_its_gate_untrainable_and_is_refused():
+    """The real defect: a gate multiplied by an all-zero frozen shared expert
+    has exactly zero derivative, so training it is pure waste. Verified by CPU
+    probe (grad 0.0 as converted vs 0.16 with a non-zero shared expert)."""
+    model = _ZeroSharedModel(zero_shared=True)
+    with pytest.raises(RouterHealingError) as excinfo:
+        freeze_for_router_healing(model)
+    assert "cannot receive gradient" in str(excinfo.value)
+    assert "shared_expert" in str(excinfo.value)
+
+
+def test_nonzero_shared_expert_passes_reachability():
+    model = _ZeroSharedModel(zero_shared=False)
+    summary = freeze_for_router_healing(model)
+    assert summary.layers_with_trainable_shared_expert_gate == 2
+
+
+def test_reachability_check_can_be_explicitly_bypassed():
+    """Escape hatch for deliberately measuring the dead configuration, but it
+    must be asked for -- the default refuses."""
+    model = _ZeroSharedModel(zero_shared=True)
+    summary = freeze_for_router_healing(model, require_reachable=False)
+    assert summary.layers_with_trainable_shared_expert_gate == 2
