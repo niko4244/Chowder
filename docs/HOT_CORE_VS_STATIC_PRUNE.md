@@ -84,6 +84,52 @@ a general one**, which is the opposite of what a deployable artifact wants.
   the +2.5% seen earlier, consistent with the two tensor layouts quantising
   differently under nf4 rather than with a conversion error.
 
+## The built artifact
+
+`F:\llm-models\Qwen3.8-9B-Pruned-CW-3440`, built by `chowder.static_prune`
+(`evidence/hot-core-upcycling/static-prune-checkpoint.json`). Corpus-wide ranking
+`304fffa858ea`, top 3,440 of 12,288 channels kept, emitted in rank order.
+
+| | dense parent | hot-core MoE (CW) | **static prune (CW)** |
+|---|---:|---:|---:|
+| architecture | `qwen3_5` | `qwen3_5_moe` | **`qwen3_5`, unchanged** |
+| total params | 9.410B | 9.410B | **5.931B** |
+| active params | 9.410B | 5.931B | **5.931B** |
+| checkpoint on disk | 18.82 GB | 18.82 GB | **11.86 GB** |
+| peak VRAM, nf4 load | 5.72 GiB | 15.07 GiB | **5.45 GiB** |
+| eval A ppl | 5.2707 | 13.4224 | **9.9235** |
+| eval B ppl | 4.3044 | 15.2936 | **13.0258** |
+| geo-mean × dense | 1.000× | 3.008× | **2.387×** |
+
+It beats the MoE on every axis simultaneously: smaller on disk, **less VRAM than
+even the dense parent** (the MoE's raw-`nn.Parameter` expert bank stays BF16 under
+nf4; a pruned `nn.Linear` quantises like any other), lower perplexity, and no
+change of architecture.
+
+**Framing, so the number is not misread as shrinking:** the earlier "27% better"
+was `MoE / static − 1` using the mask-emulated static cost (2.366×). With the real
+pruned checkpoint it is `3.008 / 2.387 − 1` = **26.0%** in that same framing — a
+one-point move from the static side's real-checkpoint drift. The build log's "21%"
+is the other framing, `1 − static / MoE`. Same result.
+
+**Prediction held.** The mask emulation predicted 9.7968 / 12.9605; the real
+checkpoint scored 9.9235 / 13.0258 — drift **+1.3% / +0.5%**, same positive
+direction as the +1.6% and +2.5% seen at both previous mask-vs-checkpoint
+comparisons. Four independent comparisons now drift the same way, which makes
+nf4 layout differences the consistent explanation rather than a conversion error.
+
+Byte-level check on the real artifact: 760 tensors in, 760 out; all **664**
+non-MLP tensors byte-identical, including all **108** vision-tower `.mlp.`
+tensors; the 96 decoder MLP tensors narrowed to (3440, 4096) / (4096, 3440).
+
+**One deployment wart, predicted and confirmed.** bitsandbytes warns *"inner
+dimension (3440) is not aligned for fast kernel with blocksize=64, falling back to
+slower implementation."* 3,440 is not a multiple of 64, which is exactly why the
+build predicted a drift band rather than a point. It is correct, just slower. For
+a deployment build, **keep 3,456 (= 54 × 64)** — 16 more channels, +0.47%, fast
+kernel. Because output is in rank order, that is also a strict superset of this
+checkpoint's channels.
+
 ## Recommendation
 
 **Stop spending on the hot-core/routing path at f=0.28 and take the static prune.**
