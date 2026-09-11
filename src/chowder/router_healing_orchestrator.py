@@ -209,6 +209,7 @@ def run_router_healing_experiment(
     reload_model_dir: str | None = None,
     parent_experiment_id: str | None = None,
     estimated_gpu_hours: float = 1.0,
+    trainable_suffixes: tuple[str, ...] | None = None,
     cancellation: CancellationToken | None = None,
 ) -> HealingRunRecord:
     """Drive one bounded healing experiment end to end.
@@ -255,7 +256,8 @@ def run_router_healing_experiment(
     try:
         token.raise_if_requested()
         # Conditions 2: freeze + refuse unreachable trainables, pre-compute.
-        freeze_for_router_healing(model)
+        freeze_summary = freeze_for_router_healing(model, suffixes=trainable_suffixes)
+        preflight["freeze"] = freeze_summary.to_dict()
         registry.update_experiment_status(experiment_id, ExperimentStatus.RUNNING.value)
 
         outcome = train_fn(model=model, spec=spec, cancellation=token)

@@ -58,14 +58,26 @@ class RouterHealingFreezeSummary:
         }
 
 
-def select_trainable_parameter_names(named_parameters: Any) -> list[str]:
-    """Pick exactly the router + shared-expert-gate parameter names.
+#: Router only. The honest selection when the shared expert is zero-init and
+#: frozen, which makes its gate provably unlearnable -- better to declare that
+#: narrower scope than to designate a dead tensor and have the reachability
+#: check refuse the whole run.
+ROUTER_ONLY_SUFFIXES: tuple[str, ...] = ("mlp.gate.weight",)
+
+
+def select_trainable_parameter_names(
+    named_parameters: Any, suffixes: tuple[str, ...] | None = None
+) -> list[str]:
+    """Pick exactly the designated trainable parameter names.
 
     `named_parameters` is anything iterable of (name, param) pairs (a real
     `model.named_parameters()`, or a fake for tests) -- kept untyped so this
     function needs no torch import and is fast/CPU to unit test.
+    `suffixes` defaults to router + shared-expert gate; pass
+    `ROUTER_ONLY_SUFFIXES` to scope a run to the router alone.
     """
-    return [name for name, _ in named_parameters if name.endswith(_TRAINABLE_SUFFIXES)]
+    wanted = _TRAINABLE_SUFFIXES if suffixes is None else tuple(suffixes)
+    return [name for name, _ in named_parameters if name.endswith(wanted)]
 
 
 def assert_trainable_gradients_reachable(model: Any, trainable_names: Any) -> dict[str, Any]:
@@ -128,7 +140,12 @@ def assert_trainable_gradients_reachable(model: Any, trainable_names: Any) -> di
     return {"checked": len(names), "dead": []}
 
 
-def freeze_for_router_healing(model: Any, *, require_reachable: bool = True) -> RouterHealingFreezeSummary:
+def freeze_for_router_healing(
+    model: Any,
+    *,
+    require_reachable: bool = True,
+    suffixes: tuple[str, ...] | None = None,
+) -> RouterHealingFreezeSummary:
     """Freeze everything except the router + shared-expert gates.
 
     Hard-stops (no guessing a different module layout) if nothing matched --
@@ -137,11 +154,12 @@ def freeze_for_router_healing(model: Any, *, require_reachable: bool = True) -> 
     model already has the verified MoE shape.
     """
     named = list(model.named_parameters())
-    trainable_names = select_trainable_parameter_names(named)
+    trainable_names = select_trainable_parameter_names(named, suffixes)
     if not trainable_names:
         raise RouterHealingError(
-            "no parameter matched the router/shared-expert-gate suffixes "
-            f"{_TRAINABLE_SUFFIXES}; refusing to guess a different module "
+            "no parameter matched the requested trainable suffixes "
+            f"{_TRAINABLE_SUFFIXES if suffixes is None else tuple(suffixes)}; "
+            "refusing to guess a different module "
             "layout for this model"
         )
     trainable_set = set(trainable_names)
