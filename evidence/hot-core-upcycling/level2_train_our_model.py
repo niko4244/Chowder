@@ -225,9 +225,13 @@ def main() -> int:
         ev = dict(art.evidence)
         report["telemetry"] = tel
         cfg = adapter_cfg = Path(art.artifact_ref) / "adapter_config.json"
-        report["resolved_target_modules"] = (
-            sorted(json.loads(cfg.read_text(encoding="utf-8"))["target_modules"])
-            if cfg.is_file() else ev.get("resolved_target_modules"))
+        # Unsloth stores target_modules as a regex STRING, transformers as a list;
+        # sorting a string yields characters, so keep the string intact.
+        if cfg.is_file():
+            tm = json.loads(cfg.read_text(encoding="utf-8"))["target_modules"]
+            report["resolved_target_modules"] = tm if isinstance(tm, str) else sorted(tm)
+        else:
+            report["resolved_target_modules"] = ev.get("resolved_target_modules")
         report["artifact_ref"] = art.artifact_ref
         adapter = Path(art.artifact_ref)
         report["adapter_files"] = sorted(p.name for p in adapter.iterdir()) if adapter.is_dir() else None

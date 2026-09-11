@@ -1,4 +1,4 @@
-# Can Chowder train this model? Verified, with two defects found
+# Can Chowder train this model? Yes — on both engines, after three fixes
 
 Target: `F:\llm-models\Qwen3.8-9B-Pruned-CW-3456` — the artifact
 `docs/HOT_CORE_VS_STATIC_PRUNE.md` recommends. `qwen3_5` hybrid, 24 `linear_attn`
@@ -105,16 +105,47 @@ this architecture — indistinguishable from a genuinely useless adapter. Any
 previous Unsloth result on a model with this wrapper shape should be re-checked
 before it is believed.
 
-**Not fixed here**, because the fix is a design choice rather than a patch:
+**Both are now fixed** — the guard below, and the root cause: option 1, load the
+same class the evaluator does. Unsloth exposes exactly that as
+`FastLanguageModel.from_pretrained(text_only=True)`, which loads the family's text
+decoder, remaps the VLM weights itself (`_apply_text_only_key_mapping`), and applies
+only when the text config belongs to the same family
+(`_is_family_text_decoder`: `"qwen3_5_text".startswith("qwen3_5")` → True),
+keeping the full model otherwise rather than loading random weights. So it is safe
+to pass unconditionally, and it is a supported Unsloth path rather than a key
+remap that guesses. It is version-guarded: an Unsloth without the parameter records
+`text_only_requested: false` in provenance, which explains any later liveness
+refusal instead of leaving it mysterious.
 
-1. have the Unsloth worker load the same class the evaluator does;
-2. evaluate Unsloth-trained adapters with Unsloth;
-3. normalise adapter keys on save or load (strip/insert the `language_model`
-   segment) — cheapest, but a remap that silently guesses is the kind of thing
-   that produced this bug;
-4. at minimum, **fail loudly** rather than report a number. **This one is now
-   landed** — see below. It does not make the Unsloth path work; it makes the
-   Unsloth path stop lying.
+Result on the same run that previously scored exactly baseline:
+
+| | before | after |
+|---|---|---|
+| adapter keys under `language_model.` | 400 / 400 | **0 / 256** |
+| keys matching the evaluator's model | 0 | **256** |
+| candidate quality (baseline 0.30) | 0.30 — inert | **0.60** |
+| gate | rejected (no gain) | **promoted** |
+| peak VRAM | 6.24 GB | **5.84 GB** (vision tower skipped) |
+
+### One limitation this exposed, and the guard cannot catch it
+
+Under `text_only` the Unsloth adapter covers **128 modules, not 200**: all 72
+`linear_attn` modules (`in_proj_qkv`, `in_proj_z`, `out_proj` × 24 layers) are
+skipped, even though they were passed in the explicit `target_modules` list.
+Unsloth converts the list into a regex, and that regex does not match the
+Mamba-style layers once the `language_model.` segment is gone. The Transformers
+engine adapts all 200.
+
+This is the same silent partial-coverage failure the transformers worker's own
+comment warns about, now on the Unsloth side — and **the liveness guard does not
+detect it**, because 128 live modules is live. The guard's contract is "can this
+adapter change the model", not "did it cover what you asked for". A training-side
+check comparing requested against resolved target modules is the right place for
+that, and is not implemented. Until it is: for this architecture the Transformers
+engine gives full coverage, and Unsloth gives cheaper training over the attention
+and FFN only. The 0.60-vs-0.45 difference between them is **not** a controlled
+comparison (n=20, different engines, one run each) and should not be read as
+Unsloth being better.
 
 ## The loud-failure guard (landed)
 
@@ -148,8 +179,15 @@ key-overlap check carries that decision.
 
 ## Status
 
-* Chowder **can** train this model, through its own lifecycle, on this hardware —
-  via the **Transformers** engine, with explicit `target_modules`.
-* The **Unsloth** engine trains it (and more cheaply) but cannot currently be
-  evaluated through Chowder on this architecture. Treat the Unsloth path as
-  unverified for `qwen3_5` until the adapter-key mismatch is resolved.
+* Chowder **can** train this model through its own lifecycle on this hardware, on
+  **both** engines, with explicit `target_modules` (PEFT cannot auto-detect
+  `qwen3_5`).
+* **Transformers**: full 200-module coverage, 11.66 GB, baseline 0.30 → 0.45, gate
+  correctly withheld promotion below its pre-set bar.
+* **Unsloth**: 5.84 GB, baseline 0.30 → **0.60, promoted** — but only 128 of 200
+  modules, skipping the `linear_attn` layers. Use it when memory is the binding
+  constraint and that coverage gap is acceptable; prefer Transformers when it is
+  not.
+* Remaining known gap: nothing verifies that an adapter covered the modules that
+  were requested. Zero coverage is now refused loudly; partial coverage is not
+  detected.

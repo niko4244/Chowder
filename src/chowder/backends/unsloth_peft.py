@@ -807,6 +807,11 @@ class UnslothPeftExecutor:
                 "versions": dict(versions),
                 "model_provenance": dict(model_provenance),
                 "resolved_target_modules": worker_result.get("resolved_target_modules"),
+                # False means the isolated Unsloth predates `text_only`, so a
+                # VLM-wrapped base was loaded and the saved adapter will not load
+                # into the evaluator's AutoModelForCausalLM -- the liveness guard
+                # will refuse it, and this is the explanation.
+                "text_only_requested": worker_result.get("text_only_requested"),
                 "resource_usage": {
                     "wall_seconds": usage.wall_seconds,
                     "accelerator_seconds": usage.accelerator_seconds,

@@ -222,13 +222,40 @@ def train(spec: _Spec) -> dict[str, Any]:
 
     set_seed(spec.seed)
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=spec.base_model,
-        revision=spec.revision,
-        max_seq_length=spec.max_length,
-        dtype=None,
-        load_in_4bit=(spec.quantization == "4bit"),
-    )
+    # text_only=True makes Unsloth load the family's TEXT decoder class instead of
+    # a *ForConditionalGeneration wrapper. That is what this backend wants on two
+    # counts. It is a text trainer (text_field / max_length / chat templates; the
+    # vision tower is never trained), and -- the reason this is a fix rather than a
+    # preference -- the adapter it saves must be loadable by Chowder's evaluator,
+    # which loads AutoModelForCausalLM. Without it, a VLM-wrapped model puts the
+    # decoder under `model.language_model.layers` while the evaluator's model has
+    # `model.layers`, so NO adapter key matches: PEFT warns, loads nothing, leaves
+    # every LoRA B at zero, and the candidate silently scores as the base model.
+    # Measured on Qwen3.8-9B: max logit delta 0.000000 versus 14.5 for the same
+    # training under the Transformers engine.
+    #
+    # Unsloth does the remapping itself (_apply_text_only_key_mapping) and applies
+    # it only when the text config belongs to the same family
+    # (_is_family_text_decoder: "qwen3_5_text".startswith("qwen3_5")), keeping the
+    # full model otherwise rather than loading random weights -- so this is safe to
+    # pass unconditionally. Version-guarded because an Unsloth without the
+    # parameter would raise on an unexpected kwarg; when it is absent the flag is
+    # recorded in the result so an operator can explain a liveness refusal.
+    _load_kwargs: dict[str, Any] = {
+        "model_name": spec.base_model,
+        "revision": spec.revision,
+        "max_seq_length": spec.max_length,
+        "dtype": None,
+        "load_in_4bit": (spec.quantization == "4bit"),
+    }
+    import inspect as _inspect
+
+    text_only_supported = "text_only" in _inspect.signature(
+        FastLanguageModel.from_pretrained
+    ).parameters
+    if text_only_supported:
+        _load_kwargs["text_only"] = True
+    model, tokenizer = FastLanguageModel.from_pretrained(**_load_kwargs)
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token_id is None:
             raise RuntimeError("tokenizer has neither pad_token nor eos_token")
@@ -399,6 +426,10 @@ def train(spec: _Spec) -> dict[str, Any]:
             "replay_selected_rows": replay_selected_rows,
         },
         "resolved_target_modules": resolved_target_modules,
+        # Whether the text-decoder class was requested. False means this
+        # Unsloth build predates the parameter, and an adapter trained on a
+        # VLM-wrapped model will not load into Chowder's evaluator.
+        "text_only_requested": text_only_supported,
         "resource_usage": {
             "active_accelerator_count": active_count,
             "visible_accelerator_count": active_count,
