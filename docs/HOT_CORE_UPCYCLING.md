@@ -98,6 +98,77 @@ The ranking split (even-index) is disjoint from the eval split (odd-index).
   static→oracle gap (measured at up to 4.30×), which is the entire thesis.
   That is the next experiment, not a result.
 
+## Training fit on a 16 GiB card (measured)
+
+Card: RTX 5060 Ti, 15.93 GiB. Evidence: `evidence/hot-core-upcycling/`.
+
+### The B1 LoRA arm does NOT fit, for two independent reasons
+
+**1. `prepare_model_for_kbit_training` upcasts the frozen expert bank to fp32.**
+peft's own comment is "cast all non INT8 parameters to fp32". The routed bank is
+raw `nn.Parameter` and so was never quantized, which means 7.95 GB of frozen,
+un-adaptable weight becomes 15.9 GB:
+
+| stage | allocated | peak reserved |
+|---|---|---|
+| after 4-bit load | 12.64 GiB | 12.78 GiB |
+| after `prepare_model_for_kbit_training` | **23.84 GiB** | **28.39 GiB** |
+
+Predicted jump from the documented upcast: +11.19 GiB. Measured: **+11.20 GiB**.
+Windows WDDM oversubscribes into system RAM rather than raising, so this does not
+error — it pages. One 4×400 GRPO rollout then ran **>14 minutes without
+finishing**, against 133 s for the entire dense step.
+
+**2. LoRA cannot reach the expert bank or the router at all.** PEFT wraps
+`nn.Linear`; `Qwen3_5MoeExperts.gate_up_proj`/`down_proj` and `mlp.gate.weight`
+are raw `nn.Parameter`. With the `broad` target set, 200 adapters attached
+(24.58M trainable) and **zero** landed on the routed bank:
+
+| target | adapters |
+|---|---|
+| `linear_attn.{in_proj_qkv, in_proj_z, out_proj}` | 24 each |
+| `self_attn.{q,k,v,o}_proj` | 8 each |
+| `shared_expert.{gate,up,down}_proj` | 32 each |
+| **routed expert bank** | **0** |
+| **router (`mlp.gate.weight`)** | **0** |
+
+So even with unlimited memory this arm could not test the routing thesis: it
+would train attention, `linear_attn` and the hot core, and never the router.
+
+### Router healing DOES fit, and the router does learn
+
+No `prepare_model_for_kbit_training`; `freeze_for_router_healing` (64 tensors,
+**2.228M** trainable, 6.974B frozen); gradient checkpointing; AdamW.
+Resident after load: 11.24 GiB.
+
+| seq | peak reserved | headroom | step | |
+|---:|---:|---:|---:|---|
+| 384 | 15.51 | +0.41 | 5.03 s | fits |
+| 512 | 15.53 | +0.40 | 5.67 s | fits |
+| 768 | 15.55 | +0.38 | 7.08 s | **fits — ceiling** |
+| 1024 | 16.51 | −0.58 | 9.05 s | oversubscribed |
+| 1536 | 19.39 | −3.46 | **145.61 s** | thrashing |
+| 2048 | 23.21 | −7.28 | **137.11 s** | thrashing |
+
+**Methodological note on this platform:** `torch.cuda.OutOfMemoryError` never
+fires here, because WDDM pages instead of failing. The first version of the probe
+accordingly reported "FITS at seq 2048" while that step took 137 s against 7 s at
+768. Judge on headroom plus step-time blowup, never on an OOM exception.
+
+Both claims that were under test passed:
+
+* `assert_trainable_gradients_reachable` **PASS** (64 checked, 0 dead) — the hot
+  core makes `shared_expert_gate` learnable, confirming the corollary above. With
+  `dense_to_moe`'s zero shared expert this refuses, and correctly so.
+* Router gradient is non-zero at every length (‖g‖ ≈ 0.41–1.01; shared gate
+  2.1–4.8), so the router can move despite its zero init.
+
+Budget at the seq-768 ceiling: **7.08 s/step**, batch 1 → 208 steps ≈ 25 min
+(~160k tokens), 2088 steps ≈ 4.1 h (~1.6M tokens). Not comparable to the dense
+GRPO arm's 133 s/step, which includes 4×400 generation — this is a different unit
+of work, and a healing arm needs its own token budget rather than a step count
+borrowed from GRPO.
+
 ## Router init caveat, recorded rather than glossed
 
 The router is written as zeros, so logits are tied and which `top_k` experts win
