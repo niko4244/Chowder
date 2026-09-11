@@ -616,6 +616,94 @@ def convert_checkpoint(
     return provenance
 
 
+def set_experts_per_token(model_dir: str | Path, top_k: int) -> dict[str, Any]:
+    """Set `num_experts_per_tok` on an already-converted MoE checkpoint.
+
+    **This is deliberately NOT a conversion-time option.** `convert_checkpoint`
+    always writes `num_experts_per_tok == num_experts`, because that equality
+    is what makes the conversion output-exact: the router's weights are zero,
+    so softmax gives a uniform 1/E, `topk` takes all E of them, the renormalise
+    step leaves 1/E, and each expert's `down_proj` slice was pre-scaled by E --
+    so the sum reproduces the dense FFN exactly.
+
+    Lowering `top_k` breaks that equality on purpose, and the arithmetic is
+    worth stating plainly because a surprised reader will otherwise file a
+    bug. `Qwen3_5MoeTopKRouter.forward` renormalises unconditionally
+    (`router_top_value /= router_top_value.sum(...)`, no config flag), so at
+    `top_k = k` the block computes::
+
+        (E / k) * sum(slice_i for i in the k selected experts)
+
+    against a dense target of ``sum(slice_i for all E experts)``. So:
+
+    * With an **unhealed** (zero-init) router every logit is equal, which
+      makes `topk`'s choice arbitrary -- lowering `top_k` here is *random
+      expert dropout with a compensating rescale*, not informed routing. That
+      is a legitimate and cheap measurement (it prices the mechanical
+      partition), but it must never be reported as "the sparse model works".
+    * With a **healed** router the selection is token-conditional, which is
+      the entire point of healing.
+
+    Either way the output is no longer exact, so this records
+    `exactness_broken_by` provenance in the checkpoint's
+    `conversion.provenance.json` when one is present. Returns the applied
+    change for logging.
+    """
+    root = Path(model_dir)
+    config_path = root / "config.json"
+    if not config_path.is_file():
+        raise DenseToMoeError(f"no config.json in {root}")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    text_config = config.get("text_config")
+    target = text_config if isinstance(text_config, Mapping) else config
+    num_experts = target.get("num_experts")
+    if not isinstance(num_experts, int) or num_experts <= 0:
+        raise DenseToMoeError(
+            f"{config_path} has no usable num_experts; this does not look like a "
+            "converted MoE checkpoint"
+        )
+    if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1:
+        raise DenseToMoeError(f"top_k must be a positive integer, got {top_k!r}")
+    if top_k > num_experts:
+        raise DenseToMoeError(
+            f"top_k {top_k} exceeds num_experts {num_experts}; a token cannot route "
+            "to more experts than exist"
+        )
+    previous = target.get("num_experts_per_tok")
+    new_text = dict(target)
+    new_text["num_experts_per_tok"] = top_k
+    if isinstance(text_config, Mapping):
+        config["text_config"] = new_text
+    else:
+        config = new_text
+    config_path.write_text(
+        json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8", newline="\n"
+    )
+
+    change = {
+        "num_experts": num_experts,
+        "previous_num_experts_per_tok": previous,
+        "num_experts_per_tok": top_k,
+        "exact_at_init": top_k == num_experts,
+        "active_expert_fraction": top_k / num_experts,
+        "routed_rescale_factor": num_experts / top_k,
+    }
+    provenance_path = root / "conversion.provenance.json"
+    if provenance_path.is_file():
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+        if top_k != num_experts:
+            history = list(provenance.get("exactness_broken_by") or [])
+            history.append(change)
+            provenance["exactness_broken_by"] = history
+        provenance["num_experts_per_tok"] = top_k
+        provenance_path.write_text(
+            json.dumps(provenance, indent=2, sort_keys=True, ensure_ascii=False),
+            encoding="utf-8",
+            newline="\n",
+        )
+    return change
+
+
 def _write_converted_config(source: Path, out: Path, num_experts: int, moe_int: int) -> None:
     config = json.loads((source / "config.json").read_text(encoding="utf-8"))
     text_config = config.get("text_config", config)
