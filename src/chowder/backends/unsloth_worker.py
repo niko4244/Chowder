@@ -22,6 +22,7 @@ import argparse
 import hashlib
 import json
 import math
+import re as _re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -286,10 +287,24 @@ def train(spec: _Spec) -> dict[str, Any]:
                 "identity and this run would silently start from scratch"
             )
     else:
+        # Hand Unsloth a REGEX, not a list. Given a list, Unsloth rewrites it
+        # through get_peft_regex, whose component block is
+        # (self_attn|attention|attn|mixer|mlp|feed_forward|ffn|dense) -- none of
+        # which match `linear_attn`, so on a hybrid Mamba/attention model it
+        # silently drops every linear_attn module. Measured on Qwen3.8-9B: the same
+        # ten names adapted 128 modules as a list and 200 as a regex.
+        #
+        # vision.py passes a string straight through to PEFT, and this regex
+        # reproduces PEFT's own list semantics exactly -- a list entry matches a
+        # module whose dotted name ends with that name, which under PEFT's
+        # re.fullmatch is `(?:.*\.)?(?:names)`. The optional prefix preserves the
+        # edge case of a top-level module named exactly like a target.
+        _names = list(spec.target_modules) or list(_DEFAULT_TARGET_MODULES)
+        _target_regex = r"(?:.*\.)?(?:" + "|".join(_re.escape(n) for n in _names) + r")"
         model = FastLanguageModel.get_peft_model(
             model,
             r=spec.lora_r,
-            target_modules=list(spec.target_modules) or list(_DEFAULT_TARGET_MODULES),
+            target_modules=_target_regex,
             lora_alpha=spec.lora_alpha,
             lora_dropout=spec.lora_dropout,
             bias="none",

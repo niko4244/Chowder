@@ -127,3 +127,28 @@ def assert_targets_covered(
         "backend.lora.allow_unmatched_target_modules=true to accept partial "
         "coverage deliberately."
     )
+
+
+def suffix_match_regex(names: Iterable[str]) -> str:
+    """A regex equivalent to passing `names` as PEFT's `target_modules` list.
+
+    PEFT treats a list entry as a suffix on the dotted module path, and applies a
+    regex with `re.fullmatch`, so `(?:.*\.)?(?:name1|name2)` is the exact
+    equivalent. The prefix is optional to preserve the edge case of a top-level
+    module named exactly like a target.
+
+    This exists because Unsloth rewrites a LIST through its own
+    `get_peft_regex`, whose component block
+    (`self_attn|attention|attn|mixer|mlp|feed_forward|ffn|dense`) matches no
+    `linear_attn` module, silently dropping every Mamba-style layer -- measured at
+    128 adapted modules instead of 200 on the hybrid 9B. A string is passed
+    straight through to PEFT, so handing it this regex keeps list semantics and
+    skips the lossy rewrite. `unsloth_worker.py` inlines the same expression,
+    because it must not import from the chowder package.
+    """
+    import re
+
+    escaped = "|".join(re.escape(str(name)) for name in names)
+    if not escaped:
+        raise ValueError("suffix_match_regex needs at least one module name")
+    return r"(?:.*\.)?(?:" + escaped + r")"

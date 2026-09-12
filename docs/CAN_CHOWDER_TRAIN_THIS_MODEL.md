@@ -184,9 +184,12 @@ key-overlap check carries that decision.
   `qwen3_5`).
 * **Transformers**: full 200-module coverage, 11.66 GB, baseline 0.30 → 0.45, gate
   correctly withheld promotion below its pre-set bar.
-* **Unsloth**: 5.84 GB, and it loads and scores correctly — but it adapts only 128
-  of 200 modules, so the coverage check now **refuses it by default** on this
-  architecture. Opt in with `allow_unmatched_target_modules: true` if partial
-  coverage is acceptable; otherwise use Transformers.
+* **Unsloth**: also full 200-module coverage, at **5.96 GB and 65 s** — half the
+  memory and half the time of Transformers for the same quality. Preferred on this
+  hardware.
 * Both silent failures are now loud: **zero** coverage (an inert adapter) is refused
-  by `adapter_guard`, and **partial** coverage is refused by `target_coverage`.
+  by `adapter_guard`, and **partial** coverage by `target_coverage`. Both fired on
+  real defects before those defects were fixed, which is the only reason either is
+  believable.
+* `allow_unmatched_target_modules: true` remains the deliberate opt-in for partial
+  coverage; it is no longer needed for this architecture.

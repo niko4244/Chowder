@@ -135,3 +135,62 @@ def test_an_unreported_measurement_is_unknown_not_zero():
 def test_a_measured_report_is_labelled_as_such():
     report = assert_targets_covered(HYBRID, FULL)
     assert report["status"] == "measured"
+
+
+# ---------------------------------------------------------------------------
+# the regex that makes Unsloth honour an explicit target list
+# ---------------------------------------------------------------------------
+
+
+def test_suffix_match_regex_reproduces_peft_list_semantics():
+    """PEFT treats a list entry as a suffix on the dotted module path and applies a
+    regex with fullmatch, so these must agree exactly."""
+    import re
+
+    from chowder.target_coverage import suffix_match_regex
+
+    pattern = suffix_match_regex(["q_proj", "in_proj_qkv", "out_proj"])
+    matches = [
+        "model.layers.3.linear_attn.in_proj_qkv",   # the module Unsloth's own regex drops
+        "model.layers.0.self_attn.q_proj",
+        "q_proj",                                    # a bare top-level name
+    ]
+    rejects = [
+        "model.layers.0.self_attn.q_proj_extra",     # not a whole trailing segment
+        "model.layers.0.self_attn.k_proj",           # not requested
+        "xq_proj",
+    ]
+    for name in matches:
+        assert re.fullmatch(pattern, name), name
+    for name in rejects:
+        assert not re.fullmatch(pattern, name), name
+
+
+def test_suffix_match_regex_escapes_names():
+    import re
+
+    from chowder.target_coverage import suffix_match_regex
+
+    pattern = suffix_match_regex(["a.b"])
+    assert re.fullmatch(pattern, "x.a.b")
+    assert not re.fullmatch(pattern, "x.aXb"), "the dot must be literal, not a wildcard"
+
+
+def test_suffix_match_regex_refuses_an_empty_list():
+    from chowder.target_coverage import suffix_match_regex
+
+    with pytest.raises(ValueError, match="at least one module name"):
+        suffix_match_regex([])
+
+
+def test_the_unsloth_worker_inlines_the_same_pattern():
+    """The worker cannot import chowder, so it inlines this expression. If either
+    side changes shape, they must be reconciled deliberately."""
+    from pathlib import Path
+
+    import chowder
+
+    src = Path(chowder.__file__).resolve().parent / "backends" / "unsloth_worker.py"
+    text = src.read_text(encoding="utf-8")
+    assert r'r"(?:.*\.)?(?:"' in text, "worker no longer builds the suffix-match regex"
+    assert "get_peft_regex" in text, "the reason for the regex should stay documented"

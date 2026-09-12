@@ -1,0 +1,81 @@
+{
+  "engine": "unsloth",
+  "model": "F:\\llm-models\\Qwen3.8-9B-Pruned-CW-3456",
+  "wall_seconds": 170.86522269248962,
+  "candidate_error": null,
+  "telemetry": {
+    "global_step": 50,
+    "peak_vram_gb": 5.9607038497924805,
+    "replay_available_rows": 0,
+    "replay_selected_rows": 0,
+    "train_loss": 0.7195017141103744,
+    "train_runtime_seconds": 64.53762130002724,
+    "training_rows": 20
+  },
+  "resolved_target_modules": "(?:.*\\.)?(?:q_proj|k_proj|v_proj|o_proj|in_proj_qkv|in_proj_z|out_proj|gate_proj|up_proj|down_proj)",
+  "artifact_ref": "F:\\llm-models\\_a4b\\level2-unsloth-v4\\.chowder\\runs\\level2-unsloth-9a3a5d69ef48\\adapter",
+  "adapter_files": [
+    "README.md",
+    "adapter_config.json",
+    "adapter_model.safetensors",
+    "chat_template.jinja",
+    "progress.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "trainer"
+  ],
+  "progress_losses": [
+    4.401427745819092,
+    2.200571298599243,
+    1.850582480430603,
+    1.0237517356872559,
+    1.0979385375976562,
+    1.0402477979660034,
+    0.8107151985168457,
+    0.6734564304351807,
+    0.7114073634147644,
+    0.6309189200401306,
+    1.0148124694824219,
+    0.3985142707824707,
+    0.4844478964805603,
+    0.5417639017105103,
+    0.5270806550979614,
+    0.3881072998046875,
+    0.4183943271636963,
+    0.3970436751842499,
+    0.34830042719841003,
+    0.4017315208911896,
+    0.493830144405365,
+    0.47289520502090454,
+    0.3941749930381775,
+    0.4058455228805542,
+    0.37919124960899353,
+    0.3521908223628998,
+    0.36167216300964355,
+    0.43209004402160645,
+    0.4290159046649933,
+    0.3830804228782654,
+    0.3632897138595581,
+    0.3615208566188812,
+    0.37150126695632935,
+    0.35087594389915466,
+    0.38122496008872986
+  ],
+  "registry_results": {
+    "baseline": {
+      "metrics": {
+        "quality": 0.3
+      }
+    },
+    "level2-unsloth": {
+      "metrics": {
+        "quality": 0.45
+      }
+    }
+  },
+  "candidate_metrics": {
+    "quality": 0.45
+  },
+  "promoted_experiment_id": null,
+  "gate_promoted": false
+}
