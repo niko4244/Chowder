@@ -742,6 +742,71 @@ def test_qwen3_5_curated_modules_match_a_real_qwen3_5_decoder():
     assert counts["in_proj_a"] == 24
 
 
+def test_resolver_accepts_the_actual_text_decoder_type():
+    """The preset must resolve for the model_type the real run actually loads,
+    not only for the composite config the checkpoint ships. AutoModelForCausalLM
+    swaps a composite `qwen3_5` config for its nested text_config, so the model
+    given to _resolve_target_modules carries `qwen3_5_text` -- which the resolver
+    rejected before the alias existed, even though every leaf count above is
+    correct. Built on meta (no weights, no download) and resolved through the
+    public resolver entry point so the alias and the resolver are exercised
+    together, exactly as a run would hit them.
+    """
+    torch = pytest.importorskip("torch")
+    configuration = pytest.importorskip("transformers.models.qwen3_5.configuration_qwen3_5")
+    modeling = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+
+    config = configuration.Qwen3_5TextConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        vocab_size=256,
+    )
+    assert config.model_type == "qwen3_5_text"
+    with torch.device("meta"):
+        model = modeling.Qwen3_5ForCausalLM(config)
+    # The loaded decoder, not its composite wrapper, is what the resolver sees.
+    assert model.config.model_type == "qwen3_5_text"
+
+    resolved = _resolve_target_modules(model, explicit=(), preset="attention_and_mlp")
+    assert resolved == [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "in_proj_qkv",
+        "in_proj_z",
+        "out_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
+
+    # The MoE text decoder nests the same way; the dense preset must keep
+    # refusing it rather than silently adapting only the shared dense leaves.
+    moe_configuration = pytest.importorskip(
+        "transformers.models.qwen3_5_moe.configuration_qwen3_5_moe"
+    )
+    moe_modeling = pytest.importorskip(
+        "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe"
+    )
+    moe_config = moe_configuration.Qwen3_5MoeTextConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        vocab_size=256,
+    )
+    assert moe_config.model_type == "qwen3_5_moe_text"
+    with torch.device("meta"):
+        moe_model = moe_modeling.Qwen3_5MoeForCausalLM(moe_config)
+    with pytest.raises(RuntimeError, match="no curated module list for model_type"):
+        _resolve_target_modules(moe_model, explicit=(), preset="attention_and_mlp")
+
+
 def test_spec_defaults_to_auto_target_module_detection(tmp_path):
     data = tmp_path / "train.jsonl"
     data.write_text('{"text":"hello"}\n')

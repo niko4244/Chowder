@@ -97,6 +97,16 @@ _ATTENTION_AND_MLP_MODULES_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     "gemma": _ATTENTION_AND_MLP_TARGET_MODULES,
     "gemma2": _ATTENTION_AND_MLP_TARGET_MODULES,
     "qwen3_5": _QWEN3_5_TARGET_MODULES,
+    # The text-only decoder the real loader instantiates: AutoModelForCausalLM
+    # replaces the composite `qwen3_5` config with its nested text_config, so
+    # model.config.model_type is `qwen3_5_text` after loading (verified against
+    # the actual pruned-9B checkpoint; worker-result.json in
+    # F:/llm-models/_a4b/level2-transformers-v7). Without this alias the preset
+    # resolved fine for the composite type and rejected the decoder every real
+    # run actually gets. MoE variants (`qwen3_5_moe`, `qwen3_5_moe_text`) stay
+    # deliberately absent: the expert leaves are NOT this dense list, and this
+    # dense preset must not silently half-cover an MoE stack.
+    "qwen3_5_text": _QWEN3_5_TARGET_MODULES,
 }
 
 
