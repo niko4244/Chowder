@@ -24,6 +24,7 @@ import json
 import math
 import os as _os
 import re as _re
+import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -204,6 +205,152 @@ def _load_text_dataset_with_replay(dataset: Any, spec: _Spec) -> tuple[Any, int,
     return merged, replay_available_rows, replay_selected_rows
 
 
+def _saved_adapter_keys(adapter_dir: str | Path) -> set[str]:
+    """Tensor names inside an adapter directory's safetensors/bin weights.
+
+    Inlined copy of chowder.adapter_guard.saved_adapter_keys: this file must not
+    import from the chowder package (module docstring), and the parent-adapter
+    liveness check needs the saved key names to detect the total-mismatch case
+    PEFT only warns about.
+    """
+    directory = Path(adapter_dir)
+    safetensors = directory / "adapter_model.safetensors"
+    if safetensors.is_file():
+        with safetensors.open("rb") as handle:
+            length = struct.unpack("<Q", handle.read(8))[0]
+            header = json.loads(handle.read(length))
+        return {k for k in header if k != "__metadata__"}
+    legacy = directory / "adapter_model.bin"
+    if legacy.is_file():
+        # A torch pickle; only reachable when torch is already loaded anyway.
+        import torch
+
+        return set(torch.load(legacy, map_location="cpu", weights_only=True))
+    raise RuntimeError(
+        f"no adapter weights in {directory} (expected adapter_model.safetensors "
+        "or adapter_model.bin); there is no parent adapter to continue from"
+    )
+
+
+def _normalise_adapter_key(name: str) -> str:
+    """Drop the adapter-name segment so saved and live names are comparable.
+
+    Same contract as chowder.adapter_guard._normalise: live parameters carry
+    the active adapter's name (`...lora_B.default.weight`), saved tensors do
+    not (`...lora_B.weight`).
+    """
+    return name.replace(".default.", ".")
+
+
+def _adapter_liveness_report(model: Any, adapter_dir: str | Path) -> dict[str, Any]:
+    """Inlined copy of chowder.adapter_guard.adapter_liveness_report (this file
+    must not import from the chowder package -- module docstring -- while the
+    isolated-unsloth continuation path still needs the exact same three-way
+    measurement the shared guard was fixed to make on 2026-09-12). Parity is
+    pinned by tests/test_unsloth_guard_parity.py: same buckets, same refusal
+    decisions. Change the shared guard and this copy together, in one slice.
+
+    Measures whether a loaded adapter can actually change `model`: verified
+    nonzero, verified zero, and unreadable/nonfinite `lora_B` tensors are
+    counted separately, and an unreadable tensor is never evidence of liveness.
+    """
+    saved = _saved_adapter_keys(adapter_dir)
+    live_lora: dict[str, Any] = {}
+    for name, param in model.named_parameters():
+        if "lora_" in name:
+            live_lora[name] = param
+
+    normalised_live = {_normalise_adapter_key(n) for n in live_lora}
+    matched = {k for k in (_normalise_adapter_key(s) for s in saved) if k in normalised_live}
+
+    b_params = {n: p for n, p in live_lora.items() if "lora_B" in n}
+    nonzero_b = 0
+    zero_b = 0
+    unreadable_b = 0
+    unreadable_names: list[str] = []
+    for name, param in b_params.items():
+        try:
+            magnitude = float(param.detach().float().abs().max())
+        except Exception:
+            # A measurement gap is never evidence of liveness: record it, name it,
+            # and let the decision rules in _assert_parent_adapter_live decide.
+            unreadable_b += 1
+            unreadable_names.append(name)
+            continue
+        if not math.isfinite(magnitude):
+            # NaN/inf cannot certify a finite nonzero value, so a nonfinite read
+            # is an invalid measurement, not a trained adapter.
+            unreadable_b += 1
+            unreadable_names.append(name)
+        elif magnitude > 0.0:
+            nonzero_b += 1
+        else:
+            zero_b += 1
+
+    return {
+        "adapter_dir": str(adapter_dir),
+        "saved_tensors": len(saved),
+        "live_lora_parameters": len(live_lora),
+        "matched_keys": len(matched),
+        "lora_B_parameters": len(b_params),
+        "lora_B_nonzero": nonzero_b,
+        "lora_B_zero": zero_b,
+        "lora_B_unreadable": unreadable_b,
+        "lora_B_unreadable_names": unreadable_names,
+        "example_saved_key": sorted(saved)[0] if saved else None,
+        "example_live_parameter": sorted(live_lora)[0] if live_lora else None,
+    }
+
+
+def _assert_parent_adapter_live(model: Any, adapter_dir: str | Path) -> dict[str, Any]:
+    """Refuse to continue from a parent adapter that cannot change the model.
+
+    Inlined decision rules of chowder.adapter_guard.assert_adapter_is_live:
+    zero key overlap refuses first (the measured Unsloth failure mode), then a
+    wholly-unmeasured adapter refuses as evidence-incomplete -- neither live
+    nor inert -- then the verified all-zero identity refusal, which keeps this
+    worker's own "continuation would silently start from scratch" wording
+    because that is the run-level consequence here. Passing means matched keys
+    plus at least one VERIFIED nonzero B; strict per-component coverage is the
+    separate training-qualification condition, not this check.
+    """
+    report = _adapter_liveness_report(model, adapter_dir)
+
+    if report["matched_keys"] == 0:
+        raise RuntimeError(
+            f"parent adapter at {adapter_dir} shares NO parameter names with the "
+            f"loaded model: {report['saved_tensors']} saved tensors, "
+            f"{report['live_lora_parameters']} adapter parameters on the model, 0 "
+            "matched. PeftModel.from_pretrained does not fail on this -- it warns "
+            "about missing keys and leaves every LoRA B at zero, so the run would "
+            "silently start from scratch while its provenance claimed continuity.\n"
+            f"  example saved key:      {report['example_saved_key']}\n"
+            f"  example live parameter: {report['example_live_parameter']}\n"
+            "A prefix difference here usually means the adapter was trained against "
+            "a different model class than the one just loaded (e.g. a "
+            "*ForConditionalGeneration wrapper, whose decoder layers sit under "
+            "`language_model.`, versus a text-only CausalLM)."
+        )
+
+    if report["lora_B_parameters"] and report["lora_B_nonzero"] == 0:
+        if report["lora_B_unreadable"]:
+            raise RuntimeError(
+                f"parent adapter at {adapter_dir} has evidence-incomplete liveness: "
+                f"{report['lora_B_unreadable']} of {report['lora_B_parameters']} "
+                "LoRA B matrices could not be measured (unreadable storage or a "
+                "nonfinite value) and none of the rest is verified nonzero, so the "
+                "adapter can be called neither live nor inert. Refusing to continue: "
+                "unknown evidence never satisfies verified liveness.\n"
+                f"  unreadable parameters: {report['lora_B_unreadable_names']}"
+            )
+        raise RuntimeError(
+            f"parent adapter {adapter_dir} loaded but all "
+            f"{report['lora_B_parameters']} LoRA B matrices are exactly zero, so it is an "
+            "identity and this run would silently start from scratch"
+        )
+    return report
+
+
 def train(spec: _Spec) -> dict[str, Any]:
     from unsloth import FastLanguageModel
 
@@ -266,6 +413,7 @@ def train(spec: _Spec) -> dict[str, Any]:
             raise RuntimeError("tokenizer has neither pad_token nor eos_token")
         tokenizer.pad_token = tokenizer.eos_token
 
+    _parent_liveness: dict[str, Any] | None = None
     if spec.parent_adapter is not None:
         # Continuation: load the exact verified parent adapter onto the
         # Unsloth-loaded base model instead of creating a fresh LoRA adapter.
@@ -278,18 +426,14 @@ def train(spec: _Spec) -> dict[str, Any]:
         from peft import PeftModel
 
         model = PeftModel.from_pretrained(model, spec.parent_adapter, is_trainable=True)
-        # Same guard as chowder.adapter_guard, inlined: this file must not
-        # import from the chowder package (see the module docstring), and a
-        # parent adapter that silently fails to load would turn a "continued"
-        # run into a fresh one while provenance claimed continuity. PEFT only
-        # warns on a total key mismatch and leaves every LoRA B at zero.
-        _b = [q for n, q in model.named_parameters() if "lora_B" in n]
-        if _b and not any(float(q.detach().float().abs().max()) > 0.0 for q in _b):
-            raise RuntimeError(
-                f"parent adapter {spec.parent_adapter} loaded but all "
-                f"{len(_b)} LoRA B matrices are exactly zero, so it is an "
-                "identity and this run would silently start from scratch"
-            )
+        # Inlined parity guard (see _assert_parent_adapter_live above): this file
+        # must not import from the chowder package (module docstring), and the
+        # decision rules must match chowder.adapter_guard.assert_adapter_is_live
+        # exactly -- parity pinned by tests/test_unsloth_guard_parity.py. A parent
+        # adapter that silently fails to load would turn a "continued" run into a
+        # fresh one while provenance claimed continuity; PEFT only warns on a
+        # total key mismatch and leaves every LoRA B at zero.
+        _parent_liveness = _assert_parent_adapter_live(model, spec.parent_adapter)
     else:
         # Hand Unsloth a REGEX, not a list. Given a list, Unsloth rewrites it
         # through get_peft_regex, whose component block is
@@ -510,6 +654,7 @@ def train(spec: _Spec) -> dict[str, Any]:
             "requested_revision": spec.revision,
             "continued_from_parent_adapter": spec.parent_adapter is not None,
             "parent_adapter_sha256": spec.parent_adapter_sha256,
+            "parent_adapter_liveness": _parent_liveness,
         },
         "versions": {
             "unsloth": _package_version("unsloth"),
