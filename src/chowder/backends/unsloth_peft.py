@@ -828,6 +828,9 @@ class UnslothPeftExecutor:
                 # into the evaluator's AutoModelForCausalLM -- the liveness guard
                 # will refuse it, and this is the explanation.
                 "text_only_requested": worker_result.get("text_only_requested"),
+                # Non-zero means progress publishing kept failing; training
+                # still completed, because telemetry is never fatal.
+                "progress_write_failures": worker_result.get("progress_write_failures"),
                 "resource_usage": {
                     "wall_seconds": usage.wall_seconds,
                     "accelerator_seconds": usage.accelerator_seconds,

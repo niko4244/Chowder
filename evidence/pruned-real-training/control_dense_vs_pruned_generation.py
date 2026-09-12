@@ -18,17 +18,28 @@ EVAL = Path(r"F:\llm-models\_a4b\gsm8k_test_50.jsonl")
 N = 8
 MAX_NEW = 768
 
-def repetition_ratio(text: str) -> float:
-    """Share of generated lines that are exact duplicates of an earlier line."""
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    if len(lines) < 2:
-        return 0.0
-    seen, dupes = set(), 0
-    for l in lines:
-        if l in seen:
-            dupes += 1
-        seen.add(l)
-    return dupes / len(lines)
+def degeneration(text: str) -> dict:
+    """Line-AGNOSTIC degeneration, because the line-based version undercounted.
+
+    A duplicate-LINE ratio was tried first and missed the dominant failure mode: the
+    baseline's "least degenerate" response scored 0.00 on it while actually being one
+    unbroken line repeating "200 / 20 = 200 / 20 = ..." to the token cap. On the real
+    50-problem baseline the line metric flagged 41/50; these two flag 48/50, and even
+    the two they spare cycle forever with only surface variety from line numbering.
+
+    Two independent measures on purpose -- trusting a single proxy is what went wrong.
+    """
+    words = text.split()
+    if len(words) >= 4:
+        grams = [" ".join(words[i:i + 3]) for i in range(len(words) - 2)]
+        distinct = len(set(grams)) / len(grams)
+    else:
+        distinct = 1.0
+    raw = text.encode("utf-8", "replace")
+    compression = len(zlib.compress(raw, 9)) / max(len(raw), 1)
+    # thresholds from the measured baseline, whose medians were 0.079 and 0.080
+    return {"distinct_trigram_ratio": distinct, "compression_ratio": compression,
+            "degenerate": bool(distinct < 0.25 or compression < 0.15)}
 
 def main() -> int:
     import torch
@@ -55,12 +66,14 @@ def main() -> int:
                                      pad_token_id=tok.pad_token_id or tok.eos_token_id)
             text = tok.decode(gen[0][enc["input_ids"].shape[-1]:], skip_special_tokens=True)
             scores.append(_score(text, r["expected"], "final_number_match"))
-            reps.append(repetition_ratio(text))
+            reps.append(degeneration(text))
             lens.append(int(gen.shape[-1] - enc["input_ids"].shape[-1]))
         out[label] = {
             "n": len(rows),
             "gsm8k_final_number_match": sum(scores) / len(scores),
-            "mean_duplicate_line_ratio": sum(reps) / len(reps),
+            "mean_distinct_trigram_ratio": sum(d["distinct_trigram_ratio"] for d in reps) / len(reps),
+            "mean_compression_ratio": sum(d["compression_ratio"] for d in reps) / len(reps),
+            "degenerate_count": sum(1 for d in reps if d["degenerate"]),
             "mean_generated_tokens": sum(lens) / len(lens),
             "hit_token_cap_fraction": sum(1 for x in lens if x >= MAX_NEW) / len(lens),
             "seconds": round(time.time() - t0, 1),
@@ -73,11 +86,11 @@ def main() -> int:
 
     print("\nCONTROL VERDICT")
     d, p = out["dense"], out["pruned"]
-    print(f"  dense  GSM8K {d['gsm8k_final_number_match']:.3f}  dup-lines {d['mean_duplicate_line_ratio']:.3f}  cap-hit {d['hit_token_cap_fraction']:.2f}")
-    print(f"  pruned GSM8K {p['gsm8k_final_number_match']:.3f}  dup-lines {p['mean_duplicate_line_ratio']:.3f}  cap-hit {p['hit_token_cap_fraction']:.2f}")
-    if d["gsm8k_final_number_match"] > p["gsm8k_final_number_match"] and d["mean_duplicate_line_ratio"] < p["mean_duplicate_line_ratio"]:
+    print(f"  dense  GSM8K {d['gsm8k_final_number_match']:.3f}  degen {d['degenerate_count']}/{d['n']}  cap-hit {d['hit_token_cap_fraction']:.2f}")
+    print(f"  pruned GSM8K {p['gsm8k_final_number_match']:.3f}  degen {p['degenerate_count']}/{p['n']}  cap-hit {p['hit_token_cap_fraction']:.2f}")
+    if d["gsm8k_final_number_match"] > p["gsm8k_final_number_match"] and d["degenerate_count"] < p["degenerate_count"]:
         print("  => the harness is fine; PRUNING caused the degeneration")
-    elif d["mean_duplicate_line_ratio"] > 0.3:
+    elif d["degenerate_count"] >= len(rows) - 1:
         print("  => the DENSE model loops too: the prompt/harness is implicated, not pruning")
     else:
         print("  => mixed; neither explanation is clean")

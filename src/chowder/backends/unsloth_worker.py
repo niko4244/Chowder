@@ -22,6 +22,7 @@ import argparse
 import hashlib
 import json
 import math
+import os as _os
 import re as _re
 import time
 from dataclasses import dataclass
@@ -383,6 +384,10 @@ def train(spec: _Spec) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     progress_path = output_dir / "progress.json"
     started = time.perf_counter()
+    # A list, not an int, so the callback closure can mutate it. Counted and
+    # reported rather than swallowed: a path that is ALWAYS unwritable is a real
+    # problem worth seeing, just not one worth destroying a training run over.
+    progress_failures: list[int] = []
 
     class _ProgressReportingCallback(TrainerCallback):
         def on_log(self, args, state, control, logs=None, **kwargs):
@@ -396,9 +401,24 @@ def train(spec: _Spec) -> dict[str, Any]:
                 "learning_rate": logs.get("learning_rate"),
                 "wall_seconds": time.perf_counter() - started,
             }
+            # Best-effort, inlined because this file must not import from the
+            # chowder package (see the module docstring); the canonical copy is
+            # chowder.progress_write. Publishing progress must never kill training:
+            # this exact rename failed with WinError 5 at step 323/500 and threw
+            # away 16 minutes of a real run, with the payload already written.
             tmp_path = progress_path.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(payload), encoding="utf-8")
-            tmp_path.replace(progress_path)
+            for _attempt in range(3):
+                try:
+                    tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+                    _os.replace(tmp_path, progress_path)
+                    break
+                except OSError:
+                    if _attempt < 2:
+                        time.sleep(0.05)
+                except Exception:
+                    break
+            else:
+                progress_failures.append(1)
 
     args_kwargs: dict[str, Any] = {
         "output_dir": str(output_dir / "trainer"),
@@ -461,6 +481,7 @@ def train(spec: _Spec) -> dict[str, Any]:
         # Unsloth build predates the parameter, and an adapter trained on a
         # VLM-wrapped model will not load into Chowder's evaluator.
         "text_only_requested": text_only_supported,
+        "progress_write_failures": len(progress_failures),
         "resource_usage": {
             "active_accelerator_count": active_count,
             "visible_accelerator_count": active_count,

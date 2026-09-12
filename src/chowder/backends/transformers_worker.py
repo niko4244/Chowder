@@ -10,6 +10,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from ..progress_write import write_progress_best_effort
 from ..target_coverage import adapted_modules_by_leaf
 from ..adapter_guard import assert_adapter_is_live
 from ..hf_resilience import cache_status, with_hub_retries
@@ -191,6 +192,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         def __init__(self, progress_path: Path, started: float) -> None:
             self._progress_path = progress_path
             self._started = started
+            self._progress_write_failures = 0
 
         def on_log(self, args, state, control, logs=None, **kwargs):
             # Trainer also calls on_log once more at the very end of
@@ -211,10 +213,12 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
                 "learning_rate": logs.get("learning_rate"),
                 "wall_seconds": time.perf_counter() - self._started,
             }
-            tmp_path = self._progress_path.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(payload), encoding="utf-8")
-            tmp_path.replace(self._progress_path)  # atomic on POSIX/NTFS, so a
-            # concurrent poller in the main process never reads a half-written file.
+            # Best-effort: the rename is atomic WHEN IT SUCCEEDS, so a concurrent
+            # poller never sees a half-written file -- but it can still fail with a
+            # sharing violation on Windows, and an exception raised here propagates
+            # out of Trainer.train() and destroys the run. One did, at step 323/500.
+            if not write_progress_best_effort(payload, self._progress_path):
+                self._progress_write_failures += 1
 
     class _FrozenLayerStreamingCallback(TrainerCallback):
         """Kicks off each step's frozen-layer prefetch right before that
