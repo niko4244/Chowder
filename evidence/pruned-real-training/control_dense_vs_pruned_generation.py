@@ -11,6 +11,7 @@ same settings, same scorer -- only the weights differ.
 """
 import json, sys, time
 from pathlib import Path
+import zlib
 sys.path.insert(0, r"C:\Users\nikma\Chowder-router-healing\src")
 DENSE = r"F:\llm-models\Qwen3.8-9B-abliterated-25-bf16"
 PRUNED = r"F:\llm-models\Qwen3.8-9B-Pruned-CW-3456"

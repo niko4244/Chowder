@@ -1,5 +1,30 @@
 # Hot-core MoE vs static pruning at equal active compute — the conclusion
 
+> **WITHDRAWN AS A DEPLOYABLE RECOMMENDATION (2026-09-11).** A paired control on the
+> real models — same 8 GSM8K prompts, same settings, same scorer, same nf4 load, only
+> the weights differing — shows the pruned checkpoint **degenerates on 8/8 prompts**
+> and hits the 768-token cap every time, while the dense parent degenerates on 1/8 and
+> terminates 62.5% of the time:
+>
+> | | dense | pruned (f=0.28) |
+> |---|---:|---:|
+> | GSM8K (`final_number_match`) | **0.375** | 0.125 |
+> | distinct-trigram ratio | 0.641 | **0.094** |
+> | compression ratio | 0.344 | **0.084** |
+> | degenerate | 1/8 | **8/8** |
+> | hit the token cap | 37.5% | **100%** |
+>
+> **Pruning is the cause, not the harness.** The pruned 0.125 is itself an artifact —
+> `final_number_match` takes the last number, and a degenerate loop sometimes ends on
+> the right one. Everything below remains correct **as perplexity**; perplexity simply
+> does not predict whether a checkpoint can terminate. See
+> `PRUNED_9B_REAL_TRAINING_RESULT.md`.
+>
+> Two limits on how far this generalises: the MoE checkpoint has **not** been measured
+> for degeneration, so "static pruning beats the hot-core MoE" stays a perplexity
+> claim and neither artifact has been shown usable; and f=0.28 is the only fraction
+> tested this way — f=0.56 cost just 1.14× perplexity and is untested for generation.
+
 Evidence: `evidence/hot-core-upcycling/reconvert-corpuswide.json`,
 `corpus-wide-ranking.json`, `static-prune-evalb.json`, `pilot-result.json`.
 Design held identical across both checkpoints (E=16, `top_k`=2, core 2176, cold

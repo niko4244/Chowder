@@ -106,11 +106,35 @@ What remains genuinely unresolved is *cause*: pruning, or something shared by bo
 checkpoints (prompt format, chat template, generation config). The corrected control
 answers that and has not been run.
 
+## The control ran: pruning is the cause
+
+Same 8 prompts, same settings, same scorer, same nf4 load; only the weights differ.
+
+| | dense | pruned |
+|---|---:|---:|
+| GSM8K (`final_number_match`) | **0.375** (3/8) | 0.125 (1/8) |
+| mean distinct-trigram ratio | 0.641 | **0.094** |
+| mean compression ratio | 0.344 | **0.084** |
+| degenerate | 1/8 | **8/8** |
+| mean generated tokens | 492.6 | **768.0** |
+| hit the 768-token cap | 37.5% | **100%** |
+| wall seconds | 465 | 1009 |
+
+The dense parent reasons, answers 3 of 8, and terminates on most prompts. The pruned
+checkpoint degenerates on every prompt and never terminates. **The harness is
+exonerated and pruning is the cause.**
+
+Note the pruned 0.125 is not capability: it is one degenerate loop that happened to
+end on the correct number, which is the `final_number_match` weakness recorded above.
+
+Two limits on the conclusion, stated rather than glossed: **n=8**, so these rates are
+coarse; and **the MoE checkpoint was never measured for degeneration**, so "static
+pruning beats the hot-core MoE" remains a perplexity claim — neither artifact has been
+shown usable for generation.
+
 ## Next, in order
 
-1. **Run the corrected control** — dense vs pruned, same prompts, same settings, now
-   with line-agnostic degeneration. If the dense parent also degenerates, the finding
-   is about the harness, not pruning.
+1. ~~Run the corrected control.~~ **Done — see above.** Pruning is the cause.
 2. **Unify the two scorers.** The base worker's stricter rule is the correct one: an
    unclosed `<think>` means no answer was produced, which is incorrect — not "extract
    whatever number is lying around." Add a test that both workers agree on a shared
