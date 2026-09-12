@@ -11,6 +11,7 @@ from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
 from .generation import resolve_eos_token_ids
 from .scoring import final_answer, final_number, normalize, score
+from .vram import peak_vram as _peak_vram
 from .transformers_text import EvalSuiteSpec, TransformersTextEvalSpec
 
 
@@ -219,6 +220,14 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         "runtime": {
             "device": device_name,
             "gpu_count": 1 if device_name.startswith("cuda") else 0,
+            # The training workers have always reported this; the evaluators did
+            # not, and a pre-registered "peak VRAM under budget" condition was
+            # therefore undecidable for the evaluation leg. Judging it from
+            # nvidia-smi instead measures the whole MACHINE -- every browser and
+            # service on it -- and that is what produced a spurious
+            # oversubscription FAIL (docs/PRUNED_9B_RERUN_RESULT.md). A run must be
+            # able to answer "how much VRAM did *I* use" from its own artifacts.
+            **_peak_vram(device_name),
         },
         "model_provenance": {
             "requested_base_model": spec.base_model,

@@ -11,6 +11,7 @@ from ..hf_resilience import cache_status, with_hub_retries
 from .base_text import BaseTextEvalSpec
 from .generation import resolve_eos_token_ids
 from .scoring import final_answer, final_number, normalize, score
+from .vram import peak_vram as _peak_vram
 from chowder.canonical_chat_template import render_canonical
 from .transformers_text import EvalSuiteSpec
 
@@ -218,6 +219,10 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
         "runtime": {
             "device": device_name,
             "gpu_count": 1 if device_name.startswith("cuda") else 0,
+            # See transformers_text_worker: both evaluation arms must report their
+            # own footprint, or a baseline-vs-candidate VRAM comparison is not
+            # possible from run artifacts.
+            **_peak_vram(device_name),
         },
         "model_provenance": {
             "requested_base_model": spec.base_model,

@@ -1,0 +1,161 @@
+{
+  "samples": [
+    {
+      "t": 1789220867.1470945,
+      "mem_get_info_free_gib": 9.021484375,
+      "nvidia_smi_free_gib": 9.3837890625,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220872.2295034,
+      "mem_get_info_free_gib": 9.009765625,
+      "nvidia_smi_free_gib": 9.3720703125,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220877.3143077,
+      "mem_get_info_free_gib": 9.009765625,
+      "nvidia_smi_free_gib": 9.3720703125,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220882.3981106,
+      "mem_get_info_free_gib": 9.009765625,
+      "nvidia_smi_free_gib": 9.3349609375,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220887.4926226,
+      "mem_get_info_free_gib": 9.009765625,
+      "nvidia_smi_free_gib": 9.361328125,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220892.5792086,
+      "mem_get_info_free_gib": 9.009765625,
+      "nvidia_smi_free_gib": 9.3642578125,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220897.644504,
+      "mem_get_info_free_gib": 9.009765625,
+      "nvidia_smi_free_gib": 9.3740234375,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220902.7646306,
+      "mem_get_info_free_gib": 9.009765625,
+      "nvidia_smi_free_gib": 9.3603515625,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220907.8750541,
+      "mem_get_info_free_gib": 9.009765625,
+      "nvidia_smi_free_gib": 9.373046875,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220912.957285,
+      "mem_get_info_free_gib": 9.009765625,
+      "nvidia_smi_free_gib": 9.3779296875,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220918.0310502,
+      "mem_get_info_free_gib": 9.009765625,
+      "nvidia_smi_free_gib": 9.373046875,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220923.115078,
+      "mem_get_info_free_gib": 9.009765625,
+      "nvidia_smi_free_gib": 9.3798828125,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220928.2078986,
+      "mem_get_info_free_gib": 9.009765625,
+      "nvidia_smi_free_gib": 9.3798828125,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220933.2976847,
+      "mem_get_info_free_gib": 9.009765625,
+      "nvidia_smi_free_gib": 9.3798828125,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220938.3764627,
+      "mem_get_info_free_gib": 9.009765625,
+      "nvidia_smi_free_gib": 9.3623046875,
+      "torch_reserved_gib": 5.76953125
+    },
+    {
+      "t": 1789220943.464701,
+      "mem_get_info_free_gib": 8.990234375,
+      "nvidia_smi_free_gib": 9.3427734375,
+      "torch_reserved_gib": 5.7890625
+    },
+    {
+      "t": 1789220948.5258067,
+      "mem_get_info_free_gib": 8.990234375,
+      "nvidia_smi_free_gib": 9.3408203125,
+      "torch_reserved_gib": 5.7890625
+    },
+    {
+      "t": 1789220953.6203947,
+      "mem_get_info_free_gib": 8.990234375,
+      "nvidia_smi_free_gib": 9.3525390625,
+      "torch_reserved_gib": 5.7890625
+    },
+    {
+      "t": 1789220958.7070417,
+      "mem_get_info_free_gib": 8.990234375,
+      "nvidia_smi_free_gib": 9.345703125,
+      "torch_reserved_gib": 5.7890625
+    },
+    {
+      "t": 1789220963.7996073,
+      "mem_get_info_free_gib": 8.990234375,
+      "nvidia_smi_free_gib": 9.349609375,
+      "torch_reserved_gib": 5.7890625
+    },
+    {
+      "t": 1789220968.875146,
+      "mem_get_info_free_gib": 8.978515625,
+      "nvidia_smi_free_gib": 9.328125,
+      "torch_reserved_gib": 5.80078125
+    },
+    {
+      "t": 1789220973.963299,
+      "mem_get_info_free_gib": 8.978515625,
+      "nvidia_smi_free_gib": 9.330078125,
+      "torch_reserved_gib": 5.80078125
+    },
+    {
+      "t": 1789220979.0425549,
+      "mem_get_info_free_gib": 8.978515625,
+      "nvidia_smi_free_gib": 9.33984375,
+      "torch_reserved_gib": 5.80078125
+    },
+    {
+      "t": 1789220984.1344373,
+      "mem_get_info_free_gib": 8.978515625,
+      "nvidia_smi_free_gib": 9.33984375,
+      "torch_reserved_gib": 5.80078125
+    },
+    {
+      "t": 1789220989.2269478,
+      "mem_get_info_free_gib": 8.978515625,
+      "nvidia_smi_free_gib": 9.3359375,
+      "torch_reserved_gib": 5.80078125
+    },
+    {
+      "t": 1789220994.3178108,
+      "mem_get_info_free_gib": 8.978515625,
+      "nvidia_smi_free_gib": 9.3359375,
+      "torch_reserved_gib": 5.80078125
+    }
+  ],
+  "verdict": "INSTRUMENTS AGREE: the earlier 0.56 GiB reading is not an instrument artifact"
+}
