@@ -319,7 +319,14 @@ def train(spec: _Spec) -> dict[str, Any]:
     # model, rather than assuming a preset -- recorded in evidence so a
     # config that silently matched zero real modules is visible, not silent.
     # Populated identically by get_peft_model and PeftModel.from_pretrained.
-    resolved_target_modules = sorted(model.peft_config[model.active_adapter].target_modules)
+    # PEFT keeps target_modules as a STRING when the spec is a regex, and sorting a
+    # string shreds it into characters -- which is what this recorded for the GSM8K
+    # run that used a suffix-match regex to reach 200/200 coverage. Provenance that
+    # looks like data but is a sorted character list is worse than none.
+    _resolved = model.peft_config[model.active_adapter].target_modules
+    resolved_target_modules = (
+        _resolved if isinstance(_resolved, str) else sorted(_resolved)
+    )
     # Counted the same way chowder.target_coverage does, inlined because this
     # file must not import from the chowder package (see the module docstring).
     # Keys off ".lora_A" so the adapter name does not matter. The controller

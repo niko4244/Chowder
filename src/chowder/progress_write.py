@@ -13,9 +13,11 @@ It happened, and it cost a real run: a 500-step GSM8K training job died at **ste
 
 The forensic evidence is unambiguous about where the fault was. Both files
 survived: `progress.json` held step 322 (loss 1.1002) and `progress.tmp` held step
-323 (loss 1.0737). The payload was written correctly; only the rename failed. Loss
-was falling steadily from ~4.8, the adapter directory was left empty, and 323 steps
-of real training were discarded because a *telemetry* write raised.
+323 (loss 1.0737). The payload was written correctly; only the rename failed. The
+adapter directory was left empty, and 323 steps of real training were discarded
+because a *telemetry* write raised. A re-run under the same config reached 1.0750 at
+step 323 -- 0.1% from the recovered value, so training really was progressing
+normally when the rename refused.
 
 `transformers_worker` carried the same pattern with a comment asserting the rename
 is "atomic on POSIX/NTFS". That is true of the *semantics* when it succeeds, and

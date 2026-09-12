@@ -447,7 +447,12 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         )
         model = get_peft_model(base_model, lora_config)
 
-    resolved_target_modules = sorted(model.peft_config[model.active_adapter].target_modules)
+    # A regex target spec stays a STRING in peft_config, and sorting a string shreds
+    # it into characters. See unsloth_worker for the run this corrupted.
+    _resolved = model.peft_config[model.active_adapter].target_modules
+    resolved_target_modules = (
+        _resolved if isinstance(_resolved, str) else sorted(_resolved)
+    )
     # What was actually ADAPTED, not what was configured: PEFT matches by suffix
     # and silently adapts only the subset that matches. The controller turns this
     # into a coverage verdict against the requested list.

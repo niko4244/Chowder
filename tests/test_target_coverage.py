@@ -194,3 +194,28 @@ def test_the_unsloth_worker_inlines_the_same_pattern():
     text = src.read_text(encoding="utf-8")
     assert r'r"(?:.*\.)?(?:"' in text, "worker no longer builds the suffix-match regex"
     assert "get_peft_regex" in text, "the reason for the regex should stay documented"
+
+
+def test_neither_worker_sorts_a_regex_target_spec_into_characters() -> None:
+    """`resolved_target_modules` is provenance, and PEFT keeps target_modules as a
+    STRING when the spec is a regex. `sorted()` on a string returns its characters,
+    so the GSM8K run that used a suffix-match regex to reach 200/200 coverage
+    recorded its target spec as a sorted list of 99 characters -- data-shaped
+    nonsense that cannot be compared against a later run or audited at all.
+
+    Guarded by source because both workers read it off a live PeftModel, and
+    unsloth_worker may not import from the chowder package.
+    """
+    from pathlib import Path
+
+    import chowder
+
+    backends = Path(chowder.__file__).resolve().parent / "backends"
+    for name in ("unsloth_worker.py", "transformers_worker.py"):
+        text = (backends / name).read_text(encoding="utf-8")
+        assert "sorted(model.peft_config[model.active_adapter].target_modules)" not in text, (
+            f"{name} sorts target_modules unconditionally; a regex spec becomes characters"
+        )
+        assert "isinstance(_resolved, str)" in text, (
+            f"{name} no longer preserves a string target spec"
+        )

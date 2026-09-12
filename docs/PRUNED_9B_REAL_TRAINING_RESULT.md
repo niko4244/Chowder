@@ -37,8 +37,22 @@ settle where the fault was:
 | `progress.tmp` (rename refused) | 323 | **1.0737** | 981.9 s |
 
 The payload was written correctly; only the rename failed. **Training was working**:
-loss falling steadily from ~4.8 to 1.07, 3.04 s/step. The adapter directory was left
+loss had reached 1.07 by step 323 at 3.04 s/step. The adapter directory was left
 empty, so 323 steps of real training were discarded.
+
+> **Correction (2026-09-12).** This paragraph and the bullet below originally said
+> loss fell "from ~4.8". That figure was never measured on this run. The driver
+> crashed on printing `CANDIDATE ERROR` through a cp1252 console *before* reaching
+> its loss-trajectory print, so `realtrain4.log` contains no trajectory at all, and
+> `progress.json` was overwritten every step so only 322 and 323 survived. The
+> 4.8354 came from the **level-2 invented-facts runs** — a different task, 20 items,
+> 50 steps — and I carried it across. What is actually supported for this run is
+> steps 322 (1.1002) and 323 (1.0737) and nothing earlier.
+>
+> The re-run under the same config puts the start at **2.8503** (step 1) and reaches
+> **1.0750** at step 323, against this run's 1.0737 — agreement to ~0.1% at the same
+> step, which is independent evidence the recovered progress files were read
+> correctly. Treat 2.85 as the re-run's measurement, not a retrofit of this one.
 
 `transformers_worker.py` carried the identical pattern, with a comment asserting the
 rename is "atomic on POSIX/NTFS" — true of the semantics when it succeeds, silent on
@@ -61,7 +75,8 @@ either worker goes back to an unguarded rename.
   the entire failure after my driver also crashed (on printing the error, through a
   cp1252 console — a second, separate encoding bug of mine).
 * Training on a real corpus works at this scale: 7,473 GSM8K rows, 1024-token
-  sequences, 3.04 s/step, loss 4.8 → 1.07 over 323 steps.
+  sequences, 3.04 s/step, loss down to 1.07 by step 323 (see the correction above:
+  the starting value was not recorded for this run).
 * **The budget did not refuse.** Baseline ~1.2 h + training 0.27 h = ~1.47 h of the
   2.0 h allowance. The risk was correctly identified in review before the run; it
   simply did not materialise.
