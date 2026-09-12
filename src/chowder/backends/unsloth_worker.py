@@ -67,6 +67,9 @@ class _Spec:
     epochs: float
     max_steps: int
     learning_rate: float
+    lr_scheduler_type: str
+    warmup_ratio: float
+    warmup_steps: int
     batch_size: int
     gradient_accumulation_steps: int
     logging_steps: int
@@ -427,6 +430,12 @@ def train(spec: _Spec) -> dict[str, Any]:
         "per_device_train_batch_size": spec.batch_size,
         "gradient_accumulation_steps": spec.gradient_accumulation_steps,
         "learning_rate": spec.learning_rate,
+        # These three were absent until 2026-09-11, so every Unsloth run silently
+        # got the trainer's default linear schedule no matter what the recipe asked
+        # for -- including a pre-registered run that specified cosine.
+        "lr_scheduler_type": spec.lr_scheduler_type,
+        "warmup_ratio": spec.warmup_ratio,
+        "warmup_steps": spec.warmup_steps,
         "logging_steps": spec.logging_steps,
         "save_strategy": spec.save_strategy,
         "report_to": "none",
@@ -528,6 +537,9 @@ def main() -> int:
         epochs=float(raw.get("epochs", 1.0)),
         max_steps=int(raw.get("max_steps", -1)),
         learning_rate=float(raw.get("learning_rate", 2e-4)),
+        lr_scheduler_type=str(raw.get("lr_scheduler_type", "linear")),
+        warmup_ratio=float(raw.get("warmup_ratio", 0.0)),
+        warmup_steps=int(raw.get("warmup_steps", 0)),
         batch_size=int(raw.get("batch_size", 1)),
         gradient_accumulation_steps=int(raw.get("gradient_accumulation_steps", 4)),
         logging_steps=int(raw.get("logging_steps", 10)),

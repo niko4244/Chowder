@@ -86,9 +86,9 @@ def build_project(work: Path, engine: str) -> Path:
     import shutil
     shutil.copyfile(TRAIN, work / "train.jsonl")
     shutil.copyfile(EVAL, work / "eval.jsonl")
-    (work / "eval.jsonl").write_text("".join(
-        json.dumps({"prompt": f"Q: Which letter is assigned to {s}? A:", "expected": w}) + "\n"
-        for s, w in facts), encoding="utf-8")
+    train_rows = sum(1 for _ in (work / "train.jsonl").open(encoding="utf-8"))
+    eval_rows = sum(1 for _ in (work / "eval.jsonl").open(encoding="utf-8"))
+    log(f"data: {train_rows} train rows, {eval_rows} eval problems")
 
     backend = {
         "schema_version": 1,
@@ -112,6 +112,7 @@ def build_project(work: Path, engine: str) -> Path:
             "epochs": 1.0,
             "max_steps": 500,
             "learning_rate": 2e-4,
+            "lr_scheduler_type": "cosine",
             "batch_size": 1,
             "gradient_accumulation_steps": 4,
             "logging_steps": 1,
@@ -134,7 +135,7 @@ def build_project(work: Path, engine: str) -> Path:
         "goal": {
             "metrics": [{"name": "gsm8k", "minimum": 0.0, "direction": "maximize",
                          "regression_tolerance": 1.0}],
-            "gpu_hour_budget": 2.0,
+            "gpu_hour_budget": 4.5,
             "max_parallel_candidates": 1,
             "minimum_promotion_gain": 0.02,
             "require_protocol_match": True,
@@ -142,7 +143,7 @@ def build_project(work: Path, engine: str) -> Path:
         "baseline": {"mode": "auto"},
         "experiment": {
             "experiment_id": f"realtrain-{engine}",
-            "estimated_gpu_hours": 0.5,
+            "estimated_gpu_hours": 0.45,
             "hypothesis": {
                 "observation": "pruning cost the model arithmetic ability",
                 "suspected_cause": "3,456 of 12,288 FFN channels were deleted",
@@ -157,7 +158,7 @@ def build_project(work: Path, engine: str) -> Path:
             "backend": backend,
             "evaluation": {
                 "type": "transformers-text",
-                "estimated_gpu_hours": 0.1,
+                "estimated_gpu_hours": 1.8,
                 "precision": "bf16",
                 "quantization": "4bit",
                 "device": "cuda",

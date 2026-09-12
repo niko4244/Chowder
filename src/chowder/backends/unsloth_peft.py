@@ -20,6 +20,7 @@ from ..provenance import sha256_directory, sha256_file
 from ..resources import ResourceUsage
 from ..run_events import TrainingProgressEvent
 from ..unsloth_env import unsloth_env_dir, unsloth_python
+from .transformers_peft import _ALLOWED_LR_SCHEDULER_TYPES
 from .training_data import (
     _build_chat_example,
     _chat_digest,
@@ -93,6 +94,15 @@ class UnslothPeftRunSpec:
     epochs: float = 1.0
     max_steps: int = -1
     learning_rate: float = 2e-4
+    #: The Unsloth worker silently ignored all three of these until 2026-09-11: the
+    #: shared spec validated `lr_scheduler_type` and `transformers_worker` honoured
+    #: it, but the Unsloth worker never read it, so a recipe asking for cosine got
+    #: the trainer's default linear and said nothing. A pre-registered run
+    #: (docs/PRUNED_9B_REAL_TRAINING_PREREG.md, "lr 2e-4 cosine") was trained on the
+    #: wrong schedule because of it.
+    lr_scheduler_type: str = "linear"
+    warmup_ratio: float = 0.0
+    warmup_steps: int = 0
     batch_size: int = 1
     gradient_accumulation_steps: int = 4
     logging_steps: int = 10
@@ -155,6 +165,12 @@ class UnslothPeftRunSpec:
             raise ValueError("backend.max_length must be positive")
         if self.epochs <= 0 or self.learning_rate <= 0:
             raise ValueError("training epochs and learning_rate must be positive")
+        if self.lr_scheduler_type not in _ALLOWED_LR_SCHEDULER_TYPES:
+            raise ValueError(f"unsupported lr_scheduler_type: {self.lr_scheduler_type}")
+        if not math.isfinite(self.warmup_ratio) or not 0 <= self.warmup_ratio < 1:
+            raise ValueError("warmup_ratio must be finite and in [0, 1)")
+        if self.warmup_steps < 0:
+            raise ValueError("warmup_steps cannot be negative")
         if self.max_steps != -1 and self.max_steps <= 0:
             raise ValueError("max_steps must be -1 (disabled) or a positive integer")
         if self.batch_size <= 0 or self.gradient_accumulation_steps <= 0:
@@ -276,6 +292,9 @@ class UnslothPeftRunSpec:
             epochs=float(training.get("epochs", 1.0)),
             max_steps=int(training.get("max_steps", -1)),
             learning_rate=float(training.get("learning_rate", 2e-4)),
+            lr_scheduler_type=str(training.get("lr_scheduler_type", "linear")),
+            warmup_ratio=float(training.get("warmup_ratio", 0.0)),
+            warmup_steps=int(training.get("warmup_steps", 0)),
             batch_size=int(training.get("batch_size", 1)),
             gradient_accumulation_steps=int(training.get("gradient_accumulation_steps", 4)),
             logging_steps=int(training.get("logging_steps", 10)),
