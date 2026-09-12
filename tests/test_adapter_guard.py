@@ -140,25 +140,101 @@ def test_report_records_what_it_measured_for_provenance(tmp_path):
     assert Path(report["adapter_dir"]).name == "ok"
 
 
-def test_unreadable_weights_do_not_fail_closed(tmp_path):
-    """A measurement gap must not be reported as a dead adapter: if a B matrix
-    cannot be read (quantised or exotic storage) the guard counts it as live and
-    lets the key-overlap check carry the decision."""
+def test_unreadable_b_cannot_qualify_as_live(tmp_path):
+    """The 2026-09-12 audit defect: the guard's exception branch used to count an
+    unreadable B as nonzero, so an adapter with one matched key and unreadable
+    storage returned success with `verified_readable_B_matrices=0,
+    reported_nonzero=1`. Unknown must never satisfy verified liveness: refused
+    as evidence-incomplete, which is neither live nor inert.
+    """
 
-    class _Opaque(_Tensor):
-        def max(self):
-            raise RuntimeError("unreadable storage")
+    class _Unreadable(_Tensor):
+        def detach(self):
+            raise RuntimeError("unreadable test tensor")
 
     class _M:
         def named_parameters(self):
             return [
                 ("base_model.model.model.layers.0.linear_attn.in_proj_qkv.lora_A.default.weight", _Tensor(0.1)),
-                ("base_model.model.model.layers.0.linear_attn.in_proj_qkv.lora_B.default.weight", _Opaque(0.0)),
+                ("base_model.model.model.layers.0.linear_attn.in_proj_qkv.lora_B.default.weight", _Unreadable(0.0)),
             ]
 
     d = _write_adapter(tmp_path / "opaque", _TRANSFORMERS_KEYS)
-    report = assert_adapter_is_live(_M(), d)
+    with pytest.raises(AdapterNotLiveError, match="unreadable|incomplete"):
+        assert_adapter_is_live(_M(), d)
+
+
+def test_report_separates_verified_zero_nonzero_and_unreadable(tmp_path):
+    """The report must distinguish measured states instead of collapsing them
+    into one 'nonzero' number: verified nonzero, verified zero, unreadable
+    (raising storage) and nonfinite (NaN) each land in their own bucket, with
+    the offending parameter names preserved for the audit trail.
+    """
+
+    class _Unreadable(_Tensor):
+        def max(self):
+            raise RuntimeError("unreadable storage")
+
+    base = "base_model.model.model.layers.0.linear_attn.in_proj_qkv"
+
+    class _MixedModel:
+        def named_parameters(self):
+            return [
+                (f"{base}.0.lora_A.default.weight", _Tensor(0.03)),
+                (f"{base}.0.lora_B.default.weight", _Tensor(0.07)),  # verified nonzero
+                (f"{base}.1.lora_A.default.weight", _Tensor(0.03)),
+                (f"{base}.1.lora_B.default.weight", _Tensor(0.0)),  # verified zero
+                (f"{base}.2.lora_A.default.weight", _Tensor(0.03)),
+                (f"{base}.2.lora_B.default.weight", _Unreadable(0.0)),  # unreadable
+                (f"{base}.3.lora_A.default.weight", _Tensor(0.03)),
+                (f"{base}.3.lora_B.default.weight", _Tensor(float("nan"))),  # nonfinite
+            ]
+
+    d = _write_adapter(tmp_path / "mixed", _TRANSFORMERS_KEYS)
+    report = adapter_liveness_report(_MixedModel(), d)
     assert report["lora_B_nonzero"] == 1
+    assert report["lora_B_zero"] == 1
+    assert report["lora_B_unreadable"] == 2
+    assert report["lora_B_unreadable_names"] == [
+        f"{base}.2.lora_B.default.weight",
+        f"{base}.3.lora_B.default.weight",
+    ]
+
+
+def test_one_verified_nonzero_b_still_qualifies(tmp_path):
+    """Strict complete per-component coverage is a separate training-
+    qualification condition (plan P5); liveness needs only one verified nonzero
+    B alongside matched keys. A zero B must not poison a genuinely live adapter.
+    """
+    d = _write_adapter(tmp_path / "one-live", _TRANSFORMERS_KEYS)
+    base = "base_model.model.model.layers.0.linear_attn.in_proj_qkv"
+    params = {
+        f"{base}.lora_A.default.weight": 0.03,
+        f"{base}.lora_B.default.weight": 0.07,
+        f"{base}.extra.lora_B.default.weight": 0.0,
+    }
+    report = assert_adapter_is_live(_Model(params), d)
+    assert report["lora_B_nonzero"] == 1
+    assert report["lora_B_zero"] == 1
+
+
+def test_report_records_zero_and_partial_key_overlap(tmp_path):
+    """Zero overlap is the measured Unsloth failure mode; partial overlap means
+    only part of the adapter found a home on the model. The report must expose
+    both instead of a single matched-count.
+    """
+    partial_saved = [
+        *_TRANSFORMERS_KEYS,
+        "base_model.model.model.layers.99.q_proj.lora_A.weight",
+    ]
+    d_partial = _write_adapter(tmp_path / "partial", partial_saved)
+    report = adapter_liveness_report(_Model(_LIVE_TRAINED), d_partial)
+    assert report["matched_keys"] == 2
+    assert report["saved_tensors"] == 3
+
+    d_zero = _write_adapter(tmp_path / "zero-overlap", _UNSLOTH_KEYS)
+    report = adapter_liveness_report(_Model(_LIVE_TRAINED), d_zero)
+    assert report["matched_keys"] == 0
 
 
 def test_every_adapter_load_site_is_guarded():
