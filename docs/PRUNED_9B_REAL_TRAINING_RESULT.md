@@ -155,8 +155,13 @@ shown usable for generation.
    mutation-verified source check. Re-scored, the 50 baseline predictions contain
    **no answer span at all**, and the old lenient rule would have scored 1 of them
    correct. See `..._CORRECTION.md`.
-3. **Re-run the training arm** with the progress fix in place. The recipe's cosine
-   scheduler was also never applied (the config omits `lr_scheduler_type`, so the
-   trainer default linear was used); fix that in the same pass and record it.
+3. ~~Re-run the training arm.~~ **Done — `PRUNED_9B_RERUN_RESULT.md`.** It completed
+   500 steps with `progress_write_failures: 0`, and the cosine schedule was verified
+   against the realised LR curve. The cause of the missing schedule was not "the
+   config omits `lr_scheduler_type`" as written here: the key was validated and
+   honoured by `transformers_worker`, but `unsloth_worker` never read it, so setting
+   it would have changed nothing. Engineering **FAIL** on oversubscription during the
+   candidate eval; capability **RECOVERS** at +0.12, though 0/100 responses across
+   both arms ever terminated.
 4. Only then revisit whether a milder prune (f=0.56 cost just 1.14× perplexity)
    produces a checkpoint that terminates.
