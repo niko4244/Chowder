@@ -210,6 +210,18 @@ def main() -> int:
         verdict = "H1: adapter compute explains the slowdown; no oversubscription"
     elif ratio_token <= RATIO_H2:
         verdict = "H2: adapter compute does NOT explain it; the run's 2x was VRAM pressure"
+    elif ratio_token >= RATIO_H1 and not headroom_ok:
+        # The case this actually hit. Naming the real reason matters: the first
+        # message said "ratio falls between 1.2 and 1.5" for a ratio of 1.58, which
+        # is false. H1 was unreachable by construction -- the adapter arm cannot hold
+        # 4 GiB of headroom because the adapter path is what consumes it, so the two
+        # hypotheses are coupled rather than exclusive. See H3 in the result doc.
+        verdict = (
+            f"COUPLED: ratio {ratio_token:.2f}x but the adapter arm ran at only "
+            f"{min(arm_a['min_card_free_gib'], arm_b['min_card_free_gib']):.2f} GiB free, "
+            "so adapter compute and VRAM pressure cannot be separated by this design: "
+            "the adapter path CAUSES the pressure"
+        )
     else:
         verdict = f"INCONCLUSIVE: ratio {ratio_token:.2f} falls between {RATIO_H2} and {RATIO_H1}"
 
