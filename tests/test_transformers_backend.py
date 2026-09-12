@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -541,6 +542,209 @@ def test_resume_is_rejected_when_dataset_format_changed(tmp_path, monkeypatch):
     )
     with pytest.raises(ValueError, match="refusing to resume"):
         TransformersPeftExecutor().run(_experiment(), context)
+
+
+# --- P4b: checkpoint bound inputs bind a local base by content, not path ---
+#
+# The 2026-09-12 audit found the base identified by a path plus an unresolved
+# revision: a resume (or a re-run) months later reproduced whatever bytes sat
+# at that path. These tests pin the fix at the checkpoint seam: a local base is
+# bound by its measured content, the binding is path-free so relocating
+# identical bytes stays valid, an external (hub) reference keeps an honest
+# revision-only binding with no fake content claim, and manifests written
+# before this binding existed keep resuming.
+
+
+def _local_base_dir(root: Path) -> Path:
+    """A minimal local model directory the content manifest can measure."""
+    base = root / "base-model"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "config.json").write_text('{"model_type": "test-tiny"}', encoding="utf-8")
+    (base / "model.safetensors").write_bytes(b"\x00" * 64)
+    return base
+
+
+def _spec_bound_to(config: dict, base: str, tmp_path: Path, *, output_dir: str = "out"):
+    config["backend"]["base_model"] = base
+    return TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / output_dir, seed=1
+    )
+
+
+def test_bound_inputs_bind_a_local_base_by_content_not_path(tmp_path):
+    base = _local_base_dir(tmp_path)
+    config = _config(str(tmp_path / "train.jsonl"))
+
+    one = TransformersPeftExecutor._bound_inputs(
+        _spec_bound_to(config, str(base), tmp_path)
+    )
+    assert one["base_binding"] == "local-content"
+    assert len(one["base_content_sha256"]) == 64
+
+    # identical bytes at a different path are the same content identity
+    moved = tmp_path / "elsewhere" / "base-model"
+    moved.parent.mkdir(parents=True)
+    shutil.copytree(base, moved)
+    two = TransformersPeftExecutor._bound_inputs(
+        _spec_bound_to(config, str(moved), tmp_path)
+    )
+    assert two["base_content_sha256"] == one["base_content_sha256"]
+    assert two["base_weight_binding"] == "per-shard-sha256"
+    # the path is operational, not mathematical: for a content-bound local
+    # base it is not a bound input at all, so identical bytes at a new
+    # location produce identical bound inputs (recipe digest included)
+    assert "base_model" not in one
+    assert two["checkpoint_recipe_sha256"] == one["checkpoint_recipe_sha256"]
+
+
+def test_bound_inputs_keep_external_bases_on_revision_binding_only(tmp_path):
+    """A hub id is not measurable bytes: no content claim may be invented."""
+    config = _config(str(tmp_path / "train.jsonl"))
+    bound = TransformersPeftExecutor._bound_inputs(
+        _spec_bound_to(config, "example/model", tmp_path)
+    )
+    assert bound["base_binding"] == "external-reference"
+    assert "base_content_sha256" not in bound
+    assert bound["base_model"] == "example/model"
+
+
+def test_resume_is_rejected_when_the_local_base_content_changed(tmp_path, monkeypatch):
+    """Same size, different bytes: only a content digest can see this, and a
+    checkpoint whose optimizer state was produced against other weights must
+    not be silently resumed into."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    base = _local_base_dir(tmp_path)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = sha256_file(data)
+    spec_for_manifest = _spec_bound_to(
+        config, str(base), tmp_path, output_dir="prior"
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    (base / "model.safetensors").write_bytes(b"\x01" * 64)
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch when the base content changed")
+
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen", should_not_launch
+    )
+    with pytest.raises(ValueError, match="refusing to resume"):
+        TransformersPeftExecutor().run(_experiment(), context)
+
+
+def test_resume_accepts_a_relocated_identical_local_base(tmp_path, monkeypatch):
+    """The binding is over content, so moving the identical base does not
+    invalidate a checkpoint -- the operational path is not the recipe."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    base = _local_base_dir(tmp_path)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = sha256_file(data)
+    spec_for_manifest = _spec_bound_to(
+        config, str(base), tmp_path, output_dir="prior"
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    moved = tmp_path / "relocated" / "base-model"
+    moved.parent.mkdir(parents=True)
+    shutil.copytree(base, moved)
+    config["backend"]["base_model"] = str(moved)
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact is not None
+    assert observed_spec["resume_from_checkpoint"] == str(checkpoint_dir.resolve())
+
+
+def test_resume_keeps_working_for_a_manifest_written_before_base_content_binding(
+    tmp_path, monkeypatch
+):
+    """Existing checkpoints must not become unresumable just because the
+    binding grew: keys the recorded manifest never had are not divergences."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    base = _local_base_dir(tmp_path)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = sha256_file(data)
+    spec_for_manifest = _spec_bound_to(
+        config, str(base), tmp_path, output_dir="prior"
+    )
+    legacy = TransformersPeftExecutor._bound_inputs(spec_for_manifest)
+    for key in ("base_binding", "base_content_sha256", "base_weight_binding"):
+        legacy.pop(key, None)
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(legacy)
+    )
+
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact is not None
+    assert observed_spec["resume_from_checkpoint"] == str(checkpoint_dir.resolve())
+
+
+def test_checkpoint_manifest_upgrades_additively_without_losing_refusal(tmp_path):
+    """An existing manifest that is a strict subset of the new bound inputs is
+    upgraded in place (strictly more evidence); a manifest whose recorded
+    values disagree is still refused."""
+    trainer = tmp_path / "trainer"
+    trainer.mkdir()
+    manifest_path = trainer / "chowder-checkpoint-manifest.json"
+    manifest_path.write_text(json.dumps({"base_model": "example/model", "revision": None}))
+
+    TransformersPeftExecutor._write_checkpoint_manifest(
+        trainer,
+        {
+            "base_model": "example/model",
+            "revision": None,
+            "base_content_sha256": "a" * 64,
+        },
+    )
+    upgraded = json.loads(manifest_path.read_text())
+    assert upgraded["base_content_sha256"] == "a" * 64
+
+    with pytest.raises(RuntimeError, match="different bound inputs"):
+        TransformersPeftExecutor._write_checkpoint_manifest(
+            trainer,
+            {
+                "base_model": "someone-else/model",
+                "revision": None,
+                "base_content_sha256": "a" * 64,
+            },
+        )
 
 
 def test_validate_chat_messages_normalizes_a_well_formed_row():

@@ -24,12 +24,91 @@ one under review*, recording results against the wrong code.
 imported to `PYTHONPATH`, which Python searches before site-packages and `.pth`
 entries, so the child resolves `chowder` to the same code. Nothing else changes:
 the interpreter, site-packages and every other variable are inherited as before.
+
+That guarantee is still environmental: it holds only while the launch is wired
+up. P4 adds the *evidence* half — `chowder_source_identity()` records a content
+digest of the package this process actually imported, and a worker's `main()`
+calls `verify_source_identity()` with the identity its controller declared
+BEFORE reading its spec. If the two disagree (env broken, wrong checkout, a
+competing editable install), the worker refuses instead of running against the
+wrong code and recording results against it.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
+
+
+class WorkerIdentityError(RuntimeError):
+    """A worker's imported source does not match the identity its parent declared."""
+
+
+def identity_from_tree(package_root: Path) -> dict[str, Any]:
+    """Content identity of a package tree: hash of paths + bytes, pycache excluded.
+
+    The digest is over *content*: the same files under a different root hash
+    identically (the root is recorded, not mixed into the digest), while one
+    changed byte in one module changes everything. `__pycache__` and `.pyc`
+    artifacts are excluded — compiled caches are derivable, not source.
+    """
+    root = Path(package_root).resolve()
+    if not root.is_dir():
+        raise WorkerIdentityError(f"package root is not a directory: {root}")
+    entries: list[dict[str, Any]] = []
+    for path in sorted(root.rglob("*"), key=lambda p: p.as_posix()):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        if "__pycache__" in path.parts or rel.endswith((".pyc", ".pyo")):
+            continue
+        entries.append({"path": rel, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    if not entries:
+        raise WorkerIdentityError(f"package tree contains no source files: {root}")
+    digest = hashlib.sha256(
+        json.dumps(entries, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {"source_root": str(root), "source_sha256": digest, "files": len(entries)}
+
+
+def chowder_source_identity() -> dict[str, Any]:
+    """Identity of the `chowder` package THIS process actually imported."""
+    import chowder
+
+    return identity_from_tree(Path(chowder.__file__).resolve().parent)
+
+
+def verify_source_identity(expected: Mapping[str, Any]) -> dict[str, Any]:
+    """Child-side check: refuse unless the declared identity matches reality.
+
+    Called first in every worker `main()`, before the worker reads its spec —
+    the plan's "fail before training when they disagree".
+    """
+    if not isinstance(expected, Mapping):
+        raise WorkerIdentityError("invalid chowder identity: expected a mapping")
+    missing = {"source_root", "source_sha256"} - set(expected)
+    if missing:
+        raise WorkerIdentityError(
+            f"invalid chowder identity: missing fields {sorted(missing)}"
+        )
+    sha = expected["source_sha256"]
+    if not isinstance(sha, str) or len(sha) != 64:
+        raise WorkerIdentityError("invalid chowder identity: source_sha256 must be 64 hex chars")
+    actual = chowder_source_identity()
+    if actual["source_sha256"] != sha:
+        raise WorkerIdentityError(
+            "source identity mismatch: the worker imported different chowder code "
+            f"than its controller declared (expected {sha[:12]}…, actual "
+            f"{actual['source_sha256'][:12]}…) — refusing to run against the wrong code"
+        )
+    if Path(str(expected["source_root"])).resolve() != Path(actual["source_root"]).resolve():
+        raise WorkerIdentityError(
+            "source identity mismatch: the worker's chowder package lives at "
+            f"{actual['source_root']}, not the declared {expected['source_root']}"
+        )
+    return actual
 
 
 def chowder_source_root() -> Path:

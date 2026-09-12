@@ -16,8 +16,9 @@ if TYPE_CHECKING:
     from ..placement_policy import PlacementPlan
 from uuid import uuid4
 
+from ..base_identity import BaseIdentityError, resolve_base_identity
 from ..target_coverage import assert_targets_covered
-from ..worker_env import worker_env
+from ..worker_env import chowder_source_identity, worker_env
 from ..cancellation import CancellationToken
 from ..dependency_preflight import check_dependencies
 from ..executors import CostEstimate, ExecutionContext, TrainingArtifact
@@ -566,6 +567,17 @@ class TransformersPeftRunSpec:
 
 _CHECKPOINT_MANIFEST_NAME = "chowder-checkpoint-manifest.json"
 
+#: Bound inputs added after the first checkpoint manifests were written. A
+#: manifest that predates a binding cannot have recorded it, and refusing such
+#: checkpoints would make every existing one unresumable the moment the bound
+#: set grows -- so a key absent from the recorded manifest is only tolerated
+#: for these names. Every pre-existing binding keeps exact comparison.
+_BINDINGS_ADDED_AFTER_INITIAL_RELEASE: tuple[str, ...] = (
+    "base_binding",
+    "base_content_sha256",
+    "base_weight_binding",
+)
+
 
 class TransformersPeftExecutor:
     name = "transformers-peft"
@@ -698,29 +710,78 @@ class TransformersPeftExecutor:
             "detailed_timing_telemetry",
         ):
             recipe.pop(key, None)
+        # The base is only a *path* input when its content cannot be measured
+        # (an external reference). For a local directory the path is
+        # operational, not mathematical: leaving it in the recipe digest would
+        # make the identical weights at a new location look like a recipe
+        # change, which is the relocation hazard -- not the identity -- this
+        # binding exists to close.
+        local_base = Path(spec.base_model).is_dir()
+        if local_base:
+            recipe.pop("base_model", None)
         recipe_payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
-        return {
+        bound: dict[str, Any] = {
             "checkpoint_recipe_sha256": hashlib.sha256(
                 recipe_payload.encode("utf-8")
             ).hexdigest(),
-            "base_model": spec.base_model,
             "revision": spec.revision,
             "dataset_sha256": spec.dataset_sha256,
             "replay_dataset_sha256": spec.replay_sha256,
             "parent_adapter_sha256": spec.parent_adapter_sha256,
         }
+        if not local_base:
+            bound["base_model"] = spec.base_model
+        # A name (or an unresolved revision) is not an identity: the audit
+        # found the base recorded as a path, so a later resume reproduced
+        # whatever bytes sat there. A local directory is therefore bound by
+        # its measured content -- per-shard sha256 over the real weights --
+        # and that content digest is path-free, so relocating identical
+        # artifacts keeps a checkpoint resumable. Cost is stated rather than
+        # hidden: full mode reads every shard once, at run start, and P6
+        # accounts for it in the measured load/startup phase. An external
+        # reference (hub id) gets an honest revision-only label and no
+        # fabricated content claim, and a local directory the manifest cannot
+        # measure honestly says so instead of pretending to a digest.
+        if local_base:
+            try:
+                identity = resolve_base_identity(spec.base_model, mode="full")
+            except BaseIdentityError as exc:
+                bound["base_binding"] = "local-unverifiable"
+                bound["base_identity_error"] = str(exc)
+            else:
+                bound["base_binding"] = "local-content"
+                bound["base_content_sha256"] = identity["content_sha256"]
+                bound["base_weight_binding"] = identity["weight_binding"]
+        else:
+            bound["base_binding"] = "external-reference"
+        return bound
 
     @staticmethod
     def _write_checkpoint_manifest(trainer_dir: Path, bound_inputs: Mapping[str, Any]) -> None:
         trainer_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = trainer_dir / _CHECKPOINT_MANIFEST_NAME
-        payload = json.dumps(dict(bound_inputs), sort_keys=True, indent=2) + "\n"
-        existing = manifest_path.read_text(encoding="utf-8") if manifest_path.is_file() else None
-        if existing is not None and existing != payload:
-            raise RuntimeError(
-                f"checkpoint manifest {manifest_path} already exists with different bound "
-                "inputs -- this run directory was not produced by the current spec"
-            )
+        payload_dict = dict(bound_inputs)
+        payload = json.dumps(payload_dict, sort_keys=True, indent=2) + "\n"
+        if manifest_path.is_file():
+            recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(recorded, Mapping):
+                raise RuntimeError(f"checkpoint manifest {manifest_path} is not a JSON object")
+            # A strictly-subset manifest (written before a binding existed) is
+            # upgraded in place: the new manifest is strictly more evidence
+            # about the same inputs, never less. Any recorded value that
+            # disagrees, or any recorded binding the current spec cannot
+            # reproduce, is still a refusal.
+            conflicts = {
+                key: {"existing": value, "requested": payload_dict[key]}
+                for key, value in recorded.items()
+                if key in payload_dict and payload_dict[key] != value
+            }
+            lost = [key for key in recorded if key not in payload_dict]
+            if conflicts or lost:
+                raise RuntimeError(
+                    f"checkpoint manifest {manifest_path} already exists with different bound "
+                    "inputs -- this run directory was not produced by the current spec"
+                )
         manifest_path.write_text(payload, encoding="utf-8")
 
     @classmethod
@@ -748,11 +809,20 @@ class TransformersPeftExecutor:
         recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
         if not isinstance(recorded, Mapping):
             raise RuntimeError(f"checkpoint manifest {manifest_path} is not a JSON object")
-        changed = {
-            key: {"checkpoint": recorded.get(key), "requested": value}
-            for key, value in bound_inputs.items()
-            if recorded.get(key) != value
-        }
+        changed: dict[str, Any] = {}
+        for key, value in bound_inputs.items():
+            if key not in recorded and key in _BINDINGS_ADDED_AFTER_INITIAL_RELEASE:
+                # the checkpoint predates this binding: unverifiable, not a
+                # measured divergence, and not silently reported as verified
+                continue
+            if recorded.get(key) != value:
+                changed[key] = {"checkpoint": recorded.get(key), "requested": value}
+        for key in _BINDINGS_ADDED_AFTER_INITIAL_RELEASE:
+            if key in recorded and key not in bound_inputs:
+                # the checkpoint was bound to something the current spec can
+                # no longer produce (e.g. a local base replaced by an
+                # external reference): a downgrade, not a match
+                changed[key] = {"checkpoint": recorded.get(key), "requested": None}
         if changed:
             raise ValueError(
                 f"refusing to resume from {checkpoint_dir}: bound training input(s) changed "
@@ -1057,8 +1127,10 @@ class TransformersPeftExecutor:
         )
 
     @staticmethod
-    def _worker_module_args(spec_path: Path, result_path: Path) -> list[str]:
-        return [
+    def _worker_module_args(
+        spec_path: Path, result_path: Path, chowder_identity: Path | None = None
+    ) -> list[str]:
+        args = [
             "-m",
             "chowder.backends.transformers_worker",
             "--spec",
@@ -1066,12 +1138,26 @@ class TransformersPeftExecutor:
             "--result",
             str(result_path),
         ]
+        if chowder_identity is None:
+            # Tests build the command shape without an identity file; the run
+            # path below always supplies one, so the production wire format
+            # always carries the pin.
+            return args
+        args.extend(["--chowder-identity", str(chowder_identity)])
+        return args
 
     @classmethod
     def _worker_command(
-        cls, spec_path: Path, result_path: Path, *, active_accelerator_count: int
+        cls,
+        spec_path: Path,
+        result_path: Path,
+        *,
+        active_accelerator_count: int,
+        chowder_identity: Path | None = None,
     ) -> list[str]:
-        module_args = cls._worker_module_args(spec_path, result_path)
+        module_args = cls._worker_module_args(
+            spec_path, result_path, chowder_identity=chowder_identity
+        )
         if active_accelerator_count <= 1:
             return [sys.executable, *module_args]
         # DDP, not FSDP, for a first multi-GPU launcher: accelerate launch
@@ -1494,9 +1580,21 @@ class TransformersPeftExecutor:
         stdout_path = run_dir / "stdout.log"
         stderr_path = run_dir / "stderr.log"
         spec_path.write_text(spec.canonical_json() + "\n", encoding="utf-8")
+        # P4c: record and pass the parent's chowder source identity. The
+        # worker verifies it before reading the spec, so a wire-compatible
+        # wrong checkout is refused instead of silently training (the exact
+        # silent-mismatch case worker_env's docstring records).
+        source_identity = chowder_source_identity()
+        identity_path = run_dir / "chowder-identity.json"
+        identity_path.write_text(
+            json.dumps(source_identity, sort_keys=True) + "\n", encoding="utf-8"
+        )
 
         command = self._worker_command(
-            spec_path, result_path, active_accelerator_count=active_accelerator_count
+            spec_path,
+            result_path,
+            active_accelerator_count=active_accelerator_count,
+            chowder_identity=identity_path,
         )
         started = time.perf_counter()
         with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
@@ -1634,6 +1732,7 @@ class TransformersPeftExecutor:
                 "engine": "transformers",
                 "execution_spec_sha256": spec.digest(),
                 "recipe_sha256": spec.recipe_digest(),
+                "chowder_source_identity": source_identity,
                 "dataset_sha256": primary_sha,
                 "replay_dataset_sha256": replay_sha,
                 "replay_ratio": spec.replay_ratio,

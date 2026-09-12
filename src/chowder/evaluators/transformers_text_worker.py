@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -254,7 +255,28 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--spec", required=True)
     parser.add_argument("--result", required=True)
+    parser.add_argument(
+        "--chowder-identity",
+        default=None,
+        help="JSON file with the chowder source identity the controller declared; "
+        "verified against the code this process actually imported BEFORE the "
+        "spec is read, so a wrong-checkout worker refuses instead of scoring",
+    )
     args = parser.parse_args()
+
+    # P4c: nothing may be loaded, run, or written before the pin checks out.
+    from ..worker_env import verify_source_identity
+
+    if args.chowder_identity is not None:
+        verify_source_identity(
+            json.loads(Path(args.chowder_identity).read_text(encoding="utf-8"))
+        )
+    else:
+        print(
+            "WARNING: no --chowder-identity supplied; the worker's source "
+            "identity is unverified for this run",
+            file=sys.stderr,
+        )
 
     raw = json.loads(Path(args.spec).read_text(encoding="utf-8"))
     raw["suites"] = tuple(EvalSuiteSpec(**suite) for suite in raw["suites"])

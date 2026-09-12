@@ -9,7 +9,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..worker_env import worker_env
+from ..worker_env import chowder_source_identity, worker_env
+from ..base_identity import describe_base_identity
+from .scorer_identity import scorer_identity
 from ..cancellation import CancellationToken
 from ..executors import CostEstimate, EvaluationOutcome, ExecutionContext, TrainingArtifact
 from ..models import Experiment
@@ -215,8 +217,10 @@ class TransformersTextEvaluator:
             process.wait()
 
     @staticmethod
-    def _worker_command(spec_path: Path, result_path: Path) -> list[str]:
-        return [
+    def _worker_command(
+        spec_path: Path, result_path: Path, chowder_identity: Path | None = None
+    ) -> list[str]:
+        command = [
             sys.executable,
             "-m",
             "chowder.evaluators.transformers_text_worker",
@@ -225,6 +229,12 @@ class TransformersTextEvaluator:
             "--result",
             str(result_path),
         ]
+        if chowder_identity is not None:
+            # The worker verifies this against the code it actually imported
+            # BEFORE reading its spec: a mismatch refuses instead of scoring
+            # against the wrong checkout (see worker_env.verify_source_identity).
+            command.extend(["--chowder-identity", str(chowder_identity)])
+        return command
 
     @staticmethod
     def _tail(path: Path, lines: int = 30) -> str:
@@ -269,11 +279,18 @@ class TransformersTextEvaluator:
         stdout_path = eval_dir / "stdout.log"
         stderr_path = eval_dir / "stderr.log"
         spec_path.write_text(spec.canonical_json() + "\n", encoding="utf-8")
+        # P4c: pin the source identity the worker must run; P4a: bind the
+        # scoring implementation's content into the protocol fingerprint.
+        source_identity = chowder_source_identity()
+        identity_path = eval_dir / "chowder-identity.json"
+        identity_path.write_text(
+            json.dumps(source_identity, sort_keys=True) + "\n", encoding="utf-8"
+        )
 
         started = time.perf_counter()
         with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
             process = subprocess.Popen(
-                self._worker_command(spec_path, result_path),
+                self._worker_command(spec_path, result_path, chowder_identity=identity_path),
                 stdout=stdout,
                 stderr=stderr,
                 text=True,
@@ -348,10 +365,20 @@ class TransformersTextEvaluator:
             fingerprint_hashes[str(suite_name)] = actual_fingerprint_digest
 
         dataset_hashes = {suite.name: sha256_file(suite.dataset) for suite in spec.suites}
+        # P4a: the scoring implementation is protocol, not trivia — a scorer
+        # change must change the fingerprint so an old result can never claim
+        # the new rule's identity (the audit's lenient-vs-strict gap).
+        # P4b: a local base binds by content; a hub id binds by revision, and
+        # the payload says which one it is (no fake content claims).
+        base_identity = describe_base_identity(
+            spec.base_model, revision=spec.revision
+        )
         protocol = {
             "evaluator": self.name,
             "base_model": spec.base_model,
             "revision": spec.revision,
+            "scorer": scorer_identity(),
+            "base_identity": base_identity,
             "precision": spec.precision,
             "quantization": spec.quantization,
             "device": runtime.get("device"),
@@ -393,6 +420,7 @@ class TransformersTextEvaluator:
                 "evaluation_result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
                 "protocol": protocol,
                 "protocol_sha256": protocol_sha,
+                "chowder_source_identity": source_identity,
                 "holdout_fingerprint_sha256": fingerprint_hashes,
                 "suite_evidence": dict(suite_evidence),
                 "versions": dict(versions),

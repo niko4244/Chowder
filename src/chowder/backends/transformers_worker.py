@@ -4,6 +4,7 @@ import argparse
 import functools
 import json
 import os
+import sys
 import threading
 import time
 from importlib.metadata import PackageNotFoundError, version
@@ -856,7 +857,28 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--spec", required=True)
     parser.add_argument("--result", required=True)
+    parser.add_argument(
+        "--chowder-identity",
+        default=None,
+        help="JSON file with the chowder source identity the controller declared; "
+        "verified against the code this process actually imported BEFORE the "
+        "spec is read, so a wrong-checkout worker refuses instead of training",
+    )
     args = parser.parse_args()
+
+    # P4c: nothing may be loaded, run, or written before the pin checks out.
+    from ..worker_env import verify_source_identity
+
+    if args.chowder_identity is not None:
+        verify_source_identity(
+            json.loads(Path(args.chowder_identity).read_text(encoding="utf-8"))
+        )
+    else:
+        print(
+            "WARNING: no --chowder-identity supplied; the worker's source "
+            "identity is unverified for this run",
+            file=sys.stderr,
+        )
 
     _crash_rank_for_ddp_acceptance_test()
     _constrain_vram_for_memory_fabric_acceptance_test()
