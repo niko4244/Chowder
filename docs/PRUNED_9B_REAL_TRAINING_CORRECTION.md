@@ -124,3 +124,38 @@ to terminate.
 3. A test asserting the two workers agree on a shared case table, so the next
    scoring mode added to one of them cannot quietly diverge.
 4. Record the residual degenerate-loop weakness in the scorer's own docstring.
+
+## Done (2026-09-11, after the run terminated and the control completed)
+
+All four, in `src/chowder/evaluators/scoring.py`. No evaluation was pending: the
+training run had already terminated FAILED and the dense-vs-pruned control had
+finished, so nothing was re-scored mid-flight.
+
+Both workers now hold `_score = score` against that one module -- the same function
+object, not two copies that agree today. `tests/test_scorer_agreement.py` guards it
+three ways: **identity** (both names resolve to the shared function), **behaviour**
+(an 18-case table asserted through both workers, including the real degenerate
+generation), and **source** (neither worker file may re-declare `_score`,
+`_final_number`, `_final_answer`, `_normalize`, or its own `_FINAL_NUMBER` regex).
+The source guard is mutation-verified: pasting a local lenient `_score` back into
+`transformers_text_worker` fails 13 of the file's tests.
+
+`kaggle_equivalence` imported the extraction helpers *from the base worker* to avoid
+drift; it now imports them from `scoring`, which is the module that actually owns
+the rule.
+
+**The effect on the real recorded run, measured rather than assumed.** Re-scoring
+all 50 baseline predictions under the unified rule:
+
+| | |
+|---|---:|
+| responses with no answer span at all (unclosed `<think>`) | **50/50** |
+| recorded score | 0/50 |
+| unified-rule score | 0/50 |
+| what the old lenient rule would have scored correct | **1/50** |
+
+So the baseline stays 0.00 — but now for the right reason, and symmetrically. The
+interesting number is the last row: the lenient rule would have manufactured **one
+correct answer out of 50 responses that contain no answer**. That is the same
+artifact, at the same small-n rate, as the pruned checkpoint's 0.125 in the control
+while degenerate on 8 of 8 prompts.

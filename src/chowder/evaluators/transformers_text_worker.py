@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,7 @@ from ..adapter_guard import assert_adapter_is_live
 from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
 from .generation import resolve_eos_token_ids
+from .scoring import final_answer, final_number, normalize, score
 from .transformers_text import EvalSuiteSpec, TransformersTextEvalSpec
 
 
@@ -21,47 +21,15 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
-def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().casefold()
-
-
-#: Final-number extraction for arithmetic word problems (GSM8K and similar).
-#: The regex is comma-aware and the LAST number in the response wins, both of
-#: which were learned the hard way: the frontier repo's FINDINGS-GSM8K-EVAL-BUG.md
-#: records an extractor using r"[-]?\d+(?:\.\d+)?" that split "$70,000" into
-#: ["70", "000"] and scored a CORRECT answer wrong, so a self-improvement loop then
-#: "trained on a failure" that was not one. Commas are stripped before comparison
-#: and a trailing ".0" is normalised, so "70,000" == "70000" == "70000.0".
-_FINAL_NUMBER = re.compile(r"[-]?\d[\d,]*(?:\.\d+)?")
-
-
-def _final_number(text: str) -> str | None:
-    matches = _FINAL_NUMBER.findall(text or "")
-    if not matches:
-        return None
-    raw = matches[-1].replace(",", "")
-    if raw.endswith(".0"):
-        raw = raw[:-2]
-    if raw.endswith("."):
-        raw = raw[:-1]
-    return raw or None
-
-
-def _score(prediction: str, expected: str, scoring: str) -> float:
-    if scoring == "exact_match":
-        return float(prediction.strip() == expected.strip())
-    if scoring == "normalized_exact_match":
-        return float(_normalize(prediction) == _normalize(expected))
-    if scoring == "final_number_match":
-        # Compare the last number in each side, not the whole string: a model that
-        # shows its work cannot exact-match a bare answer, and scoring it wrong
-        # would manufacture failures rather than measure them.
-        got = _final_number(prediction)
-        want = _final_number(expected)
-        if got is None or want is None:
-            return 0.0
-        return float(got == want)
-    raise ValueError(f"unsupported scoring: {scoring}")
+#: Scoring lives in `.scoring` so both workers cannot drift apart again. This worker
+#: used to score the RAW generation while base_text_worker discarded an unclosed
+#: <think> block first, which meant Chowder's automatic baseline and its candidate
+#: were not scored by the same rule. See that module.
+#: Re-exported under the historical private names for existing callers.
+_normalize = normalize
+_final_answer = final_answer
+_final_number = final_number
+_score = score
 
 
 def _resolve_dtype(torch: Any, precision: str):

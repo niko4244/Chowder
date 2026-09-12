@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,7 @@ from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
 from .base_text import BaseTextEvalSpec
 from .generation import resolve_eos_token_ids
+from .scoring import final_answer, final_number, normalize, score
 from chowder.canonical_chat_template import render_canonical
 from .transformers_text import EvalSuiteSpec
 
@@ -22,60 +22,13 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
-def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().casefold()
-
-
-def _final_answer(prediction: str) -> str:
-    """Extract a thinking model's final answer from its raw generation.
-
-    Qwen3-style reasoning models emit chain-of-thought, then a ``</think>``
-    close marker, then the answer. The answer is everything after the LAST
-    close marker; without any marker the whole prediction is the answer
-    (non-thinking models, or thinking disabled). An *unclosed* ``<think>``
-    means the generation budget was exhausted mid-reasoning -- there is no
-    answer yet, so the extraction is empty and the item scores as a miss.
-    That is honest: failing to finish thinking within budget is a real
-    capability limit of the configured protocol, not a scoring artifact.
-    """
-    if "</think>" in prediction:
-        return prediction.rsplit("</think>", 1)[1]
-    if "<think>" in prediction:
-        return ""
-    return prediction
-
-
-#: See transformers_text_worker for why this is comma-aware and takes the LAST
-#: number: an extractor without those properties scored a correct "$70,000" wrong
-#: (frontier FINDINGS-GSM8K-EVAL-BUG.md).
-_FINAL_NUMBER = re.compile(r"[-]?\d[\d,]*(?:\.\d+)?")
-
-
-def _final_number(text: str) -> str | None:
-    matches = _FINAL_NUMBER.findall(text or "")
-    if not matches:
-        return None
-    raw = matches[-1].replace(",", "")
-    if raw.endswith(".0"):
-        raw = raw[:-2]
-    if raw.endswith("."):
-        raw = raw[:-1]
-    return raw or None
-
-
-def _score(prediction: str, expected: str, scoring: str) -> float:
-    answer = _final_answer(prediction)
-    if scoring == "exact_match":
-        return float(answer.strip() == expected.strip())
-    if scoring == "normalized_exact_match":
-        return float(_normalize(answer) == _normalize(expected))
-    if scoring == "final_number_match":
-        got = _final_number(answer)
-        want = _final_number(expected)
-        if got is None or want is None:
-            return 0.0
-        return float(got == want)
-    raise ValueError(f"unsupported scoring: {scoring}")
+#: Scoring lives in `.scoring` so both workers cannot drift apart again -- they did,
+#: and it made the two sides of a comparison incomparable. See that module.
+#: Re-exported under the historical private names for existing callers.
+_normalize = normalize
+_final_answer = final_answer
+_final_number = final_number
+_score = score
 
 
 def _dtype(torch: Any, precision: str):

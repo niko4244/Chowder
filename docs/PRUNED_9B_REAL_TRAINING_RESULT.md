@@ -135,10 +135,11 @@ shown usable for generation.
 ## Next, in order
 
 1. ~~Run the corrected control.~~ **Done — see above.** Pruning is the cause.
-2. **Unify the two scorers.** The base worker's stricter rule is the correct one: an
-   unclosed `<think>` means no answer was produced, which is incorrect — not "extract
-   whatever number is lying around." Add a test that both workers agree on a shared
-   case table so a future mode cannot quietly diverge.
+2. ~~Unify the two scorers.~~ **Done** — one `evaluators/scoring.py`, the strict
+   rule in both workers, guarded by identity + an 18-case agreement table + a
+   mutation-verified source check. Re-scored, the 50 baseline predictions contain
+   **no answer span at all**, and the old lenient rule would have scored 1 of them
+   correct. See `..._CORRECTION.md`.
 3. **Re-run the training arm** with the progress fix in place. The recipe's cosine
    scheduler was also never applied (the config omits `lr_scheduler_type`, so the
    trainer default linear was used); fix that in the same pass and record it.
