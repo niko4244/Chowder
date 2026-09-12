@@ -75,7 +75,7 @@ What 150 healing steps actually delivered: **−6.2% on eval A, −23.1% on eval
 Enough to approach parity on one split, nowhere near it on the other.
 
 **The core-share sweep already said this and I misread it.** It found more hot core
-better at *every* active budget — f=0.28: 100% core 1.69×, 75% 1.81×, 50% 2.09%,
+better at *every* active budget — f=0.28: 100% core 1.69×, 75% 1.81×, 50% 2.09×,
 25% 3.06×, 0% 214×. I recorded "at init the optimum is always core_share=1.0" and
 then argued routing would earn its keep through training. But **100% core *is*
 static pruning**. The monotone result was the answer; I treated it as a starting

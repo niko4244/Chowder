@@ -78,6 +78,18 @@ Unsloth trained the same task more cheaply — loss **4.4014 → 0.3760**, peak 
 **6.24 GB** (vs 11.66 GB), 4.0 min — and then scored **0.30, exactly the baseline**,
 with predictions byte-identical to the untrained model.
 
+> **Read those three cost numbers as the WRAPPER's cost, not the model's.** This run
+> predates `bf190e6`, so Unsloth had loaded
+> `Qwen3_5ForConditionalGeneration` with the vision tower resident. Its own diagnosis
+> (`evidence/hot-core-upcycling/unsloth-adapter-diagnosis.json`) records
+> `max_abs_logit_delta: 0.0` and `top_token_unchanged: true` — the adapter provably
+> changed nothing — and only **128** injected modules, missing all 72 Mamba-style ones.
+> The honest cheapness comparison is the post-fix **5.84–5.96 GB / 65 s**, below.
+> What bounds the damage: the 128 injected leaves were all *decoder* leaves, so no
+> vision tensor was ever adapted — the gradients hit the right modules under the wrong
+> object's key namespace. It is the evaluation and gate result that is void, not the
+> training.
+
 `adapter_loaded: true` was reported. That flag only means the load call returned.
 What it actually produced, measured by loading each adapter onto the plain
 transformers model and comparing logits:
@@ -123,7 +135,7 @@ Result on the same run that previously scored exactly baseline:
 |---|---|---|
 | adapter keys under `language_model.` | 400 / 400 | **0 / 256** |
 | keys matching the evaluator's model | 0 | **256** |
-| candidate quality (baseline 0.30) | 0.30 — inert | **0.60** |
+| candidate quality (baseline 0.30) | 0.30 — inert | **0.60** (128-module adapter; the 200-module one scored 0.45 — different adapters, not one run improving) |
 | gate | rejected (no gain) | **promoted** |
 | peak VRAM | 6.24 GB | **5.84 GB** (vision tower skipped) |
 
@@ -185,8 +197,12 @@ key-overlap check carries that decision.
 * **Transformers**: full 200-module coverage, 11.66 GB, baseline 0.30 → 0.45, gate
   correctly withheld promotion below its pre-set bar.
 * **Unsloth**: also full 200-module coverage, at **5.96 GB and 65 s** — half the
-  memory and half the time of Transformers for the same quality. Preferred on this
-  hardware.
+  memory and half the time of Transformers. **Cheaper, not better:** the quality
+  figures behind any "same quality" reading are 0.45 vs 0.45 at n=20, one run each,
+  which this document disclaims 40 lines above as not a controlled comparison. The
+  cost advantage is measured; a quality equivalence is not, and the earlier wording
+  here ("for the same quality. Preferred on this hardware.") contradicted that
+  caveat.
 * Both silent failures are now loud: **zero** coverage (an inert adapter) is refused
   by `adapter_guard`, and **partial** coverage by `target_coverage`. Both fired on
   real defects before those defects were fixed, which is the only reason either is
