@@ -1,0 +1,211 @@
+# Can Chowder train this model? Yes — on both engines, after three fixes
+
+Target: `F:\llm-models\Qwen3.8-9B-Pruned-CW-3456` — the artifact
+`docs/HOT_CORE_VS_STATIC_PRUNE.md` recommends. `qwen3_5` hybrid, 24 `linear_attn`
+(Mamba-style) + 8 full-attention layers, FFN pruned to 3,456 channels, 5.937B
+params. Driven through `chowder.project_runner.run_project` — the same entry point
+the smoke tests use, so registry, automatic baseline, protocol binding, training
+worker, evaluation worker and the promotion gate are all production code.
+Evidence: `evidence/hot-core-upcycling/level2-*.json`, `unsloth-adapter-diagnosis.json`.
+
+## A green suite had never shown that Chowder trains
+
+The tests that prove it are gated behind `CHOWDER_REAL_ML_SMOKE=1` /
+`CHOWDER_REAL_UNSLOTH_SMOKE=1` and sit among the **77 skipped** on every normal
+run. "1448 passed" said nothing about training. Opening the gates found two
+defects, both now fixed (see `chowder/worker_env.py` and
+`tests/unsloth_env_link.py`), after which:
+
+| gated suite | before | after |
+|---|---|---|
+| `test_real_ml_training.py` (Transformers, tiny model) | 1/4 | **4/4** |
+| `test_unsloth_peft_real.py` | always skipped, never run | **passes** |
+| `test_project_runner_repair_unsloth.py` | passed once in PR #135, never re-runnable | **passes, twice** |
+
+Note the Transformers smoke runs on **CPU in fp32 with no quantisation**, so even
+at 4/4 it does not exercise the GPU/4-bit path. That is what the run below is for.
+
+## Transformers engine on the real model: it trains
+
+Task chosen so "it trained" is not inferred from a loss curve: invented
+subject→letter facts the base model cannot know, one token each so greedy decoding
+can match exactly. Train and eval use the same items deliberately — this measures
+whether training takes effect, not whether it generalises.
+
+| | value |
+|---|---|
+| loss | **4.8354 → 0.3767** over 50 steps |
+| peak VRAM | **11.66 GB** (fits the 15.93 GiB card) |
+| wall clock | 3.6 min end to end, training 132 s |
+| automatic baseline | quality **0.30** (measured, not assumed) |
+| candidate | quality **0.45**, `adapter_loaded: true` |
+| gate | **not promoted** — the +0.15 gain did not clear the
+`minimum_promotion_gain: 0.2` set *before* the run |
+
+The gate rejecting on a real improvement is better evidence than a promote: it
+applied its threshold instead of rubber-stamping. The bar was **not** lowered
+afterwards to manufacture a promotion. 20 eval items is a small sample and 0.30
+baseline is partly letter-guessing luck; the claim here is "training takes effect
+through Chowder", not a capability number.
+
+## Two things anyone training this architecture must know
+
+**1. PEFT has no auto-detection mapping for `qwen3_5`.** With the default
+`target_modules=None` the run fails:
+`ValueError: Please specify target_modules or target_parameters`. Chowder's
+curated `attention_and_mlp` preset has no entry for this model_type either, and
+adding a naive one would be worse than useless: its llama-shaped list covers only
+8 of 32 layers' attention here, which is the silent partial-coverage bug the
+worker's own comment warns about.
+
+**2. The list that works**, verified from the adapter PEFT actually wrote (200
+modules injected, all three families the hybrid has):
+
+```
+q_proj, k_proj, v_proj, o_proj          # 8 full-attention layers
+in_proj_qkv, in_proj_z, out_proj        # 24 linear_attn layers
+gate_proj, up_proj, down_proj           # all 32 FFNs
+```
+
+This matches the frontier repo's `train_grpo_minimal.py` BROAD_MODULES, an
+independent cross-check. For the MoE variant the same names work —
+`gate_proj/up_proj/down_proj` land on `shared_expert`, and the routed bank is raw
+`nn.Parameter` that PEFT cannot reach at all.
+
+## Unsloth engine: it trains, but its adapter is INERT under Chowder's evaluator
+
+Unsloth trained the same task more cheaply — loss **4.4014 → 0.3760**, peak VRAM
+**6.24 GB** (vs 11.66 GB), 4.0 min — and then scored **0.30, exactly the baseline**,
+with predictions byte-identical to the untrained model.
+
+> **Read those three cost numbers as the WRAPPER's cost, not the model's.** This run
+> predates `bf190e6`, so Unsloth had loaded
+> `Qwen3_5ForConditionalGeneration` with the vision tower resident. Its own diagnosis
+> (`evidence/hot-core-upcycling/unsloth-adapter-diagnosis.json`) records
+> `max_abs_logit_delta: 0.0` and `top_token_unchanged: true` — the adapter provably
+> changed nothing — and only **128** injected modules, missing all 72 Mamba-style ones.
+> The honest cheapness comparison is the post-fix **5.84–5.96 GB / 65 s**, below.
+> What bounds the damage: the 128 injected leaves were all *decoder* leaves, so no
+> vision tensor was ever adapted — the gradients hit the right modules under the wrong
+> object's key namespace. It is the evaluation and gate result that is void, not the
+> training.
+
+`adapter_loaded: true` was reported. That flag only means the load call returned.
+What it actually produced, measured by loading each adapter onto the plain
+transformers model and comparing logits:
+
+| engine | saved key prefix | LoRA modules injected | max \|logit delta\| | effect |
+|---|---|---:|---:|---|
+| transformers | `base_model.model.model.layers.0.linear_attn…` | **200** (all families) | **14.5** | top token ` The` → ` D` |
+| unsloth | `base_model.model.model.`**`language_model`**`.layers.0…` | 128 (**all 72 `linear_attn` missing**) | **0.000000** | none |
+
+PEFT emitted `UserWarning: Found missing adapter keys` naming every key it
+expected, loaded none of them, and the adapter was a no-op. The saved B matrices
+are non-zero (200/200), so the training was real — the weights simply never reach
+the model.
+
+**Root cause:** the two engines load different classes. Unsloth loads the full
+`Qwen3_5ForConditionalGeneration`, whose decoder layers sit under
+`model.language_model.layers`; Chowder's transformers path loads the text-only
+CausalLM, whose layers sit at `model.layers`. The adapters are keyed accordingly
+and are mutually incompatible.
+
+**Why this matters more than a failed test:** it fails *silently*. An
+Unsloth-trained candidate evaluates as the base model, the gate compares base
+against base, and the run reports "no improvement" for every Unsloth candidate on
+this architecture — indistinguishable from a genuinely useless adapter. Any
+previous Unsloth result on a model with this wrapper shape should be re-checked
+before it is believed.
+
+**Both are now fixed** — the guard below, and the root cause: option 1, load the
+same class the evaluator does. Unsloth exposes exactly that as
+`FastLanguageModel.from_pretrained(text_only=True)`, which loads the family's text
+decoder, remaps the VLM weights itself (`_apply_text_only_key_mapping`), and applies
+only when the text config belongs to the same family
+(`_is_family_text_decoder`: `"qwen3_5_text".startswith("qwen3_5")` → True),
+keeping the full model otherwise rather than loading random weights. So it is safe
+to pass unconditionally, and it is a supported Unsloth path rather than a key
+remap that guesses. It is version-guarded: an Unsloth without the parameter records
+`text_only_requested: false` in provenance, which explains any later liveness
+refusal instead of leaving it mysterious.
+
+Result on the same run that previously scored exactly baseline:
+
+| | before | after |
+|---|---|---|
+| adapter keys under `language_model.` | 400 / 400 | **0 / 256** |
+| keys matching the evaluator's model | 0 | **256** |
+| candidate quality (baseline 0.30) | 0.30 — inert | **0.60** (128-module adapter; the 200-module one scored 0.45 — different adapters, not one run improving) |
+| gate | rejected (no gain) | **promoted** |
+| peak VRAM | 6.24 GB | **5.84 GB** (vision tower skipped) |
+
+### One limitation this exposed, and the guard cannot catch it
+
+Under `text_only` the Unsloth adapter covers **128 modules, not 200**: all 72
+`linear_attn` modules (`in_proj_qkv`, `in_proj_z`, `out_proj` × 24 layers) are
+skipped, even though they were passed in the explicit `target_modules` list.
+Unsloth converts the list into a regex, and that regex does not match the
+Mamba-style layers once the `language_model.` segment is gone. The Transformers
+engine adapts all 200.
+
+This is the same silent partial-coverage failure the transformers worker's own
+comment warns about, now on the Unsloth side — and **the liveness guard does not
+detect it**, because 128 live modules is live. The guard's contract is "can this
+adapter change the model", not "did it cover what you asked for". A training-side
+check comparing requested against resolved target modules is the right place for
+that, and is not implemented. Until it is: for this architecture the Transformers
+engine gives full coverage, and Unsloth gives cheaper training over the attention
+and FFN only. The 0.60-vs-0.45 difference between them is **not** a controlled
+comparison (n=20, different engines, one run each) and should not be read as
+Unsloth being better.
+
+## The loud-failure guard (landed)
+
+`chowder/adapter_guard.py`, called at **all four** adapter load sites: the text
+evaluator, both parent-adapter continuation paths, and the dataset-influence
+worker. Two checks, neither needing a forward pass:
+
+1. **Key overlap** — at least one saved tensor must name a real adapter parameter
+   on the live model. Zero overlap means nothing loaded.
+2. **A non-zero `lora_B`** — PEFT zero-initialises `B`, so an all-zero `B` is an
+   identity transform no matter how the key bookkeeping looks.
+
+On the real artifacts: the Transformers adapter is **accepted** (400 keys matched,
+200 non-zero `B`); the Unsloth adapter is **refused** — *"shares NO parameter names
+with the loaded model: 400 saved tensors, 256 adapter parameters on the model, 0
+matched"*, with the `language_model.` prefix explanation in the message so the
+cause is actionable without re-running anything.
+
+Also fixed: `adapter_loaded` in evaluation provenance was literally
+`spec.adapter_dir is not None` — "a directory was requested", not "an adapter is in
+effect". That is why the inert run reported `adapter_loaded: true`. Provenance now
+records `adapter_requested`, a measured `adapter_loaded`, and the full liveness
+report.
+
+Two deliberate design points. `unsloth_worker.py` carries the check **inlined**,
+because its docstring forbids importing from the `chowder` package; a test asserts
+both that the inline guard is present and that the file still imports nothing from
+chowder. And an unreadable `B` matrix (quantised or exotic storage) counts as live
+rather than dead — a measurement gap must not be reported as a defect, so the
+key-overlap check carries that decision.
+
+## Status
+
+* Chowder **can** train this model through its own lifecycle on this hardware, on
+  **both** engines, with explicit `target_modules` (PEFT cannot auto-detect
+  `qwen3_5`).
+* **Transformers**: full 200-module coverage, 11.66 GB, baseline 0.30 → 0.45, gate
+  correctly withheld promotion below its pre-set bar.
+* **Unsloth**: also full 200-module coverage, at **5.96 GB and 65 s** — half the
+  memory and half the time of Transformers. **Cheaper, not better:** the quality
+  figures behind any "same quality" reading are 0.45 vs 0.45 at n=20, one run each,
+  which this document disclaims 40 lines above as not a controlled comparison. The
+  cost advantage is measured; a quality equivalence is not, and the earlier wording
+  here ("for the same quality. Preferred on this hardware.") contradicted that
+  caveat.
+* Both silent failures are now loud: **zero** coverage (an inert adapter) is refused
+  by `adapter_guard`, and **partial** coverage by `target_coverage`. Both fired on
+  real defects before those defects were fixed, which is the only reason either is
+  believable.
+* `allow_unmatched_target_modules: true` remains the deliberate opt-in for partial
+  coverage; it is no longer needed for this architecture.

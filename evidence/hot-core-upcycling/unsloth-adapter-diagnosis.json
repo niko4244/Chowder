@@ -1,0 +1,49 @@
+{
+  "unsloth": {
+    "adapter_dir": "F:\\llm-models\\_a4b\\level2-unsloth\\.chowder\\runs\\level2-unsloth-256027c96e72\\adapter",
+    "target_modules_type": "str",
+    "saved_tensors": 400,
+    "lora_B_tensors": 200,
+    "lora_B_nonzero": 200,
+    "example_key": "base_model.model.model.language_model.layers.0.linear_attn.in_proj_qkv.lora_A.weight",
+    "injected_lora_modules": 128,
+    "injected_by_leaf": {
+      "gate_proj": 32,
+      "up_proj": 32,
+      "down_proj": 32,
+      "q_proj": 8,
+      "k_proj": 8,
+      "v_proj": 8,
+      "o_proj": 8
+    },
+    "max_abs_logit_delta": 0.0,
+    "top_token_unchanged": true,
+    "base_top_token": " The",
+    "adapted_top_token": " The"
+  },
+  "transformers": {
+    "adapter_dir": "F:\\llm-models\\_a4b\\level2-transformers-v4\\.chowder\\runs\\level2-transformers-8093aa1d784f\\adapter",
+    "target_modules_type": "list",
+    "saved_tensors": 400,
+    "lora_B_tensors": 200,
+    "lora_B_nonzero": 200,
+    "example_key": "base_model.model.model.layers.0.linear_attn.in_proj_qkv.lora_A.weight",
+    "injected_lora_modules": 200,
+    "injected_by_leaf": {
+      "out_proj": 24,
+      "in_proj_qkv": 24,
+      "in_proj_z": 24,
+      "gate_proj": 32,
+      "up_proj": 32,
+      "down_proj": 32,
+      "q_proj": 8,
+      "k_proj": 8,
+      "v_proj": 8,
+      "o_proj": 8
+    },
+    "max_abs_logit_delta": 14.5,
+    "top_token_unchanged": false,
+    "base_top_token": " The",
+    "adapted_top_token": " D"
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "arm": "no-adapter",
+  "with_adapter": false,
+  "model": "F:\\llm-models\\Qwen3.8-9B-Pruned-CW-3456",
+  "cache_class": "DynamicCache",
+  "before_load": {
+    "driver_used_gib": 1.11187744140625,
+    "driver_free_gib": 14.81640625,
+    "torch_reserved_gib": 0.0,
+    "torch_allocated_gib": 0.0,
+    "non_torch_gib": 1.11187744140625
+  },
+  "after_load": {
+    "driver_used_gib": 6.70562744140625,
+    "driver_free_gib": 9.22265625,
+    "torch_reserved_gib": 5.568359375,
+    "torch_allocated_gib": 5.458219528198242,
+    "non_torch_gib": 1.13726806640625
+  },
+  "steps": [
+    {
+      "driver_used_gib": 6.73101806640625,
+      "driver_free_gib": 9.197265625,
+      "torch_reserved_gib": 5.58203125,
+      "torch_allocated_gib": 5.518494606018066,
+      "non_torch_gib": 1.14898681640625,
+      "budget": 1,
+      "new_tokens": 1,
+      "seconds": 0.8869687000114936,
+      "ms_per_token": 886.9687000114936,
+      "peak_reserved_gib": 5.58203125,
+      "non_torch_above_load_gib": 0.01171875
+    },
+    {
+      "driver_used_gib": 6.78961181640625,
+      "driver_free_gib": 9.138671875,
+      "torch_reserved_gib": 5.640625,
+      "torch_allocated_gib": 5.570405006408691,
+      "non_torch_gib": 1.14898681640625,
+      "budget": 16,
+      "new_tokens": 16,
+      "seconds": 1.987837499997113,
+      "ms_per_token": 124.23984374981956,
+      "peak_reserved_gib": 5.640625,
+      "non_torch_above_load_gib": 0.01171875
+    },
+    {
+      "driver_used_gib": 6.85015869140625,
+      "driver_free_gib": 9.078125,
+      "torch_reserved_gib": 5.701171875,
+      "torch_allocated_gib": 5.571290493011475,
+      "non_torch_gib": 1.14898681640625,
+      "budget": 64,
+      "new_tokens": 64,
+      "seconds": 7.123677100025816,
+      "ms_per_token": 111.30745468790337,
+      "peak_reserved_gib": 5.701171875,
+      "non_torch_above_load_gib": 0.01171875
+    },
+    {
+      "driver_used_gib": 6.85601806640625,
+      "driver_free_gib": 9.072265625,
+      "torch_reserved_gib": 5.70703125,
+      "torch_allocated_gib": 5.578127861022949,
+      "non_torch_gib": 1.14898681640625,
+      "budget": 256,
+      "new_tokens": 256,
+      "seconds": 27.851437700010138,
+      "ms_per_token": 108.7946785156646,
+      "peak_reserved_gib": 5.70703125,
+      "non_torch_above_load_gib": 0.01171875
+    },
+    {
+      "driver_used_gib": 6.89508056640625,
+      "driver_free_gib": 9.033203125,
+      "torch_reserved_gib": 5.74609375,
+      "torch_allocated_gib": 5.5937299728393555,
+      "non_torch_gib": 1.14898681640625,
+      "budget": 768,
+      "new_tokens": 768,
+      "seconds": 81.33537250000518,
+      "ms_per_token": 105.90543294271508,
+      "peak_reserved_gib": 5.74609375,
+      "non_torch_above_load_gib": 0.01171875
+    }
+  ]
+}

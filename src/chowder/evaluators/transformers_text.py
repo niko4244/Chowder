@@ -9,13 +9,17 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..worker_env import worker_env
 from ..cancellation import CancellationToken
 from ..executors import CostEstimate, EvaluationOutcome, ExecutionContext, TrainingArtifact
 from ..models import Experiment
 from ..protocol import protocol_fingerprint
 from ..provenance import sha256_directory, sha256_file
 
-_ALLOWED_SCORING = {"exact_match", "normalized_exact_match"}
+# final_number_match compares the LAST number on each side, for arithmetic word
+# problems where the model shows its work; see the workers for the extraction
+# rules and the documented bug that motivated them.
+_ALLOWED_SCORING = {"exact_match", "normalized_exact_match", "final_number_match"}
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
 _ALLOWED_QUANTIZATION = {"none", "4bit"}
 
@@ -273,6 +277,7 @@ class TransformersTextEvaluator:
                 stdout=stdout,
                 stderr=stderr,
                 text=True,
+                env=worker_env(),
             )
             self._processes[eval_id] = process
             if self._cancellation is not None:

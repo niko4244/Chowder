@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,8 @@ from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
 from .base_text import BaseTextEvalSpec
 from .generation import resolve_eos_token_ids
+from .scoring import final_answer, final_number, normalize, score
+from .vram import peak_vram as _peak_vram
 from chowder.canonical_chat_template import render_canonical
 from .transformers_text import EvalSuiteSpec
 
@@ -22,36 +23,13 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
-def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().casefold()
-
-
-def _final_answer(prediction: str) -> str:
-    """Extract a thinking model's final answer from its raw generation.
-
-    Qwen3-style reasoning models emit chain-of-thought, then a ``</think>``
-    close marker, then the answer. The answer is everything after the LAST
-    close marker; without any marker the whole prediction is the answer
-    (non-thinking models, or thinking disabled). An *unclosed* ``<think>``
-    means the generation budget was exhausted mid-reasoning -- there is no
-    answer yet, so the extraction is empty and the item scores as a miss.
-    That is honest: failing to finish thinking within budget is a real
-    capability limit of the configured protocol, not a scoring artifact.
-    """
-    if "</think>" in prediction:
-        return prediction.rsplit("</think>", 1)[1]
-    if "<think>" in prediction:
-        return ""
-    return prediction
-
-
-def _score(prediction: str, expected: str, scoring: str) -> float:
-    answer = _final_answer(prediction)
-    if scoring == "exact_match":
-        return float(answer.strip() == expected.strip())
-    if scoring == "normalized_exact_match":
-        return float(_normalize(answer) == _normalize(expected))
-    raise ValueError(f"unsupported scoring: {scoring}")
+#: Scoring lives in `.scoring` so both workers cannot drift apart again -- they did,
+#: and it made the two sides of a comparison incomparable. See that module.
+#: Re-exported under the historical private names for existing callers.
+_normalize = normalize
+_final_answer = final_answer
+_final_number = final_number
+_score = score
 
 
 def _dtype(torch: Any, precision: str):
@@ -241,6 +219,10 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
         "runtime": {
             "device": device_name,
             "gpu_count": 1 if device_name.startswith("cuda") else 0,
+            # See transformers_text_worker: both evaluation arms must report their
+            # own footprint, or a baseline-vs-candidate VRAM comparison is not
+            # possible from run artifacts.
+            **_peak_vram(device_name),
         },
         "model_provenance": {
             "requested_base_model": spec.base_model,

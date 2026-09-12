@@ -1,0 +1,37 @@
+{
+  "list": {
+    "passed_in": "(list)",
+    "peft_target_modules_type": "str",
+    "peft_target_modules": "(?:.*?(?:language|text).*?(?:self_attn|attention|attn|mixer|mlp|feed_forward|ffn|dense|mixer).*?(?:q_proj|k_proj|v_proj|o_proj|in_proj_qkv|in_proj_z|out_proj|gate_proj|up_proj|down_proj))|(?:\\bmodel\\.layers\\.[\\d]{1,}\\.(?:self_attn|attention|attn|mixer|mlp|feed_forward|ffn|dense|mixer)\\.(?:(?:q_proj|k_proj|v_proj|o_proj|in_proj_qkv|in_proj_z|out_proj|gate_proj|up_proj|down_proj)))",
+    "adapted_by_leaf": {
+      "q_proj": 8,
+      "up_proj": 32,
+      "gate_proj": 32,
+      "down_proj": 32,
+      "o_proj": 8,
+      "k_proj": 8,
+      "v_proj": 8
+    },
+    "adapted_total": 128,
+    "linear_attn_covered": false
+  },
+  "regex_string": {
+    "passed_in": ".*\\.(?:q_proj|k_proj|v_proj|o_proj|in_proj_qkv|in_proj_z|out_proj|gate_proj|up_proj|down_proj)",
+    "peft_target_modules_type": "str",
+    "peft_target_modules": ".*\\.(?:q_proj|k_proj|v_proj|o_proj|in_proj_qkv|in_proj_z|out_proj|gate_proj|up_proj|down_proj)",
+    "adapted_by_leaf": {
+      "in_proj_qkv": 24,
+      "q_proj": 8,
+      "up_proj": 32,
+      "gate_proj": 32,
+      "down_proj": 32,
+      "out_proj": 24,
+      "o_proj": 8,
+      "in_proj_z": 24,
+      "k_proj": 8,
+      "v_proj": 8
+    },
+    "adapted_total": 200,
+    "linear_attn_covered": true
+  }
+}

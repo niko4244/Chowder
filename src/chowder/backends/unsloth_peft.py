@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
+from ..target_coverage import assert_targets_covered
+from ..worker_env import worker_env
 from ..cancellation import CancellationToken
 from ..executors import CostEstimate, ExecutionContext, TrainingArtifact
 from ..models import Experiment
@@ -18,6 +20,7 @@ from ..provenance import sha256_directory, sha256_file
 from ..resources import ResourceUsage
 from ..run_events import TrainingProgressEvent
 from ..unsloth_env import unsloth_env_dir, unsloth_python
+from .transformers_peft import _ALLOWED_LR_SCHEDULER_TYPES
 from .training_data import (
     _build_chat_example,
     _chat_digest,
@@ -91,6 +94,15 @@ class UnslothPeftRunSpec:
     epochs: float = 1.0
     max_steps: int = -1
     learning_rate: float = 2e-4
+    #: The Unsloth worker silently ignored all three of these until 2026-09-11: the
+    #: shared spec validated `lr_scheduler_type` and `transformers_worker` honoured
+    #: it, but the Unsloth worker never read it, so a recipe asking for cosine got
+    #: the trainer's default linear and said nothing. A pre-registered run
+    #: (docs/PRUNED_9B_REAL_TRAINING_PREREG.md, "lr 2e-4 cosine") was trained on the
+    #: wrong schedule because of it.
+    lr_scheduler_type: str = "linear"
+    warmup_ratio: float = 0.0
+    warmup_steps: int = 0
     batch_size: int = 1
     gradient_accumulation_steps: int = 4
     logging_steps: int = 10
@@ -98,6 +110,8 @@ class UnslothPeftRunSpec:
     lora_alpha: int = 32
     lora_dropout: float = 0.05
     target_modules: tuple[str, ...] = ()
+    #: See TransformersPeftRunSpec: off by default so partial coverage is loud.
+    allow_unmatched_target_modules: bool = False
     quantization: str = "none"
     seed: int = 1
     timeout_seconds: float | None = None
@@ -151,6 +165,12 @@ class UnslothPeftRunSpec:
             raise ValueError("backend.max_length must be positive")
         if self.epochs <= 0 or self.learning_rate <= 0:
             raise ValueError("training epochs and learning_rate must be positive")
+        if self.lr_scheduler_type not in _ALLOWED_LR_SCHEDULER_TYPES:
+            raise ValueError(f"unsupported lr_scheduler_type: {self.lr_scheduler_type}")
+        if not math.isfinite(self.warmup_ratio) or not 0 <= self.warmup_ratio < 1:
+            raise ValueError("warmup_ratio must be finite and in [0, 1)")
+        if self.warmup_steps < 0:
+            raise ValueError("warmup_steps cannot be negative")
         if self.max_steps != -1 and self.max_steps <= 0:
             raise ValueError("max_steps must be -1 (disabled) or a positive integer")
         if self.batch_size <= 0 or self.gradient_accumulation_steps <= 0:
@@ -220,6 +240,9 @@ class UnslothPeftRunSpec:
             dataset_raw = Path(work_dir) / dataset_raw
         dataset = str(dataset_raw.resolve())
         target_modules = tuple(lora.get("target_modules", ()) or ())
+        allow_unmatched_target_modules = bool(
+            lora.get("allow_unmatched_target_modules", False)
+        )
 
         resume_raw = backend.get("resume_from_checkpoint")
         resume_from_checkpoint: str | None = None
@@ -269,6 +292,9 @@ class UnslothPeftRunSpec:
             epochs=float(training.get("epochs", 1.0)),
             max_steps=int(training.get("max_steps", -1)),
             learning_rate=float(training.get("learning_rate", 2e-4)),
+            lr_scheduler_type=str(training.get("lr_scheduler_type", "linear")),
+            warmup_ratio=float(training.get("warmup_ratio", 0.0)),
+            warmup_steps=int(training.get("warmup_steps", 0)),
             batch_size=int(training.get("batch_size", 1)),
             gradient_accumulation_steps=int(training.get("gradient_accumulation_steps", 4)),
             logging_steps=int(training.get("logging_steps", 10)),
@@ -276,6 +302,7 @@ class UnslothPeftRunSpec:
             lora_alpha=int(lora.get("alpha", 32)),
             lora_dropout=float(lora.get("dropout", 0.05)),
             target_modules=target_modules,
+            allow_unmatched_target_modules=allow_unmatched_target_modules,
             quantization=str(backend.get("quantization", "none")),
             seed=seed,
             timeout_seconds=(backend.get("runtime", {}) or {}).get("timeout_seconds"),
@@ -698,7 +725,7 @@ class UnslothPeftExecutor:
         with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
             "w", encoding="utf-8"
         ) as stderr:
-            process = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True)
+            process = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True, env=worker_env())
             self._processes[run_id] = process
             if self._cancellation is not None:
                 self._cancellation._register_active(self, run_id)
@@ -752,6 +779,14 @@ class UnslothPeftExecutor:
         telemetry = worker_result.get("telemetry", {})
         versions = worker_result.get("versions", {})
         model_provenance = worker_result.get("model_provenance", {})
+        # Coverage is policy, so it lives controller-side: the worker reports what
+        # it adapted, this decides whether that honoured the request. A requested
+        # name matching nothing means training silently shrank.
+        target_coverage = assert_targets_covered(
+            spec.target_modules,
+            worker_result.get("adapted_modules_by_leaf"),
+            allow_unmatched=spec.allow_unmatched_target_modules,
+        )
         if (
             not isinstance(telemetry, Mapping)
             or not isinstance(versions, Mapping)
@@ -806,6 +841,15 @@ class UnslothPeftExecutor:
                 "versions": dict(versions),
                 "model_provenance": dict(model_provenance),
                 "resolved_target_modules": worker_result.get("resolved_target_modules"),
+                "target_coverage": target_coverage,
+                # False means the isolated Unsloth predates `text_only`, so a
+                # VLM-wrapped base was loaded and the saved adapter will not load
+                # into the evaluator's AutoModelForCausalLM -- the liveness guard
+                # will refuse it, and this is the explanation.
+                "text_only_requested": worker_result.get("text_only_requested"),
+                # Non-zero means progress publishing kept failing; training
+                # still completed, because telemetry is never fatal.
+                "progress_write_failures": worker_result.get("progress_write_failures"),
                 "resource_usage": {
                     "wall_seconds": usage.wall_seconds,
                     "accelerator_seconds": usage.accelerator_seconds,

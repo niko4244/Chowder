@@ -10,6 +10,9 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from ..progress_write import write_progress_best_effort
+from ..target_coverage import adapted_modules_by_leaf
+from ..adapter_guard import assert_adapter_is_live
 from ..hf_resilience import cache_status, with_hub_retries
 from .activation_offload_hooks import offload_pack, offload_unpack
 from .training_data import (
@@ -45,17 +48,16 @@ def _resolve_dtype(torch: Any, precision: str):
     return torch.float32
 
 
-# Only architectures whose attention (q/k/v/o_proj) AND MLP (gate/up/
-# down_proj) naming has actually been verified against a real loaded model
-# (directly, for llama; by well-documented, stable architectural convention
-# shared with llama, for the rest) are listed here. PEFT silently trains
+# Only architectures whose attention AND MLP leaf-module naming has actually
+# been verified against a real loaded model (directly, for llama and qwen3_5;
+# by well-documented, stable architectural convention shared with llama, for
+# the rest) are listed here. PEFT silently trains
 # only whatever subset of a target_modules list actually matches real module
 # names on the model -- it does NOT error if some names don't match, only if
 # NONE do -- so guessing wrong here would be a silent partial-coverage bug,
 # not a loud one. When in doubt, leave an architecture out: "auto" (PEFT's
 # own actively-maintained per-architecture mapping) or an explicit
 # backend.lora.target_modules list are always available.
-_ATTENTION_AND_MLP_MODEL_TYPES = {"llama", "mistral", "qwen2", "gemma", "gemma2"}
 _ATTENTION_AND_MLP_TARGET_MODULES = (
     "q_proj",
     "k_proj",
@@ -65,6 +67,47 @@ _ATTENTION_AND_MLP_TARGET_MODULES = (
     "up_proj",
     "down_proj",
 )
+# qwen3_5 is a hybrid stack, so the llama-family seven above would quietly
+# cover only a quarter of its attention: of 32 decoder layers just 8 are full
+# attention (q/k/v/o_proj), while the other 24 are Mamba-style `linear_attn`
+# (in_proj_qkv / in_proj_z / out_proj); all 32 share the gate/up/down_proj FFN.
+# Per-leaf counts verified against the real pruned 9B checkpoint -- q/k/v/o_proj
+# 8 each, in_proj_qkv / in_proj_z / out_proj 24 each, gate/up/down_proj 32 each,
+# 200 modules in total (docs/PRUNED_9B_RERUN_RESULT.md). in_proj_b / in_proj_a
+# (24 each) are excluded deliberately: they project to num_v_heads, so they are
+# per-head scalar gates rather than matrices a rank-r adapter can decompose.
+# PEFT ships no auto-detection entry for this model_type, so "auto" raises here
+# -- without this entry every recipe has to spell all ten names out by hand.
+_QWEN3_5_TARGET_MODULES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "in_proj_qkv",
+    "in_proj_z",
+    "out_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+_ATTENTION_AND_MLP_MODULES_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
+    "llama": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "mistral": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "qwen2": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "gemma": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "gemma2": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "qwen3_5": _QWEN3_5_TARGET_MODULES,
+    # The text-only decoder the real loader instantiates: AutoModelForCausalLM
+    # replaces the composite `qwen3_5` config with its nested text_config, so
+    # model.config.model_type is `qwen3_5_text` after loading (verified against
+    # the actual pruned-9B checkpoint; worker-result.json in
+    # F:/llm-models/_a4b/level2-transformers-v7). Without this alias the preset
+    # resolved fine for the composite type and rejected the decoder every real
+    # run actually gets. MoE variants (`qwen3_5_moe`, `qwen3_5_moe_text`) stay
+    # deliberately absent: the expert leaves are NOT this dense list, and this
+    # dense preset must not silently half-cover an MoE stack.
+    "qwen3_5_text": _QWEN3_5_TARGET_MODULES,
+}
 
 
 def _resolve_target_modules(
@@ -79,13 +122,15 @@ def _resolve_target_modules(
         return list(explicit)
     if preset == "attention_and_mlp":
         model_type = getattr(model.config, "model_type", None)
-        if model_type not in _ATTENTION_AND_MLP_MODEL_TYPES:
+        curated = _ATTENTION_AND_MLP_MODULES_BY_MODEL_TYPE.get(model_type)
+        if curated is None:
             raise RuntimeError(
                 f"lora.target_preset='attention_and_mlp' has no curated module list for "
-                f"model_type {model_type!r}; supported: {sorted(_ATTENTION_AND_MLP_MODEL_TYPES)}. "
+                f"model_type {model_type!r}; supported: "
+                f"{sorted(_ATTENTION_AND_MLP_MODULES_BY_MODEL_TYPE)}. "
                 "Specify backend.lora.target_modules explicitly instead."
             )
-        return list(_ATTENTION_AND_MLP_TARGET_MODULES)
+        return list(curated)
     return None
 
 
@@ -189,6 +234,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         def __init__(self, progress_path: Path, started: float) -> None:
             self._progress_path = progress_path
             self._started = started
+            self._progress_write_failures = 0
 
         def on_log(self, args, state, control, logs=None, **kwargs):
             # Trainer also calls on_log once more at the very end of
@@ -209,10 +255,12 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
                 "learning_rate": logs.get("learning_rate"),
                 "wall_seconds": time.perf_counter() - self._started,
             }
-            tmp_path = self._progress_path.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(payload), encoding="utf-8")
-            tmp_path.replace(self._progress_path)  # atomic on POSIX/NTFS, so a
-            # concurrent poller in the main process never reads a half-written file.
+            # Best-effort: the rename is atomic WHEN IT SUCCEEDS, so a concurrent
+            # poller never sees a half-written file -- but it can still fail with a
+            # sharing violation on Windows, and an exception raised here propagates
+            # out of Trainer.train() and destroys the run. One did, at step 323/500.
+            if not write_progress_best_effort(payload, self._progress_path):
+                self._progress_write_failures += 1
 
     class _FrozenLayerStreamingCallback(TrainerCallback):
         """Kicks off each step's frozen-layer prefetch right before that
@@ -423,6 +471,9 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             spec.parent_adapter,
             is_trainable=True,
         )
+        # A parent adapter that silently fails to load would make a
+        # 'continued' run a fresh one, with provenance claiming otherwise.
+        assert_adapter_is_live(model, spec.parent_adapter)
     else:
         target_modules = _resolve_target_modules(
             base_model, explicit=spec.target_modules, preset=spec.target_preset
@@ -438,7 +489,16 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         )
         model = get_peft_model(base_model, lora_config)
 
-    resolved_target_modules = sorted(model.peft_config[model.active_adapter].target_modules)
+    # A regex target spec stays a STRING in peft_config, and sorting a string shreds
+    # it into characters. See unsloth_worker for the run this corrupted.
+    _resolved = model.peft_config[model.active_adapter].target_modules
+    resolved_target_modules = (
+        _resolved if isinstance(_resolved, str) else sorted(_resolved)
+    )
+    # What was actually ADAPTED, not what was configured: PEFT matches by suffix
+    # and silently adapts only the subset that matches. The controller turns this
+    # into a coverage verdict against the requested list.
+    adapted_by_leaf = adapted_modules_by_leaf(model)
 
     if spec.gradient_checkpointing:
         model.config.use_cache = False
@@ -736,6 +796,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "resolved_model_commit": getattr(model.config, "_commit_hash", None),
             "model_type": getattr(model.config, "model_type", None),
             "resolved_target_modules": resolved_target_modules,
+            "adapted_modules_by_leaf": adapted_by_leaf,
             "continued_from_parent_adapter": parent_adapter_sha is not None,
             "parent_adapter_sha256": parent_adapter_sha,
         },

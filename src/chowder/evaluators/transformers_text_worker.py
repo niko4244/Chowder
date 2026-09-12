@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from ..adapter_guard import assert_adapter_is_live
 from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
 from .generation import resolve_eos_token_ids
+from .scoring import final_answer, final_number, normalize, score
+from .vram import peak_vram as _peak_vram
 from .transformers_text import EvalSuiteSpec, TransformersTextEvalSpec
 
 
@@ -20,16 +22,15 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
-def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().casefold()
-
-
-def _score(prediction: str, expected: str, scoring: str) -> float:
-    if scoring == "exact_match":
-        return float(prediction.strip() == expected.strip())
-    if scoring == "normalized_exact_match":
-        return float(_normalize(prediction) == _normalize(expected))
-    raise ValueError(f"unsupported scoring: {scoring}")
+#: Scoring lives in `.scoring` so both workers cannot drift apart again. This worker
+#: used to score the RAW generation while base_text_worker discarded an unclosed
+#: <think> block first, which meant Chowder's automatic baseline and its candidate
+#: were not scored by the same rule. See that module.
+#: Re-exported under the historical private names for existing callers.
+_normalize = normalize
+_final_answer = final_answer
+_final_number = final_number
+_score = score
 
 
 def _resolve_dtype(torch: Any, precision: str):
@@ -129,10 +130,14 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
     resolved_commit = getattr(base.config, "_commit_hash", None)
     if spec.quantization == "none":
         base = base.to(device_name)
+    adapter_liveness: dict[str, Any] | None = None
     if spec.adapter_dir is None:
         model = base
     else:
         model = PeftModel.from_pretrained(base, spec.adapter_dir, is_trainable=False)
+        # Refuse to score an adapter that cannot change the model. PEFT only
+        # warns when no saved key matches, leaving every LoRA B at zero.
+        adapter_liveness = assert_adapter_is_live(model, spec.adapter_dir)
     model.eval()
     device = next(model.parameters()).device
     resolved_eos_token_id = resolve_eos_token_ids(tokenizer, model)
@@ -215,13 +220,26 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         "runtime": {
             "device": device_name,
             "gpu_count": 1 if device_name.startswith("cuda") else 0,
+            # The training workers have always reported this; the evaluators did
+            # not, and a pre-registered "peak VRAM under budget" condition was
+            # therefore undecidable for the evaluation leg. Judging it from
+            # nvidia-smi instead measures the whole MACHINE -- every browser and
+            # service on it -- and that is what produced a spurious
+            # oversubscription FAIL (docs/PRUNED_9B_RERUN_RESULT.md). A run must be
+            # able to answer "how much VRAM did *I* use" from its own artifacts.
+            **_peak_vram(device_name),
         },
         "model_provenance": {
             "requested_base_model": spec.base_model,
             "requested_revision": spec.revision,
             "model_cache_status": model_cache_status,
             "resolved_model_commit": resolved_commit,
-            "adapter_loaded": spec.adapter_dir is not None,
+            # "an adapter directory was requested" is NOT "an adapter is in
+            # effect": PeftModel.from_pretrained succeeds on a total key mismatch.
+            # This now reports the measured check, not the request.
+            "adapter_requested": spec.adapter_dir is not None,
+            "adapter_loaded": adapter_liveness is not None,
+            "adapter_liveness": adapter_liveness,
         },
         "versions": {
             "torch": _package_version("torch"),

@@ -1,0 +1,46 @@
+{
+  "source": "F:\\llm-models\\Qwen3.8-9B-abliterated-25-bf16",
+  "output": "F:\\llm-models\\Qwen3.8-9B-Pruned-CW-3456",
+  "keep_channels": 3456,
+  "ranking_digest": "304fffa858ea1512f7d456a4ccf9b086217f3337ab56a648e110733fea9650f2",
+  "plan": {
+    "hidden_size": 4096,
+    "intermediate_size": 12288,
+    "keep_channels": 3456,
+    "keep_fraction": 0.28125,
+    "num_layers": 32,
+    "weight_dtype": "BF16",
+    "params_per_channel_all_layers": 393216,
+    "dense_ffn_params": 4831838208,
+    "pruned_ffn_params": 1358954496,
+    "always_on_params": 4577975536,
+    "total_params": 5936930032,
+    "active_params": 5936930032,
+    "ffn_params_removed": 3472883712
+  },
+  "predicted": {
+    "eval_a": 9.9235,
+    "eval_b": 13.0258
+  },
+  "measured": {
+    "eval_a": 9.818830125851651,
+    "eval_b": 12.971459423616663
+  },
+  "drift": {
+    "eval_a": -0.1046698741483496,
+    "eval_b": -0.054340576383337336
+  },
+  "dense_ppl": {
+    "eval_a": 5.2707,
+    "eval_b": 4.3044
+  },
+  "moe_corpuswide_init": {
+    "eval_a": 13.4224,
+    "eval_b": 15.2936
+  },
+  "geomean_x_dense": {
+    "static_prune": 2.3693751747726517,
+    "moe_init": 3.008011497750484
+  },
+  "output_manifest_sha256": "06f758d5ad6a9e4cb8bf13d9299ea7992479f50978febf4c1c122825b2f3c259"
+}

@@ -1,0 +1,47 @@
+{
+  "base": "F:\\llm-models\\Qwen3.8-9B-abliterated-25-bf16",
+  "converted": "F:\\llm-models\\Qwen3.8-9B-HotCore-E16-k2-h2176",
+  "design": {
+    "num_experts": 16,
+    "top_k": 2,
+    "hot_core_size": 2176,
+    "moe_intermediate_size": 632,
+    "active_channels": 3440,
+    "active_fraction": 0.2799479166666667,
+    "core_share_of_active": 0.6325581395348837
+  },
+  "params": {
+    "hidden_size": 4096,
+    "intermediate_size": 12288,
+    "num_layers": 32,
+    "weight_dtype": "BF16",
+    "num_experts": 16,
+    "top_k": 2,
+    "hot_core_size": 2176,
+    "moe_intermediate_size": 632,
+    "active_channels": 3440,
+    "active_channel_fraction": 0.2799479166666667,
+    "params_per_channel_all_layers": 393216,
+    "stored_ffn_params": 4831838208,
+    "active_ffn_params": 1352663040,
+    "dense_ffn_params": 4831838208,
+    "stored_vs_dense_ffn": 1.0,
+    "active_vs_dense_ffn": 0.2799479166666667
+  },
+  "eval": {
+    "prompts": 32,
+    "max_length": 384,
+    "split": "odd-index (disjoint from ranking)",
+    "load": "nf4, shared_expert_gate skipped"
+  },
+  "dense_ppl": 5.3136990036031815,
+  "converted_ppl": 9.84437691913201,
+  "ratio": 1.852641053333395,
+  "prediction_from_mask_sweep": {
+    "low": 1.81,
+    "high": 2.09,
+    "verdict": "AGREES"
+  },
+  "ranking_digest": "df207741fdccbcbc6dc5d2c38ddac77c832ce3590031174e4a7aea3230609b7f",
+  "output_manifest_sha256": "9146bd68aacc5332902a366b085cda9a054df6fa6bf90fac841e1dfe96e87bf2"
+}

@@ -1,0 +1,60 @@
+{
+  "dense_model": "F:\\llm-models\\Qwen3.8-9B-abliterated-25-bf16",
+  "converted": "F:\\llm-models\\Qwen3.8-9B-HotCore-CW-E16-k2-h2176",
+  "ranking_digest": "304fffa858ea1512f7d456a4ccf9b086217f3337ab56a648e110733fea9650f2",
+  "ranking_split": "corpus-wide-stride",
+  "design": {
+    "num_experts": 16,
+    "top_k": 2,
+    "hot_core_size": 2176,
+    "moe_intermediate_size": 632,
+    "active_channels": 3440,
+    "note": "identical to the contiguous-ranked checkpoint; only the ranking changed"
+  },
+  "params": {
+    "hidden_size": 4096,
+    "intermediate_size": 12288,
+    "num_layers": 32,
+    "weight_dtype": "BF16",
+    "num_experts": 16,
+    "top_k": 2,
+    "hot_core_size": 2176,
+    "moe_intermediate_size": 632,
+    "active_channels": 3440,
+    "active_channel_fraction": 0.2799479166666667,
+    "params_per_channel_all_layers": 393216,
+    "stored_ffn_params": 4831838208,
+    "active_ffn_params": 1352663040,
+    "dense_ffn_params": 4831838208,
+    "stored_vs_dense_ffn": 1.0,
+    "active_vs_dense_ffn": 0.2799479166666667
+  },
+  "predicted_init": {
+    "eval_a": 13.20865762723039,
+    "eval_b": 15.048205653183562
+  },
+  "measured_init": {
+    "eval_a": 13.422413287076905,
+    "eval_b": 15.293604094166371
+  },
+  "prediction_drift": {
+    "eval_a": 0.21375565984651423,
+    "eval_b": 0.24539844098280916
+  },
+  "references": {
+    "eval_a": {
+      "dense": 5.2707,
+      "static_contig": 8.9111,
+      "static_cw": 9.7968,
+      "converted_contig_init": 9.8444
+    },
+    "eval_b": {
+      "dense": 4.3044,
+      "static_contig": 15.6918,
+      "static_cw": 12.9605,
+      "converted_contig_init": 19.4255,
+      "contig_trained_final": 14.9314
+    }
+  },
+  "output_manifest_sha256": "77520edadb9a94f4ed70636328c4bbbaafa49c75e3b47c51418851c5ad4869c4"
+}

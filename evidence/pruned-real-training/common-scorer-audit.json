@@ -1,0 +1,36 @@
+{
+  "run": "F:\\llm-models\\_a4b\\realtrain-gsm8k",
+  "note": "Both rules applied to every file. 'base' discards an unclosed <think> block before extracting a number; 'candidate' reads raw text. The recorded score is whichever rule that side's worker used.",
+  "suites": {
+    "baseline-b17246931f63": {
+      "rows": 50,
+      "complete": true,
+      "adapter_loaded": null,
+      "recorded_metric": 0.0,
+      "recorded_sum": 0.0,
+      "scored_as_base_rule": 0.0,
+      "scored_as_candidate_rule": 1.0,
+      "base_accuracy": 0.0,
+      "candidate_accuracy": 0.02,
+      "generations": {
+        "opened_think": 50,
+        "unclosed_think": 50,
+        "mean_duplicate_line_ratio": 0.7057,
+        "degenerate_half_or_more_duplicate_lines": 41
+      },
+      "rule_disagreements": [
+        {
+          "index": 4,
+          "expected": "20",
+          "base": 0.0,
+          "candidate": 1.0,
+          "tail": " 20 = 20.\nThe equation is x * 20 = 20.\nThe equation is x * 20 = 20.\nThe equation is x * 20"
+        }
+      ]
+    }
+  },
+  "symmetric_comparison": {
+    "status": "pending",
+    "note": "only one side has predictions so far; rerun when the candidate eval finishes"
+  }
+}

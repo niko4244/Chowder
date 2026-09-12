@@ -30,6 +30,7 @@ from chowder.executors import ExecutionContext
 from chowder.memory import HardwareProfile
 from chowder.models import Experiment, Hypothesis
 from chowder.unsloth_env import unsloth_env_dir, unsloth_python
+from unsloth_env_link import link_persistent_unsloth_env
 
 _REAL_UNSLOTH_SMOKE = pytest.mark.skipif(
     os.environ.get("CHOWDER_REAL_UNSLOTH_SMOKE") != "1",
@@ -46,12 +47,16 @@ def test_real_unsloth_training_with_default_target_modules_produces_a_peft_adapt
     case) must still resolve to a real, non-empty target module list and
     produce a genuine, loadable PEFT adapter -- not crash inside Unsloth's
     own get_peft_model."""
-    env_dir = unsloth_env_dir(tmp_path)
+    # Looking only in pytest's throwaway tmp_path meant this test always skipped:
+    # a fresh directory never holds the multi-GB environment. Link the
+    # persistent one in instead -- see unsloth_env_link.
+    env_dir = link_persistent_unsloth_env(tmp_path) or unsloth_env_dir(tmp_path)
     python_executable = unsloth_python(env_dir)
     if not python_executable.is_file():
         pytest.skip(
             f"no isolated Unsloth environment at {env_dir}; run "
-            "`chowder setup unsloth` in this workspace first"
+            "`chowder setup unsloth --root <dir>` once and point "
+            "CHOWDER_REAL_UNSLOTH_ENV_ROOT at that dir"
         )
 
     data_path = tmp_path / "train.jsonl"

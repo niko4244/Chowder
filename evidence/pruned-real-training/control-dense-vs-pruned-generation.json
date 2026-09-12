@@ -1,0 +1,22 @@
+{
+  "dense": {
+    "n": 8,
+    "gsm8k_final_number_match": 0.375,
+    "mean_distinct_trigram_ratio": 0.640594339024466,
+    "mean_compression_ratio": 0.3435063451363795,
+    "degenerate_count": 1,
+    "mean_generated_tokens": 492.625,
+    "hit_token_cap_fraction": 0.375,
+    "seconds": 465.1
+  },
+  "pruned": {
+    "n": 8,
+    "gsm8k_final_number_match": 0.125,
+    "mean_distinct_trigram_ratio": 0.09381539620918714,
+    "mean_compression_ratio": 0.0836397643788965,
+    "degenerate_count": 8,
+    "mean_generated_tokens": 768.0,
+    "hit_token_cap_fraction": 1.0,
+    "seconds": 1009.0
+  }
+}
