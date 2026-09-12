@@ -622,6 +622,126 @@ def test_resolve_target_modules_attention_and_mlp_rejects_uncurated_architecture
         _resolve_target_modules(model, explicit=(), preset="attention_and_mlp")
 
 
+def test_resolve_target_modules_attention_and_mlp_covers_qwen3_5_hybrid_layers():
+    """qwen3_5's preset list is not the llama-family seven: 24 of its 32 decoder
+    layers are Mamba-style `linear_attn` rather than attention, so the preset
+    must also reach in_proj_qkv / in_proj_z / out_proj or it would silently
+    adapt only the 8 full-attention layers. Pinned exactly (not as a superset)
+    because PEFT does not complain about names that match nothing -- a typo
+    here is a partial-coverage bug that only shows up as a weak adapter.
+    """
+    model = _FakeModel("qwen3_5")
+    resolved = _resolve_target_modules(model, explicit=(), preset="attention_and_mlp")
+    assert resolved == [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "in_proj_qkv",
+        "in_proj_z",
+        "out_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
+
+
+@pytest.mark.parametrize("model_type", ["llama", "mistral", "qwen2", "gemma", "gemma2"])
+def test_resolve_target_modules_attention_and_mlp_leaves_llama_family_unchanged(model_type):
+    """Adding a per-architecture list for qwen3_5 turned the curated mapping
+    from one shared tuple into per-model_type entries. These architectures have
+    no linear_attn layers, so the hybrid names must not leak into them: doing so
+    would widen every existing llama-family recipe's adapter without review.
+    """
+    model = _FakeModel(model_type)
+    resolved = _resolve_target_modules(model, explicit=(), preset="attention_and_mlp")
+    assert resolved == [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
+
+
+@pytest.mark.parametrize("model_type", ["qwen3", "qwen3_5_moe", None])
+def test_resolve_target_modules_attention_and_mlp_raises_rather_than_resolving_empty(
+    model_type,
+):
+    """A model_type with no curated entry must fail loudly. The near-miss cases
+    are the dangerous ones -- qwen3 and qwen3_5_moe look like they should be
+    covered by a qwen3_5 entry and are not -- and a dict lookup that returned
+    an empty list (or None, which means "let PEFT auto-detect") instead of
+    raising would turn an unsupported architecture into a silently untrained or
+    differently-targeted run.
+    """
+    model = _FakeModel(model_type)
+    with pytest.raises(RuntimeError, match="no curated module list for model_type"):
+        _resolve_target_modules(model, explicit=(), preset="attention_and_mlp")
+
+
+def test_qwen3_5_curated_modules_match_a_real_qwen3_5_decoder():
+    """The curated mapping's standing precondition is that an architecture's
+    leaf names were verified against a real loaded model, because PEFT raises
+    only when NO name matches. This rebuilds that check in-suite against the
+    installed transformers implementation (on meta, so no weights are
+    materialised and nothing is downloaded), and pins the per-leaf counts that
+    docs/PRUNED_9B_RERUN_RESULT.md recorded for the real pruned 9B: 8 full-
+    attention layers, 24 linear_attn layers, 32 FFNs, 200 modules in total.
+    Real checkpoints ship the composite `qwen3_5` config; the decoder it nests
+    as text_config is what carries these leaves.
+    """
+    torch = pytest.importorskip("torch")
+    configuration = pytest.importorskip("transformers.models.qwen3_5.configuration_qwen3_5")
+    modeling = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+
+    from chowder.backends.transformers_worker import _QWEN3_5_TARGET_MODULES
+
+    # Shapes shrunk to keep this cheap; the layer *count* and full-attention
+    # interval are left at their defaults because they are what the 8/24/32
+    # split and the 200 total depend on.
+    config = configuration.Qwen3_5TextConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        vocab_size=256,
+    )
+    assert config.num_hidden_layers == 32
+    assert config.layer_types.count("full_attention") == 8
+    assert config.layer_types.count("linear_attention") == 24
+
+    with torch.device("meta"):
+        model = modeling.Qwen3_5ForCausalLM(config)
+    counts: dict[str, int] = {}
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            leaf = name.rsplit(".", 1)[-1]
+            counts[leaf] = counts.get(leaf, 0) + 1
+
+    assert {leaf: counts.get(leaf, 0) for leaf in _QWEN3_5_TARGET_MODULES} == {
+        "q_proj": 8,
+        "k_proj": 8,
+        "v_proj": 8,
+        "o_proj": 8,
+        "in_proj_qkv": 24,
+        "in_proj_z": 24,
+        "out_proj": 24,
+        "gate_proj": 32,
+        "up_proj": 32,
+        "down_proj": 32,
+    }
+    assert sum(counts[leaf] for leaf in _QWEN3_5_TARGET_MODULES) == 200
+    # in_proj_b / in_proj_a are real Linear leaves we intentionally skip, so
+    # their absence from the preset is a decision, not an oversight: if a future
+    # transformers release renames them, this says the omission was deliberate.
+    assert counts["in_proj_b"] == 24
+    assert counts["in_proj_a"] == 24
+
+
 def test_spec_defaults_to_auto_target_module_detection(tmp_path):
     data = tmp_path / "train.jsonl"
     data.write_text('{"text":"hello"}\n')

@@ -48,17 +48,16 @@ def _resolve_dtype(torch: Any, precision: str):
     return torch.float32
 
 
-# Only architectures whose attention (q/k/v/o_proj) AND MLP (gate/up/
-# down_proj) naming has actually been verified against a real loaded model
-# (directly, for llama; by well-documented, stable architectural convention
-# shared with llama, for the rest) are listed here. PEFT silently trains
+# Only architectures whose attention AND MLP leaf-module naming has actually
+# been verified against a real loaded model (directly, for llama and qwen3_5;
+# by well-documented, stable architectural convention shared with llama, for
+# the rest) are listed here. PEFT silently trains
 # only whatever subset of a target_modules list actually matches real module
 # names on the model -- it does NOT error if some names don't match, only if
 # NONE do -- so guessing wrong here would be a silent partial-coverage bug,
 # not a loud one. When in doubt, leave an architecture out: "auto" (PEFT's
 # own actively-maintained per-architecture mapping) or an explicit
 # backend.lora.target_modules list are always available.
-_ATTENTION_AND_MLP_MODEL_TYPES = {"llama", "mistral", "qwen2", "gemma", "gemma2"}
 _ATTENTION_AND_MLP_TARGET_MODULES = (
     "q_proj",
     "k_proj",
@@ -68,6 +67,37 @@ _ATTENTION_AND_MLP_TARGET_MODULES = (
     "up_proj",
     "down_proj",
 )
+# qwen3_5 is a hybrid stack, so the llama-family seven above would quietly
+# cover only a quarter of its attention: of 32 decoder layers just 8 are full
+# attention (q/k/v/o_proj), while the other 24 are Mamba-style `linear_attn`
+# (in_proj_qkv / in_proj_z / out_proj); all 32 share the gate/up/down_proj FFN.
+# Per-leaf counts verified against the real pruned 9B checkpoint -- q/k/v/o_proj
+# 8 each, in_proj_qkv / in_proj_z / out_proj 24 each, gate/up/down_proj 32 each,
+# 200 modules in total (docs/PRUNED_9B_RERUN_RESULT.md). in_proj_b / in_proj_a
+# (24 each) are excluded deliberately: they project to num_v_heads, so they are
+# per-head scalar gates rather than matrices a rank-r adapter can decompose.
+# PEFT ships no auto-detection entry for this model_type, so "auto" raises here
+# -- without this entry every recipe has to spell all ten names out by hand.
+_QWEN3_5_TARGET_MODULES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "in_proj_qkv",
+    "in_proj_z",
+    "out_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+_ATTENTION_AND_MLP_MODULES_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
+    "llama": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "mistral": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "qwen2": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "gemma": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "gemma2": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "qwen3_5": _QWEN3_5_TARGET_MODULES,
+}
 
 
 def _resolve_target_modules(
@@ -82,13 +112,15 @@ def _resolve_target_modules(
         return list(explicit)
     if preset == "attention_and_mlp":
         model_type = getattr(model.config, "model_type", None)
-        if model_type not in _ATTENTION_AND_MLP_MODEL_TYPES:
+        curated = _ATTENTION_AND_MLP_MODULES_BY_MODEL_TYPE.get(model_type)
+        if curated is None:
             raise RuntimeError(
                 f"lora.target_preset='attention_and_mlp' has no curated module list for "
-                f"model_type {model_type!r}; supported: {sorted(_ATTENTION_AND_MLP_MODEL_TYPES)}. "
+                f"model_type {model_type!r}; supported: "
+                f"{sorted(_ATTENTION_AND_MLP_MODULES_BY_MODEL_TYPE)}. "
                 "Specify backend.lora.target_modules explicitly instead."
             )
-        return list(_ATTENTION_AND_MLP_TARGET_MODULES)
+        return list(curated)
     return None
 
 
