@@ -1,9 +1,9 @@
 # Dense→MoE vs static prune, measured to a negative result — plus ten defects it exposed in Chowder's training path
 
-**Base** `main` (`41a2913`) · **Head** `feat/hot-core-upcycling` (`78e2615`) · **30 commits, 108 files, +13419/-82**
+**Base** `main` (`41a2913`) · **Head** `feat/hot-core-upcycling` (`384a34e`) · **34 commits, 114 files, +14890/-90**
 
 > The previous title (`feat(upcycle): hot-core dense->MoE init, validated against a prior
-> prediction`) describes `f948cc1` only — the first of thirty commits. The branch went on to
+> prediction`) describes `f948cc1` only — the first of 34. The branch went on to
 > measure that init against a simpler alternative, conclude *against* it, withdraw the
 > deployability recommendation that followed, and then spend its second half fixing the
 > training and evaluation defects it hit while trying to train the resulting checkpoint.
@@ -161,8 +161,8 @@ Opening the gated real-ML suites is what found most of these. Those tests sit am
 | 4 | **Unverified target coverage.** PEFT raises only when *nothing* matches; a ten-name list silently adapted **128 modules instead of 200** (all 72 `linear_attn` modules skipped) and the gate promoted it | `src/chowder/target_coverage.py` | `81cfe05` | `tests/test_target_coverage.py` (16) |
 | 5 | Unsloth turned an explicit target list into a regex that missed the Mamba-style layers | pass a suffix-match regex so the full list is honoured | `0bd62ed` | `tests/test_project_runner_repair_unsloth.py` |
 | 6 | A **telemetry rename killed a 500-step run at step 323**: `PermissionError: [WinError 5]` on `progress.tmp → progress.json` inside `TrainerCallback.on_log` propagates out of `Trainer.train()`, discarding 323 steps | `src/chowder/progress_write.py` — retry briefly, then keep training; failures surfaced as `progress_write_failures` | `e2e6df1` | `tests/test_progress_write.py` (7) |
-| 7 | **Two text scorers had silently diverged.** Baseline ran through `base_text_worker` (discards an unclosed `<think>`), candidate through `transformers_text_worker` (scores raw text) — so the two sides of one comparison used different rules under one name | `src/chowder/evaluators/scoring.py`; both workers hold `_score = score`, the same function object | `a9cd0ad` | `tests/test_scorer_agreement.py` (6), `tests/test_final_number_scoring.py` (9) |
-| 8 | `unsloth_worker` **never read `lr_scheduler_type`** (nor `warmup_ratio`/`warmup_steps`) — the key was validated by the spec and honoured by `transformers_worker`, so a pre-registered **cosine** recipe trained on **linear** and nothing said so | read and pass it in both spec and worker | `5de632d` | `tests/test_lr_scheduler_honoured.py` (7), mutation-verified source check |
+| 7 | **Two text scorers had silently diverged.** Baseline ran through `base_text_worker` (discards an unclosed `<think>`), candidate through `transformers_text_worker` (scores raw text) — so the two sides of one comparison used different rules under one name | `src/chowder/evaluators/scoring.py`; both workers hold `_score = score`, the same function object | `a9cd0ad` | `tests/test_scorer_agreement.py` (23), `tests/test_final_number_scoring.py` (16) |
+| 8 | `unsloth_worker` **never read `lr_scheduler_type`** (nor `warmup_ratio`/`warmup_steps`) — the key was validated by the spec and honoured by `transformers_worker`, so a pre-registered **cosine** recipe trained on **linear** and nothing said so | read and pass it in both spec and worker | `5de632d` | `tests/test_lr_scheduler_honoured.py` (10), mutation-verified source check |
 | 9 | Both workers recorded `resolved_target_modules` as `sorted(...)` of a regex **string** — i.e. a sorted list of its 99 characters — in the run's own provenance | keep the regex out of `sorted()`; also retracts an unmeasured loss figure | `69e27c0` | guarded in the same commit |
 | 10 | **Evaluators recorded no VRAM at all.** A pre-registered peak-VRAM condition was therefore undecidable for the evaluation leg, and the only proxy (`nvidia-smi`) measures the whole machine — a busy desktop could fail an experiment | `src/chowder/evaluators/vram.py` reports `peak_vram_gb` and `peak_vram_reserved_gb`, `None` for unknown, never raises | `52cba56` | `tests/test_evaluator_vram_reporting.py` (5) |
 
@@ -191,7 +191,7 @@ assertion for months). `src/chowder/schedule_audit.py` identifies the schedule f
 a run actually logged, and returns `INCONCLUSIVE` rather than guessing when the trajectory
 carries no information. The real 500-step trajectory is committed as a fixture:
 `tests/data/lr-trajectory-pruned9b-cosine-500.jsonl` (500 rows), with
-`tests/test_schedule_audit.py` (14 tests).
+`tests/test_schedule_audit.py` (21 tests).
 
 On the re-run: **cosine residual 0.0000 — exact, all 500 steps**, against linear 0.0754 and
 constant 0.6116; final logged rate **1.97e-9** against a 2e-4 peak.
@@ -225,7 +225,7 @@ control script was corrected **before** running rather than after.
 No outcome threshold altered; the GPU-hour ceiling was raised 2.0 → 4.5 from measured leg
 costs, with the reasoning for why a resource ceiling is not an outcome threshold. Result
 skeleton committed at `5df9193` *while the candidate eval was still running*, so the verdict
-rules predate the numbers — guarded by `tests/test_result_docs_are_not_drafts.py` (3 tests),
+rules predate the numbers — guarded by `tests/test_result_docs_are_not_drafts.py` (5 tests),
 which forbids a placeholder surviving the removal of the SKELETON banner.
 
 `PRUNED_9B_RERUN_RESULT.md`: 208.0 min (3.47 h against the 4.5 h ceiling). 500 steps,
@@ -303,6 +303,31 @@ Training taught it to *solve* more, not to *stop*.
 
 `git log main..HEAD` shows **49** commits against a local `main` that is 19 commits behind the
 remote. Against the PR's actual base (`origin/main` = `41a2913`, which already carries
-PRs #154–#157) the range is **30 commits, 108 files, +13419/-82** — GitHub reports the same
-30. The router-healing modules (`router_healing*.py`, `parent_freeze.py`, `dense_to_moe.py`
+PRs #154–#157) the range is **34 commits, 114 files, +14890/-90** — GitHub reports the same
+count. The router-healing modules (`router_healing*.py`, `parent_freeze.py`, `dense_to_moe.py`
 changes) are **already on `main`** and are not part of this review.
+
+---
+
+## Closing result, added after the draft
+
+`docs/PRUNE_FRACTION_GENERATION_SWEEP.md` — swept five prune fractions for
+**generation**, masking the channels a prune would delete with the same corpus-wide
+ranking the built checkpoints use:
+
+| f | keep/layer | ×dense ppl | GSM8K | terminated | degenerate | verdict |
+|---:|---:|---:|---:|---:|---:|---|
+| 1.00 | 12288 | 1.00 | 0.375 | 5/8 | 2/8 | **SURVIVES** |
+| 0.75 | 9216 | 1.03 | 0.250 | 4/8 | 0/8 | **SURVIVES** |
+| 0.5625 | 6912 | 1.09–1.14 | 0.250 | 1/8 | 7/8 | FAILS |
+| 0.40 | 4915 | 1.19 | 0.000 | 0/8 | 8/8 | FAILS |
+| 0.28 | 3441 | 1.48–1.69 | 0.000 | 0/8 | 8/8 | FAILS |
+
+Perplexity moves **1.03× → 1.14×** across the interval where termination collapses
+**4/8 → 1/8**. So on this model, choosing a prune fraction by perplexity selects a
+checkpoint that cannot stop — the metric is not merely uninformative about termination,
+it is actively misleading. Both pre-registered anchors behaved: f=1.00 reproduced the
+independent dense control (0.375/5-of-8/0.641 against 0.375/5-of-8/0.6406) and f=0.28
+reproduced the built checkpoint's degeneration, which is the reason to believe the
+fractions between them. n=8 per arm, so the cliff's existence is robust and its exact
+position between 0.75 and 0.5625 is not.
