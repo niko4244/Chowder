@@ -45,12 +45,36 @@ def _final_answer(prediction: str) -> str:
     return prediction
 
 
+#: See transformers_text_worker for why this is comma-aware and takes the LAST
+#: number: an extractor without those properties scored a correct "$70,000" wrong
+#: (frontier FINDINGS-GSM8K-EVAL-BUG.md).
+_FINAL_NUMBER = re.compile(r"[-]?\d[\d,]*(?:\.\d+)?")
+
+
+def _final_number(text: str) -> str | None:
+    matches = _FINAL_NUMBER.findall(text or "")
+    if not matches:
+        return None
+    raw = matches[-1].replace(",", "")
+    if raw.endswith(".0"):
+        raw = raw[:-2]
+    if raw.endswith("."):
+        raw = raw[:-1]
+    return raw or None
+
+
 def _score(prediction: str, expected: str, scoring: str) -> float:
     answer = _final_answer(prediction)
     if scoring == "exact_match":
         return float(answer.strip() == expected.strip())
     if scoring == "normalized_exact_match":
         return float(_normalize(answer) == _normalize(expected))
+    if scoring == "final_number_match":
+        got = _final_number(answer)
+        want = _final_number(expected)
+        if got is None or want is None:
+            return 0.0
+        return float(got == want)
     raise ValueError(f"unsupported scoring: {scoring}")
 
 

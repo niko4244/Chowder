@@ -25,11 +25,42 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().casefold()
 
 
+#: Final-number extraction for arithmetic word problems (GSM8K and similar).
+#: The regex is comma-aware and the LAST number in the response wins, both of
+#: which were learned the hard way: the frontier repo's FINDINGS-GSM8K-EVAL-BUG.md
+#: records an extractor using r"[-]?\d+(?:\.\d+)?" that split "$70,000" into
+#: ["70", "000"] and scored a CORRECT answer wrong, so a self-improvement loop then
+#: "trained on a failure" that was not one. Commas are stripped before comparison
+#: and a trailing ".0" is normalised, so "70,000" == "70000" == "70000.0".
+_FINAL_NUMBER = re.compile(r"[-]?\d[\d,]*(?:\.\d+)?")
+
+
+def _final_number(text: str) -> str | None:
+    matches = _FINAL_NUMBER.findall(text or "")
+    if not matches:
+        return None
+    raw = matches[-1].replace(",", "")
+    if raw.endswith(".0"):
+        raw = raw[:-2]
+    if raw.endswith("."):
+        raw = raw[:-1]
+    return raw or None
+
+
 def _score(prediction: str, expected: str, scoring: str) -> float:
     if scoring == "exact_match":
         return float(prediction.strip() == expected.strip())
     if scoring == "normalized_exact_match":
         return float(_normalize(prediction) == _normalize(expected))
+    if scoring == "final_number_match":
+        # Compare the last number in each side, not the whole string: a model that
+        # shows its work cannot exact-match a bare answer, and scoring it wrong
+        # would manufacture failures rather than measure them.
+        got = _final_number(prediction)
+        want = _final_number(expected)
+        if got is None or want is None:
+            return 0.0
+        return float(got == want)
     raise ValueError(f"unsupported scoring: {scoring}")
 
 
