@@ -5,7 +5,13 @@ Branch `feat/hot-core-upcycling`, [PR #158](https://github.com/niko4244/Chowder/
 `main` that is 19 commits stale — use `origin/main..HEAD`). Suite **1577 passed, 77
 skipped**. Working tree clean, everything pushed.
 
-## §1 READ FIRST — work was in flight when this was written
+## §1 The fraction sweep COMPLETED — see `PRUNE_FRACTION_GENERATION_SWEEP.md`
+
+Lowest surviving fraction **0.75**; f=0.5625 fails at 1/8 terminating and 7/8
+degenerate despite costing only 1.09–1.14× dense perplexity. Both pre-registered
+anchors behaved. The original in-flight notes are kept below for provenance.
+
+## §1a (as written while it was still running)
 
 A **prune-fraction generation sweep** was running on the GPU. If it finished, its
 result is at `F:\llm-models\_a4b\prune-fraction-generation-sweep.json` (written
@@ -39,11 +45,16 @@ should not be believed.
 **Chowder trains this 9B hybrid correctly.** 500 steps, 200/200 module coverage,
 6.14 GiB peak, cosine schedule verified from the realised LR curve, on a real corpus.
 
-**No prune of this model has been shown to produce a usable checkpoint.** At f=0.28,
+**Only one prune fraction has been shown to generate at all: f=0.75.** At f=0.28,
 0 of 100 responses across two arms ever terminated — every one ran to the 768-token
 cap. Training recovered **+0.10 of real arithmetic** (verified under three scoring
 rules, so it is not a scorer artifact) while leaving degeneration statistically
-unchanged. It learned to **solve** more problems, not to **stop**.
+unchanged. It learned to **solve** more problems, not to **stop**. The sweep then
+showed f=0.5625 and f=0.40 also fail, with the cliff between 0.75 and 0.5625.
+
+**And perplexity cannot be used to choose the fraction.** It moves 1.03× → 1.14×
+across the exact interval where termination collapses 4/8 → 1/8. Selecting on
+perplexity picks a checkpoint that cannot stop.
 
 `HOT_CORE_VS_STATIC_PRUNE.md` is marked **WITHDRAWN as a deployable recommendation**.
 Its perplexity results stand; perplexity simply does not predict termination. The
@@ -72,15 +83,15 @@ proxy stood in and **a busy desktop failed an experiment**. See §5.
 
 ## §4 Open items, in priority order
 
-1. **Finish the fraction sweep** (§1) and record where generation survives. This is
-   the question that decides whether the pruning line has a deployable endpoint.
+1. ~~Finish the fraction sweep.~~ **Done — `PRUNE_FRACTION_GENERATION_SWEEP.md`.**
+   Only f=0.75 survives; f=0.5625 fails at 1/8 terminating. The open question it
+   leaves: is a 25% FFN prune (f=0.75, 9216/12288) worth building and healing? That is
+   a much smaller prize than the 72% f=0.28 promised.
 2. **Unqualified engineering PASS** — re-run the evaluation leg on a verified-idle
    card with the new VRAM instrumentation (~1.4 h). The verdict is "PASS, qualified"
    only because the run could not measure its own footprint.
-3. **Apply the PR #158 title/description.** Drafted and verified against the
-   30-commit range at `docs/PR158-DESCRIPTION.md`. **Nothing has been pushed to
-   GitHub** — retitling is a visible change on a public repo and was left for the
-   user to approve.
+3. ~~Apply the PR #158 title/description.~~ **Applied 2026-09-12 on explicit user
+   approval**, from `docs/PR158-DESCRIPTION.md`.
 4. **`qwen3_5_moe` and `qwen3_5_text` preset entries.** Deliberately not added: the
    MoE FFN replaces one gate/up/down triple per layer with one per expert plus a
    router, so the same ten names resolve to a very different set and it needs its own

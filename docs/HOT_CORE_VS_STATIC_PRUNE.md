@@ -22,8 +22,16 @@
 >
 > Two limits on how far this generalises: the MoE checkpoint has **not** been measured
 > for degeneration, so "static pruning beats the hot-core MoE" stays a perplexity
-> claim and neither artifact has been shown usable; and f=0.28 is the only fraction
-> tested this way — f=0.56 cost just 1.14× perplexity and is untested for generation.
+> claim and neither artifact has been shown usable.
+>
+> **Update (2026-09-12): a milder prune does not rescue it.**
+> `PRUNE_FRACTION_GENERATION_SWEEP.md` swept f = 1.00 / 0.75 / 0.5625 / 0.40 / 0.28 for
+> generation. Only **f=0.75 survives**; f=0.5625 terminates on 1 prompt in 8 with 7/8
+> degenerate, at a perplexity cost of just 1.09–1.14×. Perplexity moves 1.03× → 1.14×
+> across the interval where termination collapses 4/8 → 1/8, so on this model **choosing
+> a prune fraction by perplexity selects a checkpoint that cannot stop.** Both
+> pre-registered anchors behaved (f=1.00 reproduced the dense control; f=0.28 reproduced
+> the built checkpoint), so the emulation is trustworthy.
 
 Evidence: `evidence/hot-core-upcycling/reconvert-corpuswide.json`,
 `corpus-wide-ranking.json`, `static-prune-evalb.json`, `pilot-result.json`.

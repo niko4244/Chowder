@@ -163,5 +163,9 @@ shown usable for generation.
    it would have changed nothing. Engineering **FAIL** on oversubscription during the
    candidate eval; capability **RECOVERS** at +0.12, though 0/100 responses across
    both arms ever terminated.
-4. Only then revisit whether a milder prune (f=0.56 cost just 1.14× perplexity)
-   produces a checkpoint that terminates.
+4. ~~Revisit whether a milder prune (f=0.56 cost just 1.14× perplexity) produces a
+   checkpoint that terminates.~~ **Done — no. See
+   `PRUNE_FRACTION_GENERATION_SWEEP.md`.** At f=0.56 generation is already broken:
+   1/8 terminating, 7/8 degenerate. The cliff sits between f=0.75 and f=0.56, and
+   perplexity is nearly flat across it (1.03× → 1.14×), so at that operating point
+   perplexity is actively misleading rather than merely uninformative.
