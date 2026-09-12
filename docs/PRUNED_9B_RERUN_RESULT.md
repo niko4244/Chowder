@@ -14,17 +14,26 @@ Ran 2026-09-11 22:27:39 → 2026-09-12 01:55:39, **208.0 min** wall (3.47 h agai
 
 | arm | verdict |
 |---|---|
-| **Engineering** (the primary claim) | **FAIL** — oversubscription, on a reproducible cause |
+| **Engineering** (the primary claim) | **PASS, qualified** — see the withdrawal below |
 | **Capability** (secondary) | **RECOVERS** — +0.12, and the gain is not a scoring artifact |
 
-That pair is uncomfortable and it is the honest reading. Every one of the six PASS
-conditions was met, training worked, and arithmetic measurably improved — and the
-pre-registered FAIL list says "**any of**: … OOM/oversubscription (judged by headroom
-and step-time blowup, never by an OOM exception — this platform pages instead of
-raising)". The candidate eval ran at **0.56 GiB free with a 1.58–2.0× step-time
-blowup**, from a cause reproduced on a clean card. Relabelling that as a PASS because
-the rest went well is precisely the post-hoc move the pre-registration exists to
-prevent.
+> **This was first recorded as Engineering FAIL, and the FAIL is withdrawn.** It is
+> the only verdict revised in this document, the reasons are below in full, and the
+> reasoning deserves scepticism because flipping a FAIL to a PASS is exactly the
+> post-hoc move a pre-registration exists to prevent.
+>
+> The test I applied to myself: *would I have accepted the opposite outcome?* Had the
+> controlled probes shown the adapter genuinely consuming 15 GiB, I would have
+> recorded the FAIL as confirmed and said so. The procedure was symmetric before the
+> data arrived, which is the only thing that distinguishes a correction from a
+> rationalisation.
+>
+> **PASS is "qualified" and not clean.** All six pre-registered conditions were met,
+> but the oversubscription clause turned out to be *undecidable from the run's own
+> artifacts*, so its withdrawal rests on post-hoc controlled measurement of the same
+> configuration rather than on evidence the run itself produced. An unqualified PASS
+> would require re-running the evaluation leg on a verified-idle card with the
+> instrumentation now added (`52cba56`). That has not been done.
 
 ### Engineering, condition by condition
 
@@ -36,7 +45,7 @@ prevent.
 | loss finite and decreasing | yes | 2.8503 → 1.0676, mean 1.2107 | ✓ |
 | peak VRAM, training | < 15.93 GiB | **6.14 GiB** | ✓ |
 | GSM8K both arms, same protocol | yes | 0.00 / 0.12, identical protocol | ✓ |
-| **no oversubscription** | headroom + no blowup | **0.56 GiB free, 1.58–2.0× blowup** | **✗** |
+| no oversubscription | headroom + no blowup | **undecidable from run artifacts** | — |
 
 Coverage reproduced the hybrid's real structure from a live model rather than from an
 assumption: `q/k/v/o_proj` 8 each (the 8 full-attention layers), `in_proj_qkv` /
@@ -44,11 +53,12 @@ assumption: `q/k/v/o_proj` 8 each (the 8 full-attention layers), `in_proj_qkv` /
 each (all layers) = 200.
 
 **On the pre-registration's internal conflict.** Its PASS list says "peak VRAM under
-15.93 GiB", which ~15.1 GiB satisfies; its FAIL list says oversubscription judged by
-headroom and blowup, which 0.56 GiB and 1.58× satisfy. I flagged this as ambiguous
-before the deciding measurement existed. The plain text settles it without needing a
-new rule: the FAIL list is "any of", so a FAIL trigger is sufficient on its own. The
-numeric budget was also met *on the leg it describes* — training peaked at 6.14 GiB.
+15.93 GiB"; its FAIL list says oversubscription judged by headroom and blowup. I
+flagged the tension before the deciding measurement existed. The resolution turned out
+to be more basic than choosing between them: **neither quantity existed in the
+evaluation leg's artifacts.** The evaluator workers recorded no VRAM at all, so both
+clauses were undecidable for that leg and I substituted `nvidia-smi`, which measures
+the whole machine. Fixed in `52cba56`; see the withdrawal below.
 
 ### Capability
 
@@ -126,44 +136,71 @@ control's pruned arm (0.094 / 0.084 at n=8) on an independent sample.
 This readout was pre-registered in the addendum as descriptive, not a gate, and no
 threshold is placed on it before or after.
 
-## Why the candidate eval oversubscribed: the adapter path, not the adapter
+## Withdrawn: the candidate eval did not oversubscribe
 
-Controlled A/B (`evidence/pruned-real-training/ab_adapter_overhead.py`), 5 problems ×
-768 tokens, greedy, from a clean card, decision rule fixed before running:
+The trigger was that the candidate arm ran at 166 s/problem against the baseline's 83
+while `nvidia-smi` showed 559 MiB of card free. Two things turned out to be true: the
+slowdown is real and explained, and the headroom figure was never a measurement of
+this run.
 
-| arm | ms/token | tokens | cap | torch reserved | card used | outside torch |
-|---|---:|---:|---:|---:|---:|---:|
-| no-adapter | 112.1 | 3840 | 5/5 | 5.64 GiB | 6.47 GiB | ~0 |
-| adapter | **177.6** | 3840 | 5/5 | **5.84 GiB** | **15.37 GiB** | **~8.45 GiB** |
+### The slowdown is adapter compute
 
-Both arms generated exactly the same number of tokens and hit the cap 5/5, so the
-1.58× is per equal work — the seconds-per-token precaution proved unnecessary here,
-but it is verified rather than assumed.
+Probed with `torch.cuda.mem_get_info()` (driver-level free memory from inside the
+process) and **one arm per process**, at five token budgets:
 
-**The adapter weights cost +0.20 GiB and do not explain the memory.** ~8.45 GiB
-appears *outside torch's accounting* during generation with the adapter attached:
-9.31 GiB free immediately after load, 0.56 GiB free while generating. That reproduces
-the real run's 15.1 GiB from a clean start, which rules out external contention — it
-is the configuration under test.
+| budget | no-adapter | adapter | ratio | adapter non-torch | driver free |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 887.0 | 923.2 | 1.04 | 1.15 GiB | 9.01 GiB |
+| 16 | 124.2 | 191.7 | **1.54** | 1.15 GiB | 8.96 GiB |
+| 64 | 111.3 | 172.8 | **1.55** | 1.15 GiB | 8.90 GiB |
+| 256 | 108.8 | 167.9 | **1.54** | 1.15 GiB | 8.90 GiB |
+| 768 | 105.9 | 193.5 | **1.83** | 1.15 GiB | **8.88 GiB** |
 
-**My hypothesis framing was wrong and the A/B could not have confirmed H1.** I posed
-adapter compute (H1) and VRAM pressure (H2) as exclusive alternatives. They are
-coupled: the adapter path *causes* the pressure. My rule required ≥4 GiB headroom in
-the adapter arm to credit H1, which is unsatisfiable by construction when the adapter
-is what consumes the headroom, so the H1 branch could never fire. The script's
-verdict message was additionally wrong on its face — it printed "ratio 1.58 falls
-between 1.2 and 1.5" for a ratio of 1.58; the logic was right, the stated reason was
-not. Both corrected in `39bee30`.
+A stable 1.54–1.83× **with ~8.9 GiB free throughout**. 200 unfused LoRA modules add
+two matmuls each per token, and batch-1 decode is launch-latency bound, so the arms
+are simply unequal work. The 1-token row is prefill-dominated and uninformative.
 
-Reproduction is partial: 1.58× here against 2.0× in the 50-problem run, with the
-no-adapter arm (86.1 s/problem) matching the real baseline (83). The longer run was
-worse, plausibly fragmentation accumulating over 50 problems — untested.
+### The ~8.45 GiB has no reproduction, and five mechanisms are eliminated
 
-**Still open:** what allocates the ~8.45 GiB. cuBLAS or bitsandbytes workspaces
-outside the caching allocator are the obvious suspects for 400 extra small matmuls
-per token, but that is a hypothesis and has not been measured. Until it is, the
-practical finding stands on its own: **evaluating with an unfused 200-module adapter
-nearly exhausts a 16 GiB card for reasons unrelated to adapter size.**
+| candidate mechanism | verdict |
+|---|---|
+| adapter weights | **no** — +0.15 GiB at 768 tokens |
+| token count | **no** — non-torch flat 1 → 768 tokens |
+| accumulation across problems | **no** — reserved plateaus at 5.99 GiB by problem 4 and is identical for the next eight; free plateaus at 8.79 GiB; ms/tok shows no progressive slowing |
+| PEFT forcing a non-specialised cache | **no** — `DynamicCache` in both arms |
+| nvidia-smi vs mem_get_info disagreeing | **no** — 26 interleaved samples agree within 0.33 GiB, with nvidia-smi reading slightly *more* free |
+
+The evaluation process's own footprint is **~6.6 GiB**, measured four ways, against a
+15.93 GiB budget. The remaining ~9 GiB during the run was held by something outside
+the experiment which I **could not identify**. The tidiest candidate — the user's
+Ollama, which runs with `KEEP_ALIVE 5m` and would have unloaded by morning — fits the
+facts but has **no supporting evidence**: no log entries on either date, newest server
+log from June 30. Dropped rather than left standing on plausibility.
+
+### The actual defect, now fixed
+
+**The evaluator workers recorded no VRAM at all.** The training workers always have.
+So a pre-registered peak-VRAM condition was undecidable for the evaluation leg, and
+the only available proxy measured the whole machine — every browser and service on it.
+A busy desktop was able to fail an experiment.
+
+`chowder/evaluators/vram.py` (`52cba56`) now reports both `peak_vram_gb` (allocated —
+what the model needed) and `peak_vram_reserved_gb` (what torch took from the driver —
+what decides whether a run fits alongside anything else), from both arms, with
+unknown reported as `None` rather than 0.0, and never raising. Mutation-verified.
+
+### What I got wrong along the way
+
+* The A/B ran both arms in **one process**, so its adapter arm could never hold the
+  4 GiB of headroom its own decision rule demanded for H1. I declared H1 unreachable;
+  it was reachable, just not by that design. One arm per process showed it plainly.
+* I framed adapter compute and VRAM pressure as exclusive alternatives. They were
+  neither exclusive nor both real.
+* The A/B's verdict message said "ratio 1.58 falls between 1.2 and 1.5" for a ratio of
+  1.58 — the logic was right, the stated reason false. Fixed in `39bee30`.
+* I did not notice until late that **instrument and condition had changed together**:
+  every reading showing a full card used nvidia-smi, every reading showing free memory
+  used mem_get_info. That confound was mine to catch at design time.
 
 ## The schedule the pre-registration asked for actually ran
 
@@ -205,11 +242,11 @@ recovery from that crash:
   RECOVERS verdict here is about arithmetic, not usability.
 * **Not** that the capability gain generalises. n=50, single seed, one run per arm,
   ~2,000 of 7,473 problems seen (about a quarter epoch). One problem is 0.02.
-* **Not** that the engineering FAIL means Chowder cannot train this checkpoint. It
-  trained it correctly end to end; the FAIL is a resource finding about evaluating
-  with an unfused adapter on a 16 GiB card.
-* **Not** that the ~8.45 GiB has an identified cause. It has a reproduction, not an
-  explanation.
+* **Not** that the qualified PASS is a clean one. The oversubscription clause was
+  undecidable from the run's artifacts, and its withdrawal rests on post-hoc
+  controlled measurement of the same configuration, not on the run's own evidence.
+* **Not** that the ~9 GiB has an identified cause. It has five *eliminated* causes and
+  no positive explanation, and it did not come from the experiment.
 
 ## Corrections recorded during this run
 
@@ -230,5 +267,14 @@ recovery from that crash:
 6. I reported `progress_write_failures` and coverage as absent from the worker result;
    they are top-level fields, not under `telemetry`/`provenance`. I looked in the
    wrong place — the same mistake shape as the earlier coverage-nesting bug.
-7. The A/B's hypotheses were not exclusive and its H1 branch was unreachable; its
-   verdict message misstated the reason. Both corrected in `39bee30`.
+7. The A/B's hypotheses were not exclusive and its H1 branch was unreachable by
+   construction; its verdict message misstated the reason. Corrected in `39bee30`.
+8. **The Engineering FAIL was withdrawn.** It rested on a whole-machine `nvidia-smi`
+   reading standing in for a per-process figure the evaluators never recorded. Five
+   mechanisms eliminated, footprint ~6.6 GiB measured four ways, root defect fixed in
+   `52cba56`. This is the one verdict revised here, and it is marked qualified because
+   the withdrawal is post-hoc rather than from the run's own evidence.
+9. A test of mine was order-dependent: it asserted `peak_vram("cuda:99")` returns
+   `None`, which passed in the full suite and failed standalone, because torch rejects
+   an out-of-range ordinal only once CUDA has been initialised by an earlier test. It
+   now drives the defensive path by making torch raise.
