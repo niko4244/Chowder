@@ -166,19 +166,55 @@ async def test_active_accelerator_count_auto_uses_detected_gpu_count(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_active_accelerator_count_auto_with_no_hardware_scanned_yet_defaults_to_zero(
-    tmp_path,
+async def test_a_save_in_the_scan_window_measures_rather_than_recording_zero(
+    tmp_path, monkeypatch
 ):
-    """The background hardware scan on_mount() kicks off can genuinely
-    finish before this test's own code runs (a real race, not just a local
-    timing accident -- observed passing locally and failing on CI), so this
-    forces the "not scanned yet" state directly rather than hoping the scan
-    hasn't completed."""
+    """Saving before the background scan lands must not record CPU-only training.
+
+    The window is real, not a timing accident in the test: `_scan_hardware` is
+    an `on_mount` worker, and the previous version of this test documented that
+    the race "was observed passing locally and failing on CI" -- while pinning
+    the wrong behaviour, that `'auto'` resolves to zero. A count is a
+    measurement, so the save takes the measurement. Treating "not yet" as
+    "none" silently recorded zero accelerators for a GPU machine.
+    """
     app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    monkeypatch.setattr("chowder.tui.detect_hardware", lambda _cwd: _snapshot(2))
+    async with app.run_test():
+        app._hardware = None  # the scan has not landed yet
+        payload = app._build_payload()
+    assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_failed_scan_is_refused_rather_than_recorded_as_zero(tmp_path, monkeypatch):
+    """Unknown is not zero: a scan that failed has no count to record."""
+
+    def exploding_scan(_cwd):
+        raise RuntimeError("nvidia-smi is not on PATH")
+
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    monkeypatch.setattr("chowder.tui.detect_hardware", exploding_scan)
     async with app.run_test():
         app._hardware = None
+        with pytest.raises(ProjectValidationError, match="hardware scan failed"):
+            app._build_payload()
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_accelerator_count_needs_no_scan(tmp_path, monkeypatch):
+    """An explicit choice is not a measurement, so it must not be blocked."""
+
+    def exploding_scan(_cwd):
+        raise RuntimeError("nvidia-smi is not on PATH")
+
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    monkeypatch.setattr("chowder.tui.detect_hardware", exploding_scan)
+    async with app.run_test():
+        _set(app, active_accelerator_count="1")
+        app._hardware = None
         payload = app._build_payload()
-    assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 0
+    assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 1
 
 
 @pytest.mark.asyncio
