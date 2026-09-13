@@ -11,6 +11,16 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from ..evaluators.vram import MemorySampler
+from ..lifecycle import (
+    PHASE_CLOSEOUT,
+    PhaseTimer,
+    cuda_synchronize,
+    quantization_reality_report,
+    sampling_device,
+    tensor_inventory,
+    training_lifecycle_ledger,
+)
 from ..progress_write import write_progress_best_effort
 from ..target_coverage import adapted_modules_by_leaf
 from ..trainability import (
@@ -338,6 +348,12 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             self.forward_seconds = 0.0
             self.backward_seconds = 0.0
             self.optimizer_seconds = 0.0
+            # The FIRST step is its own quantity: a real run reached its memory
+            # peak inside the first step, and a steady-state average hides that.
+            # None means "not observed", never 0.0.
+            self.first_forward_seconds: float | None = None
+            self.first_backward_seconds: float | None = None
+            self.first_optimizer_seconds: float | None = None
             self._utilization_samples: list[float] = []
             self._stop_sampling = threading.Event()
             self._sampler_thread: threading.Thread | None = None
@@ -375,7 +391,10 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
                 started = time.perf_counter()
                 result = original_compute_loss(*call_args, **call_kwargs)
                 self._sync()
-                self.forward_seconds += time.perf_counter() - started
+                elapsed = time.perf_counter() - started
+                self.forward_seconds += elapsed
+                if self.first_forward_seconds is None:
+                    self.first_forward_seconds = elapsed
                 return result
 
             trainer.compute_loss = timed_compute_loss
@@ -388,7 +407,10 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
                 started = time.perf_counter()
                 result = original_backward(*call_args, **call_kwargs)
                 self._sync()
-                self.backward_seconds += time.perf_counter() - started
+                elapsed = time.perf_counter() - started
+                self.backward_seconds += elapsed
+                if self.first_backward_seconds is None:
+                    self.first_backward_seconds = elapsed
                 return result
 
             trainer.accelerator.backward = timed_backward
@@ -401,7 +423,10 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
                 started = time.perf_counter()
                 result = original_step(*call_args, **call_kwargs)
                 self._sync()
-                self.optimizer_seconds += time.perf_counter() - started
+                elapsed = time.perf_counter() - started
+                self.optimizer_seconds += elapsed
+                if self.first_optimizer_seconds is None:
+                    self.first_optimizer_seconds = elapsed
                 return result
 
             trainer.optimizer.step = timed_step
@@ -426,6 +451,12 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     dtype = _resolve_dtype(torch, spec.precision)
     if spec.quantization == "4bit" and not torch.cuda.is_available():
         raise RuntimeError("initial 4-bit QLoRA backend requires an available CUDA device")
+
+    # P6: the model load is a real, measurable phase. Until now the completed
+    # rerun's artifacts could not say how much of its 3.463 GPU-hours was load,
+    # how much was the 500 steps, and how much was generation.
+    load_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
+    load_timer.__enter__()
 
     set_seed(spec.seed)
     model_cache_status = cache_status(spec.base_model, spec.revision)
@@ -519,6 +550,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
 
     if spec.gradient_checkpointing:
         model.config.use_cache = False
+    load_timer.__exit__()
 
     is_chat = spec.dataset_format == "chat"
     field = spec.messages_field if is_chat else spec.text_field
@@ -668,6 +700,13 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         streamed_layers = stream_frozen_layers(model, trainer.args.device)
         frozen_layer_streaming_callback.streamed = streamed_layers
 
+    # P6: sampled headroom while the steps run, from this process's own view.
+    # The report states its own cadence and that a sample is a point reading;
+    # judging headroom from a machine-wide nvidia-smi figure is what produced a
+    # spurious oversubscription FAIL on a busy desktop.
+    memory_sampler = MemorySampler(device_name=sampling_device(torch))
+    memory_sampler.start()
+
     activation_offload_bytes_transferred: int | None = None
     if spec.activation_offload:
         # Moves a tensor to CPU when it's saved for backward, and back to
@@ -702,6 +741,9 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     else:
         train_output = trainer.train(resume_from_checkpoint=spec.resume_from_checkpoint)
     runtime = time.perf_counter() - started
+    memory_sampling = memory_sampler.stop()
+    closeout_timer = PhaseTimer()
+    closeout_timer.__enter__()
 
     if streamed_layers is not None:
         frozen_layer_streaming_bytes_transferred = streamed_layers.runtime.bytes_transferred
@@ -722,8 +764,11 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     # .train() returns, so the non-main ranks have nothing left to do.
     if not trainer.is_world_process_zero():
         return None
+    publication_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
+    publication_timer.__enter__()
     model.save_pretrained(output_dir, safe_serialization=True)
     tokenizer.save_pretrained(output_dir)
+    publication_timer.__exit__()
     # KNOWN LIMITATION: under multi-GPU DDP, torch.cuda.max_memory_allocated
     # is scoped to the CALLING process's own CUDA context per device -- this
     # process (rank 0) only ever allocated on its own device, so peak VRAM
@@ -735,6 +780,41 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     # reporting its own device, rank 0 merging them) is a real follow-up,
     # not done here.
     resource_snapshot = _cuda_resource_snapshot(torch, model, trainer)
+
+    # P6: what the run could measure, and what it could not. `lifecycle` keeps
+    # the two apart on purpose; `tensor_inventory`/`quantization_reality` report
+    # the storage that is actually present, not the loader setting requested.
+    lifecycle = training_lifecycle_ledger(
+        accelerator_count=int(resource_snapshot["active_accelerator_count"]),
+        model_load=load_timer,
+        checkpoint_publication=publication_timer,
+        steady_state_steps_seconds=runtime,
+        detailed_timing_enabled=timer_callback is not None,
+        first_forward_seconds=(
+            timer_callback.first_forward_seconds if timer_callback is not None else None
+        ),
+        first_backward_seconds=(
+            timer_callback.first_backward_seconds if timer_callback is not None else None
+        ),
+        first_update_seconds=(
+            timer_callback.first_optimizer_seconds if timer_callback is not None else None
+        ),
+        resumed_from_checkpoint=spec.resume_from_checkpoint is not None,
+    )
+    lifecycle_data = lifecycle.to_dict()
+    tensor_storage = tensor_inventory(model)
+    quantization_reality = quantization_reality_report(
+        model, requested=spec.quantization
+    )
+    # The first step's own cost, only when the first forward was actually
+    # observed -- None otherwise, never a partial sum presented as a total.
+    first_step_seconds: float | None = None
+    if timer_callback is not None and timer_callback.first_forward_seconds is not None:
+        first_step_seconds = (
+            timer_callback.first_forward_seconds
+            + (timer_callback.first_backward_seconds or 0.0)
+            + (timer_callback.first_optimizer_seconds or 0.0)
+        )
 
     # Real, device-agnostic tensor introspection -- identical approach to
     # Phase 7A's optimizer_state_bytes and 7C's own experiment worker.
@@ -771,6 +851,10 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         ):
             raise RuntimeError("parent adapter changed during worker execution")
 
+    closeout_timer.__exit__()
+    lifecycle.record_timer(PHASE_CLOSEOUT, closeout_timer)
+    lifecycle_data = lifecycle.to_dict()
+
     peak_values = list(resource_snapshot["peak_vram_gb_by_accelerator"].values())
     peak_vram_gb = max(peak_values, default=0.0)
     return {
@@ -791,6 +875,14 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "primary_rows": primary_rows,
             "replay_selected_rows": replay_selected_rows,
             "training_rows": len(dataset),
+            # P6: the whole-lifecycle phase ledger, the storage that is really
+            # present, and this process's own sampled headroom. An unmeasured
+            # phase is null and named in `unmeasured` -- never a zero.
+            "lifecycle": lifecycle_data,
+            "tensor_inventory": tensor_storage,
+            "quantization_reality": quantization_reality,
+            "memory_sampling": memory_sampling,
+            "first_step_seconds": first_step_seconds,
         },
         "resource_usage": resource_snapshot,
         "data_provenance": {

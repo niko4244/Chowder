@@ -9,11 +9,17 @@ from typing import Any
 
 from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
+from ..lifecycle import (
+    PhaseTimer,
+    cuda_synchronize,
+    evaluation_lifecycle_ledger,
+    sampling_device,
+)
 from .base_text import BaseTextEvalSpec
 from .generation import resolve_eos_token_ids
 from .rendering import render_prompt
 from .scoring import final_answer, final_number, normalize, score
-from .vram import peak_vram as _peak_vram
+from .vram import MemorySampler, peak_vram as _peak_vram
 from .transformers_text import EvalSuiteSpec
 
 
@@ -91,6 +97,10 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
     if spec.quantization == "4bit" and not device_name.startswith("cuda"):
         raise RuntimeError("4-bit baseline evaluation requires CUDA")
     dtype = _dtype(torch, spec.precision)
+    # P6: this arm's own load and generation are timed separately, so the
+    # baseline leg of a comparison is a measured cost instead of a blind spot.
+    load_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
+    load_timer.__enter__()
     set_seed(spec.seed)
 
     model_cache_status = cache_status(spec.base_model, spec.revision)
@@ -135,12 +145,17 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
     model.eval()
     device = next(model.parameters()).device
     resolved_eos_token_id = resolve_eos_token_ids(tokenizer, model)
+    load_timer.__exit__()
 
     output_dir = Path(spec.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics: dict[str, float] = {}
     evidence: dict[str, Any] = {}
 
+    generation_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
+    memory_sampler = MemorySampler(device_name=sampling_device(torch))
+    memory_sampler.start()
+    generation_timer.__enter__()
     with torch.inference_mode():
         for suite in spec.suites:
             rows = _rows(suite)
@@ -206,12 +221,25 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
                 **render_evidence,
             }
 
+    # The baseline arm's own generation, timed and sampled separately from the
+    # candidate's -- one arm cannot measure the other, and the ledger says so.
+    generation_timer.__exit__()
+    memory_sampling = memory_sampler.stop()
+    lifecycle_data = evaluation_lifecycle_ledger(
+        accelerator_count=1 if device_name.startswith("cuda") else 0,
+        arm="baseline",
+        generation_seconds=generation_timer.seconds,
+        model_load_seconds=load_timer.seconds,
+    ).to_dict()
+
     return {
         "metrics": metrics,
         "suites": evidence,
         "runtime": {
             "device": device_name,
             "gpu_count": 1 if device_name.startswith("cuda") else 0,
+            "lifecycle": lifecycle_data,
+            "memory_sampling": memory_sampling,
             # See transformers_text_worker: both evaluation arms must report their
             # own footprint, or a baseline-vs-candidate VRAM comparison is not
             # possible from run artifacts.

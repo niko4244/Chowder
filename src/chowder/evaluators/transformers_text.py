@@ -15,6 +15,7 @@ from .rendering import validate_rendering_evidence
 from .scorer_identity import scorer_identity
 from ..cancellation import CancellationToken
 from ..executors import CostEstimate, EvaluationOutcome, ExecutionContext, TrainingArtifact
+from ..lifecycle import evaluation_lifecycle_evidence
 from ..models import Experiment
 from ..protocol import protocol_fingerprint
 from ..provenance import sha256_directory, sha256_file
@@ -353,6 +354,10 @@ class TransformersTextEvaluator:
         gpu_count = int(runtime.get("gpu_count", 0))
         if gpu_count < 0:
             raise RuntimeError("evaluation runtime reported a negative gpu_count")
+        # P6: the candidate arm's own measured lifecycle (load, generation, and
+        # sampled headroom), validated here so an unparseable report is refused
+        # instead of being filed as evidence.
+        lifecycle_evidence = evaluation_lifecycle_evidence(runtime)
 
         expected_names = {suite.name for suite in spec.suites}
         if set(metrics) != expected_names:
@@ -454,6 +459,7 @@ class TransformersTextEvaluator:
                 "suite_evidence": dict(suite_evidence),
                 "versions": dict(versions),
                 "runtime": dict(runtime),
+                "lifecycle": lifecycle_evidence,
                 "model_provenance": dict(model_provenance),
                 "wall_time_seconds": elapsed,
                 "stdout_log": str(stdout_path),

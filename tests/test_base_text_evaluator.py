@@ -34,7 +34,7 @@ def _hardware():
     return HardwareProfile(16, 64, 500, 12, 40, 3)
 
 
-def _fake_process(rendering="raw", chat_template_sha256=None):
+def _fake_process(rendering="raw", chat_template_sha256=None, runtime_extra=None):
     class FakeProcess:
         returncode = 0
 
@@ -52,12 +52,15 @@ def _fake_process(rendering="raw", chat_template_sha256=None):
                 suite["rendering"] = rendering
             if chat_template_sha256 is not None:
                 suite["chat_template_sha256"] = chat_template_sha256
+            runtime = {"device": "cpu", "gpu_count": 0}
+            if runtime_extra is not None:
+                runtime.update(runtime_extra)
             result_path.write_text(
                 json.dumps(
                     {
                         "metrics": {"quality": 0.5},
                         "suites": {"quality": suite},
-                        "runtime": {"device": "cpu", "gpu_count": 0},
+                        "runtime": runtime,
                         "versions": {"transformers": "5.test"},
                         "model_provenance": {},
                     }
@@ -130,6 +133,54 @@ def test_baseline_protocol_refuses_a_silent_renderer_fallback(tmp_path, monkeypa
             monkeypatch,
             rendering="tokenizer-template",
             chat_template_sha256="d" * 64,
+        )
+
+
+def test_baseline_evidence_records_its_own_generation_lifecycle(tmp_path, monkeypatch):
+    result = _evaluate(
+        _config("eval.jsonl"),
+        tmp_path,
+        monkeypatch,
+        runtime_extra={
+            "lifecycle": {
+                "accelerator_count": 0,
+                "phases": {
+                    "baseline_generation": {
+                        "phase": "baseline_generation",
+                        "seconds": 60.0,
+                        "measured": True,
+                        "accelerator_count": 0,
+                        "sync_overhead_seconds": 0.0,
+                    }
+                },
+                "unmeasured": {
+                    "candidate_generation": "the candidate arm runs in a separate worker process"
+                },
+            }
+        },
+    )
+    lifecycle = result.evidence["lifecycle"]
+
+    assert lifecycle["state"] == "measured"
+    assert lifecycle["phase_ledger"]["phases"]["baseline_generation"]["seconds"] == pytest.approx(
+        60.0
+    )
+    assert "candidate_generation" in lifecycle["phase_ledger"]["unmeasured"]
+
+
+def test_baseline_without_a_lifecycle_reports_unknown(tmp_path, monkeypatch):
+    result = _evaluate(_config("eval.jsonl"), tmp_path, monkeypatch)
+    assert result.evidence["lifecycle"]["phase_ledger"] is None
+    assert result.evidence["lifecycle"]["state"] == "unknown"
+
+
+def test_baseline_refuses_a_malformed_lifecycle(tmp_path, monkeypatch):
+    with pytest.raises(RuntimeError, match="lifecycle"):
+        _evaluate(
+            _config("eval.jsonl"),
+            tmp_path,
+            monkeypatch,
+            runtime_extra={"lifecycle": {"phases": "not a mapping"}},
         )
 
 

@@ -17,6 +17,13 @@ if TYPE_CHECKING:
 from uuid import uuid4
 
 from ..base_identity import BaseIdentityError, resolve_base_identity
+from ..lifecycle import (
+    PHASE_MODEL_LOAD,
+    PHASE_STEADY_STEPS,
+    LifecycleForecast,
+    LifecycleLedger,
+    ledger_from_payload,
+)
 from ..target_coverage import assert_targets_covered
 from ..worker_env import chowder_source_identity, worker_env
 from ..cancellation import CancellationToken
@@ -1520,6 +1527,77 @@ class TransformersPeftExecutor:
             "avg_gpu_utilization_percent": telemetry.get("avg_gpu_utilization_percent"),
         }
 
+    @staticmethod
+    def _summarize_lifecycle(
+        telemetry: Mapping[str, Any], context: ExecutionContext
+    ) -> dict[str, Any]:
+        """P6: the phase ledger, and the estimate it either matched or broke.
+
+        The comparison is built parent-side from the configured profile, never
+        taken from the child: a worker grading its own estimate could report
+        agreement it never achieved. Every phase the parent has no estimate for
+        reports an unknown difference, not a zero one.
+        """
+        payload = telemetry.get("lifecycle")
+        if payload is None:
+            return {
+                "phase_ledger": None,
+                "state": "unknown",
+                "reason": "the worker did not report a lifecycle ledger",
+                "forecast_comparison": None,
+                "reservation_basis": "no worker measurement",
+            }
+        ledger = ledger_from_payload(payload)
+        forecast, basis = TransformersPeftExecutor._lifecycle_forecast(
+            context, accelerator_count=ledger.accelerator_count
+        )
+        return {
+            "phase_ledger": ledger.to_dict(),
+            "state": "measured",
+            "reason": None,
+            "forecast_comparison": forecast.compare_to(ledger),
+            "reservation_basis": basis,
+        }
+
+    @staticmethod
+    def _lifecycle_forecast(
+        context: ExecutionContext, *, accelerator_count: int
+    ) -> tuple[LifecycleForecast, str]:
+        """The parent-side forecast a reported ledger is compared against."""
+        config = context.resolved_config if isinstance(context.resolved_config, Mapping) else {}
+        backend = config.get("backend", {})
+        backend = backend if isinstance(backend, Mapping) else {}
+        profile = backend.get("profile", {})
+        profile = profile if isinstance(profile, Mapping) else {}
+        terms: dict[str, Any] = {}
+        steps = profile.get("estimated_steps")
+        seconds_per_step = profile.get("seconds_per_step")
+        basis = "no configured step profile"
+        if steps is not None and seconds_per_step is not None:
+            steps_value = float(steps)
+            seconds_value = float(seconds_per_step)
+            if not math.isfinite(steps_value) or not math.isfinite(seconds_value):
+                raise ValueError("backend.profile step estimate must be finite")
+            terms[PHASE_STEADY_STEPS] = (
+                max(0.0, steps_value * seconds_value),
+                "derived",
+                f"{steps} steps x {seconds_per_step}s from backend.profile",
+            )
+            basis = "backend step profile (estimated_steps x seconds_per_step)"
+        model_load = profile.get("model_load_seconds")
+        if model_load is not None:
+            terms[PHASE_MODEL_LOAD] = (
+                max(0.0, float(model_load)),
+                "declared",
+                "declared in backend.profile.model_load_seconds",
+            )
+        return (
+            LifecycleForecast.from_terms(
+                accelerator_count=accelerator_count, terms=terms
+            ),
+            basis,
+        )
+
     def run(self, experiment: Experiment, context: ExecutionContext) -> TrainingArtifact:
         run_id = f"{experiment.experiment_id}-{uuid4().hex[:12]}"
         run_dir = (Path(context.work_dir) / ".chowder" / "runs" / run_id).resolve()
@@ -1742,6 +1820,13 @@ class TransformersPeftExecutor:
         production_timing_evidence = self._production_timing_evidence(
             spec=spec, telemetry=telemetry
         )
+        lifecycle_evidence = self._summarize_lifecycle(telemetry, context)
+        storage_evidence: dict[str, Any] = {}
+        for key in ("tensor_inventory", "quantization_reality", "memory_sampling"):
+            value = telemetry.get(key)
+            if value is not None and not isinstance(value, Mapping):
+                raise RuntimeError(f"worker reported an invalid {key} payload")
+            storage_evidence[key] = None if value is None else dict(value)
         return TrainingArtifact(
             run_id=run_id,
             experiment_id=experiment.experiment_id,
@@ -1760,6 +1845,8 @@ class TransformersPeftExecutor:
                 "replay_ratio": spec.replay_ratio,
                 "target_coverage": target_coverage,
                 "component_paths": component_paths,
+                "lifecycle": lifecycle_evidence,
+                **storage_evidence,
                 "parent_adapter_sha256": parent_adapter_sha,
                 "continued_from_parent_adapter": parent_adapter_sha is not None,
                 "data_provenance": dict(data_provenance),

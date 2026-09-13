@@ -71,6 +71,7 @@ def _fake_payload(
     gpu_count: int,
     rendering: str | None = "raw",
     chat_template_sha256: str | None = None,
+    runtime: dict | None = None,
 ):
     fingerprint_path = result_path.parent / "holdout-fingerprints-quality.jsonl"
     fingerprint_digest = write_holdout_fingerprint_index([("2+2?", "4")], fingerprint_path)
@@ -84,10 +85,13 @@ def _fake_payload(
         suite["rendering"] = rendering
     if chat_template_sha256 is not None:
         suite["chat_template_sha256"] = chat_template_sha256
+    runtime_payload: dict = {"device": device, "gpu_count": gpu_count}
+    if runtime is not None:
+        runtime_payload.update(runtime)
     return {
         "metrics": {"quality": metric},
         "suites": {"quality": suite},
-        "runtime": {"device": device, "gpu_count": gpu_count},
+        "runtime": runtime_payload,
         "versions": {"transformers": "5.test"},
     }
 
@@ -455,6 +459,74 @@ def test_protocol_binds_raw_rendering_without_a_template_digest(tmp_path, monkey
     suite_entry = result.evidence["protocol"]["suites"][0]
     assert suite_entry["rendering"] == "raw"
     assert "chat_template_sha256" not in suite_entry
+
+
+# --- P6: each evaluation arm reports its own measured lifecycle -------------
+
+
+def _lifecycle_runtime(arm_phase: str) -> dict:
+    return {
+        "lifecycle": {
+            "accelerator_count": 1,
+            "phases": {
+                arm_phase: {
+                    "phase": arm_phase,
+                    "seconds": 120.0,
+                    "measured": True,
+                    "accelerator_count": 1,
+                    "synchronized": True,
+                    "sync_overhead_seconds": 0.01,
+                    "note": None,
+                }
+            },
+            "unmeasured": {
+                "model_load": "the evaluator did not time the model load",
+            },
+        },
+        "memory_sampling": {
+            "samples": 10,
+            "cadence_seconds": 0.5,
+            "span_seconds": 5.0,
+            "unavailable_fields": [],
+        },
+    }
+
+
+def test_evaluator_evidence_records_the_arm_lifecycle_and_sampling(tmp_path, monkeypatch):
+    result = _evaluate_with_fake_worker(
+        _config("eval.jsonl"),
+        tmp_path,
+        monkeypatch,
+        runtime=_lifecycle_runtime("candidate_generation"),
+    )
+    lifecycle = result.evidence["lifecycle"]
+
+    assert lifecycle["state"] == "measured"
+    ledger = lifecycle["phase_ledger"]
+    assert ledger["phases"]["candidate_generation"]["seconds"] == pytest.approx(120.0)
+    # The other arm is a separate process, and the ledger says so rather than
+    # inheriting a number this arm never saw.
+    assert "model_load" in ledger["unmeasured"]
+    assert lifecycle["memory_sampling"]["cadence_seconds"] == pytest.approx(0.5)
+
+
+def test_evaluator_without_a_lifecycle_leaves_unknown_not_zero(tmp_path, monkeypatch):
+    result = _evaluate_with_fake_worker(_config("eval.jsonl"), tmp_path, monkeypatch)
+    lifecycle = result.evidence["lifecycle"]
+
+    assert lifecycle["phase_ledger"] is None
+    assert lifecycle["state"] == "unknown"
+    assert "did not report" in lifecycle["reason"]
+
+
+def test_evaluator_refuses_a_malformed_lifecycle(tmp_path, monkeypatch):
+    with pytest.raises(RuntimeError, match="lifecycle"):
+        _evaluate_with_fake_worker(
+            _config("eval.jsonl"),
+            tmp_path,
+            monkeypatch,
+            runtime={"lifecycle": {"phases": "not a mapping"}},
+        )
 
 
 def test_evaluator_cancel_is_a_no_op_for_unknown_or_finished_run():

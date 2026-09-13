@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from ..worker_env import chowder_source_identity, worker_env
 from ..base_identity import describe_base_identity
+from ..lifecycle import evaluation_lifecycle_evidence
 from .rendering import validate_rendering_evidence
 from .scorer_identity import scorer_identity
 from ..executors import EvaluationOutcome, ExecutionContext
@@ -251,6 +252,9 @@ class BaseModelTextEvaluator:
         gpu_count = int(runtime.get("gpu_count", 0))
         if gpu_count < 0:
             raise RuntimeError("baseline evaluation reported negative gpu_count")
+        # P6: the baseline arm's own measured lifecycle. Both arms report one,
+        # so neither leg of a comparison is a blind spot.
+        lifecycle_evidence = evaluation_lifecycle_evidence(runtime)
         expected_names = {suite.name for suite in spec.suites}
         if set(metrics) != expected_names or set(suite_evidence) != expected_names:
             raise RuntimeError("baseline evaluation metrics do not match configured suites")
@@ -352,6 +356,7 @@ class BaseModelTextEvaluator:
                 "suite_evidence": dict(suite_evidence),
                 "versions": dict(versions),
                 "runtime": dict(runtime),
+                "lifecycle": lifecycle_evidence,
                 "model_provenance": dict(provenance),
                 "wall_time_seconds": elapsed,
                 "stdout_log": str(stdout_path),

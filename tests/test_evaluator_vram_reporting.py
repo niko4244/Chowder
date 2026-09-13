@@ -13,6 +13,7 @@ A busy desktop must not be able to fail an experiment.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from chowder.evaluators.vram import peak_vram
@@ -76,8 +77,16 @@ def test_both_evaluator_workers_report_their_footprint() -> None:
     evaluators = Path(chowder.__file__).resolve().parent / "evaluators"
     for name in ("transformers_text_worker.py", "base_text_worker.py"):
         source = (evaluators / name).read_text(encoding="utf-8")
-        assert "from .vram import peak_vram" in source, f"{name} does not import the helper"
+        # P6 added MemorySampler to this same import line, so the pin is on the
+        # helper actually arriving rather than on one exact import spelling.
+        assert re.search(r"from \.vram import .*\bpeak_vram\b", source), (
+            f"{name} does not import the helper"
+        )
         assert "**_peak_vram(device_name)" in source, (
             f"{name} does not splat its VRAM footprint into the runtime block, so a "
             "pre-registered peak-VRAM condition stays undecidable for this leg"
         )
+        # P6: each arm reports its own lifecycle (load + generation + sampled
+        # headroom) too, so neither leg of the cost breakdown is a blind spot.
+        assert "evaluation_lifecycle_ledger(" in source, f"{name} reports no lifecycle ledger"
+        assert "MemorySampler(" in source, f"{name} samples no headroom"
