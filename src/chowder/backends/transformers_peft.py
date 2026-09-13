@@ -1685,6 +1685,28 @@ class TransformersPeftExecutor:
             worker_provenance.get("adapted_modules_by_leaf"),
             allow_unmatched=spec.allow_unmatched_target_modules,
         )
+        # P5: the leaf counts above cannot see WHICH path is missing. When the
+        # recipe declared an explicit target list the worker also reports the
+        # exact intended-vs-adapted module set; a missing, unreadable, or
+        # unknown-intent path blocks qualification before the artifact is
+        # accepted. Extra adapted modules are recorded, not refused (PEFT
+        # matches by suffix and a broader match is legitimate).
+        component_paths = worker_provenance.get("component_paths")
+        if component_paths is not None:
+            if not isinstance(component_paths, Mapping):
+                raise RuntimeError("worker reported an invalid component_paths payload")
+            if not component_paths.get("ok"):
+                missing = component_paths.get("missing") or []
+                unreadable = component_paths.get("unreadable") or []
+                unknown = component_paths.get("unknown_suffixes") or []
+                raise ValueError(
+                    "the adapter did not cover exactly the declared target modules, "
+                    "so the run did not train what the recipe asked for: "
+                    f"missing={missing[:10]} unreadable={unreadable[:10]} "
+                    f"unknown_intent={unknown[:10]}. A count-based coverage check "
+                    "can pass while a specific path is absent, so this is refused "
+                    "rather than recorded."
+                )
         if (
             not isinstance(telemetry, Mapping)
             or not isinstance(versions, Mapping)
@@ -1737,6 +1759,7 @@ class TransformersPeftExecutor:
                 "replay_dataset_sha256": replay_sha,
                 "replay_ratio": spec.replay_ratio,
                 "target_coverage": target_coverage,
+                "component_paths": component_paths,
                 "parent_adapter_sha256": parent_adapter_sha,
                 "continued_from_parent_adapter": parent_adapter_sha is not None,
                 "data_provenance": dict(data_provenance),

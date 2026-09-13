@@ -137,6 +137,32 @@ def test_a_measured_report_is_labelled_as_such():
     assert report["status"] == "measured"
 
 
+def test_the_leaf_count_guard_cannot_see_a_missing_path_that_strict_identity_can():
+    """The plan's P5 regression, and the reason a count is a summary and not
+    proof: seven of eight expected `q_proj` paths were adapted. Every name still
+    has a non-zero count, so this guard passes; the exact-path comparison names
+    the hole. Both are needed -- they answer different questions."""
+    from chowder.trainability import (
+        TrainabilityError,
+        assert_components_qualified,
+        component_path_report,
+    )
+
+    expected = [f"layers.{index}.q_proj" for index in range(8)]
+    adapted = [name for name in expected if name != "layers.3.q_proj"]
+
+    # what the shipped guard sees: the family is present, nothing unmatched
+    counted = assert_targets_covered(["q_proj"], {"q_proj": 7})
+    assert counted["unmatched"] == []
+    assert counted["matched_by_name"] == {"q_proj": 7}
+
+    # what the strict identity check sees: which one is missing
+    strict = component_path_report(expected, adapted, require_exact=False)
+    assert strict.missing == ("layers.3.q_proj",)
+    with pytest.raises(TrainabilityError, match="layers.3.q_proj"):
+        assert_components_qualified(strict)
+
+
 # ---------------------------------------------------------------------------
 # the regex that makes Unsloth honour an explicit target list
 # ---------------------------------------------------------------------------

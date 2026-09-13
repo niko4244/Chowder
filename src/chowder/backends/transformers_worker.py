@@ -13,6 +13,11 @@ from typing import Any
 
 from ..progress_write import write_progress_best_effort
 from ..target_coverage import adapted_modules_by_leaf
+from ..trainability import (
+    adapted_module_paths,
+    component_path_report,
+    resolve_expected_module_paths,
+)
 from ..adapter_guard import assert_adapter_is_live
 from ..hf_resilience import cache_status, with_hub_retries
 from .activation_offload_hooks import offload_pack, offload_unpack
@@ -500,6 +505,17 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     # and silently adapts only the subset that matches. The controller turns this
     # into a coverage verdict against the requested list.
     adapted_by_leaf = adapted_modules_by_leaf(model)
+    # P5: the leaf counts above are a summary and cannot see WHICH path is
+    # missing -- seven of eight `q_proj` modules still counts as "q_proj
+    # present". Record the exact intended-vs-adapted module path set as well, so
+    # a run carries the comparison rather than only the totals. Only meaningful
+    # for an explicit list: a preset's regex declares no per-path intent.
+    component_paths: dict[str, Any] | None = None
+    if spec.target_modules:
+        intended, unknown_targets = resolve_expected_module_paths(model, spec.target_modules)
+        component_paths = component_path_report(
+            intended, adapted_module_paths(model), unknown_suffixes=unknown_targets
+        ).to_dict()
 
     if spec.gradient_checkpointing:
         model.config.use_cache = False
@@ -798,6 +814,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "model_type": getattr(model.config, "model_type", None),
             "resolved_target_modules": resolved_target_modules,
             "adapted_modules_by_leaf": adapted_by_leaf,
+            "component_paths": component_paths,
             "continued_from_parent_adapter": parent_adapter_sha is not None,
             "parent_adapter_sha256": parent_adapter_sha,
         },

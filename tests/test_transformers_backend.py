@@ -544,6 +544,107 @@ def test_resume_is_rejected_when_dataset_format_changed(tmp_path, monkeypatch):
         TransformersPeftExecutor().run(_experiment(), context)
 
 
+# --- P5: the declared component set is qualified exactly, not by count ------
+
+
+def _fake_process_with_provenance(observed_spec: dict, provenance_extra: dict):
+    """A worker whose result carries the given provenance fields."""
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            spec_path = Path(command[command.index("--spec") + 1])
+            result_path = Path(command[command.index("--result") + 1])
+            spec = json.loads(spec_path.read_text())
+            observed_spec.update(spec)
+            output = Path(spec["output_dir"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "adapter_model.safetensors").write_bytes(b"adapter")
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "telemetry": {"train_loss": 0.1, "global_step": 1},
+                        "versions": {"transformers": "5.test"},
+                        "provenance": {
+                            "resolved_model_commit": "abc123",
+                            **provenance_extra,
+                        },
+                        "data_provenance": {"primary_rows": 1, "replay_selected_rows": 0},
+                    }
+                )
+            )
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    return FakeProcess
+
+
+def _run_with_provenance(tmp_path, monkeypatch, provenance_extra):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_with_provenance({}, provenance_extra),
+    )
+    return TransformersPeftExecutor().run(_experiment(), context)
+
+
+def test_a_missing_declared_component_path_blocks_acceptance(tmp_path, monkeypatch):
+    """The summary below it passes -- every requested NAME has a non-zero count --
+    and the run must still be refused, because `layers.3.q_proj` was declared and
+    is not adapted. A count cannot see that; the exact set can."""
+    provenance = {
+        "adapted_modules_by_leaf": {"q_proj": 7, "v_proj": 8},
+        "component_paths": {
+            "ok": False,
+            "missing": ["layers.3.q_proj"],
+            "extra": [],
+            "unreadable": [],
+            "unknown_suffixes": [],
+        },
+    }
+    with pytest.raises(ValueError, match="did not cover exactly the declared target modules"):
+        _run_with_provenance(tmp_path, monkeypatch, provenance)
+
+
+def test_passing_component_paths_are_recorded_in_the_artifact(tmp_path, monkeypatch):
+    provenance = {
+        "adapted_modules_by_leaf": {"q_proj": 8, "v_proj": 8},
+        "component_paths": {
+            "ok": True,
+            "missing": [],
+            "extra": ["layers.0.k_proj"],
+            "unreadable": [],
+            "unknown_suffixes": [],
+        },
+    }
+    artifact = _run_with_provenance(tmp_path, monkeypatch, provenance)
+    recorded = artifact.evidence["component_paths"]
+    assert recorded["ok"] is True
+    # a broader match is legitimate for a suffix match -- recorded, not refused
+    assert recorded["extra"] == ["layers.0.k_proj"]
+
+
+def test_an_unreported_component_set_is_unknown_not_a_pass(tmp_path, monkeypatch):
+    """A worker predating the report leaves the exact set UNKNOWN: recorded as
+    None and not refused, the same rule adapter_guard and target_coverage use."""
+    artifact = _run_with_provenance(tmp_path, monkeypatch, {})
+    assert artifact.evidence["component_paths"] is None
+
+
 # --- P4b: checkpoint bound inputs bind a local base by content, not path ---
 #
 # The 2026-09-12 audit found the base identified by a path plus an unresolved
