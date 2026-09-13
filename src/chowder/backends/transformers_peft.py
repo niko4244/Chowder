@@ -16,12 +16,27 @@ if TYPE_CHECKING:
     from ..placement_policy import PlacementPlan
 from uuid import uuid4
 
+from ..base_identity import BaseIdentityError, resolve_base_identity
+from ..lifecycle import (
+    PHASE_MODEL_LOAD,
+    PHASE_STEADY_STEPS,
+    LifecycleForecast,
+    LifecycleLedger,
+    ledger_from_payload,
+)
+from ..target_coverage import assert_targets_covered
+from ..worker_env import chowder_source_identity, worker_env
 from ..cancellation import CancellationToken
 from ..dependency_preflight import check_dependencies
 from ..executors import CostEstimate, ExecutionContext, TrainingArtifact
 from ..memory import HardwareProfile
 from ..models import Experiment
 from ..provenance import sha256_directory, sha256_file
+from ..resume_state import (
+    CheckpointInventory,
+    assert_resumable,
+    inventory_checkpoint,
+)
 from ..resources import ResourceUsage
 from ..run_events import TrainingProgressEvent
 
@@ -239,6 +254,9 @@ class TransformersPeftRunSpec:
     lora_dropout: float = 0.05
     target_modules: tuple[str, ...] = ()
     target_preset: str = "auto"
+    #: Accept a requested target module that adapts nothing. Off by default:
+    #: silent partial coverage trains a smaller model than asked for.
+    allow_unmatched_target_modules: bool = False
     use_rslora: bool = False
     quantization: str = "none"
     precision: str = "auto"
@@ -521,6 +539,9 @@ class TransformersPeftRunSpec:
             lora_dropout=float(lora.get("dropout", 0.05)),
             target_modules=tuple(str(x) for x in lora.get("target_modules", ())),
             target_preset=str(lora.get("target_preset", "auto")),
+            allow_unmatched_target_modules=bool(
+                lora.get("allow_unmatched_target_modules", False)
+            ),
             use_rslora=bool(lora.get("use_rslora", False)),
             quantization=(
                 str(backend["quantization"]).lower()
@@ -557,6 +578,17 @@ class TransformersPeftRunSpec:
 
 
 _CHECKPOINT_MANIFEST_NAME = "chowder-checkpoint-manifest.json"
+
+#: Bound inputs added after the first checkpoint manifests were written. A
+#: manifest that predates a binding cannot have recorded it, and refusing such
+#: checkpoints would make every existing one unresumable the moment the bound
+#: set grows -- so a key absent from the recorded manifest is only tolerated
+#: for these names. Every pre-existing binding keeps exact comparison.
+_BINDINGS_ADDED_AFTER_INITIAL_RELEASE: tuple[str, ...] = (
+    "base_binding",
+    "base_content_sha256",
+    "base_weight_binding",
+)
 
 
 class TransformersPeftExecutor:
@@ -690,35 +722,84 @@ class TransformersPeftExecutor:
             "detailed_timing_telemetry",
         ):
             recipe.pop(key, None)
+        # The base is only a *path* input when its content cannot be measured
+        # (an external reference). For a local directory the path is
+        # operational, not mathematical: leaving it in the recipe digest would
+        # make the identical weights at a new location look like a recipe
+        # change, which is the relocation hazard -- not the identity -- this
+        # binding exists to close.
+        local_base = Path(spec.base_model).is_dir()
+        if local_base:
+            recipe.pop("base_model", None)
         recipe_payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
-        return {
+        bound: dict[str, Any] = {
             "checkpoint_recipe_sha256": hashlib.sha256(
                 recipe_payload.encode("utf-8")
             ).hexdigest(),
-            "base_model": spec.base_model,
             "revision": spec.revision,
             "dataset_sha256": spec.dataset_sha256,
             "replay_dataset_sha256": spec.replay_sha256,
             "parent_adapter_sha256": spec.parent_adapter_sha256,
         }
+        if not local_base:
+            bound["base_model"] = spec.base_model
+        # A name (or an unresolved revision) is not an identity: the audit
+        # found the base recorded as a path, so a later resume reproduced
+        # whatever bytes sat there. A local directory is therefore bound by
+        # its measured content -- per-shard sha256 over the real weights --
+        # and that content digest is path-free, so relocating identical
+        # artifacts keeps a checkpoint resumable. Cost is stated rather than
+        # hidden: full mode reads every shard once, at run start, and P6
+        # accounts for it in the measured load/startup phase. An external
+        # reference (hub id) gets an honest revision-only label and no
+        # fabricated content claim, and a local directory the manifest cannot
+        # measure honestly says so instead of pretending to a digest.
+        if local_base:
+            try:
+                identity = resolve_base_identity(spec.base_model, mode="full")
+            except BaseIdentityError as exc:
+                bound["base_binding"] = "local-unverifiable"
+                bound["base_identity_error"] = str(exc)
+            else:
+                bound["base_binding"] = "local-content"
+                bound["base_content_sha256"] = identity["content_sha256"]
+                bound["base_weight_binding"] = identity["weight_binding"]
+        else:
+            bound["base_binding"] = "external-reference"
+        return bound
 
     @staticmethod
     def _write_checkpoint_manifest(trainer_dir: Path, bound_inputs: Mapping[str, Any]) -> None:
         trainer_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = trainer_dir / _CHECKPOINT_MANIFEST_NAME
-        payload = json.dumps(dict(bound_inputs), sort_keys=True, indent=2) + "\n"
-        existing = manifest_path.read_text(encoding="utf-8") if manifest_path.is_file() else None
-        if existing is not None and existing != payload:
-            raise RuntimeError(
-                f"checkpoint manifest {manifest_path} already exists with different bound "
-                "inputs -- this run directory was not produced by the current spec"
-            )
+        payload_dict = dict(bound_inputs)
+        payload = json.dumps(payload_dict, sort_keys=True, indent=2) + "\n"
+        if manifest_path.is_file():
+            recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(recorded, Mapping):
+                raise RuntimeError(f"checkpoint manifest {manifest_path} is not a JSON object")
+            # A strictly-subset manifest (written before a binding existed) is
+            # upgraded in place: the new manifest is strictly more evidence
+            # about the same inputs, never less. Any recorded value that
+            # disagrees, or any recorded binding the current spec cannot
+            # reproduce, is still a refusal.
+            conflicts = {
+                key: {"existing": value, "requested": payload_dict[key]}
+                for key, value in recorded.items()
+                if key in payload_dict and payload_dict[key] != value
+            }
+            lost = [key for key in recorded if key not in payload_dict]
+            if conflicts or lost:
+                raise RuntimeError(
+                    f"checkpoint manifest {manifest_path} already exists with different bound "
+                    "inputs -- this run directory was not produced by the current spec"
+                )
         manifest_path.write_text(payload, encoding="utf-8")
 
     @classmethod
     def _verify_resume_checkpoint(
         cls, spec: TransformersPeftRunSpec, bound_inputs: Mapping[str, Any]
-    ) -> None:
+    ) -> CheckpointInventory:
         """Reject a resume if any bound training input has changed.
 
         A checkpoint's optimizer/scheduler state is only meaningful for the
@@ -727,6 +808,11 @@ class TransformersPeftExecutor:
         optimizing toward a different objective with stale momentum/LR
         schedule state. Refusing is the safe default; the caller can always
         start a fresh (non-resuming) run instead.
+
+        Identity is checked first, then *completeness*: a checkpoint whose
+        identity matches but whose optimizer/scheduler state is missing would
+        make Trainer restore the weights and silently start optimization over.
+        The measured inventory is returned so the artifact can carry it.
         """
         checkpoint_dir = Path(spec.resume_from_checkpoint).resolve()  # type: ignore[arg-type]
         if not checkpoint_dir.is_dir():
@@ -740,16 +826,33 @@ class TransformersPeftExecutor:
         recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
         if not isinstance(recorded, Mapping):
             raise RuntimeError(f"checkpoint manifest {manifest_path} is not a JSON object")
-        changed = {
-            key: {"checkpoint": recorded.get(key), "requested": value}
-            for key, value in bound_inputs.items()
-            if recorded.get(key) != value
-        }
+        changed: dict[str, Any] = {}
+        for key, value in bound_inputs.items():
+            if key not in recorded and key in _BINDINGS_ADDED_AFTER_INITIAL_RELEASE:
+                # the checkpoint predates this binding: unverifiable, not a
+                # measured divergence, and not silently reported as verified
+                continue
+            if recorded.get(key) != value:
+                changed[key] = {"checkpoint": recorded.get(key), "requested": value}
+        for key in _BINDINGS_ADDED_AFTER_INITIAL_RELEASE:
+            if key in recorded and key not in bound_inputs:
+                # the checkpoint was bound to something the current spec can
+                # no longer produce (e.g. a local base replaced by an
+                # external reference): a downgrade, not a match
+                changed[key] = {"checkpoint": recorded.get(key), "requested": None}
         if changed:
             raise ValueError(
                 f"refusing to resume from {checkpoint_dir}: bound training input(s) changed "
                 f"since this checkpoint was produced: {json.dumps(changed, sort_keys=True)}"
             )
+        # P7: identity matched -- now check that there is real state to resume
+        # *from*. This runs before any model load, so a partial write left by a
+        # killed process costs nothing to discover.
+        inventory = inventory_checkpoint(checkpoint_dir)
+        # require_rng: without the RNG stream position, a resumed run silently
+        # restarts the data order, which makes an "exact resume" claim unprovable.
+        assert_resumable(inventory, require_rng=True)
+        return inventory
 
     @staticmethod
     def _json_digest(value: Mapping[str, Any]) -> str:
@@ -1049,8 +1152,10 @@ class TransformersPeftExecutor:
         )
 
     @staticmethod
-    def _worker_module_args(spec_path: Path, result_path: Path) -> list[str]:
-        return [
+    def _worker_module_args(
+        spec_path: Path, result_path: Path, chowder_identity: Path | None = None
+    ) -> list[str]:
+        args = [
             "-m",
             "chowder.backends.transformers_worker",
             "--spec",
@@ -1058,12 +1163,26 @@ class TransformersPeftExecutor:
             "--result",
             str(result_path),
         ]
+        if chowder_identity is None:
+            # Tests build the command shape without an identity file; the run
+            # path below always supplies one, so the production wire format
+            # always carries the pin.
+            return args
+        args.extend(["--chowder-identity", str(chowder_identity)])
+        return args
 
     @classmethod
     def _worker_command(
-        cls, spec_path: Path, result_path: Path, *, active_accelerator_count: int
+        cls,
+        spec_path: Path,
+        result_path: Path,
+        *,
+        active_accelerator_count: int,
+        chowder_identity: Path | None = None,
     ) -> list[str]:
-        module_args = cls._worker_module_args(spec_path, result_path)
+        module_args = cls._worker_module_args(
+            spec_path, result_path, chowder_identity=chowder_identity
+        )
         if active_accelerator_count <= 1:
             return [sys.executable, *module_args]
         # DDP, not FSDP, for a first multi-GPU launcher: accelerate launch
@@ -1426,6 +1545,121 @@ class TransformersPeftExecutor:
             "avg_gpu_utilization_percent": telemetry.get("avg_gpu_utilization_percent"),
         }
 
+    @staticmethod
+    def _summarize_lifecycle(
+        telemetry: Mapping[str, Any], context: ExecutionContext
+    ) -> dict[str, Any]:
+        """P6: the phase ledger, and the estimate it either matched or broke.
+
+        The comparison is built parent-side from the configured profile, never
+        taken from the child: a worker grading its own estimate could report
+        agreement it never achieved. Every phase the parent has no estimate for
+        reports an unknown difference, not a zero one.
+        """
+        payload = telemetry.get("lifecycle")
+        if payload is None:
+            return {
+                "phase_ledger": None,
+                "state": "unknown",
+                "reason": "the worker did not report a lifecycle ledger",
+                "forecast_comparison": None,
+                "reservation_basis": "no worker measurement",
+            }
+        ledger = ledger_from_payload(payload)
+        forecast, basis = TransformersPeftExecutor._lifecycle_forecast(
+            context, accelerator_count=ledger.accelerator_count
+        )
+        return {
+            "phase_ledger": ledger.to_dict(),
+            "state": "measured",
+            "reason": None,
+            "forecast_comparison": forecast.compare_to(ledger),
+            "reservation_basis": basis,
+        }
+
+    @staticmethod
+    def _summarize_resume(
+        telemetry: Mapping[str, Any], inventory: CheckpointInventory | None
+    ) -> dict[str, Any]:
+        """P7: the source checkpoint's measured state, and the resume witness.
+
+        A witness that *disagrees* -- the run reported that it did not continue
+        past the restore point -- refuses the artifact: that is a silent fresh
+        start caught in the act. A worker that reports no witness leaves the
+        field ``None`` with a reason (unknown, not verified), which is what an
+        older worker can honestly say.
+        """
+        witness = telemetry.get("resume")
+        if witness is not None and not isinstance(witness, Mapping):
+            raise RuntimeError("worker reported an invalid resume payload")
+        if inventory is None:
+            return {
+                "source_checkpoint": None,
+                "witness": None if witness is None else dict(witness),
+                "state": "not-a-resume",
+                "reason": "this run did not resume from a checkpoint",
+            }
+        if witness is None:
+            return {
+                "source_checkpoint": inventory.to_dict(),
+                "witness": None,
+                "state": "unknown",
+                "reason": (
+                    "the worker did not report a resume witness, so this run cannot "
+                    "claim it continued from the checkpoint rather than restarting"
+                ),
+            }
+        if not witness.get("matched"):
+            raise ValueError(
+                "the run did not actually resume from the checkpoint it was given: "
+                f"{witness.get('reason')} (witness={dict(witness)})"
+            )
+        return {
+            "source_checkpoint": inventory.to_dict(),
+            "witness": dict(witness),
+            "state": "witnessed",
+            "reason": None,
+        }
+
+    @staticmethod
+    def _lifecycle_forecast(
+        context: ExecutionContext, *, accelerator_count: int
+    ) -> tuple[LifecycleForecast, str]:
+        """The parent-side forecast a reported ledger is compared against."""
+        config = context.resolved_config if isinstance(context.resolved_config, Mapping) else {}
+        backend = config.get("backend", {})
+        backend = backend if isinstance(backend, Mapping) else {}
+        profile = backend.get("profile", {})
+        profile = profile if isinstance(profile, Mapping) else {}
+        terms: dict[str, Any] = {}
+        steps = profile.get("estimated_steps")
+        seconds_per_step = profile.get("seconds_per_step")
+        basis = "no configured step profile"
+        if steps is not None and seconds_per_step is not None:
+            steps_value = float(steps)
+            seconds_value = float(seconds_per_step)
+            if not math.isfinite(steps_value) or not math.isfinite(seconds_value):
+                raise ValueError("backend.profile step estimate must be finite")
+            terms[PHASE_STEADY_STEPS] = (
+                max(0.0, steps_value * seconds_value),
+                "derived",
+                f"{steps} steps x {seconds_per_step}s from backend.profile",
+            )
+            basis = "backend step profile (estimated_steps x seconds_per_step)"
+        model_load = profile.get("model_load_seconds")
+        if model_load is not None:
+            terms[PHASE_MODEL_LOAD] = (
+                max(0.0, float(model_load)),
+                "declared",
+                "declared in backend.profile.model_load_seconds",
+            )
+        return (
+            LifecycleForecast.from_terms(
+                accelerator_count=accelerator_count, terms=terms
+            ),
+            basis,
+        )
+
     def run(self, experiment: Experiment, context: ExecutionContext) -> TrainingArtifact:
         run_id = f"{experiment.experiment_id}-{uuid4().hex[:12]}"
         run_dir = (Path(context.work_dir) / ".chowder" / "runs" / run_id).resolve()
@@ -1476,8 +1710,9 @@ class TransformersPeftExecutor:
             )
 
         bound_inputs = self._bound_inputs(spec)
+        resume_inventory: CheckpointInventory | None = None
         if spec.resume_from_checkpoint is not None:
-            self._verify_resume_checkpoint(spec, bound_inputs)
+            resume_inventory = self._verify_resume_checkpoint(spec, bound_inputs)
         if spec.save_strategy != "no":
             self._write_checkpoint_manifest(Path(spec.output_dir) / "trainer", bound_inputs)
 
@@ -1486,15 +1721,27 @@ class TransformersPeftExecutor:
         stdout_path = run_dir / "stdout.log"
         stderr_path = run_dir / "stderr.log"
         spec_path.write_text(spec.canonical_json() + "\n", encoding="utf-8")
+        # P4c: record and pass the parent's chowder source identity. The
+        # worker verifies it before reading the spec, so a wire-compatible
+        # wrong checkout is refused instead of silently training (the exact
+        # silent-mismatch case worker_env's docstring records).
+        source_identity = chowder_source_identity()
+        identity_path = run_dir / "chowder-identity.json"
+        identity_path.write_text(
+            json.dumps(source_identity, sort_keys=True) + "\n", encoding="utf-8"
+        )
 
         command = self._worker_command(
-            spec_path, result_path, active_accelerator_count=active_accelerator_count
+            spec_path,
+            result_path,
+            active_accelerator_count=active_accelerator_count,
+            chowder_identity=identity_path,
         )
         started = time.perf_counter()
         with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
             "w", encoding="utf-8"
         ) as stderr:
-            process = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True)
+            process = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True, env=worker_env())
             self._processes[run_id] = process
             if self._cancellation is not None:
                 self._cancellation._register_active(self, run_id)
@@ -1569,6 +1816,38 @@ class TransformersPeftExecutor:
         versions = worker_result.get("versions", {})
         worker_provenance = worker_result.get("provenance", {})
         data_provenance = worker_result.get("data_provenance", {})
+        # Coverage is policy, so it lives controller-side: the worker reports what
+        # it adapted, this decides whether that honoured the request. A requested
+        # name matching nothing means training silently shrank.
+        target_coverage = assert_targets_covered(
+            spec.target_modules,
+            # this worker reports it inside "provenance", beside
+            # resolved_target_modules; absent means unknown, not zero
+            worker_provenance.get("adapted_modules_by_leaf"),
+            allow_unmatched=spec.allow_unmatched_target_modules,
+        )
+        # P5: the leaf counts above cannot see WHICH path is missing. When the
+        # recipe declared an explicit target list the worker also reports the
+        # exact intended-vs-adapted module set; a missing, unreadable, or
+        # unknown-intent path blocks qualification before the artifact is
+        # accepted. Extra adapted modules are recorded, not refused (PEFT
+        # matches by suffix and a broader match is legitimate).
+        component_paths = worker_provenance.get("component_paths")
+        if component_paths is not None:
+            if not isinstance(component_paths, Mapping):
+                raise RuntimeError("worker reported an invalid component_paths payload")
+            if not component_paths.get("ok"):
+                missing = component_paths.get("missing") or []
+                unreadable = component_paths.get("unreadable") or []
+                unknown = component_paths.get("unknown_suffixes") or []
+                raise ValueError(
+                    "the adapter did not cover exactly the declared target modules, "
+                    "so the run did not train what the recipe asked for: "
+                    f"missing={missing[:10]} unreadable={unreadable[:10]} "
+                    f"unknown_intent={unknown[:10]}. A count-based coverage check "
+                    "can pass while a specific path is absent, so this is refused "
+                    "rather than recorded."
+                )
         if (
             not isinstance(telemetry, Mapping)
             or not isinstance(versions, Mapping)
@@ -1604,6 +1883,14 @@ class TransformersPeftExecutor:
         production_timing_evidence = self._production_timing_evidence(
             spec=spec, telemetry=telemetry
         )
+        lifecycle_evidence = self._summarize_lifecycle(telemetry, context)
+        resume_evidence = self._summarize_resume(telemetry, resume_inventory)
+        storage_evidence: dict[str, Any] = {}
+        for key in ("tensor_inventory", "quantization_reality", "memory_sampling"):
+            value = telemetry.get(key)
+            if value is not None and not isinstance(value, Mapping):
+                raise RuntimeError(f"worker reported an invalid {key} payload")
+            storage_evidence[key] = None if value is None else dict(value)
         return TrainingArtifact(
             run_id=run_id,
             experiment_id=experiment.experiment_id,
@@ -1616,9 +1903,15 @@ class TransformersPeftExecutor:
                 "engine": "transformers",
                 "execution_spec_sha256": spec.digest(),
                 "recipe_sha256": spec.recipe_digest(),
+                "chowder_source_identity": source_identity,
                 "dataset_sha256": primary_sha,
                 "replay_dataset_sha256": replay_sha,
                 "replay_ratio": spec.replay_ratio,
+                "target_coverage": target_coverage,
+                "component_paths": component_paths,
+                "lifecycle": lifecycle_evidence,
+                "resume": resume_evidence,
+                **storage_evidence,
                 "parent_adapter_sha256": parent_adapter_sha,
                 "continued_from_parent_adapter": parent_adapter_sha is not None,
                 "data_provenance": dict(data_provenance),

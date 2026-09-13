@@ -11,13 +11,118 @@ from __future__ import annotations
 import pytest
 
 from chowder.router_healing import (
+    ROUTER_ONLY_SUFFIXES,
     RouterHealingError,
     assert_trainable_gradients_reachable,
     freeze_for_router_healing,
     select_trainable_parameter_names,
 )
+from chowder.trainability import (
+    GRAD_NONZERO,
+    TrainabilityProbe,
+    assert_router_only_scope,
+    utilization_by_expert,
+)
 
 torch = pytest.importorskip("torch")
+
+
+def _tiny_qwen3_moe():
+    """A real Qwen3 MoE, E=4 / k=2, small enough for CPU in ~0.1s.
+
+    A real model rather than a parameter-name stub, because the whole point of
+    P5 is that `requires_grad` and structural checks are not evidence: a real
+    forward/backward/update is required, and the plan asks for exactly this
+    shape (E=4, k=2). Runs wherever transformers is installed (the real-CPU CI
+    job and any dev box); there is no silent skip on a machine that has it.
+    """
+    pytest.importorskip("transformers")
+    from transformers.models.qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
+
+    torch.manual_seed(0)
+    config = Qwen3MoeConfig(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=8,
+        moe_intermediate_size=8,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        num_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=64,
+    )
+    return Qwen3MoeForCausalLM(config).float()
+
+
+# --- P5: real autograd on a real MoE, not a shape stub -----------------------
+
+
+def test_real_moe_router_only_training_shows_a_real_gradient_and_a_real_update():
+    model = _tiny_qwen3_moe()
+    summary = freeze_for_router_healing(model, suffixes=ROUTER_ONLY_SUFFIXES)
+    gate_names = list(summary.trainable_param_names)
+    assert gate_names == [
+        "model.layers.0.mlp.gate.weight",
+        "model.layers.1.mlp.gate.weight",
+    ]
+
+    frozen = [name for name, _ in model.named_parameters() if name not in set(gate_names)]
+    probe = TrainabilityProbe(model, gate_names, window_steps=2, frozen_names=frozen)
+    optimizer = torch.optim.SGD(
+        [param for name, param in model.named_parameters() if name in set(gate_names)],
+        lr=0.05,
+    )
+
+    for step in range(2):
+        ids = torch.randint(0, 64, (1, 12))
+        optimizer.zero_grad()
+        loss = model(input_ids=ids, labels=ids).loss
+        loss.backward()
+        probe.record_gradients(step)  # after backward, before the step
+        optimizer.step()
+        probe.record_update(step)
+
+    report = probe.assert_qualified()
+    for name in gate_names:
+        assert GRAD_NONZERO in report["components"][name]["gradient_states"]
+        assert report["components"][name]["update_steps"]
+
+    # the freeze policy is verified, not assumed: every expert and every frozen
+    # attention weight is byte-identical after two real optimizer steps
+    frozen_report = probe.assert_frozen_unchanged()
+    assert frozen_report["frozen_parameters"] == len(frozen)
+    assert frozen_report["digest_strategy"] == ["full"]
+
+
+def test_real_moe_router_only_scope_is_exact_and_experts_are_refused():
+    model = _tiny_qwen3_moe()
+    gates = [
+        name
+        for name, _ in model.named_parameters()
+        if name.endswith("mlp.gate.weight")
+    ]
+    report = assert_router_only_scope(gates, model)
+    assert report["router_count"] == 2
+    assert report["architecture_router_count"] == 2
+    with pytest.raises(Exception, match="exactly the router gates"):
+        assert_router_only_scope(gates + ["model.layers.0.mlp.experts.down_proj"], model)
+
+
+def test_real_moe_expert_utilisation_is_reported_separately_from_reachability():
+    """A routing table and a gradient are different evidence. This asserts the
+    separation on a real router: utilisation is measured and reported, and says
+    nothing about whether any tensor can learn."""
+    model = _tiny_qwen3_moe()
+    gate = model.model.layers[0].mlp.gate  # Qwen3MoeTopKRouter: logits = x @ weight.T
+    hidden = torch.randn(8, gate.weight.shape[1])
+    logits = torch.nn.functional.linear(hidden, gate.weight)
+    top = logits.argmax(dim=-1)
+    counts = [int((top == index).sum()) for index in range(4)]
+    report = utilization_by_expert({"0": counts})
+    assert report["status"] == "measured"
+    assert sum(report["layers"]["0"]["counts"]) == 8
+    assert "not evidence of per-tensor reachability" in report["note"]
 nn = torch.nn
 
 

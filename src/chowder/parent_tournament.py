@@ -66,6 +66,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from .worker_env import worker_env as _chowder_worker_env
 from .local_model_manifest import (
     LocalModelManifest,
     verify_local_model_manifest,
@@ -482,7 +483,7 @@ def _run_worker(spec_payload: dict[str, Any], run_dir: Path, *, timeout_seconds:
     # Unbuffered stderr so a native crash cannot swallow the tqdm position
     # (the pre-fix runs appeared to crash at "0%" only because buffered
     # stderr was lost with the process).
-    worker_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    worker_env = _chowder_worker_env({"PYTHONUNBUFFERED": "1"})
     commit_headroom = _enforce_commit_headroom()
     attempts = 0
     started = time.perf_counter()

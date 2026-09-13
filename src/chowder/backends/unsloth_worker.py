@@ -22,6 +22,9 @@ import argparse
 import hashlib
 import json
 import math
+import os as _os
+import re as _re
+import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,6 +68,9 @@ class _Spec:
     epochs: float
     max_steps: int
     learning_rate: float
+    lr_scheduler_type: str
+    warmup_ratio: float
+    warmup_steps: int
     batch_size: int
     gradient_accumulation_steps: int
     logging_steps: int
@@ -199,6 +205,152 @@ def _load_text_dataset_with_replay(dataset: Any, spec: _Spec) -> tuple[Any, int,
     return merged, replay_available_rows, replay_selected_rows
 
 
+def _saved_adapter_keys(adapter_dir: str | Path) -> set[str]:
+    """Tensor names inside an adapter directory's safetensors/bin weights.
+
+    Inlined copy of chowder.adapter_guard.saved_adapter_keys: this file must not
+    import from the chowder package (module docstring), and the parent-adapter
+    liveness check needs the saved key names to detect the total-mismatch case
+    PEFT only warns about.
+    """
+    directory = Path(adapter_dir)
+    safetensors = directory / "adapter_model.safetensors"
+    if safetensors.is_file():
+        with safetensors.open("rb") as handle:
+            length = struct.unpack("<Q", handle.read(8))[0]
+            header = json.loads(handle.read(length))
+        return {k for k in header if k != "__metadata__"}
+    legacy = directory / "adapter_model.bin"
+    if legacy.is_file():
+        # A torch pickle; only reachable when torch is already loaded anyway.
+        import torch
+
+        return set(torch.load(legacy, map_location="cpu", weights_only=True))
+    raise RuntimeError(
+        f"no adapter weights in {directory} (expected adapter_model.safetensors "
+        "or adapter_model.bin); there is no parent adapter to continue from"
+    )
+
+
+def _normalise_adapter_key(name: str) -> str:
+    """Drop the adapter-name segment so saved and live names are comparable.
+
+    Same contract as chowder.adapter_guard._normalise: live parameters carry
+    the active adapter's name (`...lora_B.default.weight`), saved tensors do
+    not (`...lora_B.weight`).
+    """
+    return name.replace(".default.", ".")
+
+
+def _adapter_liveness_report(model: Any, adapter_dir: str | Path) -> dict[str, Any]:
+    """Inlined copy of chowder.adapter_guard.adapter_liveness_report (this file
+    must not import from the chowder package -- module docstring -- while the
+    isolated-unsloth continuation path still needs the exact same three-way
+    measurement the shared guard was fixed to make on 2026-09-12). Parity is
+    pinned by tests/test_unsloth_guard_parity.py: same buckets, same refusal
+    decisions. Change the shared guard and this copy together, in one slice.
+
+    Measures whether a loaded adapter can actually change `model`: verified
+    nonzero, verified zero, and unreadable/nonfinite `lora_B` tensors are
+    counted separately, and an unreadable tensor is never evidence of liveness.
+    """
+    saved = _saved_adapter_keys(adapter_dir)
+    live_lora: dict[str, Any] = {}
+    for name, param in model.named_parameters():
+        if "lora_" in name:
+            live_lora[name] = param
+
+    normalised_live = {_normalise_adapter_key(n) for n in live_lora}
+    matched = {k for k in (_normalise_adapter_key(s) for s in saved) if k in normalised_live}
+
+    b_params = {n: p for n, p in live_lora.items() if "lora_B" in n}
+    nonzero_b = 0
+    zero_b = 0
+    unreadable_b = 0
+    unreadable_names: list[str] = []
+    for name, param in b_params.items():
+        try:
+            magnitude = float(param.detach().float().abs().max())
+        except Exception:
+            # A measurement gap is never evidence of liveness: record it, name it,
+            # and let the decision rules in _assert_parent_adapter_live decide.
+            unreadable_b += 1
+            unreadable_names.append(name)
+            continue
+        if not math.isfinite(magnitude):
+            # NaN/inf cannot certify a finite nonzero value, so a nonfinite read
+            # is an invalid measurement, not a trained adapter.
+            unreadable_b += 1
+            unreadable_names.append(name)
+        elif magnitude > 0.0:
+            nonzero_b += 1
+        else:
+            zero_b += 1
+
+    return {
+        "adapter_dir": str(adapter_dir),
+        "saved_tensors": len(saved),
+        "live_lora_parameters": len(live_lora),
+        "matched_keys": len(matched),
+        "lora_B_parameters": len(b_params),
+        "lora_B_nonzero": nonzero_b,
+        "lora_B_zero": zero_b,
+        "lora_B_unreadable": unreadable_b,
+        "lora_B_unreadable_names": unreadable_names,
+        "example_saved_key": sorted(saved)[0] if saved else None,
+        "example_live_parameter": sorted(live_lora)[0] if live_lora else None,
+    }
+
+
+def _assert_parent_adapter_live(model: Any, adapter_dir: str | Path) -> dict[str, Any]:
+    """Refuse to continue from a parent adapter that cannot change the model.
+
+    Inlined decision rules of chowder.adapter_guard.assert_adapter_is_live:
+    zero key overlap refuses first (the measured Unsloth failure mode), then a
+    wholly-unmeasured adapter refuses as evidence-incomplete -- neither live
+    nor inert -- then the verified all-zero identity refusal, which keeps this
+    worker's own "continuation would silently start from scratch" wording
+    because that is the run-level consequence here. Passing means matched keys
+    plus at least one VERIFIED nonzero B; strict per-component coverage is the
+    separate training-qualification condition, not this check.
+    """
+    report = _adapter_liveness_report(model, adapter_dir)
+
+    if report["matched_keys"] == 0:
+        raise RuntimeError(
+            f"parent adapter at {adapter_dir} shares NO parameter names with the "
+            f"loaded model: {report['saved_tensors']} saved tensors, "
+            f"{report['live_lora_parameters']} adapter parameters on the model, 0 "
+            "matched. PeftModel.from_pretrained does not fail on this -- it warns "
+            "about missing keys and leaves every LoRA B at zero, so the run would "
+            "silently start from scratch while its provenance claimed continuity.\n"
+            f"  example saved key:      {report['example_saved_key']}\n"
+            f"  example live parameter: {report['example_live_parameter']}\n"
+            "A prefix difference here usually means the adapter was trained against "
+            "a different model class than the one just loaded (e.g. a "
+            "*ForConditionalGeneration wrapper, whose decoder layers sit under "
+            "`language_model.`, versus a text-only CausalLM)."
+        )
+
+    if report["lora_B_parameters"] and report["lora_B_nonzero"] == 0:
+        if report["lora_B_unreadable"]:
+            raise RuntimeError(
+                f"parent adapter at {adapter_dir} has evidence-incomplete liveness: "
+                f"{report['lora_B_unreadable']} of {report['lora_B_parameters']} "
+                "LoRA B matrices could not be measured (unreadable storage or a "
+                "nonfinite value) and none of the rest is verified nonzero, so the "
+                "adapter can be called neither live nor inert. Refusing to continue: "
+                "unknown evidence never satisfies verified liveness.\n"
+                f"  unreadable parameters: {report['lora_B_unreadable_names']}"
+            )
+        raise RuntimeError(
+            f"parent adapter {adapter_dir} loaded but all "
+            f"{report['lora_B_parameters']} LoRA B matrices are exactly zero, so it is an "
+            "identity and this run would silently start from scratch"
+        )
+    return report
+
+
 def train(spec: _Spec) -> dict[str, Any]:
     from unsloth import FastLanguageModel
 
@@ -222,18 +374,46 @@ def train(spec: _Spec) -> dict[str, Any]:
 
     set_seed(spec.seed)
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=spec.base_model,
-        revision=spec.revision,
-        max_seq_length=spec.max_length,
-        dtype=None,
-        load_in_4bit=(spec.quantization == "4bit"),
-    )
+    # text_only=True makes Unsloth load the family's TEXT decoder class instead of
+    # a *ForConditionalGeneration wrapper. That is what this backend wants on two
+    # counts. It is a text trainer (text_field / max_length / chat templates; the
+    # vision tower is never trained), and -- the reason this is a fix rather than a
+    # preference -- the adapter it saves must be loadable by Chowder's evaluator,
+    # which loads AutoModelForCausalLM. Without it, a VLM-wrapped model puts the
+    # decoder under `model.language_model.layers` while the evaluator's model has
+    # `model.layers`, so NO adapter key matches: PEFT warns, loads nothing, leaves
+    # every LoRA B at zero, and the candidate silently scores as the base model.
+    # Measured on Qwen3.8-9B: max logit delta 0.000000 versus 14.5 for the same
+    # training under the Transformers engine.
+    #
+    # Unsloth does the remapping itself (_apply_text_only_key_mapping) and applies
+    # it only when the text config belongs to the same family
+    # (_is_family_text_decoder: "qwen3_5_text".startswith("qwen3_5")), keeping the
+    # full model otherwise rather than loading random weights -- so this is safe to
+    # pass unconditionally. Version-guarded because an Unsloth without the
+    # parameter would raise on an unexpected kwarg; when it is absent the flag is
+    # recorded in the result so an operator can explain a liveness refusal.
+    _load_kwargs: dict[str, Any] = {
+        "model_name": spec.base_model,
+        "revision": spec.revision,
+        "max_seq_length": spec.max_length,
+        "dtype": None,
+        "load_in_4bit": (spec.quantization == "4bit"),
+    }
+    import inspect as _inspect
+
+    text_only_supported = "text_only" in _inspect.signature(
+        FastLanguageModel.from_pretrained
+    ).parameters
+    if text_only_supported:
+        _load_kwargs["text_only"] = True
+    model, tokenizer = FastLanguageModel.from_pretrained(**_load_kwargs)
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token_id is None:
             raise RuntimeError("tokenizer has neither pad_token nor eos_token")
         tokenizer.pad_token = tokenizer.eos_token
 
+    _parent_liveness: dict[str, Any] | None = None
     if spec.parent_adapter is not None:
         # Continuation: load the exact verified parent adapter onto the
         # Unsloth-loaded base model instead of creating a fresh LoRA adapter.
@@ -246,11 +426,33 @@ def train(spec: _Spec) -> dict[str, Any]:
         from peft import PeftModel
 
         model = PeftModel.from_pretrained(model, spec.parent_adapter, is_trainable=True)
+        # Inlined parity guard (see _assert_parent_adapter_live above): this file
+        # must not import from the chowder package (module docstring), and the
+        # decision rules must match chowder.adapter_guard.assert_adapter_is_live
+        # exactly -- parity pinned by tests/test_unsloth_guard_parity.py. A parent
+        # adapter that silently fails to load would turn a "continued" run into a
+        # fresh one while provenance claimed continuity; PEFT only warns on a
+        # total key mismatch and leaves every LoRA B at zero.
+        _parent_liveness = _assert_parent_adapter_live(model, spec.parent_adapter)
     else:
+        # Hand Unsloth a REGEX, not a list. Given a list, Unsloth rewrites it
+        # through get_peft_regex, whose component block is
+        # (self_attn|attention|attn|mixer|mlp|feed_forward|ffn|dense) -- none of
+        # which match `linear_attn`, so on a hybrid Mamba/attention model it
+        # silently drops every linear_attn module. Measured on Qwen3.8-9B: the same
+        # ten names adapted 128 modules as a list and 200 as a regex.
+        #
+        # vision.py passes a string straight through to PEFT, and this regex
+        # reproduces PEFT's own list semantics exactly -- a list entry matches a
+        # module whose dotted name ends with that name, which under PEFT's
+        # re.fullmatch is `(?:.*\.)?(?:names)`. The optional prefix preserves the
+        # edge case of a top-level module named exactly like a target.
+        _names = list(spec.target_modules) or list(_DEFAULT_TARGET_MODULES)
+        _target_regex = r"(?:.*\.)?(?:" + "|".join(_re.escape(n) for n in _names) + r")"
         model = FastLanguageModel.get_peft_model(
             model,
             r=spec.lora_r,
-            target_modules=list(spec.target_modules) or list(_DEFAULT_TARGET_MODULES),
+            target_modules=_target_regex,
             lora_alpha=spec.lora_alpha,
             lora_dropout=spec.lora_dropout,
             bias="none",
@@ -261,7 +463,29 @@ def train(spec: _Spec) -> dict[str, Any]:
     # model, rather than assuming a preset -- recorded in evidence so a
     # config that silently matched zero real modules is visible, not silent.
     # Populated identically by get_peft_model and PeftModel.from_pretrained.
-    resolved_target_modules = sorted(model.peft_config[model.active_adapter].target_modules)
+    # PEFT keeps target_modules as a STRING when the spec is a regex, and sorting a
+    # string shreds it into characters -- which is what this recorded for the GSM8K
+    # run that used a suffix-match regex to reach 200/200 coverage. Provenance that
+    # looks like data but is a sorted character list is worse than none.
+    _resolved = model.peft_config[model.active_adapter].target_modules
+    resolved_target_modules = (
+        _resolved if isinstance(_resolved, str) else sorted(_resolved)
+    )
+    # Counted the same way chowder.target_coverage does, inlined because this
+    # file must not import from the chowder package (see the module docstring).
+    # Keys off ".lora_A" so the adapter name does not matter. The controller
+    # compares this against the requested list: Unsloth rewrites the list into a
+    # regex, which on a hybrid model silently missed 72 linear_attn modules.
+    _targets: set[str] = set()
+    for _name, _ in model.named_modules():
+        _i = _name.find(".lora_A")
+        if _i > 0:
+            _targets.add(_name[:_i])
+    _adapted: dict[str, int] = {}
+    for _t in _targets:
+        _leaf = _t.rsplit(".", 1)[-1]
+        if _leaf:
+            _adapted[_leaf] = _adapted.get(_leaf, 0) + 1
 
     dataset = load_dataset("json", data_files=spec.dataset, split="train")
     if len(dataset) == 0:
@@ -314,6 +538,10 @@ def train(spec: _Spec) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     progress_path = output_dir / "progress.json"
     started = time.perf_counter()
+    # A list, not an int, so the callback closure can mutate it. Counted and
+    # reported rather than swallowed: a path that is ALWAYS unwritable is a real
+    # problem worth seeing, just not one worth destroying a training run over.
+    progress_failures: list[int] = []
 
     class _ProgressReportingCallback(TrainerCallback):
         def on_log(self, args, state, control, logs=None, **kwargs):
@@ -327,9 +555,24 @@ def train(spec: _Spec) -> dict[str, Any]:
                 "learning_rate": logs.get("learning_rate"),
                 "wall_seconds": time.perf_counter() - started,
             }
+            # Best-effort, inlined because this file must not import from the
+            # chowder package (see the module docstring); the canonical copy is
+            # chowder.progress_write. Publishing progress must never kill training:
+            # this exact rename failed with WinError 5 at step 323/500 and threw
+            # away 16 minutes of a real run, with the payload already written.
             tmp_path = progress_path.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(payload), encoding="utf-8")
-            tmp_path.replace(progress_path)
+            for _attempt in range(3):
+                try:
+                    tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+                    _os.replace(tmp_path, progress_path)
+                    break
+                except OSError:
+                    if _attempt < 2:
+                        time.sleep(0.05)
+                except Exception:
+                    break
+            else:
+                progress_failures.append(1)
 
     args_kwargs: dict[str, Any] = {
         "output_dir": str(output_dir / "trainer"),
@@ -338,6 +581,12 @@ def train(spec: _Spec) -> dict[str, Any]:
         "per_device_train_batch_size": spec.batch_size,
         "gradient_accumulation_steps": spec.gradient_accumulation_steps,
         "learning_rate": spec.learning_rate,
+        # These three were absent until 2026-09-11, so every Unsloth run silently
+        # got the trainer's default linear schedule no matter what the recipe asked
+        # for -- including a pre-registered run that specified cosine.
+        "lr_scheduler_type": spec.lr_scheduler_type,
+        "warmup_ratio": spec.warmup_ratio,
+        "warmup_steps": spec.warmup_steps,
         "logging_steps": spec.logging_steps,
         "save_strategy": spec.save_strategy,
         "report_to": "none",
@@ -387,6 +636,12 @@ def train(spec: _Spec) -> dict[str, Any]:
             "replay_selected_rows": replay_selected_rows,
         },
         "resolved_target_modules": resolved_target_modules,
+        "adapted_modules_by_leaf": _adapted,
+        # Whether the text-decoder class was requested. False means this
+        # Unsloth build predates the parameter, and an adapter trained on a
+        # VLM-wrapped model will not load into Chowder's evaluator.
+        "text_only_requested": text_only_supported,
+        "progress_write_failures": len(progress_failures),
         "resource_usage": {
             "active_accelerator_count": active_count,
             "visible_accelerator_count": active_count,
@@ -399,6 +654,7 @@ def train(spec: _Spec) -> dict[str, Any]:
             "requested_revision": spec.revision,
             "continued_from_parent_adapter": spec.parent_adapter is not None,
             "parent_adapter_sha256": spec.parent_adapter_sha256,
+            "parent_adapter_liveness": _parent_liveness,
         },
         "versions": {
             "unsloth": _package_version("unsloth"),
@@ -433,6 +689,9 @@ def main() -> int:
         epochs=float(raw.get("epochs", 1.0)),
         max_steps=int(raw.get("max_steps", -1)),
         learning_rate=float(raw.get("learning_rate", 2e-4)),
+        lr_scheduler_type=str(raw.get("lr_scheduler_type", "linear")),
+        warmup_ratio=float(raw.get("warmup_ratio", 0.0)),
+        warmup_steps=int(raw.get("warmup_steps", 0)),
         batch_size=int(raw.get("batch_size", 1)),
         gradient_accumulation_steps=int(raw.get("gradient_accumulation_steps", 4)),
         logging_steps=int(raw.get("logging_steps", 10)),

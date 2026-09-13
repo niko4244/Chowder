@@ -1,0 +1,74 @@
+{
+  "dense_model": "F:\\llm-models\\Qwen3.8-9B-abliterated-25-bf16",
+  "ranking_digest": "df207741fdccbcbc6dc5d2c38ddac77c832ce3590031174e4a7aea3230609b7f",
+  "eval_split": "eval B = rows[632:696], disjoint from rank and train",
+  "eval_prompts": 64,
+  "eval_maxlen": 384,
+  "intermediate_size": 12288,
+  "arms": {
+    "dense": {
+      "ppl": 4.304398356962633,
+      "active_channels": 12288,
+      "active_fraction": 1.0,
+      "ratio_to_dense": 1.0
+    },
+    "static_hot_3440": {
+      "ppl": 15.691828574203372,
+      "active_channels": 3440,
+      "active_fraction": 0.2799479166666667,
+      "ratio_to_dense": 3.645533538693244
+    },
+    "converted_init_set": {
+      "ppl": 18.947401055193207,
+      "active_channels": 3440,
+      "active_fraction": 0.2799479166666667,
+      "ratio_to_dense": 4.401869781532791
+    },
+    "static_hot_2176": {
+      "ppl": 31.622134156172816,
+      "active_channels": 2176,
+      "active_fraction": 0.17708333333333334,
+      "ratio_to_dense": 7.346470176260996
+    },
+    "arbitrary_3440": {
+      "ppl": 2879.302517113952,
+      "active_channels": 3440,
+      "active_fraction": 0.2799479166666667,
+      "ratio_to_dense": 668.9210148165075
+    }
+  },
+  "dense_ppl": 4.304398356962633,
+  "static_reference_ppl": 15.691828574203372,
+  "consistency_check": {
+    "converted_init_set_ppl": 18.947401055193207,
+    "measured_checkpoint_init": 19.4255,
+    "drift": 0.47809894480679205
+  },
+  "pilot_comparison": {
+    "converted_init": {
+      "ppl": 19.4255,
+      "beats_static_reference": false,
+      "margin_pct": -19.220464985697294
+    },
+    "both_trained_best": {
+      "ppl": 14.7491,
+      "beats_static_reference": true,
+      "margin_pct": 6.39177017040613
+    },
+    "both_trained_final": {
+      "ppl": 14.9314,
+      "beats_static_reference": true,
+      "margin_pct": 5.092814968478332
+    },
+    "router_only": {
+      "ppl": 15.5713,
+      "beats_static_reference": true,
+      "margin_pct": 0.7740431062491337
+    },
+    "gate_only": {
+      "ppl": 17.4243,
+      "beats_static_reference": false,
+      "margin_pct": -9.94284663255699
+    }
+  }
+}

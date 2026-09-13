@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -32,6 +33,7 @@ from chowder.executors import ExecutionContext
 from chowder.memory import HardwareProfile
 from chowder.models import Experiment, Hypothesis
 from chowder.provenance import sha256_file
+from chowder.resume_state import IncompleteCheckpointError
 
 
 def _hardware():
@@ -507,6 +509,207 @@ def test_recipe_digest_changes_with_dataset_format(tmp_path):
     assert a.recipe_digest() != b.recipe_digest()
 
 
+def _write_checkpoint_state(checkpoint_dir: Path, *, global_step: int = 50) -> Path:
+    """A checkpoint that can really be resumed from.
+
+    P7: a directory holding only a manifest is not a resumable checkpoint.
+    Trainer would restore the model weights and silently initialise a fresh
+    optimizer, scheduler, and RNG stream -- so the completeness check refuses
+    it, and a fixture that claims to resume has to contain real state.
+    """
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    (checkpoint_dir / "optimizer.pt").write_bytes(b"optimizer-state")
+    (checkpoint_dir / "scheduler.pt").write_bytes(b"scheduler-state")
+    (checkpoint_dir / "rng_state.pth").write_bytes(b"rng-state")
+    (checkpoint_dir / "trainer_state.json").write_text(
+        json.dumps({"global_step": global_step}), encoding="utf-8"
+    )
+    return checkpoint_dir
+
+
+def _fake_process_with_resume_witness(resume_payload):
+    """A worker that reports the given resume witness in its telemetry."""
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            result_path = Path(command[command.index("--result") + 1])
+            spec_path = Path(command[command.index("--spec") + 1])
+            spec = json.loads(spec_path.read_text())
+            output = Path(spec["output_dir"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "adapter_model.safetensors").write_bytes(b"adapter")
+            telemetry = {"train_loss": 0.25, "global_step": 60}
+            if resume_payload is not None:
+                telemetry["resume"] = resume_payload
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "telemetry": telemetry,
+                        "versions": {"transformers": "5.test"},
+                        "provenance": {},
+                        "data_provenance": {},
+                    }
+                )
+            )
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    return FakeProcess
+
+
+def _resume_ready_config(tmp_path, monkeypatch, witness):
+    """A resumable checkpoint (complete state) plus a worker reporting `witness`."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    _write_checkpoint_state(checkpoint_dir)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest)),
+        encoding="utf-8",
+    )
+
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_with_resume_witness(witness),
+    )
+    return checkpoint_dir, context
+
+
+def test_a_witnessed_resume_is_recorded_with_its_source_checkpoint(tmp_path, monkeypatch):
+    checkpoint_dir, context = _resume_ready_config(
+        tmp_path,
+        monkeypatch,
+        {
+            "requested_checkpoint": "unused",
+            "restored_global_step": 50,
+            "final_global_step": 60,
+            "steps_executed": 10,
+            "complete": True,
+            "missing_required": [],
+            "optimizer_state_present": True,
+            "rng_state_present": True,
+            "matched": True,
+            "reason": None,
+        },
+    )
+
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    resume = artifact.evidence["resume"]
+
+    assert resume["state"] == "witnessed"
+    assert resume["witness"]["restored_global_step"] == 50
+    assert resume["witness"]["final_global_step"] == 60
+    # The source checkpoint's own measured state travels with the artifact.
+    assert resume["source_checkpoint"]["state"] == "complete"
+    assert resume["source_checkpoint"]["global_step"] == 50
+    assert resume["source_checkpoint"]["directory"] == str(checkpoint_dir.resolve())
+
+
+def test_an_unwitnessed_resume_is_refused(tmp_path, monkeypatch):
+    """The silent fresh start, caught: the worker reports it did not continue."""
+    _, context = _resume_ready_config(
+        tmp_path,
+        monkeypatch,
+        {
+            "restored_global_step": None,
+            "final_global_step": 60,
+            "steps_executed": None,
+            "complete": False,
+            "missing_required": ["optimizer"],
+            "optimizer_state_present": False,
+            "rng_state_present": False,
+            "matched": False,
+            "reason": "the checkpoint was not complete",
+        },
+    )
+
+    with pytest.raises(ValueError, match="did not actually resume"):
+        TransformersPeftExecutor().run(_experiment(), context)
+
+
+def test_a_resume_with_no_witness_is_recorded_as_unknown_not_verified(
+    tmp_path, monkeypatch
+):
+    """An older worker can honestly say nothing; that is unknown, not a pass."""
+    _, context = _resume_ready_config(tmp_path, monkeypatch, None)
+
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    resume = artifact.evidence["resume"]
+
+    assert resume["state"] == "unknown"
+    assert resume["witness"] is None
+    assert "not report a resume witness" in resume["reason"]
+    # The measured source checkpoint is still recorded.
+    assert resume["source_checkpoint"]["state"] == "complete"
+
+
+def test_resume_is_rejected_when_the_checkpoint_has_no_optimizer_state(
+    tmp_path, monkeypatch
+):
+    """The silent-fresh-start hazard, at the parent boundary.
+
+    Identity matches and the directory exists, but `optimizer.pt` was never
+    written (a killed process, or a save that only got as far as the manifest).
+    Trainer would restore the weights and start optimization over without a
+    word, so this is refused before any model load instead.
+    """
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "trainer_state.json").write_text(
+        json.dumps({"global_step": 50}), encoding="utf-8"
+    )
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest)),
+        encoding="utf-8",
+    )
+
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch from an incomplete checkpoint")
+
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen", should_not_launch
+    )
+    with pytest.raises(IncompleteCheckpointError, match="optimizer"):
+        TransformersPeftExecutor().run(_experiment(), context)
+
+
 def test_resume_is_rejected_when_dataset_format_changed(tmp_path, monkeypatch):
     """dataset_format is a bound input, not excluded like epochs/max_steps --
     switching between text and chat between save and resume changes what the
@@ -517,7 +720,7 @@ def test_resume_is_rejected_when_dataset_format_changed(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -541,6 +744,310 @@ def test_resume_is_rejected_when_dataset_format_changed(tmp_path, monkeypatch):
     )
     with pytest.raises(ValueError, match="refusing to resume"):
         TransformersPeftExecutor().run(_experiment(), context)
+
+
+# --- P5: the declared component set is qualified exactly, not by count ------
+
+
+def _fake_process_with_provenance(observed_spec: dict, provenance_extra: dict):
+    """A worker whose result carries the given provenance fields."""
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            spec_path = Path(command[command.index("--spec") + 1])
+            result_path = Path(command[command.index("--result") + 1])
+            spec = json.loads(spec_path.read_text())
+            observed_spec.update(spec)
+            output = Path(spec["output_dir"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "adapter_model.safetensors").write_bytes(b"adapter")
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "telemetry": {"train_loss": 0.1, "global_step": 1},
+                        "versions": {"transformers": "5.test"},
+                        "provenance": {
+                            "resolved_model_commit": "abc123",
+                            **provenance_extra,
+                        },
+                        "data_provenance": {"primary_rows": 1, "replay_selected_rows": 0},
+                    }
+                )
+            )
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    return FakeProcess
+
+
+def _run_with_provenance(tmp_path, monkeypatch, provenance_extra):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_with_provenance({}, provenance_extra),
+    )
+    return TransformersPeftExecutor().run(_experiment(), context)
+
+
+def test_a_missing_declared_component_path_blocks_acceptance(tmp_path, monkeypatch):
+    """The summary below it passes -- every requested NAME has a non-zero count --
+    and the run must still be refused, because `layers.3.q_proj` was declared and
+    is not adapted. A count cannot see that; the exact set can."""
+    provenance = {
+        "adapted_modules_by_leaf": {"q_proj": 7, "v_proj": 8},
+        "component_paths": {
+            "ok": False,
+            "missing": ["layers.3.q_proj"],
+            "extra": [],
+            "unreadable": [],
+            "unknown_suffixes": [],
+        },
+    }
+    with pytest.raises(ValueError, match="did not cover exactly the declared target modules"):
+        _run_with_provenance(tmp_path, monkeypatch, provenance)
+
+
+def test_passing_component_paths_are_recorded_in_the_artifact(tmp_path, monkeypatch):
+    provenance = {
+        "adapted_modules_by_leaf": {"q_proj": 8, "v_proj": 8},
+        "component_paths": {
+            "ok": True,
+            "missing": [],
+            "extra": ["layers.0.k_proj"],
+            "unreadable": [],
+            "unknown_suffixes": [],
+        },
+    }
+    artifact = _run_with_provenance(tmp_path, monkeypatch, provenance)
+    recorded = artifact.evidence["component_paths"]
+    assert recorded["ok"] is True
+    # a broader match is legitimate for a suffix match -- recorded, not refused
+    assert recorded["extra"] == ["layers.0.k_proj"]
+
+
+def test_an_unreported_component_set_is_unknown_not_a_pass(tmp_path, monkeypatch):
+    """A worker predating the report leaves the exact set UNKNOWN: recorded as
+    None and not refused, the same rule adapter_guard and target_coverage use."""
+    artifact = _run_with_provenance(tmp_path, monkeypatch, {})
+    assert artifact.evidence["component_paths"] is None
+
+
+# --- P4b: checkpoint bound inputs bind a local base by content, not path ---
+#
+# The 2026-09-12 audit found the base identified by a path plus an unresolved
+# revision: a resume (or a re-run) months later reproduced whatever bytes sat
+# at that path. These tests pin the fix at the checkpoint seam: a local base is
+# bound by its measured content, the binding is path-free so relocating
+# identical bytes stays valid, an external (hub) reference keeps an honest
+# revision-only binding with no fake content claim, and manifests written
+# before this binding existed keep resuming.
+
+
+def _local_base_dir(root: Path) -> Path:
+    """A minimal local model directory the content manifest can measure."""
+    base = root / "base-model"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "config.json").write_text('{"model_type": "test-tiny"}', encoding="utf-8")
+    (base / "model.safetensors").write_bytes(b"\x00" * 64)
+    return base
+
+
+def _spec_bound_to(config: dict, base: str, tmp_path: Path, *, output_dir: str = "out"):
+    config["backend"]["base_model"] = base
+    return TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / output_dir, seed=1
+    )
+
+
+def test_bound_inputs_bind_a_local_base_by_content_not_path(tmp_path):
+    base = _local_base_dir(tmp_path)
+    config = _config(str(tmp_path / "train.jsonl"))
+
+    one = TransformersPeftExecutor._bound_inputs(
+        _spec_bound_to(config, str(base), tmp_path)
+    )
+    assert one["base_binding"] == "local-content"
+    assert len(one["base_content_sha256"]) == 64
+
+    # identical bytes at a different path are the same content identity
+    moved = tmp_path / "elsewhere" / "base-model"
+    moved.parent.mkdir(parents=True)
+    shutil.copytree(base, moved)
+    two = TransformersPeftExecutor._bound_inputs(
+        _spec_bound_to(config, str(moved), tmp_path)
+    )
+    assert two["base_content_sha256"] == one["base_content_sha256"]
+    assert two["base_weight_binding"] == "per-shard-sha256"
+    # the path is operational, not mathematical: for a content-bound local
+    # base it is not a bound input at all, so identical bytes at a new
+    # location produce identical bound inputs (recipe digest included)
+    assert "base_model" not in one
+    assert two["checkpoint_recipe_sha256"] == one["checkpoint_recipe_sha256"]
+
+
+def test_bound_inputs_keep_external_bases_on_revision_binding_only(tmp_path):
+    """A hub id is not measurable bytes: no content claim may be invented."""
+    config = _config(str(tmp_path / "train.jsonl"))
+    bound = TransformersPeftExecutor._bound_inputs(
+        _spec_bound_to(config, "example/model", tmp_path)
+    )
+    assert bound["base_binding"] == "external-reference"
+    assert "base_content_sha256" not in bound
+    assert bound["base_model"] == "example/model"
+
+
+def test_resume_is_rejected_when_the_local_base_content_changed(tmp_path, monkeypatch):
+    """Same size, different bytes: only a content digest can see this, and a
+    checkpoint whose optimizer state was produced against other weights must
+    not be silently resumed into."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    base = _local_base_dir(tmp_path)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    _write_checkpoint_state(checkpoint_dir)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = sha256_file(data)
+    spec_for_manifest = _spec_bound_to(
+        config, str(base), tmp_path, output_dir="prior"
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    (base / "model.safetensors").write_bytes(b"\x01" * 64)
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch when the base content changed")
+
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen", should_not_launch
+    )
+    with pytest.raises(ValueError, match="refusing to resume"):
+        TransformersPeftExecutor().run(_experiment(), context)
+
+
+def test_resume_accepts_a_relocated_identical_local_base(tmp_path, monkeypatch):
+    """The binding is over content, so moving the identical base does not
+    invalidate a checkpoint -- the operational path is not the recipe."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    base = _local_base_dir(tmp_path)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    _write_checkpoint_state(checkpoint_dir)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = sha256_file(data)
+    spec_for_manifest = _spec_bound_to(
+        config, str(base), tmp_path, output_dir="prior"
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest))
+    )
+
+    moved = tmp_path / "relocated" / "base-model"
+    moved.parent.mkdir(parents=True)
+    shutil.copytree(base, moved)
+    config["backend"]["base_model"] = str(moved)
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact is not None
+    assert observed_spec["resume_from_checkpoint"] == str(checkpoint_dir.resolve())
+
+
+def test_resume_keeps_working_for_a_manifest_written_before_base_content_binding(
+    tmp_path, monkeypatch
+):
+    """Existing checkpoints must not become unresumable just because the
+    binding grew: keys the recorded manifest never had are not divergences."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    base = _local_base_dir(tmp_path)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    _write_checkpoint_state(checkpoint_dir)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = sha256_file(data)
+    spec_for_manifest = _spec_bound_to(
+        config, str(base), tmp_path, output_dir="prior"
+    )
+    legacy = TransformersPeftExecutor._bound_inputs(spec_for_manifest)
+    for key in ("base_binding", "base_content_sha256", "base_weight_binding"):
+        legacy.pop(key, None)
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(legacy)
+    )
+
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    observed_spec: dict = {}
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_factory(observed_spec),
+    )
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    assert artifact is not None
+    assert observed_spec["resume_from_checkpoint"] == str(checkpoint_dir.resolve())
+
+
+def test_checkpoint_manifest_upgrades_additively_without_losing_refusal(tmp_path):
+    """An existing manifest that is a strict subset of the new bound inputs is
+    upgraded in place (strictly more evidence); a manifest whose recorded
+    values disagree is still refused."""
+    trainer = tmp_path / "trainer"
+    trainer.mkdir()
+    manifest_path = trainer / "chowder-checkpoint-manifest.json"
+    manifest_path.write_text(json.dumps({"base_model": "example/model", "revision": None}))
+
+    TransformersPeftExecutor._write_checkpoint_manifest(
+        trainer,
+        {
+            "base_model": "example/model",
+            "revision": None,
+            "base_content_sha256": "a" * 64,
+        },
+    )
+    upgraded = json.loads(manifest_path.read_text())
+    assert upgraded["base_content_sha256"] == "a" * 64
+
+    with pytest.raises(RuntimeError, match="different bound inputs"):
+        TransformersPeftExecutor._write_checkpoint_manifest(
+            trainer,
+            {
+                "base_model": "someone-else/model",
+                "revision": None,
+                "base_content_sha256": "a" * 64,
+            },
+        )
 
 
 def test_validate_chat_messages_normalizes_a_well_formed_row():
@@ -622,6 +1129,191 @@ def test_resolve_target_modules_attention_and_mlp_rejects_uncurated_architecture
         _resolve_target_modules(model, explicit=(), preset="attention_and_mlp")
 
 
+def test_resolve_target_modules_attention_and_mlp_covers_qwen3_5_hybrid_layers():
+    """qwen3_5's preset list is not the llama-family seven: 24 of its 32 decoder
+    layers are Mamba-style `linear_attn` rather than attention, so the preset
+    must also reach in_proj_qkv / in_proj_z / out_proj or it would silently
+    adapt only the 8 full-attention layers. Pinned exactly (not as a superset)
+    because PEFT does not complain about names that match nothing -- a typo
+    here is a partial-coverage bug that only shows up as a weak adapter.
+    """
+    model = _FakeModel("qwen3_5")
+    resolved = _resolve_target_modules(model, explicit=(), preset="attention_and_mlp")
+    assert resolved == [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "in_proj_qkv",
+        "in_proj_z",
+        "out_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
+
+
+@pytest.mark.parametrize("model_type", ["llama", "mistral", "qwen2", "gemma", "gemma2"])
+def test_resolve_target_modules_attention_and_mlp_leaves_llama_family_unchanged(model_type):
+    """Adding a per-architecture list for qwen3_5 turned the curated mapping
+    from one shared tuple into per-model_type entries. These architectures have
+    no linear_attn layers, so the hybrid names must not leak into them: doing so
+    would widen every existing llama-family recipe's adapter without review.
+    """
+    model = _FakeModel(model_type)
+    resolved = _resolve_target_modules(model, explicit=(), preset="attention_and_mlp")
+    assert resolved == [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
+
+
+@pytest.mark.parametrize("model_type", ["qwen3", "qwen3_5_moe", None])
+def test_resolve_target_modules_attention_and_mlp_raises_rather_than_resolving_empty(
+    model_type,
+):
+    """A model_type with no curated entry must fail loudly. The near-miss cases
+    are the dangerous ones -- qwen3 and qwen3_5_moe look like they should be
+    covered by a qwen3_5 entry and are not -- and a dict lookup that returned
+    an empty list (or None, which means "let PEFT auto-detect") instead of
+    raising would turn an unsupported architecture into a silently untrained or
+    differently-targeted run.
+    """
+    model = _FakeModel(model_type)
+    with pytest.raises(RuntimeError, match="no curated module list for model_type"):
+        _resolve_target_modules(model, explicit=(), preset="attention_and_mlp")
+
+
+def test_qwen3_5_curated_modules_match_a_real_qwen3_5_decoder():
+    """The curated mapping's standing precondition is that an architecture's
+    leaf names were verified against a real loaded model, because PEFT raises
+    only when NO name matches. This rebuilds that check in-suite against the
+    installed transformers implementation (on meta, so no weights are
+    materialised and nothing is downloaded), and pins the per-leaf counts that
+    docs/PRUNED_9B_RERUN_RESULT.md recorded for the real pruned 9B: 8 full-
+    attention layers, 24 linear_attn layers, 32 FFNs, 200 modules in total.
+    Real checkpoints ship the composite `qwen3_5` config; the decoder it nests
+    as text_config is what carries these leaves.
+    """
+    torch = pytest.importorskip("torch")
+    configuration = pytest.importorskip("transformers.models.qwen3_5.configuration_qwen3_5")
+    modeling = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+
+    from chowder.backends.transformers_worker import _QWEN3_5_TARGET_MODULES
+
+    # Shapes shrunk to keep this cheap; the layer *count* and full-attention
+    # interval are left at their defaults because they are what the 8/24/32
+    # split and the 200 total depend on.
+    config = configuration.Qwen3_5TextConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        vocab_size=256,
+    )
+    assert config.num_hidden_layers == 32
+    assert config.layer_types.count("full_attention") == 8
+    assert config.layer_types.count("linear_attention") == 24
+
+    with torch.device("meta"):
+        model = modeling.Qwen3_5ForCausalLM(config)
+    counts: dict[str, int] = {}
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            leaf = name.rsplit(".", 1)[-1]
+            counts[leaf] = counts.get(leaf, 0) + 1
+
+    assert {leaf: counts.get(leaf, 0) for leaf in _QWEN3_5_TARGET_MODULES} == {
+        "q_proj": 8,
+        "k_proj": 8,
+        "v_proj": 8,
+        "o_proj": 8,
+        "in_proj_qkv": 24,
+        "in_proj_z": 24,
+        "out_proj": 24,
+        "gate_proj": 32,
+        "up_proj": 32,
+        "down_proj": 32,
+    }
+    assert sum(counts[leaf] for leaf in _QWEN3_5_TARGET_MODULES) == 200
+    # in_proj_b / in_proj_a are real Linear leaves we intentionally skip, so
+    # their absence from the preset is a decision, not an oversight: if a future
+    # transformers release renames them, this says the omission was deliberate.
+    assert counts["in_proj_b"] == 24
+    assert counts["in_proj_a"] == 24
+
+
+def test_resolver_accepts_the_actual_text_decoder_type():
+    """The preset must resolve for the model_type the real run actually loads,
+    not only for the composite config the checkpoint ships. AutoModelForCausalLM
+    swaps a composite `qwen3_5` config for its nested text_config, so the model
+    given to _resolve_target_modules carries `qwen3_5_text` -- which the resolver
+    rejected before the alias existed, even though every leaf count above is
+    correct. Built on meta (no weights, no download) and resolved through the
+    public resolver entry point so the alias and the resolver are exercised
+    together, exactly as a run would hit them.
+    """
+    torch = pytest.importorskip("torch")
+    configuration = pytest.importorskip("transformers.models.qwen3_5.configuration_qwen3_5")
+    modeling = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+
+    config = configuration.Qwen3_5TextConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        vocab_size=256,
+    )
+    assert config.model_type == "qwen3_5_text"
+    with torch.device("meta"):
+        model = modeling.Qwen3_5ForCausalLM(config)
+    # The loaded decoder, not its composite wrapper, is what the resolver sees.
+    assert model.config.model_type == "qwen3_5_text"
+
+    resolved = _resolve_target_modules(model, explicit=(), preset="attention_and_mlp")
+    assert resolved == [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "in_proj_qkv",
+        "in_proj_z",
+        "out_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
+
+    # The MoE text decoder nests the same way; the dense preset must keep
+    # refusing it rather than silently adapting only the shared dense leaves.
+    moe_configuration = pytest.importorskip(
+        "transformers.models.qwen3_5_moe.configuration_qwen3_5_moe"
+    )
+    moe_modeling = pytest.importorskip(
+        "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe"
+    )
+    moe_config = moe_configuration.Qwen3_5MoeTextConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        vocab_size=256,
+    )
+    assert moe_config.model_type == "qwen3_5_moe_text"
+    with torch.device("meta"):
+        moe_model = moe_modeling.Qwen3_5MoeForCausalLM(moe_config)
+    with pytest.raises(RuntimeError, match="no curated module list for model_type"):
+        _resolve_target_modules(moe_model, explicit=(), preset="attention_and_mlp")
+
+
 def test_spec_defaults_to_auto_target_module_detection(tmp_path):
     data = tmp_path / "train.jsonl"
     data.write_text('{"text":"hello"}\n')
@@ -694,7 +1386,7 @@ def test_resume_is_rejected_when_target_preset_changed(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -933,7 +1625,7 @@ def test_resume_allows_a_different_offline_value(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -1031,7 +1723,7 @@ def test_resume_allows_a_different_activation_offload_setting(tmp_path, monkeypa
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -1335,7 +2027,7 @@ def test_resume_is_rejected_when_optimizer_tiering_setting_changed(tmp_path):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -1635,7 +2327,7 @@ def test_resume_allows_a_different_frozen_layer_streaming_setting(tmp_path, monk
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -1912,7 +2604,7 @@ def test_resume_allows_a_different_detailed_timing_telemetry_setting(tmp_path, m
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -2180,7 +2872,7 @@ def test_resume_is_rejected_when_dataset_changed_since_checkpoint(tmp_path, monk
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = original_sha
@@ -2218,7 +2910,7 @@ def test_resume_succeeds_when_bound_inputs_match(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -2252,7 +2944,7 @@ def test_resume_allows_a_different_total_epoch_count(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -2287,7 +2979,7 @@ def test_resume_allows_a_different_max_steps(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -2322,7 +3014,7 @@ def test_resume_is_rejected_when_weight_decay_changed(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha

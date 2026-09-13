@@ -1,0 +1,87 @@
+{
+  "converter": "hot_core_upcycle",
+  "exactness_contract": "NONE -- this init is deliberately not exact. Only hot_core_size + top_k * moe_intermediate_size of intermediate_size channels are present for a given token, so the converted model does not reproduce the dense function bit-for-bit. The exactness contract it replaces required top_k == num_experts, which is dense compute and therefore zero saving; this trades that for graceful degradation (measured 1.81x baseline perplexity at a 75% core over a 3,440-channel active budget, against a per-token-oracle ceiling of 1.03x). Scaling: cold down_proj x top_k because renormalised routed weights are 1/top_k each; shared down_proj x2 because the shared branch is gated by sigmoid(shared_expert_gate(x)) and a zero-init gate gives exactly 0.5. gate/up are copied verbatim -- silu is not positively homogeneous, so scaling the gate factor would change the function.",
+  "output_file_sha256": {
+    "model-00001-of-00004.safetensors": "b3e9b920e164081193182ad80b0c089ac4290d324ad4b43b1a7dcc0ab93c3e34",
+    "model-00002-of-00004.safetensors": "dca30abc64f6cd849b68b678f33f19c64c84d09905b3b8d5f4437816bf25e511",
+    "model-00003-of-00004.safetensors": "93b7d3cca48a7bffacfae5167de7e89c87b9f017e00a235b3c895843dff47ca5",
+    "model-00004-of-00004.safetensors": "9c4a90f9894ed4d9a850634f878e7ec3e8a0970044a7befbce1b07ca2b4ce570"
+  },
+  "output_manifest_sha256": "77520edadb9a94f4ed70636328c4bbbaafa49c75e3b47c51418851c5ad4869c4",
+  "plan": {
+    "active_channel_fraction": 0.2799479166666667,
+    "active_channels": 3440,
+    "active_ffn_params": 1352663040,
+    "active_vs_dense_ffn": 0.2799479166666667,
+    "dense_ffn_params": 4831838208,
+    "hidden_size": 4096,
+    "hot_core_size": 2176,
+    "intermediate_size": 12288,
+    "moe_intermediate_size": 632,
+    "num_experts": 16,
+    "num_layers": 32,
+    "params_per_channel_all_layers": 393216,
+    "stored_ffn_params": 4831838208,
+    "stored_vs_dense_ffn": 1.0,
+    "top_k": 2,
+    "weight_dtype": "BF16"
+  },
+  "ranking": {
+    "calibration": {
+      "load_in_4bit": true,
+      "max_length": 384,
+      "prompts": 32,
+      "split": "corpus-wide-stride",
+      "texts_sha256": "4cdf55d544b2abcff6f3d4d2a2e276be5314698af8783e998c2fa296e7fe99dc",
+      "tokens": 1530
+    },
+    "concentration": {
+      "top10pct_mass_max": 0.4472458630139887,
+      "top10pct_mass_mean": 0.20866870922016326,
+      "top10pct_mass_min": 0.14920773112285612
+    },
+    "digest": "304fffa858ea1512f7d456a4ccf9b086217f3337ab56a648e110733fea9650f2",
+    "method": "abs_activation_sum_v1"
+  },
+  "router_init": "zeros. Logits are therefore tied and which top_k experts win is an implementation detail of torch.topk, not a guarantee -- so at step 0 experts outside the tie-break winners may receive no token. This is reproducible but cold-starts the bank; a training arm should break the tie deliberately rather than rely on the tie order.",
+  "scheme_digests": {
+    "0": "7070a4d8537e02117719a53b166631ca90b164cf2d0409f13798889d85b34219",
+    "1": "217945d41507af4ab3e944ab61ab814812df185df69dfe2ec1479b02646d704a",
+    "10": "ebfaf935b7e25f714351d6b88c5bcbc81bbccb5f5d8d8c8b81699286409ef78d",
+    "11": "e2a1fdc957e69c5841ef6cfd945ae6a8c33009d5d8a34c7f3375417a09281ad0",
+    "12": "31adc558fe0a25163781b155ad9b671102773d9c33c22d099f6807a6d99837c6",
+    "13": "4be85c7fd0d1090395124b44b3c1b126fe7f0cd562fb43c613f223d7ae49a30f",
+    "14": "e5c4c7a4d15279f435c961c80a77f2160d1f4ec07c871ad4b4b86726f42a3b42",
+    "15": "4e92e5d44c4d37d73b8b5d507da033d9cdf2b4419a2ab719f12b6d91c81222a8",
+    "16": "6ff7107ea77ae75ce4da487314f45613f901741b5fb7e91648a332fce4e7e379",
+    "17": "d3685bd0b2d1d40c165636269bf8e0c40f4037fe1931e9d6a957bc5e372dc129",
+    "18": "2ccc430f6449f398c6378aae653d060f5cd39986e7205594adf8f647be79ed90",
+    "19": "eccfc212121e8b7653511e8e72f3fbed33b9e26dfc15dc3c9920b9e2fbbe9c5e",
+    "2": "395323d8808ff6bebd6a7be2f06ea4602a7345448d2d06c87f190b92da22efe4",
+    "20": "b203d479d15c5152159d457bd3f6ae21346d761a446c0f510ec005112fa6e2e6",
+    "21": "1f7301fcce1e16b86c915f5d11f7014aef5eb35971e79eb435809a3d8435df02",
+    "22": "f1f80b9440a65c68fb04f1f24a32bdb64b8f17a637e552b644ccdc7053624ace",
+    "23": "3e320afc08ba6781e9f1d66fa9891116217f0761e8e95a76788cc551e6ffdbba",
+    "24": "291e0eb6a7d4f37f1433535eaf532c519d2570e45f98d25189924a20dda00a9a",
+    "25": "727d0186b7fa82257a83d7a05083cdae94efbfbb09f8549fbd72d7b58b9f0324",
+    "26": "51ba39af22d59900d0b4be3393146451a045786ae9c51f5c8b5a98aad5051655",
+    "27": "68596d2ba1b20c0f74a2c00326d1d7975a310443c3f4525ea0809c5d887daf13",
+    "28": "4797a45968bb915558461a1676bcda179714a3a7bba90ee54c67c0360040c14e",
+    "29": "2768a917a65af6641bba90cf95b6f7561a1bfd5852e92d5441e6103c875f6dd0",
+    "3": "20caaf773e28925f068243a8b455a6e43aa18d0210cfb30173518c726a3cbfcd",
+    "30": "bbb799e7fad76bd294451daab0d34c3159f227dc2b7241a197a33c508828732a",
+    "31": "6c7b5ff803a4671bc87206c84bd77f8f16c89899aca99cda9bc7eb5a934b02ad",
+    "4": "608f56e45a3db29aaeb20677ce060c982caeeff900de72f4d45185ee5ec63620",
+    "5": "d237232c07f4b9b365f46922b820312043b0e43c21d18986246b4b466aa88774",
+    "6": "b11df35ff6605f4f34d291b82887a33779166a879ae87c21fac260d53d8103e3",
+    "7": "957ef67e353069218b38d3efe55d00ee71324f6ea92b3938ef9f35ef987923f7",
+    "8": "c6e55d808b9d3d92b98cf3efc784fdcc9fbc8467e3290a7367e5962c261ad5c8",
+    "9": "6dc06c39d92fe6bcaae3bc0f0aefedec43826272e822df048a2279c8e92e8d74"
+  },
+  "source_dir": "F:\\llm-models\\Qwen3.8-9B-abliterated-25-bf16",
+  "source_manifest_sha256": "5ec28a876420dfc44ac5e0c90d7e32429086b7caabf6bf95e6873505384b16f2",
+  "storage": {
+    "actual_output_bytes": 18824195544,
+    "source_bytes": 18819721120
+  }
+}

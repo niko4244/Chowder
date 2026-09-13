@@ -2,14 +2,24 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
+import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from ..adapter_guard import assert_adapter_is_live
 from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
+from ..lifecycle import (
+    PhaseTimer,
+    cuda_synchronize,
+    evaluation_lifecycle_ledger,
+    sampling_device,
+)
 from .generation import resolve_eos_token_ids
+from .rendering import render_prompt
+from .scoring import final_answer, final_number, normalize, score
+from .vram import MemorySampler, peak_vram as _peak_vram
 from .transformers_text import EvalSuiteSpec, TransformersTextEvalSpec
 
 
@@ -20,16 +30,15 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
-def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().casefold()
-
-
-def _score(prediction: str, expected: str, scoring: str) -> float:
-    if scoring == "exact_match":
-        return float(prediction.strip() == expected.strip())
-    if scoring == "normalized_exact_match":
-        return float(_normalize(prediction) == _normalize(expected))
-    raise ValueError(f"unsupported scoring: {scoring}")
+#: Scoring lives in `.scoring` so both workers cannot drift apart again. This worker
+#: used to score the RAW generation while base_text_worker discarded an unclosed
+#: <think> block first, which meant Chowder's automatic baseline and its candidate
+#: were not scored by the same rule. See that module.
+#: Re-exported under the historical private names for existing callers.
+_normalize = normalize
+_final_answer = final_answer
+_final_number = final_number
+_score = score
 
 
 def _resolve_dtype(torch: Any, precision: str):
@@ -89,6 +98,11 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         raise RuntimeError("4-bit evaluation requires a CUDA device")
 
     dtype = _resolve_dtype(torch, spec.precision)
+    # P6: generation dominated the completed rerun's cost (1.16 + 1.86 GPU-hours
+    # against 0.44 for the 500 steps), and neither evaluation arm reported its
+    # own timing, so that cost was invisible in the artifacts.
+    load_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
+    load_timer.__enter__()
     set_seed(spec.seed)
     model_cache_status = cache_status(spec.base_model, spec.revision)
     tokenizer = with_hub_retries(
@@ -129,19 +143,28 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
     resolved_commit = getattr(base.config, "_commit_hash", None)
     if spec.quantization == "none":
         base = base.to(device_name)
+    adapter_liveness: dict[str, Any] | None = None
     if spec.adapter_dir is None:
         model = base
     else:
         model = PeftModel.from_pretrained(base, spec.adapter_dir, is_trainable=False)
+        # Refuse to score an adapter that cannot change the model. PEFT only
+        # warns when no saved key matches, leaving every LoRA B at zero.
+        adapter_liveness = assert_adapter_is_live(model, spec.adapter_dir)
     model.eval()
     device = next(model.parameters()).device
     resolved_eos_token_id = resolve_eos_token_ids(tokenizer, model)
+    load_timer.__exit__()
 
     output_dir = Path(spec.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics: dict[str, float] = {}
     suite_evidence: dict[str, Any] = {}
 
+    generation_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
+    memory_sampler = MemorySampler(device_name=sampling_device(torch))
+    memory_sampler.start()
+    generation_timer.__enter__()
     with torch.inference_mode():
         for suite in spec.suites:
             rows = _load_rows(suite)
@@ -160,18 +183,19 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                 for row in rows:
                     prompt = str(row[suite.prompt_field])
                     expected = str(row[suite.expected_field])
-                    if suite.use_chat_template:
-                        if not getattr(tokenizer, "chat_template", None):
-                            raise RuntimeError(
-                                f"suite {suite.name!r} requested chat template but tokenizer has none"
-                            )
-                        rendered = tokenizer.apply_chat_template(
-                            [{"role": "user", "content": prompt}],
-                            tokenize=False,
-                            add_generation_prompt=True,
-                        )
-                    else:
-                        rendered = prompt
+                    # One renderer for both text workers (see
+                    # evaluators/rendering.py). This arm previously ignored
+                    # `canonical_rendering` entirely: a suite asking for the
+                    # pinned template silently rendered through the
+                    # checkpoint's own instead, so baseline and candidate
+                    # scored different prompt bytes under one protocol entry.
+                    rendered, render_evidence = render_prompt(
+                        tokenizer=tokenizer,
+                        prompt=prompt,
+                        suite_name=suite.name,
+                        use_chat_template=suite.use_chat_template,
+                        canonical_rendering=suite.canonical_rendering,
+                    )
                     encoded = tokenizer(rendered, return_tensors="pt")
                     encoded = {key: value.to(device) for key, value in encoded.items()}
                     generated = model.generate(
@@ -207,7 +231,19 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                 "holdout_fingerprints_file": str(fingerprint_path),
                 "holdout_fingerprints_sha256": fingerprint_digest,
                 "resolved_eos_token_id": resolved_eos_token_id,
+                **render_evidence,
             }
+
+    # The candidate arm's own generation, timed and sampled separately from the
+    # baseline's -- one arm cannot measure the other, and the ledger says so.
+    generation_timer.__exit__()
+    memory_sampling = memory_sampler.stop()
+    lifecycle_data = evaluation_lifecycle_ledger(
+        accelerator_count=1 if device_name.startswith("cuda") else 0,
+        arm="candidate",
+        generation_seconds=generation_timer.seconds,
+        model_load_seconds=load_timer.seconds,
+    ).to_dict()
 
     return {
         "metrics": metrics,
@@ -215,13 +251,28 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         "runtime": {
             "device": device_name,
             "gpu_count": 1 if device_name.startswith("cuda") else 0,
+            "lifecycle": lifecycle_data,
+            "memory_sampling": memory_sampling,
+            # The training workers have always reported this; the evaluators did
+            # not, and a pre-registered "peak VRAM under budget" condition was
+            # therefore undecidable for the evaluation leg. Judging it from
+            # nvidia-smi instead measures the whole MACHINE -- every browser and
+            # service on it -- and that is what produced a spurious
+            # oversubscription FAIL (docs/PRUNED_9B_RERUN_RESULT.md). A run must be
+            # able to answer "how much VRAM did *I* use" from its own artifacts.
+            **_peak_vram(device_name),
         },
         "model_provenance": {
             "requested_base_model": spec.base_model,
             "requested_revision": spec.revision,
             "model_cache_status": model_cache_status,
             "resolved_model_commit": resolved_commit,
-            "adapter_loaded": spec.adapter_dir is not None,
+            # "an adapter directory was requested" is NOT "an adapter is in
+            # effect": PeftModel.from_pretrained succeeds on a total key mismatch.
+            # This now reports the measured check, not the request.
+            "adapter_requested": spec.adapter_dir is not None,
+            "adapter_loaded": adapter_liveness is not None,
+            "adapter_liveness": adapter_liveness,
         },
         "versions": {
             "torch": _package_version("torch"),
@@ -236,7 +287,28 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--spec", required=True)
     parser.add_argument("--result", required=True)
+    parser.add_argument(
+        "--chowder-identity",
+        default=None,
+        help="JSON file with the chowder source identity the controller declared; "
+        "verified against the code this process actually imported BEFORE the "
+        "spec is read, so a wrong-checkout worker refuses instead of scoring",
+    )
     args = parser.parse_args()
+
+    # P4c: nothing may be loaded, run, or written before the pin checks out.
+    from ..worker_env import verify_source_identity
+
+    if args.chowder_identity is not None:
+        verify_source_identity(
+            json.loads(Path(args.chowder_identity).read_text(encoding="utf-8"))
+        )
+    else:
+        print(
+            "WARNING: no --chowder-identity supplied; the worker's source "
+            "identity is unverified for this run",
+            file=sys.stderr,
+        )
 
     raw = json.loads(Path(args.spec).read_text(encoding="utf-8"))
     raw["suites"] = tuple(EvalSuiteSpec(**suite) for suite in raw["suites"])

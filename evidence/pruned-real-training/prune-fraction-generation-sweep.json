@@ -1,0 +1,488 @@
+{
+  "dense_model": "F:\\llm-models\\Qwen3.8-9B-abliterated-25-bf16",
+  "ranking_digest": "304fffa858ea1512f7d456a4ccf9b086217f3337ab56a648e110733fea9650f2",
+  "prompts": 8,
+  "max_new_tokens": 768,
+  "seed": 123,
+  "survival_rule": {
+    "min_terminated_of_8": 4,
+    "max_degenerate_of_8": 2,
+    "trigram_floor": 0.3,
+    "compression_floor": 0.2,
+    "anchors": "f=1.0 must pass (dense control: 5/8 terminated, 1/8 degenerate); f=0.28 must fail (8/8 degenerate, 0/8 terminated)"
+  },
+  "arms": [
+    {
+      "fraction": 1.0,
+      "keep_channels": 12288,
+      "gsm8k_final_number_match": 0.375,
+      "terminated": 5,
+      "degenerate": 2,
+      "mean_distinct_trigram_ratio": 0.640594339024466,
+      "mean_compression_ratio": 0.3436777579274495,
+      "mean_new_tokens": 492.625,
+      "survives": true,
+      "seconds": 486.8239228000166,
+      "per_prompt": [
+        {
+          "index": 0,
+          "new_tokens": 379,
+          "terminated": true,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.7148760330578512,
+          "compression_ratio": 0.39619220308250225,
+          "degenerate": false,
+          "tail": "ars old in 75 - 64 = 11 years. In 11 years, the brother will be 32 + 11 = 43 years old.\n\nThe final answer is: \\boxed{43}"
+        },
+        {
+          "index": 1,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.25925925925925924,
+          "compression_ratio": 0.1411522633744856,
+          "degenerate": true,
+          "tail": "hen end with the final numeric answer.\nAnswer: The man's height is 6 feet, and his shadow is 1/2 his height, which is 6/"
+        },
+        {
+          "index": 2,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.41350210970464135,
+          "compression_ratio": 0.23288973384030418,
+          "degenerate": false,
+          "tail": "+ x = 2 * (4 + x).\nExpanding the equation, we get 64 + x = 8 + 2x.\nSubtracting x from both sides, we get 64 = 8 + x.\nSub"
+        },
+        {
+          "index": 3,
+          "new_tokens": 76,
+          "terminated": true,
+          "score": 1.0,
+          "distinct_trigram_ratio": 0.9069767441860465,
+          "compression_ratio": 0.6084656084656085,
+          "degenerate": false,
+          "tail": "week.\nEach sprint is 60 meters, so he runs 9 * 60 = 540 meters a week.\nThe final answer is 540.\nThe final answer is 540."
+        },
+        {
+          "index": 4,
+          "new_tokens": 186,
+          "terminated": true,
+          "score": 1.0,
+          "distinct_trigram_ratio": 0.8320610687022901,
+          "compression_ratio": 0.4381846635367762,
+          "degenerate": false,
+          "tail": "0 = 20 cups.\nTherefore, Wendi needs to give her chickens 20 cups of feed in the final meal of the day.\nThe answer is: 20"
+        },
+        {
+          "index": 5,
+          "new_tokens": 259,
+          "terminated": true,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.8117647058823529,
+          "compression_ratio": 0.4270833333333333,
+          "degenerate": false,
+          "tail": "50\n\nTherefore, Kylar needs to pay $50 for 16 glasses.\n\nFinal Answer: \\boxed{50}\nThe final floating-point result is 50.0."
+        },
+        {
+          "index": 6,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.3827433628318584,
+          "compression_ratio": 0.18621633957097217,
+          "degenerate": true,
+          "tail": ".\nAnswer: The man's height is 180 cm.\nHis son's height is 1/3 of his father's height, so the son's height is 180 / 3 = 6"
+        },
+        {
+          "index": 7,
+          "new_tokens": 737,
+          "terminated": true,
+          "score": 1.0,
+          "distinct_trigram_ratio": 0.8035714285714286,
+          "compression_ratio": 0.31923791821561337,
+          "degenerate": false,
+          "tail": "(partial download)} + 20 \\text{ minutes (restart)} + 100 \\text{ minutes (full re-download)} = 160 \\text{ minutes}$$\n\n160"
+        }
+      ]
+    },
+    {
+      "fraction": 0.75,
+      "keep_channels": 9216,
+      "gsm8k_final_number_match": 0.25,
+      "terminated": 4,
+      "degenerate": 0,
+      "mean_distinct_trigram_ratio": 0.7653718241942985,
+      "mean_compression_ratio": 0.34659766014401167,
+      "mean_new_tokens": 551.25,
+      "survives": true,
+      "seconds": 505.35195750001003,
+      "per_prompt": [
+        {
+          "index": 0,
+          "new_tokens": 352,
+          "terminated": true,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.8382352941176471,
+          "compression_ratio": 0.39464285714285713,
+          "degenerate": false,
+          "tail": " selling the remaining eggs at $2 each:\n$$11 \\times 2 = 22$$\n\nShe makes 22 dollars every day at the farmers' market.\n\n22"
+        },
+        {
+          "index": 1,
+          "new_tokens": 190,
+          "terminated": true,
+          "score": 1.0,
+          "distinct_trigram_ratio": 0.8956521739130435,
+          "compression_ratio": 0.48247078464106846,
+          "degenerate": false,
+          "tail": "s 2 bolts of blue fiber.\nHalf that much is $2 / 2 = 1$ bolt of white fiber.\nThe total number of bolts is $2 + 1 = 3$.\n\n3"
+        },
+        {
+          "index": 2,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.6631299734748011,
+          "compression_ratio": 0.29867761057911535,
+          "degenerate": false,
+          "tail": "ng price + repairs) is increased by 150%.\n    Total Cost = $80,000 + $50,000 = $130,000.\n    Increase = 150% of $130,000"
+        },
+        {
+          "index": 3,
+          "new_tokens": 337,
+          "terminated": true,
+          "score": 1.0,
+          "distinct_trigram_ratio": 0.7551020408163265,
+          "compression_ratio": 0.3401360544217687,
+          "degenerate": false,
+          "tail": " week = 3 sprints \u00d7 3 times = 9 sprints.\nTotal meters per week = 9 sprints \u00d7 60 meters/sprint = 540 meters.\n\nAnswer: 540"
+        },
+        {
+          "index": 4,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.7939814814814815,
+          "compression_ratio": 0.3229951262738148,
+          "degenerate": false,
+          "tail": "l feed for the day - (Feed in morning meal + Feed in afternoon meal).\nFeed in final meal = 180 - (15 + 25) = 180 - 45 = "
+        },
+        {
+          "index": 5,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.8045112781954887,
+          "compression_ratio": 0.3654342218400688,
+          "degenerate": false,
+          "tail": "630432 * 0.6 = 0.003843216\n0.60^11 = 0.003843216 * 0.6 = 0.0028831296\n0.60^12 = 0.0028831296 * 0.6 = 0.00216308736\n0.60^"
+        },
+        {
+          "index": 6,
+          "new_tokens": 459,
+          "terminated": true,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.8260869565217391,
+          "compression_ratio": 0.35405998536942207,
+          "degenerate": false,
+          "tail": "  $80 \\times 2 = 160$ sheep.\n\n4.  **Calculate the total number of sheep:**\n    $20 + 80 + 160 = 240$ sheep.\n\nAnswer: 240"
+        },
+        {
+          "index": 7,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.54627539503386,
+          "compression_ratio": 0.2143646408839779,
+          "degenerate": false,
+          "tail": "the beginning.\nThe download restarts from the beginning.\nThe download restarts from the beginning.\nThe download restarts"
+        }
+      ]
+    },
+    {
+      "fraction": 0.5625,
+      "keep_channels": 6912,
+      "gsm8k_final_number_match": 0.25,
+      "terminated": 1,
+      "degenerate": 7,
+      "mean_distinct_trigram_ratio": 0.3843418134253805,
+      "mean_compression_ratio": 0.20030536830228599,
+      "mean_new_tokens": 687.125,
+      "survives": false,
+      "seconds": 601.9818813999882,
+      "per_prompt": [
+        {
+          "index": 0,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 1.0,
+          "distinct_trigram_ratio": 0.2915601023017903,
+          "compression_ratio": 0.14888010540184454,
+          "degenerate": true,
+          "tail": "final answer is: \\boxed{18}\nThe final answer is: \\boxed{18}\nThe final answer is: \\boxed{18}\nThe final answer is: \\boxed{"
+        },
+        {
+          "index": 1,
+          "new_tokens": 121,
+          "terminated": true,
+          "score": 1.0,
+          "distinct_trigram_ratio": 0.9516129032258065,
+          "compression_ratio": 0.5701219512195121,
+          "degenerate": false,
+          "tail": "al = 2 + 1\n    *   Total = 3\n3.  **Conclusion:**\n    *   The robe takes 3 bolts in total.\n</think>\n\n2 + 1 = 3\n\nAnswer: 3"
+        },
+        {
+          "index": 2,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.25,
+          "compression_ratio": 0.16137931034482758,
+          "degenerate": true,
+          "tail": "* 1.15\nTotal Value = $80,000 + $50,000 * 1.15\nTotal Value = $80,000 + $50,000 * 1.15\nTotal Value = $80,000 + $50,000 * 1"
+        },
+        {
+          "index": 3,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.22151898734177214,
+          "compression_ratio": 0.10378827192527244,
+          "degenerate": true,
+          "tail": " answer is: \\boxed{540}\nThe final answer is: \\boxed{540}\nThe final answer is: \\boxed{540}\nThe final answer is: \\boxed{54"
+        },
+        {
+          "index": 4,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.2400793650793651,
+          "compression_ratio": 0.11962537249893572,
+          "degenerate": true,
+          "tail": "0\n- Final meal feed cups: -3 * 3 = -9\n\nStep 13: Determine the number of feed cups Wendi gives in the final meal.\n- Final"
+        },
+        {
+          "index": 5,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.4305177111716621,
+          "compression_ratio": 0.19883966244725737,
+          "degenerate": true,
+          "tail": "}\nThe final answer is: \\boxed{90}\nThe final answer is: \\boxed{90}\nThe final answer is: \\boxed{90}\nThe final answer is: \\"
+        },
+        {
+          "index": 6,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.22790697674418606,
+          "compression_ratio": 0.12624750499001997,
+          "degenerate": true,
+          "tail": "e.\n- 20 + 80 + 160 = 130.\n\nStep 5: Verify the answer.\n- 20 * 4 * 2 = 130.\n- 130 = 130.\n- The answer is 130.\n</think>\n\n13"
+        },
+        {
+          "index": 7,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.46153846153846156,
+          "compression_ratio": 0.17356076759061834,
+          "degenerate": true,
+          "tail": "minutes.\nStep 36: The total time for the download is 70 minutes.\nStep 37: The total time for the download is 70 minutes."
+        }
+      ]
+    },
+    {
+      "fraction": 0.4,
+      "keep_channels": 4915,
+      "gsm8k_final_number_match": 0.0,
+      "terminated": 0,
+      "degenerate": 8,
+      "mean_distinct_trigram_ratio": 0.226794218796868,
+      "mean_compression_ratio": 0.1306776060366853,
+      "mean_new_tokens": 768.0,
+      "survives": false,
+      "seconds": 673.7164631999913,
+      "per_prompt": [
+        {
+          "index": 0,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.16179775280898875,
+          "compression_ratio": 0.17862714508580343,
+          "degenerate": true,
+          "tail": "4 * 2 = $14 * 2 = $14 * 2 = $14 * 2 = $14 * 2 = $14 * 2 = $14 * 2 = $14 * 2 = $14 * 2 = $14 * 2 = $14 * 2 = $14 * 2 = $1"
+        },
+        {
+          "index": 1,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.0851528384279476,
+          "compression_ratio": 0.08317929759704251,
+          "degenerate": true,
+          "tail": "s equal to 1/2 * 2, which is 1.\n- Half of 1 is equal to 1/2 * 2, which is 1.\n- Half of 1 is equal to 1/2 * 2, which is 1"
+        },
+        {
+          "index": 2,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.09547738693467336,
+          "compression_ratio": 0.08588351431391905,
+          "degenerate": true,
+          "tail": " $50,000 = $80,000 + $50,000 = $80,000 + $50,000 = $80,000 + $50,000 = $80,000 + $50,000 = $80,000 + $50,000 = $80,000 +"
+        },
+        {
+          "index": 3,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.11320754716981132,
+          "compression_ratio": 0.11122770199370409,
+          "degenerate": true,
+          "tail": " * 60 = 360 * 60\n360 * 60 = 360 * 60\n360 * 60 = 360 * 60\n360 * 60 = 360 * 60\n360 * 60 = 360 * 60\n360 * 60 = 360 * 60\n360"
+        },
+        {
+          "index": 4,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.08097165991902834,
+          "compression_ratio": 0.06959884001933302,
+          "degenerate": true,
+          "tail": " 25 + 20.\nThe total number of chickens in the day is 15 + 25 + 20.\nThe total number of chickens in the day is 15 + 25 + "
+        },
+        {
+          "index": 5,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.6949152542372882,
+          "compression_ratio": 0.19848053181386516,
+          "degenerate": true,
+          "tail": "glass: $0.000000000000006 * 0.60 = $0.0000000000000006 * 0.60 = $0.00000000000000006\n- Ninth glass: $0.00000000000000006"
+        },
+        {
+          "index": 6,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.22921914357682618,
+          "compression_ratio": 0.2059071729957806,
+          "degenerate": true,
+          "tail": "40 + 20 = 80 + 40 + 20 = 80 + 40 + 20 = 80 + 40 + 20 = 80 + 40 + 20 = 80 + 40 + 20 = 80 + 40 + 20 = 80 + 40 + 20 = 80 + "
+        },
+        {
+          "index": 7,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.35361216730038025,
+          "compression_ratio": 0.11251664447403462,
+          "degenerate": true,
+          "tail": "the beginning.\nStep 46: Carla has to restart the download from the beginning.\nStep 47: Carla has to restart the download"
+        }
+      ]
+    },
+    {
+      "fraction": 0.28,
+      "keep_channels": 3441,
+      "gsm8k_final_number_match": 0.0,
+      "terminated": 0,
+      "degenerate": 8,
+      "mean_distinct_trigram_ratio": 0.10786334889403508,
+      "mean_compression_ratio": 0.08449954485321615,
+      "mean_new_tokens": 768.0,
+      "survives": false,
+      "seconds": 674.9970397999859,
+      "per_prompt": [
+        {
+          "index": 0,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.05688073394495413,
+          "compression_ratio": 0.050316809541557955,
+          "degenerate": true,
+          "tail": "arket is 2.\nThe number of eggs for the farmers' market is 2.\nThe number of eggs for the farmers' market is 2.\nThe number"
+        },
+        {
+          "index": 1,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.18491484184914841,
+          "compression_ratio": 0.10529556650246305,
+          "degenerate": true,
+          "tail": "\nThe tenthth condition is:\nx + 2 = 2x + 1/2\nThe thirti condition is:\nx + 2 = 2x + 1/2\nThe fourthth condition is:\nx + 2 ="
+        },
+        {
+          "index": 2,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.0390625,
+          "compression_ratio": 0.04564606741573034,
+          "degenerate": true,
+          "tail": "se is $50,000.\nThe house is $50,000.\nThe house is $50,000.\nThe house is $50,000.\nThe house is $50,000.\nThe house is $50,"
+        },
+        {
+          "index": 3,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.05157593123209169,
+          "compression_ratio": 0.07142857142857142,
+          "degenerate": true,
+          "tail": "60 = 5\n5 * 60 = 600\n600 / 60 = 5\n5 * 60 = 600\n600 / 60 = 5\n5 * 60 = 600\n600 / 60 = 5\n5 * 60 = 600\n600 / 60 = 5\n5 * 60 = "
+        },
+        {
+          "index": 4,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.4005524861878453,
+          "compression_ratio": 0.176278563656148,
+          "degenerate": true,
+          "tail": " = 25 / 5\n41) 25 / 5 = 25 / 5\n42) 25 / 5 = 25 / 5\n43) 25 / 5 = 25 / 5\n44) 25 / 5 = 25 / 5\n45) 25 / 5 = 25 / 5\n46) 25 / 5"
+        },
+        {
+          "index": 5,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.041463414634146344,
+          "compression_ratio": 0.06246016571064372,
+          "degenerate": true,
+          "tail": " x + 16 = 16.\nThe equation is: x + 16 = 16.\nThe equation is: x + 16 = 16.\nThe equation is: x + 16 = 16.\nThe equation is:"
+        },
+        {
+          "index": 6,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.05958549222797927,
+          "compression_ratio": 0.10687830687830688,
+          "degenerate": true,
+          "tail": "= 20\nS = 20\nS = 20\nS = 20\nS = 20\nS = 20\nS = 20\nS = 20\nS = 20\nS = 20\nS = 20\nS = 20\nS = 20\nS = 20\nS = 20\nS = 20\nS = 20\nS ="
+        },
+        {
+          "index": 7,
+          "new_tokens": 768,
+          "terminated": false,
+          "score": 0.0,
+          "distinct_trigram_ratio": 0.028871391076115485,
+          "compression_ratio": 0.057692307692307696,
+          "degenerate": true,
+          "tail": "0 / 2 = 20\n20 / 2 = 20\n20 / 2 = 20\n20 / 2 = 20\n20 / 2 = 20\n20 / 2 = 20\n20 / 2 = 20\n20 / 2 = 20\n20 / 2 = 20\n20 / 2 = 20\n2"
+        }
+      ]
+    }
+  ],
+  "lowest_surviving_fraction": 0.75,
+  "anchors_behaved": true
+}
