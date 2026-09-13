@@ -276,6 +276,96 @@ def test_the_automatic_baseline_is_measured_by_the_router_evaluator(tmp_path, mo
     assert [stored.experiment_id for stored in results] == ["baseline"]
 
 
+def test_the_automatic_baseline_row_reaches_a_terminal_status(tmp_path, monkeypatch):
+    """A measured baseline row must not remain ``planned``.
+
+    ``planned`` means "has not run yet". A row that already carries a scored
+    result but stays ``planned`` fabricates a pending experiment that never
+    resolves -- the durable record then disagrees with the evidence it
+    stores. The convention ``parent_tournament`` already applies to a
+    measured base-model row applies here too: measured and trustworthy
+    becomes ``passed``. This is a *measurement* verdict, not a gate verdict;
+    the gate's own accept/reject lives on the candidate's row.
+    """
+    from chowder import project_runner
+    from chowder.backends.router_healing import RouterHealingEvaluator
+    from chowder.models import ExperimentStatus
+
+    base, train, holdout = _write_corpora(tmp_path)
+    payload = _project_payload(tmp_path, base=base, train=train, holdout=holdout)
+    project = project_from_mapping(payload, source_dir=tmp_path)
+    project.work_dir.mkdir(parents=True, exist_ok=True)
+
+    def _fake_evaluate_base(self, *, config, context, experiment_id="baseline"):
+        return EvaluationOutcome(
+            run_id="baseline-eval",
+            experiment_id=experiment_id,
+            source_artifact_ref="base-model:test",
+            metrics={"holdout_loss": 3.5, "experts_per_token": 2.0, "dead_experts": 0.0},
+            gpu_hours=0.0,
+            evidence={
+                "backend": "transformers-router-healing-evaluator",
+                "base_holdout_loss": 3.5,
+                "payload_applied": False,
+            },
+        )
+
+    monkeypatch.setattr(RouterHealingEvaluator, "evaluate_base", _fake_evaluate_base)
+
+    with RunRegistry(project.registry_path) as registry:
+        project_runner._run_automatic_baseline(
+            project,
+            ExecutionContext(_hardware(), str(project.work_dir), project.seed),
+            registry,
+            None,
+        )
+        experiments = {
+            experiment.experiment_id: experiment for experiment in registry.list_experiments()
+        }
+
+    assert experiments["baseline"].status is ExperimentStatus.PASSED
+
+
+def test_a_failed_baseline_measurement_settles_the_row_as_failed(tmp_path, monkeypatch):
+    """A baseline evaluation that raises must still settle its row.
+
+    When the base measurement fails, the exception aborts the project before
+    any candidate runs -- but the row exists, and it must not be stranded in
+    ``planned`` either. The honest record is ``failed`` with no result row,
+    which is exactly what censored-outcome accounting expects of an attempt
+    that never produced a scored outcome.
+    """
+    from chowder import project_runner
+    from chowder.backends.router_healing import RouterHealingEvaluator
+    from chowder.models import ExperimentStatus
+
+    base, train, holdout = _write_corpora(tmp_path)
+    payload = _project_payload(tmp_path, base=base, train=train, holdout=holdout)
+    project = project_from_mapping(payload, source_dir=tmp_path)
+    project.work_dir.mkdir(parents=True, exist_ok=True)
+
+    def _boom(self, *, config, context, experiment_id="baseline"):
+        raise RuntimeError("baseline measurement exploded")
+
+    monkeypatch.setattr(RouterHealingEvaluator, "evaluate_base", _boom)
+
+    with RunRegistry(project.registry_path) as registry:
+        with pytest.raises(RuntimeError, match="baseline measurement exploded"):
+            project_runner._run_automatic_baseline(
+                project,
+                ExecutionContext(_hardware(), str(project.work_dir), project.seed),
+                registry,
+                None,
+            )
+        experiments = {
+            experiment.experiment_id: experiment for experiment in registry.list_experiments()
+        }
+        result_ids = [result.experiment_id for result in registry.list_results()]
+
+    assert experiments["baseline"].status is ExperimentStatus.FAILED
+    assert result_ids == []
+
+
 # --- the real layer ----------------------------------------------------------
 
 
@@ -410,6 +500,9 @@ def test_a_router_project_runs_end_to_end_through_the_normal_runner(tiny_router_
     assert "baseline" in experiments
     assert "router-pilot" in experiments
     assert experiments["router-pilot"].status.value in {"passed", "failed"}
+    # The baseline row is a completed measurement: `passed`, not a stranded
+    # `planned` beside its own scored result.
+    assert experiments["baseline"].status.value == "passed"
     assert results["router-pilot"].metrics["holdout_loss"] > 0.0
     # The project path records the automatic baseline as its own experiment row
     # compared by value, not as the candidate's parent: `parent_id` stays None for

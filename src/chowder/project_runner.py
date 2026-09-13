@@ -20,7 +20,7 @@ from .failures import harvest_transformers_text_failures
 from .hardware import HardwareSnapshot, detect_hardware
 from .local_corpus_provider import LocalCorpusRepairProvider
 from .memory import HardwareProfile
-from .models import Experiment, ExperimentResult, Hypothesis
+from .models import Experiment, ExperimentResult, ExperimentStatus, Hypothesis
 from .project import ProjectSpec, load_project
 from .recursive_repair import RecursiveRepairOutcome, run_bounded_autonomous_repair
 from .registry import RunRegistry
@@ -186,11 +186,23 @@ def _run_automatic_baseline(
     if resolve_training_engine(project.config) == ROUTER_HEALING_ENGINE:
         from .backends.router_healing import RouterHealingEvaluator
 
-        outcome = RouterHealingEvaluator().evaluate_base(
-            config=project.config, context=context
-        )
+        try:
+            outcome = RouterHealingEvaluator().evaluate_base(
+                config=project.config, context=context
+            )
+        except Exception:
+            # The row exists; a measurement that never completed must not
+            # strand it in `planned` ("has not run yet") -- `failed` with no
+            # result is the honest record for an attempt that produced no
+            # scored outcome.
+            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
+            raise
     else:
-        outcome = BaseModelTextEvaluator().evaluate(config=project.config, context=context)
+        try:
+            outcome = BaseModelTextEvaluator().evaluate(config=project.config, context=context)
+        except Exception:
+            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
+            raise
     evidence: dict[str, Any] = {
         "evaluation_run_id": outcome.run_id,
         "evaluation": dict(outcome.evidence),
@@ -211,6 +223,12 @@ def _run_automatic_baseline(
     )
     registry.record_evaluation_outcome(outcome)
     registry.record_result(result)
+    # A measured baseline is a completed measurement, not a gate verdict: the
+    # gate's accept/reject lives on the candidate's row. `parent_tournament`
+    # already persists its measured base-model rows as `passed`; the automatic
+    # baseline follows the same convention so the durable status finally
+    # matches the evidence the row carries.
+    registry.update_experiment_status("baseline", ExperimentStatus.PASSED.value)
     metrics_summary = ", ".join(f"{name}={value:.4f}" for name, value in sorted(result.metrics.items()))
     _emit_stage(
         on_event, registry, "baseline", f"Automatic baseline established: {metrics_summary}"
