@@ -67,6 +67,14 @@ def _write_matching_checkpoint(app: ChowderTUI, work_dir: Path, *, step: int) ->
     trainer_dir = work_dir / ".chowder" / "runs" / "e1-abc" / "adapter" / "trainer"
     checkpoint_dir = trainer_dir / f"checkpoint-{step}"
     checkpoint_dir.mkdir(parents=True)
+    # P7: a manifest alone is not a resumable checkpoint. Discovery reports one
+    # without optimizer/scheduler state as invalid, so a fixture the TUI is
+    # meant to offer for a resume has to contain real state.
+    for name in ("optimizer.pt", "scheduler.pt", "rng_state.pth"):
+        (checkpoint_dir / name).write_bytes(b"state")
+    (checkpoint_dir / "trainer_state.json").write_text(
+        json.dumps({"global_step": step}), encoding="utf-8"
+    )
     (trainer_dir / "chowder-checkpoint-manifest.json").write_text(
         json.dumps(bound_inputs), encoding="utf-8"
     )

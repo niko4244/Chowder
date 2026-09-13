@@ -33,6 +33,7 @@ from chowder.executors import ExecutionContext
 from chowder.memory import HardwareProfile
 from chowder.models import Experiment, Hypothesis
 from chowder.provenance import sha256_file
+from chowder.resume_state import IncompleteCheckpointError
 
 
 def _hardware():
@@ -508,6 +509,207 @@ def test_recipe_digest_changes_with_dataset_format(tmp_path):
     assert a.recipe_digest() != b.recipe_digest()
 
 
+def _write_checkpoint_state(checkpoint_dir: Path, *, global_step: int = 50) -> Path:
+    """A checkpoint that can really be resumed from.
+
+    P7: a directory holding only a manifest is not a resumable checkpoint.
+    Trainer would restore the model weights and silently initialise a fresh
+    optimizer, scheduler, and RNG stream -- so the completeness check refuses
+    it, and a fixture that claims to resume has to contain real state.
+    """
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    (checkpoint_dir / "optimizer.pt").write_bytes(b"optimizer-state")
+    (checkpoint_dir / "scheduler.pt").write_bytes(b"scheduler-state")
+    (checkpoint_dir / "rng_state.pth").write_bytes(b"rng-state")
+    (checkpoint_dir / "trainer_state.json").write_text(
+        json.dumps({"global_step": global_step}), encoding="utf-8"
+    )
+    return checkpoint_dir
+
+
+def _fake_process_with_resume_witness(resume_payload):
+    """A worker that reports the given resume witness in its telemetry."""
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            result_path = Path(command[command.index("--result") + 1])
+            spec_path = Path(command[command.index("--spec") + 1])
+            spec = json.loads(spec_path.read_text())
+            output = Path(spec["output_dir"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "adapter_model.safetensors").write_bytes(b"adapter")
+            telemetry = {"train_loss": 0.25, "global_step": 60}
+            if resume_payload is not None:
+                telemetry["resume"] = resume_payload
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "telemetry": telemetry,
+                        "versions": {"transformers": "5.test"},
+                        "provenance": {},
+                        "data_provenance": {},
+                    }
+                )
+            )
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    return FakeProcess
+
+
+def _resume_ready_config(tmp_path, monkeypatch, witness):
+    """A resumable checkpoint (complete state) plus a worker reporting `witness`."""
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    _write_checkpoint_state(checkpoint_dir)
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest)),
+        encoding="utf-8",
+    )
+
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen",
+        _fake_process_with_resume_witness(witness),
+    )
+    return checkpoint_dir, context
+
+
+def test_a_witnessed_resume_is_recorded_with_its_source_checkpoint(tmp_path, monkeypatch):
+    checkpoint_dir, context = _resume_ready_config(
+        tmp_path,
+        monkeypatch,
+        {
+            "requested_checkpoint": "unused",
+            "restored_global_step": 50,
+            "final_global_step": 60,
+            "steps_executed": 10,
+            "complete": True,
+            "missing_required": [],
+            "optimizer_state_present": True,
+            "rng_state_present": True,
+            "matched": True,
+            "reason": None,
+        },
+    )
+
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    resume = artifact.evidence["resume"]
+
+    assert resume["state"] == "witnessed"
+    assert resume["witness"]["restored_global_step"] == 50
+    assert resume["witness"]["final_global_step"] == 60
+    # The source checkpoint's own measured state travels with the artifact.
+    assert resume["source_checkpoint"]["state"] == "complete"
+    assert resume["source_checkpoint"]["global_step"] == 50
+    assert resume["source_checkpoint"]["directory"] == str(checkpoint_dir.resolve())
+
+
+def test_an_unwitnessed_resume_is_refused(tmp_path, monkeypatch):
+    """The silent fresh start, caught: the worker reports it did not continue."""
+    _, context = _resume_ready_config(
+        tmp_path,
+        monkeypatch,
+        {
+            "restored_global_step": None,
+            "final_global_step": 60,
+            "steps_executed": None,
+            "complete": False,
+            "missing_required": ["optimizer"],
+            "optimizer_state_present": False,
+            "rng_state_present": False,
+            "matched": False,
+            "reason": "the checkpoint was not complete",
+        },
+    )
+
+    with pytest.raises(ValueError, match="did not actually resume"):
+        TransformersPeftExecutor().run(_experiment(), context)
+
+
+def test_a_resume_with_no_witness_is_recorded_as_unknown_not_verified(
+    tmp_path, monkeypatch
+):
+    """An older worker can honestly say nothing; that is unknown, not a pass."""
+    _, context = _resume_ready_config(tmp_path, monkeypatch, None)
+
+    artifact = TransformersPeftExecutor().run(_experiment(), context)
+    resume = artifact.evidence["resume"]
+
+    assert resume["state"] == "unknown"
+    assert resume["witness"] is None
+    assert "not report a resume witness" in resume["reason"]
+    # The measured source checkpoint is still recorded.
+    assert resume["source_checkpoint"]["state"] == "complete"
+
+
+def test_resume_is_rejected_when_the_checkpoint_has_no_optimizer_state(
+    tmp_path, monkeypatch
+):
+    """The silent-fresh-start hazard, at the parent boundary.
+
+    Identity matches and the directory exists, but `optimizer.pt` was never
+    written (a killed process, or a save that only got as far as the manifest).
+    Trainer would restore the weights and start optimization over without a
+    word, so this is refused before any model load instead.
+    """
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    dataset_sha = sha256_file(data)
+
+    checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
+    checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "trainer_state.json").write_text(
+        json.dumps({"global_step": 50}), encoding="utf-8"
+    )
+
+    config = _config(str(data))
+    config["backend"]["dataset_sha256"] = dataset_sha
+    spec_for_manifest = TransformersPeftRunSpec.from_resolved_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "prior", seed=1
+    )
+    (checkpoint_trainer_dir / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(TransformersPeftExecutor._bound_inputs(spec_for_manifest)),
+        encoding="utf-8",
+    )
+
+    config["backend"]["resume_from_checkpoint"] = str(checkpoint_dir)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+
+    def should_not_launch(*args, **kwargs):
+        raise AssertionError("worker must not launch from an incomplete checkpoint")
+
+    monkeypatch.setattr(
+        "chowder.backends.transformers_peft.subprocess.Popen", should_not_launch
+    )
+    with pytest.raises(IncompleteCheckpointError, match="optimizer"):
+        TransformersPeftExecutor().run(_experiment(), context)
+
+
 def test_resume_is_rejected_when_dataset_format_changed(tmp_path, monkeypatch):
     """dataset_format is a bound input, not excluded like epochs/max_steps --
     switching between text and chat between save and resume changes what the
@@ -518,7 +720,7 @@ def test_resume_is_rejected_when_dataset_format_changed(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -719,7 +921,7 @@ def test_resume_is_rejected_when_the_local_base_content_changed(tmp_path, monkey
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = sha256_file(data)
@@ -753,7 +955,7 @@ def test_resume_accepts_a_relocated_identical_local_base(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = sha256_file(data)
@@ -791,7 +993,7 @@ def test_resume_keeps_working_for_a_manifest_written_before_base_content_binding
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = sha256_file(data)
@@ -1184,7 +1386,7 @@ def test_resume_is_rejected_when_target_preset_changed(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -1423,7 +1625,7 @@ def test_resume_allows_a_different_offline_value(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -1521,7 +1723,7 @@ def test_resume_allows_a_different_activation_offload_setting(tmp_path, monkeypa
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -1825,7 +2027,7 @@ def test_resume_is_rejected_when_optimizer_tiering_setting_changed(tmp_path):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -2125,7 +2327,7 @@ def test_resume_allows_a_different_frozen_layer_streaming_setting(tmp_path, monk
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -2402,7 +2604,7 @@ def test_resume_allows_a_different_detailed_timing_telemetry_setting(tmp_path, m
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -2670,7 +2872,7 @@ def test_resume_is_rejected_when_dataset_changed_since_checkpoint(tmp_path, monk
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = original_sha
@@ -2708,7 +2910,7 @@ def test_resume_succeeds_when_bound_inputs_match(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -2742,7 +2944,7 @@ def test_resume_allows_a_different_total_epoch_count(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -2777,7 +2979,7 @@ def test_resume_allows_a_different_max_steps(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha
@@ -2812,7 +3014,7 @@ def test_resume_is_rejected_when_weight_decay_changed(tmp_path, monkeypatch):
 
     checkpoint_trainer_dir = tmp_path / "prior" / "trainer"
     checkpoint_dir = checkpoint_trainer_dir / "checkpoint-50"
-    checkpoint_dir.mkdir(parents=True)
+    _write_checkpoint_state(checkpoint_dir)
 
     config = _config(str(data))
     config["backend"]["dataset_sha256"] = dataset_sha

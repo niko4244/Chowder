@@ -3,13 +3,14 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import math
 import os
 import sys
 import threading
 import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from ..evaluators.vram import MemorySampler
 from ..lifecycle import (
@@ -22,6 +23,7 @@ from ..lifecycle import (
     training_lifecycle_ledger,
 )
 from ..progress_write import write_progress_best_effort
+from ..resume_state import assert_resumable, inventory_checkpoint, resume_witness
 from ..target_coverage import adapted_modules_by_leaf
 from ..trainability import (
     adapted_module_paths,
@@ -48,6 +50,54 @@ def _package_version(name: str) -> str:
         return version(name)
     except PackageNotFoundError:
         return "unknown"
+
+
+#: Bound on the recorded per-step log, so a long run cannot turn its own
+#: evidence into an unbounded payload. Truncation is recorded, never silent.
+_STEP_LOG_LIMIT = 5000
+
+
+def _step_log(trainer: Any) -> dict[str, Any]:
+    """Per-step loss and LR as Trainer actually logged them, in order.
+
+    This is the comparison surface for a resumed run: the same losses at the
+    same steps mean the continuation saw the same data order, and the same LR
+    sequence means the scheduler really continued rather than restarting. Only
+    finite numbers are recorded -- a non-finite value is dropped rather than
+    written into JSON as ``NaN``, and a missing entry stays missing.
+    """
+
+    def _number(value: Any) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        return number if math.isfinite(number) else None
+
+    history = getattr(getattr(trainer, "state", None), "log_history", None) or []
+    entries: list[dict[str, Any]] = []
+    for row in history:
+        if not isinstance(row, Mapping):
+            continue
+        step = row.get("step")
+        entry = {
+            "step": (
+                int(step)
+                if isinstance(step, int) and not isinstance(step, bool)
+                else None
+            ),
+            "loss": _number(row.get("loss")),
+            "learning_rate": _number(row.get("learning_rate")),
+        }
+        if entry["loss"] is None and entry["learning_rate"] is None:
+            # Trainer's end-of-run summary row carries a step and nothing else;
+            # it is not a step measurement and would read as a null step.
+            continue
+        entries.append(entry)
+    return {
+        "entries": entries[:_STEP_LOG_LIMIT],
+        "total_entries": len(entries),
+        "truncated": len(entries) > _STEP_LOG_LIMIT,
+    }
 
 
 def _resolve_dtype(torch: Any, precision: str):
@@ -209,6 +259,16 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             spec.parent_adapter_sha256,
             label="parent",
         )
+
+    # P7: check the checkpoint *before* loading anything. A checkpoint whose
+    # optimizer/scheduler state is missing (a process killed mid-save, or a save
+    # that only reached the manifest) makes Trainer restore the weights and
+    # silently start optimization over; refusing here costs no model load and no
+    # GPU time, and the inventory is reused for the post-training witness.
+    resume_inventory = None
+    if spec.resume_from_checkpoint is not None:
+        resume_inventory = inventory_checkpoint(spec.resume_from_checkpoint)
+        assert_resumable(resume_inventory, require_rng=True)
 
     try:
         import torch
@@ -769,6 +829,23 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     model.save_pretrained(output_dir, safe_serialization=True)
     tokenizer.save_pretrained(output_dir)
     publication_timer.__exit__()
+
+    # P7: a resume that cannot be witnessed is refused. The adapter existing
+    # proves training ran; only the advance past the checkpoint's own recorded
+    # step proves it *resumed* rather than quietly starting over.
+    resume_report: dict[str, Any] | None = None
+    if resume_inventory is not None:
+        resume_report = resume_witness(
+            resume_inventory,
+            final_global_step=int(trainer.state.global_step),
+            declared_max_steps=spec.max_steps if spec.max_steps > 0 else None,
+        )
+        if not resume_report["matched"]:
+            raise RuntimeError(
+                "the run did not resume from the checkpoint it was given: "
+                f"{resume_report['reason']} (witness={resume_report})"
+            )
+    step_log = _step_log(trainer)
     # KNOWN LIMITATION: under multi-GPU DDP, torch.cuda.max_memory_allocated
     # is scoped to the CALLING process's own CUDA context per device -- this
     # process (rank 0) only ever allocated on its own device, so peak VRAM
@@ -883,6 +960,8 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "quantization_reality": quantization_reality,
             "memory_sampling": memory_sampling,
             "first_step_seconds": first_step_seconds,
+            "resume": resume_report,
+            "step_log": step_log,
         },
         "resource_usage": resource_snapshot,
         "data_provenance": {

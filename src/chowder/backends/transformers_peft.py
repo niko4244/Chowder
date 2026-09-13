@@ -32,6 +32,11 @@ from ..executors import CostEstimate, ExecutionContext, TrainingArtifact
 from ..memory import HardwareProfile
 from ..models import Experiment
 from ..provenance import sha256_directory, sha256_file
+from ..resume_state import (
+    CheckpointInventory,
+    assert_resumable,
+    inventory_checkpoint,
+)
 from ..resources import ResourceUsage
 from ..run_events import TrainingProgressEvent
 
@@ -794,7 +799,7 @@ class TransformersPeftExecutor:
     @classmethod
     def _verify_resume_checkpoint(
         cls, spec: TransformersPeftRunSpec, bound_inputs: Mapping[str, Any]
-    ) -> None:
+    ) -> CheckpointInventory:
         """Reject a resume if any bound training input has changed.
 
         A checkpoint's optimizer/scheduler state is only meaningful for the
@@ -803,6 +808,11 @@ class TransformersPeftExecutor:
         optimizing toward a different objective with stale momentum/LR
         schedule state. Refusing is the safe default; the caller can always
         start a fresh (non-resuming) run instead.
+
+        Identity is checked first, then *completeness*: a checkpoint whose
+        identity matches but whose optimizer/scheduler state is missing would
+        make Trainer restore the weights and silently start optimization over.
+        The measured inventory is returned so the artifact can carry it.
         """
         checkpoint_dir = Path(spec.resume_from_checkpoint).resolve()  # type: ignore[arg-type]
         if not checkpoint_dir.is_dir():
@@ -835,6 +845,14 @@ class TransformersPeftExecutor:
                 f"refusing to resume from {checkpoint_dir}: bound training input(s) changed "
                 f"since this checkpoint was produced: {json.dumps(changed, sort_keys=True)}"
             )
+        # P7: identity matched -- now check that there is real state to resume
+        # *from*. This runs before any model load, so a partial write left by a
+        # killed process costs nothing to discover.
+        inventory = inventory_checkpoint(checkpoint_dir)
+        # require_rng: without the RNG stream position, a resumed run silently
+        # restarts the data order, which makes an "exact resume" claim unprovable.
+        assert_resumable(inventory, require_rng=True)
+        return inventory
 
     @staticmethod
     def _json_digest(value: Mapping[str, Any]) -> str:
@@ -1560,6 +1578,50 @@ class TransformersPeftExecutor:
         }
 
     @staticmethod
+    def _summarize_resume(
+        telemetry: Mapping[str, Any], inventory: CheckpointInventory | None
+    ) -> dict[str, Any]:
+        """P7: the source checkpoint's measured state, and the resume witness.
+
+        A witness that *disagrees* -- the run reported that it did not continue
+        past the restore point -- refuses the artifact: that is a silent fresh
+        start caught in the act. A worker that reports no witness leaves the
+        field ``None`` with a reason (unknown, not verified), which is what an
+        older worker can honestly say.
+        """
+        witness = telemetry.get("resume")
+        if witness is not None and not isinstance(witness, Mapping):
+            raise RuntimeError("worker reported an invalid resume payload")
+        if inventory is None:
+            return {
+                "source_checkpoint": None,
+                "witness": None if witness is None else dict(witness),
+                "state": "not-a-resume",
+                "reason": "this run did not resume from a checkpoint",
+            }
+        if witness is None:
+            return {
+                "source_checkpoint": inventory.to_dict(),
+                "witness": None,
+                "state": "unknown",
+                "reason": (
+                    "the worker did not report a resume witness, so this run cannot "
+                    "claim it continued from the checkpoint rather than restarting"
+                ),
+            }
+        if not witness.get("matched"):
+            raise ValueError(
+                "the run did not actually resume from the checkpoint it was given: "
+                f"{witness.get('reason')} (witness={dict(witness)})"
+            )
+        return {
+            "source_checkpoint": inventory.to_dict(),
+            "witness": dict(witness),
+            "state": "witnessed",
+            "reason": None,
+        }
+
+    @staticmethod
     def _lifecycle_forecast(
         context: ExecutionContext, *, accelerator_count: int
     ) -> tuple[LifecycleForecast, str]:
@@ -1648,8 +1710,9 @@ class TransformersPeftExecutor:
             )
 
         bound_inputs = self._bound_inputs(spec)
+        resume_inventory: CheckpointInventory | None = None
         if spec.resume_from_checkpoint is not None:
-            self._verify_resume_checkpoint(spec, bound_inputs)
+            resume_inventory = self._verify_resume_checkpoint(spec, bound_inputs)
         if spec.save_strategy != "no":
             self._write_checkpoint_manifest(Path(spec.output_dir) / "trainer", bound_inputs)
 
@@ -1821,6 +1884,7 @@ class TransformersPeftExecutor:
             spec=spec, telemetry=telemetry
         )
         lifecycle_evidence = self._summarize_lifecycle(telemetry, context)
+        resume_evidence = self._summarize_resume(telemetry, resume_inventory)
         storage_evidence: dict[str, Any] = {}
         for key in ("tensor_inventory", "quantization_reality", "memory_sampling"):
             value = telemetry.get(key)
@@ -1846,6 +1910,7 @@ class TransformersPeftExecutor:
                 "target_coverage": target_coverage,
                 "component_paths": component_paths,
                 "lifecycle": lifecycle_evidence,
+                "resume": resume_evidence,
                 **storage_evidence,
                 "parent_adapter_sha256": parent_adapter_sha,
                 "continued_from_parent_adapter": parent_adapter_sha is not None,
