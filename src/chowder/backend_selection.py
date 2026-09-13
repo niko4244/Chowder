@@ -9,6 +9,12 @@ TRANSFORMERS_ENGINE = "transformers"
 UNSLOTH_ENGINE = "unsloth"
 SUPPORTED_PEFT_ENGINES = frozenset({TRANSFORMERS_ENGINE, UNSLOTH_ENGINE})
 
+#: The router-healing workload is not a PEFT adapter run: it trains a small
+#: designated parameter set (the router gates) inside an otherwise frozen model.
+#: It is a distinct engine so a project cannot ask for it by accident through a
+#: PEFT spelling, and so its artifact/evaluator dispatch stays separate.
+ROUTER_HEALING_ENGINE = "router-healing"
+
 
 class BackendSelectionError(ValueError):
     """Raised when a project does not select a supported training engine safely."""
@@ -37,6 +43,14 @@ def resolve_training_engine(config: Mapping[str, Any]) -> str:
     backend = _backend(config)
     backend_type = str(backend.get("type", "transformers-peft")).strip().lower()
     raw_engine = backend.get("engine")
+
+    if backend_type == ROUTER_HEALING_ENGINE:
+        if raw_engine is not None and str(raw_engine).strip().lower() != ROUTER_HEALING_ENGINE:
+            raise BackendSelectionError(
+                f"backend.type='{ROUTER_HEALING_ENGINE}' cannot select a different engine "
+                f"(got {raw_engine!r})"
+            )
+        return ROUTER_HEALING_ENGINE
 
     if backend_type == "transformers-peft":
         if raw_engine is None:
@@ -80,6 +94,10 @@ def normalize_training_config_for_executor(config: Mapping[str, Any]) -> dict[st
     engine = resolve_training_engine(config)
     normalized = dict(config)
     backend = dict(_backend(config))
+    if engine == ROUTER_HEALING_ENGINE:
+        # Not a PEFT engine: there is no canonical spelling to normalize, and
+        # rewriting its backend block would erase its identity in evidence.
+        return normalized
     if engine == TRANSFORMERS_ENGINE:
         backend["type"] = "transformers-peft"
         backend.pop("engine", None)
@@ -95,6 +113,10 @@ def create_training_executor(config: Mapping[str, Any]) -> TrainingExecutor:
     """
 
     engine = resolve_training_engine(config)
+    if engine == ROUTER_HEALING_ENGINE:
+        from .backends.router_healing import RouterHealingExecutor
+
+        return RouterHealingExecutor()
     if engine == TRANSFORMERS_ENGINE:
         from .backends.transformers_peft import TransformersPeftExecutor
 
