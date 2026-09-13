@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .executors import TrainingExecutor
+from .executors import EvaluationExecutor, TrainingExecutor
 
 
 TRANSFORMERS_ENGINE = "transformers"
@@ -126,3 +126,26 @@ def create_training_executor(config: Mapping[str, Any]) -> TrainingExecutor:
 
         return UnslothPeftExecutor()
     raise AssertionError(f"unhandled training engine: {engine}")
+
+
+def create_evaluation_executor(config: Mapping[str, Any]) -> EvaluationExecutor:
+    """Construct the evaluator that matches the selected training backend.
+
+    An artifact is only meaningful to the evaluator that understands it. A
+    router payload is not a PEFT adapter directory, so handing one to the text
+    evaluator -- which calls `PeftModel.from_pretrained` -- would fail deep
+    inside PEFT rather than here, and only after a worker process had started.
+    Dispatch is therefore keyed on the same `backend.type` the trainer was
+    chosen by, so the two can never disagree about what was produced.
+    """
+
+    engine = resolve_training_engine(config)
+    if engine == ROUTER_HEALING_ENGINE:
+        from .backends.router_healing import RouterHealingEvaluator
+
+        return RouterHealingEvaluator()
+    if engine in {TRANSFORMERS_ENGINE, UNSLOTH_ENGINE}:
+        from .evaluators.transformers_text import TransformersTextEvaluator
+
+        return TransformersTextEvaluator()
+    raise AssertionError(f"unhandled evaluation engine: {engine}")

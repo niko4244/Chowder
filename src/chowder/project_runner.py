@@ -4,12 +4,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .backend_selection import create_training_executor, normalize_training_config_for_executor
+from .backend_selection import (
+    ROUTER_HEALING_ENGINE,
+    create_evaluation_executor,
+    create_training_executor,
+    normalize_training_config_for_executor,
+    resolve_training_engine,
+)
 from .cancellation import CancellationToken
 from .cycle import ExperimentCycleRunner, GenerationOutcome
 from .engine import EvolutionEngine
 from .evaluators.base_text import BaseModelTextEvaluator
-from .evaluators.transformers_text import TransformersTextEvaluator
 from .executors import EvaluationOutcome, ExecutionContext
 from .failures import harvest_transformers_text_failures
 from .hardware import HardwareSnapshot, detect_hardware
@@ -173,7 +178,19 @@ def _run_automatic_baseline(
             estimated_gpu_hours=estimated_gpu_hours,
         )
     )
-    outcome = BaseModelTextEvaluator().evaluate(config=project.config, context=context)
+    # The baseline must be measured by the *same* scorer that will score the
+    # candidate: a router project's untouched base scored by the PEFT text
+    # evaluator would be a different measurement on a different protocol, and
+    # comparing it to a router payload's holdout loss would be arithmetic on two
+    # unrelated numbers.
+    if resolve_training_engine(project.config) == ROUTER_HEALING_ENGINE:
+        from .backends.router_healing import RouterHealingEvaluator
+
+        outcome = RouterHealingEvaluator().evaluate_base(
+            config=project.config, context=context
+        )
+    else:
+        outcome = BaseModelTextEvaluator().evaluate(config=project.config, context=context)
     evidence: dict[str, Any] = {
         "evaluation_run_id": outcome.run_id,
         "evaluation": dict(outcome.evidence),
@@ -268,7 +285,10 @@ def run_project(
             spent_gpu_hours=baseline.gpu_hours,
         )
         trainer = create_training_executor(training_config)
-        evaluator = TransformersTextEvaluator()
+        # Same engine key as the trainer, so a router payload can never be handed
+        # to the PEFT text evaluator (or the reverse) and fail inside the
+        # library instead of at the dispatch seam.
+        evaluator = create_evaluation_executor(training_config)
         runner = ExperimentCycleRunner(
             engine=engine,
             trainer=trainer,

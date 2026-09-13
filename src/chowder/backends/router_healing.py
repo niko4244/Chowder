@@ -36,8 +36,19 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from ..base_identity import BaseIdentityError, resolve_base_identity
-from ..executors import CostEstimate, ExecutionContext, TrainingArtifact
-from ..lifecycle import REQUIRED_FOR_TRAINING, ledger_from_payload
+from ..executors import (
+    CostEstimate,
+    EvaluationOutcome,
+    ExecutionContext,
+    TrainingArtifact,
+)
+from ..lifecycle import (
+    PHASE_BASELINE_GENERATION,
+    PHASE_MODEL_LOAD,
+    REQUIRED_FOR_EVALUATION,
+    REQUIRED_FOR_TRAINING,
+    ledger_from_payload,
+)
 from ..models import Experiment
 from ..provenance import sha256_file
 from ..resources import ResourceUsage
@@ -49,6 +60,11 @@ QUALIFIED_DEVICES: tuple[str, ...] = ("cpu",)
 #: The worker's result schema. Bumped when a field's meaning changes.
 WORKER_RESULT_KIND = "router_healing_worker_result.v1"
 
+#: The evaluation worker's result schema. A separate document from the training
+#: result on purpose: an evaluation that could be mistaken for a training report
+#: would let a scored artifact and a produced artifact blur together.
+EVAL_WORKER_RESULT_KIND = "router_healing_eval_result.v1"
+
 #: Extra wall-clock allowance around the spec's own limit, for interpreter
 #: startup, the base load, and payload publication. The spec's `max_seconds`
 #: bounds *training*; this bounds the process.
@@ -59,6 +75,21 @@ _ALLOWED_SCHEDULERS = {"constant", "cosine"}
 
 class RouterHealingBackendError(RuntimeError):
     """A router-healing run cannot be launched, or its result cannot be trusted."""
+
+
+def _resolve_declared_path(value: Any, work_dir: Path) -> Path:
+    """Resolve a declared path the way the project loader does.
+
+    A relative knob is relative to the project's work directory, never to
+    whatever directory a spawned worker happens to start in -- otherwise the
+    same project file would train against different bytes depending on where it
+    was launched from, and the recorded content identity would be the only hint
+    that it happened.
+    """
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute():
+        path = work_dir / path
+    return path.resolve()
 
 
 @dataclass(frozen=True)
@@ -235,7 +266,8 @@ class RouterHealingExecutor:
                 "preregistered research spec) or backend.router_healing."
             )
 
-        base_dir = Path(str(settings["base_model_dir"]))
+        work_dir = Path(context.work_dir)
+        base_dir = _resolve_declared_path(settings["base_model_dir"], work_dir)
         try:
             identity = resolve_base_identity(base_dir)
         except BaseIdentityError as exc:
@@ -251,7 +283,7 @@ class RouterHealingExecutor:
                 "base nobody proved it belongs to."
             )
 
-        corpus_path = Path(str(settings["corpus_path"]))
+        corpus_path = _resolve_declared_path(settings["corpus_path"], work_dir)
         if not corpus_path.is_file():
             raise RouterHealingBackendError(f"training corpus not found: {corpus_path}")
         corpus_sha = sha256_file(corpus_path)
@@ -283,7 +315,7 @@ class RouterHealingExecutor:
             max_tokens=max_tokens,
             checkpoint_dir=str((run_dir / "checkpoints").resolve()),
             resume_from=(
-                str(Path(str(settings["resume_from"])).resolve())
+                str(_resolve_declared_path(settings["resume_from"], work_dir))
                 if settings.get("resume_from")
                 else None
             ),
@@ -561,6 +593,602 @@ class RouterHealingExecutor:
 
     def cancel(self, run_id: str) -> None:
         """Ask the worker to stop; the run path turns that into a terminal reason."""
+        self._cancelled.add(run_id)
+        process = self._processes.get(run_id)
+        if process is not None and process.poll() is None:
+            process.terminate()
+
+
+class RouterHealingEvaluationError(RuntimeError):
+    """A router payload cannot be independently evaluated honestly."""
+
+
+@dataclass(frozen=True)
+class RouterHealingEvalSpec:
+    """Everything the evaluation worker needs to score one published payload.
+
+    The holdout corpus is a first-class field rather than a reuse of the
+    training corpus: an evaluation that scores the data the router was trained
+    on measures fit, not capability, and this seam is where that would go
+    wrong silently.
+
+    ``payload_dir`` is ``None`` for exactly one thing: the **base arm**. A
+    baseline is the untouched base measured under the same holdout protocol,
+    so it is the same worker with nothing applied -- not a second code path
+    that could drift from the scored one. A base spec that named payload
+    parameters is refused, because those two claims contradict each other.
+    """
+
+    base_model_dir: str
+    base_content_sha256: str
+    payload_dir: str | None
+    holdout_corpus_path: str
+    holdout_corpus_sha256: str
+    expected_parameter_paths: tuple[str, ...]
+    output_dir: str
+    seq_len: int
+    batches: int
+    device: str = "cpu"
+    detailed_timing: bool = False
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("base_model_dir", self.base_model_dir),
+            ("holdout_corpus_path", self.holdout_corpus_path),
+            ("output_dir", self.output_dir),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"router healing eval spec {label} must be a non-empty string")
+        if self.payload_dir is not None and (
+            not isinstance(self.payload_dir, str) or not self.payload_dir.strip()
+        ):
+            raise ValueError(
+                "router healing eval spec payload_dir must be a non-empty string or None "
+                "(None scores the untouched base arm)"
+            )
+        for label, digest in (
+            ("base_content_sha256", self.base_content_sha256),
+            ("holdout_corpus_sha256", self.holdout_corpus_sha256),
+        ):
+            if not isinstance(digest, str) or len(digest) != 64:
+                raise ValueError(f"router healing eval spec {label} must be a sha256 digest")
+        for label, value in (("seq_len", self.seq_len), ("batches", self.batches)):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"router healing eval spec {label} must be a positive integer")
+        names = tuple(str(name) for name in self.expected_parameter_paths)
+        if len(set(names)) != len(names):
+            raise ValueError("router healing eval spec expected parameter paths must be unique")
+        if self.payload_dir is None:
+            if names:
+                raise ValueError(
+                    "a base-arm spec (payload_dir=None) must not declare expected parameter "
+                    "paths: nothing is applied, so naming parameters it must touch is a "
+                    "contradiction"
+                )
+        elif not names:
+            raise ValueError(
+                "router healing eval spec needs at least one expected parameter path; an "
+                "empty allowlist cannot prove the payload touched what it claims"
+            )
+        object.__setattr__(self, "expected_parameter_paths", names)
+        if self.device not in QUALIFIED_DEVICES:
+            raise ValueError(
+                f"device {self.device!r} is not qualified for router evaluation; qualified "
+                f"devices are {list(QUALIFIED_DEVICES)}"
+            )
+
+    @property
+    def payload_applied(self) -> bool:
+        """Whether this spec scores a payload or the untouched base."""
+        return self.payload_dir is not None
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.__dict__)
+
+    def canonical_json(self) -> str:
+        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+
+    def digest(self) -> str:
+        return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
+
+
+class RouterHealingEvaluator:
+    """Score a published router payload in a process of its own.
+
+    Independent means independent: the base is loaded fresh, the payload is
+    re-verified from disk against the base it was trained on, and the two
+    application controls the artifact claims are *measured* here rather than
+    taken from the training run's word -- an artifact whose own report disagrees
+    with what applying it actually did is refused.
+    """
+
+    name = "transformers-router-healing-evaluator"
+
+    def __init__(self) -> None:
+        self._processes: dict[str, subprocess.Popen[bytes]] = {}
+        self._cancelled: set[str] = set()
+        self._cancellation: Any = None
+        self._progress_callback: Any = None
+
+    def bind_cancellation(self, token: Any) -> None:
+        self._cancellation = token
+
+    def bind_progress_callback(self, callback: Any, **_kwargs: Any) -> None:
+        self._progress_callback = callback
+
+    def _knobs(self, context: ExecutionContext) -> Mapping[str, Any]:
+        backend = context.resolved_config.get("backend", {})
+        backend = backend if isinstance(backend, Mapping) else {}
+        knobs = backend.get("router_healing", {})
+        return knobs if isinstance(knobs, Mapping) else {}
+
+    def _protocol(
+        self,
+        context: ExecutionContext,
+        *,
+        experimental_research: Mapping[str, Any] | None = None,
+        config: Mapping[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], Mapping[str, Any], Path]:
+        """Resolve the base + holdout protocol, whatever supplied the settings.
+
+        The candidate arm reads the protocol from the experiment that is running
+        (so a worker's resolved config cannot silently drift from what was
+        preregistered); the base arm has no experiment yet, so it reads the
+        project config the baseline is being measured under. Both arms end up
+        with the same fields, which is what makes them comparable at all.
+        """
+        research: Mapping[str, Any] = experimental_research or {}
+        if config is not None:
+            backend = config.get("backend", {}) if isinstance(config, Mapping) else {}
+            backend = backend if isinstance(backend, Mapping) else {}
+            raw_knobs = backend.get("router_healing", {})
+            knobs: Mapping[str, Any] = raw_knobs if isinstance(raw_knobs, Mapping) else {}
+        else:
+            knobs = self._knobs(context)
+        settings: dict[str, Any] = dict(knobs)
+        settings["base_model_dir"] = research.get("base_model_dir", knobs.get("base_model_dir"))
+        settings["holdout_corpus_path"] = research.get(
+            "holdout_corpus_path", knobs.get("holdout_corpus_path")
+        )
+        if not settings.get("base_model_dir"):
+            raise RouterHealingEvaluationError(
+                "no base_model_dir is declared for router evaluation"
+            )
+        if not settings.get("holdout_corpus_path"):
+            raise RouterHealingEvaluationError(
+                "no holdout_corpus_path is declared; evaluating on the training corpus "
+                "would measure fit rather than capability, so this is refused"
+            )
+
+        work_dir = Path(context.work_dir)
+        base_dir = _resolve_declared_path(settings["base_model_dir"], work_dir)
+        try:
+            identity = resolve_base_identity(base_dir)
+        except BaseIdentityError as exc:
+            raise RouterHealingEvaluationError(
+                f"the base model at {base_dir} has no honest content identity: {exc}"
+            ) from exc
+
+        declared_manifest = research.get("base_manifest_sha256")
+        if declared_manifest is not None and declared_manifest != identity["manifest_sha256"]:
+            raise RouterHealingEvaluationError(
+                "the base directory does not match the manifest the experiment was frozen "
+                f"against: declared {declared_manifest!r}, measured "
+                f"{identity['manifest_sha256']!r}"
+            )
+
+        holdout = _resolve_declared_path(settings["holdout_corpus_path"], work_dir)
+        if not holdout.is_file():
+            raise RouterHealingEvaluationError(f"holdout corpus not found: {holdout}")
+        holdout_sha = sha256_file(holdout)
+        declared_holdout = research.get("holdout_corpus_sha256")
+        if declared_holdout is not None and declared_holdout != holdout_sha:
+            raise RouterHealingEvaluationError(
+                f"holdout corpus hash mismatch: the experiment was frozen against "
+                f"{declared_holdout!r} but {holdout} is {holdout_sha!r}"
+            )
+        settings["_base_dir"] = base_dir
+        settings["_identity"] = identity
+        settings["_holdout"] = holdout
+        settings["_holdout_sha"] = holdout_sha
+        settings["_work_dir"] = work_dir
+        return settings, research, work_dir
+
+    def _base_spec_for(
+        self,
+        context: ExecutionContext,
+        *,
+        config: Mapping[str, Any],
+        eval_dir: Path,
+    ) -> RouterHealingEvalSpec:
+        """The base arm: the untouched base scored on the same holdout.
+
+        Deliberately the *same* worker and the same protocol as the candidate
+        arm, with no payload. A baseline that drifted from the protocol it will
+        be compared against would make the comparison meaningless.
+        """
+        settings, _research, _work_dir = self._protocol(context, config=config)
+        return RouterHealingEvalSpec(
+            base_model_dir=str(settings["_base_dir"]),
+            base_content_sha256=settings["_identity"]["content_sha256"],
+            payload_dir=None,
+            holdout_corpus_path=str(settings["_holdout"]),
+            holdout_corpus_sha256=settings["_holdout_sha"],
+            expected_parameter_paths=(),
+            output_dir=str((eval_dir / "output").resolve()),
+            seq_len=int(settings.get("seq_len", 128)),
+            batches=int(settings.get("eval_batches", 4)),
+            device=str(settings.get("device", "cpu")),
+            detailed_timing=bool(settings.get("eval_detailed_timing", False)),
+        )
+
+    def _spec_for(
+        self,
+        experiment: Experiment,
+        artifact: TrainingArtifact,
+        context: ExecutionContext,
+        *,
+        eval_dir: Path,
+    ) -> RouterHealingEvalSpec:
+        research = RouterHealingExecutor._research_spec(experiment)
+        settings, _research, _work_dir = self._protocol(
+            context, experimental_research=research
+        )
+
+        payload_dir = Path(str(artifact.artifact_ref))
+        if not payload_dir.is_dir():
+            raise RouterHealingEvaluationError(
+                f"the artifact reference {payload_dir} is not a published payload directory"
+            )
+
+        # The intended set comes from the training artifact, never from a fresh
+        # guess: it is the scope the payload was published under, so re-deriving
+        # it here could silently accept a payload that touches more.
+        declared = research.get("expected_parameter_paths")
+        expected_names = (
+            tuple(str(name) for name in declared) if isinstance(declared, (list, tuple)) else ()
+        )
+        if not expected_names:
+            recorded = artifact.evidence.get("freeze_summary", {})
+            if isinstance(recorded, Mapping):
+                expected_names = tuple(
+                    str(name) for name in recorded.get("trainable_param_names", ())
+                )
+        if not expected_names:
+            raise RouterHealingEvaluationError(
+                "the training artifact records no intended parameter set, so a payload "
+                "cannot be checked for scope; refusing to evaluate it blindly"
+            )
+
+        return RouterHealingEvalSpec(
+            base_model_dir=str(settings["_base_dir"]),
+            base_content_sha256=settings["_identity"]["content_sha256"],
+            payload_dir=str(payload_dir.resolve()),
+            holdout_corpus_path=str(settings["_holdout"]),
+            holdout_corpus_sha256=settings["_holdout_sha"],
+            expected_parameter_paths=expected_names,
+            output_dir=str((eval_dir / "output").resolve()),
+            seq_len=int(settings.get("seq_len", research.get("seq_len", 128))),
+            batches=int(settings.get("eval_batches", 4)),
+            device=str(settings.get("device", "cpu")),
+            detailed_timing=bool(settings.get("eval_detailed_timing", False)),
+        )
+
+    def profile(self, experiment: Experiment, context: ExecutionContext) -> CostEstimate:
+        profile = self._knobs(context).get("profile", {})
+        profile = profile if isinstance(profile, Mapping) else {}
+        steps = profile.get("eval_seconds")
+        if steps is not None:
+            return CostEstimate(
+                gpu_hours=0.0,
+                confidence=0.5,
+                notes=(
+                    "router evaluation is CPU-only, so its attributable accelerator hours "
+                    "are zero; the declared wall time is not a GPU-hour estimate",
+                ),
+            )
+        return CostEstimate(
+            gpu_hours=0.0,
+            confidence=0.25,
+            notes=(
+                "router evaluation is CPU-only and unprofiled: zero accelerator hours, "
+                "with the wall time unmeasured until the run reports it",
+            ),
+        )
+
+    def _spawn(
+        self,
+        spec: RouterHealingEvalSpec,
+        run_id: str,
+        eval_dir: Path,
+    ) -> tuple[Mapping[str, Any], float, Mapping[str, Any]]:
+        """Launch one evaluation worker and return its parsed result.
+
+        Both arms share this so a base score and a payload score cannot drift in
+        how they were launched, timed, or checked for source identity -- the
+        whole point of an arm is that it differs only in what was applied.
+        """
+        spec_path = eval_dir / "eval-spec.json"
+        spec_path.write_text(
+            json.dumps(spec.to_dict(), sort_keys=True, indent=2) + "\n", encoding="utf-8"
+        )
+        identity = chowder_source_identity()
+        identity_path = eval_dir / "chowder-identity.json"
+        identity_path.write_text(json.dumps(identity, sort_keys=True) + "\n", encoding="utf-8")
+
+        result_path = eval_dir / "worker-result.json"
+        stdout_path = eval_dir / "worker-stdout.log"
+        stderr_path = eval_dir / "worker-stderr.log"
+        command = [
+            sys.executable,
+            "-m",
+            "chowder.backends.router_healing_eval_worker",
+            "--spec",
+            str(spec_path),
+            "--result",
+            str(result_path),
+            "--chowder-identity",
+            str(identity_path),
+        ]
+
+        started = time.perf_counter()
+        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+            process = subprocess.Popen(
+                command,
+                cwd=str(eval_dir),
+                env=worker_env({"PYTHONUNBUFFERED": "1"}),
+                stdout=stdout,
+                stderr=stderr,
+            )
+            self._processes[run_id] = process
+            timeout = (spec.batches * 600.0) + _PROCESS_GRACE_SECONDS
+            try:
+                while True:
+                    if process.poll() is not None:
+                        break
+                    if run_id in self._cancelled or (
+                        self._cancellation is not None
+                        and getattr(self._cancellation, "requested", False)
+                    ):
+                        process.terminate()
+                        try:
+                            process.wait(timeout=30)
+                        except subprocess.TimeoutExpired:  # pragma: no cover
+                            process.kill()
+                            process.wait(timeout=30)
+                        raise RouterHealingEvaluationError(
+                            f"router evaluation {run_id} was cancelled by the controller"
+                        )
+                    if time.perf_counter() - started > timeout:
+                        process.kill()
+                        process.wait(timeout=30)
+                        raise RouterHealingEvaluationError(
+                            f"router evaluation {run_id} exceeded its process budget"
+                        )
+                    time.sleep(0.05)
+            finally:
+                self._processes.pop(run_id, None)
+                self._cancelled.discard(run_id)
+
+        wall_seconds = time.perf_counter() - started
+        if process.returncode != 0 or not result_path.is_file():
+            raise RouterHealingEvaluationError(
+                "router evaluation worker exited with code "
+                f"{process.returncode} and wrote no result. stderr tail:\n"
+                f"{RouterHealingExecutor._tail(stderr_path)}"
+            )
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            raise RouterHealingEvaluationError(
+                f"router evaluation worker wrote an unparseable result: {exc}"
+            ) from exc
+        return result, wall_seconds, identity
+
+    def evaluate(
+        self,
+        *,
+        experiment: Experiment,
+        artifact: TrainingArtifact,
+        context: ExecutionContext,
+    ) -> EvaluationOutcome:
+        if experiment.experiment_id != artifact.experiment_id:
+            raise RouterHealingEvaluationError("artifact experiment_id does not match experiment")
+        run_id = f"{experiment.experiment_id}-eval-{uuid4().hex[:12]}"
+        eval_dir = (Path(context.work_dir) / ".chowder" / "evals" / run_id).resolve()
+        eval_dir.mkdir(parents=True, exist_ok=False)
+        spec = self._spec_for(experiment, artifact, context, eval_dir=eval_dir)
+        result, wall_seconds, identity = self._spawn(spec, run_id, eval_dir)
+        return self._outcome_from_result(
+            result,
+            experiment_id=experiment.experiment_id,
+            artifact_ref=str(artifact.artifact_ref),
+            spec=spec,
+            run_id=run_id,
+            eval_dir=eval_dir,
+            identity=identity,
+            wall_seconds=wall_seconds,
+        )
+
+    def evaluate_base(
+        self,
+        *,
+        config: Mapping[str, Any],
+        context: ExecutionContext,
+        experiment_id: str = "baseline",
+    ) -> EvaluationOutcome:
+        """Score the untouched base on the holdout protocol.
+
+        This is what an automatic baseline means for a router project: the same
+        worker, the same holdout corpus and the same settings as the candidate
+        arm, with nothing applied. It is deliberately not the PEFT text
+        evaluator -- a baseline measured by a different scorer than the one that
+        will score the candidate is not a baseline, it is a second opinion.
+        """
+        run_id = f"{experiment_id}-eval-{uuid4().hex[:12]}"
+        eval_dir = (Path(context.work_dir) / ".chowder" / "evals" / run_id).resolve()
+        eval_dir.mkdir(parents=True, exist_ok=False)
+        spec = self._base_spec_for(context, config=config, eval_dir=eval_dir)
+        result, wall_seconds, identity = self._spawn(spec, run_id, eval_dir)
+        return self._outcome_from_result(
+            result,
+            experiment_id=experiment_id,
+            artifact_ref=None,
+            spec=spec,
+            run_id=run_id,
+            eval_dir=eval_dir,
+            identity=identity,
+            wall_seconds=wall_seconds,
+            payload_arm=False,
+        )
+
+    def _outcome_from_result(
+        self,
+        result: Mapping[str, Any],
+        *,
+        experiment_id: str,
+        artifact_ref: str | None,
+        spec: RouterHealingEvalSpec,
+        run_id: str,
+        eval_dir: Path,
+        identity: Mapping[str, Any],
+        wall_seconds: float,
+        payload_arm: bool = True,
+    ) -> EvaluationOutcome:
+        """Turn a worker result into an outcome, refusing an arm that lies.
+
+        The base arm cannot require the phases a payload comparison requires, so
+        the required set is arm-dependent. What is *not* arm-dependent is the
+        ledger refusal itself: an unmeasured phase refuses in both arms rather
+        than being quietly absent from one of them.
+        """
+        if result.get("kind") != EVAL_WORKER_RESULT_KIND:
+            raise RouterHealingEvaluationError(
+                f"router evaluation result has kind {result.get('kind')!r}, expected "
+                f"{EVAL_WORKER_RESULT_KIND!r}"
+            )
+        if result.get("spec_digest") != spec.digest():
+            raise RouterHealingEvaluationError(
+                "the evaluation worker's spec digest does not match the spec this controller "
+                "wrote; the result belongs to a different run"
+            )
+
+        required = (
+            list(REQUIRED_FOR_EVALUATION)
+            if payload_arm
+            else [PHASE_MODEL_LOAD, PHASE_BASELINE_GENERATION]
+        )
+        try:
+            ledger = ledger_from_payload(result.get("lifecycle") or {})
+            ledger.require(required, purpose="router evaluation")
+        except Exception as exc:
+            raise RouterHealingEvaluationError(
+                f"the evaluation worker's lifecycle ledger cannot qualify this run: {exc}"
+            ) from exc
+
+        control = result.get("application_control")
+        if not isinstance(control, Mapping):
+            raise RouterHealingEvaluationError(
+                "the evaluation worker reported no application control; without it there is "
+                "no evidence what was applied"
+            )
+        changed_parameters = control.get("parameters_changed")
+        changed_output = control.get("outputs_changed")
+        if not isinstance(changed_parameters, bool) or not isinstance(changed_output, bool):
+            raise RouterHealingEvaluationError(
+                "the application control must report booleans for both the parameter change "
+                f"and the output change, got {dict(control)!r}"
+            )
+        if not payload_arm:
+            # The base arm's whole claim is that nothing was applied. If any of
+            # that moved, this is not a baseline and its number cannot be used
+            # as one.
+            if control.get("payload_kind") != "none" or changed_parameters or changed_output:
+                raise RouterHealingEvaluationError(
+                    "the base arm reported an applied change, so it is not a baseline: "
+                    f"{dict(control)!r}"
+                )
+            if spec.payload_dir is not None:
+                raise RouterHealingEvaluationError(
+                    "the base arm ran with a payload directory in its spec; this is not a "
+                    "baseline measurement"
+                )
+        else:
+            if changed_parameters and not changed_output:
+                raise RouterHealingEvaluationError(
+                    "the payload changed parameters but changed no model output: the routing "
+                    "path may not be wired to these tensors at all, so a score from it would "
+                    "be fiction"
+                )
+            if changed_output and not changed_parameters:
+                raise RouterHealingEvaluationError(
+                    "the model's output changed although no payload parameter changed; the "
+                    "evaluation is not measuring what it claims"
+                )
+            if control.get("payload_kind") not in {"replacement", "additive"}:
+                raise RouterHealingEvaluationError(
+                    f"the applied payload declares an unknown kind {control.get('payload_kind')!r}"
+                )
+
+        metrics = result.get("metrics")
+        if not isinstance(metrics, Mapping) or not metrics:
+            raise RouterHealingEvaluationError(
+                "the evaluation worker reported no metrics"
+            )
+        numeric: dict[str, float] = {}
+        for name, value in metrics.items():
+            number = float(value)
+            if not math.isfinite(number):
+                raise RouterHealingEvaluationError(
+                    f"evaluation metric {name!r} is not finite ({value!r})"
+                )
+            numeric[str(name)] = number
+
+        raw_usage = result.get("resource_usage")
+        if not isinstance(raw_usage, Mapping):
+            raise RouterHealingEvaluationError("the evaluation worker reported no resource usage")
+        usage = ResourceUsage.from_wall_time(
+            wall_seconds=float(raw_usage.get("wall_seconds", wall_seconds)),
+            active_accelerator_count=int(raw_usage.get("active_accelerator_count", 0)),
+            visible_accelerator_count=int(raw_usage.get("visible_accelerator_count", 0)),
+            peak_vram_gb_by_accelerator=dict(raw_usage.get("peak_vram_gb_by_accelerator", {})),
+        )
+
+        # The base arm has no artifact to point at, and it must not pretend to:
+        # its source reference names the base content it actually measured.
+        source_ref = (
+            str(artifact_ref)
+            if artifact_ref is not None
+            else f"base-model:{spec.base_model_dir}@{spec.base_content_sha256[:12]}"
+        )
+        return EvaluationOutcome(
+            run_id=run_id,
+            experiment_id=experiment_id,
+            source_artifact_ref=source_ref,
+            metrics=numeric,
+            gpu_hours=usage.gpu_hours,
+            evidence={
+                "backend": self.name,
+                "arm": "candidate" if payload_arm else "base",
+                "payload_applied": payload_arm,
+                "eval_spec": spec.to_dict(),
+                "eval_spec_digest": spec.digest(),
+                "source_identity": dict(identity),
+                "source_artifact_ref": artifact_ref,
+                "base_identity": result.get("base_identity"),
+                "base_holdout_loss": result.get("base_holdout_loss"),
+                "candidate_holdout_loss": result.get("candidate_holdout_loss"),
+                "application_control": dict(control),
+                "payload_verification": result.get("payload_verification"),
+                "routing": result.get("routing"),
+                "metric_sources": result.get("metric_sources"),
+                "phase_ledger": ledger.to_dict(),
+                "eval_dir": str(eval_dir),
+            },
+            resource_usage=usage,
+        )
+
+    def cancel(self, run_id: str) -> None:
         self._cancelled.add(run_id)
         process = self._processes.get(run_id)
         if process is not None and process.poll() is None:

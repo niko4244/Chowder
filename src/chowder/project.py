@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .backend_selection import (
+    ROUTER_HEALING_ENGINE,
     BackendSelectionError,
     TRANSFORMERS_ENGINE,
     UNSLOTH_ENGINE,
@@ -30,6 +31,24 @@ from .repair_candidates import RepairVariant
 
 
 PROJECT_SCHEMA_VERSION = 1
+
+#: The metrics the router-healing evaluator actually produces. A goal metric
+#: outside this set names a number nothing measures, which is refused at load
+#: time rather than discovered as a missing field after compute was spent.
+ROUTER_HEALING_METRICS = frozenset({"holdout_loss", "experts_per_token", "dead_experts"})
+
+#: Settings a router-healing run cannot start without. Deliberately checked here
+#: *and* in the executor: this check refuses a project before any compute, while
+#: the executor's own check protects a run whose config was assembled some other
+#: way (a repaired continuation, a hand-written spec).
+ROUTER_HEALING_REQUIRED_KNOBS = (
+    "base_model_dir",
+    "corpus_path",
+    "holdout_corpus_path",
+    "max_steps",
+    "learning_rate",
+    "seq_len",
+)
 
 
 class ProjectValidationError(ValueError):
@@ -116,6 +135,21 @@ class ProjectSpec:
         elif self.baseline is not None:
             raise ProjectValidationError("automatic baseline must not include fixed metrics")
 
+        try:
+            training_engine = resolve_training_engine(self.config)
+        except BackendSelectionError as exc:
+            raise ProjectValidationError(str(exc)) from exc
+
+        if training_engine == ROUTER_HEALING_ENGINE:
+            # The router workload's evaluation protocol is a holdout corpus, not
+            # a prompt/expected suite table: there is no chat template and no
+            # per-prompt scorer, so validating it against the PEFT-text schema
+            # would either reject every valid project or accept nonsense.
+            _validate_router_healing_project(
+                self.config, metric_names=metric_names, work_dir=self.work_dir
+            )
+            return
+
         evaluation = _mapping(self.config.get("evaluation"), path="config.evaluation")
         if evaluation.get("type", "transformers-text") != "transformers-text":
             raise ProjectValidationError(
@@ -140,10 +174,6 @@ class ProjectSpec:
                 "evaluation suite names must exactly match goal metric names"
             )
 
-        try:
-            training_engine = resolve_training_engine(self.config)
-        except BackendSelectionError as exc:
-            raise ProjectValidationError(str(exc)) from exc
         training_config = normalize_training_config_for_executor(self.config)
 
         # Validate both the strict namespace and the actual executable spec at
@@ -184,6 +214,35 @@ class ProjectSpec:
 
     def validate_files(self) -> None:
         backend = _mapping(self.config.get("backend"), path="config.backend")
+        if resolve_training_engine(self.config) == ROUTER_HEALING_ENGINE:
+            knobs = _mapping(
+                backend.get("router_healing", {}),
+                path="config.backend.router_healing",
+            )
+            for label, key in (
+                ("training corpus", "corpus_path"),
+                ("holdout corpus", "holdout_corpus_path"),
+            ):
+                declared = knobs.get(key)
+                if not declared:
+                    raise ProjectValidationError(
+                        f"config.backend.router_healing.{key} is required"
+                    )
+                path = _resolve_path(str(declared), base=self.work_dir)
+                if not path.is_file():
+                    raise ProjectValidationError(f"{label} not found: {path}")
+            base_model = knobs.get("base_model_dir")
+            if not base_model:
+                raise ProjectValidationError(
+                    "config.backend.router_healing.base_model_dir is required"
+                )
+            base_path = _resolve_path(str(base_model), base=self.work_dir)
+            if not base_path.is_dir():
+                raise ProjectValidationError(f"base model directory not found: {base_path}")
+            self.work_dir.mkdir(parents=True, exist_ok=True)
+            self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+            return
+
         training_dataset = _resolve_path(
             str(backend.get("dataset", "")), base=self.work_dir
         )
@@ -208,6 +267,85 @@ class ProjectSpec:
                     )
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _validate_router_healing_project(
+    config: Mapping[str, Any],
+    *,
+    metric_names: set[str],
+    work_dir: Path,
+) -> None:
+    """Validate a router-healing project without computing anything.
+
+    Nothing here loads a model or hashes a tensor: this is the cheap load-time
+    contract. The expensive identity checks (real base content, real corpus
+    hash) stay where they belong -- immediately before the worker launches -- so
+    a preflight cannot become the slowest part of a run, and cannot report
+    success from a hash it computed against a directory it never really read.
+    """
+    evaluation = _mapping(config.get("evaluation"), path="config.evaluation")
+    kind = str(evaluation.get("type", "")).strip().lower()
+    if kind != ROUTER_HEALING_ENGINE:
+        raise ProjectValidationError(
+            "config.evaluation.type must be 'router-healing' when "
+            f"backend.type='{ROUTER_HEALING_ENGINE}'; got {kind!r}"
+        )
+
+    backend = _mapping(config.get("backend"), path="config.backend")
+    knobs = _mapping(
+        backend.get("router_healing", {}), path="config.backend.router_healing"
+    )
+    missing = [key for key in ROUTER_HEALING_REQUIRED_KNOBS if not knobs.get(key)]
+    if missing:
+        raise ProjectValidationError(
+            "config.backend.router_healing is missing required setting(s): "
+            f"{missing}. A router run without a base, a corpus, a holdout corpus, a "
+            "step count, a learning rate or a sequence length cannot be measured."
+        )
+
+    for name in ("max_steps", "seq_len"):
+        value = knobs[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ProjectValidationError(
+                f"config.backend.router_healing.{name} must be a positive integer"
+            )
+    learning_rate = _finite(
+        knobs["learning_rate"], path="config.backend.router_healing.learning_rate"
+    )
+    if learning_rate <= 0:
+        raise ProjectValidationError(
+            "config.backend.router_healing.learning_rate must be positive"
+        )
+    device = str(knobs.get("device", "cpu")).strip().lower()
+    if device != "cpu":
+        raise ProjectValidationError(
+            f"config.backend.router_healing.device={device!r} is not qualified: the "
+            "frozen-tensor digest is not device-safe yet, so only 'cpu' runs are "
+            "accepted rather than accepted and then attempted"
+        )
+
+    training_corpus = _resolve_path(str(knobs["corpus_path"]), base=work_dir)
+    holdout_corpus = _resolve_path(str(knobs["holdout_corpus_path"]), base=work_dir)
+    if training_corpus == holdout_corpus:
+        raise ProjectValidationError(
+            "config.backend.router_healing.holdout_corpus_path is the training corpus: "
+            "scoring the data the router was trained on measures fit, not capability, "
+            "and the evaluator refuses it later. Refusing it here costs nothing."
+        )
+
+    unknown = sorted(metric_names - ROUTER_HEALING_METRICS)
+    if unknown:
+        raise ProjectValidationError(
+            f"goal metric(s) {unknown} are not measured by the router-healing evaluator; "
+            f"it reports {sorted(ROUTER_HEALING_METRICS)}. A gate that reads a metric "
+            "nothing measures cannot decide anything."
+        )
+    if "holdout_loss" not in metric_names:
+        raise ProjectValidationError(
+            "a router-healing goal must include the 'holdout_loss' metric: it is the only "
+            "measured capability signal the evaluator produces, and a gate that ranks "
+            "runs on a routing diagnostic alone would promote on plumbing"
+        )
 
 
 def _metric_from_mapping(raw: Mapping[str, Any]) -> MetricTarget:

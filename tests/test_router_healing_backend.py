@@ -14,24 +14,30 @@ Two layers are tested here, deliberately separated by cost:
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
 
 from chowder.backend_selection import (
     ROUTER_HEALING_ENGINE,
+    create_evaluation_executor,
     create_training_executor,
     normalize_training_config_for_executor,
     resolve_training_engine,
 )
 from chowder.backends.router_healing import (
+    EVAL_WORKER_RESULT_KIND,
     QUALIFIED_DEVICES,
     WORKER_RESULT_KIND,
     RouterHealingBackendError,
+    RouterHealingEvalSpec,
+    RouterHealingEvaluationError,
+    RouterHealingEvaluator,
     RouterHealingExecutor,
     RouterHealingRunSpec,
 )
-from chowder.executors import ExecutionContext
+from chowder.executors import ExecutionContext, TrainingArtifact
 from chowder.lifecycle import PhaseTimer, training_lifecycle_ledger
 from chowder.memory import HardwareProfile
 from chowder.models import Experiment, Hypothesis
@@ -270,6 +276,16 @@ def tiny_base(tmp_path_factory):
     ]
     corpus = root / "corpus.txt"
     corpus.write_text("\n".join(lines), encoding="utf-8")
+    # A separate holdout corpus: scoring the training data would measure fit, and
+    # the evaluator is built to refuse exactly that.
+    holdout = root / "holdout.txt"
+    holdout.write_text(
+        "\n".join(
+            f"held out sentence {index} asks which expert answers token {index * 3}"
+            for index in range(400)
+        ),
+        encoding="utf-8",
+    )
 
     tokenizer = Tokenizer(models.WordLevel(unk_token="[UNK]"))
     tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
@@ -301,9 +317,11 @@ def tiny_base(tmp_path_factory):
     return {
         "base_dir": str(base_dir),
         "corpus": str(corpus),
+        "holdout": str(holdout),
         "manifest_sha256": identity["manifest_sha256"],
         "content_sha256": identity["content_sha256"],
         "corpus_sha256": sha256_file(corpus),
+        "holdout_sha256": sha256_file(holdout),
     }
 
 
@@ -313,6 +331,8 @@ def _experiment(tiny_base, **research_overrides) -> Experiment:
         "base_manifest_sha256": tiny_base["manifest_sha256"],
         "corpus_path": tiny_base["corpus"],
         "corpus_sha256": tiny_base["corpus_sha256"],
+        "holdout_corpus_path": tiny_base["holdout"],
+        "holdout_corpus_sha256": tiny_base["holdout_sha256"],
         "max_steps": 4,
         "learning_rate": 0.05,
         "seq_len": 16,
@@ -727,6 +747,295 @@ def test_an_abruptly_killed_worker_leaves_a_complete_resumable_checkpoint(
     assert inventory.is_complete, inventory.notes
     assert_resumable(inventory)
     assert inventory.global_step is not None and inventory.global_step >= 1
+
+
+# --- the router evaluator ----------------------------------------------------
+
+
+def _eval_artifact(experiment: Experiment, payload_dir: Path) -> TrainingArtifact:
+    return TrainingArtifact(
+        run_id="exp-router-backend-run",
+        experiment_id=experiment.experiment_id,
+        artifact_ref=str(payload_dir),
+        gpu_hours=0.0,
+        evidence={
+            "freeze_summary": {
+                "trainable_param_names": [
+                    "model.layers.0.mlp.gate.weight",
+                    "model.layers.1.mlp.gate.weight",
+                ]
+            }
+        },
+    )
+
+
+@pytest.fixture(scope="module")
+def payloads(tiny_base, tmp_path_factory):
+    """Three published payloads: differing, identical, and provably inert.
+
+    The third one is not padding. A *uniform* shift of every gate entry adds the
+    same multiple of the hidden state to every expert's logit, so it cannot
+    change the routing distribution at all and the model's output is
+    bit-identical. It is the sharpest available check that the application
+    control measures real behaviour rather than merely detecting a tensor write.
+    """
+    _require_real_model()
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    from chowder.router_payload import save_router_payload
+
+    root = tmp_path_factory.mktemp("router-payloads")
+    model = AutoModelForCausalLM.from_pretrained(tiny_base["base_dir"], dtype=torch.float32)
+    names = ["model.layers.0.mlp.gate.weight", "model.layers.1.mlp.gate.weight"]
+    parameters = dict(model.named_parameters())
+    identical = {name: parameters[name].detach().clone() for name in names}
+
+    # Per-expert offsets change the relative expert logits, so routing moves.
+    experts = int(model.config.num_experts)
+    row_offsets = (torch.arange(experts, dtype=torch.float32).unsqueeze(1) * 0.05).to(
+        parameters[names[0]].dtype
+    )
+    different = {name: (parameters[name].detach() + row_offsets).clone() for name in names}
+    uniform = {name: (parameters[name].detach() + 0.05).clone() for name in names}
+
+    common = {
+        "base_content_sha256": tiny_base["content_sha256"],
+        "spec_digest": "a" * 64,
+        "steps_completed": 1,
+    }
+    identity = save_router_payload(identical, root / "identity", **common)
+    changed = save_router_payload(different, root / "changed", **common)
+    inert = save_router_payload(uniform, root / "uniform", **common)
+    return {
+        "identity": Path(identity["payload_dir"]),
+        "changed": Path(changed["payload_dir"]),
+        "uniform": Path(inert["payload_dir"]),
+        "names": names,
+    }
+
+
+def test_the_evaluator_is_dispatched_from_the_same_engine_key_as_the_trainer(tmp_path):
+    evaluator = create_evaluation_executor({"backend": {"type": "router-healing"}})
+    assert evaluator.name == "transformers-router-healing-evaluator"
+    peft = create_evaluation_executor({"backend": {"type": "peft", "engine": "transformers"}})
+    assert peft.name != evaluator.name
+
+
+def test_the_evaluator_reports_zero_accelerator_hours(tmp_path):
+    experiment = Experiment(
+        experiment_id="exp-router-eval-profile",
+        parent_id=None,
+        hypothesis=Hypothesis(
+            observation="o", suspected_cause="c", intervention="i", expected_deltas={}
+        ),
+        config_patch={},
+        estimated_gpu_hours=1.0,
+    )
+    context = ExecutionContext(
+        _hardware(), str(tmp_path), 1, resolved_config={"backend": {"type": ROUTER_HEALING_ENGINE}}
+    )
+    estimate = RouterHealingEvaluator().profile(experiment, context)
+    assert estimate.gpu_hours == 0.0
+    assert "accelerator hours" in " ".join(estimate.notes)
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        ({"expected_parameter_paths": ()}, "at least one expected parameter path"),
+        ({"holdout_corpus_sha256": "short"}, "sha256 digest"),
+        ({"batches": 0}, "batches must be a positive integer"),
+        ({"device": "cuda"}, "not qualified"),
+    ],
+)
+def test_an_eval_spec_refuses_configurations_that_cannot_score_honestly(overrides, match):
+    kwargs = {
+        "base_model_dir": "base",
+        "base_content_sha256": "a" * 64,
+        "payload_dir": "payload",
+        "holdout_corpus_path": "holdout",
+        "holdout_corpus_sha256": "b" * 64,
+        "expected_parameter_paths": ("model.layers.0.mlp.gate.weight",),
+        "output_dir": "out",
+        "seq_len": 16,
+        "batches": 2,
+    }
+    kwargs.update(overrides)
+    with pytest.raises(ValueError, match=match):
+        RouterHealingEvalSpec(**kwargs)
+
+
+def test_evaluation_is_refused_without_a_holdout_corpus(tmp_path, tiny_base):
+    """Scoring the training corpus is fit, not capability, so it is a refusal."""
+    experiment = _experiment(tiny_base)
+    experiment.config_patch["router_healing"].pop("holdout_corpus_path")
+    experiment.config_patch["router_healing"].pop("holdout_corpus_sha256")
+    artifact = _eval_artifact(experiment, tmp_path / "payload")
+    with pytest.raises(RouterHealingEvaluationError, match="holdout_corpus_path"):
+        RouterHealingEvaluator().evaluate(
+            experiment=experiment, artifact=artifact, context=_context(tmp_path)
+        )
+
+
+def test_a_verified_payload_is_applied_and_scored_in_a_fresh_process(
+    tmp_path, tiny_base, payloads
+):
+    """The whole point: another process, the published artifact only."""
+    _require_real_model()
+    experiment = _experiment(tiny_base)
+    artifact = _eval_artifact(experiment, payloads["changed"])
+    outcome = RouterHealingEvaluator().evaluate(
+        experiment=experiment, artifact=artifact, context=_context(tmp_path)
+    )
+
+    assert outcome.gpu_hours == 0.0
+    assert outcome.source_artifact_ref == str(payloads["changed"])
+    assert math.isfinite(outcome.metrics["holdout_loss"])
+    assert outcome.metrics["experts_per_token"] == 2.0  # the tiny model's configured top-k
+    assert outcome.metrics["dead_experts"] >= 0.0
+
+    control = outcome.evidence["application_control"]
+    assert control["payload_kind"] == "replacement"
+    assert control["parameters_changed"] is True
+    assert control["outputs_changed"] is True
+    assert control["parameters_differing"] == sorted(payloads["names"])
+
+    # The metric that came from configuration says so; the measured one does not.
+    sources = outcome.evidence["metric_sources"]
+    assert "configuration read" in sources["experts_per_token"]
+    assert "measured" in sources["holdout_loss"]
+
+    # Both arms of the comparison were measured in this process, so a cost
+    # breakdown exists rather than an honest "another process" placeholder.
+    ledger = outcome.evidence["phase_ledger"]
+    assert ledger["phases"]["baseline_generation"]["measured"] is True
+    assert ledger["phases"]["candidate_generation"]["measured"] is True
+    assert ledger["phases"]["model_load"]["measured"] is True
+    assert ledger["phases"]["steady_state_steps"]["measured"] is False
+
+
+def test_an_identity_payload_is_the_control_that_proves_the_apply_is_measured(
+    tmp_path, tiny_base, payloads
+):
+    """A payload equal to the base must change neither parameters nor output.
+
+    If this ever reports a changed output, the evaluation is not measuring what
+    it claims, and every non-identity result becomes suspect.
+    """
+    _require_real_model()
+    experiment = _experiment(tiny_base)
+    artifact = _eval_artifact(experiment, payloads["identity"])
+    outcome = RouterHealingEvaluator().evaluate(
+        experiment=experiment, artifact=artifact, context=_context(tmp_path)
+    )
+    control = outcome.evidence["application_control"]
+    assert control["identity_payload"] is True
+    assert control["parameters_changed"] is False
+    assert control["outputs_changed"] is False
+    assert outcome.evidence["candidate_holdout_loss"] == pytest.approx(
+        outcome.evidence["base_holdout_loss"]
+    )
+
+
+def test_a_uniform_gate_shift_is_refused_because_it_cannot_change_routing(
+    tmp_path, tiny_base, payloads
+):
+    """Real behaviour, measured on a real model.
+
+    Adding the same constant to every gate entry adds the same multiple of the
+    hidden state to every expert's logit, so the routing distribution is
+    unchanged and the output is bit-identical. This is exactly the case a
+    "did the tensors change" check would wave through while reporting a score
+    that cannot have come from the payload.
+    """
+    _require_real_model()
+    experiment = _experiment(tiny_base)
+    artifact = _eval_artifact(experiment, payloads["uniform"])
+    with pytest.raises(RouterHealingEvaluationError, match="changed no model output"):
+        RouterHealingEvaluator().evaluate(
+            experiment=experiment, artifact=artifact, context=_context(tmp_path)
+        )
+
+
+def test_a_payload_that_changes_parameters_but_not_output_is_refused(
+    tmp_path, monkeypatch, tiny_base, payloads
+):
+    """A payload wired to nothing would still produce a number; refuse it."""
+
+    def factory(command, **kwargs):
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self, command, **process_kwargs):
+                spec_path = Path(command[command.index("--spec") + 1])
+                result_path = Path(command[command.index("--result") + 1])
+                spec = RouterHealingEvalSpec(**json.loads(spec_path.read_text(encoding="utf-8")))
+                result_path.write_text(json.dumps(_valid_eval_result(spec, force_broken=True)))
+
+            def poll(self):
+                return 0
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        return FakeProcess(command, **kwargs)
+
+    monkeypatch.setattr(
+        "chowder.backends.router_healing.subprocess.Popen", factory
+    )
+    experiment = _experiment(tiny_base)
+    artifact = _eval_artifact(experiment, payloads["changed"])
+    with pytest.raises(RouterHealingEvaluationError, match="changed no model output"):
+        RouterHealingEvaluator().evaluate(
+            experiment=experiment, artifact=artifact, context=_context(tmp_path)
+        )
+
+
+def _valid_eval_result(spec: RouterHealingEvalSpec, *, force_broken: bool = False) -> dict:
+    load = PhaseTimer()
+    load.seconds = 0.5
+    from chowder.lifecycle import (
+        PHASE_BASELINE_GENERATION,
+        PHASE_CANDIDATE_GENERATION,
+        PHASE_STEADY_STEPS,
+        training_lifecycle_ledger,
+    )
+
+    ledger = training_lifecycle_ledger(accelerator_count=0, model_load=load)
+    ledger.record_unavailable(PHASE_STEADY_STEPS, "evaluation only")
+    ledger.record(PHASE_BASELINE_GENERATION, 0.1, synchronized=False)
+    ledger.record(PHASE_CANDIDATE_GENERATION, 0.1, synchronized=False)
+    return {
+        "kind": EVAL_WORKER_RESULT_KIND,
+        "spec_digest": spec.digest(),
+        "metrics": {"holdout_loss": 1.0, "experts_per_token": 2.0, "dead_experts": 0.0},
+        "metric_sources": {
+            "holdout_loss": "measured",
+            "experts_per_token": "configuration read",
+            "dead_experts": "measured",
+        },
+        "base_holdout_loss": 1.0,
+        "candidate_holdout_loss": 1.0,
+        "application_control": {
+            "payload_kind": "replacement",
+            "parameters_changed": True,
+            "outputs_changed": not force_broken,
+        },
+        "lifecycle": ledger.to_dict(),
+        "resource_usage": {
+            "wall_seconds": 1.0,
+            "active_accelerator_count": 0,
+            "visible_accelerator_count": 0,
+            "peak_vram_gb_by_accelerator": {},
+        },
+    }
 
 
 def test_the_worker_refuses_an_accelerator_spec_before_loading_anything(tmp_path, tiny_base):
