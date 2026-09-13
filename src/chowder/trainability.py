@@ -250,7 +250,10 @@ def _tensor_digest(tensor: Any) -> dict[str, Any]:
     if elements <= _FULL_HASH_MAX_ELEMENTS:
         digest = hashlib.sha256(flat.numpy().tobytes()).hexdigest()
         return {"digest": digest, "strategy": "full", "elements": elements}
-    stride = max(1, elements // _FULL_HASH_MAX_ELEMENTS)
+    # Ceiling division, not floor: with floor, a tensor just above the threshold
+    # gets stride 1 and the "sampled" digest covers every element -- a label that
+    # claims sampling while doing the full read, which is worse than either.
+    stride = max(1, -(-elements // _FULL_HASH_MAX_ELEMENTS))
     sampled = flat[::stride]
     digest = hashlib.sha256(sampled.numpy().tobytes()).hexdigest()
     return {

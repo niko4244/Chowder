@@ -18,7 +18,12 @@ exactly zero, non-finite, unreadable, and "no update" need different fixes.
 from __future__ import annotations
 
 import pytest
-import torch
+
+# Same convention as the other torch-dependent suites (test_router_healing,
+# test_activation_census): the plain CI jobs have no torch, and a bare import
+# would turn every one of them into a collection error rather than a skip.
+# The real-autograd tests run in the job that has the ML stack installed.
+torch = pytest.importorskip("torch")
 
 from chowder.trainability import (
     GRAD_NONE,
@@ -336,7 +341,7 @@ def test_frozen_parameters_are_verified_by_digest_not_assumed():
 
 def test_a_sampled_digest_says_it_is_sampled():
     """A sampled check must never be reported as complete equality."""
-    big = torch.randn(4, 1_000_000)
+    big = torch.randn(2, 1_000_000)
     record = hash_parameters({"big": big})["big"]
     assert record["strategy"] == "sampled"
     assert record["sampled_elements"] < record["elements"]
