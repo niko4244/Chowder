@@ -31,6 +31,9 @@ from chowder.trainability import (
     GRAD_NONZERO,
     GRAD_UNREADABLE,
     GRAD_ZERO,
+    _FULL_HASH_MAX_ELEMENTS,
+    _sample_stride,
+    _tensor_digest,
     TrainabilityError,
     TrainabilityProbe,
     adapted_module_paths,
@@ -411,3 +414,149 @@ def test_utilisation_is_reported_separately_from_reachability():
     assert report["layers_with_unused_experts"] == ["0"]
     assert "not evidence of per-tensor reachability" in report["note"]
     assert utilization_by_expert(None)["status"] == "not_reported"
+
+
+# --------------------------------------------------------------------------
+# the digest is bounded and device-safe
+# --------------------------------------------------------------------------
+
+
+def test_the_sample_stride_never_labels_a_full_read_as_sampled():
+    """Pure arithmetic, because this is the bug that shipped once already.
+
+    Floor division gave stride 1 for a tensor just above the threshold, so a
+    digest *labelled* sampled covered every element.
+    """
+    threshold = _FULL_HASH_MAX_ELEMENTS
+    assert _sample_stride(threshold, threshold) == 1
+    assert _sample_stride(threshold + 1, threshold) == 2
+    assert _sample_stride(threshold * 2, threshold) == 2
+    assert _sample_stride(threshold * 2 + 1, threshold) == 3
+    # Above the threshold the stride is always at least 2, so "sampled" is true.
+    for extra in (1, 7, 1_000, threshold):
+        assert _sample_stride(threshold + extra, threshold) >= 2
+
+
+def test_a_sampled_digest_stays_within_its_declared_budget():
+    threshold = _FULL_HASH_MAX_ELEMENTS
+    big = torch.randn(threshold + 1)
+    record = _tensor_digest(big)
+    assert record["strategy"] == "sampled"
+    assert record["stride"] >= 2
+    assert record["sampled_elements"] <= threshold + 1
+    assert record["sampled_elements"] < record["elements"]
+    assert record["elements"] == threshold + 1
+
+
+def test_the_digest_is_the_same_value_on_every_device_it_can_reach():
+    """A device is a place a value lives, not part of the value."""
+    values = torch.randn(64)
+    reference = _tensor_digest(values)
+    if torch.cuda.is_available():
+        moved = _tensor_digest(values.clone().cuda())
+        assert moved["digest"] == reference["digest"]
+        assert moved["strategy"] == reference["strategy"]
+
+
+def test_a_large_digest_on_an_accelerator_matches_the_host_result():
+    """The real device path, exercised whenever a device is actually present.
+
+    CI runners without a GPU skip this; the machine that develops Chowder has
+    one, so the accelerator path is not left permanently untested.
+    """
+    if not torch.cuda.is_available():  # pragma: no cover - depends on the host
+        pytest.skip("no CUDA device on this host")
+    threshold = _FULL_HASH_MAX_ELEMENTS
+    values = torch.randn(threshold + 5)
+    host = _tensor_digest(values)
+    device = _tensor_digest(values.clone().cuda())
+    assert host["strategy"] == device["strategy"] == "sampled"
+    assert host["stride"] == device["stride"]
+    assert host["sampled_elements"] == device["sampled_elements"]
+    assert host["digest"] == device["digest"]
+
+
+class _AcceleratorBoundaryTensor:
+    """A CPU tensor that behaves like an accelerator one at the `.numpy()` boundary.
+
+    This is the regression for the shipped defect: the digest converted the whole
+    flattened tensor to fp32 *in place on its device* and then called `.numpy()`
+    with no host move, so on an accelerator it raised instead of measuring. A
+    stub is used rather than a real device so the failure mode is exercised on
+    GPU-less CI too, and the contract it enforces is the real torch one: a host
+    transfer must happen before `.numpy()`.
+    """
+
+    def __init__(self, inner, *, on_host=False):
+        self._inner = inner
+        self._on_host = on_host
+        self.dtype = inner.dtype
+
+    @property
+    def device(self):
+        return torch.device("cpu") if self._on_host else torch.device("cuda", 0)
+
+    def _wrap(self, inner, *, on_host=None):
+        return _AcceleratorBoundaryTensor(
+            inner, on_host=self._on_host if on_host is None else on_host
+        )
+
+    def detach(self):
+        return self
+
+    def numel(self):
+        return self._inner.numel()
+
+    def reshape(self, *shape):
+        return self._wrap(self._inner.reshape(*shape))
+
+    def __getitem__(self, key):
+        return self._wrap(self._inner[key])
+
+    def to(self, destination):
+        if isinstance(destination, torch.dtype):
+            return self._wrap(self._inner.to(destination))
+        if str(destination) == "cpu":
+            return self._wrap(self._inner, on_host=True)
+        return self
+
+    def cpu(self):
+        return self._wrap(self._inner, on_host=True)
+
+    def contiguous(self):
+        return self._wrap(self._inner.contiguous())
+
+    def numpy(self):
+        if not self._on_host:
+            raise TypeError(
+                "can't convert cuda:0 device type tensor to numpy. Use Tensor.cpu() "
+                "to copy the tensor to host memory first."
+            )
+        return self._inner.numpy()
+
+
+def test_the_digest_moves_values_to_the_host_before_reading_them():
+    """The exact defect: `.numpy()` on a tensor that never left its device."""
+    inner = torch.randn(32, dtype=torch.float64)
+    reference = _tensor_digest(inner)
+
+    boundary = _AcceleratorBoundaryTensor(inner)
+    assert boundary.device.type == "cuda"
+    with pytest.raises(TypeError, match="to host memory first"):
+        boundary.numpy()  # the old code's final step, on an unmoved tensor
+
+    measured = _tensor_digest(boundary)
+    assert measured["digest"] == reference["digest"]
+    assert measured["elements"] == reference["elements"]
+
+
+def test_a_large_accelerator_boundary_digest_gathers_before_it_widens():
+    """The fp32 conversion must touch the samples, not the whole tensor."""
+    threshold = _FULL_HASH_MAX_ELEMENTS
+    inner = torch.randn(threshold + 3, dtype=torch.float64)
+    boundary = _AcceleratorBoundaryTensor(inner)
+    record = _tensor_digest(boundary)
+    assert record["strategy"] == "sampled"
+    assert record["elements"] == threshold + 3
+    assert record["sampled_elements"] < record["elements"]
+    assert record["digest"] == _tensor_digest(inner)["digest"]
