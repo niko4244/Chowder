@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from ..worker_env import chowder_source_identity, worker_env
 from ..base_identity import describe_base_identity
+from .rendering import validate_rendering_evidence
 from .scorer_identity import scorer_identity
 from ..cancellation import CancellationToken
 from ..executors import CostEstimate, EvaluationOutcome, ExecutionContext, TrainingArtifact
@@ -50,6 +51,14 @@ class EvalSuiteSpec:
             raise ValueError(f"unsupported scoring method: {self.scoring}")
         if self.max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
+        if self.canonical_rendering and not self.use_chat_template:
+            # Refuse the contradictory request at construction: canonical
+            # rendering is a *way* of applying a chat template, so this would
+            # render raw prompt bytes while the spec claimed canonical ones.
+            raise ValueError(
+                f"evaluation suite {self.name!r} sets canonical_rendering without "
+                "use_chat_template; enable use_chat_template or drop canonical_rendering"
+            )
 
 
 @dataclass(frozen=True)
@@ -135,6 +144,11 @@ class TransformersTextEvalSpec:
                     scoring=str(raw.get("scoring", "normalized_exact_match")),
                     max_new_tokens=int(raw.get("max_new_tokens", evaluation.get("max_new_tokens", 64))),
                     use_chat_template=bool(raw.get("use_chat_template", evaluation.get("use_chat_template", False))),
+                    # This arm previously dropped the flag, so a suite asking for
+                    # canonical rendering silently scored the checkpoint's own
+                    # template while the protocol claimed otherwise. The field
+                    # exists on the shared EvalSuiteSpec; it is now parsed here.
+                    canonical_rendering=bool(raw.get("canonical_rendering", False)),
                 )
             )
 
@@ -347,9 +361,20 @@ class TransformersTextEvaluator:
             raise RuntimeError("evaluation suite evidence names do not match configured suites")
 
         fingerprint_hashes: dict[str, str] = {}
+        rendering_evidence: dict[str, dict[str, Any]] = {}
+        specs_by_name = {suite.name: suite for suite in spec.suites}
         for suite_name, suite_payload in suite_evidence.items():
             if not isinstance(suite_payload, Mapping):
                 raise RuntimeError(f"suite evidence for {suite_name!r} is invalid")
+            # P4: bind what the worker actually rendered with, validated against
+            # what this suite asked for (see evaluators/rendering.py).
+            suite_spec = specs_by_name[str(suite_name)]
+            rendering_evidence[str(suite_name)] = validate_rendering_evidence(
+                suite_name=str(suite_name),
+                reported=suite_payload,
+                use_chat_template=suite_spec.use_chat_template,
+                canonical_rendering=suite_spec.canonical_rendering,
+            )
             fingerprint_ref = suite_payload.get("holdout_fingerprints_file")
             declared_digest = suite_payload.get("holdout_fingerprints_sha256")
             if not isinstance(fingerprint_ref, str) or not isinstance(declared_digest, str):
@@ -400,6 +425,10 @@ class TransformersTextEvaluator:
                         if suite.canonical_rendering
                         else {}
                     ),
+                    # P4: the rendering the worker actually performed, with the
+                    # template digest -- the same shape the baseline evaluator
+                    # writes, so `gate.py`'s baseline==candidate check covers it.
+                    **rendering_evidence[suite.name],
                 }
                 for suite in spec.suites
             ],

@@ -11,6 +11,7 @@ from ..adapter_guard import assert_adapter_is_live
 from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
 from .generation import resolve_eos_token_ids
+from .rendering import render_prompt
 from .scoring import final_answer, final_number, normalize, score
 from .vram import peak_vram as _peak_vram
 from .transformers_text import EvalSuiteSpec, TransformersTextEvalSpec
@@ -166,18 +167,19 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                 for row in rows:
                     prompt = str(row[suite.prompt_field])
                     expected = str(row[suite.expected_field])
-                    if suite.use_chat_template:
-                        if not getattr(tokenizer, "chat_template", None):
-                            raise RuntimeError(
-                                f"suite {suite.name!r} requested chat template but tokenizer has none"
-                            )
-                        rendered = tokenizer.apply_chat_template(
-                            [{"role": "user", "content": prompt}],
-                            tokenize=False,
-                            add_generation_prompt=True,
-                        )
-                    else:
-                        rendered = prompt
+                    # One renderer for both text workers (see
+                    # evaluators/rendering.py). This arm previously ignored
+                    # `canonical_rendering` entirely: a suite asking for the
+                    # pinned template silently rendered through the
+                    # checkpoint's own instead, so baseline and candidate
+                    # scored different prompt bytes under one protocol entry.
+                    rendered, render_evidence = render_prompt(
+                        tokenizer=tokenizer,
+                        prompt=prompt,
+                        suite_name=suite.name,
+                        use_chat_template=suite.use_chat_template,
+                        canonical_rendering=suite.canonical_rendering,
+                    )
                     encoded = tokenizer(rendered, return_tensors="pt")
                     encoded = {key: value.to(device) for key, value in encoded.items()}
                     generated = model.generate(
@@ -213,6 +215,7 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                 "holdout_fingerprints_file": str(fingerprint_path),
                 "holdout_fingerprints_sha256": fingerprint_digest,
                 "resolved_eos_token_id": resolved_eos_token_id,
+                **render_evidence,
             }
 
     return {

@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from ..worker_env import chowder_source_identity, worker_env
 from ..base_identity import describe_base_identity
+from .rendering import validate_rendering_evidence
 from .scorer_identity import scorer_identity
 from ..executors import EvaluationOutcome, ExecutionContext
 from ..protocol import protocol_fingerprint
@@ -255,9 +256,21 @@ class BaseModelTextEvaluator:
             raise RuntimeError("baseline evaluation metrics do not match configured suites")
 
         fingerprint_hashes: dict[str, str] = {}
+        rendering_evidence: dict[str, dict[str, Any]] = {}
+        specs_by_name = {suite.name: suite for suite in spec.suites}
         for suite_name, suite_payload in suite_evidence.items():
             if not isinstance(suite_payload, Mapping):
                 raise RuntimeError(f"suite evidence for {suite_name!r} is invalid")
+            # P4: bind what the worker actually rendered with. A suite rendered
+            # differently from what the spec asked for is not the same protocol,
+            # even when every other field matches.
+            suite_spec = specs_by_name[str(suite_name)]
+            rendering_evidence[str(suite_name)] = validate_rendering_evidence(
+                suite_name=str(suite_name),
+                reported=suite_payload,
+                use_chat_template=suite_spec.use_chat_template,
+                canonical_rendering=suite_spec.canonical_rendering,
+            )
             ref = suite_payload.get("holdout_fingerprints_file")
             declared = suite_payload.get("holdout_fingerprints_sha256")
             if not isinstance(ref, str) or not isinstance(declared, str):
@@ -308,6 +321,10 @@ class BaseModelTextEvaluator:
                         if suite.canonical_rendering
                         else {}
                     ),
+                    # P4: the rendering the worker actually performed, with the
+                    # template digest, identical in shape to the candidate
+                    # evaluator's entry so a comparison is a comparison.
+                    **rendering_evidence[suite.name],
                 }
                 for suite in spec.suites
             ],
