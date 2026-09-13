@@ -1583,9 +1583,10 @@ class TransformersPeftExecutor:
     ) -> dict[str, Any]:
         """P7: the source checkpoint's measured state, and the resume witness.
 
-        A witness that *disagrees* -- the run reported that it did not continue
-        past the restore point -- refuses the artifact: that is a silent fresh
-        start caught in the act. A worker that reports no witness leaves the
+        A conflicting or incomplete positive worker claim refuses the artifact.
+        Consistency with source metadata is not proof that optimizer/RNG tensors
+        were actually restored; that requires the independent continuation test.
+        A worker that reports no witness leaves the
         field ``None`` with a reason (unknown, not verified), which is what an
         older worker can honestly say.
         """
@@ -1609,15 +1610,56 @@ class TransformersPeftExecutor:
                     "claim it continued from the checkpoint rather than restarting"
                 ),
             }
-        if not witness.get("matched"):
+        if witness.get("matched") is not True:
             raise ValueError(
                 "the run did not actually resume from the checkpoint it was given: "
                 f"{witness.get('reason')} (witness={dict(witness)})"
             )
+        required = {
+            "requested_checkpoint", "restored_global_step", "final_global_step",
+            "steps_executed", "complete", "missing_required",
+            "optimizer_state_present", "rng_state_present",
+        }
+        missing = required - witness.keys()
+        if missing:
+            raise ValueError(f"invalid resume witness: missing fields {sorted(missing)}")
+        errors: list[str] = []
+        checkpoint = witness["requested_checkpoint"]
+        try:
+            same_checkpoint = (
+                isinstance(checkpoint, str) and bool(checkpoint.strip())
+                and Path(checkpoint).resolve() == Path(inventory.directory).resolve()
+            )
+        except (OSError, ValueError, RuntimeError):
+            same_checkpoint = False
+        if not same_checkpoint:
+            errors.append("requested_checkpoint differs from the inventoried source")
+        counters = ("restored_global_step", "final_global_step", "steps_executed")
+        if any(type(witness[key]) is not int for key in counters):
+            errors.append("step counters must be integers, not booleans or strings")
+        else:
+            restored, final, executed = (witness[key] for key in counters)
+            if restored != inventory.global_step or restored < 0:
+                errors.append("restored_global_step differs from the source checkpoint")
+            if final < restored or executed != final - restored:
+                errors.append("final/executed step counters are inconsistent")
+        if (type(telemetry.get("global_step")) is not int
+                or witness["final_global_step"] != telemetry["global_step"]):
+            errors.append("final_global_step disagrees with worker global_step telemetry")
+        if (not inventory.is_complete or witness["complete"] is not True
+                or witness["missing_required"] != list(inventory.missing_required)):
+            errors.append("checkpoint completeness disagrees with source inventory")
+        for field, piece in (("optimizer_state_present", "optimizer"),
+                             ("rng_state_present", "rng_state")):
+            if witness[field] is not (piece in inventory.present):
+                errors.append(f"{field} disagrees with source inventory")
+        if errors:
+            raise ValueError("invalid resume witness: " + "; ".join(errors))
         return {
             "source_checkpoint": inventory.to_dict(),
             "witness": dict(witness),
             "state": "witnessed",
+            "verification": "source-metadata-and-worker-report",
             "reason": None,
         }
 

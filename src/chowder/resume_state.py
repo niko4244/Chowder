@@ -12,15 +12,15 @@ So every checkpoint is *inventoried* before it is trusted, and an inventory that
 is not complete is refused rather than treated as an implicit fresh start. Two
 rules keep that honest:
 
-* A file that exists but cannot be read is **not** a present file. A
+* An empty file or one that fails a read probe is **not** a present file. A
   ``trainer_state.json`` without a usable ``global_step`` is treated as missing,
   with the reason recorded -- otherwise a corrupt checkpoint would pass as
   complete and the resume point would be guessed.
 * A resume is only accepted if it can be **witnessed**: the restore point has to
   be known and the run has to advance past it. "It ran" is not "it resumed".
 
-Nothing here reads tensor payloads: this is a metadata inventory, deliberately
-cheap enough to run before a model load, so a broken checkpoint costs nothing.
+This metadata inventory probes one byte per file before a model load. Tensor
+payloads are never deserialized here: nonempty corrupt contents remain unverified.
 """
 
 from __future__ import annotations
@@ -59,10 +59,10 @@ class IncompleteCheckpointError(RuntimeError):
 class CheckpointInventory:
     """What a checkpoint directory really contains, measured.
 
-    ``state`` is ``complete`` (every required piece is present and readable),
+    ``state`` is ``complete`` (every required piece is nonempty and passes a read probe),
     ``partial`` (some are), or ``unreadable`` (none are, or the path is not a
     directory). ``global_step`` is ``None`` when it cannot be read -- an unknown
-    resume point, never 0.
+    resume point, never 0. Completeness does not verify tensor payload integrity.
     """
 
     directory: str
@@ -155,8 +155,12 @@ def inventory_checkpoint(directory: str | Path) -> CheckpointInventory:
         candidate = path / name
         if candidate.is_file():
             try:
+                with candidate.open("rb") as state_file:
+                    if not state_file.read(1):
+                        notes.append(f"{name} is empty")
+                        continue
                 files[piece] = int(candidate.stat().st_size)
-            except OSError as exc:  # pragma: no cover - defensive
+            except OSError as exc:
                 notes.append(f"{name} is unreadable: {exc}")
                 continue
 

@@ -603,7 +603,7 @@ def test_a_witnessed_resume_is_recorded_with_its_source_checkpoint(tmp_path, mon
         tmp_path,
         monkeypatch,
         {
-            "requested_checkpoint": "unused",
+            "requested_checkpoint": str(tmp_path / "prior" / "trainer" / "checkpoint-50"),
             "restored_global_step": 50,
             "final_global_step": 60,
             "steps_executed": 10,
