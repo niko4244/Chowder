@@ -209,6 +209,7 @@ def test_the_resume_advanced_past_the_restore_point(continuation):
     assert witness["optimizer_state_present"] is True
     assert witness["matched"] is True
     assert witness["reason"] is None
+    assert witness["progress_state"] == "advanced"
     # Same declared horizon as the checkpoint recorded, so this is an exact
     # resume rather than a longer continuation with a recomputed schedule.
     assert witness["restored_max_steps"] == TOTAL_STEPS

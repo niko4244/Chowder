@@ -181,16 +181,46 @@ def test_witness_confirms_a_resume_that_actually_restored_state(tmp_path):
     assert witness["steps_executed"] == 4
     assert witness["matched"] is True
     assert witness["reason"] is None
+    assert witness["progress_state"] == "advanced"
     assert witness["optimizer_state_present"] is True
 
 
-def test_witness_refuses_a_resume_that_executed_nothing(tmp_path):
+def test_a_resume_with_nothing_left_to_run_is_recorded_not_refused(tmp_path):
+    """A checkpoint that already reached its horizon resumes legitimately and
+    does nothing further. Treating that as a failure would refuse a real
+    workflow, so it is recorded distinctly instead."""
     inventory = inventory_checkpoint(_write_state(tmp_path / "checkpoint-4", step=4))
 
-    witness = resume_witness(inventory, final_global_step=4)
+    witness = resume_witness(inventory, final_global_step=4, declared_max_steps=4)
+
+    assert witness["matched"] is True
+    assert witness["reason"] is None
+    assert witness["steps_executed"] == 0
+    assert witness["progress_state"] == "already_at_horizon"
+
+
+def test_a_resume_that_stopped_at_its_restore_point_below_the_horizon_is_visible(
+    tmp_path,
+):
+    inventory = inventory_checkpoint(_write_state(tmp_path / "checkpoint-4", step=4))
+
+    witness = resume_witness(inventory, final_global_step=4, declared_max_steps=8)
+
+    # Not refused (a cancellation can legitimately look like this), but named:
+    # there were steps left to run and none were taken.
+    assert witness["matched"] is True
+    assert witness["progress_state"] == "no_further_steps"
+
+
+def test_a_run_that_ends_behind_its_restore_point_is_refused(tmp_path):
+    inventory = inventory_checkpoint(_write_state(tmp_path / "checkpoint-8", step=8))
+
+    witness = resume_witness(inventory, final_global_step=4, declared_max_steps=8)
 
     assert witness["matched"] is False
-    assert "no steps" in (witness["reason"] or "")
+    assert "BEHIND" in (witness["reason"] or "")
+    assert witness["steps_executed"] == -4
+    assert witness["progress_state"] == "unknown"
 
 
 def test_witness_refuses_when_the_restore_point_is_unknown(tmp_path):

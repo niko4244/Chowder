@@ -245,13 +245,25 @@ def resume_witness(
 ) -> dict[str, Any]:
     """Did the run actually continue from the checkpoint, measured after the fact?
 
-    A resume that cannot be witnessed is refused by the caller: an adapter that
-    exists proves training ran, never that it resumed.
+    ``matched`` means the measurements do **not contradict** a real resume: the
+    state is complete, the restore point is known, and the run did not end
+    *behind* it. It deliberately does not require progress, because resuming a
+    checkpoint that already reached its horizon is a legitimate no-op -- Trainer
+    restores it, finds nothing left to do, and reports the same step. Refusing
+    that would break a real supported workflow (the activation-offload resume
+    path resumes the newest checkpoint under an unchanged epoch horizon), so the
+    zero-progress cases are *recorded* in ``progress_state`` instead: an accepted
+    resume that merely sat there is visible in the evidence.
+
+    What actually catches a silent fresh start is the completeness rule: with
+    ``optimizer.pt`` missing, Trainer restores the weights and re-initialises the
+    optimizer, and that is refused before training begins.
     """
     restored = inventory.global_step
+    final = None if final_global_step is None else int(final_global_step)
     steps_executed: int | None = None
-    if restored is not None and final_global_step is not None:
-        steps_executed = int(final_global_step) - int(restored)
+    if restored is not None and final is not None:
+        steps_executed = final - restored
 
     reason: str | None = None
     if not inventory.is_complete:
@@ -267,13 +279,27 @@ def resume_witness(
             "the checkpoint's resume point is unknown, so no continuation can be "
             "witnessed from it"
         )
-    elif final_global_step is None:
+    elif final is None:
         reason = "the run reported no final global step, so no continuation can be witnessed"
-    elif steps_executed is None or steps_executed <= 0:
+    elif steps_executed is not None and steps_executed < 0:
         reason = (
-            f"no steps were executed past the restore point (restored {restored}, "
-            f"final {final_global_step})"
+            f"the run ended at step {final}, BEHIND its restore point {restored} -- the "
+            "optimizer state it restored cannot belong to a shorter run"
         )
+
+    progress_state: str
+    if reason is not None or steps_executed is None:
+        progress_state = "unknown"
+    elif steps_executed > 0:
+        progress_state = "advanced"
+    elif (
+        declared_max_steps is not None
+        and restored is not None
+        and restored >= int(declared_max_steps)
+    ):
+        progress_state = "already_at_horizon"
+    else:
+        progress_state = "no_further_steps"
 
     # A different declared horizon is a legitimate longer continuation, but the
     # remaining LR trajectory is recomputed for the new total, so the run is not
@@ -285,7 +311,7 @@ def resume_witness(
     return {
         "requested_checkpoint": inventory.directory,
         "restored_global_step": restored,
-        "final_global_step": final_global_step,
+        "final_global_step": final,
         "steps_executed": steps_executed,
         "complete": inventory.is_complete,
         "missing_required": list(inventory.missing_required),
@@ -294,6 +320,7 @@ def resume_witness(
         "restored_max_steps": inventory.max_steps,
         "declared_max_steps": None if declared_max_steps is None else int(declared_max_steps),
         "horizon_changed": horizon_changed,
+        "progress_state": progress_state,
         "matched": reason is None,
         "reason": reason,
     }
