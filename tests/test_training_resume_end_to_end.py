@@ -1,9 +1,6 @@
 """P7: a real save -> checkpoint -> fresh-process resume, compared to a control.
 
-Every other resume test in this suite drives the fake worker, so it proves the
-*command* and the *bound-input gate*, never that Transformers actually continued
-the run. This file runs the real worker on a tiny real model on CPU and asks the
-only question that matters:
+This file runs the real worker on a tiny real model on CPU and asks:
 
     does a resumed run end up where the uninterrupted run ended up?
 
@@ -12,16 +9,18 @@ with ``max_steps=4`` and is then continued with ``max_steps=8`` is a *different
 schedule* (the linear decay is computed over a different total), so it could not
 prove exact resume even if it looked right. Here the control trains all 8 steps
 with ``max_steps=8`` and checkpoints at step 4 mid-flight; the resumed run is a
-separate call from that same checkpoint. Identical losses at steps 5-8 mean the
-continuation saw the same data in the same order; an identical LR sequence means
-the scheduler really continued; bit-identical final adapters mean the optimizer
-state was really restored.
+separate interpreter from that same checkpoint. Distinct tokenized inputs,
+matching losses/LRs at steps 5-8, and matching final adapters test continuation
+equivalence for this fixture. This is not a forced-interruption test or a
+qualification of the actual GPU/router workload.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -41,10 +40,15 @@ from chowder.resume_state import (  # noqa: E402
     assert_resumable,
     inventory_checkpoint,
 )
+from chowder.worker_env import chowder_source_identity, worker_env  # noqa: E402
 
 TOTAL_STEPS = 8
 CHECKPOINT_STEP = 4
 ADAPTER_TOLERANCE = 1e-6
+# Fixed CPU test tolerances, not research/promotion thresholds. Restored history
+# and integer counters remain exact; new float computations use zero relative tolerance.
+LOSS_ABS_TOLERANCE = 1e-6
+LR_ABS_TOLERANCE = 1e-12
 
 
 def _bytes_to_unicode() -> dict[int, str]:
@@ -125,12 +129,23 @@ def _write_dataset(path: Path) -> Path:
     words = ["one", "two", "three", "four", "five", "six", "seven", "eight"]
     path.write_text(
         "".join(
-            json.dumps({"text": f"the cat sat on the mat {word}"}) + "\n"
+            json.dumps({"text": f"{word}: the cat sat on the mat"}) + "\n"
             for word in words
         ),
         encoding="utf-8",
     )
     return path
+
+
+def test_fixture_preserves_distinct_samples_after_training_truncation(tmp_path):
+    from transformers import AutoTokenizer
+
+    base = _write_tiny_base(tmp_path / "base")
+    dataset = _write_dataset(tmp_path / "train.jsonl")
+    tokenizer = AutoTokenizer.from_pretrained(base, local_files_only=True)
+    texts = [json.loads(row)["text"] for row in dataset.read_text().splitlines()]
+    rows = tokenizer(texts, truncation=True, max_length=16)["input_ids"]
+    assert len({tuple(row) for row in rows}) == len(texts) == 8
 
 
 def _spec(base: Path, dataset: Path, output: Path, **overrides) -> TransformersPeftRunSpec:
@@ -165,16 +180,35 @@ def _spec(base: Path, dataset: Path, output: Path, **overrides) -> TransformersP
 
 @pytest.fixture(scope="module")
 def continuation(tmp_path_factory):
-    """An 8-step control that checkpoints at 4, then a fresh resume from it."""
+    """An 8-step control and a checkpoint-4 resume in separate interpreters."""
     root = tmp_path_factory.mktemp("p7-resume")
     base = _write_tiny_base(root / "base")
     dataset = _write_dataset(root / "train.jsonl")
+    identity_path = root / "source-identity.json"
+    identity_path.write_text(json.dumps(chowder_source_identity()), encoding="utf-8")
 
-    control = train(_spec(base, dataset, root / "control"))
+    def run_worker(name, **overrides):
+        spec = _spec(base, dataset, root / name, **overrides)
+        spec_path, result_path = root / f"{name}-spec.json", root / f"{name}-result.json"
+        spec_path.write_text(spec.canonical_json(), encoding="utf-8")
+        process = subprocess.run(
+            [sys.executable, "-m", "chowder.backends.transformers_worker",
+             "--spec", str(spec_path), "--result", str(result_path),
+             "--chowder-identity", str(identity_path)],
+            env=worker_env({
+                "CUDA_VISIBLE_DEVICES": "-1", "HF_HUB_OFFLINE": "1",
+                "TRANSFORMERS_OFFLINE": "1", "OMP_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1", "TOKENIZERS_PARALLELISM": "false",
+            }),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=180, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        assert process.returncode == 0, process.stdout + process.stderr
+        return json.loads(result_path.read_text(encoding="utf-8"))
+
+    control = run_worker("control")
     checkpoint = root / "control" / "trainer" / f"checkpoint-{CHECKPOINT_STEP}"
-    resumed = train(
-        _spec(base, dataset, root / "resumed", resume_from_checkpoint=str(checkpoint))
-    )
+    resumed = run_worker("resumed", resume_from_checkpoint=str(checkpoint))
     return {
         "root": root,
         "control": control,
@@ -193,8 +227,8 @@ def test_the_checkpoint_holds_the_state_a_resume_needs(continuation):
     assert inventory.state == "complete"
     assert inventory.global_step == CHECKPOINT_STEP
     assert inventory.missing_required == ()
-    # The RNG stream is what makes the *data order* reproducible, not just the
-    # optimizer state -- it is required for an exact-resume claim.
+    # Require recorded RNG state as well as optimizer/scheduler state. Equivalence
+    # below remains specific to this deterministic, no-dropout fixture.
     assert "rng_state" in inventory.present
     assert_resumable(inventory, require_rng=True)
 
@@ -226,18 +260,19 @@ def test_the_resumed_run_reproduces_the_control_loss_and_lr_sequence(continuatio
     assert [entry["step"] for entry in resumed_entries] == list(
         range(1, TOTAL_STEPS + 1)
     )
-    # Identical loss at the same step is the measured evidence that the
-    # continuation consumed the same rows in the same order: a different sample
-    # would produce a different loss.
-    assert [entry["loss"] for entry in resumed_entries] == [
-        entry["loss"] for entry in control_entries
-    ]
+    # Include newly executed steps, not just history copied from the checkpoint.
+    # The separate fixture check ensures truncation did not collapse the inputs.
+    assert [entry["loss"] for entry in resumed_entries[CHECKPOINT_STEP:]] == pytest.approx(
+        [entry["loss"] for entry in control_entries[CHECKPOINT_STEP:]],
+        rel=0, abs=LOSS_ABS_TOLERANCE,
+    )
     # And the scheduler continued rather than restarting: the LR at the step
     # after the restore point must be the next step of the same decay, not a
     # fresh maximum.
-    assert [entry["learning_rate"] for entry in resumed_entries] == [
-        entry["learning_rate"] for entry in control_entries
-    ]
+    assert [entry["learning_rate"] for entry in resumed_entries[CHECKPOINT_STEP:]] == pytest.approx(
+        [entry["learning_rate"] for entry in control_entries[CHECKPOINT_STEP:]],
+        rel=0, abs=LR_ABS_TOLERANCE,
+    )
 
 
 def test_the_resumed_run_restored_the_recorded_history(continuation):
@@ -295,13 +330,11 @@ def test_the_worker_refuses_a_checkpoint_without_optimizer_state(tmp_path):
         train(spec)
 
 
-def test_an_abrupt_stop_leaves_the_last_complete_checkpoint_still_usable(tmp_path):
-    """Cancellation vs abrupt death, at the layer that decides resumability.
+def test_partial_save_inventory_does_not_invalidate_last_complete_checkpoint(tmp_path):
+    """Synthetic inventory control, not a real cancellation/worker-death test.
 
-    A graceful stop publishes a complete final boundary; a killed process may
-    only have whatever it finished writing. Either way the *complete* checkpoint
-    stays resumable and the partial one is refused -- the partial directory is
-    never silently treated as a fresh start.
+    A partial newer directory must not invalidate the older complete checkpoint,
+    or be silently accepted as resumable itself. Payload integrity is not tested.
     """
     complete = tmp_path / "checkpoint-4"
     complete.mkdir()

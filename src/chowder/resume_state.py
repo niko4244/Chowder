@@ -16,8 +16,9 @@ rules keep that honest:
   ``trainer_state.json`` without a usable ``global_step`` is treated as missing,
   with the reason recorded -- otherwise a corrupt checkpoint would pass as
   complete and the resume point would be guessed.
-* A resume is only accepted if it can be **witnessed**: the restore point has to
-  be known and the run has to advance past it. "It ran" is not "it resumed".
+* A resume report must agree with the known restore point. Legitimate no-op
+  continuations are classified explicitly; report consistency alone does not
+  prove state restoration or that any further optimization occurred.
 
 This metadata inventory probes one byte per file before a model load. Tensor
 payloads are never deserialized here: nonempty corrupt contents remain unverified.

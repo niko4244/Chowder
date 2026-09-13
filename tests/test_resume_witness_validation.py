@@ -86,3 +86,20 @@ def test_consistent_record_states_its_verification_boundary(inventory):
 def test_absent_legacy_witness_remains_unknown(inventory):
     result = TransformersPeftExecutor._summarize_resume({"global_step": 8}, inventory)
     assert result["state"] == "unknown"
+
+
+@pytest.mark.parametrize("horizon,progress", [(4, "already_at_horizon"), (8, "no_further_steps")])
+def test_consistent_no_op_preserves_upstream_progress_classification(inventory, horizon, progress):
+    witness = resume_witness(inventory, final_global_step=4, declared_max_steps=horizon)
+    result = TransformersPeftExecutor._summarize_resume({"global_step": 4, "resume": witness}, inventory)
+    assert result["verification"] == "source-metadata-and-worker-report"
+    assert result["witness"]["steps_executed"] == 0
+    assert result["witness"]["progress_state"] == progress
+
+
+@pytest.mark.parametrize("value", [8.0, True, "8"])
+def test_top_level_final_counter_requires_an_integer(inventory, value):
+    telemetry = _telemetry(inventory)
+    telemetry["global_step"] = value
+    with pytest.raises(ValueError, match="resume witness"):
+        TransformersPeftExecutor._summarize_resume(telemetry, inventory)
