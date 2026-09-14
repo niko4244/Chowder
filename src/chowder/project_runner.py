@@ -48,6 +48,7 @@ class ProjectRunOutcome:
     hardware: HardwareSnapshot
     generation: GenerationOutcome
     repair: RecursiveRepairOutcome | None = None
+    registry_audit: tuple[dict[str, object], ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -427,11 +428,31 @@ def run_project(
                     experiment_id=candidate.experiment_id,
                 )
 
+        # Closeout audit: a result stranded on a non-terminal row is the class
+        # of durable-evidence disagreement the automatic-baseline settlement
+        # fixed for one writer. The audit keeps the class visible instead of
+        # trusting every writer to stay correct forever; the finding is both
+        # on the outcome for the caller and persisted as a run event so a
+        # restart reconstructs the warning from durable history.
+        registry_audit = tuple(registry.audit_stranded_results())
+        if registry_audit:
+            summary = ", ".join(
+                f"{finding['experiment_id']} ({finding['status']})"
+                for finding in registry_audit
+            )
+            _emit_stage(
+                on_event,
+                registry,
+                "registry-audit",
+                f"{len(registry_audit)} result(s) stranded on non-terminal rows: {summary}",
+            )
+
     return ProjectRunOutcome(
         project=project,
         hardware=hardware,
         generation=generation,
         repair=repair_outcome,
+        registry_audit=registry_audit,
     )
 
 
