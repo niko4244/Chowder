@@ -115,7 +115,7 @@ def _save_file_retrying_sharing_violation(
     message is retried; every other error propagates unchanged.
     """
     from safetensors import SafetensorError
-    from safetensors.torch import save_file
+    from safetensors.torch import save, save_file
 
     last: Exception | None = None
     for attempt in range(max(1, attempts)):
@@ -128,8 +128,15 @@ def _save_file_retrying_sharing_violation(
             last = error
             if attempt + 1 < attempts:
                 time.sleep(delay_seconds)
+    # The retry lost every race: this lock is deterministic, not transient.
+    # safetensors serializes through a temp file it then renames, and a
+    # scanner that opens each fresh temp file wins that race every time on
+    # some Windows hosts (measured twice on the rung-3b 9B run). Serialize in
+    # memory and write the final path directly, so no rename is ever
+    # attempted. Safety is unchanged: the manifest is written last, so an
+    # interrupted direct write still leaves an ineligible directory.
     assert last is not None
-    raise last
+    Path(path).write_bytes(save(tensors))
 
 
 def save_router_payload(

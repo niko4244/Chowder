@@ -291,6 +291,41 @@ def test_publication_retries_a_windows_sharing_violation(tmp_path, monkeypatch):
     assert payload["manifest"]["steps_completed"] == 3
 
 
+def test_publication_survives_a_permanent_sharing_violation_by_not_renaming(tmp_path, monkeypatch):
+    """A deterministic lock race must be removed, not merely retried.
+
+    The rung-3b 9B CUDA run measured the retry losing every attempt: safetensors
+    serializes through a temp file it then renames, real-time scanning opens
+    each freshly created 8.4 MB temp file, and the rename hits the sharing
+    violation every time -- retries just re-run the race. The fallback must
+    therefore serialize in memory and write the final path directly, so no
+    rename is ever attempted. The manifest-last rule already makes an
+    interrupted direct write an ineligible directory, so safety is unchanged.
+    """
+    from safetensors import SafetensorError
+    import safetensors.torch as st_torch
+
+    calls = {"n": 0}
+
+    def always_locked(*args, **kwargs):
+        calls["n"] += 1
+        raise SafetensorError(
+            "Error while serializing: I/O error: The process cannot access "
+            "the file because it is being used by another process. (os error 32)"
+        )
+
+    monkeypatch.setattr(st_torch, "save_file", always_locked)
+    artifact = _publish(_model(), tmp_path, shift=1.0)
+
+    assert calls["n"] >= 2, "the fast path must have been attempted before fallback"
+    payload = load_router_payload(
+        artifact["payload_dir"], expected_base_content_sha256=_BASE_SHA
+    )
+    assert payload["manifest"]["steps_completed"] == 3
+    assert payload["base_content_sha256"] == _BASE_SHA
+    assert sorted(payload["tensors"]) == sorted(ROUTER_NAMES)
+
+
 def test_publication_does_not_retry_unrelated_errors(tmp_path, monkeypatch):
     """Only a file-lock race is transient; everything else must fail loudly."""
     from safetensors import SafetensorError
