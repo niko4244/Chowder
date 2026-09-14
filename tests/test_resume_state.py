@@ -15,6 +15,7 @@ refused too, because "it ran" is not "it resumed".
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -84,6 +85,36 @@ def test_missing_optimizer_state_is_partial_not_a_fresh_start(tmp_path):
     # The message has to name the consequence, because this is the failure that
     # otherwise happens in silence inside Trainer.
     assert "fresh" in message.lower()
+
+
+@pytest.mark.parametrize(
+    ("piece", "filename"),
+    [("optimizer", "optimizer.pt"), ("scheduler", "scheduler.pt"), ("rng_state", "rng_state.pth")],
+)
+@pytest.mark.parametrize("fault", ["empty", "unreadable"])
+def test_unusable_state_file_is_not_present(tmp_path, monkeypatch, piece, filename, fault):
+    checkpoint = _write_state(tmp_path / "checkpoint-50")
+    (checkpoint / "rng_state.pth").write_bytes(b"rng")
+    bad_file = checkpoint / filename
+    if fault == "empty":
+        bad_file.write_bytes(b"")
+    else:
+        original_open = Path.open
+
+        def open_with_unreadable_state(path, *args, **kwargs):
+            if path == bad_file:
+                raise PermissionError("state file cannot be read")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", open_with_unreadable_state)
+
+    inventory = inventory_checkpoint(checkpoint)
+
+    assert piece not in inventory.present
+    assert piece not in inventory.files
+    assert any(filename in note and fault in note for note in inventory.notes)
+    with pytest.raises(IncompleteCheckpointError, match=piece):
+        assert_resumable(inventory, require_rng=True)
 
 
 def test_a_corrupt_trainer_state_is_not_a_present_trainer_state(tmp_path):

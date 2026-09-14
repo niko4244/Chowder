@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from chowder.combined_mechanism_experiment import CombinedMechanismExperiment
@@ -153,3 +155,73 @@ def test_registry_rejects_divergent_combined_mechanism_experiment_replay(tmp_pat
         registry.record_combined_mechanism_experiment(first)
         with pytest.raises(RegistryInvariantError, match="different content"):
             registry.record_combined_mechanism_experiment(second)
+
+
+# --- Stranded-result audit ----------------------------------------------------
+
+
+def test_audit_flags_a_result_carrying_row_stranded_in_planned(tmp_path):
+    """A row with a scored result but a non-terminal status is flagged.
+
+    ``planned`` means "has not run yet". Carrying a measured result while
+    claiming not to have run is exactly the durable-evidence disagreement
+    the automatic-baseline fix (6867813) closed for one writer; the audit
+    makes the whole class visible instead of trusting every writer to stay
+    correct forever.
+    """
+    db = tmp_path / "runs.db"
+    experiment = Experiment("stranded", None, Hypothesis("o", "c", "i"), {}, 1)
+    result = ExperimentResult("stranded", {"score": 1.0}, 0.5, "adapter://x")
+    with RunRegistry(db) as registry:
+        registry.record_experiment(experiment)
+        registry.record_result(result)
+        findings = registry.audit_stranded_results()
+    assert [(f["experiment_id"], f["status"]) for f in findings] == [
+        ("stranded", "planned")
+    ]
+
+
+def test_audit_flags_a_running_row_and_counts_the_findings(tmp_path):
+    db = tmp_path / "runs.db"
+    with RunRegistry(db) as registry:
+        registry.record_experiment(
+            Experiment("mid-run", None, Hypothesis("o", "c", "i"), {}, 1)
+        )
+        registry.update_experiment_status("mid-run", ExperimentStatus.RUNNING.value)
+        registry.record_result(ExperimentResult("mid-run", {"score": 2.0}, 0.5, "r"))
+        findings = registry.audit_stranded_results()
+    assert findings == [
+        {
+            "experiment_id": "mid-run",
+            "status": "running",
+            "gpu_hours": 0.5,
+            "artifact_ref": "r",
+        }
+    ]
+
+
+def test_audit_passes_terminal_rows_and_clean_registries(tmp_path):
+    db = tmp_path / "runs.db"
+    with RunRegistry(db) as registry:
+        registry.record_experiment(
+            Experiment("done", None, Hypothesis("o", "c", "i"), {}, 1)
+        )
+        registry.update_experiment_status("done", ExperimentStatus.PASSED.value)
+        registry.record_result(ExperimentResult("done", {"score": 1.0}, 0.5, "a"))
+        registry.record_experiment(
+            Experiment("never-ran", None, Hypothesis("o", "c", "i"), {}, 1)
+        )
+        assert registry.audit_stranded_results() == []
+
+
+def test_the_schema_refuses_a_result_without_an_experiment_row(tmp_path):
+    """The orphan case is blocked at the schema, not audited after the fact.
+
+    ``results.experiment_id`` carries a foreign key into ``experiments``, so a
+    result can never exist whose experiment row is missing — the worst
+    stranding case cannot be persisted at all, and the audit only has to
+    watch statuses.
+    """
+    db = tmp_path / "runs.db"
+    with RunRegistry(db) as registry, pytest.raises(sqlite3.IntegrityError):
+        registry.record_result(ExperimentResult("orphan", {"score": 1.0}, 0.5, "r"))

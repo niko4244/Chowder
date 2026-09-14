@@ -235,27 +235,65 @@ def assert_components_qualified(report: ComponentPathReport) -> ComponentPathRep
     )
 
 
+def _sample_stride(elements: int, threshold: int = _FULL_HASH_MAX_ELEMENTS) -> int:
+    """Stride that brings `elements` down to at most `threshold` samples.
+
+    Ceiling division, not floor: with floor, a tensor just above the threshold
+    gets stride 1 and a digest *labelled* ``sampled`` covers every element -- a
+    label claiming sampling while doing the full read, which is worse than
+    either. Pure arithmetic, so the budget is unit-testable without allocating
+    anything.
+    """
+    if elements <= threshold:
+        return 1
+    return -(-int(elements) // int(threshold))
+
+
+def _host_bytes(sampled: Any) -> bytes:
+    """Bytes of an already-small tensor, read on the host from any device.
+
+    The single place this module crosses the device boundary. ``.numpy()`` is
+    only ever called on a CPU tensor, because on an accelerator it raises
+    rather than copying -- which is exactly how this function used to be
+    unusable off CPU.
+    """
+    return sampled.detach().to("cpu").contiguous().numpy().tobytes()
+
+
 def _tensor_digest(tensor: Any) -> dict[str, Any]:
     """Digest of tensor values, with the strategy recorded.
 
     Full sha256 for small tensors; a stride-sampled digest above the element
-    threshold, reported as `sampled` so a sampled check can never be mistaken for
-    complete equality.
+    threshold, reported as ``sampled`` so a sampled check can never be mistaken
+    for complete equality.
+
+    The read is bounded *and* device-safe, in that order of importance:
+
+    * Nothing is ever widened to float32 in full. Above the threshold only the
+      sampled positions are gathered, so a multi-gigabyte frozen expert tensor
+      costs at most `_FULL_HASH_MAX_ELEMENTS` values of host transfer instead of
+      its whole width twice over (once to fp32, once to the host).
+    * Values are gathered on the tensor's own device and transferred once, at
+      the end, through `_host_bytes`: a sampled slice lives on the device until
+      the single ``.cpu()`` move inside that helper.
+
+    One honest limitation: `reshape(-1)` on a *non-contiguous* tensor copies at
+    full width on the device. Parameters are contiguous in practice, and the
+    host-side bound -- which is what protects the measurement -- still holds.
     """
     import torch  # local: this module must import cheaply without torch
 
     detached = tensor.detach()
-    flat = detached.reshape(-1).to(torch.float32).contiguous()
-    elements = int(flat.numel())
+    elements = int(detached.numel())
+    flat = detached.reshape(-1)
     if elements <= _FULL_HASH_MAX_ELEMENTS:
-        digest = hashlib.sha256(flat.numpy().tobytes()).hexdigest()
+        digest = hashlib.sha256(_host_bytes(flat.to(torch.float32))).hexdigest()
         return {"digest": digest, "strategy": "full", "elements": elements}
-    # Ceiling division, not floor: with floor, a tensor just above the threshold
-    # gets stride 1 and the "sampled" digest covers every element -- a label that
-    # claims sampling while doing the full read, which is worse than either.
-    stride = max(1, -(-elements // _FULL_HASH_MAX_ELEMENTS))
-    sampled = flat[::stride]
-    digest = hashlib.sha256(sampled.numpy().tobytes()).hexdigest()
+    stride = _sample_stride(elements)
+    # Slice first, widen second: the fp32 conversion then touches only the
+    # samples, not the whole tensor.
+    sampled = flat[::stride].to(torch.float32)
+    digest = hashlib.sha256(_host_bytes(sampled)).hexdigest()
     return {
         "digest": digest,
         "strategy": "sampled",

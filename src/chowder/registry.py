@@ -720,6 +720,43 @@ class RunRegistry:
                 evidence=json.loads(evidence),
             )
 
+    def audit_stranded_results(self) -> list[dict[str, object]]:
+        """Flag results stranded on a non-terminal experiment row.
+
+        A result row whose experiment still reports ``planned`` or ``running``
+        is a durable-evidence disagreement: the row carries a measured score
+        while its status claims the experiment has not run (or has not
+        finished). This is the audit for the class of defect the automatic-
+        baseline settlement fixed for one writer — it keeps the class from
+        recurring silently through any other writer.
+
+        An orphan result (no experiment row at all) cannot exist here:
+        ``results.experiment_id`` carries a foreign key into ``experiments``,
+        so the schema refuses it at insert time — the audit only has to watch
+        statuses.
+        """
+        terminal = {"passed", "failed", "rejected"}
+        status_by_id = {
+            row[0]: row[1]
+            for row in self._conn.execute("SELECT experiment_id, status FROM experiments")
+        }
+        findings: list[dict[str, object]] = []
+        for experiment_id, _metrics, gpu_hours, artifact_ref, _evidence in self._conn.execute(
+            "SELECT experiment_id, metrics_json, gpu_hours, artifact_ref, evidence_json "
+            "FROM results ORDER BY rowid"
+        ):
+            status = status_by_id.get(experiment_id)
+            if status not in terminal:
+                findings.append(
+                    {
+                        "experiment_id": experiment_id,
+                        "status": status,
+                        "gpu_hours": gpu_hours,
+                        "artifact_ref": artifact_ref,
+                    }
+                )
+        return findings
+
     def record_event(self, event: RunEventPayload) -> None:
         """Append one structured run event to the durable history.
 

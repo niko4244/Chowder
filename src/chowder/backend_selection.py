@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .executors import TrainingExecutor
+from .executors import EvaluationExecutor, TrainingExecutor
 
 
 TRANSFORMERS_ENGINE = "transformers"
 UNSLOTH_ENGINE = "unsloth"
 SUPPORTED_PEFT_ENGINES = frozenset({TRANSFORMERS_ENGINE, UNSLOTH_ENGINE})
+
+#: The router-healing workload is not a PEFT adapter run: it trains a small
+#: designated parameter set (the router gates) inside an otherwise frozen model.
+#: It is a distinct engine so a project cannot ask for it by accident through a
+#: PEFT spelling, and so its artifact/evaluator dispatch stays separate.
+ROUTER_HEALING_ENGINE = "router-healing"
 
 
 class BackendSelectionError(ValueError):
@@ -37,6 +43,14 @@ def resolve_training_engine(config: Mapping[str, Any]) -> str:
     backend = _backend(config)
     backend_type = str(backend.get("type", "transformers-peft")).strip().lower()
     raw_engine = backend.get("engine")
+
+    if backend_type == ROUTER_HEALING_ENGINE:
+        if raw_engine is not None and str(raw_engine).strip().lower() != ROUTER_HEALING_ENGINE:
+            raise BackendSelectionError(
+                f"backend.type='{ROUTER_HEALING_ENGINE}' cannot select a different engine "
+                f"(got {raw_engine!r})"
+            )
+        return ROUTER_HEALING_ENGINE
 
     if backend_type == "transformers-peft":
         if raw_engine is None:
@@ -80,6 +94,10 @@ def normalize_training_config_for_executor(config: Mapping[str, Any]) -> dict[st
     engine = resolve_training_engine(config)
     normalized = dict(config)
     backend = dict(_backend(config))
+    if engine == ROUTER_HEALING_ENGINE:
+        # Not a PEFT engine: there is no canonical spelling to normalize, and
+        # rewriting its backend block would erase its identity in evidence.
+        return normalized
     if engine == TRANSFORMERS_ENGINE:
         backend["type"] = "transformers-peft"
         backend.pop("engine", None)
@@ -95,6 +113,10 @@ def create_training_executor(config: Mapping[str, Any]) -> TrainingExecutor:
     """
 
     engine = resolve_training_engine(config)
+    if engine == ROUTER_HEALING_ENGINE:
+        from .backends.router_healing import RouterHealingExecutor
+
+        return RouterHealingExecutor()
     if engine == TRANSFORMERS_ENGINE:
         from .backends.transformers_peft import TransformersPeftExecutor
 
@@ -104,3 +126,26 @@ def create_training_executor(config: Mapping[str, Any]) -> TrainingExecutor:
 
         return UnslothPeftExecutor()
     raise AssertionError(f"unhandled training engine: {engine}")
+
+
+def create_evaluation_executor(config: Mapping[str, Any]) -> EvaluationExecutor:
+    """Construct the evaluator that matches the selected training backend.
+
+    An artifact is only meaningful to the evaluator that understands it. A
+    router payload is not a PEFT adapter directory, so handing one to the text
+    evaluator -- which calls `PeftModel.from_pretrained` -- would fail deep
+    inside PEFT rather than here, and only after a worker process had started.
+    Dispatch is therefore keyed on the same `backend.type` the trainer was
+    chosen by, so the two can never disagree about what was produced.
+    """
+
+    engine = resolve_training_engine(config)
+    if engine == ROUTER_HEALING_ENGINE:
+        from .backends.router_healing import RouterHealingEvaluator
+
+        return RouterHealingEvaluator()
+    if engine in {TRANSFORMERS_ENGINE, UNSLOTH_ENGINE}:
+        from .evaluators.transformers_text import TransformersTextEvaluator
+
+        return TransformersTextEvaluator()
+    raise AssertionError(f"unhandled evaluation engine: {engine}")

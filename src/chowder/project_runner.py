@@ -4,18 +4,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .backend_selection import create_training_executor, normalize_training_config_for_executor
+from .backend_selection import (
+    ROUTER_HEALING_ENGINE,
+    create_evaluation_executor,
+    create_training_executor,
+    normalize_training_config_for_executor,
+    resolve_training_engine,
+)
 from .cancellation import CancellationToken
 from .cycle import ExperimentCycleRunner, GenerationOutcome
 from .engine import EvolutionEngine
 from .evaluators.base_text import BaseModelTextEvaluator
-from .evaluators.transformers_text import TransformersTextEvaluator
 from .executors import EvaluationOutcome, ExecutionContext
 from .failures import harvest_transformers_text_failures
 from .hardware import HardwareSnapshot, detect_hardware
 from .local_corpus_provider import LocalCorpusRepairProvider
 from .memory import HardwareProfile
-from .models import Experiment, ExperimentResult, Hypothesis
+from .models import Experiment, ExperimentResult, ExperimentStatus, Hypothesis
 from .project import ProjectSpec, load_project
 from .recursive_repair import RecursiveRepairOutcome, run_bounded_autonomous_repair
 from .registry import RunRegistry
@@ -43,6 +48,7 @@ class ProjectRunOutcome:
     hardware: HardwareSnapshot
     generation: GenerationOutcome
     repair: RecursiveRepairOutcome | None = None
+    registry_audit: tuple[dict[str, object], ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -173,7 +179,31 @@ def _run_automatic_baseline(
             estimated_gpu_hours=estimated_gpu_hours,
         )
     )
-    outcome = BaseModelTextEvaluator().evaluate(config=project.config, context=context)
+    # The baseline must be measured by the *same* scorer that will score the
+    # candidate: a router project's untouched base scored by the PEFT text
+    # evaluator would be a different measurement on a different protocol, and
+    # comparing it to a router payload's holdout loss would be arithmetic on two
+    # unrelated numbers.
+    if resolve_training_engine(project.config) == ROUTER_HEALING_ENGINE:
+        from .backends.router_healing import RouterHealingEvaluator
+
+        try:
+            outcome = RouterHealingEvaluator().evaluate_base(
+                config=project.config, context=context
+            )
+        except Exception:
+            # The row exists; a measurement that never completed must not
+            # strand it in `planned` ("has not run yet") -- `failed` with no
+            # result is the honest record for an attempt that produced no
+            # scored outcome.
+            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
+            raise
+    else:
+        try:
+            outcome = BaseModelTextEvaluator().evaluate(config=project.config, context=context)
+        except Exception:
+            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
+            raise
     evidence: dict[str, Any] = {
         "evaluation_run_id": outcome.run_id,
         "evaluation": dict(outcome.evidence),
@@ -194,6 +224,12 @@ def _run_automatic_baseline(
     )
     registry.record_evaluation_outcome(outcome)
     registry.record_result(result)
+    # A measured baseline is a completed measurement, not a gate verdict: the
+    # gate's accept/reject lives on the candidate's row. `parent_tournament`
+    # already persists its measured base-model rows as `passed`; the automatic
+    # baseline follows the same convention so the durable status finally
+    # matches the evidence the row carries.
+    registry.update_experiment_status("baseline", ExperimentStatus.PASSED.value)
     metrics_summary = ", ".join(f"{name}={value:.4f}" for name, value in sorted(result.metrics.items()))
     _emit_stage(
         on_event, registry, "baseline", f"Automatic baseline established: {metrics_summary}"
@@ -268,7 +304,10 @@ def run_project(
             spent_gpu_hours=baseline.gpu_hours,
         )
         trainer = create_training_executor(training_config)
-        evaluator = TransformersTextEvaluator()
+        # Same engine key as the trainer, so a router payload can never be handed
+        # to the PEFT text evaluator (or the reverse) and fail inside the
+        # library instead of at the dispatch seam.
+        evaluator = create_evaluation_executor(training_config)
         runner = ExperimentCycleRunner(
             engine=engine,
             trainer=trainer,
@@ -389,11 +428,31 @@ def run_project(
                     experiment_id=candidate.experiment_id,
                 )
 
+        # Closeout audit: a result stranded on a non-terminal row is the class
+        # of durable-evidence disagreement the automatic-baseline settlement
+        # fixed for one writer. The audit keeps the class visible instead of
+        # trusting every writer to stay correct forever; the finding is both
+        # on the outcome for the caller and persisted as a run event so a
+        # restart reconstructs the warning from durable history.
+        registry_audit = tuple(registry.audit_stranded_results())
+        if registry_audit:
+            summary = ", ".join(
+                f"{finding['experiment_id']} ({finding['status']})"
+                for finding in registry_audit
+            )
+            _emit_stage(
+                on_event,
+                registry,
+                "registry-audit",
+                f"{len(registry_audit)} result(s) stranded on non-terminal rows: {summary}",
+            )
+
     return ProjectRunOutcome(
         project=project,
         hardware=hardware,
         generation=generation,
         repair=repair_outcome,
+        registry_audit=registry_audit,
     )
 
 
