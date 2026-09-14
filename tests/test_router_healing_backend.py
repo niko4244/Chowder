@@ -1303,6 +1303,44 @@ def test_the_memory_projection_refuses_a_step_peak_above_the_measured_free_memor
     assert overflowing["projected_oom"] is True
 
 
+def test_the_memory_projection_compares_incremental_step_demand_to_free_memory():
+    """The step peak already contains the resident model; free memory does too.
+
+    The rung-3b CUDA run caught this: with the 9B resident (~9.3 GB) the
+    sampler read memory_allocated ~= 11.15 GB for one step, free-after-load
+    was ~5.49 GB, and the projection refused a workload diagnostic D had
+    measured fitting (11.37 GB absolute peak). The model was being demanded
+    to fit twice. The projection must compare the *incremental* step demand
+    (allocated minus resident-before-step) against the measured free memory.
+    """
+    from chowder.backends.router_healing_worker import project_device_memory
+
+    # 5.49 GiB free with the model resident; the step sampler saw 11.15 GiB
+    # allocated, of which 9.3 GiB was the resident model.
+    projected = project_device_memory(
+        free_bytes=5_899_288_576,
+        peak_bytes=11_972_909_056,
+        resident_before_step_bytes=9_300_000_000,
+    )
+    assert projected["resident_before_step_bytes"] == 9_300_000_000
+    assert projected["incremental_step_bytes"] == 11_972_909_056 - 9_300_000_000
+    assert projected["projected_oom"] is False, (
+        "the model must not be demanded to fit twice"
+    )
+    assert projected["headroom_bytes"] == 5_899_288_576 - (
+        11_972_909_056 - 9_300_000_000
+    )
+
+    # A genuinely incremental overflow still refuses.
+    overflowing = project_device_memory(
+        free_bytes=256 << 20,
+        peak_bytes=(1 << 30) + (512 << 20),
+        resident_before_step_bytes=1 << 30,
+    )
+    assert overflowing["incremental_step_bytes"] == 512 << 20
+    assert overflowing["projected_oom"] is True
+
+
 def test_the_parent_refuses_an_accelerator_run_that_never_measured_one(
     tmp_path, monkeypatch, tiny_base
 ):

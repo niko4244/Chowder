@@ -278,6 +278,13 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
             name: parameters[name].detach().clone() for name in trainable_names
         }
         probe_optimizer = torch.optim.AdamW(trainable_params, lr=spec.learning_rate)
+        # The sampler below reads memory_allocated *during* the step, which
+        # includes the resident model. Record the resident baseline first so
+        # the projection compares the step's incremental demand against free
+        # memory — demanding the model to fit twice is how the rung-3b CUDA
+        # run falsely refused a workload that fits.
+        synchronize()
+        resident_before_probe = int(torch.cuda.memory_allocated(device))
         probe_timer = PhaseTimer(synchronize=synchronize)
         with probe_timer:
             synchronize()
@@ -299,7 +306,9 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         del probe_backup
 
         memory_projection = project_device_memory(
-            free_bytes=free_before_probe, peak_bytes=peak["bytes"]
+            free_bytes=free_before_probe,
+            peak_bytes=peak["bytes"],
+            resident_before_step_bytes=resident_before_probe,
         )
         if memory_projection["projected_oom"]:
             raise RuntimeError(
@@ -325,6 +334,8 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
                 "measured": True,
                 "step_seconds": probe_seconds,
                 "peak_step_bytes": peak["bytes"],
+                "resident_before_step_bytes": resident_before_probe,
+                "incremental_step_bytes": memory_projection["incremental_step_bytes"],
                 "projected_oom": memory_projection["projected_oom"],
                 "would_exceed_budget": step_projection["would_exceed_budget"],
             },

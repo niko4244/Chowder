@@ -21,16 +21,34 @@ from typing import Any
 GIB = 1024.0**3
 
 
-def project_device_memory(*, free_bytes: int, peak_bytes: int) -> dict[str, Any]:
-    """Refuse a run whose measured step peak cannot fit measured free memory."""
+def project_device_memory(
+    *, free_bytes: int, peak_bytes: int, resident_before_step_bytes: int = 0
+) -> dict[str, Any]:
+    """Refuse a run whose measured step demand cannot fit measured free memory.
+
+    ``peak_bytes`` is sampled with ``torch.cuda.memory_allocated`` *during* a
+    real step, so it already contains the resident model; ``free_bytes`` is
+    measured after the model is resident too. Comparing them directly demands
+    the model fit twice — the rung-3b CUDA run caught this on the 9B artifact
+    (11.15 GB "peak" vs 5.49 GB free, when diagnostic D had measured the same
+    workload fitting at an 11.37 GB absolute peak). The honest comparison is
+    the *incremental* step demand — allocated minus the resident bytes before
+    the step — against free memory. Pass ``resident_before_step_bytes=0`` to
+    keep the old absolute-peak semantics (valid when the sampler baseline is
+    empty).
+    """
     free = int(free_bytes)
     peak = int(peak_bytes)
+    resident = int(resident_before_step_bytes)
+    incremental = peak - resident
     return {
         "measured": True,
         "free_memory_bytes": free,
         "peak_step_bytes": peak,
-        "headroom_bytes": free - peak,
-        "projected_oom": peak > free,
+        "resident_before_step_bytes": resident,
+        "incremental_step_bytes": incremental,
+        "headroom_bytes": free - incremental,
+        "projected_oom": incremental > free,
     }
 
 
