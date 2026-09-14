@@ -180,14 +180,31 @@ def test_a_router_project_refuses_a_missing_router_knob(tmp_path):
         project_from_mapping(payload, source_dir=tmp_path)
 
 
-def test_a_router_project_refuses_an_accelerator_device(tmp_path):
+def test_a_router_project_refuses_a_never_measured_device(tmp_path):
+    """Project validation defers to the backend's qualified-device list.
+
+    ``cuda`` was admitted by the P11 rung-2 guard lift behind a measured
+    device preflight; ``mps`` has never been measured, so it stays refused
+    here — the project seam must agree with ``QUALIFIED_DEVICES``, not carry
+    its own stale copy of the device policy.
+    """
+    base, train, holdout = _write_corpora(tmp_path)
+    payload = _project_payload(
+        tmp_path, base=base, train=train, holdout=holdout, device="mps"
+    )
+
+    with pytest.raises(ProjectValidationError, match="not qualified"):
+        project_from_mapping(payload, source_dir=tmp_path)
+
+
+def test_a_router_project_with_a_cuda_device_validates(tmp_path):
     base, train, holdout = _write_corpora(tmp_path)
     payload = _project_payload(
         tmp_path, base=base, train=train, holdout=holdout, device="cuda"
     )
 
-    with pytest.raises(ProjectValidationError, match="not qualified"):
-        project_from_mapping(payload, source_dir=tmp_path)
+    project = project_from_mapping(payload, source_dir=tmp_path)
+    assert project.config["backend"]["router_healing"]["device"] == "cuda"
 
 
 def test_a_router_project_refuses_the_peft_text_evaluation_type(tmp_path):
@@ -530,3 +547,53 @@ def test_a_router_project_runs_end_to_end_through_the_normal_runner(tiny_router_
     base_ledger = ledger_from_payload(base_evaluations[0].evidence["phase_ledger"])
     base_ledger.require([PHASE_MODEL_LOAD, PHASE_BASELINE_GENERATION], purpose="test")
     assert base_ledger.to_dict()["unmeasured"][PHASE_CANDIDATE_GENERATION]
+
+
+def test_the_run_closeout_surfaces_a_row_stranded_in_a_non_terminal_status(
+    tmp_path, tiny_router_project
+):
+    """The closeout audit makes the stranded-result class visible, durably.
+
+    A writer bug (the class the automatic-baseline settlement fixed for one
+    writer) leaves a result on a row that still says ``planned``. The project
+    run must not end silently with that disagreement in its registry: the
+    closeout audit reports the finding on the outcome and persists it as a
+    run event, so a restart reconstructs the warning from durable history.
+
+    The shared module fixture's registry already belongs to the full-run
+    test, so this test clones the project into its own work dir (base and
+    corpora are read-only and stay shared) and plants the stranded row there
+    before running.
+    """
+    import copy
+
+    from chowder.models import Experiment, ExperimentResult, Hypothesis
+    from chowder.project_runner import run_project
+
+    payload = copy.deepcopy(tiny_router_project["project"])
+    payload["name"] = "router-healing-tiny-audit"
+    payload["work_dir"] = str(tmp_path / "work")
+    payload["registry_path"] = str(tmp_path / "work" / "runs.db")
+    project_path = tmp_path / "project.json"
+    project_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    project = load_project(project_path, validate_files=True)
+    with RunRegistry(project.registry_path) as registry:
+        registry.record_experiment(
+            Experiment("ghost", None, Hypothesis("o", "c", "i"), {}, 1.0)
+        )
+        registry.record_result(
+            ExperimentResult("ghost", {"score": 1.0}, 0.5, "adapter://ghost")
+        )
+
+    outcome = run_project(project_path)
+
+    assert outcome.succeeded
+    findings = outcome.registry_audit
+    assert [(f["experiment_id"], f["status"]) for f in findings] == [
+        ("ghost", "planned")
+    ]
+
+    with RunRegistry(outcome.project.registry_path) as registry:
+        stages = [event.payload.get("stage") for event in registry.list_events()]
+    assert "registry-audit" in stages
