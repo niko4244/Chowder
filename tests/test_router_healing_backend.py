@@ -1441,3 +1441,134 @@ def test_a_cuda_run_reports_a_measured_preflight_and_peak_memory(tmp_path, tiny_
     assert result["trainability"]["ok"] is True
     assert result["frozen"]["ok"] is True
     assert result["limits"]["stop_reason"] == "max_steps"
+
+
+# --- P11 rung-3 amendment: the bf16-offload-transient load policy -------------
+
+
+def test_the_run_spec_refuses_an_unknown_load_policy():
+    """A policy nobody preregistered is refused at spec time, not at load time."""
+    with pytest.raises(ValueError, match="unknown load policy"):
+        RouterHealingRunSpec(**_spec_kwargs(load_policy="quantized-4bit"))
+
+
+def test_the_run_spec_defaults_to_fp32_resident():
+    """Existing behaviour is the default: nothing changes unless declared."""
+    assert RouterHealingRunSpec(**_spec_kwargs()).load_policy == "fp32-resident"
+
+
+def test_the_run_spec_accepts_the_amended_offload_policy():
+    spec = RouterHealingRunSpec(**_spec_kwargs(load_policy="bf16-offload-transient"))
+    assert spec.load_policy == "bf16-offload-transient"
+
+
+def test_the_recipe_digest_changes_with_the_load_policy():
+    """A payload's recipe must say how its base was resident."""
+    one = RouterHealingRunSpec(**_spec_kwargs())
+    two = RouterHealingRunSpec(**_spec_kwargs(load_policy="bf16-offload-transient"))
+    assert one.recipe_digest() != two.recipe_digest()
+
+
+def test_the_eval_spec_carries_the_same_policy_contract():
+    """The two arms must share the load contract, so both specs validate it."""
+    base_fields = {
+        "base_model_dir": "unused-base",
+        "base_content_sha256": "a" * 64,
+        "payload_dir": None,
+        "holdout_corpus_path": "unused-holdout",
+        "holdout_corpus_sha256": "c" * 64,
+        "expected_parameter_paths": (),
+        "output_dir": "unused-out",
+        "seq_len": 8,
+        "batches": 1,
+    }
+    with pytest.raises(ValueError, match="unknown load policy"):
+        RouterHealingEvalSpec(**base_fields, load_policy="quantized-4bit")
+    assert RouterHealingEvalSpec(**base_fields).load_policy == "fp32-resident"
+    # A base arm loads the model under the policy too, so the amended policy is
+    # valid exactly where the default is: with no declared parameter paths.
+    amended = RouterHealingEvalSpec(**base_fields, load_policy="bf16-offload-transient")
+    assert amended.load_policy == "bf16-offload-transient"
+
+
+def test_an_offload_policy_on_a_base_without_experts_is_refused():
+    """Nothing to offload means the request is a contradiction, not a fallback."""
+    _require_real_model()
+    torch = pytest.importorskip("torch")
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    from chowder.backends.router_healing_load import resolve_load_placement
+
+    config = AutoConfig.from_pretrained("hf-internal-testing/tiny-random-gpt2")
+    model = AutoModelForCausalLM.from_config(config)
+    names = [name for name, _ in model.named_parameters()]
+    with pytest.raises(RuntimeError, match="has no expert parameters"):
+        resolve_load_placement("unused-root", names, device="cuda")
+    del model
+
+
+def test_the_placement_census_refuses_a_full_resident_model(tmp_path, tiny_base):
+    """Negative control: a model loaded WITHOUT offload must fail the census.
+
+    Pins the census logic itself -- not just the happy path -- so a mutation
+    that hard-codes ``verified = True`` cannot survive.
+    """
+    _require_real_model()
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():  # pragma: no cover - depends on the host
+        pytest.skip("no CUDA device on this host")
+    from transformers import AutoModelForCausalLM
+
+    from chowder.backends.router_healing_load import verify_placement_census
+
+    model = AutoModelForCausalLM.from_pretrained(
+        tiny_base["base_dir"], dtype=torch.float32, local_files_only=True
+    ).to("cuda")
+    census = verify_placement_census(model, device_type="cuda")
+    assert census["expert_params_total"] > 0
+    assert census["expert_params_on_device"] == census["expert_params_total"]
+    assert census["verified"] is False, "a full-resident base must not pass the offload census"
+    del model
+
+
+def test_an_offload_run_on_the_tiny_moe_proves_the_census_and_trainability(tmp_path, tiny_base):
+    """The amended policy, end to end on a real tiny MoE, on the real device.
+
+    Mirrors the rung-2 CUDA contract at the worker level: measured preflight,
+    exact gate scope, frozen-unchanged digests -- plus the amendment's own
+    placement census. Skips where no accelerator exists; the CPU suite is not
+    affected because the CPU path never enters this policy's load seam.
+    """
+    _require_real_model()
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():  # pragma: no cover - depends on the host
+        pytest.skip("no CUDA device on this host")
+    spec = RouterHealingRunSpec(
+        base_model_dir=tiny_base["base_dir"],
+        base_content_sha256=tiny_base["content_sha256"],
+        corpus_path=tiny_base["corpus"],
+        corpus_sha256=tiny_base["corpus_sha256"],
+        output_dir=str(tmp_path / "out"),
+        max_steps=2,
+        learning_rate=0.01,
+        seq_len=16,
+        batch_size=1,
+        seed=0,
+        probe_window=1,
+        max_tokens=64,
+        device="cuda",
+        load_policy="bf16-offload-transient",
+    )
+    result = train(spec)
+
+    placement = result["load_policy_report"]
+    assert placement["policy"] == "bf16-offload-transient"
+    assert placement["dtype"] == "torch.bfloat16"
+    census = placement["placement_census"]
+    assert census["expert_params_on_device"] == 0, "experts must be offloaded"
+    assert census["gate_params_on_device"] == census["gate_params_total"]
+    assert census["gate_params_total"] > 0
+    assert census["verified"] is True
+    assert result["trainability"]["ok"] is True
+    assert result["frozen"]["ok"] is True
+    assert result["resource_usage"]["active_accelerator_count"] == 1

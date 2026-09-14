@@ -57,6 +57,7 @@ from ..trainability import _tensor_digest, utilization_by_expert
 from ..worker_env import chowder_source_identity
 from .device_preflight import GIB
 from .router_healing import EVAL_WORKER_RESULT_KIND, QUALIFIED_DEVICES, RouterHealingEvalSpec
+from .router_healing_load import load_with_policy
 
 #: The probe whose logits demonstrate the payload reached the routing path.
 _PROBE_TEXT = "the router chooses an expert"
@@ -272,7 +273,6 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
         )
 
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     synchronize = cuda_synchronize(torch)
     device = torch.device(spec.device)
@@ -300,12 +300,11 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
 
     model_load = PhaseTimer(synchronize=synchronize)
     with model_load:
-        tokenizer = AutoTokenizer.from_pretrained(spec.base_model_dir, local_files_only=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            spec.base_model_dir, dtype=torch.float32, local_files_only=True
+        model, tokenizer, load_report = load_with_policy(
+            spec.base_model_dir, load_policy=spec.load_policy, device=str(device)
         )
-        model.to(device)
         model.eval()
+    load_policy_report: dict[str, Any] = dict(load_report)
 
     text = _read_holdout(spec)
     encoded = tokenizer(text, add_special_tokens=False)["input_ids"]
@@ -487,6 +486,7 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
         "payload_verification": payload_verification,
         "routing": {"per_layer_top1": counts, "utilization": utilization},
         "base_identity": base_identity,
+        "load_policy_report": load_policy_report,
         "lifecycle": ledger.to_dict(),
         "holdout": {
             "path": spec.holdout_corpus_path,

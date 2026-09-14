@@ -71,6 +71,7 @@ from ..trainability import (
 from ..worker_env import chowder_source_identity
 from .device_preflight import GIB, project_device_memory, project_step_cost
 from .router_healing import QUALIFIED_DEVICES, RouterHealingRunSpec
+from .router_healing_load import install_transient_expert_forward, load_with_policy
 
 RESULT_KIND = "router_healing_worker_result.v1"
 
@@ -198,7 +199,6 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         raise RuntimeError("output_dir cannot be the base model directory")
 
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     torch.manual_seed(spec.seed)
     synchronize = cuda_synchronize(torch)
@@ -217,15 +217,27 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
 
     model_load = PhaseTimer(synchronize=synchronize)
     with model_load:
-        tokenizer = AutoTokenizer.from_pretrained(spec.base_model_dir, local_files_only=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            spec.base_model_dir, dtype=torch.float32, local_files_only=True
+        model, tokenizer, load_report = load_with_policy(
+            spec.base_model_dir, load_policy=spec.load_policy, device=str(device)
         )
-        model.to(device)
         model.train()
+    load_policy_report: dict[str, Any] = dict(load_report)
 
     freeze_summary = freeze_for_router_healing(model, suffixes=ROUTER_ONLY_SUFFIXES)
     scope = assert_router_only_scope(freeze_summary.trainable_param_names, model)
+    if spec.load_policy == "bf16-offload-transient":
+        # Freeze before the transient forward: the patch binds methods, not
+        # parameters, but installing it after the freeze guarantees the copied
+        # expert slices can never be mistaken for trainables.
+        patched = install_transient_expert_forward(model)
+        if patched == 0:
+            raise RuntimeError(
+                "the offload census found expert parameters but no experts module "
+                "could be patched after the freeze; refusing a run whose forward "
+                "would hit the measured device-mismatch failure"
+            )
+        load_policy_report["patched_expert_modules_after_freeze"] = patched
+        load_policy_report["transient_forward_installed"] = True
     expected_paths, unknown_suffixes = resolve_expected_parameter_paths(model, ROUTER_ONLY_SUFFIXES)
     coverage = component_path_report(
         expected_paths,
@@ -538,6 +550,7 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         "checkpoints": checkpoints,
         "resume": resume,
         "base_identity": base_identity,
+        "load_policy_report": load_policy_report,
         "tensor_inventory": inventory,
         "quantization_reality": quantization,
         "utilization": utilization_by_expert(None),

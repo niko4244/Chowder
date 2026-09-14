@@ -53,6 +53,7 @@ from ..models import Experiment
 from ..provenance import sha256_file
 from ..resources import ResourceUsage
 from ..worker_env import chowder_source_identity, worker_env
+from .router_healing_load import LOAD_POLICIES
 
 #: Devices this backend has qualified. See the module docstring.
 #: Devices a router run may request. `cuda` was qualified by the P11 rung-2
@@ -130,6 +131,7 @@ class RouterHealingRunSpec:
     warmup_steps: int = 0
     device: str = "cpu"
     detailed_timing: bool = False
+    load_policy: str = "fp32-resident"
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -187,6 +189,12 @@ class RouterHealingRunSpec:
                 f"devices are {list(QUALIFIED_DEVICES)}. An unqualified device is refused "
                 "at spec time, not attempted and discovered."
             )
+        if self.load_policy not in LOAD_POLICIES:
+            raise ValueError(
+                f"unknown load policy {self.load_policy!r}; qualified policies are "
+                f"{list(LOAD_POLICIES)}. A load nobody preregistered is refused at spec "
+                "time, not discovered at load time."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
@@ -219,6 +227,10 @@ class RouterHealingRunSpec:
             "loss": "causal-language-modelling-cross-entropy",
             "base_content_sha256": self.base_content_sha256,
             "corpus_sha256": self.corpus_sha256,
+            # P11 rung-3 amendment: how the base was resident is part of the
+            # recipe, because it changes the measured cost and the memory
+            # contract a payload's consumer is entitled to rely on.
+            "load_policy": self.load_policy,
         }
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -266,6 +278,7 @@ class RouterHealingExecutor:
             "seq_len",
             "seed",
             "device",
+            "load_policy",
         ):
             if key in research:
                 settings[key] = research[key]
@@ -342,6 +355,7 @@ class RouterHealingExecutor:
             warmup_steps=int(settings.get("warmup_steps", 0)),
             device=str(settings.get("device", "cpu")),
             detailed_timing=bool(settings.get("detailed_timing", False)),
+            load_policy=str(settings.get("load_policy", "fp32-resident")),
         )
 
     # -- TrainingExecutor --------------------------------------------------
@@ -661,6 +675,7 @@ class RouterHealingEvalSpec:
     batches: int
     device: str = "cpu"
     detailed_timing: bool = False
+    load_policy: str = "fp32-resident"
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -707,6 +722,12 @@ class RouterHealingEvalSpec:
                 f"device {self.device!r} is not qualified for router evaluation; qualified "
                 f"devices are {list(QUALIFIED_DEVICES)}. An unqualified device is refused "
                 "at spec time, not attempted and discovered."
+            )
+        if self.load_policy not in LOAD_POLICIES:
+            raise ValueError(
+                f"unknown load policy {self.load_policy!r}; qualified policies are "
+                f"{list(LOAD_POLICIES)}. The base arm and the candidate arm must load "
+                "under the same declared contract."
             )
 
     @property
@@ -904,6 +925,9 @@ class RouterHealingEvaluator:
             batches=int(settings.get("eval_batches", 4)),
             device=str(settings.get("device", "cpu")),
             detailed_timing=bool(settings.get("eval_detailed_timing", False)),
+            load_policy=str(
+                research.get("load_policy", settings.get("load_policy", "fp32-resident"))
+            ),
         )
 
     def profile(self, experiment: Experiment, context: ExecutionContext) -> CostEstimate:
