@@ -873,6 +873,12 @@ class RouterHealingEvaluator:
             batches=int(settings.get("eval_batches", 4)),
             device=str(settings.get("device", "cpu")),
             detailed_timing=bool(settings.get("eval_detailed_timing", False)),
+            # The base arm loads the same base under the same declared residency
+            # contract as the candidate arm; a baseline under a different load
+            # policy is not a baseline. (Caught live by the rung-3b CUDA run:
+            # the base arm silently loaded fp32-resident and hit the measured
+            # WDDM-spill failure the amendment exists to prevent.)
+            load_policy=str(settings.get("load_policy", "fp32-resident")),
         )
 
     def _spec_for(

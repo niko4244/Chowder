@@ -1507,6 +1507,54 @@ def test_an_offload_policy_on_a_base_without_experts_is_refused():
     del model
 
 
+def test_the_base_arm_scores_under_the_same_load_policy(tmp_path, monkeypatch, tiny_base):
+    """Both arms must load the base under the same declared load policy.
+
+    The rung-3b CUDA run caught the real defect: the candidate arm read
+    ``load_policy`` from the research spec, but the base arm built its spec
+    from project config only, so the baseline loaded fp32-resident (the exact
+    WDDM-spill failure the amendment forbids) while the candidate loaded
+    bf16-offload-transient. A mixed-policy comparison is refused here.
+    """
+    _require_real_model()
+    from chowder.backends.router_healing import RouterHealingEvaluator
+
+    evaluator = RouterHealingEvaluator()
+    experiment = _experiment(tiny_base, load_policy="bf16-offload-transient")
+    artifact = TrainingArtifact(
+        run_id="run-base-policy",
+        experiment_id=experiment.experiment_id,
+        artifact_ref=str(tmp_path / "payload"),
+        gpu_hours=0.0,
+        telemetry={},
+        evidence={
+            "freeze_summary": {
+                "trainable_param_names": ["model.layers.0.mlp.gate.weight"]
+            },
+        },
+        resource_usage=None,
+    )
+    context = _context(tmp_path)
+    config = {
+        "backend": {
+            "type": "router-healing",
+            "router_healing": {
+                "base_model_dir": tiny_base["base_dir"],
+                "holdout_corpus_path": tiny_base["holdout"],
+                "device": "cpu",
+                # The project config carries the policy too; the research spec
+                # (config_patch) also declares it. Both must agree.
+                "load_policy": "bf16-offload-transient",
+            },
+        }
+    }
+    spec = evaluator._base_spec_for(context, config=config, eval_dir=tmp_path)
+    assert spec.load_policy == "bf16-offload-transient", (
+        "the base arm must inherit the declared load policy; a baseline under a "
+        "different residency contract is not a baseline"
+    )
+
+
 def test_the_placement_census_refuses_a_full_resident_model(tmp_path, tiny_base):
     """Negative control: a model loaded WITHOUT offload must fail the census.
 
