@@ -326,6 +326,55 @@ def test_publication_survives_a_permanent_sharing_violation_by_not_renaming(tmp_
     assert sorted(payload["tensors"]) == sorted(ROUTER_NAMES)
 
 
+def test_a_bf16_payload_publishes_verifies_and_applies_in_its_trained_dtype(tmp_path):
+    """A payload must be stored, verified, and applicable in the dtype it trained in.
+
+    The rung-3b 9B CUDA run measured the old publication policy silently
+    upcasting trained bf16 gates to fp32 while the manifest still recorded
+    bfloat16 -- a file that could never pass its own dtype check, and that
+    ``apply_router_payload`` would refuse against the bf16 model anyway. Both
+    CPU pilots missed it because fp32 models train fp32 gates. Publication
+    must store the trained values in their trained dtype so the manifest, the
+    file, and the model all agree.
+    """
+    model = _model()
+    trained = _trained_values(model, shift=1.0)
+    bf16_values = {name: tensor.to(torch.bfloat16) for name, tensor in trained.items()}
+
+    artifact = save_router_payload(
+        bf16_values,
+        tmp_path / "payload",
+        base_content_sha256=_BASE_SHA,
+        spec_digest=_SPEC_SHA,
+        steps_completed=3,
+    )
+
+    payload = load_router_payload(
+        artifact["payload_dir"], expected_base_content_sha256=_BASE_SHA
+    )
+    assert payload["manifest"]["tensors"][0]["dtype"] == "bfloat16"
+    loaded = payload["tensors"][ROUTER_NAMES[0]]
+    assert loaded.dtype == torch.bfloat16
+    assert torch.equal(loaded.cpu(), bf16_values[ROUTER_NAMES[0]].cpu()), (
+        "the published file must carry the exact trained bf16 values"
+    )
+
+    # The same payload must apply cleanly to a bf16 model.
+    target = _model()
+    with torch.no_grad():
+        for name in ROUTER_NAMES:
+            dict(target.named_parameters())[name].data = (
+                dict(target.named_parameters())[name].data.to(torch.bfloat16)
+            )
+    before = {name: dict(target.named_parameters())[name].detach().clone() for name in ROUTER_NAMES}
+    apply_router_payload(target, payload)
+    after = dict(target.named_parameters())
+    for name in ROUTER_NAMES:
+        assert after[name].dtype == torch.bfloat16
+        assert torch.equal(after[name].detach(), bf16_values[name].to(after[name].device))
+        assert not torch.equal(after[name].detach().cpu(), before[name].cpu())
+
+
 def test_publication_does_not_retry_unrelated_errors(tmp_path, monkeypatch):
     """Only a file-lock race is transient; everything else must fail loudly."""
     from safetensors import SafetensorError

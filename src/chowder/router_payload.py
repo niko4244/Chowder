@@ -63,13 +63,18 @@ def sha256_file(path: str | Path) -> str:
 
 
 def _cpu_bytes(tensor: Any) -> bytes:
-    """Raw bytes of a tensor, read on the host regardless of its device."""
+    """Raw bytes of a tensor, read on the host in the tensor's own dtype.
+
+    The hash must describe the bytes a reader will actually load, so no
+    upcasting happens here: an fp32 tensor hashes its fp32 bytes, a bf16
+    tensor its bf16 bytes (numpy cannot carry bfloat16, so the raw bytes are
+    taken through a uint8 view, which is byte-identical for every dtype).
+    """
     import torch  # local: this module must import cheaply without torch
 
     detached = tensor.detach()
-    flat = detached.reshape(-1).to(torch.float32)
-    cpu = flat.cpu().contiguous()
-    return cpu.numpy().tobytes()
+    cpu = detached.reshape(-1).cpu().contiguous()
+    return cpu.view(torch.uint8).numpy().tobytes()
 
 
 def _tensor_record(name: str, tensor: Any) -> dict[str, Any]:
@@ -185,7 +190,7 @@ def save_router_payload(
     out.mkdir(parents=True, exist_ok=True)
     tensor_path = out / tensor_file
     serialized = {
-        name: tensor.detach().to(torch.float32).cpu().contiguous()
+        name: tensor.detach().cpu().contiguous()
         for name, tensor in ordered.items()
     }
     _save_file_retrying_sharing_violation(serialized, str(tensor_path))
