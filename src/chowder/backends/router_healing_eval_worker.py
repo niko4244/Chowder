@@ -35,10 +35,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 import time
 from pathlib import Path
 from typing import Any
+from typing import Mapping
 
 from ..base_identity import resolve_base_identity
 from ..lifecycle import (
@@ -53,10 +55,19 @@ from ..lifecycle import (
 from ..router_payload import apply_router_payload, load_router_payload, payload_matches_model
 from ..trainability import _tensor_digest, utilization_by_expert
 from ..worker_env import chowder_source_identity
+from .device_preflight import GIB
 from .router_healing import EVAL_WORKER_RESULT_KIND, QUALIFIED_DEVICES, RouterHealingEvalSpec
 
 #: The probe whose logits demonstrate the payload reached the routing path.
 _PROBE_TEXT = "the router chooses an expert"
+
+# Routing-invariance tolerance for the uniform-shift identity control.
+# Softmax over unchanged gate logits is mathematically identical; the only
+# differences a routing-invariant payload can produce here are float
+# rounding. 1e-6 is orders of magnitude above fp32 softmax rounding noise
+# and orders below any routing change a real payload makes (the test
+# fixture's smallest real routing change is ~5e-2).
+_ROUTING_ROUNDING_TOLERANCE = 1e-6
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -109,6 +120,109 @@ def _logits_fingerprint(torch: Any, model: Any, probe: Any) -> dict[str, Any]:
         logits = model(input_ids=probe).logits
     record = _tensor_digest(logits)
     return {"digest": record["digest"], "strategy": record["strategy"], "shape": list(logits.shape)}
+
+
+def _routing_fingerprint(model: Any, spec: Any, tokenizer: Any = None) -> dict[str, Any]:
+    """Routing behaviour on the probe input, before vs after a payload lands.
+
+    Bit-identical logits cannot be the identity control: softmax's uniform-
+    shift invariance holds in exact arithmetic, and in float32 a uniform gate
+    shift can round one ulp away in the rest of the network -- depending on
+    the host's elementwise kernel dispatch, which is how a green control
+    became a CI coin flip. The invariant that actually distinguishes
+    "cannot change routing" from "changed routing" is the routing itself:
+
+    * ``top1_decisions``: per-layer top-1 expert choice per probe position,
+      from the gate logits the model actually computed (same hook convention
+      as ``_routing_counts``),
+    * ``routing_weights``: the softmax over those same logits, so a payload
+      that keeps the argmax but rescales expert weights is still caught.
+
+    Deterministic on the fixed probe, device-safe (compared on-device, only
+    a few floats cross to the host), and honest about what it is not: it does
+    not certify the holdout score, only that the routing path consumed the
+    payload.
+    """
+    import torch
+
+    if tokenizer is None:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            spec.base_model_dir, local_files_only=True
+        )
+    probe_ids = tokenizer(_PROBE_TEXT, add_special_tokens=False)["input_ids"][
+        : spec.seq_len
+    ]
+    # The probe must live where the model lives: the flow may have loaded on
+    # cpu while a CUDA device exists, and torch.cuda.is_available() would
+    # silently place the input on the wrong device.
+    device = next(model.parameters()).device
+    probe = torch.tensor([probe_ids], device=device)
+    layer_logits: dict[str, Any] = {}
+    handles = []
+
+    def _hook(name: str):
+        def hook(_module: Any, _inputs: Any, output: Any) -> None:
+            logits = output[0] if isinstance(output, tuple) else output
+            if not torch.is_tensor(logits) or logits.dim() < 2:
+                return
+            layer_logits[name] = logits.detach()
+
+        return hook
+
+    for name, module in model.named_modules():
+        if name.endswith("mlp.gate"):
+            handles.append(module.register_forward_hook(_hook(name)))
+    try:
+        with torch.no_grad():
+            model(input_ids=probe)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    if not layer_logits:
+        raise RuntimeError(
+            "the model exposes no mlp.gate modules, so a routing fingerprint "
+            "cannot be taken; refusing to claim routing invariance from nothing"
+        )
+
+    decisions: dict[str, list[int]] = {}
+    weights: dict[str, list[list[float]]] = {}
+    for name in sorted(layer_logits):
+        logits = layer_logits[name]
+        flat = logits.reshape(-1, logits.shape[-1])
+        decisions[name] = flat.argmax(dim=-1).tolist()
+        weights[name] = torch.softmax(flat, dim=-1).tolist()
+    return {
+        "top1_decisions": decisions,
+        "routing_weights": weights,
+        "probe_length": len(probe_ids),
+    }
+
+
+def _routing_fingerprint_delta(before: Mapping[str, Any], after: Mapping[str, Any]) -> float:
+    """Largest absolute routing-weight change between two fingerprints.
+
+    ``inf`` when the layers or positions being compared do not line up at
+    all: a structural change is the largest possible change, not a missing
+    measurement.
+    """
+    before_layers = before.get("routing_weights") or {}
+    after_layers = after.get("routing_weights") or {}
+    if sorted(before_layers) != sorted(after_layers):
+        return math.inf
+    worst = 0.0
+    for name, before_rows in before_layers.items():
+        after_rows = after_layers[name]
+        if len(before_rows) != len(after_rows):
+            return math.inf
+        for before_row, after_row in zip(before_rows, after_rows):
+            if len(before_row) != len(after_row):
+                return math.inf
+            for before_value, after_value in zip(before_row, after_row):
+                worst = max(worst, abs(after_value - before_value))
+    return worst
 
 
 def _routing_counts(torch: Any, model: Any, batches: list[Any]) -> dict[str, list[int]]:
@@ -165,6 +279,17 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
     accelerator_count = 0 if device.type == "cpu" else 1
     started = time.perf_counter()
 
+    # P11 rung 2: on a non-CPU device, measure the device before scoring. The
+    # free-memory reading is the budget context the score was measured under;
+    # peak accounting starts here so the score's own footprint is measured.
+    device_preflight: dict[str, Any] | None = None
+    if device.type != "cpu":
+        device_preflight = {
+            "device": str(device),
+            "free_memory_bytes": int(torch.cuda.mem_get_info(device)[0]),
+        }
+        torch.cuda.reset_peak_memory_stats(device)
+
     base_identity = resolve_base_identity(spec.base_model_dir)
     if base_identity["content_sha256"] != spec.base_content_sha256:
         raise RuntimeError(
@@ -201,11 +326,13 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
     baseline_timer.__enter__()
     base_loss = _score(torch, model, batches)
     before = _logits_fingerprint(torch, model, probe)
+    routing_before = _routing_fingerprint(model, spec, tokenizer)
     baseline_timer.__exit__(None, None, None)
 
     payload: dict[str, Any] | None = None
     comparison: dict[str, Any] | None = None
     apply_report: dict[str, Any] | None = None
+    routing_after: dict[str, Any] | None = None
     candidate_timer: PhaseTimer | None = None
     if spec.payload_dir is None:
         # The base arm. Nothing is loaded and nothing is applied; the score below
@@ -234,8 +361,19 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
             model, payload, expected_parameter_paths=spec.expected_parameter_paths
         )
         after = _logits_fingerprint(torch, model, probe)
+        routing_after = _routing_fingerprint(model, spec, tokenizer)
         candidate_loss = _score(torch, model, batches)
         candidate_timer.__exit__(None, None, None)
+        routing_top1_equal = (
+            routing_before["top1_decisions"] == routing_after["top1_decisions"]
+        )
+        max_abs_routing_weight_delta = _routing_fingerprint_delta(
+            routing_before, routing_after
+        )
+        routing_unchanged = bool(
+            routing_top1_equal
+            and max_abs_routing_weight_delta <= _ROUTING_ROUNDING_TOLERANCE
+        )
 
     counts = _routing_counts(torch, model, batches)
     utilization = utilization_by_expert(counts or None)
@@ -289,6 +427,11 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
             "applied_parameters": apply_report["applied_parameters"],
             "logits_before": before,
             "logits_after": after,
+            "routing_fingerprint_before": routing_before,
+            "routing_fingerprint_after": routing_after,
+            "routing_top1_equal": routing_top1_equal,
+            "max_abs_routing_weight_delta": max_abs_routing_weight_delta,
+            "routing_unchanged_beyond_rounding": routing_unchanged,
         }
         payload_verification = {
             "payload_dir": payload["payload_dir"],
@@ -351,17 +494,20 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
             "blocks_available": len(blocks),
             "blocks_scored": len(scored),
             "seq_len": spec.seq_len,
-        },
-        "source_identity": chowder_source_identity(),
+        },        "source_identity": chowder_source_identity(),
+        "device_preflight": device_preflight,
         "resource_usage": {
             "wall_seconds": total_wall,
             "active_accelerator_count": accelerator_count,
             "visible_accelerator_count": accelerator_count,
-            "peak_vram_gb_by_accelerator": {},
+            "peak_vram_gb_by_accelerator": (
+                {}
+                if device.type == "cpu"
+                else {"0": round(torch.cuda.max_memory_allocated(device) / GIB, 6)}
+            ),
             "sampling_device": sampling_device(torch),
         },
     }
-
 
 def main() -> int:
     parser = argparse.ArgumentParser()

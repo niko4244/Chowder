@@ -55,10 +55,24 @@ from ..resources import ResourceUsage
 from ..worker_env import chowder_source_identity, worker_env
 
 #: Devices this backend has qualified. See the module docstring.
-QUALIFIED_DEVICES: tuple[str, ...] = ("cpu",)
+#: Devices a router run may request. `cuda` was qualified by the P11 rung-2
+#: small-CUDA preregistered qualification (docs/quals/P11_CUDA_PREREG_2026-09-13.md):
+#: the frozen-tensor digest reads bounded chunks on-device, and the workers run a
+#: measured device preflight (free memory, step-cost probe, projections) that
+#: refuses before optimizer step 1 when the run cannot fit. `mps` stays unqualified:
+#: never measured, never claimed.
+QUALIFIED_DEVICES: tuple[str, ...] = ("cpu", "cuda")
 
 #: The worker's result schema. Bumped when a field's meaning changes.
 WORKER_RESULT_KIND = "router_healing_worker_result.v1"
+
+#: Tolerance for the uniform-shift identity control: a routing-invariant
+#: payload can move logits only through float rounding, so "unchanged" means
+#: routing decisions identical and routing weights within rounding noise —
+#: not bit-identical logits, which float32 never promised (that demand made
+#: the control flaky across CPUs). Must match the worker's
+#: `_ROUTING_ROUNDING_TOLERANCE`.
+ROUTING_ROUNDING_TOLERANCE = 1e-6
 
 #: The evaluation worker's result schema. A separate document from the training
 #: result on purpose: an evaluation that could be mistaken for a training report
@@ -170,8 +184,8 @@ class RouterHealingRunSpec:
         if self.device not in QUALIFIED_DEVICES:
             raise ValueError(
                 f"device {self.device!r} is not qualified for router training; qualified "
-                f"devices are {list(QUALIFIED_DEVICES)}. The frozen-tensor digest is not "
-                "device-safe yet, so an accelerator run is refused rather than attempted."
+                f"devices are {list(QUALIFIED_DEVICES)}. An unqualified device is refused "
+                "at spec time, not attempted and discovered."
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -251,6 +265,7 @@ class RouterHealingExecutor:
             "learning_rate",
             "seq_len",
             "seed",
+            "device",
         ):
             if key in research:
                 settings[key] = research[key]
@@ -545,6 +560,21 @@ class RouterHealingExecutor:
         raw_usage = result.get("resource_usage")
         if not isinstance(raw_usage, Mapping):
             raise RouterHealingBackendError("the worker reported no resource usage")
+        if spec.device != "cpu":
+            # A cuda run is only trustworthy if its preflight actually measured
+            # the device. A missing record, or a free-memory field that is not a
+            # real byte count, is the unmeasured-zero lie in another costume.
+            preflight = result.get("device_preflight")
+            if not isinstance(preflight, Mapping) or not preflight.get("step_cost_probe"):
+                raise RouterHealingBackendError(
+                    "the accelerator worker reported no device preflight: a cuda run "
+                    "without measured device evidence is refused, not believed"
+                )
+            free_memory = preflight.get("free_memory_bytes")
+            if not isinstance(free_memory, int) or free_memory <= 0:
+                raise RouterHealingBackendError(
+                    "the accelerator worker's device preflight did not measure free memory"
+                )
         usage = ResourceUsage.from_wall_time(
             wall_seconds=float(raw_usage.get("wall_seconds", wall_seconds)),
             active_accelerator_count=int(raw_usage.get("active_accelerator_count", 0)),
@@ -582,6 +612,7 @@ class RouterHealingExecutor:
                 "limits": result.get("limits"),
                 "tensor_inventory": result.get("tensor_inventory"),
                 "quantization_reality": result.get("quantization_reality"),
+                "device_preflight": result.get("device_preflight"),
                 "utilization": result.get("utilization"),
                 "tokenizer": result.get("tokenizer"),
                 "model": result.get("model"),
@@ -674,7 +705,8 @@ class RouterHealingEvalSpec:
         if self.device not in QUALIFIED_DEVICES:
             raise ValueError(
                 f"device {self.device!r} is not qualified for router evaluation; qualified "
-                f"devices are {list(QUALIFIED_DEVICES)}"
+                f"devices are {list(QUALIFIED_DEVICES)}. An unqualified device is refused "
+                "at spec time, not attempted and discovered."
             )
 
     @property
@@ -1085,6 +1117,18 @@ class RouterHealingEvaluator:
             raise RouterHealingEvaluationError(
                 f"the evaluation worker's lifecycle ledger cannot qualify this run: {exc}"
             ) from exc
+        if spec.device != "cpu":
+            usage = result.get("resource_usage")
+            peak = (
+                usage.get("peak_vram_gb_by_accelerator", {})
+                if isinstance(usage, Mapping)
+                else {}
+            )
+            if not isinstance(peak, Mapping) or not peak:
+                raise RouterHealingEvaluationError(
+                    "the accelerator evaluation worker did not measure peak VRAM: an "
+                    "empty map on a cuda arm is an unmeasured claim, refused"
+                )
 
         control = result.get("application_control")
         if not isinstance(control, Mapping):
@@ -1114,7 +1158,31 @@ class RouterHealingEvaluator:
                     "baseline measurement"
                 )
         else:
-            if changed_parameters and not changed_output:
+            if "routing_top1_equal" not in control or (
+                "max_abs_routing_weight_delta" not in control
+            ):
+                raise RouterHealingEvaluationError(
+                    "the payload arm reported no routing fingerprint; without it there is "
+                    "no evidence the routing path consumed the payload, and a score from "
+                    "an unverified routing path would be fiction"
+                )
+            routing_top1_equal = bool(control["routing_top1_equal"])
+            try:
+                max_routing_delta = float(control["max_abs_routing_weight_delta"])
+            except (TypeError, ValueError) as error:
+                raise RouterHealingEvaluationError(
+                    "the payload arm reported an unreadable routing-weight delta: "
+                    f"{control.get('max_abs_routing_weight_delta')!r}"
+                ) from error
+            if not math.isfinite(max_routing_delta):
+                raise RouterHealingEvaluationError(
+                    "the payload arm reported a non-finite routing-weight delta; the "
+                    "routing fingerprint did not compare"
+                )
+            routing_unchanged = (
+                routing_top1_equal and max_routing_delta <= ROUTING_ROUNDING_TOLERANCE
+            )
+            if changed_parameters and routing_unchanged:
                 raise RouterHealingEvaluationError(
                     "the payload changed parameters but changed no model output: the routing "
                     "path may not be wired to these tensors at all, so a score from it would "
@@ -1124,6 +1192,12 @@ class RouterHealingEvaluator:
                 raise RouterHealingEvaluationError(
                     "the model's output changed although no payload parameter changed; the "
                     "evaluation is not measuring what it claims"
+                )
+            if changed_parameters and not changed_output and not routing_unchanged:
+                raise RouterHealingEvaluationError(
+                    "the payload changed routing but the reported logits are bit-identical; "
+                    "a routing change must reach the model output, so this measurement is "
+                    "internally inconsistent"
                 )
             if control.get("payload_kind") not in {"replacement", "additive"}:
                 raise RouterHealingEvaluationError(

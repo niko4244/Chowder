@@ -317,11 +317,17 @@ def _validate_router_healing_project(
             "config.backend.router_healing.learning_rate must be positive"
         )
     device = str(knobs.get("device", "cpu")).strip().lower()
-    if device != "cpu":
+    # The device policy has one home: the router backend's QUALIFIED_DEVICES.
+    # A stale copy here once refused `cuda` months after the frozen-tensor
+    # digest had been made device-safe and tested on real accelerators.
+    from .backends.router_healing import QUALIFIED_DEVICES
+
+    if device not in QUALIFIED_DEVICES:
         raise ProjectValidationError(
-            f"config.backend.router_healing.device={device!r} is not qualified: the "
-            "frozen-tensor digest is not device-safe yet, so only 'cpu' runs are "
-            "accepted rather than accepted and then attempted"
+            f"config.backend.router_healing.device={device!r} is not qualified: "
+            f"qualified devices are {sorted(QUALIFIED_DEVICES)}; a device is "
+            "admitted only behind measured evidence, never accepted and then "
+            "attempted"
         )
 
     training_corpus = _resolve_path(str(knobs["corpus_path"]), base=work_dir)

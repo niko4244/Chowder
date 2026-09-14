@@ -37,6 +37,7 @@ from chowder.backends.router_healing import (
     RouterHealingExecutor,
     RouterHealingRunSpec,
 )
+from chowder.backends.router_healing_worker import train
 from chowder.executors import ExecutionContext, TrainingArtifact
 from chowder.lifecycle import PhaseTimer, training_lifecycle_ledger
 from chowder.memory import HardwareProfile
@@ -84,16 +85,16 @@ def _spec_kwargs(**overrides) -> dict:
 # --- the contract layer ------------------------------------------------------
 
 
-def test_the_only_qualified_device_is_cpu():
-    assert QUALIFIED_DEVICES == ("cpu",)
+def test_the_only_qualified_devices_are_cpu_and_cuda():
+    assert set(QUALIFIED_DEVICES) == {"cpu", "cuda"}
 
 
 def test_a_spec_pins_the_device_it_has_actually_qualified():
-    """An accelerator run is refused, not attempted and discovered."""
-    with pytest.raises(ValueError, match="not qualified"):
-        RouterHealingRunSpec(**_spec_kwargs(device="cuda"))
+    """An unqualified accelerator run is refused, not attempted and discovered."""
     with pytest.raises(ValueError, match="not qualified"):
         RouterHealingRunSpec(**_spec_kwargs(device="mps"))
+    with pytest.raises(ValueError, match="not qualified"):
+        RouterHealingRunSpec(**_spec_kwargs(device="npu"))
 
 
 @pytest.mark.parametrize(
@@ -731,7 +732,13 @@ def test_an_abruptly_killed_worker_leaves_a_complete_resumable_checkpoint(
         while time.time() < deadline:
             published = sorted(checkpoints.glob("step-*")) if checkpoints.is_dir() else []
             if published:
-                break
+                # Kill only once the earliest checkpoint is *complete* on
+                # disk. Under heavy load the directory can be visible while
+                # its files are still being written; killing inside that
+                # publication window would test a partial write, not abrupt
+                # death after a durable checkpoint.
+                if inventory_checkpoint(published[0]).is_complete:
+                    break
             if process.poll() is not None:
                 raise AssertionError("the worker exited before publishing a checkpoint")
             time.sleep(0.5)
@@ -775,9 +782,11 @@ def payloads(tiny_base, tmp_path_factory):
 
     The third one is not padding. A *uniform* shift of every gate entry adds the
     same multiple of the hidden state to every expert's logit, so it cannot
-    change the routing distribution at all and the model's output is
-    bit-identical. It is the sharpest available check that the application
-    control measures real behaviour rather than merely detecting a tensor write.
+    change routing decisions or routing weights at all; only float rounding
+    in the rest of the network can move the logits, and how much rounding
+    appears depends on the host's kernels. It is the sharpest available check
+    that the application control measures real behaviour rather than merely
+    detecting a tensor write.
     """
     _require_real_model()
     import torch
@@ -846,7 +855,7 @@ def test_the_evaluator_reports_zero_accelerator_hours(tmp_path):
         ({"expected_parameter_paths": ()}, "at least one expected parameter path"),
         ({"holdout_corpus_sha256": "short"}, "sha256 digest"),
         ({"batches": 0}, "batches must be a positive integer"),
-        ({"device": "cuda"}, "not qualified"),
+        ({"device": "npu"}, "not qualified"),
     ],
 )
 def test_an_eval_spec_refuses_configurations_that_cannot_score_honestly(overrides, match):
@@ -944,10 +953,12 @@ def test_a_uniform_gate_shift_is_refused_because_it_cannot_change_routing(
     """Real behaviour, measured on a real model.
 
     Adding the same constant to every gate entry adds the same multiple of the
-    hidden state to every expert's logit, so the routing distribution is
-    unchanged and the output is bit-identical. This is exactly the case a
-    "did the tensors change" check would wave through while reporting a score
-    that cannot have come from the payload.
+    hidden state to every expert's logit, so routing decisions and routing
+    weights are unchanged; only float rounding can move the logits, and how
+    much rounding appears depends on the host's elementwise kernels. The
+    refusal therefore keys on the routing fingerprint staying inside the
+    rounding tolerance, not on bit-identical logits -- demanding bit-equality
+    made this control a coin flip across machines (and eventually failed CI).
     """
     _require_real_model()
     experiment = _experiment(tiny_base)
@@ -971,7 +982,11 @@ def test_a_payload_that_changes_parameters_but_not_output_is_refused(
                 spec_path = Path(command[command.index("--spec") + 1])
                 result_path = Path(command[command.index("--result") + 1])
                 spec = RouterHealingEvalSpec(**json.loads(spec_path.read_text(encoding="utf-8")))
-                result_path.write_text(json.dumps(_valid_eval_result(spec, force_broken=True)))
+                result_path.write_text(
+                    json.dumps(
+                        _valid_eval_result(spec, force_broken=True, routing="unchanged")
+                    )
+                )
 
             def poll(self):
                 return 0
@@ -998,7 +1013,12 @@ def test_a_payload_that_changes_parameters_but_not_output_is_refused(
         )
 
 
-def _valid_eval_result(spec: RouterHealingEvalSpec, *, force_broken: bool = False) -> dict:
+def _valid_eval_result(
+    spec: RouterHealingEvalSpec,
+    *,
+    force_broken: bool = False,
+    routing: str = "moved",
+) -> dict:
     load = PhaseTimer()
     load.seconds = 0.5
     from chowder.lifecycle import (
@@ -1012,6 +1032,11 @@ def _valid_eval_result(spec: RouterHealingEvalSpec, *, force_broken: bool = Fals
     ledger.record_unavailable(PHASE_STEADY_STEPS, "evaluation only")
     ledger.record(PHASE_BASELINE_GENERATION, 0.1, synchronized=False)
     ledger.record(PHASE_CANDIDATE_GENERATION, 0.1, synchronized=False)
+    routing_control = {
+        "routing_top1_equal": routing == "unchanged",
+        "max_abs_routing_weight_delta": 0.0 if routing == "unchanged" else 0.2,
+        "routing_unchanged_beyond_rounding": routing == "unchanged",
+    }
     return {
         "kind": EVAL_WORKER_RESULT_KIND,
         "spec_digest": spec.digest(),
@@ -1027,6 +1052,7 @@ def _valid_eval_result(spec: RouterHealingEvalSpec, *, force_broken: bool = Fals
             "payload_kind": "replacement",
             "parameters_changed": True,
             "outputs_changed": not force_broken,
+            **routing_control,
         },
         "lifecycle": ledger.to_dict(),
         "resource_usage": {
@@ -1038,21 +1064,380 @@ def _valid_eval_result(spec: RouterHealingEvalSpec, *, force_broken: bool = Fals
     }
 
 
-def test_the_worker_refuses_an_accelerator_spec_before_loading_anything(tmp_path, tiny_base):
-    """The device guard lives in the spec, so it fires before a subprocess exists."""
-    with pytest.raises(ValueError, match="not qualified"):
-        RouterHealingRunSpec(
-            base_model_dir=tiny_base["base_dir"],
-            base_content_sha256=tiny_base["content_sha256"],
-            corpus_path=tiny_base["corpus"],
-            corpus_sha256=tiny_base["corpus_sha256"],
-            output_dir=str(tmp_path / "out"),
-            max_steps=2,
-            learning_rate=0.01,
-            seq_len=16,
-            batch_size=1,
-            seed=0,
-            probe_window=1,
-            max_tokens=64,
-            device="cuda",
+# --- Uniform-shift identity control: rounding-honest, not bit-lucky ----------
+
+
+def _uniform_fingerprint_spec(tiny_base, payload_dir, tmp_path):
+    return RouterHealingEvalSpec(
+        base_model_dir=tiny_base["base_dir"],
+        base_content_sha256=tiny_base["content_sha256"],
+        payload_dir=str(payload_dir),
+        holdout_corpus_path=tiny_base["holdout"],
+        holdout_corpus_sha256=tiny_base["holdout_sha256"],
+        expected_parameter_paths=(
+            "model.layers.0.mlp.gate.weight",
+            "model.layers.1.mlp.gate.weight",
+        ),
+        output_dir=str(tmp_path / "out"),
+        seq_len=16,
+        batches=1,
+        device="cpu",
+    )
+
+
+def _loaded_tiny_model(tiny_base):
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    model = AutoModelForCausalLM.from_pretrained(
+        tiny_base["base_dir"], dtype=torch.float32
+    )
+    model.eval()
+    return model
+
+
+def test_a_uniform_gate_shift_leaves_routing_and_weights_unchanged_beyond_rounding(
+    tmp_path, tiny_base, payloads
+):
+    """Real behaviour, measured on a real model.
+
+    A routing-invariant payload must leave *routing decisions (argmax) and
+    routing weights (softmax over the gate logits)* unchanged beyond the
+    float rounding that the shift mathematically forces through the rest of
+    the network. Demanding bit-identical logits there turned the identity
+    control into a coin flip: softmax(x+c) rounds one ulp away from
+    softmax(x) whenever the elementwise kernels dispatch differently, which
+    is exactly how CI failed while the same code passed locally.
+    """
+    _require_real_model()
+    from chowder.backends.router_healing_eval_worker import (
+        _routing_fingerprint,
+        _routing_fingerprint_delta,
+    )
+    from chowder.router_payload import apply_router_payload, load_router_payload
+
+    spec = _uniform_fingerprint_spec(tiny_base, payloads["uniform"], tmp_path)
+    model = _loaded_tiny_model(tiny_base)
+
+    payload = load_router_payload(
+        payloads["uniform"], expected_base_content_sha256=tiny_base["content_sha256"]
+    )
+    before = _routing_fingerprint(model, spec)
+    apply_router_payload(
+        model, payload, expected_parameter_paths=spec.expected_parameter_paths
+    )
+    after = _routing_fingerprint(model, spec)
+
+    assert before["top1_decisions"] == after["top1_decisions"]
+    assert _routing_fingerprint_delta(before, after) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_a_routing_changing_payload_moves_the_routing_fingerprint(
+    tmp_path, tiny_base, payloads
+):
+    """The control must still catch a payload that really changes routing."""
+    _require_real_model()
+    from chowder.backends.router_healing_eval_worker import (
+        _routing_fingerprint,
+        _routing_fingerprint_delta,
+    )
+    from chowder.router_payload import apply_router_payload, load_router_payload
+
+    spec = _uniform_fingerprint_spec(tiny_base, payloads["changed"], tmp_path)
+    model = _loaded_tiny_model(tiny_base)
+
+    payload = load_router_payload(
+        payloads["changed"], expected_base_content_sha256=tiny_base["content_sha256"]
+    )
+    before = _routing_fingerprint(model, spec)
+    apply_router_payload(
+        model, payload, expected_parameter_paths=spec.expected_parameter_paths
+    )
+    after = _routing_fingerprint(model, spec)
+
+    assert before["top1_decisions"] != after["top1_decisions"]
+    assert _routing_fingerprint_delta(before, after) > 1e-3
+
+
+def test_the_uniform_gate_shift_is_refused_without_demanding_bit_identical_logits(
+    tmp_path, monkeypatch, tiny_base, payloads
+):
+    """End-to-end: the refusal survives float-rounding differences.
+
+    The worker is mocked at the process boundary so ``outputs_changed`` is
+    True exactly because softmax rounds one ulp differently after a uniform
+    shift -- the condition that made CI flaky -- while routing decisions are
+    unchanged. The refusal must now come from the routing fingerprint, not
+    from demanding bit-equality that exact arithmetic promises but float
+    arithmetic cannot.
+    """
+
+    def mutate(result, spec):
+        control = result["application_control"]
+        control["outputs_changed"] = True  # ulp-level softmax rounding
+        # The real worker reports the routing truth: a uniform shift leaves
+        # decisions and weights unchanged beyond rounding.
+        control["routing_top1_equal"] = True
+        control["max_abs_routing_weight_delta"] = 0.0
+        control["routing_unchanged_beyond_rounding"] = True
+
+    def factory(command, **kwargs):
+        class FakeEvalProcess:
+            returncode = 0
+
+            def __init__(self, command, **process_kwargs):
+                spec_path = Path(command[command.index("--spec") + 1])
+                result_path = Path(command[command.index("--result") + 1])
+                spec = RouterHealingEvalSpec(
+                    **json.loads(spec_path.read_text(encoding="utf-8"))
+                )
+                result = _valid_eval_result(spec)
+                mutate(result, spec)
+                result_path.write_text(json.dumps(result), encoding="utf-8")
+
+            def poll(self):
+                return 0
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        return FakeEvalProcess(command, **kwargs)
+
+    monkeypatch.setattr(
+        "chowder.backends.router_healing.subprocess.Popen", factory
+    )
+    experiment = _experiment(tiny_base)
+    artifact = _eval_artifact(experiment, payloads["uniform"])
+    with pytest.raises(RouterHealingEvaluationError, match="changed no model output"):
+        RouterHealingEvaluator().evaluate(
+            experiment=experiment, artifact=artifact, context=_context(tmp_path)
         )
+
+
+def test_the_parent_refuses_a_payload_arm_that_reports_no_routing_fingerprint(
+    tmp_path, monkeypatch, tiny_base, payloads
+):
+    """A worker that stops reporting the fingerprint is refused, not believed."""
+
+    def factory(command, **kwargs):
+        class FakeEvalProcess:
+            returncode = 0
+
+            def __init__(self, command, **process_kwargs):
+                spec_path = Path(command[command.index("--spec") + 1])
+                result_path = Path(command[command.index("--result") + 1])
+                spec = RouterHealingEvalSpec(**json.loads(spec_path.read_text(encoding="utf-8")))
+                result = _valid_eval_result(spec)
+                for field in ("routing_top1_equal", "max_abs_routing_weight_delta"):
+                    result["application_control"].pop(field, None)
+                result_path.write_text(json.dumps(result), encoding="utf-8")
+
+            def poll(self):
+                return 0
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        return FakeEvalProcess(command, **kwargs)
+
+    monkeypatch.setattr(
+        "chowder.backends.router_healing.subprocess.Popen", factory
+    )
+    experiment = _experiment(tiny_base)
+    artifact = _eval_artifact(experiment, payloads["changed"])
+    with pytest.raises(RouterHealingEvaluationError, match="no routing fingerprint"):
+        RouterHealingEvaluator().evaluate(
+            experiment=experiment, artifact=artifact, context=_context(tmp_path)
+        )
+
+
+# --- P11 rung 2: cuda is admitted behind a measured device preflight ---------
+
+
+def test_cpu_and_cuda_are_qualified_but_mps_is_not():
+    """The guard lifts for cuda alone, behind the preflight contract below."""
+    assert "cpu" in QUALIFIED_DEVICES
+    assert "cuda" in QUALIFIED_DEVICES
+    assert "mps" not in QUALIFIED_DEVICES
+
+
+def test_mps_is_still_refused():
+    with pytest.raises(ValueError, match="not qualified"):
+        RouterHealingRunSpec(**_spec_kwargs(device="mps"))
+
+
+def test_the_step_cost_projection_refuses_a_run_that_cannot_fit_its_wall_budget():
+    """A measured step rate that cannot fit the declared horizon is refused."""
+    from chowder.backends.router_healing_worker import project_step_cost
+
+    fitting = project_step_cost(step_seconds=1.0, max_steps=12, max_seconds=600)
+    assert fitting["measured"] is True
+    assert fitting["projected_wall_seconds"] == pytest.approx(12.0)
+    assert fitting["would_exceed_budget"] is False
+
+    overflowing = project_step_cost(step_seconds=1.0, max_steps=12, max_seconds=10)
+    assert overflowing["projected_wall_seconds"] == pytest.approx(12.0)
+    assert overflowing["would_exceed_budget"] is True
+
+
+def test_the_memory_projection_refuses_a_step_peak_above_the_measured_free_memory():
+    from chowder.backends.router_healing_worker import project_device_memory
+
+    fitting = project_device_memory(free_bytes=1 << 30, peak_bytes=256 << 20)
+    assert fitting["headroom_bytes"] == (1 << 30) - (256 << 20)
+    assert fitting["projected_oom"] is False
+
+    overflowing = project_device_memory(free_bytes=256 << 20, peak_bytes=(256 << 20) + 1)
+    assert overflowing["projected_oom"] is True
+
+
+def test_the_parent_refuses_an_accelerator_run_that_never_measured_one(
+    tmp_path, monkeypatch, tiny_base
+):
+    """A cuda run without a device preflight is refused, not believed."""
+
+    def mutate(result, spec):
+        if spec.device != "cpu":
+            result.pop("device_preflight", None)
+
+    _install_fake_worker(monkeypatch, mutate)
+    with pytest.raises(RouterHealingBackendError, match="device preflight"):
+        RouterHealingExecutor().run(
+            _experiment(tiny_base, device="cuda"), _context(tmp_path)
+        )
+
+
+def test_the_parent_refuses_an_accelerator_run_whose_preflight_never_measured_memory(
+    tmp_path, monkeypatch, tiny_base
+):
+    """A preflight with a named device but no measured free memory is not one."""
+
+    def mutate(result, spec):
+        if spec.device != "cpu":
+            result["device_preflight"] = {
+                "device": "cuda",
+                "free_memory_bytes": None,
+                "step_cost_probe": {"measured": True, "step_seconds": 0.1},
+            }
+
+    _install_fake_worker(monkeypatch, mutate)
+    with pytest.raises(RouterHealingBackendError, match="did not measure free memory"):
+        RouterHealingExecutor().run(
+            _experiment(tiny_base, device="cuda"), _context(tmp_path)
+        )
+
+
+def test_the_evaluator_refuses_an_accelerator_arm_that_never_measured_memory(
+    tmp_path, monkeypatch, tiny_base, payloads
+):
+    """Peak VRAM {} on a cuda arm is the unmeasured-zero lie, refused."""
+
+    def factory(command, **kwargs):
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self, command, **process_kwargs):
+                spec_path = Path(command[command.index("--spec") + 1])
+                result_path = Path(command[command.index("--result") + 1])
+                spec = RouterHealingEvalSpec(
+                    **json.loads(spec_path.read_text(encoding="utf-8"))
+                )
+                result = _valid_eval_result(spec)
+                if spec.device != "cpu":
+                    result["resource_usage"]["peak_vram_gb_by_accelerator"] = {}
+                result_path.write_text(json.dumps(result))
+
+            def poll(self):
+                return 0
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        return FakeProcess(command, **kwargs)
+
+    monkeypatch.setattr("chowder.backends.router_healing.subprocess.Popen", factory)
+    experiment = _experiment(tiny_base)
+    artifact = _eval_artifact(experiment, payloads["changed"])
+    context = _context(tmp_path)
+    object.__setattr__(
+        context,
+        "resolved_config",
+        {
+            "backend": {
+                "type": ROUTER_HEALING_ENGINE,
+                "router_healing": {"batch_size": 2, "max_tokens": 4096, "probe_window": 2, "device": "cuda"},
+            }
+        },
+    )
+    with pytest.raises(RouterHealingEvaluationError, match="did not measure"):
+        RouterHealingEvaluator().evaluate(
+            experiment=experiment, artifact=artifact, context=context
+        )
+
+
+def test_a_cuda_run_reports_a_measured_preflight_and_peak_memory(tmp_path, tiny_base):
+    """P11 rung 2, the real device path: the tiny router trains on cuda.
+
+    Skips on GPU-less CI; executes where a real accelerator exists. The
+    preregistered rung is qualified by a real run through the CLI; this test
+    pins the worker-level contract that run depends on.
+    """
+    _require_real_model()
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():  # pragma: no cover - depends on the host
+        pytest.skip("no CUDA device on this host")
+    checkpoint_dir = tmp_path / "checkpoints"
+    spec = RouterHealingRunSpec(
+        base_model_dir=tiny_base["base_dir"],
+        base_content_sha256=tiny_base["content_sha256"],
+        corpus_path=tiny_base["corpus"],
+        corpus_sha256=tiny_base["corpus_sha256"],
+        output_dir=str(tmp_path / "out"),
+        max_steps=2,
+        learning_rate=0.01,
+        seq_len=16,
+        batch_size=1,
+        seed=0,
+        probe_window=1,
+        max_tokens=64,
+        device="cuda",
+        checkpoint_every=2,
+        checkpoint_dir=str(checkpoint_dir),
+    )
+    result = train(spec)
+
+    preflight = result["device_preflight"]
+    assert preflight["device"] == "cuda"
+    assert preflight["free_memory_bytes"] > 0
+    assert preflight["projected_oom"] is False
+    probe = preflight["step_cost_probe"]
+    assert probe["measured"] is True
+    assert probe["step_seconds"] > 0.0
+    assert probe["peak_step_bytes"] > 0
+    assert probe["projected_oom"] is False
+    assert probe["would_exceed_budget"] is False
+
+    usage = result["resource_usage"]
+    assert usage["active_accelerator_count"] == 1
+    assert usage["peak_vram_gb_by_accelerator"], "peak VRAM must be measured, not {}"
+    assert result["trainability"]["ok"] is True
+    assert result["frozen"]["ok"] is True
+    assert result["limits"]["stop_reason"] == "max_steps"

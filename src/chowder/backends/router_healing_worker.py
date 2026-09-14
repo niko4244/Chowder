@@ -27,8 +27,10 @@ Honesty rules this module implements
 ------------------------------------
 * A phase it did not measure is recorded as unavailable **with the reason** --
   never as ``0.0``.
-* CPU is the only qualified device. The frozen-tensor digest path is not
-  accelerator-safe yet, so a CUDA request is refused rather than half-done.
+* CPU and CUDA are qualified devices (cuda behind the P11 rung-2 preregistered
+  qualification). On a non-CPU device the worker first measures the device --
+  free memory, a real step-cost probe, projections -- and refuses before
+  optimizer step 1 when the run cannot fit its device or its declared budget.
 * Expert-row utilisation is reported only when it was actually collected; it is
   `not_reported` otherwise, because a made-up routing table is worse than none.
 * A run that hits a hard limit still writes its result, with the limit named.
@@ -67,6 +69,7 @@ from ..trainability import (
     utilization_by_expert,
 )
 from ..worker_env import chowder_source_identity
+from .device_preflight import GIB, project_device_memory, project_step_cost
 from .router_healing import QUALIFIED_DEVICES, RouterHealingRunSpec
 
 RESULT_KIND = "router_healing_worker_result.v1"
@@ -187,9 +190,9 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
     """Run one bounded router-training attempt and return its measured result."""
     if spec.device not in QUALIFIED_DEVICES:
         raise RuntimeError(
-            f"device {spec.device!r} is not qualified for router training; this worker "
-            f"is CPU-only until the frozen-tensor digest is device-safe. Qualified: "
-            f"{list(QUALIFIED_DEVICES)}"
+            f"device {spec.device!r} is not qualified for router training; qualified "
+            f"devices are {list(QUALIFIED_DEVICES)}. An unqualified device is refused "
+            "rather than attempted."
         )
     if Path(spec.base_model_dir).resolve() == Path(spec.output_dir).resolve():
         raise RuntimeError("output_dir cannot be the base model directory")
@@ -246,6 +249,78 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
     parameters = dict((str(name), param) for name, param in model.named_parameters())
     trainable_params = [parameters[name] for name in trainable_names]
     frozen_names = [name for name in parameters if name not in trainable_set]
+
+    # P11 rung 2: on a non-CPU device, measure the device before training.
+    # The probe is a real forward/backward/update whose state is fully restored
+    # afterwards, so the training loop starts pristine; its measured step cost
+    # doubles as the projection input for the declared wall budget.
+    device_preflight: dict[str, Any] | None = None
+    if device.type != "cpu":
+        free_before_probe = int(torch.cuda.mem_get_info(device)[0])
+        peak = {"bytes": 0}
+
+        def _sample_peak() -> None:
+            peak["bytes"] = max(peak["bytes"], int(torch.cuda.memory_allocated(device)))
+
+        probe_backup = {
+            name: parameters[name].detach().clone() for name in trainable_names
+        }
+        probe_optimizer = torch.optim.AdamW(trainable_params, lr=spec.learning_rate)
+        probe_timer = PhaseTimer(synchronize=synchronize)
+        with probe_timer:
+            synchronize()
+            probe_optimizer.zero_grad(set_to_none=True)
+            probe_batch = torch.tensor([blocks[0]], device=device)
+            probe_loss = model(input_ids=probe_batch, labels=probe_batch).loss
+            _sample_peak()
+            probe_loss.backward()
+            _sample_peak()
+            probe_optimizer.step()
+            _sample_peak()
+            synchronize()
+        probe_seconds = probe_timer.seconds
+        probe_optimizer.zero_grad(set_to_none=True)
+        del probe_optimizer, probe_loss, probe_batch
+        with torch.no_grad():
+            for name in trainable_names:
+                parameters[name].copy_(probe_backup[name])
+        del probe_backup
+
+        memory_projection = project_device_memory(
+            free_bytes=free_before_probe, peak_bytes=peak["bytes"]
+        )
+        if memory_projection["projected_oom"]:
+            raise RuntimeError(
+                "device preflight refuses before optimizer step 1: the measured step "
+                f"peak exceeds measured free memory -- {json.dumps(memory_projection)}. "
+                "A run that cannot fit its device is stopped before it starts, not "
+                "rescued by an OOM partway through."
+            )
+        step_projection = project_step_cost(
+            step_seconds=probe_seconds,
+            max_steps=spec.max_steps,
+            max_seconds=spec.max_seconds,
+        )
+        if step_projection["would_exceed_budget"]:
+            raise RuntimeError(
+                "device preflight refuses before optimizer step 1: the measured step "
+                f"cost cannot fit the declared wall budget -- {json.dumps(step_projection)}"
+            )
+        device_preflight = {
+            "device": str(device),
+            "free_memory_bytes": free_before_probe,
+            "step_cost_probe": {
+                "measured": True,
+                "step_seconds": probe_seconds,
+                "peak_step_bytes": peak["bytes"],
+                "projected_oom": memory_projection["projected_oom"],
+                "would_exceed_budget": step_projection["would_exceed_budget"],
+            },
+            "projected_oom": memory_projection["projected_oom"],
+        }
+        # Peak-VRAM accounting starts here: the probe's own allocations must
+        # not be counted as training's peak.
+        torch.cuda.reset_peak_memory_stats(device)
 
     optimizer = torch.optim.AdamW(trainable_params, lr=spec.learning_rate)
 
@@ -429,6 +504,11 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
     )
 
     losses = state["losses"]
+    peak_vram_gb: dict[str, float] = (
+        {}
+        if device.type == "cpu"
+        else {"0": round(torch.cuda.max_memory_allocated(device) / GIB, 6)}
+    )
     return {
         "kind": RESULT_KIND,
         "spec_digest": spec.digest(),
@@ -469,11 +549,12 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
             "blocks": len(blocks),
         },
         "source_identity": chowder_source_identity(),
+        "device_preflight": device_preflight,
         "resource_usage": {
             "wall_seconds": total_wall,
             "active_accelerator_count": accelerator_count,
             "visible_accelerator_count": accelerator_count,
-            "peak_vram_gb_by_accelerator": {},
+            "peak_vram_gb_by_accelerator": peak_vram_gb,
             "sampling_device": sampling_device(torch),
         },
         "model": {
