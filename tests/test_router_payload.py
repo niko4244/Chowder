@@ -6,6 +6,7 @@ corruption, so each test names the corruption it blocks.
 """
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
 
@@ -248,3 +249,75 @@ def test_publishing_writes_the_tensor_file_before_the_manifest(tmp_path):
     assert Path(artifact["manifest_path"]).is_file()
     assert Path(artifact["tensor_path"]).name == TENSOR_FILE
     assert Path(artifact["manifest_path"]).name == MANIFEST_FILE
+
+
+# --- the publication file-lock race -------------------------------------------
+
+
+def test_publication_retries_a_windows_sharing_violation(tmp_path, monkeypatch):
+    """A lost file-lock race after training must not discard the finished run.
+
+    The rung-3b 9B CUDA run measured this: all 12 steps trained, then the
+    safetensors serialization died with ``I/O error: The process cannot access
+    the file because it is being used by another process. (os error 32)`` -- a
+    background process (indexer/antivirus) held the temp file. Retrying an
+    identical serialization is safe: the manifest is written last, so no
+    published payload can be half-overwritten, and the refusal at the top of
+    ``save_router_payload`` still guards the whole directory.
+    """
+    from safetensors import SafetensorError
+    import safetensors.torch as st_torch
+
+    real_save = st_torch.save_file
+    calls = {"n": 0}
+
+    def flaky_save(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise SafetensorError(
+                "Error while serializing: I/O error: The process cannot access "
+                "the file because it is being used by another process. "
+                "(os error 32)"
+            )
+        return real_save(*args, **kwargs)
+
+    monkeypatch.setattr(st_torch, "save_file", flaky_save)
+    artifact = _publish(_model(), tmp_path, shift=1.0)
+
+    assert calls["n"] == 2, "the sharing violation must be retried exactly once here"
+    payload = load_router_payload(
+        artifact["payload_dir"], expected_base_content_sha256=_BASE_SHA
+    )
+    assert payload["manifest"]["steps_completed"] == 3
+
+
+def test_publication_does_not_retry_unrelated_errors(tmp_path, monkeypatch):
+    """Only a file-lock race is transient; everything else must fail loudly."""
+    from safetensors import SafetensorError
+    import safetensors.torch as st_torch
+
+    calls = {"n": 0}
+
+    def make_broken(error):
+        def broken(*args, **kwargs):
+            calls["n"] += 1
+            raise error
+
+        return broken
+
+    cases = [
+        OSError(errno.ENOSPC, "No space left on device"),
+        SafetensorError("Error while serializing: header too large"),
+    ]
+    for error in cases:
+        calls["n"] = 0
+        monkeypatch.setattr(st_torch, "save_file", make_broken(error))
+        with pytest.raises(type(error)):
+            save_router_payload(
+                _trained_values(_model(), shift=1.0),
+                tmp_path / "payload-other",
+                base_content_sha256=_BASE_SHA,
+                spec_digest=_SPEC_SHA,
+                steps_completed=3,
+            )
+        assert calls["n"] == 1, f"{type(error).__name__} must not be retried"

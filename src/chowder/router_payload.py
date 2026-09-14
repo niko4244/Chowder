@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -97,6 +98,40 @@ def _tensor_record(name: str, tensor: Any) -> dict[str, Any]:
     }
 
 
+def _save_file_retrying_sharing_violation(
+    tensors: Mapping[str, Any], path: str, *, attempts: int = 3, delay_seconds: float = 1.0
+) -> None:
+    """Serialize a safetensors file, retrying only a Windows sharing violation.
+
+    The rung-3b 9B CUDA run measured the failure this guards: all training
+    steps completed, then ``save_file`` died with ``I/O error: The process
+    cannot access the file because it is being used by another process
+    (os error 32)`` -- a background process (indexer or antivirus) held the
+    temp file serialization writes through. Losing a finished run to that race
+    is waste, not safety. The retry is safe by construction: serialization is
+    deterministic for the same tensors, the manifest is written only after the
+    tensor file survives, and the whole-directory refusal at the top of
+    ``save_router_payload`` still applies. Only the measured sharing-violation
+    message is retried; every other error propagates unchanged.
+    """
+    from safetensors import SafetensorError
+    from safetensors.torch import save_file
+
+    last: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            save_file(tensors, path)
+            return
+        except SafetensorError as error:
+            if "os error 32" not in str(error):
+                raise
+            last = error
+            if attempt + 1 < attempts:
+                time.sleep(delay_seconds)
+    assert last is not None
+    raise last
+
+
 def save_router_payload(
     named_tensors: Mapping[str, Any],
     out_dir: str | Path,
@@ -142,13 +177,11 @@ def save_router_payload(
 
     out.mkdir(parents=True, exist_ok=True)
     tensor_path = out / tensor_file
-    save_file(
-        {
-            name: tensor.detach().to(torch.float32).cpu().contiguous()
-            for name, tensor in ordered.items()
-        },
-        str(tensor_path),
-    )
+    serialized = {
+        name: tensor.detach().to(torch.float32).cpu().contiguous()
+        for name, tensor in ordered.items()
+    }
+    _save_file_retrying_sharing_violation(serialized, str(tensor_path))
     tensor_sha = sha256_file(tensor_path)
 
     manifest = {
