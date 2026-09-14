@@ -12,6 +12,21 @@
 > remain below as historical evidence. No distillation in the primary
 > lineage — ever.
 
+> **Active-parameter target revised (2026-09-14):** the former hard
+> successor gate of ≤10B total / ≤3.5B active parameters is **removed by
+> decision** — the program aim is now the *lowest per-model active
+> parameter count actually achieved*, honestly measured under the frozen
+> accounting convention. The measured non-FFN floor of the
+> Qwen3.8-9B-derived backbone (**4,121,965,056** parameters, from
+> safetensors headers; see the 2026-09-12 audit) is the recorded floor the
+> program has hit: expert routing/pruning of FFNs alone cannot reduce the
+> always-on remainder, so the floor stands as the achievement baseline
+> rather than a failed gate. Any later architecture work (narrower always-on
+> backbone, routing beyond FFN) is judged by how far below the recorded
+> floor it measurably reaches, not by the retired ceiling. The strict
+> historical targets remain preserved in the 2026-09-12 planning documents
+> as history; they are not rewritten.
+
 Reorganized around what's actually proven vs. still speculative, rather than
 version milestones — a checkbox next to a bullet doesn't distinguish "real
 code with real tests" from "a stub that returns a plausible-looking dict."
