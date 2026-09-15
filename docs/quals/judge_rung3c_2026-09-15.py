@@ -175,7 +175,11 @@ def check_t3_measured_preflight(train: list, evals: list, verdict: Verdict) -> N
             problems.append(f"step_seconds={seconds!r} against a {STEP_COST_CEILING_S}s ceiling")
         if step.get("would_exceed_budget") is not False:
             problems.append("step-cost projection would exceed the wall budget")
-    load = preflight.get("load_budget")
+    # The train worker emits load_budget top-level (the same convention as the
+    # eval workers below and the production parent's re-check); reading it
+    # inside device_preflight was an instrument location bug that refused the
+    # real 3c run's measured block. Same fields, right place.
+    load = train[0][1].get("load_budget")
     if not isinstance(load, dict) or load.get("measured") is not True:
         problems.append("load_budget missing or unmeasured (the rung-3c head must emit it)")
     else:
