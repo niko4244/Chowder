@@ -69,7 +69,13 @@ from ..trainability import (
     utilization_by_expert,
 )
 from ..worker_env import chowder_source_identity
-from .device_preflight import GIB, project_device_memory, project_load_cost, project_step_cost
+from .device_preflight import (
+    GIB,
+    project_device_memory,
+    project_load_cost,
+    project_run_ceiling,
+    project_step_cost,
+)
 from .router_healing import QUALIFIED_DEVICES, RouterHealingRunSpec
 from .router_healing_load import install_transient_expert_forward, load_with_policy
 
@@ -206,6 +212,20 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
     accelerator_count = 0 if device.type == "cpu" else 1
     started = time.perf_counter()
 
+    # A GPU-hour ceiling is measured in attributable accelerator hours; a CPU
+    # worker attributes zero, so any projection against it passes vacuously and
+    # the budget exists only on paper. A declared ceiling this worker cannot
+    # measure is refused outright -- a budget that cannot be enforced is not a
+    # budget, and pretending otherwise is how rung-3b's ceiling was exceeded.
+    if spec.max_gpu_hours is not None and device.type == "cpu":
+        raise RuntimeError(
+            "device preflight refuses before training: the declared run ceiling cannot "
+            "be enforced by a CPU worker -- GPU-hour ceilings are measured in "
+            "attributable accelerator hours and this worker attributes zero, so no "
+            "projection against it can refuse. Re-declare the ceiling on a CUDA run; "
+            "a budget that cannot be measured here is refused, not silently unbudgeted."
+        )
+
     base_identity = resolve_base_identity(spec.base_model_dir)
     if base_identity["content_sha256"] != spec.base_content_sha256:
         raise RuntimeError(
@@ -285,6 +305,7 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
     # afterwards, so the training loop starts pristine; its measured step cost
     # doubles as the projection input for the declared wall budget.
     device_preflight: dict[str, Any] | None = None
+    probe_seconds = 0.0
     if device.type != "cpu":
         free_before_probe = int(torch.cuda.mem_get_info(device)[0])
         peak = {"bytes": 0}
@@ -362,6 +383,34 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         # Peak-VRAM accounting starts here: the probe's own allocations must
         # not be counted as training's peak.
         torch.cuda.reset_peak_memory_stats(device)
+
+    # The rung-3c aggregate ceiling: the load and step projections above each
+    # see one category, and neither can see their sum -- a run whose parts each
+    # fit while the whole exceeds the preregistered ceiling is exactly the
+    # exceedance rung-3b recorded after the fact. Project the whole run from
+    # its measured inputs and refuse before optimizer step 1. Generations are
+    # scored by the evaluation workers, not here; this worker's honest input
+    # for that category is zero, and the ceiling decomposition still accounts
+    # for it. Unreachable with a ceiling on CPU: the vacuous-ceiling refusal
+    # above already stopped the run.
+    run_ceiling: dict[str, Any] | None = None
+    if spec.max_gpu_hours is not None:
+        run_ceiling = project_run_ceiling(
+            load_seconds=model_load.seconds or 0.0,
+            step_seconds=probe_seconds,
+            max_steps=spec.max_steps,
+            eval_generation_seconds=0.0,
+            accelerator_count=accelerator_count,
+            max_gpu_hours=spec.max_gpu_hours,
+            sub_budget_gpu_hours=spec.sub_budget_gpu_hours,
+        )
+        if run_ceiling["would_exceed_ceiling"]:
+            raise RuntimeError(
+                "device preflight refuses before optimizer step 1: the measured load "
+                f"plus the projected step cost exceeds the declared run ceiling -- "
+                f"{json.dumps(run_ceiling)}. The preregistration's whole-run budget "
+                "is refused before compute, not exceeded and footnoted."
+            )
 
     optimizer = torch.optim.AdamW(trainable_params, lr=spec.learning_rate)
 
@@ -593,6 +642,7 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         "source_identity": chowder_source_identity(),
         "device_preflight": device_preflight,
         "load_budget": load_budget,
+        "run_ceiling": run_ceiling,
         "resource_usage": {
             "wall_seconds": total_wall,
             "active_accelerator_count": accelerator_count,
