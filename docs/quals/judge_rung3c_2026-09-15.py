@@ -7,6 +7,10 @@ Scores the run's durable artifacts against each threshold of
 SQLite read-only URIs, hashes corpus files without writing anything, and
 never mutates the run directory.
 
+The shared machinery (verdict table, discovery, read-only registry,
+strict epistemics) lives in ``quals_harness.py`` beside this script; the
+thresholds and pins below are run-specific and frozen with the prereg.
+
 Usage::
 
     python judge_rung3c_2026-09-15.py <run-root>
@@ -22,12 +26,29 @@ only when every threshold is PASS; any FAIL or UNKNOWN refuses certification.
 
 from __future__ import annotations
 
-import hashlib
-import json
-import math
 import sqlite3
 import sys
 from pathlib import Path
+
+from quals_harness import (
+    FAIL,
+    INFO,
+    PASS,
+    UNKNOWN,
+    TERMINAL_STATUSES,
+    Verdict,
+    discover,
+    finite_number,
+    load_json,
+    load_json_safe,
+    open_registry_readonly,
+    phase,
+    report,
+    sha256_file,
+)
+
+# The check bodies read ``_phase(result, name)``; same seam, shared implementation.
+_phase = phase
 
 # ---- Pins from the preregistration (fixed before the run) -------------------
 
@@ -70,76 +91,6 @@ REPRO_TOLERANCE = 1e-3
 TERMINAL_STATUSES = {"passed", "failed", "rejected", "withdrawn"}
 
 PASS, FAIL, UNKNOWN = "PASS", "FAIL", "UNKNOWN"
-
-
-class Verdict:
-    def __init__(self) -> None:
-        self.rows: list[tuple[str, str, str, str]] = []
-
-    def add(self, threshold: str, name: str, status: str, detail: str) -> None:
-        self.rows.append((threshold, name, status, detail))
-
-    def finalize_status(self) -> str:
-        statuses = {row[2] for row in self.rows}
-        if FAIL in statuses:
-            return "REFUSED — at least one threshold failed"
-        if UNKNOWN in statuses:
-            return "NOT CERTIFIED — at least one threshold could not be decided from artifacts"
-        return "QUALIFIED — every threshold passes on measured evidence"
-
-    def render(self) -> str:
-        lines = ["threshold  check                                          verdict  detail"]
-        for threshold, name, status, detail in self.rows:
-            lines.append(f"{threshold:<10} {name:<46} {status:<8} {detail}")
-        return "\n".join(lines)
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def load_json(path: Path):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-
-
-def finite_number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
-
-
-def discover(run_root: Path):
-    """Locate the durable artifacts without writing anything."""
-    registry_path = run_root / "runs.db"
-    runs_dir = run_root / ".chowder" / "runs"
-    evals_dir = run_root / ".chowder" / "evals"
-    train_results: list[tuple[Path, dict]] = []
-    eval_results: list[tuple[Path, dict]] = []
-    if runs_dir.is_dir():
-        for result_path in sorted(runs_dir.glob("*/worker-result.json")):
-            payload = load_json(result_path)
-            if payload is not None:
-                train_results.append((result_path, payload))
-    if evals_dir.is_dir():
-        for result_path in sorted(evals_dir.glob("*/worker-result.json")):
-            payload = load_json(result_path)
-            if payload is not None:
-                eval_results.append((result_path, payload))
-    return registry_path, train_results, eval_results
-
-
-def open_registry_readonly(path: Path):
-    if not path.is_file():
-        return None
-    try:
-        return sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
-    except sqlite3.Error:
-        return None
 
 
 # ---- Threshold checks -------------------------------------------------------
@@ -396,13 +347,6 @@ def check_t6_paired_gate_contract(
                 "one measured load, both generations measured, baseline row completed from paired evidence")
 
 
-def load_json_safe(text):
-    try:
-        return json.loads(text) if text else None
-    except ValueError:
-        return None
-
-
 def check_t7_accounting(
     train: list, evals: list, registry, verdict: Verdict
 ) -> None:
@@ -567,9 +511,6 @@ def main(argv: list[str]) -> int:
         print(__doc__)
         return 2
     run_root = Path(argv[1]).resolve()
-    if not run_root.is_dir():
-        print(f"run root does not exist: {run_root}")
-        return 2
     verdict = Verdict()
     registry_path, train, evals = discover(run_root)
     registry = open_registry_readonly(registry_path)
@@ -582,14 +523,7 @@ def main(argv: list[str]) -> int:
     check_t7_accounting(train, evals, registry, verdict)
     check_t8_identity_chain(run_root, train, evals, verdict)
     check_reproduction(evals, verdict)
-    print(f"run root: {run_root}")
-    print(f"training worker results: {len(train)}   evaluation worker results: {len(evals)}")
-    print()
-    print(verdict.render())
-    print()
-    print(f"VERDICT: {verdict.finalize_status()}")
-    statuses = {row[2] for row in verdict.rows if row[0] != "INFO"}
-    return 0 if statuses <= {PASS} else 1
+    return report(run_root, verdict, train, evals, argv_len_ok=True)
 
 
 if __name__ == "__main__":
