@@ -126,6 +126,7 @@ class RouterHealingRunSpec:
     checkpoint_dir: str | None = None
     resume_from: str | None = None
     max_seconds: float | None = None
+    max_load_seconds: float | None = None
     checkpoint_every: int = 0
     scheduler: str = "constant"
     warmup_steps: int = 0
@@ -176,6 +177,12 @@ class RouterHealingRunSpec:
             not math.isfinite(float(self.max_seconds)) or self.max_seconds <= 0
         ):
             raise ValueError("router healing spec max_seconds must be finite and positive when set")
+        if self.max_load_seconds is not None and (
+            not math.isfinite(float(self.max_load_seconds)) or self.max_load_seconds <= 0
+        ):
+            raise ValueError(
+                "router healing spec max_load_seconds must be finite and positive when set"
+            )
         if self.scheduler not in _ALLOWED_SCHEDULERS:
             raise ValueError(
                 f"unsupported router healing scheduler {self.scheduler!r}; expected one of "
@@ -279,6 +286,7 @@ class RouterHealingExecutor:
             "seed",
             "device",
             "load_policy",
+            "max_load_seconds",
         ):
             if key in research:
                 settings[key] = research[key]
@@ -356,6 +364,11 @@ class RouterHealingExecutor:
             device=str(settings.get("device", "cpu")),
             detailed_timing=bool(settings.get("detailed_timing", False)),
             load_policy=str(settings.get("load_policy", "fp32-resident")),
+            max_load_seconds=(
+                float(settings["max_load_seconds"])
+                if settings.get("max_load_seconds") is not None
+                else None
+            ),
         )
 
     # -- TrainingExecutor --------------------------------------------------
@@ -589,6 +602,41 @@ class RouterHealingExecutor:
                 raise RouterHealingBackendError(
                     "the accelerator worker's device preflight did not measure free memory"
                 )
+        # A declared load ceiling demands a measured, honored load budget -- on
+        # every device, because the ceiling is part of the frozen spec. A
+        # worker that reports success while over its ceiling is not believed,
+        # and a worker that reports no block under a declared ceiling is
+        # unknown, not zero.
+        if spec.max_load_seconds is not None:
+            block = result.get("load_budget")
+            if not isinstance(block, Mapping) or not block.get("measured"):
+                raise RouterHealingBackendError(
+                    "the worker did not measure its load cost although the spec declared "
+                    "a load budget; an unmeasured load is unknown, not zero"
+                )
+            try:
+                measured_load = float(block["load_seconds"])
+                declared_load = float(block["max_load_seconds"])
+            except (TypeError, ValueError, KeyError) as exc:
+                raise RouterHealingBackendError(
+                    f"the worker's load-budget block is unreadable: {block!r}"
+                ) from exc
+            if not math.isfinite(measured_load) or measured_load < 0:
+                raise RouterHealingBackendError(
+                    f"the worker's measured load is not a finite duration: {block!r}"
+                )
+            if declared_load != float(spec.max_load_seconds):
+                raise RouterHealingBackendError(
+                    "the worker's load-budget block names a different ceiling than the "
+                    f"spec declared: block={declared_load!r}, spec={spec.max_load_seconds!r}"
+                )
+            if measured_load > declared_load:
+                raise RouterHealingBackendError(
+                    "the worker reports success while over its load budget: measured "
+                    f"{measured_load!r}s against a declared ceiling of {declared_load!r}s. "
+                    "A run that cannot honor its declared load cost is refused, not "
+                    "footnoted."
+                )
         usage = ResourceUsage.from_wall_time(
             wall_seconds=float(raw_usage.get("wall_seconds", wall_seconds)),
             active_accelerator_count=int(raw_usage.get("active_accelerator_count", 0)),
@@ -676,6 +724,7 @@ class RouterHealingEvalSpec:
     device: str = "cpu"
     detailed_timing: bool = False
     load_policy: str = "fp32-resident"
+    max_load_seconds: float | None = None
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -728,6 +777,13 @@ class RouterHealingEvalSpec:
                 f"unknown load policy {self.load_policy!r}; qualified policies are "
                 f"{list(LOAD_POLICIES)}. The base arm and the candidate arm must load "
                 "under the same declared contract."
+            )
+        if self.max_load_seconds is not None and (
+            not math.isfinite(float(self.max_load_seconds)) or self.max_load_seconds <= 0
+        ):
+            raise ValueError(
+                "router healing eval spec max_load_seconds must be finite and positive "
+                "when set"
             )
 
     @property
@@ -879,6 +935,13 @@ class RouterHealingEvaluator:
             # the base arm silently loaded fp32-resident and hit the measured
             # WDDM-spill failure the amendment exists to prevent.)
             load_policy=str(settings.get("load_policy", "fp32-resident")),
+            # Same reasoning for the load ceiling: both arms must honor the
+            # same declared budget, or one arm's cost is unaccounted for.
+            max_load_seconds=(
+                float(settings["max_load_seconds"])
+                if settings.get("max_load_seconds") is not None
+                else None
+            ),
         )
 
     def _spec_for(
@@ -933,6 +996,12 @@ class RouterHealingEvaluator:
             detailed_timing=bool(settings.get("eval_detailed_timing", False)),
             load_policy=str(
                 research.get("load_policy", settings.get("load_policy", "fp32-resident"))
+            ),
+            max_load_seconds=(
+                float(value)
+                if (value := research.get("max_load_seconds", settings.get("max_load_seconds")))
+                is not None
+                else None
             ),
         )
 
@@ -1158,6 +1227,38 @@ class RouterHealingEvaluator:
                 raise RouterHealingEvaluationError(
                     "the accelerator evaluation worker did not measure peak VRAM: an "
                     "empty map on a cuda arm is an unmeasured claim, refused"
+                )
+        # The load ceiling binds both arms on any device: an arm under a
+        # declared ceiling must measure its load and honor it, or its cost is
+        # unknown relative to what its preregistration accounted for.
+        if spec.max_load_seconds is not None:
+            block = result.get("load_budget")
+            if not isinstance(block, Mapping) or not block.get("measured"):
+                raise RouterHealingEvaluationError(
+                    "the evaluation worker did not measure its load although the eval spec "
+                    "declared a load budget; an unmeasured load is unknown, not zero"
+                )
+            try:
+                measured_load = float(block["load_seconds"])
+                declared_load = float(block["max_load_seconds"])
+            except (TypeError, ValueError, KeyError) as exc:
+                raise RouterHealingEvaluationError(
+                    f"the evaluation worker's load-budget block is unreadable: {block!r}"
+                ) from exc
+            if not math.isfinite(measured_load) or measured_load < 0:
+                raise RouterHealingEvaluationError(
+                    f"the evaluation worker's measured load is not finite: {block!r}"
+                )
+            if declared_load != float(spec.max_load_seconds):
+                raise RouterHealingEvaluationError(
+                    "the evaluation worker's load budget names a different ceiling than "
+                    f"the eval spec declared: block={declared_load!r}, "
+                    f"spec={spec.max_load_seconds!r}"
+                )
+            if measured_load > declared_load:
+                raise RouterHealingEvaluationError(
+                    "the evaluation arm overran its declared load budget: measured "
+                    f"{measured_load!r}s against a ceiling of {declared_load!r}s"
                 )
 
         control = result.get("application_control")

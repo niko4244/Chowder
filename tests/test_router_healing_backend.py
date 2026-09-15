@@ -507,6 +507,112 @@ def test_an_unmeasured_required_phase_cannot_qualify(tmp_path, monkeypatch, tiny
         RouterHealingExecutor().run(_experiment(tiny_base), _context(tmp_path))
 
 
+def test_a_run_overrunning_its_declared_load_budget_is_refused(
+    tmp_path, tiny_base
+):
+    """The worker must refuse a load that busts its declared ceiling.
+
+    The exceedance must surface in the worker's own refusal -- not be carried
+    silently into a successful result the parent has to catch after the fact.
+    Real worker path: an impossible one-tenth-millisecond ceiling cannot hold.
+    """
+    spec = RouterHealingRunSpec(
+        base_model_dir=tiny_base["base_dir"],
+        base_content_sha256=tiny_base["content_sha256"],
+        corpus_path=tiny_base["corpus"],
+        corpus_sha256=tiny_base["corpus_sha256"],
+        output_dir=str(tmp_path / "out"),
+        max_steps=1,
+        learning_rate=0.01,
+        seq_len=16,
+        batch_size=1,
+        seed=0,
+        probe_window=1,
+        max_tokens=32,
+        max_load_seconds=0.0001,
+    )
+    with pytest.raises(RuntimeError, match="declared budget"):
+        train(spec)
+
+
+def test_a_worker_that_reports_success_while_over_its_load_budget_is_refused(
+    tmp_path, monkeypatch, tiny_base
+):
+    """The parent re-checks the budget; a lying worker result is not believed."""
+
+    def mutate(result, spec):
+        if spec.max_load_seconds is not None:
+            result["load_budget"] = {
+                "measured": True,
+                "load_seconds": spec.max_load_seconds * 100.0,
+                "max_load_seconds": spec.max_load_seconds,
+                "would_exceed_load_budget": False,  # the lie
+                "load_gpu_hours": 0.5,
+                "max_load_gpu_hours": spec.max_load_seconds / 3600.0,
+            }
+
+    _install_fake_worker(monkeypatch, mutate)
+    with pytest.raises(RouterHealingBackendError, match="load budget"):
+        RouterHealingExecutor().run(
+            _experiment(tiny_base, max_load_seconds=100.0), _context(tmp_path)
+        )
+
+
+def test_a_worker_that_never_measured_its_load_cost_is_refused_when_budgeted(
+    tmp_path, monkeypatch, tiny_base
+):
+    """A declared ceiling demands a measured load; absent is unknown, not zero."""
+
+    def mutate(result, spec):
+        if spec.max_load_seconds is not None:
+            result["load_budget"] = None
+
+    _install_fake_worker(monkeypatch, mutate)
+    with pytest.raises(RouterHealingBackendError, match="did not measure its load"):
+        RouterHealingExecutor().run(
+            _experiment(tiny_base, max_load_seconds=100.0), _context(tmp_path)
+        )
+
+
+def test_the_worker_reports_a_measured_load_budget_block(tmp_path, tiny_base):
+    """The real worker path: load_budget is present and its load is measured.
+
+    Runs in the real-ML job (it builds a real tiny base); on any device it
+    proves the block exists, is measured, and converts to GPU-hours.
+    """
+    _require_real_model()
+    spec = RouterHealingRunSpec(
+        base_model_dir=tiny_base["base_dir"],
+        base_content_sha256=tiny_base["content_sha256"],
+        corpus_path=tiny_base["corpus"],
+        corpus_sha256=tiny_base["corpus_sha256"],
+        output_dir=str(tmp_path / "out"),
+        max_steps=1,
+        learning_rate=0.01,
+        seq_len=16,
+        batch_size=1,
+        seed=0,
+        probe_window=1,
+        max_tokens=32,
+        max_load_seconds=3600.0,
+    )
+    result = train(spec)
+    block = result["load_budget"]
+    accelerators = int(result["resource_usage"]["active_accelerator_count"])
+    assert block["measured"] is True
+    assert block["load_seconds"] > 0.0
+    assert block["max_load_seconds"] == 3600.0
+    assert block["would_exceed_load_budget"] is False
+    # The conversion is device-relative: a CPU load contributes zero
+    # accelerator hours, a GPU load its full measured duration.
+    assert block["load_gpu_hours"] == pytest.approx(
+        block["load_seconds"] * accelerators / 3600.0
+    )
+    # The declared ceiling converts under the same rule, so a prereg can
+    # budget loads in GPU-hours and the projection checks the same number.
+    assert block["max_load_gpu_hours"] == pytest.approx(3600.0 * accelerators / 3600.0)
+
+
 def test_a_base_that_does_not_match_the_frozen_manifest_is_refused(tmp_path, tiny_base):
     experiment = _experiment(tiny_base, base_manifest_sha256="f" * 64)
     with pytest.raises(RouterHealingBackendError, match="does not match the manifest"):
@@ -1303,6 +1409,47 @@ def test_the_memory_projection_refuses_a_step_peak_above_the_measured_free_memor
     assert overflowing["projected_oom"] is True
 
 
+def test_the_load_projection_budgets_the_measured_load_against_the_declared_ceiling():
+    """Model loads are a first-class preflight phase with their own ceiling.
+
+    The rung-3b CUDA run recorded an exceedance nobody preregistered for:
+    three on-device model loads at 12.8 s each doubled the measured GPU-hours
+    over a ceiling derived from workload-only time. The projection must make
+    load cost a declared, refused-when-overrun quantity -- and convert it to
+    GPU-hours, the unit a preregistration's ceiling is written in.
+    """
+    from chowder.backends.router_healing_worker import project_load_cost
+
+    fitting = project_load_cost(load_seconds=12.8, max_load_seconds=30.0, accelerator_count=1)
+    assert fitting["measured"] is True
+    assert fitting["load_seconds"] == pytest.approx(12.8)
+    assert fitting["max_load_seconds"] == pytest.approx(30.0)
+    assert fitting["would_exceed_load_budget"] is False
+    assert fitting["load_gpu_hours"] == pytest.approx(12.8 / 3600.0)
+
+    overflowing = project_load_cost(load_seconds=12.8, max_load_seconds=10.0, accelerator_count=1)
+    assert overflowing["would_exceed_load_budget"] is True
+
+    # The declared ceiling itself converts, so a prereg can state its load
+    # budget in GPU-hours and have the projection check the same number.
+    assert fitting["max_load_gpu_hours"] == pytest.approx(30.0 / 3600.0)
+
+    # An undeclared ceiling cannot be exceeded and must not pretend otherwise.
+    undeclared = project_load_cost(load_seconds=12.8, max_load_seconds=None, accelerator_count=1)
+    assert undeclared["would_exceed_load_budget"] is False
+    assert undeclared["max_load_seconds"] is None
+
+
+def test_the_load_projection_refuses_non_finite_loads():
+    """A load time that is not a finite non-negative number is not a measurement."""
+    from chowder.backends.router_healing_worker import project_load_cost
+
+    with pytest.raises(ValueError, match="finite"):
+        project_load_cost(load_seconds=float("nan"), max_load_seconds=10.0, accelerator_count=1)
+    with pytest.raises(ValueError, match="non-negative"):
+        project_load_cost(load_seconds=-1.0, max_load_seconds=10.0, accelerator_count=1)
+
+
 def test_the_memory_projection_compares_incremental_step_demand_to_free_memory():
     """The step peak already contains the resident model; free memory does too.
 
@@ -1482,6 +1629,32 @@ def test_a_cuda_run_reports_a_measured_preflight_and_peak_memory(tmp_path, tiny_
 
 
 # --- P11 rung-3 amendment: the bf16-offload-transient load policy -------------
+
+
+def test_the_run_spec_accepts_a_declared_load_budget():
+    """max_load_seconds is an optional declared ceiling on the model-load phase."""
+    assert RouterHealingRunSpec(**_spec_kwargs()).max_load_seconds is None
+    spec = RouterHealingRunSpec(**_spec_kwargs(max_load_seconds=120.0))
+    assert spec.max_load_seconds == 120.0
+
+
+def test_the_run_spec_refuses_a_non_positive_or_non_finite_load_budget():
+    with pytest.raises(ValueError, match="max_load_seconds"):
+        RouterHealingRunSpec(**_spec_kwargs(max_load_seconds=0.0))
+    with pytest.raises(ValueError, match="max_load_seconds"):
+        RouterHealingRunSpec(**_spec_kwargs(max_load_seconds=-5.0))
+    with pytest.raises(ValueError, match="max_load_seconds"):
+        RouterHealingRunSpec(**_spec_kwargs(max_load_seconds=float("inf")))
+
+
+def test_the_load_budget_is_spec_bound_but_recipe_neutral():
+    """The ceiling changes the spec a worker must honor, not the science it runs."""
+    base = RouterHealingRunSpec(**_spec_kwargs())
+    budgeted = RouterHealingRunSpec(**_spec_kwargs(max_load_seconds=90.0))
+    assert base.digest() != budgeted.digest(), "the spec digest must bind the ceiling"
+    assert base.recipe_digest() == budgeted.recipe_digest(), (
+        "a scheduling ceiling is not a recipe change"
+    )
 
 
 def test_the_run_spec_refuses_an_unknown_load_policy():

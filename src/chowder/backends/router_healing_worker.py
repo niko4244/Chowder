@@ -69,7 +69,7 @@ from ..trainability import (
     utilization_by_expert,
 )
 from ..worker_env import chowder_source_identity
-from .device_preflight import GIB, project_device_memory, project_step_cost
+from .device_preflight import GIB, project_device_memory, project_load_cost, project_step_cost
 from .router_healing import QUALIFIED_DEVICES, RouterHealingRunSpec
 from .router_healing_load import install_transient_expert_forward, load_with_policy
 
@@ -222,6 +222,24 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         )
         model.train()
     load_policy_report: dict[str, Any] = dict(load_report)
+
+    # P11 rung-3b successor: the model load is a budgeted preflight phase, not
+    # a footnote discovered in the ledger after the ceiling was already blown.
+    # The load's measured cost is projected against the spec's declared ceiling
+    # before any compute runs; an overrun refuses exactly where the other
+    # projections do.
+    load_budget = project_load_cost(
+        load_seconds=model_load.seconds or 0.0,
+        max_load_seconds=spec.max_load_seconds,
+        accelerator_count=accelerator_count,
+    )
+    if load_budget["would_exceed_load_budget"]:
+        raise RuntimeError(
+            "device preflight refuses before training: the measured model load "
+            f"exceeded its declared budget -- {json.dumps(load_budget)}. Load cost is "
+            "device time like any other; a ceiling that cannot hold must be refused "
+            "before compute, not exceeded and footnoted."
+        )
 
     freeze_summary = freeze_for_router_healing(model, suffixes=ROUTER_ONLY_SUFFIXES)
     scope = assert_router_only_scope(freeze_summary.trainable_param_names, model)
@@ -574,6 +592,7 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         },
         "source_identity": chowder_source_identity(),
         "device_preflight": device_preflight,
+        "load_budget": load_budget,
         "resource_usage": {
             "wall_seconds": total_wall,
             "active_accelerator_count": accelerator_count,

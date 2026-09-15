@@ -16,6 +16,7 @@ preflight, it is a guess wearing one.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 GIB = 1024.0**3
@@ -76,4 +77,49 @@ def project_step_cost(
         "projected_wall_seconds": projected,
         "max_seconds": budget,
         "would_exceed_budget": projected > budget,
+    }
+
+
+def project_load_cost(
+    *, load_seconds: float, max_load_seconds: float | None, accelerator_count: int
+) -> dict[str, Any]:
+    """The third preflight projection: the model load, budgeted like the steps.
+
+    The rung-3b CUDA run recorded a GPU-hour exceedance nobody preregistered
+    for: the ceiling was derived from workload-only time, and three on-device
+    model loads at 12.8 s each doubled the measured total. A load is a real
+    device phase with a measurable cost; it belongs in the same refused-when-
+    overrun arithmetic as memory and step cost, not in a post-hoc footnote.
+
+    ``max_load_seconds`` is the *declared* ceiling, frozen into the spec before
+    the run; ``load_seconds`` is the measurement. ``load_gpu_hours`` reports
+    the load's attributable accelerator hours -- the unit a preregistration's
+    ceiling is written in -- so budgeting loads is arithmetic, not archaeology.
+    An undeclared ceiling cannot be exceeded and says so rather than guessing.
+    """
+    load = float(load_seconds)
+    if not math.isfinite(load) or load < 0:
+        raise ValueError("load_seconds must be a finite non-negative number")
+    accelerators = int(accelerator_count)
+    if accelerators < 0:
+        raise ValueError("accelerator_count must be non-negative")
+    if max_load_seconds is None:
+        return {
+            "measured": True,
+            "load_seconds": load,
+            "max_load_seconds": None,
+            "max_load_gpu_hours": None,
+            "load_gpu_hours": (load * accelerators) / 3600.0,
+            "would_exceed_load_budget": False,
+        }
+    ceiling = float(max_load_seconds)
+    if not math.isfinite(ceiling) or ceiling <= 0:
+        raise ValueError("max_load_seconds must be a finite positive number when set")
+    return {
+        "measured": True,
+        "load_seconds": load,
+        "max_load_seconds": ceiling,
+        "max_load_gpu_hours": (ceiling * accelerators) / 3600.0,
+        "load_gpu_hours": (load * accelerators) / 3600.0,
+        "would_exceed_load_budget": load > ceiling,
     }

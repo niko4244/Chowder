@@ -55,7 +55,7 @@ from ..lifecycle import (
 from ..router_payload import apply_router_payload, load_router_payload, payload_matches_model
 from ..trainability import _tensor_digest, utilization_by_expert
 from ..worker_env import chowder_source_identity
-from .device_preflight import GIB
+from .device_preflight import GIB, project_load_cost
 from .router_healing import EVAL_WORKER_RESULT_KIND, QUALIFIED_DEVICES, RouterHealingEvalSpec
 from .router_healing_load import load_with_policy
 
@@ -306,6 +306,20 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
         model.eval()
     load_policy_report: dict[str, Any] = dict(load_report)
 
+    # The load is budgeted here exactly as the training worker budgets it: a
+    # ceiling declared in the spec must hold before a score is produced, or
+    # the arm's cost exceeds what its preregistration accounted for.
+    load_budget = project_load_cost(
+        load_seconds=model_load.seconds or 0.0,
+        max_load_seconds=spec.max_load_seconds,
+        accelerator_count=accelerator_count,
+    )
+    if load_budget["would_exceed_load_budget"]:
+        raise RuntimeError(
+            "the evaluation worker refuses before scoring: the measured model load "
+            f"exceeded its declared budget -- {json.dumps(load_budget)}"
+        )
+
     text = _read_holdout(spec)
     encoded = tokenizer(text, add_special_tokens=False)["input_ids"]
     blocks = _pack_blocks(list(encoded), spec.seq_len)
@@ -496,6 +510,7 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
             "seq_len": spec.seq_len,
         },        "source_identity": chowder_source_identity(),
         "device_preflight": device_preflight,
+        "load_budget": load_budget,
         "resource_usage": {
             "wall_seconds": total_wall,
             "active_accelerator_count": accelerator_count,
