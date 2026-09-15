@@ -526,20 +526,28 @@ def _paired_baseline_completer(
                 "resident pair: the deferral decision and the actual evaluation "
                 "disagree, so the baseline is not measured"
             )
-        gpu_hours = float(candidate_outcome.evaluation.gpu_hours)
+        # Charge honesty (rung-3c reconciliation): the resident pair's wall
+        # time was already billed to the candidate row that ran the eval.
+        # Re-charging it to the baseline row double-counts the same seconds
+        # (0.0585 recorded against 0.0167 device-truth on rung 3c). The
+        # baseline row is a measurement pointer: gpu_hours 0.0, with the
+        # shared charge named and the owner row cited.
+        shared_wall_gpu_hours = float(candidate_outcome.evaluation.gpu_hours)
         registry.update_experiment_status("baseline", ExperimentStatus.PASSED.value)
         result = ExperimentResult(
             experiment_id="baseline",
             metrics={"holdout_loss": float(base_loss)},
-            gpu_hours=gpu_hours,
+            gpu_hours=0.0,
             artifact_ref=None,
             evidence={
                 "baseline_source": "paired-candidate-evaluation",
                 "base_holdout_loss": float(base_loss),
                 "compute": {
                     "baseline_source": "paired-candidate-evaluation",
-                    "total_gpu_hours": gpu_hours,
+                    "total_gpu_hours": 0.0,
                     "model_loads": 1,
+                    "shared_wall_gpu_hours": shared_wall_gpu_hours,
+                    "charged_to": candidate_outcome.experiment_id,
                 },
             },
         )

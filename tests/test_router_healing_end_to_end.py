@@ -666,3 +666,52 @@ def test_a_paired_project_measures_the_baseline_inside_the_candidate_evaluation(
     baseline_compute = baseline_row.evidence["compute"]
     assert baseline_compute["baseline_source"] == "paired-candidate-evaluation"
     assert baseline_compute["model_loads"] == 1
+
+
+def test_a_paired_baseline_row_does_not_recharge_the_shared_resident_wall(
+    tmp_path, tiny_router_project
+):
+    """The paired baseline row is a measurement pointer, not a second charge.
+
+    Rung 3c's ledger double-charged: the resident pair's wall time was billed
+    to the candidate row AND again to the deferred baseline row (0.0415 +
+    0.0171 = 0.0585 recorded against 0.0167 device-truth). The baseline row
+    must carry gpu_hours 0.0 and point at the candidate row that owns the
+    shared wall charge; the project total then equals the candidate charge.
+    """
+    import copy
+
+    from chowder.project_runner import run_project
+
+    payload = copy.deepcopy(tiny_router_project["project"])
+    payload["name"] = "router-healing-tiny-paired-no-recharge"
+    payload["work_dir"] = str(tmp_path / "work")
+    payload["registry_path"] = str(tmp_path / "work" / "runs.db")
+    payload["config"]["backend"]["router_healing"]["paired_arms"] = True
+    project_path = tmp_path / "project-paired.json"
+    project_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    outcome = run_project(project_path)
+
+    candidate = outcome.generation.candidates[0]
+    assert candidate.error is None, candidate.error
+    assert candidate.succeeded
+
+    with RunRegistry(outcome.project.registry_path) as registry:
+        results = {r.experiment_id: r for r in registry.list_results()}
+
+    baseline_row = results["baseline"]
+    assert baseline_row.gpu_hours == 0.0
+    baseline_compute = baseline_row.evidence["compute"]
+    assert baseline_compute["total_gpu_hours"] == 0.0
+    assert baseline_compute["model_loads"] == 1
+    assert baseline_compute["shared_wall_gpu_hours"] == pytest.approx(
+        candidate.result.gpu_hours
+    )
+    assert baseline_compute["charged_to"] == "router-pilot"
+
+    # No double count: the project's total ledger charge is the candidate's
+    # charge alone.
+    assert sum(r.gpu_hours for r in results.values()) == pytest.approx(
+        candidate.result.gpu_hours
+    )
