@@ -269,6 +269,20 @@ class RouterHealingExecutor:
         research = patch.get("router_healing", {})
         return research if isinstance(research, Mapping) else {}
 
+    @staticmethod
+    def paired_arms_for(research: Mapping[str, Any], context: ExecutionContext) -> bool:
+        """The single arm-separation decision, in the spec builders' own order.
+
+        ``_spec_for`` reads research-then-knobs for ``paired_arms``; the
+        project runner must decide at START time whether the baseline will be
+        measured inside the candidate's resident pair, and that decision must
+        read the exact same sources in the exact same order -- otherwise the
+        runner could defer a baseline that the candidate evaluation never
+        measures (or pay for one that the pair makes redundant).
+        """
+        settings: Mapping[str, Any] = RouterHealingExecutor._backend_knobs(context)
+        return bool(research.get("paired_arms", settings.get("paired_arms", False)))
+
     def _spec_for(
         self, experiment: Experiment, context: ExecutionContext, *, run_dir: Path
     ) -> RouterHealingRunSpec:
@@ -725,6 +739,7 @@ class RouterHealingEvalSpec:
     detailed_timing: bool = False
     load_policy: str = "fp32-resident"
     max_load_seconds: float | None = None
+    paired_arms: bool = False
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -784,6 +799,17 @@ class RouterHealingEvalSpec:
             raise ValueError(
                 "router healing eval spec max_load_seconds must be finite and positive "
                 "when set"
+            )
+        if self.paired_arms and self.payload_dir is None:
+            raise ValueError(
+                "paired_arms requires a payload_dir: amortizing the model load means "
+                "scoring both arms in one resident process, and a base-only arm has "
+                "nothing to pair"
+            )
+        if self.paired_arms and not self.expected_parameter_paths:
+            raise ValueError(
+                "paired_arms requires expected_parameter_paths: a resident pair without "
+                "a declared parameter set cannot verify what the candidate leg applied"
             )
 
     @property
@@ -1003,6 +1029,12 @@ class RouterHealingEvaluator:
                 is not None
                 else None
             ),
+            # Amortization is an execution-mode declaration, not a recipe
+            # change: it may be set by the research spec (preregistered) or by
+            # project knobs (operator choice), with the research field winning.
+            paired_arms=bool(
+                research.get("paired_arms", settings.get("paired_arms", False))
+            ),
         )
 
     def profile(self, experiment: Experiment, context: ExecutionContext) -> CostEstimate:
@@ -1130,6 +1162,19 @@ class RouterHealingEvaluator:
         eval_dir.mkdir(parents=True, exist_ok=False)
         spec = self._spec_for(experiment, artifact, context, eval_dir=eval_dir)
         result, wall_seconds, identity = self._spawn(spec, run_id, eval_dir)
+        if spec.paired_arms and result.get("arm") == "base-partial":
+            # A partial pair measured the base but refused the candidate: the
+            # candidate's own evaluation must still fail (the cycle runner
+            # settles the experiment from THIS outcome), but the measured base
+            # score is preserved in the error so the caller can complete the
+            # baseline row from it instead of re-paying the load.
+            raise RouterHealingEvaluationError(
+                "the resident-pair evaluation refused its candidate leg after measuring "
+                f"the base: {result.get('pair_error')!r}. Measured base holdout loss "
+                f"{result.get('base_holdout_loss')!r} is durable in the worker result at "
+                f"{eval_dir / 'worker-result.json'}; complete the baseline from it rather "
+                "than re-loading the model."
+            )
         return self._outcome_from_result(
             result,
             experiment_id=experiment.experiment_id,
@@ -1155,6 +1200,10 @@ class RouterHealingEvaluator:
         arm, with nothing applied. It is deliberately not the PEFT text
         evaluator -- a baseline measured by a different scorer than the one that
         will score the candidate is not a baseline, it is a second opinion.
+
+        Under a paired project this method is NOT called: the resident pair
+        scores the base inside the candidate's own evaluation, and the project
+        runner completes the baseline row from that measurement instead.
         """
         run_id = f"{experiment_id}-eval-{uuid4().hex[:12]}"
         eval_dir = (Path(context.work_dir) / ".chowder" / "evals" / run_id).resolve()
@@ -1171,6 +1220,20 @@ class RouterHealingEvaluator:
             identity=identity,
             wall_seconds=wall_seconds,
             payload_arm=False,
+        )
+
+    def defers_automatic_baseline(
+        self, *, experiment: Experiment, context: ExecutionContext
+    ) -> bool:
+        """Whether the automatic baseline waits for the candidate's own eval.
+
+        True exactly when the candidate arm will run as a resident pair
+        (``paired_arms``), decided by the same resolver the candidate spec
+        builder uses -- so "the pair will measure the baseline" cannot be
+        true at start time and false when the candidate actually runs.
+        """
+        return RouterHealingExecutor.paired_arms_for(
+            RouterHealingExecutor._research_spec(experiment), context
         )
 
     def _outcome_from_result(
@@ -1267,6 +1330,29 @@ class RouterHealingEvaluator:
                 "the evaluation worker reported no application control; without it there is "
                 "no evidence what was applied"
             )
+        if spec.paired_arms:
+            # The resident pair inherits the load of the historical two-process
+            # path only if the worker proves the amortization claim and the
+            # ordering that makes the in-process base score a baseline: the
+            # candidate leg ran INSIDE the timed candidate phase (so the base
+            # score precedes the payload), and the base score is present.
+            if result.get("arm") != "paired":
+                raise RouterHealingEvaluationError(
+                    f"the paired evaluation reported arm {result.get('arm')!r}, expected "
+                    "'paired': an amortized arm that is not labelled as one is a drift, "
+                    "not a saving"
+                )
+            if not control.get("applied_parameters"):
+                raise RouterHealingEvaluationError(
+                    "the paired arm reported no applied parameters; without them there is "
+                    "no evidence the candidate leg ran after the base score"
+                )
+            base_loss = result.get("base_holdout_loss")
+            if not isinstance(base_loss, (int, float)) or not math.isfinite(float(base_loss)):
+                raise RouterHealingEvaluationError(
+                    "the paired arm reported no measurable base score: an in-process "
+                    "baseline that was never measured is unknown, not zero"
+                )
         changed_parameters = control.get("parameters_changed")
         changed_output = control.get("outputs_changed")
         if not isinstance(changed_parameters, bool) or not isinstance(changed_output, bool):
@@ -1374,7 +1460,13 @@ class RouterHealingEvaluator:
             gpu_hours=usage.gpu_hours,
             evidence={
                 "backend": self.name,
-                "arm": "candidate" if payload_arm else "base",
+                # The arm label must say what actually ran: a resident pair is
+                # neither the historical two-process candidate nor a bare base
+                # arm, and the project runner's baseline completer refuses any
+                # paired result mislabelled as a single-arm candidate.
+                "arm": ("paired" if spec.paired_arms else "candidate")
+                if payload_arm
+                else "base",
                 "payload_applied": payload_arm,
                 "eval_spec": spec.to_dict(),
                 "eval_spec_digest": spec.digest(),

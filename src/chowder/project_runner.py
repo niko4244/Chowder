@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -144,7 +145,7 @@ def _run_automatic_baseline(
     context: ExecutionContext,
     registry: RunRegistry,
     on_event: EventCallback | None,
-) -> tuple[ExperimentResult, str | None]:
+) -> tuple[ExperimentResult | None, str | None]:
     """Evaluate the untouched base model and persist it as the baseline.
 
     Runs before any training happens, using the exact same evaluator and
@@ -152,6 +153,12 @@ def _run_automatic_baseline(
     the trained candidate -- so ``Goal.require_protocol_match`` is comparing
     like with like, not the user's guess of where the base model already
     stood against a differently-configured post-training run.
+
+    For a router project running paired arms, this records the baseline ROW
+    but defers its measurement to the candidate's own resident-pair
+    evaluation (one model load instead of two) and returns None; the
+    deferred-baseline provider in run_project completes the row from that
+    measurement before the gate adjudicates.
     """
     _emit_stage(
         on_event, registry, "baseline", "Evaluating the untouched base model for an automatic baseline"
@@ -187,8 +194,16 @@ def _run_automatic_baseline(
     if resolve_training_engine(project.config) == ROUTER_HEALING_ENGINE:
         from .backends.router_healing import RouterHealingEvaluator
 
+        evaluator = RouterHealingEvaluator()
+        if evaluator.defers_automatic_baseline(
+            experiment=project.experiment, context=context
+        ):
+            # Paired arms: the candidate's own evaluation measures the base
+            # in the same resident process. Record the row now, settle it
+            # when the paired evidence lands.
+            return None, None
         try:
-            outcome = RouterHealingEvaluator().evaluate_base(
+            outcome = evaluator.evaluate_base(
                 config=project.config, context=context
             )
         except Exception:
@@ -281,12 +296,19 @@ def run_project(
             hardware=profile,
             work_dir=str(project.work_dir),
             seed=project.seed,
+            # The project config is the base resolution the backend resolvers
+            # read (e.g. the paired-arms decision at start time); the cycle
+            # runner replaces this per candidate with the graph-resolved
+            # config, so nothing downstream sees a stale view.
+            resolved_config=project.config,
         )
 
+        deferred = False
         if project.baseline_mode == "auto":
             baseline, resolved_revision = _run_automatic_baseline(
                 project, context, registry, on_event
             )
+            deferred = baseline is None
             training_config: Mapping[str, Any] = (
                 _config_with_bound_revision(project.config, resolved_revision)
                 if resolved_revision
@@ -300,8 +322,15 @@ def run_project(
         training_config = normalize_training_config_for_executor(training_config)
         engine = EvolutionEngine(
             goal=project.goal,
+            # A deferred baseline is a real seam, not a placeholder: the
+            # engine runs with no baseline at all and refuses every gate-time
+            # operation until the paired evaluation's measurement lands.
             baseline=baseline,
-            spent_gpu_hours=baseline.gpu_hours,
+            baseline_deferred=deferred,
+            # The row's estimate is the provisional spend so budget admission
+            # stays conservative; the provider reconciles it with the
+            # measured cost.
+            spent_gpu_hours=baseline.gpu_hours if baseline is not None else 0.01,
         )
         trainer = create_training_executor(training_config)
         # Same engine key as the trainer, so a router payload can never be handed
@@ -327,6 +356,9 @@ def run_project(
             # transitions, repair/failure/promotion events, and checkpoints
             # already are.
             progress_callback=on_event,
+            deferred_baseline=(
+                _paired_baseline_completer(registry, on_event) if deferred else None
+            ),
         )
         accepted = engine.propose((project.experiment,))
         if not accepted:
@@ -454,6 +486,74 @@ def run_project(
         repair=repair_outcome,
         registry_audit=registry_audit,
     )
+
+
+def _paired_baseline_completer(
+    registry: RunRegistry,
+    on_event: EventCallback | None,
+) -> Callable[[object], ExperimentResult]:
+    """Complete the deferred baseline row from the paired evaluation.
+
+    Built by run_project when the router project deferred its automatic
+    baseline to the candidate's resident pair. The runner calls it with the
+    scored candidate outcome BEFORE the gate adjudicates; this closure is
+    the single writer of the baseline row (the same writer that created it),
+    so the stranded-result discipline holds.
+    """
+
+    def complete(candidate_outcome) -> ExperimentResult:
+        if candidate_outcome is None:
+            # No candidate ever scored: the resident pair that should have
+            # measured the base never ran to a score. Settle the row failed
+            # and tell the runner the measurement does not exist.
+            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
+            raise RuntimeError(
+                "no candidate evaluation scored, so the deferred baseline has no "
+                "resident-pair measurement to complete from"
+            )
+        evidence = candidate_outcome.evaluation.evidence
+        base_loss = evidence.get("base_holdout_loss")
+        if not isinstance(base_loss, (int, float)) or not math.isfinite(float(base_loss)):
+            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
+            raise RuntimeError(
+                "the paired evaluation carried no measurable base score; the deferred "
+                "baseline is unknown, not zero"
+            )
+        if evidence.get("arm") != "paired":
+            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
+            raise RuntimeError(
+                f"the candidate evaluation reported arm {evidence.get('arm')!r}, not a "
+                "resident pair: the deferral decision and the actual evaluation "
+                "disagree, so the baseline is not measured"
+            )
+        gpu_hours = float(candidate_outcome.evaluation.gpu_hours)
+        registry.update_experiment_status("baseline", ExperimentStatus.PASSED.value)
+        result = ExperimentResult(
+            experiment_id="baseline",
+            metrics={"holdout_loss": float(base_loss)},
+            gpu_hours=gpu_hours,
+            artifact_ref=None,
+            evidence={
+                "baseline_source": "paired-candidate-evaluation",
+                "base_holdout_loss": float(base_loss),
+                "compute": {
+                    "baseline_source": "paired-candidate-evaluation",
+                    "total_gpu_hours": gpu_hours,
+                    "model_loads": 1,
+                },
+            },
+        )
+        registry.record_result(result)
+        metrics_summary = f"holdout_loss={float(base_loss):.4f}"
+        _emit_stage(
+            on_event,
+            registry,
+            "baseline",
+            f"Automatic baseline established from the resident pair: {metrics_summary}",
+        )
+        return result
+
+    return complete
 
 
 def _emit_candidate_events(

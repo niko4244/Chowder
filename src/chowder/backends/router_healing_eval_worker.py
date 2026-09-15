@@ -347,6 +347,7 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
     apply_report: dict[str, Any] | None = None
     routing_after: dict[str, Any] | None = None
     candidate_timer: PhaseTimer | None = None
+    pair_error: str | None = None
     if spec.payload_dir is None:
         # The base arm. Nothing is loaded and nothing is applied; the score below
         # is the untouched model's, measured on the same holdout blocks. The
@@ -356,39 +357,72 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
         after = before
         candidate_loss = base_loss
     else:
-        payload = load_router_payload(
-            spec.payload_dir, expected_base_content_sha256=spec.base_content_sha256
-        )
-        comparison = payload_matches_model(model, payload)
-        declared = tuple(str(name) for name in spec.expected_parameter_paths)
-        provided = tuple(str(name) for name in payload["tensors"])
-        if sorted(declared) != sorted(provided):
-            raise RuntimeError(
-                "the payload does not carry exactly the declared parameter set: "
-                f"declared={sorted(declared)}, payload={sorted(provided)}"
+        if spec.paired_arms:
+            # The resident pair's one concession to amortization, made honest:
+            # the payload was verified from disk *after* the base score was
+            # already a measurement. If the candidate leg cannot verify or
+            # apply, the base score still stands -- reported as a partial pair
+            # with the error named -- never silently discarded.
+            try:
+                payload = load_router_payload(
+                    spec.payload_dir, expected_base_content_sha256=spec.base_content_sha256
+                )
+            except Exception as exc:
+                pair_error = f"{type(exc).__name__}: {exc}"
+                payload = None
+        else:
+            payload = load_router_payload(
+                spec.payload_dir, expected_base_content_sha256=spec.base_content_sha256
             )
+        if payload is not None:
+            comparison = payload_matches_model(model, payload)
+            declared = tuple(str(name) for name in spec.expected_parameter_paths)
+            provided = tuple(str(name) for name in payload["tensors"])
+            if sorted(declared) != sorted(provided):
+                raise RuntimeError(
+                    "the payload does not carry exactly the declared parameter set: "
+                    f"declared={sorted(declared)}, payload={sorted(provided)}"
+                )
 
         candidate_timer = PhaseTimer()
         candidate_timer.__enter__()
-        apply_report = apply_router_payload(
-            model, payload, expected_parameter_paths=spec.expected_parameter_paths
-        )
-        after = _logits_fingerprint(torch, model, probe)
-        routing_after = _routing_fingerprint(model, spec, tokenizer)
-        candidate_loss = _score(torch, model, batches)
+        try:
+            apply_report = apply_router_payload(
+                model, payload, expected_parameter_paths=spec.expected_parameter_paths
+            )
+            after = _logits_fingerprint(torch, model, probe)
+            routing_after = _routing_fingerprint(model, spec, tokenizer)
+            candidate_loss = _score(torch, model, batches)
+        except Exception as exc:
+            if not spec.paired_arms:
+                raise
+            # Same partial-pair contract as verification: the base score was
+            # measured before anything touched the model, so a candidate-leg
+            # failure reports the measured base with the error named.
+            pair_error = pair_error or f"{type(exc).__name__}: {exc}"
+            candidate_loss = None
+            after = before
+            routing_after = routing_before
         candidate_timer.__exit__(None, None, None)
-        routing_top1_equal = (
-            routing_before["top1_decisions"] == routing_after["top1_decisions"]
-        )
-        max_abs_routing_weight_delta = _routing_fingerprint_delta(
-            routing_before, routing_after
-        )
-        routing_unchanged = bool(
-            routing_top1_equal
-            and max_abs_routing_weight_delta <= _ROUTING_ROUNDING_TOLERANCE
-        )
+        if candidate_loss is not None:
+            routing_top1_equal = (
+                routing_before["top1_decisions"] == routing_after["top1_decisions"]
+            )
+            max_abs_routing_weight_delta = _routing_fingerprint_delta(
+                routing_before, routing_after
+            )
+            routing_unchanged = bool(
+                routing_top1_equal
+                and max_abs_routing_weight_delta <= _ROUTING_ROUNDING_TOLERANCE
+            )
 
-    counts = _routing_counts(torch, model, batches)
+    if pair_error is not None:
+        # A partial pair stopped before the payload landed, so the resident
+        # model is still the untouched base: its routing counts ARE the base
+        # arm's counts. Label them so nobody reads them as candidate behaviour.
+        counts = _routing_counts(torch, model, batches)
+    else:
+        counts = _routing_counts(torch, model, batches)
     utilization = utilization_by_expert(counts or None)
     dead_experts = (
         sum(
@@ -424,10 +458,17 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
             "the base arm measures the untouched model only, so there is no candidate "
             "generation leg to time",
         )
+    elif pair_error is not None:
+        # A partial pair started its candidate leg but never scored: the timed
+        # attempt is recorded with the refusal, not presented as a comparison.
+        ledger.record_unavailable(
+            PHASE_CANDIDATE_GENERATION,
+            f"the paired candidate leg failed before scoring: {pair_error}",
+        )
     else:
         ledger.record(PHASE_CANDIDATE_GENERATION, candidate_timer.seconds, synchronized=False)
 
-    payload_arm = payload is not None
+    payload_arm = payload is not None and candidate_loss is not None
     if payload_arm:
         assert comparison is not None and apply_report is not None
         application_control = {
@@ -470,9 +511,19 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
         }
         payload_verification = None
 
+    if pair_error is not None:
+        # The honest label for a measured base plus a refused candidate leg:
+        # neither a full candidate comparison nor a bare base arm.
+        arm_label = "base-partial"
+    elif payload_arm:
+        arm_label = "paired" if spec.paired_arms else "candidate"
+    else:
+        arm_label = "base"
+
     return {
         "kind": EVAL_WORKER_RESULT_KIND,
-        "arm": "candidate" if payload_arm else "base",
+        "arm": arm_label,
+        "pair_error": pair_error,
         "spec_digest": spec.digest(),
         "metrics": {
             "holdout_loss": candidate_loss,

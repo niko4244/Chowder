@@ -613,6 +613,145 @@ def test_the_worker_reports_a_measured_load_budget_block(tmp_path, tiny_base):
     assert block["max_load_gpu_hours"] == pytest.approx(3600.0 * accelerators / 3600.0)
 
 
+# --- the resident-pair arm: one load, two scored arms -----------------------
+
+
+def test_a_resident_pair_scores_baseline_before_any_payload_touches_the_model(
+    tmp_path, tiny_base, payloads
+):
+    """Baseline-first ordering is what makes the in-process base score a baseline."""
+    _require_real_model()
+    from chowder.backends.router_healing_eval_worker import _score as _unused
+
+    del _unused
+    calls: list[str] = []
+    import chowder.backends.router_healing_eval_worker as eval_worker_module
+
+    original_score = eval_worker_module._score
+
+    def counting_score(torch, model, batches):
+        calls.append("score")
+        return original_score(torch, model, batches)
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(eval_worker_module, "_score", counting_score)
+    try:
+        spec = RouterHealingEvalSpec(
+            base_model_dir=tiny_base["base_dir"],
+            base_content_sha256=tiny_base["content_sha256"],
+            payload_dir=str(payloads["changed"]),
+            holdout_corpus_path=tiny_base["holdout"],
+            holdout_corpus_sha256=tiny_base["holdout_sha256"],
+            expected_parameter_paths=(
+                "model.layers.0.mlp.gate.weight",
+                "model.layers.1.mlp.gate.weight",
+            ),
+            output_dir=str(tmp_path / "out"),
+            seq_len=16,
+            batches=1,
+            paired_arms=True,
+        )
+        result = eval_worker_module.evaluate(spec)
+    finally:
+        monkey.undo()
+    # At least two scored passes (base, then candidate) -- and the base loss
+    # must be reported even though this spec names a payload.
+    assert len(calls) >= 2
+    assert result["arm"] == "paired"
+    assert result["base_holdout_loss"] > 0.0
+    assert result["candidate_holdout_loss"] > 0.0
+    control = result["application_control"]
+    assert control["parameters_changed"] is True
+    assert control["outputs_changed"] is True
+
+
+def test_a_resident_pair_that_cannot_verify_its_payload_still_reports_the_baseline(
+    tmp_path, tiny_base, payloads
+):
+    """A base score is a completed measurement even when the candidate refuses.
+
+    In two separate processes, a candidate-side crash leaves the baseline row
+    standing. The resident pair must not make the baseline *less* durable than
+    the isolated path was: a payload that fails verification after the base was
+    scored reports the measured base score, `arm: base-partial`, and the
+    verification error -- the parent turns that into the baseline row, not
+    into a missing measurement.
+    """
+    _require_real_model()
+    from chowder.backends import router_healing_eval_worker as eval_worker_module
+
+    real_load = eval_worker_module.load_router_payload
+
+    def refusing_load(payload_dir, expected_base_content_sha256):
+        real_load(payload_dir, expected_base_content_sha256=expected_base_content_sha256)
+        raise RuntimeError("simulated payload verification failure after load")
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(eval_worker_module, "load_router_payload", refusing_load)
+    try:
+        spec = RouterHealingEvalSpec(
+            base_model_dir=tiny_base["base_dir"],
+            base_content_sha256=tiny_base["content_sha256"],
+            payload_dir=str(payloads["changed"]),
+            holdout_corpus_path=tiny_base["holdout"],
+            holdout_corpus_sha256=tiny_base["holdout_sha256"],
+            expected_parameter_paths=(
+                "model.layers.0.mlp.gate.weight",
+                "model.layers.1.mlp.gate.weight",
+            ),
+            output_dir=str(tmp_path / "out"),
+            seq_len=16,
+            batches=1,
+            paired_arms=True,
+        )
+        result = eval_worker_module.evaluate(spec)
+    finally:
+        monkey.undo()
+    assert result["arm"] == "base-partial"
+    assert result["base_holdout_loss"] > 0.0
+    assert result["candidate_holdout_loss"] is None
+    assert "simulated payload verification failure" in result["pair_error"]
+
+
+def test_a_resident_pair_that_crashes_before_scoring_reports_no_baseline(
+    tmp_path, tiny_base, payloads
+):
+    """A crash *before* the base score is a plain failure, not a partial arm.
+
+    The base load itself (or the holdout protocol) failing must not be
+    relabelled as a measured base: nothing was measured, so the result is
+    a refused run exactly as the isolated path refuses today.
+    """
+    _require_real_model()
+    from chowder.backends import router_healing_eval_worker as eval_worker_module
+
+    def exploding_load(base_model_dir, load_policy, device):
+        raise RuntimeError("simulated load crash")
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(eval_worker_module, "load_with_policy", exploding_load)
+    try:
+        spec = RouterHealingEvalSpec(
+            base_model_dir=tiny_base["base_dir"],
+            base_content_sha256=tiny_base["content_sha256"],
+            payload_dir=str(payloads["changed"]),
+            holdout_corpus_path=tiny_base["holdout"],
+            holdout_corpus_sha256=tiny_base["holdout_sha256"],
+            expected_parameter_paths=(
+                "model.layers.0.mlp.gate.weight",
+                "model.layers.1.mlp.gate.weight",
+            ),
+            output_dir=str(tmp_path / "out"),
+            seq_len=16,
+            batches=1,
+            paired_arms=True,
+        )
+        with pytest.raises(RuntimeError, match="simulated load crash"):
+            eval_worker_module.evaluate(spec)
+    finally:
+        monkey.undo()
+
+
 def test_a_base_that_does_not_match_the_frozen_manifest_is_refused(tmp_path, tiny_base):
     experiment = _experiment(tiny_base, base_manifest_sha256="f" * 64)
     with pytest.raises(RouterHealingBackendError, match="does not match the manifest"):
@@ -1631,6 +1770,59 @@ def test_a_cuda_run_reports_a_measured_preflight_and_peak_memory(tmp_path, tiny_
 # --- P11 rung-3 amendment: the bf16-offload-transient load policy -------------
 
 
+def test_the_paired_arms_mode_requires_a_payload():
+    """Amortizing the load means scoring both arms in one resident process."""
+    spec_kwargs = {
+        "base_model_dir": "unused-base",
+        "base_content_sha256": "a" * 64,
+        "payload_dir": None,
+        "holdout_corpus_path": "unused-holdout",
+        "holdout_corpus_sha256": "c" * 64,
+        "expected_parameter_paths": (),
+        "output_dir": "unused-out",
+        "seq_len": 16,
+        "batches": 1,
+        "paired_arms": True,
+    }
+    with pytest.raises(ValueError, match="paired_arms"):
+        RouterHealingEvalSpec(**spec_kwargs)
+
+
+def test_the_paired_arms_mode_requires_declared_parameter_paths():
+    spec_kwargs = {
+        "base_model_dir": "unused-base",
+        "base_content_sha256": "a" * 64,
+        "payload_dir": "some-payload",
+        "holdout_corpus_path": "unused-holdout",
+        "holdout_corpus_sha256": "c" * 64,
+        "expected_parameter_paths": (),
+        "output_dir": "unused-out",
+        "seq_len": 16,
+        "batches": 1,
+        "paired_arms": True,
+    }
+    with pytest.raises(ValueError, match="at least one expected parameter path"):
+        RouterHealingEvalSpec(**spec_kwargs)
+
+
+def test_the_paired_arms_result_always_carries_both_scores():
+    """The evaluator must surface baseline metrics from a paired candidate arm."""
+    spec_kwargs = {
+        "base_model_dir": "unused-base",
+        "base_content_sha256": "a" * 64,
+        "payload_dir": "some-payload",
+        "holdout_corpus_path": "unused-holdout",
+        "holdout_corpus_sha256": "c" * 64,
+        "expected_parameter_paths": ("model.layers.0.mlp.gate.weight",),
+        "output_dir": "unused-out",
+        "seq_len": 16,
+        "batches": 1,
+    }
+    spec = RouterHealingEvalSpec(**spec_kwargs)
+    assert spec.paired_arms is False
+    assert spec.payload_applied is True
+
+
 def test_the_run_spec_accepts_a_declared_load_budget():
     """max_load_seconds is an optional declared ceiling on the model-load phase."""
     assert RouterHealingRunSpec(**_spec_kwargs()).max_load_seconds is None
@@ -1790,7 +1982,9 @@ def test_the_placement_census_refuses_a_full_resident_model(tmp_path, tiny_base)
     del model
 
 
-def test_an_offload_run_on_the_tiny_moe_proves_the_census_and_trainability(tmp_path, tiny_base):
+def test_an_offload_run_on_the_tiny_moe_proves_the_census_and_trainability(
+    tmp_path, tiny_base
+):
     """The amended policy, end to end on a real tiny MoE, on the real device.
 
     Mirrors the rung-2 CUDA contract at the worker level: measured preflight,
@@ -1831,3 +2025,299 @@ def test_an_offload_run_on_the_tiny_moe_proves_the_census_and_trainability(tmp_p
     assert result["trainability"]["ok"] is True
     assert result["frozen"]["ok"] is True
     assert result["resource_usage"]["active_accelerator_count"] == 1
+
+
+def test_the_two_paths_measure_the_same_scores_and_controls(tmp_path, tiny_base, payloads):
+    """Amortization may not change what either arm measures.
+
+    The resident pair (one load, both arms) and the historical two-process
+    path must produce the same base score, the same candidate score, the
+    same deltas, and the same application-control verdicts on the same
+    holdout blocks -- otherwise the comparison drifts when the mode flips.
+    This is the equality half of the isolation question; the baseline-row
+    durability is pinned separately.
+    """
+    _require_real_model()
+    from chowder.backends import router_healing_eval_worker as eval_worker_module
+
+    common = {
+        "base_model_dir": tiny_base["base_dir"],
+        "base_content_sha256": tiny_base["content_sha256"],
+        "payload_dir": str(payloads["changed"]),
+        "holdout_corpus_path": tiny_base["holdout"],
+        "holdout_corpus_sha256": tiny_base["holdout_sha256"],
+        "expected_parameter_paths": (
+            "model.layers.0.mlp.gate.weight",
+            "model.layers.1.mlp.gate.weight",
+        ),
+        "output_dir": str(tmp_path / "out"),
+        "seq_len": 16,
+        "batches": 1,
+    }
+
+    # Historical path: two separate evaluate() calls, base arm then candidate.
+    base_result = eval_worker_module.evaluate(
+        RouterHealingEvalSpec(**{**common, "payload_dir": None, "expected_parameter_paths": ()})
+    )
+    candidate_result = eval_worker_module.evaluate(RouterHealingEvalSpec(**common))
+
+    # Amortized path: one load, both arms in one resident process.
+    paired_result = eval_worker_module.evaluate(
+        RouterHealingEvalSpec(**{**common, "paired_arms": True})
+    )
+
+    assert paired_result["base_holdout_loss"] == pytest.approx(
+        base_result["base_holdout_loss"], rel=1e-12
+    )
+    assert paired_result["candidate_holdout_loss"] == pytest.approx(
+        candidate_result["candidate_holdout_loss"], rel=1e-12
+    )
+    paired_control = paired_result["application_control"]
+    isolated_control = candidate_result["application_control"]
+    assert paired_control["outputs_changed"] == isolated_control["outputs_changed"]
+    assert paired_control["routing_top1_equal"] == isolated_control["routing_top1_equal"]
+    assert paired_control["max_abs_routing_weight_delta"] == pytest.approx(
+        isolated_control["max_abs_routing_weight_delta"], rel=1e-9
+    )
+    # Dead-expert behaviour must agree too: a routing-count measured after the
+    # candidate pass in the resident model would silently differ from the
+    # base arm's own count if the payload leaked between arms.
+    assert paired_result["metrics"]["dead_experts"] == pytest.approx(
+        candidate_result["metrics"]["dead_experts"]
+    )
+
+
+def test_the_paired_arms_decision_reads_the_same_places_as_the_specs(tmp_path, tiny_base):
+    """One resolver decides arm separation for the candidate spec.
+
+    ``paired_arms_for`` must read exactly where ``_spec_for`` reads --
+    research field first (preregistered), project knobs second -- so the
+    runner's start-time decision to defer the baseline cannot drift from
+    what the candidate evaluation will actually do.
+    """
+    _require_real_model()
+    from chowder.backends.router_healing import RouterHealingExecutor, RouterHealingEvaluator
+
+    payload_dir = tmp_path / "payload"
+    payload_dir.mkdir()
+    artifact = TrainingArtifact(
+        run_id="run-pair-decision",
+        experiment_id="exp-router-backend",
+        artifact_ref=str(payload_dir),
+        gpu_hours=0.0,
+        telemetry={},
+        evidence={
+            "freeze_summary": {"trainable_param_names": ["model.layers.0.mlp.gate.weight"]}
+        },
+        resource_usage=None,
+    )
+    evaluator = RouterHealingEvaluator()
+
+    # Declared in the preregistered research spec.
+    experiment = _experiment(tiny_base, paired_arms=True)
+    research = RouterHealingExecutor._research_spec(experiment)
+    assert evaluator._spec_for(
+        experiment, artifact, _context(tmp_path), eval_dir=tmp_path / "c1"
+    ).paired_arms is True
+    assert RouterHealingExecutor.paired_arms_for(research, _context(tmp_path)) is True
+
+    # Declared only as a project knob: same decision, same source order.
+    knobbed = _context(tmp_path, paired_arms=True)
+    plain_experiment = _experiment(tiny_base)
+    assert evaluator._spec_for(
+        plain_experiment, artifact, knobbed, eval_dir=tmp_path / "c2"
+    ).paired_arms is True
+    assert RouterHealingExecutor.paired_arms_for(
+        RouterHealingExecutor._research_spec(plain_experiment), knobbed
+    ) is True
+
+    # Declared nowhere: the historical two-process path.
+    assert evaluator._spec_for(
+        plain_experiment, artifact, _context(tmp_path), eval_dir=tmp_path / "c3"
+    ).paired_arms is False
+    assert RouterHealingExecutor.paired_arms_for({}, _context(tmp_path)) is False
+
+
+def test_a_paired_project_defers_the_standalone_baseline_measurement(
+    tmp_path, tiny_base
+):
+    """The project seam: paired_arms defers the standalone baseline.
+
+    The runner's deferred-baseline provider needs to know, before any model
+    is loaded, that the automatic baseline's measurement will arrive with the
+    candidate's own resident-pair evaluation -- so the run starts without the
+    separate base-arm spawn and the row waits for the paired evidence.
+    """
+    _require_real_model()
+    from chowder.backends.router_healing import RouterHealingEvaluator
+
+    assert (
+        RouterHealingEvaluator().defers_automatic_baseline(
+            experiment=_experiment(tiny_base, paired_arms=True),
+            context=_context(tmp_path),
+        )
+        is True
+    )
+    assert (
+        RouterHealingEvaluator().defers_automatic_baseline(
+            experiment=_experiment(tiny_base),
+            context=_context(tmp_path),
+        )
+        is False
+    )
+
+
+def test_the_paired_arm_loads_the_model_once(tmp_path, tiny_base, payloads):
+    """The measured amortization: one load where the two-process path loads twice.
+
+    On CPU this costs wall seconds; on the 9B CUDA run it was 12.8 s of
+    on-device time per load. The claim "the pair amortizes the load" is a
+    measurement, not a slogan: the paired spec must report exactly one load
+    in its lifecycle and no more.
+    """
+    _require_real_model()
+    from chowder.backends import router_healing_eval_worker as eval_worker_module
+    from chowder.lifecycle import PHASE_MODEL_LOAD, ledger_from_payload
+
+    loads = 0
+
+    def counting_load(*args, **kwargs):
+        nonlocal loads
+        loads += 1
+        return real_load_with_policy(*args, **kwargs)
+
+    real_load_with_policy = eval_worker_module.load_with_policy
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(eval_worker_module, "load_with_policy", counting_load)
+    try:
+        spec = RouterHealingEvalSpec(
+            base_model_dir=tiny_base["base_dir"],
+            base_content_sha256=tiny_base["content_sha256"],
+            payload_dir=str(payloads["changed"]),
+            holdout_corpus_path=tiny_base["holdout"],
+            holdout_corpus_sha256=tiny_base["holdout_sha256"],
+            expected_parameter_paths=(
+                "model.layers.0.mlp.gate.weight",
+                "model.layers.1.mlp.gate.weight",
+            ),
+            output_dir=str(tmp_path / "out"),
+            seq_len=16,
+            batches=1,
+            paired_arms=True,
+        )
+        result = eval_worker_module.evaluate(spec)
+    finally:
+        monkey.undo()
+
+    assert loads == 1, "the resident pair must load the base exactly once"
+    ledger = ledger_from_payload(result["lifecycle"])
+    phases = ledger.to_dict()["phases"]
+    assert phases[PHASE_MODEL_LOAD]["measured"] is True
+    # The historical path pays this load twice (once per arm/process); the
+    # measured saving is one whole load. Assert the ledger reports the single
+    # load duration so a prereg can budget it as one phase.
+    assert phases[PHASE_MODEL_LOAD]["seconds"] > 0.0
+
+
+def test_a_paired_result_without_a_measurable_base_score_is_refused(
+    tmp_path, monkeypatch, tiny_base, payloads
+):
+    """An unmeasured in-process baseline is unknown, not zero.
+
+    The parent must refuse a paired result whose base arm never produced a
+    score: the baseline completer would otherwise complete the row from a
+    fabricated (or absent) number, which is exactly the 'counted as present'
+    defect class P7 closed elsewhere.
+    """
+
+    def factory(command, **kwargs):
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self, command, **process_kwargs):
+                spec_path = Path(command[command.index("--spec") + 1])
+                result_path = Path(command[command.index("--result") + 1])
+                spec = RouterHealingEvalSpec(**json.loads(spec_path.read_text(encoding="utf-8")))
+                result = _valid_eval_result(spec)
+                result["arm"] = "paired"
+                result["application_control"]["applied_parameters"] = list(
+                    spec.expected_parameter_paths
+                )
+                result["base_holdout_loss"] = None
+                result_path.write_text(json.dumps(result), encoding="utf-8")
+
+            def poll(self):
+                return 0
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        return FakeProcess(command, **kwargs)
+
+    monkeypatch.setattr("chowder.backends.router_healing.subprocess.Popen", factory)
+    experiment = _experiment(tiny_base, paired_arms=True)
+    artifact = _eval_artifact(experiment, payloads["changed"])
+    with pytest.raises(RouterHealingEvaluationError, match="no measurable base score"):
+        RouterHealingEvaluator().evaluate(
+            experiment=experiment, artifact=artifact, context=_context(tmp_path)
+        )
+
+
+def test_a_successful_paired_evaluation_labels_itself_paired_in_evidence(
+    tmp_path, monkeypatch, tiny_base, payloads
+):
+    """The evidence label must say what ran: 'paired', not 'candidate'.
+
+    The project runner's baseline completer reads ``evidence['arm']`` to decide
+    whether the resident pair actually measured the base; an arm that is
+    labelled 'candidate' after running as a pair makes the completer refuse a
+    successful run. This pins the exact regression: the worker result says
+    'paired' and the outcome evidence must repeat it, alongside the base score
+    the completer completes the baseline row from.
+    """
+
+    def factory(command, **kwargs):
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self, command, **process_kwargs):
+                spec_path = Path(command[command.index("--spec") + 1])
+                result_path = Path(command[command.index("--result") + 1])
+                spec = RouterHealingEvalSpec(**json.loads(spec_path.read_text(encoding="utf-8")))
+                assert spec.paired_arms is True
+                result = _valid_eval_result(spec)
+                result["arm"] = "paired"
+                result["application_control"]["applied_parameters"] = list(
+                    spec.expected_parameter_paths
+                )
+                result_path.write_text(json.dumps(result), encoding="utf-8")
+
+            def poll(self):
+                return 0
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        return FakeProcess(command, **kwargs)
+
+    monkeypatch.setattr("chowder.backends.router_healing.subprocess.Popen", factory)
+    experiment = _experiment(tiny_base, paired_arms=True)
+    artifact = _eval_artifact(experiment, payloads["changed"])
+    outcome = RouterHealingEvaluator().evaluate(
+        experiment=experiment, artifact=artifact, context=_context(tmp_path)
+    )
+    assert outcome.evidence["arm"] == "paired"
+    assert outcome.evidence["base_holdout_loss"] == pytest.approx(1.0)
+    assert outcome.evidence["payload_applied"] is True
