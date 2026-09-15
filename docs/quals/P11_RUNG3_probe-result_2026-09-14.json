@@ -1,0 +1,138 @@
+{
+ "probe_source_sha256": "5beee3c48fded712e4c48c3dac9de4dc06b34fb5a4386a6cacfdfd02fdbfc6c2",
+ "prereg": "docs/quals/P11_RUNG3_PREREG_2026-09-14.md (PR #161, 23756d4)",
+ "artifact": "F:\\llm-models\\Qwen3.8-9B-HotCore-CW-E16-k2-h2176",
+ "torch": "2.11.0+cu128",
+ "device_name": "NVIDIA GeForce RTX 5060 Ti",
+ "device_total_gb": 15.93,
+ "strategies": {
+  "A": {
+   "name": "A_fp32_full",
+   "load_s": 1092.16,
+   "peak_after_load_gb": 33.364,
+   "reserved_after_load_gb": 33.365,
+   "note": "loaded; forward/backward not attempted at this size"
+  },
+  "B": {
+   "name": "B_bf16_full",
+   "load_s": 196.0,
+   "peak_after_load_gb": 16.807,
+   "census": {
+    "experts_on_gpu": 0,
+    "experts_on_cpu": 0,
+    "gates_on_gpu": 32,
+    "expert_names_known": 64
+   }
+  },
+  "C": {
+   "name": "C_bf16_expert_offload",
+   "meta_param_count": 555,
+   "meta_expert_param_count": 64,
+   "load_s": 4.82,
+   "peak_after_load_gb": 9.276,
+   "census": {
+    "experts_on_gpu": 0,
+    "experts_on_cpu": 64,
+    "gates_on_gpu": 32,
+    "expert_params_seen": 64
+   },
+   "census_after_dispatch": {
+    "experts_on_gpu": 0,
+    "experts_on_cpu": 64,
+    "gates_on_gpu": 32,
+    "expert_params_seen": 64
+   },
+   "t5_offload_verified": true,
+   "trainable_tensors": 32,
+   "error": "RuntimeError: Expected all tensors to be on the same device, but got mat2 is on cpu, different from other tensors on cuda:0 (when checking argument in method wrapper_CUDA___grouped_mm)",
+   "verdict": "refused"
+  },
+  "D": {
+   "name": "D_bf16_offload_transient_experts_DIAGNOSTIC",
+   "load_s": 5.61,
+   "peak_after_load_gb": 9.276,
+   "census": {
+    "experts_on_gpu": 0,
+    "experts_on_cpu": 64,
+    "gates_on_gpu": 32,
+    "expert_params_seen": 64
+   },
+   "patched_expert_modules": 32,
+   "trainable_tensors": 32,
+   "peak_after_step1_gb": 11.368,
+   "reserved_after_step1_gb": 11.385,
+   "loss_step1": 3.036306858062744,
+   "t3_finite_loss": true,
+   "gate_grad_state": {
+    "none": 0,
+    "nan": 0,
+    "zero": 0,
+    "ok": 32
+   },
+   "gate_grad_samples": {
+    "layer_0": {
+     "max_abs": 0.0869140625,
+     "sum_abs": 77.0,
+     "finite": true
+    },
+    "layer_1": {
+     "max_abs": 0.02587890625,
+     "sum_abs": 19.875,
+     "finite": true
+    },
+    "layer_2": {
+     "max_abs": 0.34765625,
+     "sum_abs": 148.0,
+     "finite": true
+    },
+    "layer_3": {
+     "max_abs": 0.015625,
+     "sum_abs": 12.6875,
+     "finite": true
+    }
+   },
+   "t3_gate_grads_finite_nonzero": true,
+   "step_times_s": [
+    2.092,
+    1.92,
+    1.979
+   ],
+   "mean_step_s": 1.997,
+   "t4_within_budget": true,
+   "t2_within_peak_limit": true,
+   "diagnostic_verdict": "fits-measured"
+  }
+ },
+ "t1_identity": {
+  "manifest_sha256_match": true,
+  "weight_files": {
+   "model-00001-of-00004.safetensors": {
+    "expected": "b3e9b920e164081193182ad80b0c089ac4290d324ad4b43b1a7dcc0ab93c3e34",
+    "actual": "b3e9b920e164081193182ad80b0c089ac4290d324ad4b43b1a7dcc0ab93c3e34",
+    "size_bytes": 4942985744,
+    "match": true
+   },
+   "model-00002-of-00004.safetensors": {
+    "expected": "dca30abc64f6cd849b68b678f33f19c64c84d09905b3b8d5f4437816bf25e511",
+    "actual": "dca30abc64f6cd849b68b678f33f19c64c84d09905b3b8d5f4437816bf25e511",
+    "size_bytes": 4888632576,
+    "match": true
+   },
+   "model-00003-of-00004.safetensors": {
+    "expected": "93b7d3cca48a7bffacfae5167de7e89c87b9f017e00a235b3c895843dff47ca5",
+    "actual": "93b7d3cca48a7bffacfae5167de7e89c87b9f017e00a235b3c895843dff47ca5",
+    "size_bytes": 5057151608,
+    "match": true
+   },
+   "model-00004-of-00004.safetensors": {
+    "expected": "9c4a90f9894ed4d9a850634f878e7ec3e8a0970044a7befbce1b07ca2b4ce570",
+    "actual": "9c4a90f9894ed4d9a850634f878e7ec3e8a0970044a7befbce1b07ca2b4ce570",
+    "size_bytes": 3935425616,
+    "match": true
+   }
+  },
+  "ok": true,
+  "verify_s": 128.4
+ },
+ "diagnostic": "fits-measured"
+}

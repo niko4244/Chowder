@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -62,13 +63,18 @@ def sha256_file(path: str | Path) -> str:
 
 
 def _cpu_bytes(tensor: Any) -> bytes:
-    """Raw bytes of a tensor, read on the host regardless of its device."""
+    """Raw bytes of a tensor, read on the host in the tensor's own dtype.
+
+    The hash must describe the bytes a reader will actually load, so no
+    upcasting happens here: an fp32 tensor hashes its fp32 bytes, a bf16
+    tensor its bf16 bytes (numpy cannot carry bfloat16, so the raw bytes are
+    taken through a uint8 view, which is byte-identical for every dtype).
+    """
     import torch  # local: this module must import cheaply without torch
 
     detached = tensor.detach()
-    flat = detached.reshape(-1).to(torch.float32)
-    cpu = flat.cpu().contiguous()
-    return cpu.numpy().tobytes()
+    cpu = detached.reshape(-1).cpu().contiguous()
+    return cpu.view(torch.uint8).numpy().tobytes()
 
 
 def _tensor_record(name: str, tensor: Any) -> dict[str, Any]:
@@ -95,6 +101,47 @@ def _tensor_record(name: str, tensor: Any) -> dict[str, Any]:
         "elements": int(detached.numel()),
         "sha256": hashlib.sha256(_cpu_bytes(detached)).hexdigest(),
     }
+
+
+def _save_file_retrying_sharing_violation(
+    tensors: Mapping[str, Any], path: str, *, attempts: int = 3, delay_seconds: float = 1.0
+) -> None:
+    """Serialize a safetensors file, retrying only a Windows sharing violation.
+
+    The rung-3b 9B CUDA run measured the failure this guards: all training
+    steps completed, then ``save_file`` died with ``I/O error: The process
+    cannot access the file because it is being used by another process
+    (os error 32)`` -- a background process (indexer or antivirus) held the
+    temp file serialization writes through. Losing a finished run to that race
+    is waste, not safety. The retry is safe by construction: serialization is
+    deterministic for the same tensors, the manifest is written only after the
+    tensor file survives, and the whole-directory refusal at the top of
+    ``save_router_payload`` still applies. Only the measured sharing-violation
+    message is retried; every other error propagates unchanged.
+    """
+    from safetensors import SafetensorError
+    from safetensors.torch import save, save_file
+
+    last: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            save_file(tensors, path)
+            return
+        except SafetensorError as error:
+            if "os error 32" not in str(error):
+                raise
+            last = error
+            if attempt + 1 < attempts:
+                time.sleep(delay_seconds)
+    # The retry lost every race: this lock is deterministic, not transient.
+    # safetensors serializes through a temp file it then renames, and a
+    # scanner that opens each fresh temp file wins that race every time on
+    # some Windows hosts (measured twice on the rung-3b 9B run). Serialize in
+    # memory and write the final path directly, so no rename is ever
+    # attempted. Safety is unchanged: the manifest is written last, so an
+    # interrupted direct write still leaves an ineligible directory.
+    assert last is not None
+    Path(path).write_bytes(save(tensors))
 
 
 def save_router_payload(
@@ -142,13 +189,11 @@ def save_router_payload(
 
     out.mkdir(parents=True, exist_ok=True)
     tensor_path = out / tensor_file
-    save_file(
-        {
-            name: tensor.detach().to(torch.float32).cpu().contiguous()
-            for name, tensor in ordered.items()
-        },
-        str(tensor_path),
-    )
+    serialized = {
+        name: tensor.detach().cpu().contiguous()
+        for name, tensor in ordered.items()
+    }
+    _save_file_retrying_sharing_violation(serialized, str(tensor_path))
     tensor_sha = sha256_file(tensor_path)
 
     manifest = {

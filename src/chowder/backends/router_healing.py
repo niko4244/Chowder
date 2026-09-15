@@ -53,6 +53,7 @@ from ..models import Experiment
 from ..provenance import sha256_file
 from ..resources import ResourceUsage
 from ..worker_env import chowder_source_identity, worker_env
+from .router_healing_load import LOAD_POLICIES
 
 #: Devices this backend has qualified. See the module docstring.
 #: Devices a router run may request. `cuda` was qualified by the P11 rung-2
@@ -125,11 +126,13 @@ class RouterHealingRunSpec:
     checkpoint_dir: str | None = None
     resume_from: str | None = None
     max_seconds: float | None = None
+    max_load_seconds: float | None = None
     checkpoint_every: int = 0
     scheduler: str = "constant"
     warmup_steps: int = 0
     device: str = "cpu"
     detailed_timing: bool = False
+    load_policy: str = "fp32-resident"
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -174,6 +177,12 @@ class RouterHealingRunSpec:
             not math.isfinite(float(self.max_seconds)) or self.max_seconds <= 0
         ):
             raise ValueError("router healing spec max_seconds must be finite and positive when set")
+        if self.max_load_seconds is not None and (
+            not math.isfinite(float(self.max_load_seconds)) or self.max_load_seconds <= 0
+        ):
+            raise ValueError(
+                "router healing spec max_load_seconds must be finite and positive when set"
+            )
         if self.scheduler not in _ALLOWED_SCHEDULERS:
             raise ValueError(
                 f"unsupported router healing scheduler {self.scheduler!r}; expected one of "
@@ -186,6 +195,12 @@ class RouterHealingRunSpec:
                 f"device {self.device!r} is not qualified for router training; qualified "
                 f"devices are {list(QUALIFIED_DEVICES)}. An unqualified device is refused "
                 "at spec time, not attempted and discovered."
+            )
+        if self.load_policy not in LOAD_POLICIES:
+            raise ValueError(
+                f"unknown load policy {self.load_policy!r}; qualified policies are "
+                f"{list(LOAD_POLICIES)}. A load nobody preregistered is refused at spec "
+                "time, not discovered at load time."
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -219,6 +234,10 @@ class RouterHealingRunSpec:
             "loss": "causal-language-modelling-cross-entropy",
             "base_content_sha256": self.base_content_sha256,
             "corpus_sha256": self.corpus_sha256,
+            # P11 rung-3 amendment: how the base was resident is part of the
+            # recipe, because it changes the measured cost and the memory
+            # contract a payload's consumer is entitled to rely on.
+            "load_policy": self.load_policy,
         }
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -250,6 +269,20 @@ class RouterHealingExecutor:
         research = patch.get("router_healing", {})
         return research if isinstance(research, Mapping) else {}
 
+    @staticmethod
+    def paired_arms_for(research: Mapping[str, Any], context: ExecutionContext) -> bool:
+        """The single arm-separation decision, in the spec builders' own order.
+
+        ``_spec_for`` reads research-then-knobs for ``paired_arms``; the
+        project runner must decide at START time whether the baseline will be
+        measured inside the candidate's resident pair, and that decision must
+        read the exact same sources in the exact same order -- otherwise the
+        runner could defer a baseline that the candidate evaluation never
+        measures (or pay for one that the pair makes redundant).
+        """
+        settings: Mapping[str, Any] = RouterHealingExecutor._backend_knobs(context)
+        return bool(research.get("paired_arms", settings.get("paired_arms", False)))
+
     def _spec_for(
         self, experiment: Experiment, context: ExecutionContext, *, run_dir: Path
     ) -> RouterHealingRunSpec:
@@ -266,6 +299,8 @@ class RouterHealingExecutor:
             "seq_len",
             "seed",
             "device",
+            "load_policy",
+            "max_load_seconds",
         ):
             if key in research:
                 settings[key] = research[key]
@@ -342,6 +377,12 @@ class RouterHealingExecutor:
             warmup_steps=int(settings.get("warmup_steps", 0)),
             device=str(settings.get("device", "cpu")),
             detailed_timing=bool(settings.get("detailed_timing", False)),
+            load_policy=str(settings.get("load_policy", "fp32-resident")),
+            max_load_seconds=(
+                float(settings["max_load_seconds"])
+                if settings.get("max_load_seconds") is not None
+                else None
+            ),
         )
 
     # -- TrainingExecutor --------------------------------------------------
@@ -575,6 +616,41 @@ class RouterHealingExecutor:
                 raise RouterHealingBackendError(
                     "the accelerator worker's device preflight did not measure free memory"
                 )
+        # A declared load ceiling demands a measured, honored load budget -- on
+        # every device, because the ceiling is part of the frozen spec. A
+        # worker that reports success while over its ceiling is not believed,
+        # and a worker that reports no block under a declared ceiling is
+        # unknown, not zero.
+        if spec.max_load_seconds is not None:
+            block = result.get("load_budget")
+            if not isinstance(block, Mapping) or not block.get("measured"):
+                raise RouterHealingBackendError(
+                    "the worker did not measure its load cost although the spec declared "
+                    "a load budget; an unmeasured load is unknown, not zero"
+                )
+            try:
+                measured_load = float(block["load_seconds"])
+                declared_load = float(block["max_load_seconds"])
+            except (TypeError, ValueError, KeyError) as exc:
+                raise RouterHealingBackendError(
+                    f"the worker's load-budget block is unreadable: {block!r}"
+                ) from exc
+            if not math.isfinite(measured_load) or measured_load < 0:
+                raise RouterHealingBackendError(
+                    f"the worker's measured load is not a finite duration: {block!r}"
+                )
+            if declared_load != float(spec.max_load_seconds):
+                raise RouterHealingBackendError(
+                    "the worker's load-budget block names a different ceiling than the "
+                    f"spec declared: block={declared_load!r}, spec={spec.max_load_seconds!r}"
+                )
+            if measured_load > declared_load:
+                raise RouterHealingBackendError(
+                    "the worker reports success while over its load budget: measured "
+                    f"{measured_load!r}s against a declared ceiling of {declared_load!r}s. "
+                    "A run that cannot honor its declared load cost is refused, not "
+                    "footnoted."
+                )
         usage = ResourceUsage.from_wall_time(
             wall_seconds=float(raw_usage.get("wall_seconds", wall_seconds)),
             active_accelerator_count=int(raw_usage.get("active_accelerator_count", 0)),
@@ -661,6 +737,9 @@ class RouterHealingEvalSpec:
     batches: int
     device: str = "cpu"
     detailed_timing: bool = False
+    load_policy: str = "fp32-resident"
+    max_load_seconds: float | None = None
+    paired_arms: bool = False
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -707,6 +786,30 @@ class RouterHealingEvalSpec:
                 f"device {self.device!r} is not qualified for router evaluation; qualified "
                 f"devices are {list(QUALIFIED_DEVICES)}. An unqualified device is refused "
                 "at spec time, not attempted and discovered."
+            )
+        if self.load_policy not in LOAD_POLICIES:
+            raise ValueError(
+                f"unknown load policy {self.load_policy!r}; qualified policies are "
+                f"{list(LOAD_POLICIES)}. The base arm and the candidate arm must load "
+                "under the same declared contract."
+            )
+        if self.max_load_seconds is not None and (
+            not math.isfinite(float(self.max_load_seconds)) or self.max_load_seconds <= 0
+        ):
+            raise ValueError(
+                "router healing eval spec max_load_seconds must be finite and positive "
+                "when set"
+            )
+        if self.paired_arms and self.payload_dir is None:
+            raise ValueError(
+                "paired_arms requires a payload_dir: amortizing the model load means "
+                "scoring both arms in one resident process, and a base-only arm has "
+                "nothing to pair"
+            )
+        if self.paired_arms and not self.expected_parameter_paths:
+            raise ValueError(
+                "paired_arms requires expected_parameter_paths: a resident pair without "
+                "a declared parameter set cannot verify what the candidate leg applied"
             )
 
     @property
@@ -852,6 +955,19 @@ class RouterHealingEvaluator:
             batches=int(settings.get("eval_batches", 4)),
             device=str(settings.get("device", "cpu")),
             detailed_timing=bool(settings.get("eval_detailed_timing", False)),
+            # The base arm loads the same base under the same declared residency
+            # contract as the candidate arm; a baseline under a different load
+            # policy is not a baseline. (Caught live by the rung-3b CUDA run:
+            # the base arm silently loaded fp32-resident and hit the measured
+            # WDDM-spill failure the amendment exists to prevent.)
+            load_policy=str(settings.get("load_policy", "fp32-resident")),
+            # Same reasoning for the load ceiling: both arms must honor the
+            # same declared budget, or one arm's cost is unaccounted for.
+            max_load_seconds=(
+                float(settings["max_load_seconds"])
+                if settings.get("max_load_seconds") is not None
+                else None
+            ),
         )
 
     def _spec_for(
@@ -904,6 +1020,21 @@ class RouterHealingEvaluator:
             batches=int(settings.get("eval_batches", 4)),
             device=str(settings.get("device", "cpu")),
             detailed_timing=bool(settings.get("eval_detailed_timing", False)),
+            load_policy=str(
+                research.get("load_policy", settings.get("load_policy", "fp32-resident"))
+            ),
+            max_load_seconds=(
+                float(value)
+                if (value := research.get("max_load_seconds", settings.get("max_load_seconds")))
+                is not None
+                else None
+            ),
+            # Amortization is an execution-mode declaration, not a recipe
+            # change: it may be set by the research spec (preregistered) or by
+            # project knobs (operator choice), with the research field winning.
+            paired_arms=bool(
+                research.get("paired_arms", settings.get("paired_arms", False))
+            ),
         )
 
     def profile(self, experiment: Experiment, context: ExecutionContext) -> CostEstimate:
@@ -1031,6 +1162,19 @@ class RouterHealingEvaluator:
         eval_dir.mkdir(parents=True, exist_ok=False)
         spec = self._spec_for(experiment, artifact, context, eval_dir=eval_dir)
         result, wall_seconds, identity = self._spawn(spec, run_id, eval_dir)
+        if spec.paired_arms and result.get("arm") == "base-partial":
+            # A partial pair measured the base but refused the candidate: the
+            # candidate's own evaluation must still fail (the cycle runner
+            # settles the experiment from THIS outcome), but the measured base
+            # score is preserved in the error so the caller can complete the
+            # baseline row from it instead of re-paying the load.
+            raise RouterHealingEvaluationError(
+                "the resident-pair evaluation refused its candidate leg after measuring "
+                f"the base: {result.get('pair_error')!r}. Measured base holdout loss "
+                f"{result.get('base_holdout_loss')!r} is durable in the worker result at "
+                f"{eval_dir / 'worker-result.json'}; complete the baseline from it rather "
+                "than re-loading the model."
+            )
         return self._outcome_from_result(
             result,
             experiment_id=experiment.experiment_id,
@@ -1056,6 +1200,10 @@ class RouterHealingEvaluator:
         arm, with nothing applied. It is deliberately not the PEFT text
         evaluator -- a baseline measured by a different scorer than the one that
         will score the candidate is not a baseline, it is a second opinion.
+
+        Under a paired project this method is NOT called: the resident pair
+        scores the base inside the candidate's own evaluation, and the project
+        runner completes the baseline row from that measurement instead.
         """
         run_id = f"{experiment_id}-eval-{uuid4().hex[:12]}"
         eval_dir = (Path(context.work_dir) / ".chowder" / "evals" / run_id).resolve()
@@ -1072,6 +1220,20 @@ class RouterHealingEvaluator:
             identity=identity,
             wall_seconds=wall_seconds,
             payload_arm=False,
+        )
+
+    def defers_automatic_baseline(
+        self, *, experiment: Experiment, context: ExecutionContext
+    ) -> bool:
+        """Whether the automatic baseline waits for the candidate's own eval.
+
+        True exactly when the candidate arm will run as a resident pair
+        (``paired_arms``), decided by the same resolver the candidate spec
+        builder uses -- so "the pair will measure the baseline" cannot be
+        true at start time and false when the candidate actually runs.
+        """
+        return RouterHealingExecutor.paired_arms_for(
+            RouterHealingExecutor._research_spec(experiment), context
         )
 
     def _outcome_from_result(
@@ -1129,6 +1291,38 @@ class RouterHealingEvaluator:
                     "the accelerator evaluation worker did not measure peak VRAM: an "
                     "empty map on a cuda arm is an unmeasured claim, refused"
                 )
+        # The load ceiling binds both arms on any device: an arm under a
+        # declared ceiling must measure its load and honor it, or its cost is
+        # unknown relative to what its preregistration accounted for.
+        if spec.max_load_seconds is not None:
+            block = result.get("load_budget")
+            if not isinstance(block, Mapping) or not block.get("measured"):
+                raise RouterHealingEvaluationError(
+                    "the evaluation worker did not measure its load although the eval spec "
+                    "declared a load budget; an unmeasured load is unknown, not zero"
+                )
+            try:
+                measured_load = float(block["load_seconds"])
+                declared_load = float(block["max_load_seconds"])
+            except (TypeError, ValueError, KeyError) as exc:
+                raise RouterHealingEvaluationError(
+                    f"the evaluation worker's load-budget block is unreadable: {block!r}"
+                ) from exc
+            if not math.isfinite(measured_load) or measured_load < 0:
+                raise RouterHealingEvaluationError(
+                    f"the evaluation worker's measured load is not finite: {block!r}"
+                )
+            if declared_load != float(spec.max_load_seconds):
+                raise RouterHealingEvaluationError(
+                    "the evaluation worker's load budget names a different ceiling than "
+                    f"the eval spec declared: block={declared_load!r}, "
+                    f"spec={spec.max_load_seconds!r}"
+                )
+            if measured_load > declared_load:
+                raise RouterHealingEvaluationError(
+                    "the evaluation arm overran its declared load budget: measured "
+                    f"{measured_load!r}s against a ceiling of {declared_load!r}s"
+                )
 
         control = result.get("application_control")
         if not isinstance(control, Mapping):
@@ -1136,6 +1330,29 @@ class RouterHealingEvaluator:
                 "the evaluation worker reported no application control; without it there is "
                 "no evidence what was applied"
             )
+        if spec.paired_arms:
+            # The resident pair inherits the load of the historical two-process
+            # path only if the worker proves the amortization claim and the
+            # ordering that makes the in-process base score a baseline: the
+            # candidate leg ran INSIDE the timed candidate phase (so the base
+            # score precedes the payload), and the base score is present.
+            if result.get("arm") != "paired":
+                raise RouterHealingEvaluationError(
+                    f"the paired evaluation reported arm {result.get('arm')!r}, expected "
+                    "'paired': an amortized arm that is not labelled as one is a drift, "
+                    "not a saving"
+                )
+            if not control.get("applied_parameters"):
+                raise RouterHealingEvaluationError(
+                    "the paired arm reported no applied parameters; without them there is "
+                    "no evidence the candidate leg ran after the base score"
+                )
+            base_loss = result.get("base_holdout_loss")
+            if not isinstance(base_loss, (int, float)) or not math.isfinite(float(base_loss)):
+                raise RouterHealingEvaluationError(
+                    "the paired arm reported no measurable base score: an in-process "
+                    "baseline that was never measured is unknown, not zero"
+                )
         changed_parameters = control.get("parameters_changed")
         changed_output = control.get("outputs_changed")
         if not isinstance(changed_parameters, bool) or not isinstance(changed_output, bool):
@@ -1243,7 +1460,13 @@ class RouterHealingEvaluator:
             gpu_hours=usage.gpu_hours,
             evidence={
                 "backend": self.name,
-                "arm": "candidate" if payload_arm else "base",
+                # The arm label must say what actually ran: a resident pair is
+                # neither the historical two-process candidate nor a bare base
+                # arm, and the project runner's baseline completer refuses any
+                # paired result mislabelled as a single-arm candidate.
+                "arm": ("paired" if spec.paired_arms else "candidate")
+                if payload_arm
+                else "base",
                 "payload_applied": payload_arm,
                 "eval_spec": spec.to_dict(),
                 "eval_spec_digest": spec.digest(),

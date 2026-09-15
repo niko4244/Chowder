@@ -69,8 +69,9 @@ from ..trainability import (
     utilization_by_expert,
 )
 from ..worker_env import chowder_source_identity
-from .device_preflight import GIB, project_device_memory, project_step_cost
+from .device_preflight import GIB, project_device_memory, project_load_cost, project_step_cost
 from .router_healing import QUALIFIED_DEVICES, RouterHealingRunSpec
+from .router_healing_load import install_transient_expert_forward, load_with_policy
 
 RESULT_KIND = "router_healing_worker_result.v1"
 
@@ -198,7 +199,6 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         raise RuntimeError("output_dir cannot be the base model directory")
 
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     torch.manual_seed(spec.seed)
     synchronize = cuda_synchronize(torch)
@@ -217,15 +217,45 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
 
     model_load = PhaseTimer(synchronize=synchronize)
     with model_load:
-        tokenizer = AutoTokenizer.from_pretrained(spec.base_model_dir, local_files_only=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            spec.base_model_dir, dtype=torch.float32, local_files_only=True
+        model, tokenizer, load_report = load_with_policy(
+            spec.base_model_dir, load_policy=spec.load_policy, device=str(device)
         )
-        model.to(device)
         model.train()
+    load_policy_report: dict[str, Any] = dict(load_report)
+
+    # P11 rung-3b successor: the model load is a budgeted preflight phase, not
+    # a footnote discovered in the ledger after the ceiling was already blown.
+    # The load's measured cost is projected against the spec's declared ceiling
+    # before any compute runs; an overrun refuses exactly where the other
+    # projections do.
+    load_budget = project_load_cost(
+        load_seconds=model_load.seconds or 0.0,
+        max_load_seconds=spec.max_load_seconds,
+        accelerator_count=accelerator_count,
+    )
+    if load_budget["would_exceed_load_budget"]:
+        raise RuntimeError(
+            "device preflight refuses before training: the measured model load "
+            f"exceeded its declared budget -- {json.dumps(load_budget)}. Load cost is "
+            "device time like any other; a ceiling that cannot hold must be refused "
+            "before compute, not exceeded and footnoted."
+        )
 
     freeze_summary = freeze_for_router_healing(model, suffixes=ROUTER_ONLY_SUFFIXES)
     scope = assert_router_only_scope(freeze_summary.trainable_param_names, model)
+    if spec.load_policy == "bf16-offload-transient":
+        # Freeze before the transient forward: the patch binds methods, not
+        # parameters, but installing it after the freeze guarantees the copied
+        # expert slices can never be mistaken for trainables.
+        patched = install_transient_expert_forward(model)
+        if patched == 0:
+            raise RuntimeError(
+                "the offload census found expert parameters but no experts module "
+                "could be patched after the freeze; refusing a run whose forward "
+                "would hit the measured device-mismatch failure"
+            )
+        load_policy_report["patched_expert_modules_after_freeze"] = patched
+        load_policy_report["transient_forward_installed"] = True
     expected_paths, unknown_suffixes = resolve_expected_parameter_paths(model, ROUTER_ONLY_SUFFIXES)
     coverage = component_path_report(
         expected_paths,
@@ -266,6 +296,13 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
             name: parameters[name].detach().clone() for name in trainable_names
         }
         probe_optimizer = torch.optim.AdamW(trainable_params, lr=spec.learning_rate)
+        # The sampler below reads memory_allocated *during* the step, which
+        # includes the resident model. Record the resident baseline first so
+        # the projection compares the step's incremental demand against free
+        # memory — demanding the model to fit twice is how the rung-3b CUDA
+        # run falsely refused a workload that fits.
+        synchronize()
+        resident_before_probe = int(torch.cuda.memory_allocated(device))
         probe_timer = PhaseTimer(synchronize=synchronize)
         with probe_timer:
             synchronize()
@@ -287,7 +324,9 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         del probe_backup
 
         memory_projection = project_device_memory(
-            free_bytes=free_before_probe, peak_bytes=peak["bytes"]
+            free_bytes=free_before_probe,
+            peak_bytes=peak["bytes"],
+            resident_before_step_bytes=resident_before_probe,
         )
         if memory_projection["projected_oom"]:
             raise RuntimeError(
@@ -313,6 +352,8 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
                 "measured": True,
                 "step_seconds": probe_seconds,
                 "peak_step_bytes": peak["bytes"],
+                "resident_before_step_bytes": resident_before_probe,
+                "incremental_step_bytes": memory_projection["incremental_step_bytes"],
                 "projected_oom": memory_projection["projected_oom"],
                 "would_exceed_budget": step_projection["would_exceed_budget"],
             },
@@ -538,6 +579,7 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         "checkpoints": checkpoints,
         "resume": resume,
         "base_identity": base_identity,
+        "load_policy_report": load_policy_report,
         "tensor_inventory": inventory,
         "quantization_reality": quantization,
         "utilization": utilization_by_expert(None),
@@ -550,6 +592,7 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         },
         "source_identity": chowder_source_identity(),
         "device_preflight": device_preflight,
+        "load_budget": load_budget,
         "resource_usage": {
             "wall_seconds": total_wall,
             "active_accelerator_count": accelerator_count,

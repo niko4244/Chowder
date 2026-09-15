@@ -597,3 +597,72 @@ def test_the_run_closeout_surfaces_a_row_stranded_in_a_non_terminal_status(
     with RunRegistry(outcome.project.registry_path) as registry:
         stages = [event.payload.get("stage") for event in registry.list_events()]
     assert "registry-audit" in stages
+
+
+# --- the amortized-baseline layer ---------------------------------------------
+
+
+def test_a_paired_project_measures_the_baseline_inside_the_candidate_evaluation(
+    tmp_path, tiny_router_project
+):
+    """paired_arms amortizes the baseline arm into the candidate's eval.
+
+    The claim, measurable in the durable artifacts: (1) the standalone base
+    arm never spawns -- one model load fewer than the historical path; (2) the
+    automatic baseline row is still completed, its metrics measured by the
+    SAME resident worker that scored the candidate, with the mode recorded;
+    (3) the gate compared the candidate against that completed baseline.
+    """
+    import copy
+
+    from chowder.project_runner import run_project
+
+    payload = copy.deepcopy(tiny_router_project["project"])
+    payload["name"] = "router-healing-tiny-paired"
+    payload["work_dir"] = str(tmp_path / "work")
+    payload["registry_path"] = str(tmp_path / "work" / "runs.db")
+    payload["config"]["backend"]["router_healing"]["paired_arms"] = True
+    project_path = tmp_path / "project-paired.json"
+    project_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    outcome = run_project(project_path)
+
+    candidate = outcome.generation.candidates[0]
+    assert candidate.error is None, candidate.error
+    assert candidate.succeeded
+
+    evaluation_evidence = candidate.evaluation.evidence
+    assert evaluation_evidence["arm"] == "paired"
+    assert evaluation_evidence["payload_applied"] is True
+
+    with RunRegistry(outcome.project.registry_path) as registry:
+        experiments = {
+            experiment.experiment_id: experiment for experiment in registry.list_experiments()
+        }
+        results = {r.experiment_id: r for r in registry.list_results()}
+        evaluations = list(registry.list_evaluation_outcomes())
+
+    # The standalone base arm never spawned: exactly one evaluation row for
+    # the candidate; no second evaluation carrying arm == "base".
+    assert [entry.evidence.get("arm") for entry in evaluations] == ["paired"]
+
+    # The baseline row is a completed measurement, and it names the mode:
+    # measured by the candidate's resident pair, not by a separate process.
+    assert experiments["baseline"].status.value == "passed"
+    baseline_row = results["baseline"]
+    assert baseline_row.metrics["holdout_loss"] == pytest.approx(
+        evaluation_evidence["base_holdout_loss"]
+    )
+    assert (
+        baseline_row.evidence["baseline_source"] == "paired-candidate-evaluation"
+    )
+    # The engine consumed the completed measurement: the gate verdict on the
+    # candidate row is real, not a placeholder comparison.
+    assert experiments["router-pilot"].status.value in {"passed", "failed"}
+
+    # Cost honesty: the paired run's accounting names what was saved. The
+    # baseline row charges the base score's own phase cost from the paired
+    # worker's ledger, not a second model load.
+    baseline_compute = baseline_row.evidence["compute"]
+    assert baseline_compute["baseline_source"] == "paired-candidate-evaluation"
+    assert baseline_compute["model_loads"] == 1

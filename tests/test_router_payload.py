@@ -6,6 +6,7 @@ corruption, so each test names the corruption it blocks.
 """
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
 
@@ -248,3 +249,159 @@ def test_publishing_writes_the_tensor_file_before_the_manifest(tmp_path):
     assert Path(artifact["manifest_path"]).is_file()
     assert Path(artifact["tensor_path"]).name == TENSOR_FILE
     assert Path(artifact["manifest_path"]).name == MANIFEST_FILE
+
+
+# --- the publication file-lock race -------------------------------------------
+
+
+def test_publication_retries_a_windows_sharing_violation(tmp_path, monkeypatch):
+    """A lost file-lock race after training must not discard the finished run.
+
+    The rung-3b 9B CUDA run measured this: all 12 steps trained, then the
+    safetensors serialization died with ``I/O error: The process cannot access
+    the file because it is being used by another process. (os error 32)`` -- a
+    background process (indexer/antivirus) held the temp file. Retrying an
+    identical serialization is safe: the manifest is written last, so no
+    published payload can be half-overwritten, and the refusal at the top of
+    ``save_router_payload`` still guards the whole directory.
+    """
+    from safetensors import SafetensorError
+    import safetensors.torch as st_torch
+
+    real_save = st_torch.save_file
+    calls = {"n": 0}
+
+    def flaky_save(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise SafetensorError(
+                "Error while serializing: I/O error: The process cannot access "
+                "the file because it is being used by another process. "
+                "(os error 32)"
+            )
+        return real_save(*args, **kwargs)
+
+    monkeypatch.setattr(st_torch, "save_file", flaky_save)
+    artifact = _publish(_model(), tmp_path, shift=1.0)
+
+    assert calls["n"] == 2, "the sharing violation must be retried exactly once here"
+    payload = load_router_payload(
+        artifact["payload_dir"], expected_base_content_sha256=_BASE_SHA
+    )
+    assert payload["manifest"]["steps_completed"] == 3
+
+
+def test_publication_survives_a_permanent_sharing_violation_by_not_renaming(tmp_path, monkeypatch):
+    """A deterministic lock race must be removed, not merely retried.
+
+    The rung-3b 9B CUDA run measured the retry losing every attempt: safetensors
+    serializes through a temp file it then renames, real-time scanning opens
+    each freshly created 8.4 MB temp file, and the rename hits the sharing
+    violation every time -- retries just re-run the race. The fallback must
+    therefore serialize in memory and write the final path directly, so no
+    rename is ever attempted. The manifest-last rule already makes an
+    interrupted direct write an ineligible directory, so safety is unchanged.
+    """
+    from safetensors import SafetensorError
+    import safetensors.torch as st_torch
+
+    calls = {"n": 0}
+
+    def always_locked(*args, **kwargs):
+        calls["n"] += 1
+        raise SafetensorError(
+            "Error while serializing: I/O error: The process cannot access "
+            "the file because it is being used by another process. (os error 32)"
+        )
+
+    monkeypatch.setattr(st_torch, "save_file", always_locked)
+    artifact = _publish(_model(), tmp_path, shift=1.0)
+
+    assert calls["n"] >= 2, "the fast path must have been attempted before fallback"
+    payload = load_router_payload(
+        artifact["payload_dir"], expected_base_content_sha256=_BASE_SHA
+    )
+    assert payload["manifest"]["steps_completed"] == 3
+    assert payload["base_content_sha256"] == _BASE_SHA
+    assert sorted(payload["tensors"]) == sorted(ROUTER_NAMES)
+
+
+def test_a_bf16_payload_publishes_verifies_and_applies_in_its_trained_dtype(tmp_path):
+    """A payload must be stored, verified, and applicable in the dtype it trained in.
+
+    The rung-3b 9B CUDA run measured the old publication policy silently
+    upcasting trained bf16 gates to fp32 while the manifest still recorded
+    bfloat16 -- a file that could never pass its own dtype check, and that
+    ``apply_router_payload`` would refuse against the bf16 model anyway. Both
+    CPU pilots missed it because fp32 models train fp32 gates. Publication
+    must store the trained values in their trained dtype so the manifest, the
+    file, and the model all agree.
+    """
+    model = _model()
+    trained = _trained_values(model, shift=1.0)
+    bf16_values = {name: tensor.to(torch.bfloat16) for name, tensor in trained.items()}
+
+    artifact = save_router_payload(
+        bf16_values,
+        tmp_path / "payload",
+        base_content_sha256=_BASE_SHA,
+        spec_digest=_SPEC_SHA,
+        steps_completed=3,
+    )
+
+    payload = load_router_payload(
+        artifact["payload_dir"], expected_base_content_sha256=_BASE_SHA
+    )
+    assert payload["manifest"]["tensors"][0]["dtype"] == "bfloat16"
+    loaded = payload["tensors"][ROUTER_NAMES[0]]
+    assert loaded.dtype == torch.bfloat16
+    assert torch.equal(loaded.cpu(), bf16_values[ROUTER_NAMES[0]].cpu()), (
+        "the published file must carry the exact trained bf16 values"
+    )
+
+    # The same payload must apply cleanly to a bf16 model.
+    target = _model()
+    with torch.no_grad():
+        for name in ROUTER_NAMES:
+            dict(target.named_parameters())[name].data = (
+                dict(target.named_parameters())[name].data.to(torch.bfloat16)
+            )
+    before = {name: dict(target.named_parameters())[name].detach().clone() for name in ROUTER_NAMES}
+    apply_router_payload(target, payload)
+    after = dict(target.named_parameters())
+    for name in ROUTER_NAMES:
+        assert after[name].dtype == torch.bfloat16
+        assert torch.equal(after[name].detach(), bf16_values[name].to(after[name].device))
+        assert not torch.equal(after[name].detach().cpu(), before[name].cpu())
+
+
+def test_publication_does_not_retry_unrelated_errors(tmp_path, monkeypatch):
+    """Only a file-lock race is transient; everything else must fail loudly."""
+    from safetensors import SafetensorError
+    import safetensors.torch as st_torch
+
+    calls = {"n": 0}
+
+    def make_broken(error):
+        def broken(*args, **kwargs):
+            calls["n"] += 1
+            raise error
+
+        return broken
+
+    cases = [
+        OSError(errno.ENOSPC, "No space left on device"),
+        SafetensorError("Error while serializing: header too large"),
+    ]
+    for error in cases:
+        calls["n"] = 0
+        monkeypatch.setattr(st_torch, "save_file", make_broken(error))
+        with pytest.raises(type(error)):
+            save_router_payload(
+                _trained_values(_model(), shift=1.0),
+                tmp_path / "payload-other",
+                base_content_sha256=_BASE_SHA,
+                spec_digest=_SPEC_SHA,
+                steps_completed=3,
+            )
+        assert calls["n"] == 1, f"{type(error).__name__} must not be retried"
