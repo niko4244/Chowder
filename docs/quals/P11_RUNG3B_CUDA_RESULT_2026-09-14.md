@@ -66,7 +66,15 @@ scale; it does not qualify model quality.
      + eval generations ≈ 32.4 s ≈ 0.0090 GPU-h) is within it. The difference
      is three model loads at 12.8 s each *on device* — the prereg expected
      load cost to be dominated by CPU hashing. Recorded, not renegotiated;
-     any successor prereg must budget loads explicitly.
+     any successor prereg must budget loads explicitly. (**Done** in
+     `b9f5c8d`: `max_load_seconds` is now a declared, spec-digest-bound
+     ceiling on both specs, the preflight's `project_load_cost` converts
+     the measured load and its ceiling into GPU-hours, workers refuse an
+     overrun before compute, and parents refuse an unmeasured or
+     over-ceiling load block. The next prereg states its load budget as
+     `max_load_seconds` — e.g. `max_load_seconds: 20` licenses three
+     ~12.8 s 9B loads — and its GPU-hour ceiling derives from
+     workload + load, checked by the preflight before any step runs.)
    - Ledger charges are wall-on-device and conservative: results table
      charges 0.0154 (baseline) + 0.0401 (candidate) = 0.0554 GPU-h against
      the 0.05 goal envelope; reservations were checked at proposal time and
