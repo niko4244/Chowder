@@ -2321,3 +2321,367 @@ def test_a_successful_paired_evaluation_labels_itself_paired_in_evidence(
     assert outcome.evidence["arm"] == "paired"
     assert outcome.evidence["base_holdout_loss"] == pytest.approx(1.0)
     assert outcome.evidence["payload_applied"] is True
+
+# --- the rung-3c aggregate ceiling: the prereg's headline enforcement --------
+
+#: The rung-3c preregistered decomposition (frozen in
+#: docs/quals/P11_RUNG3C_CUDA_PAIRED_PREREG_2026-09-15.md): measured paired
+#: total 0.0161417 GPU-h x 1.5 = 0.0242, ceiling rounded to 0.025 and split
+#: exactly across the three measurable phase categories.
+_PREREG_CEILING = 0.025
+_PREREG_SUB_BUDGETS = {"loads": 0.0107, "steps": 0.0100, "generations": 0.0043}
+
+
+def test_the_run_ceiling_projection_refuses_any_budget_violation():
+    """The sum ceiling and each sub-budget are enforced, on measured phases."""
+    from chowder.backends.device_preflight import project_run_ceiling
+
+    # The measured rung-3c basis: two loads (25.5 s), 12 steps at 2.0 s, and
+    # 7.4 s of generations = 56.9 s = 0.0158 GPU-h, inside every line.
+    fitting = project_run_ceiling(
+        load_seconds=25.5,
+        step_seconds=2.0,
+        max_steps=12,
+        eval_generation_seconds=7.4,
+        accelerator_count=1,
+        max_gpu_hours=_PREREG_CEILING,
+        sub_budget_gpu_hours=dict(_PREREG_SUB_BUDGETS),
+    )
+    assert fitting["measured"] is True
+    assert fitting["would_exceed_ceiling"] is False
+    assert fitting["projected_gpu_hours"] == pytest.approx(56.9 / 3600.0)
+    for category in ("loads", "steps", "generations"):
+        assert fitting["sub_budgets"][category]["would_exceed"] is False
+
+    # The total fits but the loads category alone busts its sub-budget: the
+    # prereg's decomposition is enforced per category, not only in sum.
+    lopsided = project_run_ceiling(
+        load_seconds=45.0,
+        step_seconds=2.0,
+        max_steps=12,
+        eval_generation_seconds=7.4,
+        accelerator_count=1,
+        max_gpu_hours=_PREREG_CEILING,
+        sub_budget_gpu_hours=dict(_PREREG_SUB_BUDGETS),
+    )
+    assert lopsided["sub_budgets"]["loads"]["would_exceed"] is True
+    assert lopsided["would_exceed_ceiling"] is True, (
+        "a run over any sub-budget must refuse even when the sum still fits"
+    )
+
+    # The plain sum bust: 60 s of steps pushes the total to 92.9 s =
+    # 0.0258 GPU-h, past the 0.025 ceiling.
+    over = project_run_ceiling(
+        load_seconds=25.5,
+        step_seconds=5.0,
+        max_steps=12,
+        eval_generation_seconds=7.4,
+        accelerator_count=1,
+        max_gpu_hours=_PREREG_CEILING,
+        sub_budget_gpu_hours=dict(_PREREG_SUB_BUDGETS),
+    )
+    assert over["would_exceed_ceiling"] is True
+    assert over["projected_gpu_hours"] > _PREREG_CEILING
+
+
+def test_the_run_ceiling_projection_refuses_unreadable_budgets():
+    """Non-finite phases, a non-positive ceiling, and a decomposition that
+    does not sum to the ceiling are construction errors, not verdicts."""
+    from chowder.backends.device_preflight import project_run_ceiling
+
+    common = dict(
+        step_seconds=1.0,
+        max_steps=1,
+        eval_generation_seconds=1.0,
+        accelerator_count=1,
+    )
+    with pytest.raises(ValueError, match="max_gpu_hours"):
+        project_run_ceiling(
+            load_seconds=1.0, max_gpu_hours=0.0,
+            sub_budget_gpu_hours=dict(_PREREG_SUB_BUDGETS), **common,
+        )
+    with pytest.raises(ValueError, match="sum"):
+        project_run_ceiling(
+            load_seconds=1.0, max_gpu_hours=0.025,
+            sub_budget_gpu_hours={"loads": 0.0107, "steps": 0.0100, "generations": 0.0040},
+            **common,
+        )
+    with pytest.raises(ValueError, match="sub_budget"):
+        project_run_ceiling(
+            load_seconds=1.0, max_gpu_hours=0.025,
+            sub_budget_gpu_hours={"loads": 0.0107, "steps": 0.0100},
+            **common,
+        )
+    with pytest.raises(ValueError, match="finite"):
+        project_run_ceiling(
+            load_seconds=float("nan"), max_gpu_hours=0.025,
+            sub_budget_gpu_hours=dict(_PREREG_SUB_BUDGETS), **common,
+        )
+
+
+def test_the_run_spec_accepts_and_binds_the_run_ceiling():
+    """The ceiling rides the spec (so workers must honor it) but stays out of
+    the recipe (so it never changes what a payload is)."""
+    assert RouterHealingRunSpec(**_spec_kwargs()).max_gpu_hours is None
+    spec = RouterHealingRunSpec(
+        **_spec_kwargs(
+            max_gpu_hours=_PREREG_CEILING,
+            sub_budget_gpu_hours=dict(_PREREG_SUB_BUDGETS),
+        )
+    )
+    assert spec.max_gpu_hours == _PREREG_CEILING
+    assert spec.sub_budget_gpu_hours == _PREREG_SUB_BUDGETS
+    unbudgeted = RouterHealingRunSpec(**_spec_kwargs())
+    assert spec.digest() != unbudgeted.digest(), "the spec digest must bind the ceiling"
+    assert spec.recipe_digest() == unbudgeted.recipe_digest(), (
+        "a scheduling ceiling is not a recipe change"
+    )
+
+
+def test_the_run_spec_refuses_an_unreadable_run_ceiling():
+    with pytest.raises(ValueError, match="max_gpu_hours"):
+        RouterHealingRunSpec(
+            **_spec_kwargs(max_gpu_hours=0.0, sub_budget_gpu_hours=dict(_PREREG_SUB_BUDGETS))
+        )
+    with pytest.raises(ValueError, match="max_gpu_hours"):
+        RouterHealingRunSpec(
+            **_spec_kwargs(max_gpu_hours=float("inf"), sub_budget_gpu_hours=dict(_PREREG_SUB_BUDGETS))
+        )
+    with pytest.raises(ValueError, match="sum"):
+        RouterHealingRunSpec(
+            **_spec_kwargs(
+                max_gpu_hours=0.025,
+                sub_budget_gpu_hours={"loads": 0.0107, "steps": 0.0100, "generations": 0.0040},
+            )
+        )
+    with pytest.raises(ValueError, match="sub_budget"):
+        RouterHealingRunSpec(
+            **_spec_kwargs(
+                max_gpu_hours=0.025,
+                sub_budget_gpu_hours={"loads": 0.0107, "steps": 0.0100},
+            )
+        )
+
+
+def _eval_spec_kwargs(**overrides) -> dict:
+    base = {
+        "base_model_dir": "unused-base",
+        "base_content_sha256": "a" * 64,
+        "payload_dir": "unused-payload",
+        "holdout_corpus_path": "unused-holdout",
+        "holdout_corpus_sha256": "c" * 64,
+        "expected_parameter_paths": ("model.layers.0.mlp.gate.weight",),
+        "output_dir": "unused-out",
+        "seq_len": 16,
+        "batches": 1,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_the_eval_spec_accepts_and_refuses_the_run_ceiling():
+    assert RouterHealingEvalSpec(**_eval_spec_kwargs()).max_gpu_hours is None
+    spec = RouterHealingEvalSpec(
+        **_eval_spec_kwargs(
+            max_gpu_hours=_PREREG_CEILING,
+            sub_budget_gpu_hours=dict(_PREREG_SUB_BUDGETS),
+        )
+    )
+    assert spec.max_gpu_hours == _PREREG_CEILING
+    with pytest.raises(ValueError, match="max_gpu_hours"):
+        RouterHealingEvalSpec(
+            **_eval_spec_kwargs(max_gpu_hours=-1.0, sub_budget_gpu_hours=dict(_PREREG_SUB_BUDGETS))
+        )
+    with pytest.raises(ValueError, match="sum"):
+        RouterHealingEvalSpec(
+            **_eval_spec_kwargs(
+                max_gpu_hours=0.025,
+                sub_budget_gpu_hours={"loads": 0.0107, "steps": 0.0100, "generations": 0.0040},
+            )
+        )
+
+
+def test_a_training_run_overrunning_its_run_ceiling_is_refused(tmp_path, tiny_base):
+    """The worker refuses an impossible ceiling before optimizer step 1 --
+    the aggregate claim enforced where it can first be known."""
+    _require_real_model()
+    spec = RouterHealingRunSpec(
+        base_model_dir=tiny_base["base_dir"],
+        base_content_sha256=tiny_base["content_sha256"],
+        corpus_path=tiny_base["corpus"],
+        corpus_sha256=tiny_base["corpus_sha256"],
+        output_dir=str(tmp_path / "out"),
+        max_steps=1,
+        learning_rate=0.01,
+        seq_len=16,
+        batch_size=1,
+        seed=0,
+        probe_window=1,
+        max_tokens=32,
+        max_gpu_hours=1e-9,
+        sub_budget_gpu_hours={"loads": 5e-10, "steps": 4e-10, "generations": 1e-10},
+    )
+    with pytest.raises(RuntimeError, match="run ceiling"):
+        train(spec)
+
+
+def test_a_paired_evaluation_overrunning_its_run_ceiling_is_refused(
+    tmp_path, tiny_base, payloads
+):
+    """The eval worker refuses before scoring when its measured phases cannot
+    fit the declared ceiling."""
+    _require_real_model()
+    from chowder.backends import router_healing_eval_worker as eval_worker_module
+
+    spec = RouterHealingEvalSpec(
+        base_model_dir=tiny_base["base_dir"],
+        base_content_sha256=tiny_base["content_sha256"],
+        payload_dir=str(payloads["changed"]),
+        holdout_corpus_path=tiny_base["holdout"],
+        holdout_corpus_sha256=tiny_base["holdout_sha256"],
+        expected_parameter_paths=(
+            "model.layers.0.mlp.gate.weight",
+            "model.layers.1.mlp.gate.weight",
+        ),
+        output_dir=str(tmp_path / "out"),
+        seq_len=16,
+        batches=1,
+        max_gpu_hours=1e-9,
+        sub_budget_gpu_hours={"loads": 5e-10, "steps": 4e-10, "generations": 1e-10},
+    )
+    with pytest.raises(RuntimeError, match="run ceiling"):
+        eval_worker_module.evaluate(spec)
+
+
+def test_the_parent_refuses_a_missing_run_ceiling_block_when_budgeted(
+    tmp_path, monkeypatch, tiny_base
+):
+    """A declared ceiling demands the worker's measured run-ceiling block;
+    absent is unknown, not passing."""
+
+    def mutate(result, spec):
+        result.pop("run_ceiling", None)
+
+    _install_fake_worker(monkeypatch, mutate)
+    with pytest.raises(RouterHealingBackendError, match="run ceiling"):
+        RouterHealingExecutor().run(
+            _experiment(
+                tiny_base,
+                max_gpu_hours=_PREREG_CEILING,
+                sub_budget_gpu_hours=dict(_PREREG_SUB_BUDGETS),
+            ),
+            _context(tmp_path),
+        )
+
+
+def test_the_parent_refuses_a_result_that_lies_about_the_run_ceiling(
+    tmp_path, monkeypatch, tiny_base
+):
+    """The block claiming the ceiling holds while the ledger's own measured
+    phases sum past it is exactly the lie the parent exists to catch."""
+
+    def mutate(result, spec):
+        block = result.get("run_ceiling")
+        if isinstance(block, dict):
+            block["would_exceed_ceiling"] = False
+        phases = (result.get("lifecycle") or {}).get("phases") or {}
+        steady = phases.get("steady_state_steps")
+        if isinstance(steady, dict):
+            steady["gpu_hours"] = 0.9  # 0.9 GPU-h against a 0.025 ceiling
+
+    _install_fake_worker(monkeypatch, mutate)
+    with pytest.raises(RouterHealingBackendError, match="run ceiling"):
+        RouterHealingExecutor().run(
+            _experiment(
+                tiny_base,
+                max_gpu_hours=_PREREG_CEILING,
+                sub_budget_gpu_hours=dict(_PREREG_SUB_BUDGETS),
+            ),
+            _context(tmp_path),
+        )
+
+
+def test_the_eval_parent_refuses_an_arm_that_lies_about_its_run_ceiling(
+    tmp_path, monkeypatch, tiny_base, payloads
+):
+    """The evaluator re-derives the arm's phase costs from the ledger and the
+    load block; a result whose run-ceiling block disagrees is refused."""
+    from chowder.backends.router_healing import RouterHealingEvaluator
+
+    def mutate(result, spec):
+        block = result.get("run_ceiling")
+        if isinstance(block, dict):
+            block["would_exceed_ceiling"] = False
+        phases = (result.get("lifecycle") or {}).get("phases") or {}
+        load = phases.get("model_load")
+        if isinstance(load, dict):
+            load["gpu_hours"] = 0.9  # against a 0.025 ceiling
+
+    def factory(command, **kwargs):
+        class FakeEvalProcess:
+            returncode = 0
+
+            def __init__(self, command, **process_kwargs):
+                spec_path = Path(command[command.index("--spec") + 1])
+                result_path = Path(command[command.index("--result") + 1])
+                spec = RouterHealingEvalSpec(
+                    **json.loads(spec_path.read_text(encoding="utf-8"))
+                )
+                result = _valid_eval_result(spec)
+                mutate(result, spec)
+                result_path.write_text(json.dumps(result), encoding="utf-8")
+
+            def poll(self):
+                return 0
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        return FakeEvalProcess(command, **kwargs)
+
+    monkeypatch.setattr(
+        "chowder.backends.router_healing.subprocess.Popen", factory
+    )
+    experiment = _experiment(
+        tiny_base,
+        max_gpu_hours=_PREREG_CEILING,
+        sub_budget_gpu_hours=dict(_PREREG_SUB_BUDGETS),
+    )
+    artifact = _eval_artifact(experiment, payloads["uniform"])
+    with pytest.raises(RouterHealingEvaluationError, match="run ceiling"):
+        RouterHealingEvaluator().evaluate(
+            experiment=experiment, artifact=artifact, context=_context(tmp_path)
+        )
+
+
+def test_the_specs_carry_the_preregistered_run_ceiling(tmp_path, tiny_base, payloads):
+    """Both spec builders thread the ceiling from research-then-knobs, the
+    same precedence as every other preregistered field."""
+    from chowder.backends.router_healing import RouterHealingEvaluator
+
+    overrides = dict(
+        max_gpu_hours=_PREREG_CEILING,
+        sub_budget_gpu_hours=dict(_PREREG_SUB_BUDGETS),
+    )
+    train_spec = RouterHealingExecutor()._spec_for(
+        _experiment(tiny_base, **overrides),
+        _context(tmp_path),
+        run_dir=tmp_path,
+    )
+    assert train_spec.max_gpu_hours == _PREREG_CEILING
+    assert train_spec.sub_budget_gpu_hours == _PREREG_SUB_BUDGETS
+
+    # The candidate eval spec reads the same fields from the same research.
+    experiment = _experiment(tiny_base, **overrides)
+    artifact = _eval_artifact(experiment, payloads["changed"])
+    eval_spec = RouterHealingEvaluator()._spec_for(
+        experiment, artifact, _context(tmp_path), eval_dir=tmp_path / "eval"
+    )
+    assert eval_spec.max_gpu_hours == _PREREG_CEILING
+    assert eval_spec.sub_budget_gpu_hours == _PREREG_SUB_BUDGETS

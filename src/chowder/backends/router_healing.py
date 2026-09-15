@@ -44,7 +44,9 @@ from ..executors import (
 )
 from ..lifecycle import (
     PHASE_BASELINE_GENERATION,
+    PHASE_CANDIDATE_GENERATION,
     PHASE_MODEL_LOAD,
+    PHASE_STEADY_STEPS,
     REQUIRED_FOR_EVALUATION,
     REQUIRED_FOR_TRAINING,
     ledger_from_payload,
@@ -53,6 +55,7 @@ from ..models import Experiment
 from ..provenance import sha256_file
 from ..resources import ResourceUsage
 from ..worker_env import chowder_source_identity, worker_env
+from .device_preflight import project_run_ceiling
 from .router_healing_load import LOAD_POLICIES
 
 #: Devices this backend has qualified. See the module docstring.
@@ -127,6 +130,8 @@ class RouterHealingRunSpec:
     resume_from: str | None = None
     max_seconds: float | None = None
     max_load_seconds: float | None = None
+    max_gpu_hours: float | None = None
+    sub_budget_gpu_hours: Mapping[str, float] | None = None
     checkpoint_every: int = 0
     scheduler: str = "constant"
     warmup_steps: int = 0
@@ -183,6 +188,46 @@ class RouterHealingRunSpec:
             raise ValueError(
                 "router healing spec max_load_seconds must be finite and positive when set"
             )
+        # The rung-3c aggregate ceiling: the load and step budgets above each
+        # cover one category, and a run whose parts each fit while their sum
+        # exceeds the preregistered ceiling is exactly the exceedance recorded
+        # after the fact on the rung-3b CUDA run. When a ceiling is declared,
+        # its decomposition is validated here so a spec that does not account
+        # for its whole budget never reaches a worker.
+        if self.max_gpu_hours is not None:
+            ceiling = float(self.max_gpu_hours)
+            if not math.isfinite(ceiling) or ceiling <= 0:
+                raise ValueError(
+                    "router healing spec max_gpu_hours must be a finite positive "
+                    "number when set"
+                )
+            if self.sub_budget_gpu_hours is None:
+                raise ValueError(
+                    "router healing spec max_gpu_hours requires sub_budget_gpu_hours: "
+                    "an undecomposed ceiling cannot be enforced per category"
+                )
+            sub_budgets = dict(self.sub_budget_gpu_hours)
+            if set(sub_budgets) != {"loads", "steps", "generations"}:
+                raise ValueError(
+                    "router healing spec sub_budget_gpu_hours must name exactly "
+                    f"['generations', 'loads', 'steps'], got {sorted(sub_budgets)}"
+                )
+            sub_total = 0.0
+            for category, bound in sub_budgets.items():
+                if not math.isfinite(float(bound)) or float(bound) <= 0:
+                    raise ValueError(
+                        f"router healing spec sub_budget_gpu_hours[{category!r}] "
+                        "must be a finite positive number"
+                    )
+                sub_total += float(bound)
+            if abs(sub_total - ceiling) > 1e-9:
+                raise ValueError(
+                    f"router healing spec sub_budget_gpu_hours sum ({sub_total!r}) "
+                    f"does not sum to max_gpu_hours ({ceiling!r}): a decomposition "
+                    "that does not account for the whole budget quietly authorizes "
+                    "the difference"
+                )
+            object.__setattr__(self, "sub_budget_gpu_hours", sub_budgets)
         if self.scheduler not in _ALLOWED_SCHEDULERS:
             raise ValueError(
                 f"unsupported router healing scheduler {self.scheduler!r}; expected one of "
@@ -301,6 +346,8 @@ class RouterHealingExecutor:
             "device",
             "load_policy",
             "max_load_seconds",
+            "max_gpu_hours",
+            "sub_budget_gpu_hours",
         ):
             if key in research:
                 settings[key] = research[key]
@@ -381,6 +428,16 @@ class RouterHealingExecutor:
             max_load_seconds=(
                 float(settings["max_load_seconds"])
                 if settings.get("max_load_seconds") is not None
+                else None
+            ),
+            max_gpu_hours=(
+                float(settings["max_gpu_hours"])
+                if settings.get("max_gpu_hours") is not None
+                else None
+            ),
+            sub_budget_gpu_hours=(
+                dict(settings["sub_budget_gpu_hours"])
+                if settings.get("sub_budget_gpu_hours") is not None
                 else None
             ),
         )
@@ -651,6 +708,56 @@ class RouterHealingExecutor:
                     "A run that cannot honor its declared load cost is refused, not "
                     "footnoted."
                 )
+        # The rung-3c aggregate ceiling: when the spec declares one, the
+        # worker must report a measured run-ceiling block, and the parent
+        # re-derives the projection from the ledger's own measured phases --
+        # a block that claims the ceiling holds while the phase ledger sums
+        # past it is a lie, and the parent does not believe lies.
+        if spec.max_gpu_hours is not None:
+            ceiling_block = result.get("run_ceiling")
+            if not isinstance(ceiling_block, Mapping) or not ceiling_block.get("measured"):
+                raise RouterHealingBackendError(
+                    "the worker did not measure the run ceiling although the spec "
+                    "declared one; an unbudgeted run is unknown, not passing"
+                )
+            if ceiling_block.get("would_exceed_ceiling") is not False:
+                raise RouterHealingBackendError(
+                    "the worker reports success while over its run ceiling: "
+                    f"{json.dumps(dict(ceiling_block))[:400]}. A run that cannot "
+                    "honor its preregistered budget is refused, not footnoted."
+                )
+            phases = (result.get("lifecycle") or {}).get("phases") or {}
+            load_phase = phases.get(PHASE_MODEL_LOAD) or {}
+            steady_phase = phases.get(PHASE_STEADY_STEPS) or {}
+            load_gpu = load_phase.get("gpu_hours")
+            steps_gpu = steady_phase.get("gpu_hours")
+            if not isinstance(load_gpu, (int, float)) or not isinstance(steps_gpu, (int, float)):
+                raise RouterHealingBackendError(
+                    "the worker's ledger lacks the measured load or step costs the "
+                    "run-ceiling projection consumes; the budget cannot be re-derived"
+                )
+            # Re-derive per category from the ledger's own device-attributed
+            # costs, against the same decomposition the worker was given.
+            category_costs = {
+                "loads": float(load_gpu),
+                "steps": float(steps_gpu),
+                "generations": 0.0,
+            }
+            total = sum(category_costs.values())
+            if total > float(spec.max_gpu_hours) or (
+                spec.sub_budget_gpu_hours is not None
+                and any(
+                    cost > float(bound)
+                    for category, cost in category_costs.items()
+                    if (bound := spec.sub_budget_gpu_hours.get(category)) is not None
+                )
+            ):
+                raise RouterHealingBackendError(
+                    "the worker's measured phases exceed the declared run ceiling even "
+                    "though its block claimed otherwise: "
+                    f"{json.dumps(category_costs)} against "
+                    f"{json.dumps(dict(spec.sub_budget_gpu_hours or {}))}"
+                )
         usage = ResourceUsage.from_wall_time(
             wall_seconds=float(raw_usage.get("wall_seconds", wall_seconds)),
             active_accelerator_count=int(raw_usage.get("active_accelerator_count", 0)),
@@ -739,6 +846,8 @@ class RouterHealingEvalSpec:
     detailed_timing: bool = False
     load_policy: str = "fp32-resident"
     max_load_seconds: float | None = None
+    max_gpu_hours: float | None = None
+    sub_budget_gpu_hours: Mapping[str, float] | None = None
     paired_arms: bool = False
 
     def __post_init__(self) -> None:
@@ -811,6 +920,43 @@ class RouterHealingEvalSpec:
                 "paired_arms requires expected_parameter_paths: a resident pair without "
                 "a declared parameter set cannot verify what the candidate leg applied"
             )
+        # The rung-3c aggregate ceiling on an evaluation arm: validated with the
+        # same decomposition rules as the training spec, so an arm cannot carry
+        # a budget that does not account for its whole ceiling.
+        if self.max_gpu_hours is not None:
+            ceiling = float(self.max_gpu_hours)
+            if not math.isfinite(ceiling) or ceiling <= 0:
+                raise ValueError(
+                    "router healing eval spec max_gpu_hours must be a finite positive "
+                    "number when set"
+                )
+            if self.sub_budget_gpu_hours is None:
+                raise ValueError(
+                    "router healing eval spec max_gpu_hours requires sub_budget_gpu_hours: "
+                    "an undecomposed ceiling cannot be enforced per category"
+                )
+            sub_budgets = dict(self.sub_budget_gpu_hours)
+            if set(sub_budgets) != {"loads", "steps", "generations"}:
+                raise ValueError(
+                    "router healing eval spec sub_budget_gpu_hours must name exactly "
+                    f"['generations', 'loads', 'steps'], got {sorted(sub_budgets)}"
+                )
+            sub_total = 0.0
+            for category, bound in sub_budgets.items():
+                if not math.isfinite(float(bound)) or float(bound) <= 0:
+                    raise ValueError(
+                        f"router healing eval spec sub_budget_gpu_hours[{category!r}] "
+                        "must be a finite positive number"
+                    )
+                sub_total += float(bound)
+            if abs(sub_total - ceiling) > 1e-9:
+                raise ValueError(
+                    f"router healing eval spec sub_budget_gpu_hours sum ({sub_total!r}) "
+                    f"does not sum to max_gpu_hours ({ceiling!r}): a decomposition "
+                    "that does not account for the whole budget quietly authorizes "
+                    "the difference"
+                )
+            object.__setattr__(self, "sub_budget_gpu_hours", sub_budgets)
 
     @property
     def payload_applied(self) -> bool:
@@ -968,6 +1114,16 @@ class RouterHealingEvaluator:
                 if settings.get("max_load_seconds") is not None
                 else None
             ),
+            max_gpu_hours=(
+                float(settings["max_gpu_hours"])
+                if settings.get("max_gpu_hours") is not None
+                else None
+            ),
+            sub_budget_gpu_hours=(
+                dict(settings["sub_budget_gpu_hours"])
+                if settings.get("sub_budget_gpu_hours") is not None
+                else None
+            ),
         )
 
     def _spec_for(
@@ -1026,6 +1182,20 @@ class RouterHealingEvaluator:
             max_load_seconds=(
                 float(value)
                 if (value := research.get("max_load_seconds", settings.get("max_load_seconds")))
+                is not None
+                else None
+            ),
+            max_gpu_hours=(
+                float(value)
+                if (value := research.get("max_gpu_hours", settings.get("max_gpu_hours")))
+                is not None
+                else None
+            ),
+            sub_budget_gpu_hours=(
+                dict(value)
+                if (
+                    value := research.get("sub_budget_gpu_hours", settings.get("sub_budget_gpu_hours"))
+                )
                 is not None
                 else None
             ),
@@ -1322,6 +1492,59 @@ class RouterHealingEvaluator:
                 raise RouterHealingEvaluationError(
                     "the evaluation arm overran its declared load budget: measured "
                     f"{measured_load!r}s against a ceiling of {declared_load!r}s"
+                )
+        # The rung-3c aggregate ceiling on an evaluation arm: when the spec
+        # declares one, the arm must report a measured block, and the parent
+        # re-derives the projection from the ledger's own measured phases and
+        # the load block -- a claim that disagrees with its own ledger is a
+        # lie, and a lie is refused rather than recorded.
+        if spec.max_gpu_hours is not None:
+            ceiling_block = result.get("run_ceiling")
+            if not isinstance(ceiling_block, Mapping) or not ceiling_block.get("measured"):
+                raise RouterHealingEvaluationError(
+                    "the evaluation arm did not measure the run ceiling although the "
+                    "spec declared one; an unbudgeted arm is unknown, not passing"
+                )
+            if ceiling_block.get("would_exceed_ceiling") is not False:
+                raise RouterHealingEvaluationError(
+                    "the evaluation arm reports success while over its run ceiling: "
+                    f"{json.dumps(dict(ceiling_block))[:400]}"
+                )
+            phases = (result.get("lifecycle") or {}).get("phases") or {}
+            load_phase = phases.get(PHASE_MODEL_LOAD) or {}
+            base_phase = phases.get(PHASE_BASELINE_GENERATION) or {}
+            candidate_phase = phases.get(PHASE_CANDIDATE_GENERATION) or {}
+            load_gpu = load_phase.get("gpu_hours")
+            base_gpu = base_phase.get("gpu_hours")
+            candidate_gpu = candidate_phase.get("gpu_hours")
+            if (
+                not isinstance(load_gpu, (int, float))
+                or not isinstance(base_gpu, (int, float))
+                or not isinstance(candidate_gpu, (int, float))
+            ):
+                raise RouterHealingEvaluationError(
+                    "the arm's ledger lacks the measured load or generation costs the "
+                    "run-ceiling projection consumes; the budget cannot be re-derived"
+                )
+            category_costs = {
+                "loads": float(load_gpu),
+                "steps": 0.0,
+                "generations": float(base_gpu) + float(candidate_gpu),
+            }
+            total = sum(category_costs.values())
+            if total > float(spec.max_gpu_hours) or (
+                spec.sub_budget_gpu_hours is not None
+                and any(
+                    cost > float(bound)
+                    for category, cost in category_costs.items()
+                    if (bound := spec.sub_budget_gpu_hours.get(category)) is not None
+                )
+            ):
+                raise RouterHealingEvaluationError(
+                    "the arm's measured phases exceed the declared run ceiling even "
+                    "though its block claimed otherwise: "
+                    f"{json.dumps(category_costs)} against "
+                    f"{json.dumps(dict(spec.sub_budget_gpu_hours or {}))}"
                 )
 
         control = result.get("application_control")

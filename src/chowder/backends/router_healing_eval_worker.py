@@ -55,7 +55,7 @@ from ..lifecycle import (
 from ..router_payload import apply_router_payload, load_router_payload, payload_matches_model
 from ..trainability import _tensor_digest, utilization_by_expert
 from ..worker_env import chowder_source_identity
-from .device_preflight import GIB, project_load_cost
+from .device_preflight import GIB, project_load_cost, project_run_ceiling
 from .router_healing import EVAL_WORKER_RESULT_KIND, QUALIFIED_DEVICES, RouterHealingEvalSpec
 from .router_healing_load import load_with_policy
 
@@ -279,6 +279,19 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
     accelerator_count = 0 if device.type == "cpu" else 1
     started = time.perf_counter()
 
+    # Same rule as the training worker: a GPU-hour ceiling is measured in
+    # attributable accelerator hours, and a CPU worker attributes zero, so any
+    # projection against it passes vacuously. A declared ceiling this worker
+    # cannot measure is refused, not silently unbudgeted.
+    if spec.max_gpu_hours is not None and device.type == "cpu":
+        raise RuntimeError(
+            "the evaluation worker refuses before scoring: the declared run ceiling "
+            "cannot be enforced by a CPU worker -- GPU-hour ceilings are measured in "
+            "attributable accelerator hours and this worker attributes zero, so no "
+            "projection against it can refuse. Re-declare the ceiling on a CUDA run; "
+            "a budget that cannot be measured here is refused, not silently unbudgeted."
+        )
+
     # P11 rung 2: on a non-CPU device, measure the device before scoring. The
     # free-memory reading is the budget context the score was measured under;
     # peak accounting starts here so the score's own footprint is measured.
@@ -469,6 +482,34 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
         ledger.record(PHASE_CANDIDATE_GENERATION, candidate_timer.seconds, synchronized=False)
 
     payload_arm = payload is not None and candidate_loss is not None
+
+    # The rung-3c aggregate ceiling for the evaluation arm: the load projection
+    # above sees one category and the ledger records generations after they
+    # happen -- neither can see their sum against the whole-run ceiling. With
+    # the phases now measured, project the arm's total and refuse before any
+    # score is reported. This worker trains nothing; its honest step input is
+    # zero, and the ceiling decomposition still accounts for that category.
+    run_ceiling: dict[str, Any] | None = None
+    if spec.max_gpu_hours is not None:
+        measured_generation_seconds = float(baseline_timer.seconds or 0.0)
+        if candidate_timer is not None and pair_error is None:
+            measured_generation_seconds += float(candidate_timer.seconds or 0.0)
+        run_ceiling = project_run_ceiling(
+            load_seconds=model_load.seconds or 0.0,
+            step_seconds=0.0,
+            max_steps=0,
+            eval_generation_seconds=measured_generation_seconds,
+            accelerator_count=accelerator_count,
+            max_gpu_hours=spec.max_gpu_hours,
+            sub_budget_gpu_hours=spec.sub_budget_gpu_hours,
+        )
+        if run_ceiling["would_exceed_ceiling"]:
+            raise RuntimeError(
+                "the evaluation worker refuses before reporting a score: its measured "
+                "load plus generation cost exceeds the declared run ceiling -- "
+                f"{json.dumps(run_ceiling)}. The preregistration's whole-run budget "
+                "is refused, not exceeded and footnoted."
+            )
     if payload_arm:
         assert comparison is not None and apply_report is not None
         application_control = {
@@ -562,6 +603,7 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
         },        "source_identity": chowder_source_identity(),
         "device_preflight": device_preflight,
         "load_budget": load_budget,
+        "run_ceiling": run_ceiling,
         "resource_usage": {
             "wall_seconds": total_wall,
             "active_accelerator_count": accelerator_count,
