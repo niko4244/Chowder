@@ -11,10 +11,17 @@ Three deliberate boundaries
   experiment's declared estimate) and returns a `CostEstimate`. It must never
   load a model, touch the base directory, or import torch: a preflight that
   loads weights is not a preflight.
-* **CPU is the only qualified device.** `QUALIFIED_DEVICES` is enforced when the
-  spec is constructed, so an accelerator request fails before a subprocess is
-  launched rather than halfway through a load. The frozen-tensor digest is not
-  device-safe yet; refusing is the honest outcome.
+* **Only measured devices are qualified.** `QUALIFIED_DEVICES` is enforced when the
+  spec is constructed, so an unqualified request fails before a subprocess is
+  launched rather than halfway through a load. Devices join the list only behind
+  a completed, preregistered qualification on real hardware — `cpu` is native;
+  `cuda` qualified on 2026-09-14 via the rung-2 run recorded in
+  `docs/quals/P11_CUDA_QUALIFICATION_2026-09-14.md`, behind the measured
+  device preflight. `mps` has never been measured and stays refused. The
+  cuda qualification was subsequently exercised end-to-end on a 9B-derived
+  artifact by the paired rung-3c run
+  (`docs/quals/P11_RUNG3C_CUDA_PAIRED_PREREG_2026-09-15.md`), judged by the
+  mechanical judge with the corrected instrument (#163).
 * **The parent never trusts the child's summary.** The worker's result is
   re-parsed: the ledger is rebuilt through `ledger_from_payload`, the required
   training phases are demanded, and the trainability / frozen / coverage
