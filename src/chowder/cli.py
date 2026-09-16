@@ -7,6 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .calibration import calibrate_hardware
+from .growth.cli import register_growth_subcommands
 from .hardware import detect_hardware
 from .memory import HardwareProfile, WorkloadProfile, plan_memory
 from .project import load_project
@@ -390,6 +391,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--output", required=True, help="Path to write the accounting evidence JSON"
     )
     account_parameters.set_defaults(func=_moe_account_parameters)
+
+    register_growth_subcommands(sub)
     return parser
 
 
