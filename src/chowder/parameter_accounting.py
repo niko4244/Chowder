@@ -510,19 +510,28 @@ def _measure_router_geometry(
     """
     gate_up_shapes: list[list[int]] = []
     down_shapes: list[list[int]] = []
+    # `Qwen3_5MoeExperts` declares these as raw `nn.Parameter` attributes, not
+    # `nn.Linear` submodules, so the real checkpoint names them
+    # `...mlp.experts.gate_up_proj` with NO `.weight` suffix (verified against
+    # transformers 5.16.1's modeling_qwen3_5_moe.py and against a real
+    # converted checkpoint's model.safetensors.index.json). Accepting only the
+    # suffixed spelling made this module refuse every genuine conversion
+    # output, which is why no `.accounting.json` existed beside the first real
+    # E=16 checkpoint. Both spellings are accepted so a future layout that
+    # does wrap them in Linear still measures.
     for name, entry in sorted(category_tensors.get("routed_expert", {}).items()):
         shape = entry["shape"]
-        if name.endswith(".gate_up_proj.weight"):
+        if name.endswith((".gate_up_proj", ".gate_up_proj.weight")):
             gate_up_shapes.append(shape)
-        elif name.endswith(".down_proj.weight"):
+        elif name.endswith((".down_proj", ".down_proj.weight")):
             down_shapes.append(shape)
 
     if not gate_up_shapes or not down_shapes:
         raise ParameterAccountingError(
             "routed tensors exist but no fused gate_up_proj/down_proj shapes were "
             "found; this module measures the verified qwen3_5_moe fused layout "
-            "(.mlp.experts.{gate_up_proj,down_proj}.weight) and refuses to guess "
-            "geometry from other layouts"
+            "(.mlp.experts.{gate_up_proj,down_proj}, with or without a trailing "
+            "`.weight`) and refuses to guess geometry from other layouts"
         )
 
     def _dims(shapes: list[list[int]], label: str) -> tuple[int, int, int]:

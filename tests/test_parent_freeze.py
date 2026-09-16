@@ -256,6 +256,97 @@ def test_tokenizer_mismatch_fails_closed(tmp_path):
         freeze_selected_parent(packet)
 
 
+def test_tokenizer_behavioral_equivalence_supersedes_identity_mismatch(tmp_path):
+    """Protocol v3: proven identical token IDs on the pinned probe corpus
+    supersede byte-identity -- a different tokenizer class/serialization
+    (e.g. D's TokenizersBackend vs the reference's Qwen2Tokenizer) is not
+    itself a failure, matching this module's docstring intent and the
+    reason v3 exists (v2's byte-identity check wrongly rejected C/D)."""
+    registry, spec = _valid_registry(tmp_path)
+    tokenizer_evidence = _tokenizer_evidence_for_all()
+    tokenizer_evidence["D"] = {
+        "tokenizer_class": "TokenizersBackend",
+        "vocab_size": 151936,
+        "identity_sha256": "different-serialization",
+        "behavioral_equivalence": {
+            "probe_corpus_sha256": "probe-corpus-hash",
+            "identical": True,
+        },
+    }
+    # Every role (including the reference, A) must carry behavioral evidence
+    # against the same probe for the gate to consider it proven.
+    for role in ("A", "B", "C"):
+        tokenizer_evidence[role] = {
+            **tokenizer_evidence[role],
+            "behavioral_equivalence": {
+                "probe_corpus_sha256": "probe-corpus-hash",
+                "identical": True,
+            },
+        }
+    packet = build_selection_packet(
+        registry,
+        role_bindings=ROLE_BINDINGS,
+        expected_protocol_sha256=spec.digest(),
+        tokenizer_evidence=tokenizer_evidence,
+    )
+    assert packet.all_gates_passed()
+    record = freeze_selected_parent(packet)
+    assert record.selected_role == "B"
+
+
+def test_tokenizer_behavioral_divergence_still_fails_closed(tmp_path):
+    """A real behavioral divergence (identical=False) must never be masked
+    by the v3 supersede path -- it is exactly the failure v3's gate exists
+    to catch."""
+    registry, spec = _valid_registry(tmp_path)
+    tokenizer_evidence = _tokenizer_evidence_for_all()
+    for role in ("A", "B", "C"):
+        tokenizer_evidence[role] = {
+            **tokenizer_evidence[role],
+            "behavioral_equivalence": {"probe_corpus_sha256": "probe-corpus-hash", "identical": True},
+        }
+    tokenizer_evidence["D"] = {
+        "tokenizer_class": "TokenizersBackend",
+        "vocab_size": 151936,
+        "identity_sha256": "different-serialization",
+        "behavioral_equivalence": {"probe_corpus_sha256": "probe-corpus-hash", "identical": False},
+    }
+    packet = build_selection_packet(
+        registry,
+        role_bindings=ROLE_BINDINGS,
+        expected_protocol_sha256=spec.digest(),
+        tokenizer_evidence=tokenizer_evidence,
+    )
+    assert not packet.all_gates_passed()
+    with pytest.raises(TokenizerComparabilityError):
+        freeze_selected_parent(packet)
+
+
+def test_tokenizer_partial_behavioral_coverage_falls_back_to_identity_check(tmp_path):
+    """If even one role lacks behavioral evidence, the v3 supersede path
+    must not apply -- falling back to strict byte-identity keeps this
+    honest rather than silently passing on partial proof."""
+    registry, spec = _valid_registry(tmp_path)
+    tokenizer_evidence = _tokenizer_evidence_for_all()
+    tokenizer_evidence["D"] = {
+        "tokenizer_class": "TokenizersBackend",
+        "vocab_size": 151936,
+        "identity_sha256": "different-serialization",
+        "behavioral_equivalence": {"probe_corpus_sha256": "probe-corpus-hash", "identical": True},
+    }
+    # B and C never got behavioral evidence attached (e.g. a v2 packet
+    # accidentally mixed with one v3 role's evidence).
+    packet = build_selection_packet(
+        registry,
+        role_bindings=ROLE_BINDINGS,
+        expected_protocol_sha256=spec.digest(),
+        tokenizer_evidence=tokenizer_evidence,
+    )
+    assert not packet.all_gates_passed()
+    with pytest.raises(TokenizerComparabilityError):
+        freeze_selected_parent(packet)
+
+
 def test_missing_tokenizer_evidence_fails_closed_unless_bypassed(tmp_path):
     registry, spec = _valid_registry(tmp_path)
     packet = build_selection_packet(

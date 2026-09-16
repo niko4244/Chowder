@@ -1,0 +1,25 @@
+W0911 13:03:41.501000 110340 site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
+[13:03:42] card total 15.93 GiB; probing moe at F:\llm-models\Qwen3.8-9B-HotCore-E16-k2-h2176
+Loading weights:   0%|          | 0/555 [00:00<?, ?it/s]Loading weights:   0%|          | 1/555 [00:13<2:01:05, 13.11s/it]Loading weights:   0%|          | 2/555 [00:13<54:04,  5.87s/it]  Loading weights:   1%|1         | 7/555 [00:14<10:27,  1.15s/it]Loading weights:   2%|1         | 10/555 [00:17<10:08,  1.12s/it]Loading weights:   3%|2         | 14/555 [00:17<05:46,  1.56it/s]Loading weights:   6%|5         | 31/555 [00:17<01:34,  5.56it/s]Loading weights:   8%|8         | 45/555 [00:17<00:51,  9.92it/s]Loading weights:  10%|9         | 54/555 [00:17<00:37, 13.20it/s]Loading weights:  11%|#1        | 62/555 [00:17<00:28, 17.00it/s]Loading weights:  14%|#4        | 79/555 [00:17<00:16, 28.70it/s]Loading weights:  16%|#6        | 90/555 [00:18<00:13, 35.31it/s]Loading weights:  18%|#8        | 101/555 [00:18<00:11, 41.27it/s]Loading weights:  20%|#9        | 110/555 [00:21<00:48,  9.09it/s]Loading weights:  21%|##1       | 119/555 [00:21<00:37, 11.76it/s]Loading weights:  23%|##3       | 128/555 [00:21<00:27, 15.31it/s]Loading weights:  26%|##6       | 147/555 [00:21<00:15, 26.27it/s]Loading weights:  28%|##8       | 157/555 [00:21<00:12, 31.12it/s]Loading weights:  31%|###       | 170/555 [00:22<00:09, 38.85it/s]Loading weights:  34%|###3      | 187/555 [00:22<00:06, 53.34it/s]Loading weights:  36%|###5      | 198/555 [00:22<00:06, 54.73it/s]Loading weights:  37%|###7      | 208/555 [00:25<00:33, 10.51it/s]Loading weights:  40%|###9      | 221/555 [00:25<00:22, 14.52it/s]Loading weights:  43%|####2     | 238/555 [00:25<00:14, 21.90it/s]Loading weights:  45%|####5     | 252/555 [00:26<00:10, 29.17it/s]Loading weights:  47%|####7     | 263/555 [00:26<00:08, 34.35it/s]Loading weights:  49%|####9     | 273/555 [00:26<00:07, 40.11it/s]Loading weights:  52%|#####1    | 288/555 [00:26<00:05, 53.11it/s]Loading weights:  54%|#####3    | 299/555 [00:26<00:04, 59.74it/s]Loading weights:  56%|#####5    | 309/555 [00:29<00:24, 10.17it/s]Loading weights:  59%|#####8    | 325/555 [00:30<00:14, 15.47it/s]Loading weights:  60%|######    | 335/555 [00:30<00:11, 18.69it/s]Loading weights:  64%|######3   | 354/555 [00:30<00:06, 28.91it/s]Loading weights:  66%|######5   | 365/555 [00:30<00:05, 33.83it/s]Loading weights:  68%|######7   | 377/555 [00:30<00:04, 40.09it/s]Loading weights:  71%|#######   | 394/555 [00:30<00:02, 54.19it/s]Loading weights:  73%|#######2  | 405/555 [00:34<00:13, 10.89it/s]Loading weights:  76%|#######6  | 423/555 [00:34<00:07, 16.64it/s]Loading weights:  78%|#######8  | 434/555 [00:34<00:05, 20.49it/s]Loading weights:  80%|########  | 446/555 [00:34<00:04, 25.60it/s]Loading weights:  83%|########3 | 463/555 [00:34<00:02, 36.22it/s]Loading weights:  85%|########5 | 474/555 [00:34<00:02, 39.94it/s]Loading weights:  89%|########8 | 492/555 [00:35<00:01, 55.22it/s]Loading weights:  91%|######### | 504/555 [00:38<00:04, 11.72it/s]Loading weights:  93%|#########2| 515/555 [00:38<00:02, 14.86it/s]Loading weights:  96%|#########5| 532/555 [00:38<00:01, 21.87it/s]Loading weights:  98%|#########7| 542/555 [00:38<00:00, 23.89it/s]Loading weights: 100%|##########| 555/555 [00:39<00:00, 14.21it/s]
+[13:04:27]   after load                   alloc  12.64  reserved  12.78  peak_res  12.78 GiB
+[13:04:27]   resident weight by kind:
+[13:04:27]     routed_expert_bank    3.976B params    7.95 GB  quantized   0.0%
+[13:04:27]     other                 3.079B params    5.11 GB  quantized  20.4%
+[13:04:27]     shared_expert         0.428B params    0.43 GB  quantized 100.0%
+[13:04:27]     router                0.002B params    0.00 GB  quantized   0.0%
+[13:04:49]   after kbit prep              alloc  23.84  reserved  28.39  peak_res  28.39 GiB
+[13:05:32]   after LoRA attach            alloc  23.94  reserved  28.48  peak_res  28.48 GiB
+[13:05:32]   LoRA adapters attached:
+[13:05:32]     linear_attn.in_proj_qkv          x24
+[13:05:32]     linear_attn.in_proj_z            x24
+[13:05:32]     linear_attn.out_proj             x24
+[13:05:32]     self_attn.k_proj                 x8
+[13:05:32]     self_attn.o_proj                 x8
+[13:05:32]     self_attn.q_proj                 x8
+[13:05:32]     self_attn.v_proj                 x8
+[13:05:32]     shared_expert.down_proj          x32
+[13:05:32]     shared_expert.gate_proj          x32
+[13:05:32]     shared_expert.up_proj            x32
+[13:05:32]   trainable params 24.58M
+[13:05:32]   routed expert bank adapters: 0  <- PEFT wraps nn.Linear only; the bank is raw nn.Parameter
+[13:05:32]   prompt 25 tokens; generating 4x400

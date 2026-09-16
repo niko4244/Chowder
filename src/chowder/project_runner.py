@@ -1,21 +1,27 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .backend_selection import create_training_executor, normalize_training_config_for_executor
+from .backend_selection import (
+    ROUTER_HEALING_ENGINE,
+    create_evaluation_executor,
+    create_training_executor,
+    normalize_training_config_for_executor,
+    resolve_training_engine,
+)
 from .cancellation import CancellationToken
 from .cycle import ExperimentCycleRunner, GenerationOutcome
 from .engine import EvolutionEngine
 from .evaluators.base_text import BaseModelTextEvaluator
-from .evaluators.transformers_text import TransformersTextEvaluator
 from .executors import EvaluationOutcome, ExecutionContext
 from .failures import harvest_transformers_text_failures
 from .hardware import HardwareSnapshot, detect_hardware
 from .local_corpus_provider import LocalCorpusRepairProvider
 from .memory import HardwareProfile
-from .models import Experiment, ExperimentResult, Hypothesis
+from .models import Experiment, ExperimentResult, ExperimentStatus, Hypothesis
 from .project import ProjectSpec, load_project
 from .recursive_repair import RecursiveRepairOutcome, run_bounded_autonomous_repair
 from .registry import RunRegistry
@@ -43,6 +49,7 @@ class ProjectRunOutcome:
     hardware: HardwareSnapshot
     generation: GenerationOutcome
     repair: RecursiveRepairOutcome | None = None
+    registry_audit: tuple[dict[str, object], ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -138,7 +145,7 @@ def _run_automatic_baseline(
     context: ExecutionContext,
     registry: RunRegistry,
     on_event: EventCallback | None,
-) -> tuple[ExperimentResult, str | None]:
+) -> tuple[ExperimentResult | None, str | None]:
     """Evaluate the untouched base model and persist it as the baseline.
 
     Runs before any training happens, using the exact same evaluator and
@@ -146,6 +153,12 @@ def _run_automatic_baseline(
     the trained candidate -- so ``Goal.require_protocol_match`` is comparing
     like with like, not the user's guess of where the base model already
     stood against a differently-configured post-training run.
+
+    For a router project running paired arms, this records the baseline ROW
+    but defers its measurement to the candidate's own resident-pair
+    evaluation (one model load instead of two) and returns None; the
+    deferred-baseline provider in run_project completes the row from that
+    measurement before the gate adjudicates.
     """
     _emit_stage(
         on_event, registry, "baseline", "Evaluating the untouched base model for an automatic baseline"
@@ -173,7 +186,39 @@ def _run_automatic_baseline(
             estimated_gpu_hours=estimated_gpu_hours,
         )
     )
-    outcome = BaseModelTextEvaluator().evaluate(config=project.config, context=context)
+    # The baseline must be measured by the *same* scorer that will score the
+    # candidate: a router project's untouched base scored by the PEFT text
+    # evaluator would be a different measurement on a different protocol, and
+    # comparing it to a router payload's holdout loss would be arithmetic on two
+    # unrelated numbers.
+    if resolve_training_engine(project.config) == ROUTER_HEALING_ENGINE:
+        from .backends.router_healing import RouterHealingEvaluator
+
+        evaluator = RouterHealingEvaluator()
+        if evaluator.defers_automatic_baseline(
+            experiment=project.experiment, context=context
+        ):
+            # Paired arms: the candidate's own evaluation measures the base
+            # in the same resident process. Record the row now, settle it
+            # when the paired evidence lands.
+            return None, None
+        try:
+            outcome = evaluator.evaluate_base(
+                config=project.config, context=context
+            )
+        except Exception:
+            # The row exists; a measurement that never completed must not
+            # strand it in `planned` ("has not run yet") -- `failed` with no
+            # result is the honest record for an attempt that produced no
+            # scored outcome.
+            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
+            raise
+    else:
+        try:
+            outcome = BaseModelTextEvaluator().evaluate(config=project.config, context=context)
+        except Exception:
+            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
+            raise
     evidence: dict[str, Any] = {
         "evaluation_run_id": outcome.run_id,
         "evaluation": dict(outcome.evidence),
@@ -194,6 +239,12 @@ def _run_automatic_baseline(
     )
     registry.record_evaluation_outcome(outcome)
     registry.record_result(result)
+    # A measured baseline is a completed measurement, not a gate verdict: the
+    # gate's accept/reject lives on the candidate's row. `parent_tournament`
+    # already persists its measured base-model rows as `passed`; the automatic
+    # baseline follows the same convention so the durable status finally
+    # matches the evidence the row carries.
+    registry.update_experiment_status("baseline", ExperimentStatus.PASSED.value)
     metrics_summary = ", ".join(f"{name}={value:.4f}" for name, value in sorted(result.metrics.items()))
     _emit_stage(
         on_event, registry, "baseline", f"Automatic baseline established: {metrics_summary}"
@@ -245,12 +296,19 @@ def run_project(
             hardware=profile,
             work_dir=str(project.work_dir),
             seed=project.seed,
+            # The project config is the base resolution the backend resolvers
+            # read (e.g. the paired-arms decision at start time); the cycle
+            # runner replaces this per candidate with the graph-resolved
+            # config, so nothing downstream sees a stale view.
+            resolved_config=project.config,
         )
 
+        deferred = False
         if project.baseline_mode == "auto":
             baseline, resolved_revision = _run_automatic_baseline(
                 project, context, registry, on_event
             )
+            deferred = baseline is None
             training_config: Mapping[str, Any] = (
                 _config_with_bound_revision(project.config, resolved_revision)
                 if resolved_revision
@@ -264,11 +322,21 @@ def run_project(
         training_config = normalize_training_config_for_executor(training_config)
         engine = EvolutionEngine(
             goal=project.goal,
+            # A deferred baseline is a real seam, not a placeholder: the
+            # engine runs with no baseline at all and refuses every gate-time
+            # operation until the paired evaluation's measurement lands.
             baseline=baseline,
-            spent_gpu_hours=baseline.gpu_hours,
+            baseline_deferred=deferred,
+            # The row's estimate is the provisional spend so budget admission
+            # stays conservative; the provider reconciles it with the
+            # measured cost.
+            spent_gpu_hours=baseline.gpu_hours if baseline is not None else 0.01,
         )
         trainer = create_training_executor(training_config)
-        evaluator = TransformersTextEvaluator()
+        # Same engine key as the trainer, so a router payload can never be handed
+        # to the PEFT text evaluator (or the reverse) and fail inside the
+        # library instead of at the dispatch seam.
+        evaluator = create_evaluation_executor(training_config)
         runner = ExperimentCycleRunner(
             engine=engine,
             trainer=trainer,
@@ -288,6 +356,9 @@ def run_project(
             # transitions, repair/failure/promotion events, and checkpoints
             # already are.
             progress_callback=on_event,
+            deferred_baseline=(
+                _paired_baseline_completer(registry, on_event) if deferred else None
+            ),
         )
         accepted = engine.propose((project.experiment,))
         if not accepted:
@@ -389,12 +460,108 @@ def run_project(
                     experiment_id=candidate.experiment_id,
                 )
 
+        # Closeout audit: a result stranded on a non-terminal row is the class
+        # of durable-evidence disagreement the automatic-baseline settlement
+        # fixed for one writer. The audit keeps the class visible instead of
+        # trusting every writer to stay correct forever; the finding is both
+        # on the outcome for the caller and persisted as a run event so a
+        # restart reconstructs the warning from durable history.
+        registry_audit = tuple(registry.audit_stranded_results())
+        if registry_audit:
+            summary = ", ".join(
+                f"{finding['experiment_id']} ({finding['status']})"
+                for finding in registry_audit
+            )
+            _emit_stage(
+                on_event,
+                registry,
+                "registry-audit",
+                f"{len(registry_audit)} result(s) stranded on non-terminal rows: {summary}",
+            )
+
     return ProjectRunOutcome(
         project=project,
         hardware=hardware,
         generation=generation,
         repair=repair_outcome,
+        registry_audit=registry_audit,
     )
+
+
+def _paired_baseline_completer(
+    registry: RunRegistry,
+    on_event: EventCallback | None,
+) -> Callable[[object], ExperimentResult]:
+    """Complete the deferred baseline row from the paired evaluation.
+
+    Built by run_project when the router project deferred its automatic
+    baseline to the candidate's resident pair. The runner calls it with the
+    scored candidate outcome BEFORE the gate adjudicates; this closure is
+    the single writer of the baseline row (the same writer that created it),
+    so the stranded-result discipline holds.
+    """
+
+    def complete(candidate_outcome) -> ExperimentResult:
+        if candidate_outcome is None:
+            # No candidate ever scored: the resident pair that should have
+            # measured the base never ran to a score. Settle the row failed
+            # and tell the runner the measurement does not exist.
+            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
+            raise RuntimeError(
+                "no candidate evaluation scored, so the deferred baseline has no "
+                "resident-pair measurement to complete from"
+            )
+        evidence = candidate_outcome.evaluation.evidence
+        base_loss = evidence.get("base_holdout_loss")
+        if not isinstance(base_loss, (int, float)) or not math.isfinite(float(base_loss)):
+            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
+            raise RuntimeError(
+                "the paired evaluation carried no measurable base score; the deferred "
+                "baseline is unknown, not zero"
+            )
+        if evidence.get("arm") != "paired":
+            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
+            raise RuntimeError(
+                f"the candidate evaluation reported arm {evidence.get('arm')!r}, not a "
+                "resident pair: the deferral decision and the actual evaluation "
+                "disagree, so the baseline is not measured"
+            )
+        # Charge honesty (rung-3c reconciliation): the resident pair's wall
+        # time was already billed to the candidate row that ran the eval.
+        # Re-charging it to the baseline row double-counts the same seconds
+        # (0.0585 recorded against 0.0167 device-truth on rung 3c). The
+        # baseline row is a measurement pointer: gpu_hours 0.0, with the
+        # shared charge named and the owner row cited.
+        shared_wall_gpu_hours = float(candidate_outcome.evaluation.gpu_hours)
+        registry.update_experiment_status("baseline", ExperimentStatus.PASSED.value)
+        result = ExperimentResult(
+            experiment_id="baseline",
+            metrics={"holdout_loss": float(base_loss)},
+            gpu_hours=0.0,
+            artifact_ref=None,
+            evidence={
+                "baseline_source": "paired-candidate-evaluation",
+                "base_holdout_loss": float(base_loss),
+                "compute": {
+                    "baseline_source": "paired-candidate-evaluation",
+                    "total_gpu_hours": 0.0,
+                    "model_loads": 1,
+                    "shared_wall_gpu_hours": shared_wall_gpu_hours,
+                    "charged_to": candidate_outcome.experiment_id,
+                },
+            },
+        )
+        registry.record_result(result)
+        metrics_summary = f"holdout_loss={float(base_loss):.4f}"
+        _emit_stage(
+            on_event,
+            registry,
+            "baseline",
+            f"Automatic baseline established from the resident pair: {metrics_summary}",
+        )
+        return result
+
+    return complete
 
 
 def _emit_candidate_events(

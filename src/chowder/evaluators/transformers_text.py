@@ -9,13 +9,21 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..worker_env import chowder_source_identity, worker_env
+from ..base_identity import describe_base_identity
+from .rendering import validate_rendering_evidence
+from .scorer_identity import scorer_identity
 from ..cancellation import CancellationToken
 from ..executors import CostEstimate, EvaluationOutcome, ExecutionContext, TrainingArtifact
+from ..lifecycle import evaluation_lifecycle_evidence
 from ..models import Experiment
 from ..protocol import protocol_fingerprint
 from ..provenance import sha256_directory, sha256_file
 
-_ALLOWED_SCORING = {"exact_match", "normalized_exact_match"}
+# final_number_match compares the LAST number on each side, for arithmetic word
+# problems where the model shows its work; see the workers for the extraction
+# rules and the documented bug that motivated them.
+_ALLOWED_SCORING = {"exact_match", "normalized_exact_match", "final_number_match"}
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
 _ALLOWED_QUANTIZATION = {"none", "4bit"}
 
@@ -44,6 +52,14 @@ class EvalSuiteSpec:
             raise ValueError(f"unsupported scoring method: {self.scoring}")
         if self.max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
+        if self.canonical_rendering and not self.use_chat_template:
+            # Refuse the contradictory request at construction: canonical
+            # rendering is a *way* of applying a chat template, so this would
+            # render raw prompt bytes while the spec claimed canonical ones.
+            raise ValueError(
+                f"evaluation suite {self.name!r} sets canonical_rendering without "
+                "use_chat_template; enable use_chat_template or drop canonical_rendering"
+            )
 
 
 @dataclass(frozen=True)
@@ -129,6 +145,11 @@ class TransformersTextEvalSpec:
                     scoring=str(raw.get("scoring", "normalized_exact_match")),
                     max_new_tokens=int(raw.get("max_new_tokens", evaluation.get("max_new_tokens", 64))),
                     use_chat_template=bool(raw.get("use_chat_template", evaluation.get("use_chat_template", False))),
+                    # This arm previously dropped the flag, so a suite asking for
+                    # canonical rendering silently scored the checkpoint's own
+                    # template while the protocol claimed otherwise. The field
+                    # exists on the shared EvalSuiteSpec; it is now parsed here.
+                    canonical_rendering=bool(raw.get("canonical_rendering", False)),
                 )
             )
 
@@ -211,8 +232,10 @@ class TransformersTextEvaluator:
             process.wait()
 
     @staticmethod
-    def _worker_command(spec_path: Path, result_path: Path) -> list[str]:
-        return [
+    def _worker_command(
+        spec_path: Path, result_path: Path, chowder_identity: Path | None = None
+    ) -> list[str]:
+        command = [
             sys.executable,
             "-m",
             "chowder.evaluators.transformers_text_worker",
@@ -221,6 +244,12 @@ class TransformersTextEvaluator:
             "--result",
             str(result_path),
         ]
+        if chowder_identity is not None:
+            # The worker verifies this against the code it actually imported
+            # BEFORE reading its spec: a mismatch refuses instead of scoring
+            # against the wrong checkout (see worker_env.verify_source_identity).
+            command.extend(["--chowder-identity", str(chowder_identity)])
+        return command
 
     @staticmethod
     def _tail(path: Path, lines: int = 30) -> str:
@@ -265,14 +294,22 @@ class TransformersTextEvaluator:
         stdout_path = eval_dir / "stdout.log"
         stderr_path = eval_dir / "stderr.log"
         spec_path.write_text(spec.canonical_json() + "\n", encoding="utf-8")
+        # P4c: pin the source identity the worker must run; P4a: bind the
+        # scoring implementation's content into the protocol fingerprint.
+        source_identity = chowder_source_identity()
+        identity_path = eval_dir / "chowder-identity.json"
+        identity_path.write_text(
+            json.dumps(source_identity, sort_keys=True) + "\n", encoding="utf-8"
+        )
 
         started = time.perf_counter()
         with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
             process = subprocess.Popen(
-                self._worker_command(spec_path, result_path),
+                self._worker_command(spec_path, result_path, chowder_identity=identity_path),
                 stdout=stdout,
                 stderr=stderr,
                 text=True,
+                env=worker_env(),
             )
             self._processes[eval_id] = process
             if self._cancellation is not None:
@@ -317,6 +354,10 @@ class TransformersTextEvaluator:
         gpu_count = int(runtime.get("gpu_count", 0))
         if gpu_count < 0:
             raise RuntimeError("evaluation runtime reported a negative gpu_count")
+        # P6: the candidate arm's own measured lifecycle (load, generation, and
+        # sampled headroom), validated here so an unparseable report is refused
+        # instead of being filed as evidence.
+        lifecycle_evidence = evaluation_lifecycle_evidence(runtime)
 
         expected_names = {suite.name for suite in spec.suites}
         if set(metrics) != expected_names:
@@ -325,9 +366,20 @@ class TransformersTextEvaluator:
             raise RuntimeError("evaluation suite evidence names do not match configured suites")
 
         fingerprint_hashes: dict[str, str] = {}
+        rendering_evidence: dict[str, dict[str, Any]] = {}
+        specs_by_name = {suite.name: suite for suite in spec.suites}
         for suite_name, suite_payload in suite_evidence.items():
             if not isinstance(suite_payload, Mapping):
                 raise RuntimeError(f"suite evidence for {suite_name!r} is invalid")
+            # P4: bind what the worker actually rendered with, validated against
+            # what this suite asked for (see evaluators/rendering.py).
+            suite_spec = specs_by_name[str(suite_name)]
+            rendering_evidence[str(suite_name)] = validate_rendering_evidence(
+                suite_name=str(suite_name),
+                reported=suite_payload,
+                use_chat_template=suite_spec.use_chat_template,
+                canonical_rendering=suite_spec.canonical_rendering,
+            )
             fingerprint_ref = suite_payload.get("holdout_fingerprints_file")
             declared_digest = suite_payload.get("holdout_fingerprints_sha256")
             if not isinstance(fingerprint_ref, str) or not isinstance(declared_digest, str):
@@ -343,10 +395,20 @@ class TransformersTextEvaluator:
             fingerprint_hashes[str(suite_name)] = actual_fingerprint_digest
 
         dataset_hashes = {suite.name: sha256_file(suite.dataset) for suite in spec.suites}
+        # P4a: the scoring implementation is protocol, not trivia — a scorer
+        # change must change the fingerprint so an old result can never claim
+        # the new rule's identity (the audit's lenient-vs-strict gap).
+        # P4b: a local base binds by content; a hub id binds by revision, and
+        # the payload says which one it is (no fake content claims).
+        base_identity = describe_base_identity(
+            spec.base_model, revision=spec.revision
+        )
         protocol = {
             "evaluator": self.name,
             "base_model": spec.base_model,
             "revision": spec.revision,
+            "scorer": scorer_identity(),
+            "base_identity": base_identity,
             "precision": spec.precision,
             "quantization": spec.quantization,
             "device": runtime.get("device"),
@@ -368,6 +430,10 @@ class TransformersTextEvaluator:
                         if suite.canonical_rendering
                         else {}
                     ),
+                    # P4: the rendering the worker actually performed, with the
+                    # template digest -- the same shape the baseline evaluator
+                    # writes, so `gate.py`'s baseline==candidate check covers it.
+                    **rendering_evidence[suite.name],
                 }
                 for suite in spec.suites
             ],
@@ -388,10 +454,12 @@ class TransformersTextEvaluator:
                 "evaluation_result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
                 "protocol": protocol,
                 "protocol_sha256": protocol_sha,
+                "chowder_source_identity": source_identity,
                 "holdout_fingerprint_sha256": fingerprint_hashes,
                 "suite_evidence": dict(suite_evidence),
                 "versions": dict(versions),
                 "runtime": dict(runtime),
+                "lifecycle": lifecycle_evidence,
                 "model_provenance": dict(model_provenance),
                 "wall_time_seconds": elapsed,
                 "stdout_log": str(stdout_path),

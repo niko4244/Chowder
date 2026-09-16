@@ -1,0 +1,114 @@
+{
+  "engine": "transformers",
+  "model": "F:\\llm-models\\Qwen3.8-9B-Pruned-CW-3456",
+  "wall_seconds": 225.97744989395142,
+  "candidate_error": null,
+  "telemetry": {
+    "activation_offload_bytes_transferred": null,
+    "avg_gpu_utilization_percent": null,
+    "backward_seconds": null,
+    "forward_seconds": null,
+    "frozen_layer_streaming_bytes_transferred": null,
+    "global_step": 50,
+    "optimizer_seconds": null,
+    "optimizer_state_bytes": 212338240,
+    "peak_vram_gb": 11.664522171020508,
+    "primary_rows": 20,
+    "replay_selected_rows": 0,
+    "train_loss": 0.7381908839941025,
+    "train_runtime_seconds": 138.65730700001586,
+    "training_rows": 20
+  },
+  "resolved_target_modules": [
+    "down_proj",
+    "gate_proj",
+    "in_proj_qkv",
+    "in_proj_z",
+    "k_proj",
+    "o_proj",
+    "out_proj",
+    "q_proj",
+    "up_proj",
+    "v_proj"
+  ],
+  "artifact_ref": "F:\\llm-models\\_a4b\\level2-transformers-v7\\.chowder\\runs\\level2-transformers-0e23cb0144a4\\adapter",
+  "adapter_files": [
+    "README.md",
+    "adapter_config.json",
+    "adapter_model.safetensors",
+    "chat_template.jinja",
+    "progress.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "trainer"
+  ],
+  "progress_losses": [
+    4.835432529449463,
+    3.4058120250701904,
+    2.5043723583221436,
+    1.594469666481018,
+    1.2476710081100464,
+    0.969193696975708,
+    1.0684702396392822,
+    1.066435694694519,
+    1.330297589302063,
+    0.8174179196357727,
+    0.647537887096405,
+    0.8663485646247864,
+    0.6125271916389465,
+    0.6895308494567871,
+    0.6112740635871887,
+    0.4489271640777588,
+    0.5160736441612244,
+    0.5628984570503235,
+    0.6142679452896118,
+    0.5875334739685059,
+    0.4933812618255615,
+    0.39494022727012634,
+    0.45995625853538513,
+    0.4342125356197357,
+    0.4290963411331177,
+    0.3378583490848541,
+    0.36925411224365234,
+    0.40521422028541565,
+    0.4985356330871582,
+    0.4591551721096039,
+    0.48825737833976746,
+    0.3671475946903229,
+    0.38445845246315,
+    0.4208710491657257,
+    0.3830055892467499,
+    0.37560877203941345,
+    0.39431658387184143,
+    0.36237210035324097,
+    0.39187803864479065,
+    0.43336600065231323,
+    0.4233872592449188,
+    0.3426952362060547,
+    0.39178016781806946,
+    0.34534695744514465,
+    0.3577798306941986,
+    0.33885160088539124,
+    0.3675753176212311,
+    0.3284244239330292,
+    0.3576521575450897,
+    0.3766736090183258
+  ],
+  "registry_results": {
+    "baseline": {
+      "metrics": {
+        "quality": 0.3
+      }
+    },
+    "level2-transformers": {
+      "metrics": {
+        "quality": 0.45
+      }
+    }
+  },
+  "candidate_metrics": {
+    "quality": 0.45
+  },
+  "promoted_experiment_id": null,
+  "gate_promoted": false
+}

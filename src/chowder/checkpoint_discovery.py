@@ -12,6 +12,7 @@ from .backends.transformers_peft import (
 )
 from .executors import ExecutionContext
 from .provenance import sha256_directory, sha256_file
+from .resume_state import REQUIRED_STATE_PIECES, inventory_checkpoint
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,10 @@ class DiscoveredCheckpoint:
     mtime: float
     valid: bool
     mismatches: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    #: P7: the measured state inventory (optimizer/scheduler/step), so a caller
+    #: can see *why* a checkpoint is not resumable rather than only that it is
+    #: not. None means the inventory was not taken (an older caller).
+    state: Mapping[str, Any] | None = None
 
     @property
     def reason(self) -> str:
@@ -130,6 +135,19 @@ def discover_checkpoints(
                     for key, value in wanted.items()
                     if manifest.get(key) != value
                 }
+            # P7: a manifest alone is not a resumable checkpoint. A process
+            # killed mid-save, or a save that only reached the manifest, leaves
+            # weights that Trainer would restore while silently re-initialising
+            # the optimizer -- so auto-resume must never select one of those.
+            state = inventory_checkpoint(checkpoint_dir)
+            if not state.is_complete:
+                mismatches = dict(mismatches)
+                mismatches["training_state"] = {
+                    "checkpoint": state.state,
+                    "requested": "complete (" + ", ".join(REQUIRED_STATE_PIECES) + ")",
+                    "missing": list(state.missing_required),
+                    "notes": list(state.notes),
+                }
             discovered.append(
                 DiscoveredCheckpoint(
                     checkpoint_dir=checkpoint_dir,
@@ -137,6 +155,7 @@ def discover_checkpoints(
                     mtime=checkpoint_dir.stat().st_mtime,
                     valid=not mismatches,
                     mismatches=mismatches,
+                    state=state.to_dict(),
                 )
             )
 

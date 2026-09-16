@@ -1,0 +1,117 @@
+{
+  "model": "F:\\llm-models\\Qwen3.8-9B-HotCore-E16-k2-h2176",
+  "prereg": "docs/HOT_CORE_HEALING_PILOT_PREREG.md",
+  "recipe": {
+    "train_seq": 768,
+    "eval_maxlen": 384,
+    "steps": 150,
+    "lr": 0.001,
+    "warmup": 10,
+    "clip": 1.0,
+    "optimizer": "AdamW",
+    "trainable_params": 2228224
+  },
+  "splits": {
+    "rank": 32,
+    "eval_a": 32,
+    "train": 562,
+    "train_dropped_duplicates": 6,
+    "eval_b": 64,
+    "train_tokens": 24849,
+    "train_blocks": 33
+  },
+  "references": {
+    "dense_ppl": 5.3137,
+    "init_ppl": 9.8444,
+    "static_prune_ppl": 8.9096,
+    "pass_ppl": 9.648
+  },
+  "trajectory": [
+    {
+      "step": 0,
+      "eval_a_ppl": 9.84437691913201,
+      "eval_b_ppl": 19.42548968059544,
+      "eval_a_ratio_to_dense": 1.8526407059359788,
+      "router_norm": 0.0,
+      "shared_gate_norm": 0.0,
+      "train_loss": null
+    },
+    {
+      "step": 25,
+      "eval_a_ppl": 9.410293935137638,
+      "eval_b_ppl": 15.521461753956391,
+      "eval_a_ratio_to_dense": 1.7709494203921257,
+      "router_norm": 4.843021332582218,
+      "shared_gate_norm": 1.6289484097631624,
+      "train_loss": 2.7174167013168335
+    },
+    {
+      "step": 50,
+      "eval_a_ppl": 8.906038892107144,
+      "eval_b_ppl": 15.752617757125385,
+      "eval_a_ratio_to_dense": 1.6760522596509295,
+      "router_norm": 7.623959592818683,
+      "shared_gate_norm": 2.3799968306139623,
+      "train_loss": 2.4894555044174194
+    },
+    {
+      "step": 75,
+      "eval_a_ppl": 10.434284015291684,
+      "eval_b_ppl": 17.815483366949532,
+      "eval_a_ratio_to_dense": 1.9636569650698543,
+      "router_norm": 9.021386470205416,
+      "shared_gate_norm": 2.8135178185514107,
+      "train_loss": 2.384608335494995
+    },
+    {
+      "step": 100,
+      "eval_a_ppl": 9.355539027539105,
+      "eval_b_ppl": 15.261327143586657,
+      "eval_a_ratio_to_dense": 1.760644941855789,
+      "router_norm": 9.46087171252763,
+      "shared_gate_norm": 2.9535506283545887,
+      "train_loss": 2.031800274848938
+    },
+    {
+      "step": 125,
+      "eval_a_ppl": 9.19892241555922,
+      "eval_b_ppl": 14.749097771726936,
+      "eval_a_ratio_to_dense": 1.731170825518795,
+      "router_norm": 9.573332532420832,
+      "shared_gate_norm": 2.9925452835755033,
+      "train_loss": 2.2002868175506594
+    },
+    {
+      "step": 150,
+      "eval_a_ppl": 9.232429002577204,
+      "eval_b_ppl": 14.93136727419792,
+      "eval_a_ratio_to_dense": 1.7374765234351213,
+      "router_norm": 9.576759722739997,
+      "shared_gate_norm": 2.994321291010295,
+      "train_loss": 2.0182110357284544
+    }
+  ],
+  "attribution": {
+    "router_only": {
+      "eval_a_ppl": 9.874179156240173,
+      "eval_b_ppl": 15.571294553676898
+    },
+    "gate_only": {
+      "eval_a_ppl": 9.08626190607384,
+      "eval_b_ppl": 17.424293122193188
+    },
+    "router_gain": -0.029802237108162544,
+    "gate_gain": 0.7581150130581698,
+    "verdict": "shared_expert_gate"
+  },
+  "best": {
+    "step": 50,
+    "eval_a_ppl": 8.906038892107144,
+    "eval_b_ppl": 15.752617757125385,
+    "eval_a_ratio_to_dense": 1.6760522596509295,
+    "router_norm": 7.623959592818683,
+    "shared_gate_norm": 2.3799968306139623,
+    "train_loss": 2.4894555044174194
+  },
+  "verdict": "ATTRIBUTION FAIL"
+}

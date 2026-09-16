@@ -2,16 +2,24 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
+import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
 from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
+from ..lifecycle import (
+    PhaseTimer,
+    cuda_synchronize,
+    evaluation_lifecycle_ledger,
+    sampling_device,
+)
 from .base_text import BaseTextEvalSpec
 from .generation import resolve_eos_token_ids
-from chowder.canonical_chat_template import render_canonical
+from .rendering import render_prompt
+from .scoring import final_answer, final_number, normalize, score
+from .vram import MemorySampler, peak_vram as _peak_vram
 from .transformers_text import EvalSuiteSpec
 
 
@@ -22,36 +30,13 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
-def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().casefold()
-
-
-def _final_answer(prediction: str) -> str:
-    """Extract a thinking model's final answer from its raw generation.
-
-    Qwen3-style reasoning models emit chain-of-thought, then a ``</think>``
-    close marker, then the answer. The answer is everything after the LAST
-    close marker; without any marker the whole prediction is the answer
-    (non-thinking models, or thinking disabled). An *unclosed* ``<think>``
-    means the generation budget was exhausted mid-reasoning -- there is no
-    answer yet, so the extraction is empty and the item scores as a miss.
-    That is honest: failing to finish thinking within budget is a real
-    capability limit of the configured protocol, not a scoring artifact.
-    """
-    if "</think>" in prediction:
-        return prediction.rsplit("</think>", 1)[1]
-    if "<think>" in prediction:
-        return ""
-    return prediction
-
-
-def _score(prediction: str, expected: str, scoring: str) -> float:
-    answer = _final_answer(prediction)
-    if scoring == "exact_match":
-        return float(answer.strip() == expected.strip())
-    if scoring == "normalized_exact_match":
-        return float(_normalize(answer) == _normalize(expected))
-    raise ValueError(f"unsupported scoring: {scoring}")
+#: Scoring lives in `.scoring` so both workers cannot drift apart again -- they did,
+#: and it made the two sides of a comparison incomparable. See that module.
+#: Re-exported under the historical private names for existing callers.
+_normalize = normalize
+_final_answer = final_answer
+_final_number = final_number
+_score = score
 
 
 def _dtype(torch: Any, precision: str):
@@ -112,6 +97,10 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
     if spec.quantization == "4bit" and not device_name.startswith("cuda"):
         raise RuntimeError("4-bit baseline evaluation requires CUDA")
     dtype = _dtype(torch, spec.precision)
+    # P6: this arm's own load and generation are timed separately, so the
+    # baseline leg of a comparison is a measured cost instead of a blind spot.
+    load_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
+    load_timer.__enter__()
     set_seed(spec.seed)
 
     model_cache_status = cache_status(spec.base_model, spec.revision)
@@ -156,12 +145,17 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
     model.eval()
     device = next(model.parameters()).device
     resolved_eos_token_id = resolve_eos_token_ids(tokenizer, model)
+    load_timer.__exit__()
 
     output_dir = Path(spec.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics: dict[str, float] = {}
     evidence: dict[str, Any] = {}
 
+    generation_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
+    memory_sampler = MemorySampler(device_name=sampling_device(torch))
+    memory_sampler.start()
+    generation_timer.__enter__()
     with torch.inference_mode():
         for suite in spec.suites:
             rows = _rows(suite)
@@ -179,25 +173,16 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
                 for row in rows:
                     prompt = str(row[suite.prompt_field])
                     expected = str(row[suite.expected_field])
-                    rendered = prompt
-                    if suite.use_chat_template:
-                        if suite.canonical_rendering:
-                            # v3 protocol: render through the ONE canonical
-                            # template (digest-pinned in
-                            # canonical_chat_template.py), never the
-                            # tokenizer's own -- this is what makes
-                            # cross-parent prompts byte-identical.
-                            rendered = render_canonical(tokenizer, prompt)
-                        else:
-                            if not getattr(tokenizer, "chat_template", None):
-                                raise RuntimeError(
-                                    f"suite {suite.name!r} requested chat template but tokenizer has none"
-                                )
-                            rendered = tokenizer.apply_chat_template(
-                                [{"role": "user", "content": prompt}],
-                                tokenize=False,
-                                add_generation_prompt=True,
-                            )
+                    # One renderer for both text workers (see
+                    # evaluators/rendering.py): what was rendered with is
+                    # protocol identity, and two copies drift.
+                    rendered, render_evidence = render_prompt(
+                        tokenizer=tokenizer,
+                        prompt=prompt,
+                        suite_name=suite.name,
+                        use_chat_template=suite.use_chat_template,
+                        canonical_rendering=suite.canonical_rendering,
+                    )
                     encoded = tokenizer(rendered, return_tensors="pt")
                     encoded = {key: value.to(device) for key, value in encoded.items()}
                     generated = model.generate(
@@ -233,7 +218,19 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
                 "holdout_fingerprints_file": str(fingerprint_path),
                 "holdout_fingerprints_sha256": fingerprint_sha,
                 "resolved_eos_token_id": resolved_eos_token_id,
+                **render_evidence,
             }
+
+    # The baseline arm's own generation, timed and sampled separately from the
+    # candidate's -- one arm cannot measure the other, and the ledger says so.
+    generation_timer.__exit__()
+    memory_sampling = memory_sampler.stop()
+    lifecycle_data = evaluation_lifecycle_ledger(
+        accelerator_count=1 if device_name.startswith("cuda") else 0,
+        arm="baseline",
+        generation_seconds=generation_timer.seconds,
+        model_load_seconds=load_timer.seconds,
+    ).to_dict()
 
     return {
         "metrics": metrics,
@@ -241,6 +238,12 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
         "runtime": {
             "device": device_name,
             "gpu_count": 1 if device_name.startswith("cuda") else 0,
+            "lifecycle": lifecycle_data,
+            "memory_sampling": memory_sampling,
+            # See transformers_text_worker: both evaluation arms must report their
+            # own footprint, or a baseline-vs-candidate VRAM comparison is not
+            # possible from run artifacts.
+            **_peak_vram(device_name),
         },
         "model_provenance": {
             "requested_base_model": spec.base_model,
@@ -268,7 +271,28 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--spec", required=True)
     parser.add_argument("--result", required=True)
+    parser.add_argument(
+        "--chowder-identity",
+        default=None,
+        help="JSON file with the chowder source identity the controller declared; "
+        "verified against the code this process actually imported BEFORE the "
+        "spec is read, so a wrong-checkout worker refuses instead of scoring",
+    )
     args = parser.parse_args()
+
+    # P4c: nothing may be loaded, run, or written before the pin checks out.
+    from ..worker_env import verify_source_identity
+
+    if args.chowder_identity is not None:
+        verify_source_identity(
+            json.loads(Path(args.chowder_identity).read_text(encoding="utf-8"))
+        )
+    else:
+        print(
+            "WARNING: no --chowder-identity supplied; the worker's source "
+            "identity is unverified for this run",
+            file=sys.stderr,
+        )
     raw = json.loads(Path(args.spec).read_text(encoding="utf-8"))
     raw["suites"] = tuple(EvalSuiteSpec(**row) for row in raw["suites"])
     spec = BaseTextEvalSpec(**raw)

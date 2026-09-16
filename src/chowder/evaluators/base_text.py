@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
+from ..worker_env import chowder_source_identity, worker_env
+from ..base_identity import describe_base_identity
+from ..lifecycle import evaluation_lifecycle_evidence
+from .rendering import validate_rendering_evidence
+from .scorer_identity import scorer_identity
 from ..executors import EvaluationOutcome, ExecutionContext
 from ..protocol import protocol_fingerprint
 from ..provenance import sha256_file
@@ -142,8 +147,10 @@ class BaseModelTextEvaluator:
     name = "transformers-text"
 
     @staticmethod
-    def _worker_command(spec_path: Path, result_path: Path) -> list[str]:
-        return [
+    def _worker_command(
+        spec_path: Path, result_path: Path, chowder_identity: Path | None = None
+    ) -> list[str]:
+        command = [
             sys.executable,
             "-m",
             "chowder.evaluators.base_text_worker",
@@ -152,6 +159,11 @@ class BaseModelTextEvaluator:
             "--result",
             str(result_path),
         ]
+        if chowder_identity is not None:
+            # Verified by the worker before it reads its spec; see
+            # worker_env.verify_source_identity.
+            command.extend(["--chowder-identity", str(chowder_identity)])
+        return command
 
     @staticmethod
     def _tail(path: Path, lines: int = 30) -> str:
@@ -186,16 +198,24 @@ class BaseModelTextEvaluator:
         stdout_path = eval_dir / "stdout.log"
         stderr_path = eval_dir / "stderr.log"
         spec_path.write_bytes((spec.canonical_json() + "\n").encode("utf-8"))
+        # P4c/P4a: pin the source identity the worker must run and bind the
+        # scoring implementation into the protocol fingerprint.
+        source_identity = chowder_source_identity()
+        identity_path = eval_dir / "chowder-identity.json"
+        identity_path.write_text(
+            json.dumps(source_identity, sort_keys=True) + "\n", encoding="utf-8"
+        )
 
         started = time.perf_counter()
         with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
             "w", encoding="utf-8"
         ) as stderr:
             process = subprocess.Popen(
-                self._worker_command(spec_path, result_path),
+                self._worker_command(spec_path, result_path, chowder_identity=identity_path),
                 stdout=stdout,
                 stderr=stderr,
                 text=True,
+                env=worker_env(),
             )
             try:
                 process.wait(timeout=spec.timeout_seconds)
@@ -232,14 +252,29 @@ class BaseModelTextEvaluator:
         gpu_count = int(runtime.get("gpu_count", 0))
         if gpu_count < 0:
             raise RuntimeError("baseline evaluation reported negative gpu_count")
+        # P6: the baseline arm's own measured lifecycle. Both arms report one,
+        # so neither leg of a comparison is a blind spot.
+        lifecycle_evidence = evaluation_lifecycle_evidence(runtime)
         expected_names = {suite.name for suite in spec.suites}
         if set(metrics) != expected_names or set(suite_evidence) != expected_names:
             raise RuntimeError("baseline evaluation metrics do not match configured suites")
 
         fingerprint_hashes: dict[str, str] = {}
+        rendering_evidence: dict[str, dict[str, Any]] = {}
+        specs_by_name = {suite.name: suite for suite in spec.suites}
         for suite_name, suite_payload in suite_evidence.items():
             if not isinstance(suite_payload, Mapping):
                 raise RuntimeError(f"suite evidence for {suite_name!r} is invalid")
+            # P4: bind what the worker actually rendered with. A suite rendered
+            # differently from what the spec asked for is not the same protocol,
+            # even when every other field matches.
+            suite_spec = specs_by_name[str(suite_name)]
+            rendering_evidence[str(suite_name)] = validate_rendering_evidence(
+                suite_name=str(suite_name),
+                reported=suite_payload,
+                use_chat_template=suite_spec.use_chat_template,
+                canonical_rendering=suite_spec.canonical_rendering,
+            )
             ref = suite_payload.get("holdout_fingerprints_file")
             declared = suite_payload.get("holdout_fingerprints_sha256")
             if not isinstance(ref, str) or not isinstance(declared, str):
@@ -255,10 +290,18 @@ class BaseModelTextEvaluator:
         dataset_hashes = {suite.name: sha256_file(suite.dataset) for suite in spec.suites}
         resolved_commit = provenance.get("resolved_model_commit")
         revision = str(resolved_commit) if resolved_commit else spec.revision
+        # P4a/P4b, identical to the candidate evaluator's protocol: the
+        # baseline and the candidate must bind the same scoring rule and the
+        # same base identity for a comparison to be a comparison.
+        base_identity = describe_base_identity(
+            spec.base_model, revision=revision
+        )
         protocol = {
             "evaluator": self.name,
             "base_model": spec.base_model,
             "revision": revision,
+            "scorer": scorer_identity(),
+            "base_identity": base_identity,
             "precision": spec.precision,
             "quantization": spec.quantization,
             "device": runtime.get("device"),
@@ -282,6 +325,10 @@ class BaseModelTextEvaluator:
                         if suite.canonical_rendering
                         else {}
                     ),
+                    # P4: the rendering the worker actually performed, with the
+                    # template digest, identical in shape to the candidate
+                    # evaluator's entry so a comparison is a comparison.
+                    **rendering_evidence[suite.name],
                 }
                 for suite in spec.suites
             ],
@@ -304,10 +351,12 @@ class BaseModelTextEvaluator:
                 ).hexdigest(),
                 "protocol": protocol,
                 "protocol_sha256": protocol_sha,
+                "chowder_source_identity": source_identity,
                 "holdout_fingerprint_sha256": fingerprint_hashes,
                 "suite_evidence": dict(suite_evidence),
                 "versions": dict(versions),
                 "runtime": dict(runtime),
+                "lifecycle": lifecycle_evidence,
                 "model_provenance": dict(provenance),
                 "wall_time_seconds": elapsed,
                 "stdout_log": str(stdout_path),

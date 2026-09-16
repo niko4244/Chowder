@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reusable machinery for mechanical qualification judges.
 
-Every preregistration in ``docs/quals/`` ships with its own judge script ---
+Every preregistration in ``docs/quals/`` ships with its own judge script —
 the thresholds are run-specific, frozen with the prereg, and belong in that
 script. But the *pattern* around them is identical every time, and copying it
 is how judges drift apart in the rules that matter:
@@ -11,7 +11,7 @@ is how judges drift apart in the rules that matter:
   threshold is PASS; any FAIL refuses, and any UNKNOWN refuses to certify.
 - **Read-only judging**: the registry is opened with SQLite read-only URIs,
   files are hashed without writing, and the run directory is never mutated.
-- **One verdict table**: threshold, check, status, detail --- rendered in a
+- **One verdict table**: threshold, check, status, detail — rendered in a
   fixed-width table and finalized by the same rules every run.
 
 Judges import from this module (the script's own directory is on ``sys.path``
@@ -63,10 +63,10 @@ class Verdict:
     def finalize_status(self) -> str:
         statuses = {row[2] for row in self.thresholds()}
         if FAIL in statuses:
-            return "REFUSED --- at least one threshold failed"
+            return "REFUSED — at least one threshold failed"
         if UNKNOWN in statuses:
-            return "NOT CERTIFIED --- at least one threshold could not be decided from artifacts"
-        return "QUALIFIED --- every threshold passes on measured evidence"
+            return "NOT CERTIFIED — at least one threshold could not be decided from artifacts"
+        return "QUALIFIED — every threshold passes on measured evidence"
 
     def render(self) -> str:
         lines = ["threshold  check                                          verdict  detail"]
@@ -84,7 +84,7 @@ def sha256_file(path: Path) -> str:
 
 
 def load_json(path: Path) -> Any:
-    """Parse a JSON file, or None when missing/unreadable --- unknown, not a guess."""
+    """Parse a JSON file, or None when missing/unreadable — unknown, not a guess."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -152,7 +152,7 @@ def open_registry_readonly(path: Path) -> sqlite3.Connection | None:
 def report(run_root: Path, verdict: Verdict, train: list, evals: list, argv_len_ok: bool) -> int:
     """Print the standard report and return the process exit code.
 
-    Exit 0 only when every gating threshold is PASS --- a FAIL refuses and an
+    Exit 0 only when every gating threshold is PASS — a FAIL refuses and an
     UNKNOWN refuses to certify. Judges call this from ``main`` so the exit
     discipline is identical everywhere.
     """

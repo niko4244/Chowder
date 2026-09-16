@@ -9,12 +9,11 @@ touches the live retry7 registry or output directory.
 
 Reused, not reinvented
 ------------------------
-- `evaluators.base_text_worker._final_answer` and `._normalize` -- the
-  exact thinking-aware answer-extraction and scoring-normalization
-  functions the real worker already uses. This module imports them
-  directly (they are Chowder-internal, not re-implemented) rather than
-  re-deriving equivalent logic that could silently drift from the real
-  scorer.
+- `evaluators.scoring.final_answer` and `.normalize` -- the exact
+  thinking-aware answer-extraction and scoring-normalization functions
+  every real worker uses. This module imports them directly (they are
+  Chowder-internal, not re-implemented) rather than re-deriving equivalent
+  logic that could silently drift from the real scorer.
 - `parent_eval.PARENT_DIMENSIONS` for the nine-dimension order.
 - `parent_freeze.ITEMS_PER_SUITE` / `parent_freeze.classify_delta` for the
   exact tie/weak-signal/clear-difference item-unit convention already
@@ -67,7 +66,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .evaluators.base_text_worker import _final_answer, _normalize
+from .evaluators.scoring import final_answer as _final_answer, normalize as _normalize
 from .parent_eval import PARENT_DIMENSIONS
 from .parent_freeze import ITEMS_PER_SUITE, classify_delta
 

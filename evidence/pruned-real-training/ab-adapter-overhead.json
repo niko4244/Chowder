@@ -1,0 +1,121 @@
+{
+  "model": "F:\\llm-models\\Qwen3.8-9B-Pruned-CW-3456",
+  "adapter": "F:\\llm-models\\_a4b\\realtrain-gsm8k-2\\.chowder\\runs\\realtrain-unsloth-a9e4dbb91fa5\\adapter",
+  "problems": 5,
+  "max_new_tokens": 768,
+  "seed": 123,
+  "decision_rule": {
+    "h1_if_ratio_at_least": 1.5,
+    "h2_if_ratio_at_most": 1.2,
+    "min_headroom_gib": 4.0
+  },
+  "arms": [
+    {
+      "label": "no-adapter",
+      "with_adapter": false,
+      "problems": 5,
+      "total_seconds": 430.6074847000418,
+      "total_new_tokens": 3840,
+      "seconds_per_problem": 86.12149694000837,
+      "seconds_per_token": 0.11213736580730256,
+      "seconds_per_token_stdev": 0.0022095870498182162,
+      "hit_cap_count": 5,
+      "peak_allocated_gib": 5.594143390655518,
+      "peak_reserved_gib": 5.640625,
+      "min_card_free_gib": 9.4560546875,
+      "per_problem": [
+        {
+          "index": 0,
+          "seconds": 85.45239220000803,
+          "new_tokens": 768,
+          "seconds_per_token": 0.1112661356770938,
+          "hit_cap": true
+        },
+        {
+          "index": 1,
+          "seconds": 87.20059810002567,
+          "new_tokens": 768,
+          "seconds_per_token": 0.11354244544274177,
+          "hit_cap": true
+        },
+        {
+          "index": 2,
+          "seconds": 88.53829670001869,
+          "new_tokens": 768,
+          "seconds_per_token": 0.115284240494816,
+          "hit_cap": true
+        },
+        {
+          "index": 3,
+          "seconds": 84.89553129998967,
+          "new_tokens": 768,
+          "seconds_per_token": 0.11054105638019489,
+          "hit_cap": true
+        },
+        {
+          "index": 4,
+          "seconds": 84.52066639999975,
+          "new_tokens": 768,
+          "seconds_per_token": 0.11005295104166635,
+          "hit_cap": true
+        }
+      ]
+    },
+    {
+      "label": "adapter",
+      "with_adapter": true,
+      "problems": 5,
+      "total_seconds": 682.1159430000116,
+      "total_new_tokens": 3840,
+      "seconds_per_problem": 136.42318860000233,
+      "seconds_per_token": 0.17763436015625303,
+      "seconds_per_token_stdev": 0.012712675982041146,
+      "hit_cap_count": 5,
+      "peak_allocated_gib": 5.703279972076416,
+      "peak_reserved_gib": 5.841796875,
+      "min_card_free_gib": 0.5576171875,
+      "per_problem": [
+        {
+          "index": 0,
+          "seconds": 133.54385680000996,
+          "new_tokens": 768,
+          "seconds_per_token": 0.17388523020834631,
+          "hit_cap": true
+        },
+        {
+          "index": 1,
+          "seconds": 130.40645720000612,
+          "new_tokens": 768,
+          "seconds_per_token": 0.16980007447917464,
+          "hit_cap": true
+        },
+        {
+          "index": 2,
+          "seconds": 131.9245605999895,
+          "new_tokens": 768,
+          "seconds_per_token": 0.17177677161456964,
+          "hit_cap": true
+        },
+        {
+          "index": 3,
+          "seconds": 153.77071529999375,
+          "new_tokens": 768,
+          "seconds_per_token": 0.20022228554686686,
+          "hit_cap": true
+        },
+        {
+          "index": 4,
+          "seconds": 132.4703531000123,
+          "new_tokens": 768,
+          "seconds_per_token": 0.17248743893230767,
+          "hit_cap": true
+        }
+      ]
+    }
+  ],
+  "ratio_seconds_per_token": 1.5840782318848192,
+  "ratio_seconds_per_problem": 1.5840782318848192,
+  "headroom_sufficient_in_both_arms": false,
+  "adapter_vram_cost_gib": 0.201171875,
+  "verdict": "INCONCLUSIVE: ratio 1.58 falls between 1.2 and 1.5"
+}

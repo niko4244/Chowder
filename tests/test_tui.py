@@ -46,6 +46,29 @@ def _set(app: ChowderTUI, **input_overrides: str) -> None:
         app.query_one(f"#{widget_id}").value = value
 
 
+def _pin_hardware(app: ChowderTUI, monkeypatch) -> HardwareSnapshot:
+    """Pin the hardware snapshot before any payload is built.
+
+    `_scan_hardware` runs as an `on_mount` background worker, so a test that
+    builds a payload before it lands and compares against one after would see
+    two different recipes -- `active_accelerator_count` is hardware-derived,
+    and an unscanned app resolves 'auto' to zero -- and would report the
+    checkpoint as incompatible for reasons that have nothing to do with
+    discovery. Patching the detector *and* pre-seeding the app makes both reads
+    identical whichever order the worker finishes in, so the race is removed
+    rather than merely made unlikely.
+
+    (The underlying behaviour this hides is real and is asserted deliberately
+    elsewhere: 'auto' with no scan yet resolves to zero accelerators. The
+    production question -- whether a project saved during that window should
+    record zero -- is out of scope here and is left as an open defect.)
+    """
+    snapshot = _snapshot(2)
+    monkeypatch.setattr("chowder.tui.detect_hardware", lambda _cwd: snapshot)
+    app._hardware = snapshot
+    return snapshot
+
+
 def _write_matching_checkpoint(app: ChowderTUI, work_dir: Path, *, step: int) -> Path:
     """A checkpoint whose manifest is derived from the app's own current
     payload, so it is guaranteed valid against whatever _build_payload()
@@ -67,6 +90,14 @@ def _write_matching_checkpoint(app: ChowderTUI, work_dir: Path, *, step: int) ->
     trainer_dir = work_dir / ".chowder" / "runs" / "e1-abc" / "adapter" / "trainer"
     checkpoint_dir = trainer_dir / f"checkpoint-{step}"
     checkpoint_dir.mkdir(parents=True)
+    # P7: a manifest alone is not a resumable checkpoint. Discovery reports one
+    # without optimizer/scheduler state as invalid, so a fixture the TUI is
+    # meant to offer for a resume has to contain real state.
+    for name in ("optimizer.pt", "scheduler.pt", "rng_state.pth"):
+        (checkpoint_dir / name).write_bytes(b"state")
+    (checkpoint_dir / "trainer_state.json").write_text(
+        json.dumps({"global_step": step}), encoding="utf-8"
+    )
     (trainer_dir / "chowder-checkpoint-manifest.json").write_text(
         json.dumps(bound_inputs), encoding="utf-8"
     )
@@ -135,19 +166,55 @@ async def test_active_accelerator_count_auto_uses_detected_gpu_count(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_active_accelerator_count_auto_with_no_hardware_scanned_yet_defaults_to_zero(
-    tmp_path,
+async def test_a_save_in_the_scan_window_measures_rather_than_recording_zero(
+    tmp_path, monkeypatch
 ):
-    """The background hardware scan on_mount() kicks off can genuinely
-    finish before this test's own code runs (a real race, not just a local
-    timing accident -- observed passing locally and failing on CI), so this
-    forces the "not scanned yet" state directly rather than hoping the scan
-    hasn't completed."""
+    """Saving before the background scan lands must not record CPU-only training.
+
+    The window is real, not a timing accident in the test: `_scan_hardware` is
+    an `on_mount` worker, and the previous version of this test documented that
+    the race "was observed passing locally and failing on CI" -- while pinning
+    the wrong behaviour, that `'auto'` resolves to zero. A count is a
+    measurement, so the save takes the measurement. Treating "not yet" as
+    "none" silently recorded zero accelerators for a GPU machine.
+    """
     app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    monkeypatch.setattr("chowder.tui.detect_hardware", lambda _cwd: _snapshot(2))
+    async with app.run_test():
+        app._hardware = None  # the scan has not landed yet
+        payload = app._build_payload()
+    assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_failed_scan_is_refused_rather_than_recorded_as_zero(tmp_path, monkeypatch):
+    """Unknown is not zero: a scan that failed has no count to record."""
+
+    def exploding_scan(_cwd):
+        raise RuntimeError("nvidia-smi is not on PATH")
+
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    monkeypatch.setattr("chowder.tui.detect_hardware", exploding_scan)
     async with app.run_test():
         app._hardware = None
+        with pytest.raises(ProjectValidationError, match="hardware scan failed"):
+            app._build_payload()
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_accelerator_count_needs_no_scan(tmp_path, monkeypatch):
+    """An explicit choice is not a measurement, so it must not be blocked."""
+
+    def exploding_scan(_cwd):
+        raise RuntimeError("nvidia-smi is not on PATH")
+
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    monkeypatch.setattr("chowder.tui.detect_hardware", exploding_scan)
+    async with app.run_test():
+        _set(app, active_accelerator_count="1")
+        app._hardware = None
         payload = app._build_payload()
-    assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 0
+    assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -506,9 +573,10 @@ async def test_status_reads_failed_for_a_non_cancellation_error(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_discover_checkpoints_finds_and_reports_a_valid_checkpoint(tmp_path):
+async def test_discover_checkpoints_finds_and_reports_a_valid_checkpoint(tmp_path, monkeypatch):
     (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
     app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    _pin_hardware(app, monkeypatch)
     async with app.run_test():
         _set(app, work_dir=str(tmp_path))
         checkpoint_dir = _write_matching_checkpoint(app, tmp_path, step=250)
@@ -541,9 +609,10 @@ async def test_discover_checkpoints_with_none_found_disables_resume_best(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_discover_checkpoints_reports_an_incompatible_checkpoint(tmp_path):
+async def test_discover_checkpoints_reports_an_incompatible_checkpoint(tmp_path, monkeypatch):
     (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
     app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    _pin_hardware(app, monkeypatch)
     async with app.run_test():
         _set(app, work_dir=str(tmp_path))
         _write_matching_checkpoint(app, tmp_path, step=100)
@@ -564,9 +633,10 @@ async def test_discover_checkpoints_reports_an_incompatible_checkpoint(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_resume_best_fills_the_resume_field_with_the_valid_checkpoint(tmp_path):
+async def test_resume_best_fills_the_resume_field_with_the_valid_checkpoint(tmp_path, monkeypatch):
     (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
     app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    _pin_hardware(app, monkeypatch)
     async with app.run_test():
         _set(app, work_dir=str(tmp_path))
         checkpoint_dir = _write_matching_checkpoint(app, tmp_path, step=250)
@@ -587,9 +657,10 @@ async def test_resume_best_is_a_noop_with_nothing_valid_discovered(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_start_fresh_clears_the_resume_field_without_touching_disk(tmp_path):
+async def test_start_fresh_clears_the_resume_field_without_touching_disk(tmp_path, monkeypatch):
     (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
     app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    _pin_hardware(app, monkeypatch)
     async with app.run_test():
         _set(app, work_dir=str(tmp_path))
         checkpoint_dir = _write_matching_checkpoint(app, tmp_path, step=250)

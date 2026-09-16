@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..worker_env import worker_env
 from ..executors import CostEstimate, EvaluationOutcome, ExecutionContext, TrainingArtifact
 from ..models import Experiment
 from ..protocol import protocol_fingerprint
@@ -244,6 +245,7 @@ class LmEvalEvaluator:
                 stdout=stdout,
                 stderr=stderr,
                 text=True,
+                env=worker_env(),
             )
             self._processes[eval_id] = process
             try:

@@ -313,6 +313,17 @@ class ExperimentCycleRunner:
     executor_investigation_budget: float = 0.25
     cancellation: CancellationToken | None = None
     progress_callback: Callable[[TrainingProgressEvent], None] | None = None
+    # The amortized project path defers the automatic baseline to the
+    # candidate's own resident-pair evaluation. The provider receives the
+    # finished candidate outcome (whose evaluation evidence carries the
+    # in-process base score) and returns the baseline ExperimentResult; the
+    # runner hands it to the engine before adjudication so the gate never
+    # ranks against a placeholder. It is called exactly once, even when no
+    # candidate scored (with None, so the closure can settle its own row
+    # honestly) -- and it fires ONLY while the engine's baseline is actually
+    # deferred: every existing caller (a constructor-time baseline) never
+    # triggers it.
+    deferred_baseline: Callable[[CandidateCycleOutcome | None], ExperimentResult] | None = None
 
     def __post_init__(self) -> None:
         budget = float(self.executor_investigation_budget)
@@ -666,6 +677,8 @@ class ExperimentCycleRunner:
         being promoted over the real current baseline.
         """
         candidates = tuple(self._run_candidate(experiment) for experiment in experiments)
+        if self.engine.baseline_deferred and self.deferred_baseline is not None:
+            candidates = self._complete_deferred_baseline(candidates)
         results = tuple(candidate.result for candidate in candidates if candidate.result is not None)
         ranking = self.engine.adjudicate(results) if results else ()
         promoted = self.engine.promote(ranking) if promote else None
@@ -677,3 +690,71 @@ class ExperimentCycleRunner:
                     self.registry.update_experiment_status(candidate.experiment_id, node.status.value)
 
         return GenerationOutcome(candidates=candidates, ranking=ranking, promoted=promoted)
+
+    def _complete_deferred_baseline(
+        self, candidates: tuple[CandidateCycleOutcome, ...]
+    ) -> tuple[CandidateCycleOutcome, ...]:
+        """Complete the deferred baseline from the first scored candidate.
+
+        The provider sees the candidate outcome BEFORE adjudication -- its
+        whole reason to exist is that the resident-pair evaluation measured
+        the untouched base inside the candidate's own process. A provider
+        failure is a generation failure for every scored candidate: the
+        numbers exist, but no honest comparison does, so each candidate is
+        settled failed (charging its real cost) rather than stranded.
+        """
+        try:
+            scored = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate.result is not None and candidate.error is None
+                ),
+                None,
+            )
+            baseline_result = self.deferred_baseline(scored)
+            if scored is None:
+                # The provider was offered the empty outcome so it could
+                # settle its own row; returning a measurement anyway would
+                # mean completing a baseline from evidence that does not
+                # exist.
+                raise RuntimeError(
+                    "the deferred baseline provider returned a measurement with no "
+                    "scored candidate to complete from"
+                )
+            self.engine.set_baseline(baseline_result)
+            return candidates
+        except Exception as exc:
+            message = f"deferred baseline: {type(exc).__name__}: {exc}"
+            settled: list[CandidateCycleOutcome] = []
+            for candidate in candidates:
+                if candidate.result is None and candidate.error is not None:
+                    settled.append(candidate)
+                    continue
+                gpu_hours = (
+                    candidate.result.gpu_hours if candidate.result is not None else 0.0
+                )
+                self.engine.fail(
+                    candidate.experiment_id, actual_gpu_hours=gpu_hours
+                )
+                node = self.engine.graph.nodes.get(candidate.experiment_id)
+                if node is not None:
+                    node.status = ExperimentStatus.FAILED
+                self._record_status_from(node, candidate.experiment_id)
+                settled.append(
+                    CandidateCycleOutcome(
+                        experiment_id=candidate.experiment_id,
+                        artifact=candidate.artifact,
+                        evaluation=candidate.evaluation,
+                        result=None,
+                        harvested_failures=candidate.harvested_failures,
+                        repair_plans=candidate.repair_plans,
+                        diagnostic_error=candidate.diagnostic_error,
+                        error=message,
+                    )
+                )
+            return tuple(settled)
+
+    def _record_status_from(self, node, experiment_id: str) -> None:
+        if self.registry is not None and node is not None:
+            self.registry.update_experiment_status(experiment_id, node.status.value)
