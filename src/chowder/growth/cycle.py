@@ -10,11 +10,21 @@ regressions) and never invents evidence.
 Integration seam with the production trainer: the caller supplies a
 ``TrainingFn`` that executes one recipe (typically through ``chowder
 train`` / ``run_project``) and returns the artifact/evaluation evidence.
-The orchestrator is trainer-agnostic by design; when the production search
-controller is reachable from this branch, ``plan_search`` output maps
-directly onto its ``search`` project config (min_survivors, rounds, UCB
-prioritization), so recipe competition reuses the qualified path instead of
-a parallel one.
+The orchestrator is trainer-agnostic by design and never invokes a trainer
+itself.
+
+Recipe competition is bounded by this package's own planner and budget
+envelope. Chowder's successive-halving controller
+(``successive_halving.run_successive_halving``,
+``candidate_selection.prioritize_candidates``) is a proven library
+capability, but no production caller invokes it: wiring it into
+``project_runner.py`` is open in ``docs/ROADMAP.md`` and "must not be
+inferred from the library implementation or its integration tests". There is
+therefore no ``search`` project config for this package to target today. A
+caller that wants real successive-halving rounds on top of this cycle runs
+them through its own ``TrainingFn``; teaching the cycle to consume a wired
+controller is part of that wiring change, not an interface that can be
+assumed here.
 """
 
 from __future__ import annotations

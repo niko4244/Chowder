@@ -78,6 +78,10 @@ The generating model never certifies its own output.
 The plan feeds `recipe_planner.py`, which proposes bounded candidate recipes
 (dataset mixture, LR/schedule, LoRA rank/alpha/target modules, sequence
 length, batch/accumulation, steps, objective, replay rate) inside the
-measured hardware envelope. Candidates then compete through Chowder's
-successive-halving search controller — cheap screens first, full budget only
-for survivors.
+measured hardware envelope. Candidates are then ordered for execution by `recipe_planner.py` inside a
+declared budget envelope — cheap screens first, full budget only for
+survivors. Chowder's successive-halving controller is the qualified
+implementation of that shape, but it is a library capability with no
+production caller yet (see `docs/ROADMAP.md`), so this cycle does not depend
+on it: competition is bounded here until the controller is wired into
+`project_runner.py`.

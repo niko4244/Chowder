@@ -33,7 +33,7 @@ Artifacts: `eval-report.json`, `capability profile`,
 5.  build a small curriculum                  (chowder growth curriculum)
 6.  propose multiple recipes                  (recipe_planner, hardware-bounded)
 7.  train candidates                          (bounded; tiny/local smoke first)
-8.  successive-halving selection              (Chowder search controller)
+8.  successive-halving selection              (growth planner budget envelope)
 9.  protected regression evaluation           (tier 2 battery + probes)
 10. broad evaluation                           (tier 3)
 11. promote or reject                          (the predeclared rule)
@@ -42,6 +42,14 @@ Artifacts: `eval-report.json`, `capability profile`,
 Every phase writes machine-readable provenance into the cycle ledger
 (`growth/cycle.py`). The verdict is whatever the evidence says — a REJECTED
 first cycle is a legitimate, recorded outcome.
+
+> Step 8 note: Chowder's `run_successive_halving()` /
+> `prioritize_candidates()` are proven library capabilities, but no
+> production caller invokes them and `docs/ROADMAP.md` records that wiring
+> them into `project_runner.py` is still open. Until it lands, step 8 means
+> the growth planner's bounded envelope plus whatever the supplied
+> `TrainingFn` actually executes — not a search controller this cycle can
+> address by config.
 
 ## Decision gates
 

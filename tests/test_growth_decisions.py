@@ -11,7 +11,8 @@ from __future__ import annotations
 import pytest
 
 from chowder.growth.capability import SkillEstimate
-from chowder.growth.curriculum import CurriculumEngine
+from chowder.growth.curriculum import CurriculumEngine, CurriculumItem
+from chowder.growth.recipe_planner import HardwareBudget, RecipePlanner
 from chowder.growth.failure_bank import FailureBank
 from chowder.growth.frontier_reference import (
     ChowderScore,
@@ -375,6 +376,77 @@ def test_gap_rows_compute_gap_and_parity_only_where_comparable(tmp_path):
     agent_row = next(r for r in rows if r.level == "LEVEL_2_OPEN_WEIGHT_FRONTIER")
     assert agent_row.comparability == NOT_DIRECTLY_COMPARABLE
     assert agent_row.parity_ratio is None
+
+
+def _planner_and_items():
+    """A real planner over real curriculum items, so the recipe under test is
+    the one the cycle would actually execute."""
+    item = CurriculumItem(
+        item_id="cur-1",
+        skill="math.arithmetic",
+        role="TARGET",
+        priority=0.8,
+        confidence=0.7,
+        weakness_evidence="measured failures on multi-step arithmetic",
+        desired_improvement=0.1,
+        preservation_risks=("reasoning.coding",),
+        source_strategy="verified_synthesis",
+        example_count=2000,
+        token_target=1_000_000,
+        difficulty_band="medium",
+        verification_method="exact_match",
+        training_type="sft",
+        evaluation_set="tier1",
+        protected_regression_set=("reasoning.instruction_following",),
+    )
+    planner = RecipePlanner(
+        budget=HardwareBudget(
+            gpu_name="RTX 5060 Ti",
+            vram_gb=17.1,
+            measured_step_seconds_at_seq={64: 2.854},
+            measured_load_seconds=13.851,
+        ),
+        # Deliberately roomy: this test pins the patch shape, so it must not
+        # depend on the planner's budget arithmetic refusing its candidates.
+        max_device_gpu_hours=1.0,
+        max_wall_gpu_hours=3.5,
+    )
+    return planner, (item,)
+
+
+def test_recipe_config_patch_emits_only_knobs_the_validator_reads():
+    """The planner must not invent configuration it cannot actually supply.
+
+    A patch is merged straight into a resolved project config, so a key the
+    validator does not read is drift at best and a corrupted qualified config
+    at worst. The former helper here targeted a ``search.variants`` section
+    that does not exist, emitted ``lora_rank`` (the PEFT path names rank
+    inside its own ``lora`` spec), and carried a bookkeeping block that would
+    have been merged into the experiment's config.
+    """
+    from chowder.graph import deep_merge_config
+    from chowder.project import ROUTER_HEALING_REQUIRED_KNOBS
+
+    planner, items = _planner_and_items()
+    patch = planner.propose(items, count=1)[0].to_config_patch()
+
+    assert set(patch) == {"backend"}
+    assert set(patch["backend"]) == {"router_healing"}
+    knobs = patch["backend"]["router_healing"]
+    assert set(knobs) == {"max_steps", "learning_rate", "seq_len"}
+    # The load-bearing link: every key must be one the project validator
+    # reads for this backend, so a rename on either side breaks this test.
+    assert set(knobs) <= set(ROUTER_HEALING_REQUIRED_KNOBS)
+
+    merged = deep_merge_config(
+        {"backend": {"router_healing": {"corpus_path": "corpus.txt"}}}, patch
+    )
+    assert set(merged["backend"]["router_healing"]) == {
+        "corpus_path",
+        "max_steps",
+        "learning_rate",
+        "seq_len",
+    }
 
 
 def test_snapshot_store_freezes_and_never_rewrites(tmp_path):

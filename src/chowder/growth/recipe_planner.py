@@ -3,8 +3,11 @@
 Given the curriculum plan and measured hardware reality (the device
 preflight numbers Chowder's routers/PEFT backends already measure), propose
 a small set of competing recipes whose projected cost fits the preregistered
-budget. The planner proposes; the production search controller (successive
-halving + UCB over run_project's `search` config) selects.
+budget. The planner proposes; selection is whatever the caller's `TrainingFn`
+and the cycle's predeclared promotion rule decide. Chowder's successive-halving
+controller would be the qualified selector, but it has no production caller
+yet and `run_project` has no `search` config for it to read
+(`docs/ROADMAP.md`), so nothing here may assume that interface exists.
 
 Variables stay inside the currently qualified training path: LoRA-family
 post-training with measured memory/step/load budgets. Architecture changes
@@ -87,24 +90,32 @@ class TrainingRecipe:
             "notes": self.notes,
         }
 
-    def to_project_search_variant(self) -> dict[str, Any]:
-        """The config_patch this recipe contributes to run_project's
-        `search.variants` (the production search controller's shape)."""
+    def to_config_patch(self) -> dict[str, Any]:
+        """The nested ``config_patch`` this recipe contributes to one experiment.
+
+        Only knobs the router-healing project validator actually reads are
+        emitted. ``ExperimentGraph`` resolves a patch by merging it with
+        ``deep_merge_config``, so any other key -- bookkeeping included --
+        would silently land inside a qualified configuration.
+
+        LoRA rank/alpha, scheduler, warmup, and target modules stay
+        proposed-but-unmapped: the PEFT path names rank and alpha inside its
+        own ``lora`` spec, so inventing a namespace for them here would be
+        drift, not integration. Recipe identity, mixture, and projections
+        travel in ``to_dict()``, which is what the cycle ledger records.
+
+        There is no project-level ``search`` config to target: ``run_project``
+        has no search section and Chowder's successive-halving controller has
+        no production caller yet (``docs/ROADMAP.md``).
+        """
         return {
             "backend": {
                 "router_healing": {
+                    "max_steps": self.max_steps,
                     "learning_rate": self.learning_rate,
-                    "lora_rank": self.lora_rank,
-                    "lora_alpha": self.lora_alpha,
+                    "seq_len": self.seq_len,
                 }
-                if self.objective != "continued_pretrain"
-                else {"learning_rate": self.learning_rate},
-            },
-            "search_metadata": {
-                "recipe_id": self.recipe_id,
-                "mixture": dict(self.mixture),
-                "projected_device_gpu_hours": self.projected_device_gpu_hours,
-            },
+            }
         }
 
 
