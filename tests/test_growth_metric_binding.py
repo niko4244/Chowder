@@ -532,6 +532,22 @@ def _three_entry_registry() -> tuple[BenchmarkEntry, ...]:
     )
 
 
+def _four_entry_registry() -> tuple[BenchmarkEntry, ...]:
+    """The three-benchmark battery plus one pass@k-capable reliability eval."""
+    return _three_entry_registry() + (
+        _entry(
+            benchmark_id="local_reliability",
+            version="2026-09",
+            name="Local reliability protocol (pass@k capable)",
+            primary_metric="reliability_pass_rate",
+            direction="higher_is_better",
+            normalization=RATE_NORMALIZATION,
+            tier=3,
+            skills=("instruction.formatting",),
+        ),
+    )
+
+
 # Measured raw per-item losses. Both sides are real shapes from the local
 # protocol; only the candidate's target values differ.
 PARENT_TARGET = _samples(3.0, 3.1, 3.0, 3.1)
@@ -541,6 +557,25 @@ IMPROVED_TARGET = _samples(2.7, 2.8, 2.7, 2.8)
 
 def _manifest(*ids: str, status: str = "CLEAN") -> dict:
     return {"benchmarks": {qualified_id: {"status": status} for qualified_id in ids}}
+
+
+RELIABILITY_ID = "local_reliability@2026-09"
+
+# Reliability is a pass rate on an identity scale, so raw samples are already
+# the better-direction 0..1 scores the promotion rule compares.
+RELIABILITY_STABLE = _samples(0.9, 0.9, 0.9, 0.9)
+RELIABILITY_REGRESSED = _samples(0.8, 0.8, 0.8, 0.8)
+
+
+def _reliability_run(
+    raw_samples: tuple[float, ...], *, generation_version: str
+) -> BenchmarkRun:
+    return _loss_run(
+        RELIABILITY_ID,
+        "reliability_pass_rate",
+        raw_samples,
+        generation_version=generation_version,
+    )
 
 
 def _loss_run(
@@ -565,10 +600,14 @@ def _attempt(
     ]
 
 
-def _binder_for_adjudication(*, status: str = "CLEAN") -> MetricBinder:
+def _binder_for_adjudication(
+    *, entries: tuple[BenchmarkEntry, ...] | None = None, status: str = "CLEAN"
+) -> MetricBinder:
     return MetricBinder(
-        _registry(*_three_entry_registry()),
-        contamination=_manifest(TARGET_ID, PROTECTED_ID, BROAD_ID, status=status)["benchmarks"],
+        _registry(*(entries or _three_entry_registry())),
+        contamination=_manifest(
+            TARGET_ID, PROTECTED_ID, BROAD_ID, RELIABILITY_ID, status=status
+        )["benchmarks"],
     )
 
 
@@ -856,3 +895,134 @@ def test_the_cycle_records_a_rejected_candidate_as_evidence(tmp_path: Path):
     assert json.loads(json.dumps(outcome.to_dict()))["promotion"]["verdict"] == "REJECTED"
     assert outcome.to_dict()["promotion"]["verdict"] == "REJECTED"
     assert outcome.to_dict()["promotion"]["checks"]["target_improvement"] == "not met"
+
+
+def test_a_reliability_regression_rejects_a_candidate_that_improved_its_target():
+    """Reliability is a hard gate: passing targets cannot buy back a drop.
+
+    PromotionInput has declared reliability_benchmarks since the growth system
+    landed, and the module docstring has always promised a reliability
+    comparison -- but evaluate_promotion never read the set. This test pins
+    the promised check: a pass@k-capable eval that drops past the declared
+    tolerance rejects the candidate no matter what the target improved.
+    """
+    binder = _binder_for_adjudication(entries=_four_entry_registry())
+    assembly = binder.promotion_input(
+        candidate_version="gen1",
+        parent_version="gen0",
+        candidate_runs=_attempt("gen1", target=IMPROVED_TARGET)
+        + [_reliability_run(RELIABILITY_REGRESSED, generation_version="gen1")],
+        parent_runs=_attempt("gen0", target=PARENT_TARGET)
+        + [_reliability_run(RELIABILITY_STABLE, generation_version="gen0")],
+        target_benchmarks=(TARGET_ID,),
+        protected_benchmarks=(PROTECTED_ID,),
+        broad_battery_benchmarks=(BROAD_ID,),
+        reliability_benchmarks=(RELIABILITY_ID,),
+    )
+    assert assembly.decision.checks[f"reliability:{RELIABILITY_ID}"] == "violated"
+    assert assembly.decision.checks["reliability"] == "violated"
+    assert assembly.decision.verdict == "REJECTED"
+    assert any("reliability regression" in reason for reason in assembly.decision.reasons)
+
+
+def test_a_stable_reliability_check_leaves_a_clean_promotion_intact():
+    binder = _binder_for_adjudication(entries=_four_entry_registry())
+    assembly = binder.promotion_input(
+        candidate_version="gen1",
+        parent_version="gen0",
+        candidate_runs=_attempt("gen1", target=IMPROVED_TARGET)
+        + [_reliability_run(RELIABILITY_STABLE, generation_version="gen1")],
+        parent_runs=_attempt("gen0", target=PARENT_TARGET)
+        + [_reliability_run(RELIABILITY_STABLE, generation_version="gen0")],
+        target_benchmarks=(TARGET_ID,),
+        protected_benchmarks=(PROTECTED_ID,),
+        broad_battery_benchmarks=(BROAD_ID,),
+        reliability_benchmarks=(RELIABILITY_ID,),
+    )
+    assert assembly.decision.checks["reliability"] == "ok"
+    assert assembly.decision.verdict == "PROMOTED", assembly.decision.reasons
+
+
+def test_a_declared_reliability_set_that_was_never_measured_is_inconclusive_not_ok():
+    """Declaring the set is a predeclaration; skipping the measurement is not ok.
+
+    A protected benchmark unmeasured is already inconclusive rather than ok.
+    Reliability follows the same rule: an empty set is 'unmeasured' (nothing
+    was promised), but a *declared* set with no results must block promotion,
+    or a candidate could dodge the gate by simply never running the eval.
+    """
+    binder = _binder_for_adjudication(entries=_four_entry_registry())
+    assembly = binder.promotion_input(
+        candidate_version="gen1",
+        parent_version="gen0",
+        candidate_runs=_attempt("gen1", target=IMPROVED_TARGET),
+        parent_runs=_attempt("gen0", target=PARENT_TARGET),
+        target_benchmarks=(TARGET_ID,),
+        protected_benchmarks=(PROTECTED_ID,),
+        broad_battery_benchmarks=(BROAD_ID,),
+        reliability_benchmarks=(RELIABILITY_ID,),
+    )
+    assert assembly.decision.checks["reliability"] == "inconclusive"
+    assert assembly.decision.checks[f"reliability:{RELIABILITY_ID}"] == "inconclusive"
+    assert assembly.decision.verdict != "PROMOTED"
+
+
+def test_an_undeclared_reliability_set_reports_unmeasured_and_promotes():
+    """The empty default stays backward compatible: nothing promised, nothing gated."""
+    binder = _binder_for_adjudication()
+    assembly = _assemble(binder, candidate_target=IMPROVED_TARGET)
+    assert assembly.decision.checks["reliability"] == "unmeasured"
+    assert assembly.decision.verdict == "PROMOTED", assembly.decision.reasons
+
+
+def test_the_cycle_passes_its_reliability_set_into_promotion(tmp_path: Path):
+    """The cycle's reliability declaration must actually reach promotion.
+
+    The binder has accepted a reliability set since the binding landed, but
+    no cycle could supply one: CycleConfig had no field, so the support was
+    unreachable and every growth cycle silently ran without the gate. The
+    same evidence must reject under a cycle that declares the set and
+    promote under one that does not -- that difference is the proof the knob
+    is wired.
+    """
+    def _cycle_with_reliability(reliability: tuple[str, ...], tag: str) -> GrowthCycle:
+        return GrowthCycle(
+            CycleConfig(
+                cycle_id=f"cycle-reliability-{tag}",
+                parent_version="gen0",
+                candidate_version="gen1",
+                device_gpu_hours_ceiling=1.0,
+                target_benchmarks=(TARGET_ID,),
+                protected_benchmarks=(PROTECTED_ID,),
+                broad_battery=(BROAD_ID,),
+                reliability_benchmarks=reliability,
+                recipe_count=1,
+            ),
+            curriculum=CurriculumEngine(),
+            planner=_NullPlanner(),
+            failure_bank=FailureBank(),
+            firewall=ContaminationFirewall(),
+            ledger=GenerationLedger(tmp_path / f"ledger-{tag}"),
+            regression_memory=RegressionMemory(tmp_path / f"probes-{tag}"),
+            snapshots=SnapshotStore(tmp_path / f"snapshots-{tag}"),
+            train_fn=lambda recipe, items: {},  # noqa: ARG005
+        )
+
+    binder = _binder_for_adjudication(entries=_four_entry_registry())
+    candidate_runs = _attempt("gen1", target=IMPROVED_TARGET) + [
+        _reliability_run(RELIABILITY_REGRESSED, generation_version="gen1")
+    ]
+    parent_runs = _attempt("gen0", target=PARENT_TARGET) + [
+        _reliability_run(RELIABILITY_STABLE, generation_version="gen0")
+    ]
+    gated = _cycle_with_reliability((RELIABILITY_ID,), "gated").decide_promotion_from_runs(
+        binder, candidate_runs=candidate_runs, parent_runs=parent_runs
+    )
+    unguarded = _cycle_with_reliability((), "unguarded").decide_promotion_from_runs(
+        binder, candidate_runs=candidate_runs, parent_runs=parent_runs
+    )
+    assert unguarded.promotion_input.reliability_benchmarks == ()
+    assert unguarded.decision.verdict == "PROMOTED"
+    assert gated.promotion_input.reliability_benchmarks == (RELIABILITY_ID,)
+    assert gated.decision.checks["reliability"] == "violated"
+    assert gated.decision.verdict == "REJECTED"

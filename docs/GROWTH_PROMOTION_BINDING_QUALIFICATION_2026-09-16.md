@@ -106,11 +106,41 @@ reproduce green afterwards; no code change was involved and none was made.
 
 ## Scope notes
 
-- `CycleConfig` has no `reliability_benchmarks` field; `promotion_input`
-  supports one and defaults it empty. A cycle that needs a reliability set
-  adds the field — the binder side is ready.
 - One automatic `baseline` row per registry (from the TrainingFn record)
   still applies: score multiple candidates through per-candidate registries.
 - The end-to-end adjudication demonstrated in tests uses measured runs
   binding onto declared identity scales; a real generation's first campaign
   still begins with the Generation-0 evaluation freeze, per the campaign doc.
+
+## Addendum (same day): the reliability set is reachable
+
+The original record listed one gap: `CycleConfig` had no
+`reliability_benchmarks` field, so the binder's existing support was
+unreachable from a cycle. Closed the same day, with a deeper fix than
+plumbing alone: `evaluate_promotion` had declared `reliability_benchmarks`
+since the growth system landed but **never read it** — the promised
+reliability comparison did not exist. Making the set reachable honestly
+required all three layers:
+
+1. `evaluate_promotion` now runs a reliability check (hard gate, plain
+   candidate-minus-parent delta against the declared
+   `max_reliability_regression`, default 0.02) with the repo's
+   "unmeasured is not pass" rule: an **empty** set reports `unmeasured`
+   (nothing promised, backward compatible) while a **declared** set with no
+   results reports `inconclusive` and blocks promotion — dodging the gate by
+   never running the eval is not a free pass.
+2. `CycleConfig.reliability_benchmarks` (default empty) is forwarded by both
+   `decide_promotion` and `decide_promotion_from_runs`.
+3. Five new tests: regression rejects a target-improving candidate, stable
+   check leaves a clean promotion intact, declared-but-unmeasured is
+   inconclusive, undeclared set stays backward compatible, and the cycle
+   wiring proof (same evidence rejects under a declaring cycle, promotes
+   under one that does not).
+
+Mutation probe extended to **23/23** (hard-gate removal, unmeasured-reads-as-
+measured, silent skip, and the cycle passthrough — the last scoped to the
+`decide_promotion_from_runs` region because the 12-space anchor is a
+substring of `decide_promotion`'s 16-space line, which the probe's
+ambiguity check correctly refused to mutate blindly). Focused suite 61
+passed; full suite **2129 passed, 77 skipped**; ruff and sdist+wheel build
+clean.

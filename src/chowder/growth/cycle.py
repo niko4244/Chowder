@@ -65,6 +65,11 @@ class CycleConfig:
     protected_benchmarks: tuple[str, ...]
     broad_battery: tuple[str, ...]
     calibration_benchmarks: tuple[str, ...] = ()
+    #: Pass@k-capable evals the cycle predeclares as reliability gates. The
+    #: binder forwards them to promotion, where a regression past the declared
+    #: tolerance is a hard rejection and a declared-but-unmeasured set is
+    #: inconclusive rather than a free pass.
+    reliability_benchmarks: tuple[str, ...] = ()
     min_target_improvement: float = 0.02
     max_protected_regression: float = 0.02
     budget_examples: int = 20000
@@ -210,6 +215,7 @@ class GrowthCycle:
                 protected_benchmarks=self.config.protected_benchmarks,
                 broad_battery_benchmarks=self.config.broad_battery,
                 calibration_benchmarks=self.config.calibration_benchmarks,
+                reliability_benchmarks=self.config.reliability_benchmarks,
                 min_target_improvement=self.config.min_target_improvement,
                 max_protected_regression=self.config.max_protected_regression,
                 device_gpu_hours=device_gpu_hours,
@@ -244,6 +250,7 @@ class GrowthCycle:
             protected_benchmarks=self.config.protected_benchmarks,
             broad_battery_benchmarks=self.config.broad_battery,
             calibration_benchmarks=self.config.calibration_benchmarks,
+            reliability_benchmarks=self.config.reliability_benchmarks,
             min_target_improvement=self.config.min_target_improvement,
             max_protected_regression=self.config.max_protected_regression,
             device_gpu_hours=device_gpu_hours,

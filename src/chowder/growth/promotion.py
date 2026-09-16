@@ -51,6 +51,7 @@ class PromotionInput:
     max_protected_regression: float = 0.02
     max_broad_regression: float = 0.05
     max_calibration_regression: float = 0.02
+    max_reliability_regression: float = 0.02
     device_gpu_hours: float = 0.0
     device_gpu_hours_ceiling: float | None = None
 
@@ -234,6 +235,40 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
     if calibration_violations:
         reasons.append(f"{calibration_violations} calibration regression(s)")
 
+    # 5b. Reliability: pass@k-capable evals must not regress past tolerance.
+    #     A hard gate like calibration, but with one stricter rule: a *declared*
+    #     reliability set with no results is inconclusive, not ok. The set is a
+    #     predeclaration -- dodging the gate by never running the eval would
+    #     otherwise be a free pass, which is exactly what a predeclared rule
+    #     must not allow. An empty set is honestly "unmeasured": nothing was
+    #     promised, so nothing can be violated.
+    reliability_violations = 0
+    reliability_inconclusive = 0
+    for benchmark_id in data.reliability_benchmarks:
+        candidate = data.candidate_results.get(benchmark_id)
+        parent = data.parent_results.get(benchmark_id)
+        if candidate is None or parent is None:
+            checks[f"reliability:{benchmark_id}"] = "inconclusive"
+            reliability_inconclusive += 1
+            reasons.append(f"reliability benchmark unmeasured: {benchmark_id}")
+            continue
+        delta = candidate.score - parent.score
+        if delta < -data.max_reliability_regression:
+            checks[f"reliability:{benchmark_id}"] = "violated"
+            reliability_violations += 1
+        else:
+            checks[f"reliability:{benchmark_id}"] = "ok"
+    if not data.reliability_benchmarks:
+        checks["reliability"] = "unmeasured"
+    elif reliability_violations:
+        checks["reliability"] = "violated"
+    elif reliability_inconclusive:
+        checks["reliability"] = "inconclusive"
+    else:
+        checks["reliability"] = "ok"
+    if reliability_violations:
+        reasons.append(f"{reliability_violations} reliability regression(s)")
+
     # 6. Resource envelope.
     if data.device_gpu_hours_ceiling is not None:
         if data.device_gpu_hours > data.device_gpu_hours_ceiling:
@@ -248,12 +283,13 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
         checks["resource_envelope"] = "unmeasured"
 
     # Verdict assembly. Hard failures decide first: a protected regression,
-    # calibration violation, or resource-envelope breach is REJECTED no
-    # matter how good the target looks. TAINTED and INCONCLUSIVE are decided
-    # above; what remains is REJECTED vs PROMOTED.
+    # calibration violation, reliability violation, or resource-envelope
+    # breach is REJECTED no matter how good the target looks. TAINTED and
+    # INCONCLUSIVE are decided above; what remains is REJECTED vs PROMOTED.
     hard_failures = (
         (checks["protected_regression"] == "violated")
         or (checks["calibration"] == "violated")
+        or (checks["reliability"] == "violated")
         or (checks["resource_envelope"] == "violated")
     )
     if hard_failures:
@@ -276,7 +312,15 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
                 protected_deltas=protected_deltas,
             )
     if improved_targets > 0 and checks["protected_regression"] == "ok" and not calibration_violations:
-        if checks["broad_battery"] == "ok" and checks["evidence_integrity"] == "ok":
+        # A declared reliability set must have been measured to promote:
+        # "unmeasured" means the set was never declared (backward-compatible
+        # default), "inconclusive" means it was declared and dodged.
+        reliability_measured = checks["reliability"] in {"ok", "unmeasured"}
+        if (
+            checks["broad_battery"] == "ok"
+            and checks["evidence_integrity"] == "ok"
+            and reliability_measured
+        ):
             return PromotionDecision(
                 verdict="PROMOTED",
                 reasons=("all predeclared promotion checks passed",),
