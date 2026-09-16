@@ -13,6 +13,12 @@ train`` / ``run_project``) and returns the artifact/evaluation evidence.
 The orchestrator is trainer-agnostic by design and never invokes a trainer
 itself.
 
+Integration seam with evaluation: ``decide_promotion_from_runs`` consumes raw
+``BenchmarkRun``s and delegates the arithmetic to ``metric_binding``, which
+reads each metric's declared polarity and 0..1 scale out of the benchmark
+registry. No phase body in this module converts a metric by hand -- a score
+computed inline here would be a promotion scale nobody declared.
+
 Recipe competition is bounded by this package's own planner and budget
 envelope. Chowder's successive-halving controller
 (``successive_halving.run_successive_halving``,
@@ -32,6 +38,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
+from chowder.evals.result import BenchmarkRun
+
 from .capability import CapabilityProfile, profile_delta
 from .contamination import ContaminationFirewall
 from .curriculum import CurriculumEngine, CurriculumItem
@@ -39,6 +47,7 @@ from .eval_tiers import EvalPlan, plan_eval_tier
 from .failure_bank import FailureBank
 from .frontier_reference import FrontierSnapshot, SnapshotStore
 from .lineage import GenerationLedger, RegressionMemory
+from .metric_binding import MetricBinder, PromotionAssembly
 from .promotion import PromotionDecision, PromotionInput, BenchmarkResult, evaluate_promotion
 from .recipe_planner import RecipePlanner, TrainingRecipe
 
@@ -206,6 +215,39 @@ class GrowthCycle:
                 device_gpu_hours=device_gpu_hours,
                 device_gpu_hours_ceiling=self.config.device_gpu_hours_ceiling,
             )
+        )
+
+    def decide_promotion_from_runs(
+        self,
+        binder: MetricBinder,
+        *,
+        candidate_runs: Sequence[BenchmarkRun],
+        parent_runs: Sequence[BenchmarkRun],
+        device_gpu_hours: float = 0.0,
+    ) -> PromotionAssembly:
+        """Phase: measured runs -> the single predeclared promotion rule.
+
+        The cycle owns the promotion *sets* (which benchmarks are targets,
+        which are protected, which form the broad battery) and the declared
+        tolerances; the binder owns turning raw metrics into declared 0..1
+        scores. Splitting it this way is what keeps the arithmetic reviewable:
+        no conversion happens in a phase body, and a benchmark the cycle names
+        but the registry does not declare refuses rather than quietly
+        disappearing from the comparison.
+        """
+        return binder.promotion_input(
+            candidate_version=self.config.candidate_version,
+            parent_version=self.config.parent_version,
+            candidate_runs=candidate_runs,
+            parent_runs=parent_runs,
+            target_benchmarks=self.config.target_benchmarks,
+            protected_benchmarks=self.config.protected_benchmarks,
+            broad_battery_benchmarks=self.config.broad_battery,
+            calibration_benchmarks=self.config.calibration_benchmarks,
+            min_target_improvement=self.config.min_target_improvement,
+            max_protected_regression=self.config.max_protected_regression,
+            device_gpu_hours=device_gpu_hours,
+            device_gpu_hours_ceiling=self.config.device_gpu_hours_ceiling,
         )
 
     def finalize(
