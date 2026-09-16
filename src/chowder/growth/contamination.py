@@ -43,11 +43,28 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _shingle_hash(shingle: str) -> int:
+    """Deterministic 64-bit hash of one shingle.
+
+    The builtin ``hash()`` is salted per process (``PYTHONHASHSEED``), which
+    would make both the LSH banding and the Jaccard estimate vary between runs
+    on identical input -- unacceptable in a guard whose verdicts must be
+    reproducible and whose fingerprints are recomputed in other processes.
+    blake2b is stable across processes and platforms.
+    """
+    return int.from_bytes(
+        hashlib.blake2b(shingle.encode("utf-8"), digest_size=8).digest(), "big"
+    )
+
+
 def _shingles(text: str, size: int = 8) -> set[int]:
     words = normalize_text(text).split()
     if len(words) < size:
         return set()
-    return {hash(" ".join(words[i : i + size])) for i in range(len(words) - size + 1)}
+    return {
+        _shingle_hash(" ".join(words[i : i + size]))
+        for i in range(len(words) - size + 1)
+    }
 
 
 class MinHashIndex:
@@ -147,7 +164,30 @@ class ProtectedMaterial:
     normalized_digests: set[str] = field(default_factory=set)
     canaries: tuple[str, ...] = ()
     minhash: MinHashIndex | None = None
+    # Hashed 8-grams per sample: still fingerprints, never the text itself.
+    # Retained so the near-duplicate test below is exact instead of dependent
+    # on whether LSH banding happened to retrieve a candidate.
+    sample_shingles: dict[str, frozenset[int]] = field(default_factory=dict)
     sample_count: int = 0
+
+    def best_jaccard(self, shingles: set[int]) -> float:
+        """Maximum exact Jaccard over every registered sample.
+
+        Deliberately biased toward recall: the maximum over samples rather
+        than an average, and LSH is not consulted, so no banding miss can
+        turn real overlap into a CLEAN verdict.
+        """
+        if not shingles:
+            return 0.0
+        best = 0.0
+        for sample in self.sample_shingles.values():
+            union = len(sample | shingles)
+            if not union:
+                continue
+            score = len(sample & shingles) / union
+            if score > best:
+                best = score
+        return best
 
 
 class ContaminationFirewall:
@@ -189,7 +229,9 @@ class ContaminationFirewall:
             material.digests.add(_sha256(text))
             normalized = normalize_text(text)
             material.normalized_digests.add(_sha256(normalized))
-            index.add(f"{benchmark_qualified_id}:{material.sample_count}", text)
+            sample_key = f"{benchmark_qualified_id}:{material.sample_count}"
+            index.add(sample_key, text)
+            material.sample_shingles[sample_key] = frozenset(_shingles(text))
             material.sample_count += 1
         material.minhash = index
         self._protected[benchmark_qualified_id] = material
@@ -222,25 +264,30 @@ class ContaminationFirewall:
                 continue
             if material.minhash is not None:
                 candidates = material.minhash.candidates(text)
+                best = 0.0
                 if candidates:
                     best = max(
                         material.minhash.jaccard_estimate(k, text) for k in candidates
                     )
-                    if best >= self.MINHASH_POSSIBLE:
-                        matches.append(
-                            Match(qualified_id, "minhash", "MinHash LSH hit", similarity=best)
+                if best >= self.MINHASH_POSSIBLE:
+                    matches.append(
+                        Match(qualified_id, "minhash", "MinHash LSH hit", similarity=best)
+                    )
+                    continue
+                # LSH banding is probabilistic: with 4 rows per band a genuine
+                # near-duplicate can miss every band, so candidate retrieval is
+                # only an accelerator. The retained shingle sets decide, on
+                # every call, whether or not a candidate was retrieved.
+                overlap = self._ngram_overlap(text, qualified_id)
+                if overlap >= self.NGRAM_POSSIBLE:
+                    matches.append(
+                        Match(
+                            qualified_id,
+                            "substring",
+                            f"shingle overlap {overlap:.2f}",
+                            similarity=overlap,
                         )
-                        continue
-                    overlap = self._ngram_overlap(text, qualified_id)
-                    if overlap >= self.NGRAM_POSSIBLE:
-                        matches.append(
-                            Match(
-                                qualified_id,
-                                "substring",
-                                f"shingle overlap {overlap:.2f}",
-                                similarity=overlap,
-                            )
-                        )
+                    )
         if matches:
             hard = any(m.detector in {"exact", "normalized", "canary"} for m in matches)
             verdict = "KNOWN_CONTAMINATION" if hard else "POSSIBLE"
@@ -248,20 +295,14 @@ class ContaminationFirewall:
         return CheckResult(verdict="CLEAN", matches=())
 
     def _ngram_overlap(self, text: str, qualified_id: str) -> float:
-        """Jaccard overlap between the text's shingles and the stored
-        signature side-information we retain per protected benchmark."""
+        """Exact Jaccard overlap between the text's 8-gram shingles and the
+        protected samples' retained shingle fingerprints.
+
+        This is the authoritative near-duplicate test: it never misses a real
+        overlap, unlike the LSH index, which may retrieve no candidate at all.
+        """
         material = self._protected[qualified_id]
-        if material.minhash is None:
-            return 0.0
-        shingles = _shingles(text)
-        if not shingles:
-            return 0.0
-        # Reconstruct a coarse overlap from candidate signatures: MinHash
-        # agreement as a Jaccard estimate against the best-matching sample.
-        candidates = material.minhash.candidates(text)
-        if not candidates:
-            return 0.0
-        return max(material.minhash.jaccard_estimate(k, text) for k in candidates)
+        return material.best_jaccard(_shingles(text))
 
     def check_source(
         self,

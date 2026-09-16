@@ -7,9 +7,11 @@ that plus the trust-class/verification floor and the licensing gate.
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
-from chowder.growth.contamination import ContaminationFirewall
+from chowder.growth.contamination import ContaminationFirewall, MinHashIndex, _shingles
 from chowder.growth.data_registry import (
     DataSource,
     admit,
@@ -68,6 +70,38 @@ def test_paraphrase_over_threshold_is_flagged_and_below_is_clean():
     firewall = _firewall()
     assert not firewall.check_text(PARAPHRASED).clean
     assert firewall.check_text("an ordinary sentence about gardening in spring.").clean
+
+
+def test_shingle_fingerprints_do_not_depend_on_the_process_salt():
+    """Guard fingerprints must be reproducible across processes.
+
+    The builtin ``hash()`` is salted per process, so shingle ids -- and with
+    them the LSH banding and the Jaccard estimate -- used to differ between
+    runs. The same candidate text could be CLEAN in one process and POSSIBLE
+    in the next, which makes a leak verdict unverifiable after the fact.
+    """
+    expected = int.from_bytes(
+        hashlib.blake2b(
+            b"alpha beta gamma delta epsilon zeta eta theta", digest_size=8
+        ).digest(),
+        "big",
+    )
+    assert expected in _shingles("alpha beta gamma delta epsilon zeta eta theta")
+
+
+def test_a_banding_miss_cannot_silently_pass_benchmark_derived_text(monkeypatch):
+    """Candidate retrieval is an accelerator; it must not be the decision.
+
+    With 4 rows per band, a real ~50%-overlapping paraphrase of protected
+    text misses every band a large fraction of the time. When that happened,
+    the overlap fallback sat inside ``if candidates:`` and never ran, so a
+    copy was reported CLEAN. Force the miss and require the refusal anyway.
+    """
+    firewall = _firewall()
+    monkeypatch.setattr(MinHashIndex, "candidates", lambda self, text: set())
+    result = firewall.check_text(PARAPHRASED)
+    assert not result.clean
+    assert any(m.detector == "substring" for m in result.matches)
 
 
 def test_known_contamination_is_declared_not_discovered():
