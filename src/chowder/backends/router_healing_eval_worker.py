@@ -264,6 +264,150 @@ def _routing_counts(torch: Any, model: Any, batches: list[Any]) -> dict[str, lis
     return counts
 
 
+def _read_generation_prompts(spec: RouterHealingEvalSpec) -> list[str]:
+    """The T10 prompt set, hash-checked against the frozen declaration.
+
+    A probe whose prompts are not pinned to the frozen hash is not the probe
+    the preregistration describes, so a drift refuses before any measurement.
+    """
+    probe = dict(spec.generation_probe or {})
+    path = Path(str(probe["prompts_path"]))
+    if not path.is_file():
+        raise RuntimeError(f"generation probe prompts not found: {path}")
+    actual = _sha256_file(path)
+    declared = probe.get("prompts_sha256")
+    if actual != declared:
+        raise RuntimeError(
+            "generation probe prompts hash mismatch: the spec declares "
+            f"{declared!r} but {path} is {actual!r}"
+        )
+    prompts = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if not prompts:
+        raise RuntimeError(
+            "the generation probe prompt set is empty; an empty probe would report "
+            "healthy ratios over no evidence"
+        )
+    return prompts
+
+
+def _trigrams(text: str) -> list[tuple[str, str, str]]:
+    words = text.split()
+    return list(zip(words, words[1:], words[2:]))
+
+
+def _distinct_trigram_ratio(texts: list[str]) -> float | None:
+    """Unique trigrams over total trigrams. ``None`` when nothing was produced."""
+    trigrams: list[tuple[str, str, str]] = []
+    for text in texts:
+        trigrams.extend(_trigrams(text))
+    if not trigrams:
+        return None
+    return len(set(trigrams)) / len(trigrams)
+
+
+def _looping_completions(texts: list[str]) -> int:
+    """Completions containing three or more consecutive identical trigrams."""
+    looping = 0
+    for text in texts:
+        trigrams = _trigrams(text)
+        run = 1
+        worst = 1
+        for previous, current in zip(trigrams, trigrams[1:]):
+            run = run + 1 if current == previous else 1
+            worst = max(worst, run)
+        if worst >= 3:
+            looping += 1
+    return looping
+
+
+def _generation_sanity(
+    torch: Any,
+    model: Any,
+    tokenizer: Any,
+    device: Any,
+    probe: Mapping[str, Any],
+    prompts: list[str],
+) -> dict[str, Any]:
+    """Sample real completions and measure degeneracy, not loss.
+
+    Loss can look tolerable while generation collapses, so this probe measures
+    the generated text itself: how often the model stops on its own, how often
+    it runs to the cap, how repetitive the tokens are, and whether any
+    completion loops. Decoding settings are exactly the declared ones, applied
+    identically to both arms.
+    """
+    max_new = int(probe["max_new_tokens"])
+    temperature = float(probe["temperature"])
+    top_p = float(probe["top_p"])
+    eos_id = getattr(tokenizer, "eos_token_id", None)
+    pad_id = getattr(tokenizer, "pad_token_id", None)
+    if pad_id is None:
+        pad_id = eos_id
+
+    was_training = bool(getattr(model, "training", False))
+    if was_training:
+        model.eval()
+    completions: list[str] = []
+    terminated = 0
+    capped = 0
+    new_tokens = 0
+    prompt_tokens = 0
+    try:
+        for prompt in prompts:
+            ids = tokenizer(prompt, return_tensors="pt")["input_ids"].to(device)
+            prompt_tokens += int(ids.shape[1])
+            with torch.no_grad():
+                generated = model.generate(
+                    ids,
+                    max_new_tokens=max_new,
+                    do_sample=True,
+                    temperature=temperature,
+                    top_p=top_p,
+                    pad_token_id=pad_id,
+                    eos_token_id=eos_id,
+                )
+            fresh = generated[0][ids.shape[1] :]
+            produced = int(fresh.shape[0])
+            new_tokens += produced
+            hit_eos = eos_id is not None and produced > 0 and int(fresh[-1]) == int(eos_id)
+            if hit_eos:
+                terminated += 1
+            elif produced >= max_new:
+                capped += 1
+            completions.append(tokenizer.decode(fresh, skip_special_tokens=True))
+    finally:
+        if was_training:
+            model.train()
+
+    count = len(prompts)
+    return {
+        "status": "measured",
+        "prompts": count,
+        "prompts_sha256": probe.get("prompts_sha256"),
+        "max_new_tokens": max_new,
+        "temperature": temperature,
+        "top_p": top_p,
+        "termination_rate": terminated / count,
+        "max_token_cap_rate": capped / count,
+        "distinct_trigram_ratio": _distinct_trigram_ratio(completions),
+        "looping_prompts": _looping_completions(completions),
+        # Reported, never gated: output length over prompt length.
+        "compression_ratio": (new_tokens / prompt_tokens) if prompt_tokens else None,
+        "task_score": {
+            "status": "UNMEASURED",
+            "reason": (
+                "the probe prompt set carries no verifiable answer keys, so no task "
+                "score is computed; it is reported, never gated"
+            ),
+        },
+        "completions": completions,
+    }
+
+
 def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
     """Apply a verified payload and measure the result."""
     if spec.device not in QUALIFIED_DEVICES:
@@ -348,9 +492,21 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
         device=device,
     )
 
+    # The generation probe's prompt set is read and hash-checked before the
+    # first measurement, so a drifted probe fails before any score is taken.
+    generation_prompts: list[str] | None = None
+    base_generation: dict[str, Any] | None = None
+    candidate_generation: dict[str, Any] | None = None
+    if spec.generation_probe is not None:
+        generation_prompts = _read_generation_prompts(spec)
+
     baseline_timer = PhaseTimer()
     baseline_timer.__enter__()
     base_loss = _score(torch, model, batches)
+    if generation_prompts is not None:
+        base_generation = _generation_sanity(
+            torch, model, tokenizer, device, spec.generation_probe, generation_prompts
+        )
     before = _logits_fingerprint(torch, model, probe)
     routing_before = _routing_fingerprint(model, spec, tokenizer)
     baseline_timer.__exit__(None, None, None)
@@ -406,6 +562,15 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
             after = _logits_fingerprint(torch, model, probe)
             routing_after = _routing_fingerprint(model, spec, tokenizer)
             candidate_loss = _score(torch, model, batches)
+            if generation_prompts is not None:
+                candidate_generation = _generation_sanity(
+                    torch,
+                    model,
+                    tokenizer,
+                    device,
+                    spec.generation_probe,
+                    generation_prompts,
+                )
         except Exception as exc:
             if not spec.paired_arms:
                 raise
@@ -588,6 +753,21 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
         "base_holdout_loss": base_loss,
         "candidate_holdout_loss": candidate_loss if payload_arm else None,
         "holdout_loss_delta": candidate_loss - base_loss if payload_arm else None,
+        # T10 gates on the candidate's degeneracy; the base arm's probe is kept
+        # beside it so a reader can see whether the payload changed generation
+        # behaviour or only the loss. Absent a declared probe this is an honest
+        # UNMEASURED, never a silent pass.
+        "generation_sanity": (
+            {**candidate_generation, "arm": "candidate"}
+            if candidate_generation is not None
+            else {**base_generation, "arm": "base"}
+            if base_generation is not None
+            else {
+                "status": "UNMEASURED",
+                "reason": "no generation probe was declared for this run",
+            }
+        ),
+        "generation_sanity_base": base_generation,
         "application_control": application_control,
         "payload_verification": payload_verification,
         "routing": {"per_layer_top1": counts, "utilization": utilization},

@@ -138,6 +138,14 @@ class RouterHealingRunSpec:
     device: str = "cpu"
     detailed_timing: bool = False
     load_policy: str = "fp32-resident"
+    # The post-training routing census that answers "are the experts still
+    # used?". A census taken over the *training* corpus flatters the router (it
+    # was optimised on exactly those tokens), so the census corpus and its
+    # block count are declared here rather than assumed: a de-collapse claim is
+    # only comparable to another one when both name the same basis.
+    census_corpus_path: str | None = None
+    census_corpus_sha256: str | None = None
+    census_blocks: int | None = None
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -147,6 +155,30 @@ class RouterHealingRunSpec:
         ):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"router healing spec {label} must be a non-empty string")
+        if (self.census_corpus_path is None) != (self.census_corpus_sha256 is None):
+            raise ValueError(
+                "router healing spec census_corpus_path and census_corpus_sha256 "
+                "must be declared together: a census corpus without its hash is a "
+                "measurement basis nobody can check"
+            )
+        if self.census_corpus_path is not None:
+            if not isinstance(self.census_corpus_path, str) or not self.census_corpus_path.strip():
+                raise ValueError(
+                    "router healing spec census_corpus_path must be a non-empty string"
+                )
+            if (
+                not isinstance(self.census_corpus_sha256, str)
+                or len(self.census_corpus_sha256) != 64
+            ):
+                raise ValueError(
+                    "router healing spec census_corpus_sha256 must be a sha256 hex digest"
+                )
+        if self.census_blocks is not None and (
+            isinstance(self.census_blocks, bool)
+            or not isinstance(self.census_blocks, int)
+            or self.census_blocks <= 0
+        ):
+            raise ValueError("router healing spec census_blocks must be a positive integer")
         for label, digest in (
             ("base_content_sha256", self.base_content_sha256),
             ("corpus_sha256", self.corpus_sha256),
@@ -348,6 +380,9 @@ class RouterHealingExecutor:
             "max_load_seconds",
             "max_gpu_hours",
             "sub_budget_gpu_hours",
+            "census_corpus_path",
+            "census_corpus_sha256",
+            "census_blocks",
         ):
             if key in research:
                 settings[key] = research[key]
@@ -390,6 +425,29 @@ class RouterHealingExecutor:
                 f"corpus hash mismatch: the experiment was frozen against "
                 f"{declared_corpus!r} but {corpus_path} is {corpus_sha!r}"
             )
+
+        # The post-training routing census. Defaulting to the training corpus
+        # would flatter the router, so the census corpus is declared explicitly
+        # and its hash is checked against the frozen declaration exactly like
+        # the training corpus. When no census corpus is declared the worker
+        # falls back to the training corpus and labels the basis as such.
+        census_corpus_path: str | None = None
+        census_corpus_sha: str | None = None
+        declared_census_path = settings.get("census_corpus_path")
+        if declared_census_path:
+            resolved_census = _resolve_declared_path(declared_census_path, work_dir)
+            if not resolved_census.is_file():
+                raise RouterHealingBackendError(
+                    f"census corpus not found: {resolved_census}"
+                )
+            census_corpus_sha = sha256_file(resolved_census)
+            declared_census_sha = settings.get("census_corpus_sha256")
+            if declared_census_sha is not None and declared_census_sha != census_corpus_sha:
+                raise RouterHealingBackendError(
+                    "census corpus hash mismatch: the experiment was frozen against "
+                    f"{declared_census_sha!r} but {resolved_census} is {census_corpus_sha!r}"
+                )
+            census_corpus_path = str(resolved_census)
 
         seq_len = int(settings["seq_len"])
         batch_size = int(settings.get("batch_size", 1))
@@ -438,6 +496,13 @@ class RouterHealingExecutor:
             sub_budget_gpu_hours=(
                 dict(settings["sub_budget_gpu_hours"])
                 if settings.get("sub_budget_gpu_hours") is not None
+                else None
+            ),
+            census_corpus_path=census_corpus_path,
+            census_corpus_sha256=census_corpus_sha,
+            census_blocks=(
+                int(settings["census_blocks"])
+                if settings.get("census_blocks") is not None
                 else None
             ),
         )
@@ -849,6 +914,10 @@ class RouterHealingEvalSpec:
     max_gpu_hours: float | None = None
     sub_budget_gpu_hours: Mapping[str, float] | None = None
     paired_arms: bool = False
+    # Rung 4's T10 generation-sanity probe. Opt-in: a run that declares no
+    # prompts records UNMEASURED rather than reporting nothing, and no existing
+    # evaluation pays a generation cost it never preregistered.
+    generation_probe: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -874,6 +943,48 @@ class RouterHealingEvalSpec:
         for label, value in (("seq_len", self.seq_len), ("batches", self.batches)):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"router healing eval spec {label} must be a positive integer")
+        if self.generation_probe is not None:
+            # The sampling settings are part of the measurement, so they are
+            # validated here: a probe whose settings nobody pinned is a probe
+            # whose results cannot be compared run to run.
+            probe = dict(self.generation_probe)
+            prompts_path = probe.get("prompts_path")
+            if not isinstance(prompts_path, str) or not prompts_path.strip():
+                raise ValueError(
+                    "router healing eval spec generation_probe.prompts_path must be a "
+                    "non-empty string"
+                )
+            prompts_sha = probe.get("prompts_sha256")
+            if not isinstance(prompts_sha, str) or len(prompts_sha) != 64:
+                raise ValueError(
+                    "router healing eval spec generation_probe.prompts_sha256 must be a "
+                    "sha256 hex digest"
+                )
+            max_new = probe.get("max_new_tokens")
+            if isinstance(max_new, bool) or not isinstance(max_new, int) or max_new <= 0:
+                raise ValueError(
+                    "router healing eval spec generation_probe.max_new_tokens must be a "
+                    "positive integer"
+                )
+            temperature = probe.get("temperature")
+            if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+                raise ValueError(
+                    "router healing eval spec generation_probe.temperature must be a number"
+                )
+            if float(temperature) <= 0:
+                raise ValueError(
+                    "router healing eval spec generation_probe.temperature must be positive"
+                )
+            top_p = probe.get("top_p")
+            if isinstance(top_p, bool) or not isinstance(top_p, (int, float)):
+                raise ValueError(
+                    "router healing eval spec generation_probe.top_p must be a number"
+                )
+            if not 0.0 < float(top_p) <= 1.0:
+                raise ValueError(
+                    "router healing eval spec generation_probe.top_p must be in (0, 1]"
+                )
+            object.__setattr__(self, "generation_probe", probe)
         names = tuple(str(name) for name in self.expected_parameter_paths)
         if len(set(names)) != len(names):
             raise ValueError("router healing eval spec expected parameter paths must be unique")
@@ -1068,6 +1179,30 @@ class RouterHealingEvaluator:
                 f"holdout corpus hash mismatch: the experiment was frozen against "
                 f"{declared_holdout!r} but {holdout} is {holdout_sha!r}"
             )
+        # The T10 generation probe is opt-in. When it is declared, its prompt
+        # set is hash-checked here for the same reason the holdout is: an
+        # unpinned prompt set would let "the same probe" mean different prompts.
+        probe = research.get("generation_probe", knobs.get("generation_probe"))
+        if isinstance(probe, Mapping):
+            probe = dict(probe)
+            prompts_path = probe.get("prompts_path")
+            declared_prompts = probe.get("prompts_sha256")
+            if prompts_path:
+                resolved_prompts = _resolve_declared_path(prompts_path, work_dir)
+                if not resolved_prompts.is_file():
+                    raise RouterHealingEvaluationError(
+                        f"generation probe prompts not found: {resolved_prompts}"
+                    )
+                measured_prompts = sha256_file(resolved_prompts)
+                if declared_prompts is not None and declared_prompts != measured_prompts:
+                    raise RouterHealingEvaluationError(
+                        "generation probe prompts hash mismatch: the experiment was "
+                        f"frozen against {declared_prompts!r} but {resolved_prompts} is "
+                        f"{measured_prompts!r}"
+                    )
+                probe["prompts_path"] = str(resolved_prompts)
+                probe["prompts_sha256"] = measured_prompts
+        settings["_generation_probe"] = probe if isinstance(probe, Mapping) else None
         settings["_base_dir"] = base_dir
         settings["_identity"] = identity
         settings["_holdout"] = holdout
@@ -1096,6 +1231,7 @@ class RouterHealingEvaluator:
             holdout_corpus_path=str(settings["_holdout"]),
             holdout_corpus_sha256=settings["_holdout_sha"],
             expected_parameter_paths=(),
+            generation_probe=settings.get("_generation_probe"),
             output_dir=str((eval_dir / "output").resolve()),
             seq_len=int(settings.get("seq_len", 128)),
             batches=int(settings.get("eval_batches", 4)),
@@ -1171,6 +1307,7 @@ class RouterHealingEvaluator:
             holdout_corpus_path=str(settings["_holdout"]),
             holdout_corpus_sha256=settings["_holdout_sha"],
             expected_parameter_paths=expected_names,
+            generation_probe=settings.get("_generation_probe"),
             output_dir=str((eval_dir / "output").resolve()),
             seq_len=int(settings.get("seq_len", research.get("seq_len", 128))),
             batches=int(settings.get("eval_batches", 4)),

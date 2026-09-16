@@ -296,6 +296,40 @@ def test_a_zero_gradient_on_the_first_step_is_not_a_failure_when_the_window_cove
     # "zero on step 0, real on step 1" is exactly what is asserted
     assert set(entry["gradient_states"]) == {GRAD_ZERO, GRAD_NONZERO}
     assert entry["nonzero_steps"] == [1]
+    # Rung-4 T4a needs the per-step counts, not just the set: "zero on one step"
+    # and "zero on every step" are different findings, and a saturated layer is
+    # only visible through the count.
+    assert entry["grad_zero_steps"] == 1
+    assert entry["grad_nonzero_steps"] == 1
+
+
+def test_a_saturated_component_reports_zero_gradient_on_every_step():
+    """Rung 4's T4a saturation signal, at the unit that has to produce it.
+
+    The judge names a layer "saturated" when ``grad_zero_steps`` equals the
+    whole horizon. That distinction must be derivable from the component
+    record alone, so a layer that is exactly-zero on every observed step is
+    distinguishable from one that is merely zero sometimes.
+    """
+    torch.manual_seed(0)
+    model = _Tiny()
+    names = _trainable_names(model, "first")
+    probe = _probe(model, names, window_steps=4)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+
+    # A loss that never depends on the parameter: gradients attach and are
+    # exactly zero on every step.
+    for step in range(4):
+        optimizer.zero_grad()
+        (0.0 * model.first(torch.randn(2, 4)).sum()).backward()
+        probe.record_gradients(step)
+
+    entry = probe.report()["components"]["first.weight"]
+    assert entry["observed_steps"] == 4
+    assert entry["gradient_states"] == [GRAD_ZERO]
+    assert entry["grad_zero_steps"] == 4
+    assert entry["grad_nonzero_steps"] == 0
+    assert entry["nonzero_steps"] == []
 
 
 def test_a_gradient_without_an_update_is_refused():

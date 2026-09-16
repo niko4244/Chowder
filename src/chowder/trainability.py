@@ -339,6 +339,15 @@ class _ComponentObservation:
         return {
             "observed_steps": len(states),
             "gradient_states": sorted(set(states)),
+            # Per-step classification counts. ``grad_zero_steps`` is the number
+            # of observed steps whose gradient was exactly zero, so a component
+            # that recorded zero on every step reports ``observed_steps`` here.
+            # Rung 4's T4a needs this: a layer whose gradient is exactly zero for
+            # the whole horizon is *saturated*, and the difference between
+            # "zero some steps" and "zero every step" is the whole point. The
+            # set in ``gradient_states`` cannot express that distinction.
+            "grad_zero_steps": sum(1 for state in states if state == GRAD_ZERO),
+            "grad_nonzero_steps": sum(1 for state in states if state == GRAD_NONZERO),
             "nonzero_steps": list(self.nonzero_steps),
             "update_steps": list(self.update_steps),
             "trainable": bool(self.nonzero_steps and self.update_steps),

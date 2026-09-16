@@ -120,6 +120,112 @@ def _pack_blocks(input_ids: list[int], seq_len: int) -> list[list[int]]:
     return [input_ids[start : start + seq_len] for start in range(0, usable, seq_len)]
 
 
+def _census_blocks(
+    spec: RouterHealingRunSpec, tokenizer: Any, training_blocks: list[list[int]]
+) -> tuple[list[list[int]], str, str]:
+    """Blocks the routing census runs over, plus the basis they represent.
+
+    Returns ``(blocks, basis, corpus_sha256)``. Without a declared census
+    corpus the census falls back to the training corpus and says so: a
+    training-corpus census flatters the router, so it must never be presented
+    as if it were held out.
+    """
+    if spec.census_corpus_path is None:
+        return training_blocks, "training-corpus", spec.corpus_sha256
+    path = Path(spec.census_corpus_path)
+    if not path.is_file():
+        raise RuntimeError(f"census corpus not found: {path}")
+    actual = _sha256_file(path)
+    if actual != spec.census_corpus_sha256:
+        raise RuntimeError(
+            "census corpus hash mismatch: the spec declares "
+            f"{spec.census_corpus_sha256!r} but {path} is {actual!r}"
+        )
+    encoded = tokenizer(path.read_text(encoding="utf-8"), add_special_tokens=False)[
+        "input_ids"
+    ]
+    return _pack_blocks(list(encoded), spec.seq_len), "declared-census-corpus", actual
+
+
+def _routing_census(
+    torch: Any,
+    model: Any,
+    blocks: list[list[int]],
+    device: Any,
+    limit: int,
+) -> dict[str, list[int]]:
+    """Per-layer top-1 expert counts, read from the router's own logits.
+
+    A forward hook on each ``mlp.gate`` tallies which expert each token's own
+    logits selected. This is measured routing behaviour, never configuration:
+    a router that has collapsed onto a few experts is visible here and nowhere
+    else. ``limit`` bounds the block count so the census has a declared,
+    bounded cost rather than "however long the corpus happens to be".
+    """
+    counts: dict[str, list[int]] = {}
+    handles = []
+
+    def _hook(name: str):
+        def hook(_module: Any, _inputs: Any, output: Any) -> None:
+            logits = output[0] if isinstance(output, tuple) else output
+            if not torch.is_tensor(logits) or logits.dim() < 2:
+                return
+            rows = logits.detach().reshape(-1, logits.shape[-1]).argmax(dim=-1)
+            tally = torch.bincount(rows.cpu(), minlength=int(logits.shape[-1])).tolist()
+            existing = counts.get(name)
+            if existing is None:
+                counts[name] = [int(value) for value in tally]
+            else:
+                counts[name] = [a + int(b) for a, b in zip(existing, tally)]
+
+        return hook
+
+    for name, module in model.named_modules():
+        if name.endswith("mlp.gate"):
+            handles.append(module.register_forward_hook(_hook(name)))
+    # The census must be a measurement, not a roll of the dice: dropout in
+    # train mode would make the same trained router report different expert
+    # usage run to run, which is exactly the kind of drift a collapse threshold
+    # cannot tolerate.
+    was_training = bool(getattr(model, "training", False))
+    if was_training:
+        model.eval()
+    try:
+        with torch.no_grad():
+            for block in blocks[:limit]:
+                batch = torch.tensor([block], device=device)
+                model(input_ids=batch, labels=batch)
+    finally:
+        for handle in handles:
+            handle.remove()
+        if was_training:
+            model.train()
+    return counts
+
+
+def _census_metrics(
+    counts: dict[str, list[int]],
+    *,
+    basis: str,
+    corpus_sha256: str,
+    blocks_used: int,
+    blocks_available: int,
+) -> dict[str, Any]:
+    """Summarise a routing census, always naming the basis it was taken on."""
+    per_layer_dead = {
+        name: sum(1 for count in layer if count == 0) for name, layer in counts.items()
+    }
+    return {
+        "census_basis": basis,
+        "census_corpus_sha256": corpus_sha256,
+        "census_blocks_used": int(blocks_used),
+        "census_blocks_available": int(blocks_available),
+        "expert_slots": int(sum(len(layer) for layer in counts.values())),
+        "dead_experts_after": int(sum(per_layer_dead.values())),
+        "dead_experts_per_layer": per_layer_dead,
+    }
+
+
 def _learning_rate_at(step: int, spec: RouterHealingRunSpec) -> float:
     """Warmup then the configured decay, computed from the step alone.
 
@@ -293,6 +399,15 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
     order = torch.randperm(
         len(blocks), generator=torch.Generator().manual_seed(spec.seed)
     ).tolist()
+
+    census_block_list, census_basis, census_corpus_sha = _census_blocks(
+        spec, tokenizer, blocks
+    )
+    census_limit = (
+        int(spec.census_blocks)
+        if spec.census_blocks is not None
+        else min(2, len(census_block_list))
+    )
 
     trainable_names = list(freeze_summary.trainable_param_names)
     trainable_set = set(trainable_names)
@@ -473,6 +588,12 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
     deadline = None if spec.max_seconds is None else started + spec.max_seconds
     batch_tokens = spec.batch_size * spec.seq_len
 
+    # A census before the first step, so "after" has a baseline taken on the
+    # identical basis and the run can show de-collapse rather than only a score.
+    census_before_counts = _routing_census(
+        torch, model, census_block_list, device, census_limit
+    )
+
     Path(spec.output_dir).mkdir(parents=True, exist_ok=True)
     steady_state = PhaseTimer()
     steady_state.__enter__()
@@ -552,6 +673,29 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
     finally:
         steady_state.__exit__(None, None, None)
 
+    # The post-training census: the same corpus, the same block count, the
+    # trained router. This is the number rung 4's T4a thresholds on.
+    census_after_counts = _routing_census(
+        torch, model, census_block_list, device, census_limit
+    )
+    census_metrics = _census_metrics(
+        census_after_counts,
+        basis=census_basis,
+        corpus_sha256=census_corpus_sha,
+        blocks_used=min(census_limit, len(census_block_list)),
+        blocks_available=len(census_block_list),
+    )
+    census_metrics["dead_experts_before"] = int(
+        sum(
+            sum(1 for count in layer if count == 0)
+            for layer in census_before_counts.values()
+        )
+    )
+    census_metrics["dead_experts_per_layer_before"] = {
+        name: sum(1 for count in layer if count == 0)
+        for name, layer in census_before_counts.items()
+    }
+
     trainability = probe.assert_qualified()
     frozen = probe.assert_frozen_unchanged()
 
@@ -621,6 +765,7 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         "lifecycle": ledger.to_dict(),
         "trainability": trainability,
         "frozen": frozen,
+        "metrics": census_metrics,
         "scope": scope,
         "coverage": coverage.to_dict(),
         "freeze_summary": freeze_summary.to_dict(),
