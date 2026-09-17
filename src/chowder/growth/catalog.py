@@ -12,13 +12,26 @@ Statuses:
 - PUBLIC_SCORE_ONLY: data private/impractical locally; scores exist.
 - PRIVATE: reference display only.
 - UNSUPPORTED_BY_CURRENT_MODALITY: N/A for text-only models (never zero).
+
+Each row also needs its metric's *semantics* -- polarity, and the 0..1 scale
+its raw value lives on -- because promotion consumes 0..1 better-direction
+scores and nothing in the shipped system produced them. Those declarations
+live in ``METRIC_SEMANTICS`` keyed by metric name (see the comment above it),
+not on the rows: a row is not permitted to decide, on its own, what
+``accuracy`` means.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
-from .benchmark_registry import BenchmarkRegistry, _entry
+from .benchmark_registry import (
+    DIRECTIONS,
+    BenchmarkRegistry,
+    Normalization,
+    _entry,
+)
 
 _ROWS: list[dict[str, Any]] = [
     # ------------------------------------------------------------------ #
@@ -857,6 +870,150 @@ _ROWS: list[dict[str, Any]] = [
 ]
 
 
+# --------------------------------------------------------------------------- #
+# Metric semantics: one declaration per metric NAME
+# --------------------------------------------------------------------------- #
+#
+# Promotion compares 0..1 scores in which higher is always better. Before a
+# measured metric can be bound onto that scale it needs exactly two
+# declarations: its polarity, and -- where one exists -- the 0..1 scale its raw
+# value lives on. ``normalization=None`` is itself a declaration: it says the
+# metric has no 0..1 scale, and such a metric cannot be bound into a promotion
+# input at all. It is not an omission, and it is not silence.
+#
+# Declaring them per metric *name* rather than per benchmark row is deliberate.
+# Seven names cover all 40 entries, so the polarity of ``accuracy`` is decided
+# once instead of being re-decided (and mis-decided) twenty-four times. A row
+# that needs a different scale does not get to redeclare its metric: it needs a
+# distinct metric name, because a different scale is a different measurement --
+# and two rows declaring the same name differently would make every bound score
+# ambiguous. ``default_registry`` refuses a row that tries.
+
+
+@dataclass(frozen=True)
+class MetricSemantics:
+    """A metric's declared polarity and 0..1 scale, and why."""
+
+    metric: str
+    direction: str
+    normalization: Normalization | None
+    rationale: str
+
+    def __post_init__(self) -> None:
+        if self.direction not in DIRECTIONS:
+            raise ValueError(
+                f"metric {self.metric!r}: unknown direction {self.direction!r}; "
+                f"known: {sorted(DIRECTIONS)}"
+            )
+        if not self.rationale.strip():
+            raise ValueError(
+                f"metric {self.metric!r}: declares no rationale; a polarity/scale "
+                "nobody can read the reasoning for is indistinguishable from a guess"
+            )
+
+
+RATE = "a proportion: already a 0..1 rate in the better direction"
+
+METRIC_SEMANTICS: dict[str, MetricSemantics] = {
+    s.metric: s
+    for s in (
+        MetricSemantics(
+            metric="accuracy",
+            direction="higher_is_better",
+            normalization=Normalization(kind="identity"),
+            rationale=f"correct answers / answers answered -- {RATE}",
+        ),
+        MetricSemantics(
+            metric="pass@1",
+            direction="higher_is_better",
+            normalization=Normalization(kind="identity"),
+            rationale=f"problems solved on the first attempt / problems posed -- {RATE}",
+        ),
+        MetricSemantics(
+            metric="resolved_rate",
+            direction="higher_is_better",
+            normalization=Normalization(kind="identity"),
+            rationale=f"issues resolved / issues attempted -- {RATE}",
+        ),
+        MetricSemantics(
+            metric="success_rate",
+            direction="higher_is_better",
+            normalization=Normalization(kind="identity"),
+            rationale=f"tasks completed / tasks attempted -- {RATE}",
+        ),
+        MetricSemantics(
+            metric="strict_accuracy",
+            direction="higher_is_better",
+            normalization=Normalization(kind="identity"),
+            rationale=(
+                "prompts satisfying every declared constraint / prompts issued -- "
+                f"{RATE}; strictness is in the constraint check, not in the scale"
+            ),
+        ),
+        MetricSemantics(
+            metric="win_rate_vs_human",
+            direction="higher_is_better",
+            normalization=Normalization(kind="identity"),
+            rationale=(
+                "pairwise comparisons won / comparisons judged -- "
+                f"{RATE}; the tie convention belongs to the judge protocol"
+            ),
+        ),
+        MetricSemantics(
+            metric="speedup_at_correctness",
+            direction="higher_is_better",
+            normalization=None,
+            rationale=(
+                "a ratio, not a rate: a 1.0x speedup is not a floor of zero and no "
+                "finite speedup is a ceiling of one. Anchoring it would require "
+                "naming a reference implementation and a timing protocol, and "
+                "inventing those here would manufacture the scale a promotion is "
+                "decided on. Declared unscaleable until a reference is pinned."
+            ),
+        ),
+    )
+}
+
+
+def semantics_for(metric: str) -> MetricSemantics:
+    """The declared semantics for one metric name.
+
+    Refuses an undeclared metric rather than guessing a polarity: a metric
+    whose better direction nobody decided cannot be promoted on.
+    """
+    try:
+        return METRIC_SEMANTICS[metric]
+    except KeyError:
+        raise ValueError(
+            f"metric {metric!r} declares no direction/normalization in "
+            f"METRIC_SEMANTICS; a metric whose polarity is undecided cannot be "
+            f"bound into a promotion input. Known: {sorted(METRIC_SEMANTICS)}"
+        ) from None
+
+
+def _with_semantics(row: dict[str, Any]) -> dict[str, Any]:
+    """Attach this row's metric semantics, refusing a competing declaration."""
+    row = dict(row)
+    metric = row.get("primary_metric")
+    if not metric:
+        raise ValueError(
+            f"catalog row {row.get('benchmark_id')!r} names no primary_metric; a "
+            "benchmark whose metric is unnamed cannot declare a polarity or a scale"
+        )
+    redeclared = [key for key in ("direction", "normalization") if key in row]
+    if redeclared:
+        raise ValueError(
+            f"catalog row {row.get('benchmark_id')!r} redeclares "
+            f"{', '.join(redeclared)}; polarity and scale belong to the metric "
+            f"name ({metric!r} -> METRIC_SEMANTICS), so a benchmark needing a "
+            "different scale needs a distinct metric name"
+        )
+    semantics = semantics_for(metric)
+    row["direction"] = semantics.direction
+    row["normalization"] = semantics.normalization
+    return row
+
+
 def default_registry() -> BenchmarkRegistry:
     """Build the seed registry (validates every row on construction)."""
-    return BenchmarkRegistry(entries=tuple(_entry(row) for row in _ROWS))
+    return BenchmarkRegistry(entries=tuple(_entry(_with_semantics(row)) for row in _ROWS))
