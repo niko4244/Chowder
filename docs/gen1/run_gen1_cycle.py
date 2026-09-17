@@ -470,6 +470,9 @@ def cmd_train(args: argparse.Namespace) -> int:
             token_target=len(rows["target"]) * 60,
             difficulty_band="easy",
             verification_method="template construction (answer embedded at generation time)",
+            training_type="sft",
+            evaluation_set=INSTRUMENT,
+            protected_regression_set=(MATH500, MGSM),
         ),
         CurriculumItem(
             item_id="gen1-preserve",
@@ -485,6 +488,9 @@ def cmd_train(args: argparse.Namespace) -> int:
             token_target=len(rows["preserve"]) * 60,
             difficulty_band="easy",
             verification_method="template construction",
+            training_type="sft",
+            evaluation_set=INSTRUMENT,
+            protected_regression_set=(MATH500, MGSM),
         ),
         CurriculumItem(
             item_id="gen1-general",
@@ -500,6 +506,9 @@ def cmd_train(args: argparse.Namespace) -> int:
             token_target=len(rows["general"]) * 60,
             difficulty_band="easy",
             verification_method="template construction",
+            training_type="sft",
+            evaluation_set=INSTRUMENT,
+            protected_regression_set=(MATH500, MGSM),
         ),
     )
 
@@ -538,7 +547,7 @@ def cmd_train(args: argparse.Namespace) -> int:
 
     recipes = [recipe("gen1-recipe-a", 1e-4), recipe("gen1-recipe-b", 2e-4)]
     sources = {i.item_id: "gen1-termination-curriculum" for i in items}
-    material = {k: material_rows[k.replace("gen1-", "")] for k in sources}
+    material = {k: material_rows[k] for k in sources}
 
     outcomes: dict[str, dict] = {}
     for rec in recipes:

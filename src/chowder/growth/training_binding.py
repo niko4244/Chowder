@@ -531,7 +531,26 @@ class SubprocessTrainingFn:
                 "the project template declares no config section to merge into",
             )
 
-        merged_config = deep_merge_config(config, recipe.to_config_patch())
+        backend_type = ""
+        backend_section = config.get("backend")
+        if isinstance(backend_section, Mapping):
+            declared = backend_section.get("type")
+            if isinstance(declared, str) and declared.strip():
+                backend_type = declared.strip()
+        if not backend_type:
+            return template, (
+                "template-contract",
+                "the project template's config.backend declares no `type`; the recipe "
+                "knobs have no namespace to target, so the merge would be a guess",
+            )
+        try:
+            patch = recipe.to_config_patch(backend_type=backend_type)
+        except ValueError as error:
+            return template, (
+                "template-contract",
+                str(error),
+            )
+        merged_config = deep_merge_config(config, patch)
         if "search" in merged_config or "search" in template:
             return template, (
                 "template-contract",

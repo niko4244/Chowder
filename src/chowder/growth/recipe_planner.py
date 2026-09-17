@@ -90,33 +90,64 @@ class TrainingRecipe:
             "notes": self.notes,
         }
 
-    def to_config_patch(self) -> dict[str, Any]:
+    def to_config_patch(self, *, backend_type: str = "router-healing") -> dict[str, Any]:
         """The nested ``config_patch`` this recipe contributes to one experiment.
 
-        Only knobs the router-healing project validator actually reads are
-        emitted. ``ExperimentGraph`` resolves a patch by merging it with
-        ``deep_merge_config``, so any other key -- bookkeeping included --
-        would silently land inside a qualified configuration.
+        Only knobs the target backend's validator actually reads are emitted;
+        the shape follows the project's ``backend.type`` (the binding passes
+        the type of the template it is composing, so a recipe never invents a
+        namespace the target backend would refuse):
 
-        LoRA rank/alpha, scheduler, warmup, and target modules stay
-        proposed-but-unmapped: the PEFT path names rank and alpha inside its
-        own ``lora`` spec, so inventing a namespace for them here would be
-        drift, not integration. Recipe identity, mixture, and projections
-        travel in ``to_dict()``, which is what the cycle ledger records.
+        - ``router-healing``: the router engine's knobs.
+        - ``transformers-peft``: the same training knobs in the peft
+          validator's namespace (``backend.training.*`` plus ``max_length``).
+          Note the peft path has no ``seq_len``: sequence length is the
+          backend-level ``max_length``.
+
+        ``ExperimentGraph`` resolves a patch by merging it with
+        ``deep_merge_config``, so any other key -- bookkeeping included --
+        would silently land inside a qualified configuration. An unknown
+        backend type raises: emitting nothing silently would drop the
+        recipe's knobs; emitting router-healing keys into another backend
+        would fail validation anyway (both discovered on real runs).
+
+        LoRA rank/alpha, and anything else the target path names inside its
+        own spec, stay proposed-but-unmapped: inventing a namespace for them
+        here would be drift, not integration. Recipe identity, mixture, and
+        projections travel in ``to_dict()``, which is what the cycle ledger
+        records.
 
         There is no project-level ``search`` config to target: ``run_project``
         has no search section and Chowder's successive-halving controller has
         no production caller yet (``docs/ROADMAP.md``).
         """
-        return {
-            "backend": {
-                "router_healing": {
-                    "max_steps": self.max_steps,
-                    "learning_rate": self.learning_rate,
-                    "seq_len": self.seq_len,
+        if backend_type == "router-healing":
+            return {
+                "backend": {
+                    "router_healing": {
+                        "max_steps": self.max_steps,
+                        "learning_rate": self.learning_rate,
+                        "seq_len": self.seq_len,
+                    }
                 }
             }
-        }
+        if backend_type == "transformers-peft":
+            return {
+                "backend": {
+                    "max_length": self.seq_len,
+                    "training": {
+                        "max_steps": self.max_steps,
+                        "learning_rate": self.learning_rate,
+                        "lr_scheduler_type": self.scheduler,
+                        "warmup_steps": self.warmup_steps,
+                    },
+                }
+            }
+        raise ValueError(
+            f"recipe knobs have no mapping for backend type {backend_type!r}; "
+            "a patch for an unknown backend would either be dropped or refused "
+            "by the backend's validator -- name the backend or extend the mapper"
+        )
 
 
 class RecipePlanner:

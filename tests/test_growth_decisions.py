@@ -428,7 +428,8 @@ def test_recipe_config_patch_emits_only_knobs_the_validator_reads():
     from chowder.project import ROUTER_HEALING_REQUIRED_KNOBS
 
     planner, items = _planner_and_items()
-    patch = planner.propose(items, count=1)[0].to_config_patch()
+    recipe = planner.propose(items, count=1)[0]
+    patch = recipe.to_config_patch()
 
     assert set(patch) == {"backend"}
     assert set(patch["backend"]) == {"router_healing"}
@@ -447,6 +448,55 @@ def test_recipe_config_patch_emits_only_knobs_the_validator_reads():
         "learning_rate",
         "seq_len",
     }
+
+
+def test_recipe_patch_maps_into_the_peft_backend_namespace():
+    """The peft backend refuses router_healing keys (fail-closed validator),
+    so a growth recipe targeting a transformers-peft project must emit the
+    same training knobs in the peft validator's own namespace."""
+    from chowder.config_validation import validate_transformers_backend_config
+    from chowder.graph import deep_merge_config
+
+    planner, items = _planner_and_items()
+    recipe = planner.propose(items, count=1)[0]
+    patch = recipe.to_config_patch(backend_type="transformers-peft")
+
+    assert set(patch) == {"backend"}
+    assert set(patch["backend"]) == {"max_length", "training"}
+    assert set(patch["backend"]["training"]) == {
+        "max_steps",
+        "learning_rate",
+        "lr_scheduler_type",
+        "warmup_steps",
+    }
+
+    merged = deep_merge_config(
+        {
+            "backend": {
+                "type": "transformers-peft",
+                "max_length": 512,
+                "training": {"epochs": 1.0},
+            }
+        },
+        patch,
+    )
+    # The merged result passes the real validator: the recipe's knobs land in
+    # a namespace the backend actually reads, and no router key leaks in.
+    validate_transformers_backend_config(merged)
+    assert merged["backend"]["max_length"] == recipe.seq_len
+    assert merged["backend"]["training"]["max_steps"] == recipe.max_steps
+    assert merged["backend"]["training"]["learning_rate"] == recipe.learning_rate
+
+
+def test_recipe_patch_refuses_an_unknown_backend_type():
+    planner, items = _planner_and_items()
+    recipe = planner.propose(items, count=1)[0]
+    try:
+        recipe.to_config_patch(backend_type="unsloth-fantasy")
+    except ValueError as error:
+        assert "unsloth-fantasy" in str(error)
+    else:
+        raise AssertionError("an unknown backend type must not produce a patch")
 
 
 def test_snapshot_store_freezes_and_never_rewrites(tmp_path):
