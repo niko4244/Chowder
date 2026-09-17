@@ -75,11 +75,21 @@ model (workload + one model load, ×1.5 safety) is the budget template.
 
 ## Readiness verdict
 
-**Infrastructure: READY. Campaign: NOT YET STARTED — awaiting the frozen
-Generation-0 evaluation of the parent 9B on the qualified device path.**
+**Infrastructure: READY. Campaign: STEP 1 COMPLETE — the first real cycle
+executed and adjudicated PROMOTED (2026-09-17).**
 
-The blocking dependency is platform closeout landing and the rebase of this
-branch; the growth system itself is complete and tested.
+Generation-0's evaluation freeze landed through protected CI (#168), and the
+first Model N → N+1 cycle ran against prereg + amendments 1–3
+(`docs/quals/GEN1_PREREG_2026-09-17.md`, executed under
+`GEN1_PREREG_AMENDMENT3_2026-09-17`'s measured physics): recipe-a/b trained
+30/30 steps through the production `SubprocessTrainingFn`, the independent
+evaluator measured EOS 1.000 / cap-hit 0.000 / unclosed-think 0.000, and the
+frozen rule adjudicated **PROMOTED**
+(`docs/quals/GEN1_RESULT_2026-09-17.md`; ledger `gen1` beside `gen0`).
+Two promotion-rule defects the cycle exposed are fixed with regression
+tests. The next cycle starts from the durable records — no manual
+evidence reconstruction — and its target must again come from fresh
+measured evidence.
 
 ## The 12 questions this system must answer
 

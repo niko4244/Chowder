@@ -16,18 +16,25 @@ for it:
 
 ## Current state (updated 2026-09-17) — READ THE HEADLINE FIRST
 
-**The autonomous growth platform is operationally ready for its first real
-cycle.** Generation 0 — the dense Qwen3.8-9B abliterated parent — is frozen
-evaluation-only (`docs/gen0/GEN0_EVAL_RESULT_2026-09-17.md`, freeze digest
-`5c8b18ab…`, immutable snapshot `gen0-frontier`, ledger record `gen0`);
-measured baseline: math500 0.0, mgsm-en 0.0, EOS termination 0.000,
+**The first real Model N → N+1 cycle has executed and closed: gen1 is
+PROMOTED.** Generation 0 — the dense Qwen3.8-9B abliterated parent — is
+frozen evaluation-only (`docs/gen0/GEN0_EVAL_RESULT_2026-09-17.md`, freeze
+digest `5c8b18ab…`, immutable snapshot `gen0-frontier`, ledger record
+`gen0`); measured baseline: math500 0.0, mgsm-en 0.0, EOS termination 0.000,
 cap-hit 1.000 (no literal loops). The cycle's TrainingFn is bound to the
 real production trainer with qualified refusals, and promotion inputs bind
 to declared metric semantics with reliability as a hard gate (#167). The
-first Model N → N+1 cycle is preregistered
-(`docs/quals/GEN1_PREREG_2026-09-17.md`) targeting chat-protocol
-compliance; its verdict will be whatever the frozen rule says — REJECTED
-is an acceptable durable outcome.
+first cycle ran for real against prereg + amendments 1–3
+(`docs/quals/GEN1_PREREG_2026-09-17.md`, executed under
+`GEN1_PREREG_AMENDMENT3_2026-09-17`'s measured physics): both recipes
+trained 30/30 steps through `SubprocessTrainingFn`, the independent
+evaluator measured EOS 1.000 / cap-hit 0.000 / unclosed-think 0.000 / loops
+0 / trigram 0.9732, and the frozen rule adjudicated
+**PROMOTED** (`docs/quals/GEN1_RESULT_2026-09-17.md`; ledger record `gen1`
+beside `gen0`). Two promotion-rule defects the cycle exposed (zero-variance
+target pairs; aggregate-only protected rows) are fixed with regression
+tests. The next cycle's target must again come from fresh measured
+evidence — the growth loop is now proven, repeatable infrastructure.
 
 **Sparse-program context (2026-09-11, unchanged below):** the sparse
 program's central mechanism does not work, and this is now measured, not
