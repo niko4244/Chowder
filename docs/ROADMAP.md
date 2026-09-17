@@ -34,6 +34,22 @@ Each item below names the module/PR that backs the claim.
 
 ## PROVEN / MERGED
 
+**Autonomous model growth (platform-proven, model-research ongoing)**
+Generation 0 frozen: the dense Qwen3.8-9B abliterated parent, evaluation-
+only, with exact identity/protocol manifests and measured baseline
+(`docs/gen0/GEN0_EVAL_RESULT_2026-09-17.md`; math500 0.0, mgsm-en 0.0,
+EOS termination 0.000, cap-hit 1.000, no literal loops; freeze digest
+`5c8b18ab…`; immutable snapshot `gen0-frontier`). GrowthCycle binds to the
+real production trainer via `SubprocessTrainingFn` with qualified
+contamination/budget/identity refusals, and promotion binds measured runs
+onto declared metric semantics with the reliability set as a hard gate
+(#167). First Model N → N+1 cycle preregistered
+(`docs/quals/GEN1_PREREG_2026-09-17.md`): target = chat-protocol
+compliance; frontier reference seeding is honest-empty with provenance
+gates (`docs/FRONTIER_REFERENCE_SEED_2026-09-17.md`). Successive-halving
+search remains a library capability with no production caller — not
+required by, and not wired into, the growth cycle.
+
 **Research kernel**
 experiment DAG · hypothesis schema · compute budget enforcement · hard
 regression gate · candidate tournament (`tournament.py`, `ranking.py`) ·

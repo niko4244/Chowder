@@ -12,16 +12,22 @@ generation follows.
 3. The parent checkpoint pinned: exact revision, tokenizer, quantization,
    inference engine.
 
-## Step 1 — Freeze Generation 0
+## Step 1 — Freeze Generation 0 — DONE (2026-09-17)
 
-Run the broadest affordable evaluation battery **before** any training and
-record exactly: model revision, tokenizer, quantization, inference engine,
-prompt templates, reasoning settings, sampling parameters, hardware, and
-benchmark versions. Without a frozen Generation 0, "improvement" is
-meaningless.
+The dense Qwen3.8-9B abliterated parent is frozen as Generation 0,
+evaluation-only, per `docs/gen0/GEN0_EVAL_RESULT_2026-09-17.md`: exact
+identity manifest (content digest `59e767aa…7555f`), protocol
+`gen0-freeze-protocol-v1` (chat template, greedy, seed 1234), measured
+battery (`math500@2024-04` 0.0, `mgsm@2022-11` 0.0, generation
+diagnostics: EOS rate 0.000 / cap-hit 1.000 / trigram 0.988), honest
+UNMEASURED rows preserved, contamination manifest all-UNKNOWN (no training
+pool exists), freeze digest `5c8b18ab…`, immutable snapshot
+`gen0-frontier`, ledger record `gen0`.
 
-Artifacts: `eval-report.json`, `capability profile`,
-`contamination_manifest.json`, frontier snapshot `gen0-frontier`.
+The first cycle is preregistered (before any training compute) at
+`docs/quals/GEN1_PREREG_2026-09-17.md`: target = chat-protocol compliance
+(turn termination + thinking-block closure), chosen from the measured
+evidence above.
 
 ## Step 2 — First cycle
 

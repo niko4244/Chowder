@@ -14,7 +14,24 @@ for it:
   [`TEACHER_FABRIC_BRIEF.md`](TEACHER_FABRIC_BRIEF.md) — read it before
   any Teacher Fabric slice; it is the source of the non-negotiable rules.
 
-## Current state (updated 2026-09-11) — READ THE HEADLINE FIRST
+## Current state (updated 2026-09-17) — READ THE HEADLINE FIRST
+
+**The autonomous growth platform is operationally ready for its first real
+cycle.** Generation 0 — the dense Qwen3.8-9B abliterated parent — is frozen
+evaluation-only (`docs/gen0/GEN0_EVAL_RESULT_2026-09-17.md`, freeze digest
+`5c8b18ab…`, immutable snapshot `gen0-frontier`, ledger record `gen0`);
+measured baseline: math500 0.0, mgsm-en 0.0, EOS termination 0.000,
+cap-hit 1.000 (no literal loops). The cycle's TrainingFn is bound to the
+real production trainer with qualified refusals, and promotion inputs bind
+to declared metric semantics with reliability as a hard gate (#167). The
+first Model N → N+1 cycle is preregistered
+(`docs/quals/GEN1_PREREG_2026-09-17.md`) targeting chat-protocol
+compliance; its verdict will be whatever the frozen rule says — REJECTED
+is an acceptable durable outcome.
+
+**Sparse-program context (2026-09-11, unchanged below):** the sparse
+program's central mechanism does not work, and this is now measured, not
+suspected.
 
 **The sparse program's central mechanism does not work, and this is now
 measured, not suspected.** The dense→MoE conversion itself is validated
