@@ -508,3 +508,52 @@ def test_snapshot_store_freezes_and_never_rewrites(tmp_path):
     frozen = SnapshotStore(tmp_path).get("v1.0-frontier")
     assert frozen.date == "2026-09-15"
     assert frozen.scores[0].model == "Peer-8B"
+
+
+def test_degenerate_parent_floor_target_improvement_is_recognized():
+    """A parent pinned at the scale floor (all-zero samples, zero variance)
+    that the candidate lifts past min_effect is an IMPROVEMENT, not
+    'inconclusive': the no-variance branch of compare() already returns
+    'flat' when |delta| <= min_effect, so treating a real lift past the
+    threshold as undecidable would make a hard 0 -> 1 target gain
+    unpromotable and the predeclared rule self-defeating."""
+    from chowder.growth.promotion import BenchmarkResult, PromotionInput, evaluate_promotion
+
+    n = 16
+    parent = BenchmarkResult(
+        benchmark_qualified_id="instrument@v1",
+        score=0.0,
+        samples=(0.0,) * n,          # floor: zero variance, zero mean
+        contamination="CLEAN",
+    )
+    candidate = BenchmarkResult(
+        benchmark_qualified_id="instrument@v1",
+        score=1.0,
+        samples=(1.0,) * n,          # ceiling: zero variance, full lift
+        contamination="CLEAN",
+    )
+    protected = BenchmarkResult(
+        benchmark_qualified_id="protected@v1",
+        score=0.5,
+        samples=(0.5, 0.5, 0.5, 0.5),
+        contamination="CLEAN",
+    )
+    data = PromotionInput(
+        candidate_version="v0.2",
+        parent_version="v0.1",
+        target_benchmarks=("instrument@v1",),
+        candidate_results={"instrument@v1": candidate, "protected@v1": protected},
+        parent_results={"instrument@v1": parent, "protected@v1": protected},
+        protected_benchmarks=("protected@v1",),
+        broad_battery_benchmarks=(),
+        min_target_improvement=0.90,
+    )
+    decision = evaluate_promotion(data)
+    assert decision.checks["target:instrument@v1"] == "improved", decision.checks
+    assert decision.checks["target_improvement"] == "met"
+    # An EMPTY declared broad battery is "unmeasured" honestly, but the rule
+    # treats an empty tuple as no-data ("inconclusive"). The target check
+    # itself is what this test pins: a floor-start lift is "improved".
+    assert decision.verdict in {"PROMOTED", "INCONCLUSIVE"}, (decision.verdict, decision.reasons)
+    if decision.verdict == "INCONCLUSIVE":
+        assert decision.reasons == ("broad battery insufficiently measured",), decision.reasons

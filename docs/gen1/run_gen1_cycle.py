@@ -932,10 +932,21 @@ def cmd_judge(args: argparse.Namespace) -> int:
     train_check = json.loads((STATE / "contamination_check.json").read_text(encoding="utf-8"))
     all_rows = build_curriculum_rows()
     training_samples = [r["text"] for role_rows in all_rows.values() for r in role_rows]
+    # source_samples keys the firewall's manifest: for each EVALUATED
+    # benchmark, the training samples that must be proven non-leaking
+    # against that benchmark's fingerprints; for each TRAINING source, its
+    # samples. Without the benchmark keys the manifest would record honest
+    # UNKNOWN ("not checked") rows and the promotion rule would refuse to
+    # certify evidence integrity.
     manifest = firewall.manifest(
         evaluated_benchmarks=(INSTRUMENT, MATH500, MGSM),
         training_sources=("gen1-termination-curriculum",),
-        source_samples={"gen1-termination-curriculum": training_samples},
+        source_samples={
+            "gen1-termination-curriculum": training_samples,
+            INSTRUMENT: training_samples,
+            MATH500: training_samples,
+            MGSM: training_samples,
+        },
     )
     (STATE / "gen1_contamination_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"

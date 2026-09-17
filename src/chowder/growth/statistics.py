@@ -144,10 +144,18 @@ def compare(
 
     if n1 < 2 or n2 < 2 or (v1 <= 0.0 and v2 <= 0.0):
         # No usable variance estimate: cannot decide significance honestly.
-        if abs(delta) <= min_effect:
-            verdict = "flat"
+        # A degenerate pair (e.g. a parent pinned at the scale floor -- all
+        # zeros -- against a candidate pinned at the ceiling) has a real,
+        # decisive delta with no spread to test; the |delta| against
+        # min_effect still decides the direction. Hiding a hard lift past
+        # the declared minimum behind "inconclusive" would make a floor
+        # start unpromotable no matter what the candidate achieves.
+        if delta > min_effect:
+            verdict = "improved"
+        elif delta < -min_effect:
+            verdict = "regressed"
         else:
-            verdict = "inconclusive"
+            verdict = "flat"
         return Comparison(
             mean_before=m1,
             mean_after=m2,
