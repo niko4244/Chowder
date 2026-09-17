@@ -428,7 +428,8 @@ def test_recipe_config_patch_emits_only_knobs_the_validator_reads():
     from chowder.project import ROUTER_HEALING_REQUIRED_KNOBS
 
     planner, items = _planner_and_items()
-    patch = planner.propose(items, count=1)[0].to_config_patch()
+    recipe = planner.propose(items, count=1)[0]
+    patch = recipe.to_config_patch()
 
     assert set(patch) == {"backend"}
     assert set(patch["backend"]) == {"router_healing"}
@@ -449,6 +450,55 @@ def test_recipe_config_patch_emits_only_knobs_the_validator_reads():
     }
 
 
+def test_recipe_patch_maps_into_the_peft_backend_namespace():
+    """The peft backend refuses router_healing keys (fail-closed validator),
+    so a growth recipe targeting a transformers-peft project must emit the
+    same training knobs in the peft validator's own namespace."""
+    from chowder.config_validation import validate_transformers_backend_config
+    from chowder.graph import deep_merge_config
+
+    planner, items = _planner_and_items()
+    recipe = planner.propose(items, count=1)[0]
+    patch = recipe.to_config_patch(backend_type="transformers-peft")
+
+    assert set(patch) == {"backend"}
+    assert set(patch["backend"]) == {"max_length", "training"}
+    assert set(patch["backend"]["training"]) == {
+        "max_steps",
+        "learning_rate",
+        "lr_scheduler_type",
+        "warmup_steps",
+    }
+
+    merged = deep_merge_config(
+        {
+            "backend": {
+                "type": "transformers-peft",
+                "max_length": 512,
+                "training": {"epochs": 1.0},
+            }
+        },
+        patch,
+    )
+    # The merged result passes the real validator: the recipe's knobs land in
+    # a namespace the backend actually reads, and no router key leaks in.
+    validate_transformers_backend_config(merged)
+    assert merged["backend"]["max_length"] == recipe.seq_len
+    assert merged["backend"]["training"]["max_steps"] == recipe.max_steps
+    assert merged["backend"]["training"]["learning_rate"] == recipe.learning_rate
+
+
+def test_recipe_patch_refuses_an_unknown_backend_type():
+    planner, items = _planner_and_items()
+    recipe = planner.propose(items, count=1)[0]
+    try:
+        recipe.to_config_patch(backend_type="unsloth-fantasy")
+    except ValueError as error:
+        assert "unsloth-fantasy" in str(error)
+    else:
+        raise AssertionError("an unknown backend type must not produce a patch")
+
+
 def test_snapshot_store_freezes_and_never_rewrites(tmp_path):
     store = SnapshotStore(tmp_path)
     scores = (_reference(),)
@@ -458,3 +508,52 @@ def test_snapshot_store_freezes_and_never_rewrites(tmp_path):
     frozen = SnapshotStore(tmp_path).get("v1.0-frontier")
     assert frozen.date == "2026-09-15"
     assert frozen.scores[0].model == "Peer-8B"
+
+
+def test_degenerate_parent_floor_target_improvement_is_recognized():
+    """A parent pinned at the scale floor (all-zero samples, zero variance)
+    that the candidate lifts past min_effect is an IMPROVEMENT, not
+    'inconclusive': the no-variance branch of compare() already returns
+    'flat' when |delta| <= min_effect, so treating a real lift past the
+    threshold as undecidable would make a hard 0 -> 1 target gain
+    unpromotable and the predeclared rule self-defeating."""
+    from chowder.growth.promotion import BenchmarkResult, PromotionInput, evaluate_promotion
+
+    n = 16
+    parent = BenchmarkResult(
+        benchmark_qualified_id="instrument@v1",
+        score=0.0,
+        samples=(0.0,) * n,          # floor: zero variance, zero mean
+        contamination="CLEAN",
+    )
+    candidate = BenchmarkResult(
+        benchmark_qualified_id="instrument@v1",
+        score=1.0,
+        samples=(1.0,) * n,          # ceiling: zero variance, full lift
+        contamination="CLEAN",
+    )
+    protected = BenchmarkResult(
+        benchmark_qualified_id="protected@v1",
+        score=0.5,
+        samples=(0.5, 0.5, 0.5, 0.5),
+        contamination="CLEAN",
+    )
+    data = PromotionInput(
+        candidate_version="v0.2",
+        parent_version="v0.1",
+        target_benchmarks=("instrument@v1",),
+        candidate_results={"instrument@v1": candidate, "protected@v1": protected},
+        parent_results={"instrument@v1": parent, "protected@v1": protected},
+        protected_benchmarks=("protected@v1",),
+        broad_battery_benchmarks=(),
+        min_target_improvement=0.90,
+    )
+    decision = evaluate_promotion(data)
+    assert decision.checks["target:instrument@v1"] == "improved", decision.checks
+    assert decision.checks["target_improvement"] == "met"
+    # An EMPTY declared broad battery is "unmeasured" honestly, but the rule
+    # treats an empty tuple as no-data ("inconclusive"). The target check
+    # itself is what this test pins: a floor-start lift is "improved".
+    assert decision.verdict in {"PROMOTED", "INCONCLUSIVE"}, (decision.verdict, decision.reasons)
+    if decision.verdict == "INCONCLUSIVE":
+        assert decision.reasons == ("broad battery insufficiently measured",), decision.reasons

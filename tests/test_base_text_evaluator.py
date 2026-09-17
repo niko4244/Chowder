@@ -214,3 +214,51 @@ def test_offline_on_evaluation_overrides_backend(tmp_path):
         config, work_dir=tmp_path, output_dir=tmp_path / "out", seed=1
     )
     assert spec.offline is False
+
+
+# --- evaluation placement: resident vs offload (dense-model policy) ----------
+
+
+def test_placement_defaults_to_resident(tmp_path):
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"x","expected":"y"}\n')
+    spec = BaseTextEvalSpec.from_config(
+        _config(str(data)), work_dir=tmp_path, output_dir=tmp_path / "out", seed=1
+    )
+    assert spec.placement == "resident"
+
+
+def test_placement_parses_from_evaluation_config(tmp_path):
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"x","expected":"y"}\n')
+    config = _config(str(data))
+    config["evaluation"]["placement"] = "offload"
+    spec = BaseTextEvalSpec.from_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "out", seed=1
+    )
+    assert spec.placement == "offload"
+
+
+def test_placement_refuses_an_unknown_mode(tmp_path):
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"x","expected":"y"}\n')
+    config = _config(str(data))
+    config["evaluation"]["placement"] = "spread-across-the-house"
+    with pytest.raises(ValueError, match="placement"):
+        BaseTextEvalSpec.from_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "out", seed=1
+        )
+
+
+def test_offload_placement_is_carried_by_the_protocol_fingerprint(tmp_path, monkeypatch):
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"x","expected":"y"}\n')
+    config = _config(str(data))
+    config["evaluation"]["placement"] = "offload"
+    config["evaluation"]["device"] = "cpu"
+    outcome = _evaluate(config, tmp_path, monkeypatch, runtime_extra={"placement": "offload"})
+    assert outcome.evidence["protocol"]["placement"] == "offload"
+    assert outcome.evidence["runtime"]["placement"] == "offload"
+    # And a resident protocol must hash differently: placement is protocol.
+    resident = _evaluate(_config(str(data)), tmp_path, monkeypatch)
+    assert resident.evidence["protocol_sha256"] != outcome.evidence["protocol_sha256"]

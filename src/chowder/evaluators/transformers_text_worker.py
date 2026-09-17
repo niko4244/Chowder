@@ -20,6 +20,7 @@ from .generation import resolve_eos_token_ids
 from .rendering import render_prompt
 from .scoring import final_answer, final_number, normalize, score
 from .vram import MemorySampler, peak_vram as _peak_vram
+from .placement import dispatch_offloaded, placement_note
 from .transformers_text import EvalSuiteSpec, TransformersTextEvalSpec
 
 
@@ -142,7 +143,10 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
     )
     resolved_commit = getattr(base.config, "_commit_hash", None)
     if spec.quantization == "none":
-        base = base.to(device_name)
+        if spec.placement == "offload":
+            base = dispatch_offloaded(base, device_name)
+        else:
+            base = base.to(device_name)
     adapter_liveness: dict[str, Any] | None = None
     if spec.adapter_dir is None:
         model = base
@@ -152,6 +156,10 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         # warns when no saved key matches, leaving every LoRA B at zero.
         adapter_liveness = assert_adapter_is_live(model, spec.adapter_dir)
     model.eval()
+    if spec.placement == "offload":
+        # Reported per run: "offload" means nothing unless the dense weights
+        # demonstrably live on the CPU while generation runs.
+        print(f"placement: offload active ({placement_note(model)})", flush=True)
     device = next(model.parameters()).device
     resolved_eos_token_id = resolve_eos_token_ids(tokenizer, model)
     load_timer.__exit__()
@@ -251,6 +259,7 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         "runtime": {
             "device": device_name,
             "gpu_count": 1 if device_name.startswith("cuda") else 0,
+            "placement": spec.placement,
             "lifecycle": lifecycle_data,
             "memory_sampling": memory_sampling,
             # The training workers have always reported this; the evaluators did

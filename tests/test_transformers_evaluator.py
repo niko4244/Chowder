@@ -542,3 +542,52 @@ def test_evaluator_cancel_is_a_no_op_for_unknown_or_finished_run():
 
     evaluator._processes["run-2"] = FinishedProcess()
     evaluator.cancel("run-2")
+
+
+# --- evaluation placement: resident vs offload (dense-model policy) ----------
+
+
+def test_candidate_placement_parses_and_flows_to_the_spec(tmp_path):
+    from chowder.evaluators.transformers_text import TransformersTextEvalSpec
+
+    config = {
+        "backend": {"base_model": "example/model", "quantization": "none"},
+        "evaluation": {
+            "type": "transformers-text",
+            "placement": "offload",
+            "device": "cpu",
+            "suites": [{"name": "quality", "dataset": "eval.jsonl"}],
+        },
+    }
+    artifact = _artifact(tmp_path)
+    spec = TransformersTextEvalSpec.from_context(
+        config=config,
+        artifact=artifact,
+        work_dir=tmp_path,
+        output_dir=tmp_path / "out",
+        seed=1,
+    )
+    assert spec.placement == "offload"
+
+
+def test_candidate_placement_refuses_an_unknown_mode(tmp_path):
+    from chowder.evaluators.transformers_text import TransformersTextEvalSpec
+
+    config = {
+        "backend": {"base_model": "example/model", "quantization": "none"},
+        "evaluation": {
+            "type": "transformers-text",
+            "placement": "teleport",
+            "device": "cpu",
+            "suites": [{"name": "quality", "dataset": "eval.jsonl"}],
+        },
+    }
+    artifact = _artifact(tmp_path)
+    with pytest.raises(ValueError, match="placement"):
+        TransformersTextEvalSpec.from_context(
+            config=config,
+            artifact=artifact,
+            work_dir=tmp_path,
+            output_dir=tmp_path / "out",
+            seed=1,
+        )
