@@ -14,6 +14,7 @@ from ..worker_env import chowder_source_identity, worker_env
 from ..base_identity import describe_base_identity
 from ..lifecycle import evaluation_lifecycle_evidence
 from .rendering import validate_rendering_evidence
+from .placement import validate_placement
 from .scorer_identity import scorer_identity
 from ..executors import EvaluationOutcome, ExecutionContext
 from ..protocol import protocol_fingerprint
@@ -30,6 +31,11 @@ class BaseTextEvalSpec:
     precision: str = "auto"
     quantization: str = "none"
     device: str = "auto"
+    # "resident" = the historical behavior (model fully on the device);
+    # "offload" = the probe-qualified dense-model policy (layers on the CPU,
+    # transient per-token copies streamed). Placement is protocol: it is
+    # reported in the result payload and carried by the protocol fingerprint.
+    placement: str = "resident"
     seed: int = 1
     timeout_seconds: float | None = None
     trust_remote_code: bool = False
@@ -46,6 +52,7 @@ class BaseTextEvalSpec:
             raise ValueError(f"unsupported baseline precision: {self.precision}")
         if self.quantization not in {"none", "4bit"}:
             raise ValueError(f"unsupported baseline quantization: {self.quantization}")
+        validate_placement(self.placement, context="baseline placement")
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("baseline timeout_seconds must be positive")
         if self.trust_remote_code:
@@ -130,6 +137,7 @@ class BaseTextEvalSpec:
             precision=precision,
             quantization=quantization,
             device=str(evaluation.get("device", "auto")),
+            placement=str(evaluation.get("placement", "resident")),
             seed=int(config.get("seed", seed)),
             timeout_seconds=(
                 float(runtime["timeout_seconds"])
@@ -304,6 +312,7 @@ class BaseModelTextEvaluator:
             "base_identity": base_identity,
             "precision": spec.precision,
             "quantization": spec.quantization,
+            "placement": spec.placement,
             "device": runtime.get("device"),
             "seed": spec.seed,
             "versions": dict(versions),

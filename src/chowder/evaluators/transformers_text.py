@@ -18,6 +18,7 @@ from ..executors import CostEstimate, EvaluationOutcome, ExecutionContext, Train
 from ..lifecycle import evaluation_lifecycle_evidence
 from ..models import Experiment
 from ..protocol import protocol_fingerprint
+from .placement import validate_placement
 from ..provenance import sha256_directory, sha256_file
 
 # final_number_match compares the LAST number on each side, for arithmetic word
@@ -72,6 +73,9 @@ class TransformersTextEvalSpec:
     precision: str = "auto"
     quantization: str = "none"
     device: str = "auto"
+    # See BaseTextEvalSpec.placement: evaluation-only load placement, reported
+    # per run and carried by the protocol fingerprint.
+    placement: str = "resident"
     seed: int = 1
     timeout_seconds: float | None = None
     trust_remote_code: bool = False
@@ -91,6 +95,7 @@ class TransformersTextEvalSpec:
             raise ValueError(f"unsupported evaluation precision: {self.precision}")
         if self.quantization not in _ALLOWED_QUANTIZATION:
             raise ValueError(f"unsupported evaluation quantization: {self.quantization}")
+        validate_placement(self.placement, context="evaluation placement")
         if not self.device.strip():
             raise ValueError("evaluation device is required")
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
@@ -186,6 +191,7 @@ class TransformersTextEvalSpec:
             precision=precision,
             quantization=quantization,
             device=str(evaluation.get("device", "auto")),
+            placement=str(evaluation.get("placement", "resident")),
             seed=int(config.get("seed", seed)),
             timeout_seconds=(float(runtime["timeout_seconds"]) if runtime.get("timeout_seconds") is not None else None),
             trust_remote_code=bool(evaluation.get("trust_remote_code", False)),
@@ -411,6 +417,7 @@ class TransformersTextEvaluator:
             "base_identity": base_identity,
             "precision": spec.precision,
             "quantization": spec.quantization,
+            "placement": spec.placement,
             "device": runtime.get("device"),
             "seed": spec.seed,
             "versions": dict(versions),
