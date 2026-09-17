@@ -827,6 +827,33 @@ _ROWS: list[dict[str, Any]] = [
         adapter="chowder.eval_adapters.lm_eval",
     ),
     dict(
+        benchmark_id="generation-diagnostics",
+        version="gen1-eval-protocol-v1",
+        name="Chowder generation diagnostics (16-prompt termination protocol)",
+        category="instruction",
+        subcategory="turn-termination / protocol compliance",
+        status="INTERNAL_REFERENCE_ONLY",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=2,
+        scorer="protocol_diagnostics",
+        primary_metric="eos_termination_rate",
+        skills=("instruction.formatting",),
+        dataset_source="docs/gen1/run_gen1_cycle.py (the 16 frozen prompts, in-repo)",
+        implementation_source="chowder-native greedy generation probe",
+        source="Chowder (this repository)",
+        license="Apache-2.0 (this repository)",
+        release_date="2026-09-17",
+        contamination_risk="low",
+        notes=(
+            "Gen-1 preregistered target instrument: greedy, seed 1234, batch 32, "
+            "16 fixed prompts, 128 max new tokens -- protocol-identical to the "
+            "Gen-0 freeze diagnostics so parent-vs-candidate stays like-for-like. "
+            "A behavioral protocol instrument: its score never enters "
+            "capability-skill aggregation."
+        ),
+        adapter="chowder_custom",
+    ),
+    dict(
         benchmark_id="bfcl_assertive_safety",
         version="v4",
         name="BFCL safety/injection probes",
@@ -957,6 +984,16 @@ METRIC_SEMANTICS: dict[str, MetricSemantics] = {
             rationale=(
                 "pairwise comparisons won / comparisons judged -- "
                 f"{RATE}; the tie convention belongs to the judge protocol"
+            ),
+        ),
+        MetricSemantics(
+            metric="eos_termination_rate",
+            direction="higher_is_better",
+            normalization=Normalization(kind="identity"),
+            rationale=(
+                "generations that ended with an explicit end-of-turn token / "
+                f"generations attempted -- {RATE}; the turn-termination rate is "
+                "the model's own behavior, not a judged quality"
             ),
         ),
         MetricSemantics(

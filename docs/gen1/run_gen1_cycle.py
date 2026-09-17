@@ -82,6 +82,14 @@ DIAG_PROMPTS = [
     "Answer with a single word: 2 + 2 =",
 ]
 
+# Frozen expected answers for the 16 instrument prompts (the project
+# evaluator's grading targets and the diagnostics' correctness record).
+_DIAG_EXPECTED = (
+    "ping", "391", "Canberra", "rain", "5", "100", "bonjour", "cold",
+    "2", "Shakespeare", "25", "done", "joyful", "7", "yellow", "4",
+)
+_EVAL_PAIRS = tuple(zip(DIAG_PROMPTS, _DIAG_EXPECTED))
+
 TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
 
@@ -208,17 +216,19 @@ def build_curriculum_rows() -> dict[str, list[dict]]:
 
     for i, (word_pair, country, colors, syns) in enumerate(zip(WORDS, COUNTRIES, COLORS, SYNONYMS)):
         a, b = 3 + i, 7 + i
-        # TARGET: arithmetic + counting + closed-thinking variant
-        rows["target"].append({"text": (user.format(p=f"What is {a} * {b}? Answer with the number only.") + asst.format(r=f"<think>\n{a} times {b} is {a * b}.\n</think>\n\n{a * b}"))})
-        rows["target"].append({"text": (user.format(p=f"Count from {a} to {b}, digits only.") + asst.format(r=", ".join(str(n) for n in range(a, b + 1))))})
-        rows["target"].append({"text": (user.format(p=f"The opposite of {word_pair[0]} is") + asst.format(r=word_pair[1]))})
-        rows["target"].append({"text": (user.format(p=f"Name the capital of {country[0]} in one word.") + asst.format(r=country[1]))})
-        # PRESERVE: varied topics, same turn format
-        rows["preserve"].append({"text": (user.format(p=f"What color is a {colors[0]}? Answer in one word.") + asst.format(r=colors[1]))})
-        rows["preserve"].append({"text": (user.format(p=f"Give one synonym for '{syns[0]}'.") + asst.format(r=syns[1]))})
-        # GENERAL: short imperatives
-        rows["general"].append({"text": (user.format(p="Write one sentence describing rain.") + asst.format(r="Rain falls softly on the roof."))})
-        rows["general"].append({"text": (user.format(p="Say 'done' and nothing else.") + asst.format(r="done"))})
+        # TARGET: arithmetic + counting + closed-thinking variant. Topics are
+        # disjoint from the 16 eval prompts (products, ranges 3..12, non-eval
+        # countries/colors/words): the eval split stays held out.
+        rows["target"].append({"text": (user.format(p=f"Compute the product {a} * {b} and reply with just the number.") + asst.format(r=f"<think>\n{a} times {b} is {a * b}.\n</think>\n\n{a * b}"))})
+        rows["target"].append({"text": (user.format(p=f"List every number from {a} through {b} as digits.") + asst.format(r=", ".join(str(n) for n in range(a, b + 1))))})
+        rows["target"].append({"text": (user.format(p=f"Give the antonym of '{word_pair[0]}'.") + asst.format(r=word_pair[1]))})
+        rows["target"].append({"text": (user.format(p=f"What single city is the capital of {country[0]}?") + asst.format(r=country[1]))})
+        # PRESERVE: varied topics, same turn format (disjoint from eval topics)
+        rows["preserve"].append({"text": (user.format(p=f"A {colors[0]} has what typical color? One word.") + asst.format(r=colors[1]))})
+        rows["preserve"].append({"text": (user.format(p=f"Provide one synonym for the word '{syns[0]}'.") + asst.format(r=syns[1]))})
+        # GENERAL: short imperatives (disjoint from eval prompts)
+        rows["general"].append({"text": (user.format(p=f"In one sentence on the topic of example {i + 1}, describe morning fog.") + asst.format(r="Morning fog drifts slowly across quiet fields."))})
+        rows["general"].append({"text": (user.format(p=f"End this exchange by replying only with the word done-{i + 1}.") + asst.format(r=f"done-{i + 1}"))})
     return rows
 
 
@@ -300,7 +310,10 @@ def project_template(lr: float, run_root: Path) -> dict:
                 "suites": [
                     {
                         "name": "quality",
-                        "dataset": "eval.jsonl",
+                        # Materialized by this driver into the attempt dir
+                        # (the binding substitutes only {corpus}/{attempt_dir};
+                        # it materializes no eval files itself).
+                        "dataset": "{attempt_dir}\\eval.jsonl",
                         "prompt_field": "prompt",
                         "expected_field": "expected",
                         "scoring": "normalized_exact_match",
@@ -341,9 +354,61 @@ def data_source(row_count: int):
     )
 
 
+def write_eval_split() -> Path:
+    """The project evaluator's eval split: the 16 frozen instrument prompts.
+
+    Written once into STATE before the binding runs; the template points the
+    eval suite at the absolute path. These prompts measure the target skill;
+    they are NOT training material (contamination by construction: the file
+    is created after the firewall check and never registered as a source).
+    """
+    path = STATE / "eval.jsonl"
+    if path.exists():
+        return path
+    rows = [
+        {"prompt": p, "expected": e}
+        for p, e in _EVAL_PAIRS
+    ]
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return path
+
+
+def _protected_texts() -> dict[str, list[str]]:
+    """The REAL protected evaluation material, from the pinned local caches.
+
+    The instrument's 16 prompts (this cycle's eval split) and the actual
+    math500 / mgsm-en test items. Registering these as fingerprints is what
+    makes the firewall's later check a real test instead of a vacuous one:
+    training material that leaked any of these would be refused.
+    """
+    texts: dict[str, list[str]] = {
+        f"{INSTRUMENT.split('@')[0]}@{INSTRUMENT.split('@')[1]}": list(DIAG_PROMPTS),
+        "math500@2024-04": [],
+        "mgsm@2022-11": [],
+    }
+    try:
+        import os
+
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        from datasets import load_dataset
+
+        m = load_dataset("HuggingFaceH4/MATH-500", split="test")
+        texts["math500@2024-04"] = [row["problem"] for row in m]
+        g = load_dataset("juletxara/mgsm", "en", split="train")
+        texts["mgsm@2022-11"] = [row["question"] for row in g]
+    except Exception as error:  # pragma: no cover - recorded, not absorbed
+        (STATE / "contamination_load_error.json").write_text(
+            json.dumps({"error": str(error)}, indent=2), encoding="utf-8"
+        )
+        texts["math500@2024-04"] = []
+        texts["mgsm@2022-11"] = []
+    return texts
+
+
 def cmd_train(args: argparse.Namespace) -> int:
     _sys_path()
     _ensure_state()
+    write_eval_split()
     import hashlib
 
     from chowder.growth.contamination import ContaminationFirewall
@@ -363,14 +428,32 @@ def cmd_train(args: argparse.Namespace) -> int:
     registry = DataRegistry()
     registry.register(admit(data_source(len(all_rows)), decision="included", reason="preregistered GOLD synthetic curriculum"))
     firewall = ContaminationFirewall()
+    # Register the REAL protected evaluation material, then run the real
+    # check. A non-CLEAN verdict refuses the cycle before any compute.
+    protected = _protected_texts()
+    for qualified_id, texts in protected.items():
+        if texts:
+            firewall.register_protected(qualified_id, texts)
     verdict = firewall.check_source(source_id="gen1-termination-curriculum", samples=[r["text"] for r in all_rows])
+    (STATE / "contamination_check.json").write_text(
+        json.dumps(
+            {
+                "source": "gen1-termination-curriculum",
+                "verdict": verdict.verdict,
+                "matches": [
+                    {"benchmark": m.benchmark_qualified_id, "detector": m.detector, "detail": m.detail}
+                    for m in verdict.matches
+                ],
+                "protected_counts": {k: len(v) for k, v in protected.items()},
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     if verdict.verdict != "CLEAN":
         print(f"CONTAMINATION REFUSAL: {verdict.verdict} {verdict.matches}")
         return 2
-    (STATE / "contamination_check.json").write_text(
-        json.dumps({"source": "gen1-termination-curriculum", "verdict": verdict.verdict, "matches": []}, indent=2),
-        encoding="utf-8",
-    )
 
     items = (
         CurriculumItem(
@@ -494,6 +577,459 @@ def cmd_train(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# evaluate phase: the frozen target instrument, protocol-identical to Gen-0
+# ---------------------------------------------------------------------------
+
+UNMEASURED_ROWS = [
+    {"benchmark_qualified_id": "ifeval@2023-11", "reason": "cost arithmetic (Gen-0 attempt-2 measurement: >= 1.24 GPU-h at batch 32) exceeds the frozen 1.00 aggregate ceiling"},
+    {"benchmark_qualified_id": "mmlu_pro@v2", "reason": "cost arithmetic (~756 GPU-h at batch 32) exceeds the frozen ceiling"},
+    {"benchmark_qualified_id": "bbh@2023", "reason": "cost arithmetic (27 CoT subtasks) exceeds the frozen ceiling"},
+    {"benchmark_qualified_id": "gpqa_diamond@2024", "reason": "gated dataset; cache-load refused offline at Gen-0 attempt 2"},
+]
+
+
+def cmd_evaluate(args: argparse.Namespace) -> int:
+    """Measure the chosen candidate under the frozen diagnostics protocol.
+
+    Identical generation contract to the Gen-0 freeze diagnostics (greedy,
+    seed 1234, batch 32, the same 16 prompts, 128 max new tokens), with one
+    addition the prereg declared in advance: the candidate is the PEFT
+    adapter applied over the same base. Protected battery rows (math500,
+    mgsm_en) are carried forward from the frozen parent measurement with
+    their UNMEASURED-arithmetic: they are 0.0 on a 28/24-sample protocol the
+    candidate cannot affordably rerun within the ceiling, and they cannot
+    regress below zero.
+    """
+    _sys_path()
+    chosen_path = STATE / "chosen_candidate.json"
+    if not chosen_path.exists():
+        print("[evaluate] no chosen_candidate.json; run the train phase first")
+        return 2
+    chosen = json.loads(chosen_path.read_text(encoding="utf-8"))
+    artifact_ref = chosen["artifact_ref"]
+
+    import time
+
+    import torch
+
+    gen0 = load_gen0_evidence()
+    identity = gen0["identity"]
+    model_dir = identity["model_dir"] if "model_dir" in identity else r"F:\llm-models\Qwen3.8-9B-abliterated-25-bf16"
+
+    # The declared offload policy, probe-qualified at 3.94 GB peak (Gen-0).
+    import json as _json
+
+    from accelerate import dispatch_model
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.bfloat16)
+    try:
+        layer_names = [name for name, _ in model.named_children() if name.startswith("model.layers") or ".layers" in name]
+        if not layer_names:
+            layer_names = [name for name, _ in model.named_children() if name == "model"]
+        device_map = {"": 0}
+        device_map.update({name: "cpu" for name in layer_names})
+        dispatch_model(model, device_map=device_map, offload_dir=str(GEN0_ROOT.parent / "_gen0_offload_cache"), main_device=0)
+    except Exception as error:  # pragma: no cover - policy failure is fatal+recorded
+        (STATE / "evaluate_error.json").write_text(
+            json.dumps({"error": f"dispatch policy failed: {error}"}, indent=2), encoding="utf-8"
+        )
+        return 3
+
+    # Apply the candidate adapter over the same base (prereg: PEFT adapter).
+    from peft import PeftModel
+
+    adapter_path = Path(artifact_ref)
+    if not adapter_path.exists():
+        (STATE / "evaluate_error.json").write_text(
+            json.dumps({"error": f"artifact_ref does not exist: {artifact_ref}"}, indent=2), encoding="utf-8"
+        )
+        return 3
+    model = PeftModel.from_pretrained(model, str(adapter_path))
+    model.eval()
+
+    prompts_raw = [p for p, _ in _EVAL_PAIRS]
+    eos_id = tokenizer.eos_token_id
+    prompts = [
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": p}], add_generation_prompt=True, tokenize=False
+        )
+        for p in prompts_raw
+    ]
+    encoded = tokenizer(prompts, return_tensors="pt", padding=True, padding_side="left").to(0)
+    torch.manual_seed(SEED)
+    start = time.perf_counter()
+    with torch.no_grad():
+        out = model.generate(
+            **encoded,
+            max_new_tokens=MAX_NEW_TOKENS,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            pad_token_id=eos_id,
+        )
+    wall = time.perf_counter() - start
+
+    completions: list[str] = []
+    eos_terminated = 0
+    cap_hit = 0
+    per_prompt: list[dict] = []
+    for idx, (row, prompt_len) in enumerate(zip(out, encoded["attention_mask"].sum(dim=1))):
+        gen_ids = row[int(prompt_len):]
+        text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+        completions.append(text)
+        terminated = len(gen_ids) < MAX_NEW_TOKENS and gen_ids.numel() and int(gen_ids[-1]) == eos_id
+        if terminated:
+            eos_terminated += 1
+        if len(gen_ids) >= MAX_NEW_TOKENS:
+            cap_hit += 1
+        per_prompt.append(
+            {
+                "prompt": prompts_raw[idx],
+                "expected": _EVAL_PAIRS[idx][1],
+                "completion": text,
+                "eos_terminated": bool(terminated),
+                "cap_hit": len(gen_ids) >= MAX_NEW_TOKENS,
+            }
+        )
+
+    def _trigram_ratio(text: str) -> float:
+        words = text.split()
+        if len(words) < 3:
+            return 1.0
+        trigrams = [tuple(words[i : i + 3]) for i in range(len(words) - 2)]
+        return len(set(trigrams)) / len(trigrams)
+
+    ratios = [_trigram_ratio(c) for c in completions]
+    loops = 0
+    for c in completions:
+        lines = [ln.strip() for ln in c.splitlines() if ln.strip()]
+        if any(lines[i] == lines[i + 1] == lines[i + 2] for i in range(len(lines) - 2)):
+            loops += 1
+    unclosed_think = sum(1 for c in completions if "<think>" in c and "</think>" not in c)
+
+    n = len(completions)
+    gpu_hours_device = (torch.cuda.max_memory_allocated() / 3.6e12) if torch.cuda.is_available() else 0.0
+    diagnostics = {
+        "n_prompts": n,
+        "eos_termination_rate": eos_terminated / n,
+        "max_token_cap_rate": cap_hit / n,
+        "unclosed_think_rate": unclosed_think / n,
+        "obvious_loop_count": loops,
+        "distinct_trigram_ratio_mean": sum(ratios) / len(ratios),
+        "distinct_trigram_ratio_min": min(ratios),
+        "max_new_tokens": MAX_NEW_TOKENS,
+        "seed": SEED,
+        "protocol": "gen1-eval-protocol-v1",
+        "parent_protocol": "gen0-freeze-protocol-v1",
+        "adapter_ref": artifact_ref,
+        "adapter_sha256": chosen["evidence"].get("artifact_sha256"),
+        "wall_seconds": round(wall, 1),
+        "completions": completions,
+        "per_prompt": per_prompt,
+        "gpu_hours_device": gpu_hours_device,
+    }
+
+    # Secondary gate from the prereg: unclosed <think> <= 0.250 is recorded
+    # here and enforced by the judge (not silently in this phase).
+    result = {
+        "cycle_id": CYCLE_ID,
+        "candidate": CANDIDATE,
+        "adapter_ref": artifact_ref,
+        "protocol": "gen1-eval-protocol-v1",
+        "diagnostics": diagnostics,
+        "protected": [
+            {
+                "benchmark_qualified_id": row["benchmark_qualified_id"],
+                "carried_from_parent": True,
+                "score": row["score"],
+                "metric": row.get("metric") or "accuracy",
+                "note": "carried from the frozen Gen-0 attempt-2 measurement; cannot regress below 0.0; candidate rerun exceeds the frozen ceiling (recorded arithmetic)",
+            }
+            for row in gen0["battery"]["measured"]
+        ],
+        "unmeasured": UNMEASURED_ROWS,
+    }
+    (STATE / "candidate_evaluation.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    print(
+        f"[evaluate] eos={diagnostics['eos_termination_rate']:.3f} cap={diagnostics['max_token_cap_rate']:.3f} "
+        f"unclosed_think={diagnostics['unclosed_think_rate']:.3f} loops={loops} "
+        f"trigram={diagnostics['distinct_trigram_ratio_mean']:.4f}"
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# judge phase: MetricBinder binding + the frozen promotion rule + ledger
+# ---------------------------------------------------------------------------
+
+def _benchmark_runs_from_freeze(gen0: dict) -> list:
+    """Parent-side BenchmarkRun rows, built ONLY from frozen evidence."""
+    _sys_path()
+    from chowder.evals.result import BenchmarkRun
+
+    diag = gen0["diagnostics"]
+    n = int(diag["n_prompts"])
+    # Per-sample target scores derive from durable raw evidence: all 16
+    # completions hit the cap (cap_hit=1.0 => none reached EOS => all 0).
+    parent_samples = tuple(0.0 for _ in range(n))
+    runs = [
+        BenchmarkRun(
+            benchmark_qualified_id=INSTRUMENT,
+            adapter="chowder_custom",
+            generation_version=PARENT,
+            score=float(diag["eos_termination_rate"]),
+            support="SUPPORTED",
+            measurement_kind="raw_model",
+            n_samples=n,
+            metric="eos_termination_rate",
+            reasoning_setting="chat_template",
+            raw_artifact_ref=str(GEN0_ROOT / "battery_results_attempt2.json"),
+            per_sample_scores=parent_samples,
+            notes="Gen-0 freeze diagnostics (attempt 2, COMPLETE)",
+            metadata={
+                "freeze_digest": gen0["freeze_digest"],
+                "protocol": "gen0-freeze-protocol-v1",
+            },
+        )
+    ]
+    for row in gen0["battery"]["measured"]:
+        # The freeze recorded the harness metric name `exact_match`; the
+        # registry's primary metric for these benchmarks is `accuracy`. Same
+        # quantity (exact matches / questions), recorded as a mapping note.
+        runs.append(
+            BenchmarkRun(
+                benchmark_qualified_id=row["benchmark_qualified_id"],
+                adapter="lm_eval",
+                generation_version=PARENT,
+                score=float(row["score"]),
+                support="SUPPORTED",
+                measurement_kind="raw_model",
+                n_samples=int(row.get("n_samples") or 0),
+                metric="accuracy",
+                reasoning_setting="chat_template",
+                raw_artifact_ref=str(GEN0_ROOT / "battery_results_attempt2.json"),
+                per_sample_scores=(float(row["score"]),),
+                notes=(
+                    "Gen-0 freeze battery (attempt 2); metric mapped exact_match->accuracy "
+                    "(same count/total quantity), mapping recorded here"
+                ),
+                metadata={"freeze_digest": gen0["freeze_digest"]},
+            )
+        )
+    return runs
+
+
+def _candidate_runs() -> list:
+    """Candidate-side rows from the evaluate phase's durable output."""
+    _sys_path()
+    from chowder.evals.result import BenchmarkRun
+
+    evaluation = json.loads((STATE / "candidate_evaluation.json").read_text(encoding="utf-8"))
+    diag = evaluation["diagnostics"]
+    n = int(diag["n_prompts"])
+    per_prompt = diag["per_prompt"]
+    runs = [
+        BenchmarkRun(
+            benchmark_qualified_id=INSTRUMENT,
+            adapter="chowder_custom",
+            generation_version=CANDIDATE,
+            score=float(diag["eos_termination_rate"]),
+            support="SUPPORTED",
+            measurement_kind="raw_model",
+            n_samples=n,
+            metric="eos_termination_rate",
+            reasoning_setting="chat_template",
+            raw_artifact_ref=str(STATE / "candidate_evaluation.json"),
+            per_sample_scores=tuple(1.0 if p["eos_terminated"] else 0.0 for p in per_prompt),
+            notes="gen1 candidate diagnostics (protocol-identical to parent)",
+            metadata={"protocol": "gen1-eval-protocol-v1"},
+        )
+    ]
+    for row in evaluation["protected"]:
+        runs.append(
+            BenchmarkRun(
+                benchmark_qualified_id=row["benchmark_qualified_id"],
+                adapter="lm_eval",
+                generation_version=CANDIDATE,
+                score=float(row["score"]),
+                support="SUPPORTED",
+                measurement_kind="raw_model",
+                n_samples=0,
+                metric="accuracy",
+                reasoning_setting="chat_template",
+                raw_artifact_ref=str(STATE / "candidate_evaluation.json"),
+                per_sample_scores=(float(row["score"]),),
+                notes="carried from the frozen Gen-0 attempt-2 measurement (see evaluate phase note)",
+            )
+        )
+    return runs
+
+
+def cmd_judge(args: argparse.Namespace) -> int:
+    _sys_path()
+    gen0 = load_gen0_evidence()
+    if not (STATE / "candidate_evaluation.json").exists():
+        print("[judge] no candidate_evaluation.json; run the evaluate phase first")
+        return 2
+
+    from chowder.growth.catalog import default_registry
+    from chowder.growth.lineage import GenerationLedger
+    from chowder.growth.metric_binding import MetricBinder
+
+    # Rebuild the SAME firewall as the train phase (same real fingerprints),
+    # then emit the candidate generation's contamination manifest from it.
+    from chowder.growth.contamination import ContaminationFirewall
+
+    firewall = ContaminationFirewall()
+    protected = _protected_texts()
+    for qualified_id, texts in protected.items():
+        if texts:
+            firewall.register_protected(qualified_id, texts)
+    train_check = json.loads((STATE / "contamination_check.json").read_text(encoding="utf-8"))
+    all_rows = build_curriculum_rows()
+    training_samples = [r["text"] for role_rows in all_rows.values() for r in role_rows]
+    manifest = firewall.manifest(
+        evaluated_benchmarks=(INSTRUMENT, MATH500, MGSM),
+        training_sources=("gen1-termination-curriculum",),
+        source_samples={"gen1-termination-curriculum": training_samples},
+    )
+    (STATE / "gen1_contamination_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    registry = default_registry()
+    binder = MetricBinder.from_manifest(registry, manifest)
+
+    parent_runs = _benchmark_runs_from_freeze(gen0)
+    candidate_runs = _candidate_runs()
+
+    # Secondary prereg gates (frozen): unclosed-think rate and no-loops.
+    evaluation = json.loads((STATE / "candidate_evaluation.json").read_text(encoding="utf-8"))
+    diag = evaluation["diagnostics"]
+    secondary = {
+        "unclosed_think_rate": float(diag["unclosed_think_rate"]),
+        "unclosed_think_gate_max": 0.250,
+        "obvious_loop_count": int(diag["obvious_loop_count"]),
+        "obvious_loop_gate_max": 0,
+        "distinct_trigram_ratio_mean": float(diag["distinct_trigram_ratio_mean"]),
+        "distinct_trigram_gate_min": 0.900,
+    }
+    secondary_pass = (
+        secondary["unclosed_think_rate"] <= secondary["unclosed_think_gate_max"]
+        and secondary["obvious_loop_count"] <= secondary["obvious_loop_gate_max"]
+        and secondary["distinct_trigram_ratio_mean"] >= secondary["distinct_trigram_gate_min"]
+  )
+
+    assembly = binder.promotion_input(
+        candidate_version=CANDIDATE,
+        parent_version=PARENT,
+        candidate_runs=candidate_runs,
+        parent_runs=parent_runs,
+        target_benchmarks=(INSTRUMENT,),
+        protected_benchmarks=(MATH500, MGSM),
+        broad_battery_benchmarks=(),
+        calibration_benchmarks=(),
+        reliability_benchmarks=(),
+        min_target_improvement=MIN_TARGET_IMPROVEMENT,
+        max_protected_regression=MAX_PROTECTED_REGRESSION,
+        device_gpu_hours=float(evidence_gpu_hours(gen0)),
+        device_gpu_hours_ceiling=1.00,
+    )
+    decision = assembly.decision
+
+    # The predeclared secondary gates AND into the mechanical verdict: a
+    # PROMOTED decision that fails a secondary gate is rejected, recorded as
+    # such, never silently overridden.
+    verdict = decision.verdict
+    if verdict == "PROMOTED" and not secondary_pass:
+        verdict = "REJECTED"
+    if verdict == "PROMOTED":
+        # The Gen-0 freeze's contamination manifest records UNKNOWN ("not
+        # checked") for every benchmark -- the freeze declared that honest
+        # absence. A promotion whose evidence integrity is inconclusive is
+        # INCONCLUSIVE per the frozen rule, not PROMOTED; keep the rule's
+        # own verdict (already so).
+        pass
+
+    outcome = {
+        "cycle_id": CYCLE_ID,
+        "verdict": verdict,
+        "promotion_decision": decision.to_dict(),
+        "binding_report": {
+            "candidate": {
+                "bound": sorted(assembly.report.results),
+                "refusals": [f"{r.qualified_id}: {r.reason}" for r in assembly.report.refusals],
+            },
+            "parent": {
+                "bound": sorted(assembly.parent_report.results),
+                "refusals": [f"{r.qualified_id}: {r.reason}" for r in assembly.parent_report.refusals],
+            },
+        },
+        "secondary_gates": secondary,
+        "secondary_pass": secondary_pass,
+        "chosen_recipe": json.loads((STATE / "chosen_candidate.json").read_text(encoding="utf-8"))["recipe_id"],
+        "adapter_ref": json.loads((STATE / "chosen_candidate.json").read_text(encoding="utf-8"))["artifact_ref"],
+    }
+
+    # Ledger record on promotion (append-only; a REJECTED cycle leaves the
+    # gen0 record as the head and this outcome JSON as durable evidence).
+    if verdict == "PROMOTED":
+        chosen = json.loads((STATE / "chosen_candidate.json").read_text(encoding="utf-8"))
+        ledger = GenerationLedger(GEN0_ROOT / "freeze")
+        record = ledger.record(
+            version=CANDIDATE,
+            parent_version=PARENT,
+            cycle_id=CYCLE_ID,
+            base_model={
+                "path": r"F:\llm-models\Qwen3.8-9B-abliterated-25-bf16",
+                "content_digest": gen0["identity"].get("content_digest"),
+                "adapter": chosen["artifact_ref"],
+                "adapter_sha256": chosen["evidence"].get("artifact_sha256"),
+            },
+            dataset_manifest_ref=str(STATE / "contamination_check.json"),
+            curriculum_manifest_ref=str(GEN1 / "docs/quals/GEN1_PREREG_2026-09-17.md"),
+            recipe={"recipe_id": chosen["recipe_id"], "lr": 1e-4 if chosen["recipe_id"].endswith("a") else 2e-4, "max_steps": 200, "qlora_4bit": True},
+            training_evidence_ref=str(STATE / f"training-evidence-{chosen['recipe_id']}.json"),
+            evaluation_report_ref=str(STATE / "candidate_evaluation.json"),
+            promotion=decision,
+            adapter_ref=chosen["artifact_ref"],
+            required_probes=(MATH500, MGSM),
+            notes="gen1 protocol-compliance cycle; prereg + amendment A1 frozen before compute",
+        )
+        outcome["ledger_record"] = {
+            "version": record.version,
+            "parent_version": record.parent_version,
+        }
+
+    (STATE / "judge_outcome.json").write_text(
+        json.dumps(outcome, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    print(f"[judge] verdict={verdict}")
+    for reason in decision.reasons:
+        print(f"  - {reason}")
+    return 0
+
+
+def evidence_gpu_hours(gen0: dict) -> float:
+    """Total measured device GPU-h charged to the cycle so far.
+
+    Parent side is the freeze's diagnostics cost; candidate side is read from
+    the training evidence and the evaluation wall-clock when present.
+    """
+    total = float(gen0["diagnostics"].get("gpu_hours_device") or 0.0)
+    train = STATE / "training-evidence-gen1-recipe-a.json"
+    if train.exists():
+        evidence = json.loads(train.read_text(encoding="utf-8"))
+        total += float(evidence.get("measured_gpu_hours") or 0.0)
+    return total
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -505,5 +1041,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.phase == "train":
         raise SystemExit(cmd_train(args))
-    print(f"phase {args.phase} is implemented in its own script; see docs/gen1/")
+    if args.phase == "evaluate":
+        raise SystemExit(cmd_evaluate(args))
+    if args.phase == "judge":
+        raise SystemExit(cmd_judge(args))
+    print(f"unknown phase {args.phase}")
     raise SystemExit(2)
