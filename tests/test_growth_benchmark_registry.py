@@ -14,6 +14,7 @@ from chowder.growth.benchmark_registry import (
     LIFECYCLE_STATES,
     TIERS,
     BenchmarkEntry,
+    Normalization,
 )
 from chowder.growth.capability import ALL_SKILLS
 from chowder.growth.catalog import default_registry
@@ -78,6 +79,9 @@ def test_catalog_has_no_duplicate_qualified_ids():
 
 
 def _entry(**overrides):
+    # direction and normalization have no defaults on BenchmarkEntry: an entry
+    # that never decided how its metric is scored cannot be promoted on, so it
+    # cannot even be constructed. The fixture below declares them explicitly.
     base = dict(
         benchmark_id="example_bench",
         version="2025-01",
@@ -89,6 +93,8 @@ def _entry(**overrides):
         tier=3,
         scorer="exact_match",
         primary_metric="accuracy",
+        direction="higher_is_better",
+        normalization=Normalization(kind="identity"),
         skills=("reasoning.abstract",),
         dataset_source="hf://example/bench",
         implementation_source="github://example/bench",
