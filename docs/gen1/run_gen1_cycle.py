@@ -60,7 +60,7 @@ BATCH_SIZE = 32
 MIN_TARGET_IMPROVEMENT = 0.90
 MAX_PROTECTED_REGRESSION = 0.02
 TRAIN_CEILING_PER_RECIPE = 0.25      # device GPU-h
-PROJECT_BUDGET = 0.25                # goal.gpu_hour_budget per recipe
+PROJECT_BUDGET = 0.30                # goal.gpu_hour_budget per recipe (WALL units — the engine charges wall; Amendment 3 C2)
 WALL_CEILING = 0.75                  # wall GPU-h per recipe (measured x1.5 headroom)
 
 DIAG_PROMPTS = [
@@ -249,10 +249,22 @@ def project_template(lr: float, run_root: Path) -> dict:
             "minimum_promotion_gain": 0.10,
             "require_protocol_match": False,
         },
-        "baseline": {"mode": "auto"},
+        "baseline": {
+            # Amendment 3 C3: carry attempt-07's protocol-identical parent
+            # measurement as fixed (a pointer, gpu_hours 0.0), instead of
+            # re-paying 0.373 wall GPU-h per recipe under baseline.mode auto.
+            # Also guarantees training is the session's first GPU workload (C5).
+            "mode": "fixed",
+            "experiment_id": "baseline",
+            "metrics": {"quality": 0.0625},
+            "gpu_hours": 0.0,
+            "artifact_ref": None,
+            "evaluation_protocol_sha256":
+                "5adb2f61204082533fa555976d1976671cd1975b92a927a58317a767ab3417a3",
+        },
         "experiment": {
             "experiment_id": "gen1-protocol-compliance",
-            "estimated_gpu_hours": 0.11,
+            "estimated_gpu_hours": 0.25,
             "hypothesis": {
                 "observation": "the gen0 parent never terminates its turns (EOS rate 0.000, cap-hit 1.000)",
                 "suspected_cause": "the abliterated base was never tuned to close thinking blocks or emit end-of-turn tokens",
@@ -271,18 +283,22 @@ def project_template(lr: float, run_root: Path) -> dict:
                 "dataset": "{corpus}",
                 "dataset_format": "text",
                 "text_field": "text",
-                "max_length": 1024,
+                "max_length": 512,
                 "precision": "bf16",
                 "quantization": "none",
                 "trust_remote_code": False,
                 "training": {
                     "epochs": 1.0,
-                    "max_steps": 200,
+                    # Amendment 3 C4: rescaled from measurement. The frozen
+                    # shape (4x4x1024) measured 204.7 s/step, 19.9 GB (WDDM
+                    # spill); the reduced micro-batch measured 28.9 s/step,
+                    # 15.9 GB (fits). 30 steps ~ 0.241 GPU-h projected.
+                    "max_steps": 30,
                     "learning_rate": lr,
                     "lr_scheduler_type": "cosine",
-                    "warmup_steps": 10,
-                    "batch_size": 4,
-                    "gradient_accumulation_steps": 4,
+                    "warmup_steps": 2,
+                    "batch_size": 1,
+                    "gradient_accumulation_steps": 1,
                     "gradient_checkpointing": True,
                     # Amendment 2 (B2): stream the frozen LoRA base layers
                     # from pinned RAM (production Memory Fabric mechanism);
@@ -535,14 +551,14 @@ def cmd_train(args: argparse.Namespace) -> int:
             mixture={"TARGET": 0.7, "PRESERVE": 0.15, "GENERAL": 0.15, "REPLAY": 0.0, "STRETCH": 0.0},
             learning_rate=lr,
             scheduler="cosine",
-            warmup_steps=10,
+            warmup_steps=2,
             lora_rank=16,
             lora_alpha=32,
             target_modules=tuple(TARGET_MODULES),
-            seq_len=1024,
-            batch_size=4,
-            gradient_accumulation=4,
-            max_steps=200,
+            seq_len=512,
+            batch_size=1,
+            gradient_accumulation=1,
+            max_steps=30,
             objective="sft",
             replay_rate=0.0,
             dataset_manifest={
@@ -550,9 +566,9 @@ def cmd_train(args: argparse.Namespace) -> int:
                 "rows": len(all_rows),
                 "roles": {k: len(v) for k, v in rows.items()},
             },
-            projected_device_gpu_hours=0.11,
-            projected_wall_gpu_hours=0.28,
-            notes="gen1 preregistered recipe (amendment 2: bf16 + frozen-layer streaming)",
+            projected_device_gpu_hours=0.241,
+            projected_wall_gpu_hours=0.241,
+            notes="gen1 preregistered recipe (amendment 3: 30 steps, 1x1x512, measured physics)",
         )
 
     recipes = [recipe("gen1-recipe-a", 1e-4), recipe("gen1-recipe-b", 2e-4)]
