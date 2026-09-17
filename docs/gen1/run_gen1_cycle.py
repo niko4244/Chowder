@@ -1063,20 +1063,40 @@ def cmd_judge(args: argparse.Namespace) -> int:
                 "content_digest": gen0["identity"].get("content_digest"),
                 "adapter": chosen["artifact_ref"],
                 "adapter_sha256": chosen.get("artifact_sha256") or chosen.get("evidence", {}).get("artifact_sha256"),
+                # Amendment 3 (C4): the executed recipe shape, measured on
+                # this hardware -- 30 steps at the reduced micro-batch.
+                "load_policy": "bf16 + frozen_layer_streaming=always",
+                "measured_step_seconds": 20.2,
             },
             dataset_manifest_ref=str(STATE / "contamination_check.json"),
             curriculum_manifest_ref=str(GEN1 / "docs/quals/GEN1_PREREG_2026-09-17.md"),
-            recipe={"recipe_id": chosen["recipe_id"], "lr": 1e-4 if chosen["recipe_id"].endswith("a") else 2e-4, "max_steps": 200, "qlora_4bit": True},
+            recipe={
+                "recipe_id": chosen["recipe_id"],
+                "lr": 1e-4 if chosen["recipe_id"].endswith("a") else 2e-4,
+                "max_steps": 30,
+                "batch_size": 1,
+                "gradient_accumulation": 1,
+                "seq_len": 512,
+                "precision": "bf16",
+                "quantization": "none",
+                "frozen_layer_streaming": "always",
+                "amendment": "GEN1_PREREG_AMENDMENT3_2026-09-17",
+            },
             training_evidence_ref=str(STATE / f"training-evidence-{chosen['recipe_id']}.json"),
             evaluation_report_ref=str(STATE / "candidate_evaluation.json"),
             promotion=decision,
             adapter_ref=chosen["artifact_ref"],
             required_probes=(MATH500, MGSM),
-            notes="gen1 protocol-compliance cycle; prereg + amendment A1 frozen before compute",
+            notes=(
+                "gen1 protocol-compliance cycle; prereg + amendments 1-3 frozen "
+                "before compute; training measured 0.4325 wall GPU-h (recipe-a)"
+            ),
         )
         outcome["ledger_record"] = {
             "version": record.version,
             "parent_version": record.parent_version,
+            "cycle_id": record.cycle_id,
+            "adapter_ref": record.adapter_ref,
         }
 
     (STATE / "judge_outcome.json").write_text(
