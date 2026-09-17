@@ -12,16 +12,22 @@ generation follows.
 3. The parent checkpoint pinned: exact revision, tokenizer, quantization,
    inference engine.
 
-## Step 1 — Freeze Generation 0
+## Step 1 — Freeze Generation 0 — DONE (2026-09-17)
 
-Run the broadest affordable evaluation battery **before** any training and
-record exactly: model revision, tokenizer, quantization, inference engine,
-prompt templates, reasoning settings, sampling parameters, hardware, and
-benchmark versions. Without a frozen Generation 0, "improvement" is
-meaningless.
+The dense Qwen3.8-9B abliterated parent is frozen as Generation 0,
+evaluation-only, per `docs/gen0/GEN0_EVAL_RESULT_2026-09-17.md`: exact
+identity manifest (content digest `59e767aa…7555f`), protocol
+`gen0-freeze-protocol-v1` (chat template, greedy, seed 1234), measured
+battery (`math500@2024-04` 0.0, `mgsm@2022-11` 0.0, generation
+diagnostics: EOS rate 0.000 / cap-hit 1.000 / trigram 0.988), honest
+UNMEASURED rows preserved, contamination manifest all-UNKNOWN (no training
+pool exists), freeze digest `5c8b18ab…`, immutable snapshot
+`gen0-frontier`, ledger record `gen0`.
 
-Artifacts: `eval-report.json`, `capability profile`,
-`contamination_manifest.json`, frontier snapshot `gen0-frontier`.
+The first cycle is preregistered (before any training compute) at
+`docs/quals/GEN1_PREREG_2026-09-17.md`: target = chat-protocol compliance
+(turn termination + thinking-block closure), chosen from the measured
+evidence above.
 
 ## Step 2 — First cycle
 
@@ -69,11 +75,21 @@ model (workload + one model load, ×1.5 safety) is the budget template.
 
 ## Readiness verdict
 
-**Infrastructure: READY. Campaign: NOT YET STARTED — awaiting the frozen
-Generation-0 evaluation of the parent 9B on the qualified device path.**
+**Infrastructure: READY. Campaign: STEP 1 COMPLETE — the first real cycle
+executed and adjudicated PROMOTED (2026-09-17).**
 
-The blocking dependency is platform closeout landing and the rebase of this
-branch; the growth system itself is complete and tested.
+Generation-0's evaluation freeze landed through protected CI (#168), and the
+first Model N → N+1 cycle ran against prereg + amendments 1–3
+(`docs/quals/GEN1_PREREG_2026-09-17.md`, executed under
+`GEN1_PREREG_AMENDMENT3_2026-09-17`'s measured physics): recipe-a/b trained
+30/30 steps through the production `SubprocessTrainingFn`, the independent
+evaluator measured EOS 1.000 / cap-hit 0.000 / unclosed-think 0.000, and the
+frozen rule adjudicated **PROMOTED**
+(`docs/quals/GEN1_RESULT_2026-09-17.md`; ledger `gen1` beside `gen0`).
+Two promotion-rule defects the cycle exposed are fixed with regression
+tests. The next cycle starts from the durable records — no manual
+evidence reconstruction — and its target must again come from fresh
+measured evidence.
 
 ## The 12 questions this system must answer
 
