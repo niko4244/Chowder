@@ -591,8 +591,14 @@ controller, further Elastic MoE phases) is explicitly open-ended and, per
 its own header, gated on these proven foundations being stable rather than
 a precondition for that stability — it is not a shippability blocker.
 
-**Final Memory Fabric acceptance test (Priority 1 follow-up) — core claim
-demonstrated for real; not yet a reliable committed test**
+**Final Memory Fabric acceptance test (Priority 1 follow-up) — CLOSED as a
+qualification artifact (PR #169): the acceptance verdict is now mechanical**
+The commitment deadline for a committed always-green CI test remains closed
+(see below) — a machine-specific WDDM flake cannot make an always-green
+honesty claim. The deliverable is therefore the qualification artifact
+[`docs/quals/memory_fabric_acceptance_qualification.py`](quals/memory_fabric_acceptance_qualification.py)
+(unit-tested verdict logic, CI-green; operator-run hardware mode that writes
+a durable verdict record).
 The milestone before Memory Fabric can be called production-proven: a real
 workload that genuinely CUDA-OOMs under normal resident training, then
 genuinely succeeds under the same model/recipe with Memory Fabric's real
