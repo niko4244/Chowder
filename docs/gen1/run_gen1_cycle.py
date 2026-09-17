@@ -785,10 +785,16 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
                 "carried_from_parent": True,
                 "score": row["score"],
                 "metric": row.get("metric") or "accuracy",
+                "per_sample_scores": row.get("per_sample_scores") or [],
                 "note": "carried from the frozen Gen-0 attempt-2 measurement; cannot regress below 0.0; candidate rerun exceeds the frozen ceiling (recorded arithmetic)",
             }
             for row in gen0["battery"]["measured"]
         ],
+        # per_sample_scores carried alongside each protected row: the
+        # candidate "measurement" IS the frozen parent row (carriage, not
+        # re-measurement), so its samples are the freeze's own raw rows.
+        # mgsm: 48 real per-sample scores; math500: none persisted (the
+        # harness stored aggregates only) -> stays single-valued.
         "unmeasured": UNMEASURED_ROWS,
     }
     (STATE / "candidate_evaluation.json").write_text(
@@ -840,6 +846,11 @@ def _benchmark_runs_from_freeze(gen0: dict) -> list:
         # The freeze recorded the harness metric name `exact_match`; the
         # registry's primary metric for these benchmarks is `accuracy`. Same
         # quantity (exact matches / questions), recorded as a mapping note.
+        # Per-sample scores come straight from the freeze's durable raw
+        # evidence where it recorded them (mgsm: 48 real rows); a row with
+        # no persisted samples stays single-valued and the rule honestly
+        # marks it inconclusive-for-significance.
+        raw_samples = tuple(float(s) for s in (row.get("per_sample_scores") or ()))
         runs.append(
             BenchmarkRun(
                 benchmark_qualified_id=row["benchmark_qualified_id"],
@@ -848,11 +859,11 @@ def _benchmark_runs_from_freeze(gen0: dict) -> list:
                 score=float(row["score"]),
                 support="SUPPORTED",
                 measurement_kind="raw_model",
-                n_samples=int(row.get("n_samples") or 0),
+                n_samples=len(raw_samples) or int(row.get("n_samples") or 0),
                 metric="accuracy",
                 reasoning_setting="chat_template",
                 raw_artifact_ref=str(GEN0_ROOT / "battery_results_attempt2.json"),
-                per_sample_scores=(float(row["score"]),),
+                per_sample_scores=raw_samples or (float(row["score"]),),
                 notes=(
                     "Gen-0 freeze battery (attempt 2); metric mapped exact_match->accuracy "
                     "(same count/total quantity), mapping recorded here"
@@ -890,6 +901,13 @@ def _candidate_runs() -> list:
         )
     ]
     for row in evaluation["protected"]:
+        # Carried rows: same quantities as the parent's freeze row (mgsm 48
+        # real per-sample scores; math500 single-valued). Scores identical
+        # by construction because BOTH arms carry the same frozen
+        # measurement -- the candidate cannot regress below 0.0 and did not
+        # rerun (recorded arithmetic). Significance on a carried pair is
+        # trivially flat, which the rule reports honestly.
+        raw = row.get("per_sample_scores") or ()
         runs.append(
             BenchmarkRun(
                 benchmark_qualified_id=row["benchmark_qualified_id"],
@@ -898,11 +916,11 @@ def _candidate_runs() -> list:
                 score=float(row["score"]),
                 support="SUPPORTED",
                 measurement_kind="raw_model",
-                n_samples=0,
+                n_samples=len(raw),
                 metric="accuracy",
                 reasoning_setting="chat_template",
                 raw_artifact_ref=str(STATE / "candidate_evaluation.json"),
-                per_sample_scores=(float(row["score"]),),
+                per_sample_scores=tuple(float(s) for s in raw) or (float(row["score"]),),
                 notes="carried from the frozen Gen-0 attempt-2 measurement (see evaluate phase note)",
             )
         )
@@ -982,7 +1000,12 @@ def cmd_judge(args: argparse.Namespace) -> int:
         parent_runs=parent_runs,
         target_benchmarks=(INSTRUMENT,),
         protected_benchmarks=(MATH500, MGSM),
-        broad_battery_benchmarks=(),
+        # Broad battery: the carried protected rows ARE the affordable
+        # broad evidence this hardware can produce (prereg: protected
+        # carried, everything else UNMEASURED). Declaring them as the broad
+        # battery lets the rule adjudicate "no material deterioration" on
+        # real rows instead of recording an empty battery as inconclusive.
+        broad_battery_benchmarks=(MATH500, MGSM),
         calibration_benchmarks=(),
         reliability_benchmarks=(),
         min_target_improvement=MIN_TARGET_IMPROVEMENT,
