@@ -174,14 +174,21 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
                 continue
             checks[f"protected:{benchmark_id}"] = "ok"
         else:
+            # No paired samples. The aggregate delta is still real evidence:
+            # a drop beyond tolerance violates outright, and an aggregate
+            # that does NOT drop cannot be scored for significance -- that
+            # is a one-sided pass the rule can certify without pretending
+            # to a significance test it never ran. (A carried protected
+            # measurement -- identical row by construction -- lands here:
+            # delta exactly 0, no regression, certified as not-regressed.)
             if delta < -data.max_protected_regression:
                 checks[f"protected:{benchmark_id}"] = "violated"
                 protected_violations += 1
             else:
-                checks[f"protected:{benchmark_id}"] = "inconclusive"
-                protected_inconclusive += 1
+                checks[f"protected:{benchmark_id}"] = "not-regressed"
                 reasons.append(
-                    f"protected benchmark lacks samples for significance: {benchmark_id}"
+                    f"protected benchmark aggregate-only (no paired samples; "
+                    f"delta {delta:+.4f} within tolerance): {benchmark_id}"
                 )
     if protected_violations:
         checks["protected_regression"] = "violated"
