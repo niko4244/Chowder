@@ -273,7 +273,7 @@ def project_template(lr: float, run_root: Path) -> dict:
                 "text_field": "text",
                 "max_length": 1024,
                 "precision": "bf16",
-                "quantization": "4bit",
+                "quantization": "none",
                 "trust_remote_code": False,
                 "training": {
                     "epochs": 1.0,
@@ -284,6 +284,13 @@ def project_template(lr: float, run_root: Path) -> dict:
                     "batch_size": 4,
                     "gradient_accumulation_steps": 4,
                     "gradient_checkpointing": True,
+                    # Amendment 2 (B2): stream the frozen LoRA base layers
+                    # from pinned RAM (production Memory Fabric mechanism);
+                    # offload/tiering stay off (not needed; documented WDDM
+                    # flakiness under pressure).
+                    "frozen_layer_streaming": "always",
+                    "activation_offload": "off",
+                    "optimizer_tiering": "off",
                     "save_strategy": "no",
                     "logging_steps": 20,
                 },
@@ -303,7 +310,10 @@ def project_template(lr: float, run_root: Path) -> dict:
                 "type": "transformers-text",
                 "estimated_gpu_hours": 0.05,
                 "precision": "bf16",
-                "quantization": "4bit",
+                # Amendment 2 (B3): the probe-qualified dense-model policy;
+                # carried by the protocol fingerprint.
+                "quantization": "none",
+                "placement": "offload",
                 "device": "cuda",
                 "trust_remote_code": False,
                 "runtime": {"timeout_seconds": 1800.0},
@@ -542,7 +552,7 @@ def cmd_train(args: argparse.Namespace) -> int:
             },
             projected_device_gpu_hours=0.11,
             projected_wall_gpu_hours=0.28,
-            notes="gen1 preregistered recipe (amendment A1: 4-bit QLoRA)",
+            notes="gen1 preregistered recipe (amendment 2: bf16 + frozen-layer streaming)",
         )
 
     recipes = [recipe("gen1-recipe-a", 1e-4), recipe("gen1-recipe-b", 2e-4)]
