@@ -559,6 +559,9 @@ def cmd_train(args: argparse.Namespace) -> int:
             firewall=firewall,
             sources=sources,
             material=material,
+            attempt_files={
+                "eval.jsonl": (STATE / "eval.jsonl").read_text(encoding="utf-8").splitlines(),
+            },
             timeout_seconds=7200.0,
         )
         evidence = dict(binding(rec, items))

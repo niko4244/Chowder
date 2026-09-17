@@ -173,6 +173,10 @@ def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _sha256_text(text: str) -> str:
+    return _sha256_bytes(text.encode("utf-8"))
+
+
 def _sha256_file(path: Path) -> str:
     return _sha256_bytes(path.read_bytes())
 
@@ -268,6 +272,7 @@ class SubprocessTrainingFn:
         firewall: ContaminationFirewall,
         sources: Mapping[str, str] | None = None,
         material: Mapping[str, Sequence[str]] | None = None,
+        attempt_files: Mapping[str, Sequence[str]] | None = None,
         python: str | None = None,
         environment: Mapping[str, str] | None = None,
         runner: Runner | None = None,
@@ -275,6 +280,12 @@ class SubprocessTrainingFn:
     ) -> None:
         self.run_root = Path(run_root)
         self.project_template = dict(project_template)
+        #: Auxiliary files a template references but the materialized corpus
+        #: does not cover (e.g. an evaluation split at a fixed absolute path).
+        #: Each value is written verbatim, UTF-8, into the attempt dir under
+        #: the given relative name before project-validate runs -- the window
+        #: where production refuses on a missing evaluation dataset.
+        self.attempt_files = {name: list(lines) for name, lines in (attempt_files or {}).items()}
         self.shared_registry_path = (
             Path(registry_path) if registry_path is not None else None
         )
@@ -417,6 +428,40 @@ class SubprocessTrainingFn:
             ATTEMPT_TOKEN: str(attempt_dir),
         }
         composed, _used = _substitute(composed, replacements)
+        # Auxiliary template files land in the attempt dir before validate:
+        # production's project.validate_files() refuses a declared evaluation
+        # dataset that does not exist, and refuse-before-compute is exactly
+        # where that refusal belongs.
+        for name, lines in self.attempt_files.items():
+            target = attempt_dir / name
+            if target.parent != attempt_dir:
+                return self._finish(
+                    attempt_dir,
+                    evidence,
+                    STATUS_REFUSED,
+                    (
+                        "template-contract",
+                        f"attempt file {name!r} must live directly in the attempt "
+                        "directory (no nested paths), so the attempt stays auditable",
+                    ),
+                )
+            if target.exists():
+                return self._finish(
+                    attempt_dir,
+                    evidence,
+                    STATUS_REFUSED,
+                    (
+                        "attempt-identity",
+                        f"attempt file {name!r} already exists in a fresh attempt "
+                        "directory; attempts never share or overwrite files",
+                    ),
+                )
+            target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            evidence.setdefault("attempt_files", {})[name] = {
+                "path": str(target),
+                "lines": len(lines),
+                "sha256": _sha256_text("\n".join(lines) + "\n"),
+            }
         composed["work_dir"] = str(attempt_dir / "work")
         if CORPUS_TOKEN in json.dumps(composed):
             return self._finish(

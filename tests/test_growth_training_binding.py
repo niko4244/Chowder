@@ -406,7 +406,8 @@ def _binding(tmp_path: Path, *, runner, registry: DataRegistry | None = None,
              template: Mapping[str, Any] | None = None, items=None,
              sources: Mapping[str, str] | None = None,
              envelope: GrowthEnvelope | None = None,
-             registry_path: Path | None = None) -> SubprocessTrainingFn:
+             registry_path: Path | None = None,
+             attempt_files: Mapping[str, Sequence[str]] | None = None) -> SubprocessTrainingFn:
     items = items if items is not None else _items()
     item_ids = [item.item_id for item in items]
     return SubprocessTrainingFn(
@@ -418,6 +419,7 @@ def _binding(tmp_path: Path, *, runner, registry: DataRegistry | None = None,
         firewall=firewall if firewall is not None else ContaminationFirewall(),
         sources=sources or {item_id: "src-1" for item_id in item_ids},
         material=material if material is not None else _material(items),
+        attempt_files=attempt_files,
         runner=runner,
         python=sys.executable,
     )
@@ -469,6 +471,43 @@ def _template(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
     }
     payload.update(overrides)
     return payload
+
+
+def test_the_binding_materializes_declared_attempt_files_before_validate(tmp_path: Path):
+    """A template may reference auxiliary files (e.g. an evaluation split at a
+    fixed absolute path). The binding writes them into the fresh attempt dir
+    before project-validate -- the window where production refuses a missing
+    evaluation dataset -- and records their content digests in the evidence."""
+    runner = _RecordingRunner()
+    binding = _binding(
+        tmp_path,
+        runner=runner,
+        attempt_files={"eval.jsonl": ["{\"prompt\": \"p\", \"expected\": \"e\"}"], "notes.txt": ["hello"]},
+    )
+    evidence = dict(binding(_recipe(), _items()))
+    assert evidence["status"] == "SUCCEEDED"
+    attempt_dir = Path(evidence["attempt_dir"])
+    eval_path = attempt_dir / "eval.jsonl"
+    assert eval_path.exists()
+    assert "prompt" in eval_path.read_text(encoding="utf-8")
+    assert (attempt_dir / "notes.txt").read_text(encoding="utf-8").strip() == "hello"
+    files = evidence["attempt_files"]
+    assert set(files) == {"eval.jsonl", "notes.txt"}
+    assert files["eval.jsonl"]["lines"] == 1
+    assert len(files["eval.jsonl"]["sha256"]) == 64
+
+
+def test_the_binding_refuses_attempt_files_outside_the_attempt_dir(tmp_path: Path):
+    runner = _RecordingRunner()
+    binding = _binding(
+        tmp_path,
+        runner=runner,
+        attempt_files={"nested/eval.jsonl": ["x"]},
+    )
+    evidence = dict(binding(_recipe(), _items()))
+    assert evidence["status"] == "REFUSED"
+    assert evidence["refused_by"] == "template-contract"
+    assert "directly in the attempt directory" in evidence["refusal_reason"]
 
 
 def test_the_binding_refuses_a_recipe_over_the_growth_envelope(tmp_path: Path):
