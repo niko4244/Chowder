@@ -155,7 +155,13 @@ def frontier_parity(chowder_score: float, reference_score: float) -> float | Non
 
 
 class FrontierDatabase:
-    """Persisted registry of published reference scores."""
+    """Persisted registry of published reference scores.
+
+    Provenance gates: a stored reference must name an exact pinned
+    benchmark version, carry a valid normalized score, and cite a real
+    source. Duplicates are refused -- a benchmark's best reference can
+    never be silently overwritten by a re-import.
+    """
 
     def __init__(self, root: Path | str) -> None:
         self._path = Path(root) / "frontier_reference_scores.json"
@@ -169,6 +175,31 @@ class FrontierDatabase:
     def add(self, score: ReferenceScore) -> None:
         if score.level not in ALL_LEVELS:
             raise ValueError(f"unknown frontier level: {score.level}")
+        version_part = score.benchmark_qualified_id.rsplit("@", 1)[-1]
+        if (
+            "@" not in score.benchmark_qualified_id
+            or version_part.strip().lower() in {"latest", "current", ""}
+        ):
+            raise ValueError(
+                f"reference benchmark name must be pinned (got {score.benchmark_qualified_id!r})"
+            )
+        if not 0.0 <= score.score <= 1.0:
+            raise ValueError(
+                f"reference score must be normalized 0..1 (got {score.score} for "
+                f"{score.benchmark_qualified_id}); rescale or record the scale in notes"
+            )
+        if not score.source_url or not score.source_url.strip():
+            raise ValueError("reference source_url is required (who published this number?)")
+        if any(
+            existing.benchmark_qualified_id == score.benchmark_qualified_id
+            and existing.level == score.level
+            and existing.model == score.model
+            for existing in self._scores
+        ):
+            raise ValueError(
+                f"duplicate reference: {score.model} on {score.benchmark_qualified_id} "
+                f"at {score.level} (updates must be new dated entries, not overwrites)"
+            )
         self._scores.append(score)
         self._flush()
 
