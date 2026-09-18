@@ -819,6 +819,51 @@ class SubprocessTrainingFn:
             return self._finish(
                 attempt_dir, evidence, STATUS_FAILED, None, "; ".join(failures)
             )
+
+        # Settlement control: actual measured cost is authoritative. A
+        # successful training process does not imply a budget-compliant
+        # experiment -- an overrun here refuses the attempt (preserving the
+        # artifact and every measurement) instead of promoting a run that
+        # blew its frozen envelope. The original projection is never
+        # rewritten; the disagreement itself is the evidence.
+        actual_wall = evidence.get("measured_gpu_hours")
+        actual_eval = None
+        if isinstance(evidence.get("evaluation"), Mapping):
+            actual_eval = evidence["evaluation"].get("gpu_hours")
+        from .compute_cost import ComputeCost, settle_cost
+
+        actual_cost = ComputeCost.from_wall_only(
+            (actual_wall or 0.0) + (actual_eval or 0.0),
+            source=f"attempt:{evidence.get('experiment_id', 'unknown')}",
+        )
+        evidence["actual_cost"] = actual_cost.to_dict()
+        evidence["projected_cost"] = {
+            "projected_device_gpu_hours": float(recipe.projected_device_gpu_hours),
+            "projected_wall_gpu_hours": float(recipe.projected_wall_gpu_hours),
+        }
+        settlement = settle_cost(
+            actual=actual_cost,
+            projected=ComputeCost(
+                float(recipe.projected_device_gpu_hours),
+                float(recipe.projected_wall_gpu_hours),
+                source="recipe projection",
+            ),
+            device_ceiling=self.envelope.device_gpu_hours_ceiling,
+            wall_ceiling=self.envelope.wall_gpu_hours_ceiling,
+            project_budget_wall_gpu_hours=self.envelope.project_gpu_hour_budget,
+        )
+        evidence["budget_settlement"] = settlement.to_dict()
+        if not settlement.compliant:
+            reason = "; ".join(settlement.failure_reasons)
+            evidence["notes"].append(
+                "the run settled over budget: " + reason
+            )
+            return self._finish(
+                attempt_dir,
+                evidence,
+                STATUS_REFUSED,
+                ("budget_settlement", reason),
+            )
         return self._finish(attempt_dir, evidence, STATUS_SUCCEEDED, None)
 
     def registry_for(self, attempt_dir: Path) -> Path:
