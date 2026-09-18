@@ -236,18 +236,24 @@ def test_absent_evidence_cannot_certify(
     assert "candidate_evaluation.json" in output
 
 
+@pytest.mark.parametrize(
+    "field_name", ("candidate_eval_report_path", "parent_eval_report_path", "baseline_eval_report_path")
+)
 def test_a_declared_report_that_does_not_exist_refuses_the_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field_name: str
 ) -> None:
-    """A declared-but-missing arm is a refusal, not an arm that never existed."""
+    """A declared-but-missing arm is a refusal, not an arm that never existed.
+
+    And it refuses *whole*: no arm is written before the missing one is
+    noticed, so the judge never reads a half-materialised evidence set.
+    """
     missing = tmp_path / "inputs" / "does-not-exist.json"
-    root, code, payload = _campaign(
-        tmp_path, monkeypatch, candidate_eval_report_path=str(missing)
-    )
+    root, code, payload = _campaign(tmp_path, monkeypatch, **{field_name: str(missing)})
     assert code == 1
     assert payload["verdict"] == "REFUSED"
-    assert "candidate_eval_report_path" in payload["refusal_reason"]
-    assert not (root / CERTIFICATION_EVIDENCE["candidate"]).exists()
+    assert field_name in payload["refusal_reason"]
+    for name in ("candidate_evaluation.json", "parent_evaluation.json", "baseline_evaluation.json"):
+        assert not (root / name).exists(), f"{name} was written before the refusal"
 
 
 @pytest.mark.parametrize(

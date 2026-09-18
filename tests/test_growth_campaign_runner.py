@@ -447,6 +447,23 @@ def test_the_committed_gen2_preregistration_manifest_still_loads():
     unknown = [rule for rule in manifest.stopping_rules if rule not in STOPPING_RULES]
     assert unknown == []
 
+    # The trusted-ancestor arm is declared, so the judge's T16 gate is
+    # decidable: an undeclared input would produce no arm and leave every gen2
+    # candidate permanently INCONCLUSIVE (GEN2_PREREG_AMENDMENT2_2026-09-18).
+    ancestor = Path(manifest.baseline_eval_report_path)
+    assert ancestor.name == "gen0-baseline-evaluation.json"
+    # The declared input must not be the judged artifact itself: the runner
+    # copies it into the run root, it does not write it in place.
+    assert ancestor.name != "baseline_evaluation.json"
+    assert ancestor.parent != Path(manifest.state_root)
+
+    amendment2 = ROOT / "docs" / "quals" / "GEN2_PREREG_AMENDMENT2_2026-09-18.md"
+    assert amendment2.is_file()
+    prereg = (ROOT / "docs" / "quals" / "GEN2_PREREG_2026-09-17.md").read_text(
+        encoding="utf-8"
+    )
+    assert amendment2.name in prereg
+
 
 # --------------------------------------------------------------------------
 # declared inputs, identity and the recipe set
