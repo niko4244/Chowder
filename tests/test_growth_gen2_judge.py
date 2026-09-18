@@ -16,7 +16,10 @@ the two cannot diverge.
 from __future__ import annotations
 
 import ast
+import contextlib
+import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 
@@ -41,6 +44,9 @@ assert _spec.loader is not None
 _spec.loader.exec_module(judge_gen2)
 
 INSTRUMENT = judge_gen2.INSTRUMENT_ID
+#: The frozen declaration itself, kept aside: fixtures re-pin its contamination
+#: evidence per run root, and one test points the module global at a missing file.
+FROZEN_CAMPAIGN_MANIFEST = judge_gen2.CAMPAIGN_MANIFEST
 MATH = "math500@2024-04"
 MGSM = "mgsm@2022-11"
 DECODING = dict(judge_gen2.PROTECTED_DECODING)
@@ -108,6 +114,52 @@ def _instrument_run(
     )
 
 
+#: Sentinel: compute the artifact digest over the canonical payload; ``None``
+#: omits the field entirely, and a string declares whatever it says.
+_AUTO = object()
+
+
+def _slice_ref(version: str, qualified_id: str) -> str:
+    """The canonical relative artifact path for one arm's slice measurement."""
+    return f"raw/{version}-{qualified_id.replace('@', '-')}-slice.json"
+
+
+def _instrument_ref(version: str) -> str:
+    return f"raw/{version}-instrument.json"
+
+
+def _canonical_ref(run: BenchmarkRun) -> str:
+    """What ``run.raw_artifact_ref`` would be if nothing had overridden it."""
+    if run.benchmark_qualified_id == INSTRUMENT:
+        return _instrument_ref(run.generation_version)
+    return _slice_ref(run.generation_version, run.benchmark_qualified_id)
+
+
+def _payload(
+    qualified_id: str, version: str, score: float, n_samples: int, samples: tuple[float, ...]
+) -> str:
+    return json.dumps(
+        {
+            "benchmark_qualified_id": qualified_id,
+            "generation_version": version,
+            "score": score,
+            "n_samples": n_samples,
+            "per_sample_scores": list(samples),
+        },
+        sort_keys=True,
+    )
+
+
+def _artifact_payload(run: BenchmarkRun) -> str:
+    return _payload(
+        run.benchmark_qualified_id,
+        run.generation_version,
+        run.score,
+        run.n_samples,
+        tuple(run.per_sample_scores),
+    )
+
+
 def _slice_run(
     qualified_id: str,
     version: str,
@@ -120,25 +172,42 @@ def _slice_run(
     shuffle: bool = False,
     decoding: dict | None = None,
     prompt_policy: str = "chat_template",
-    artifact_ref: str = "raw/slice.json",
+    artifact_ref: str | None = None,
+    artifact_sha256: object = _AUTO,
+    per_sample_scores: tuple[float, ...] | None = None,
 ) -> BenchmarkRun:
-    metadata = {
+    """A protocol-exact slice row, bound to an artifact the fixture materialises.
+
+    ``artifact_ref=None`` uses the canonical relative path (and ``_write_arm``
+    writes the payload the digest is computed over); a caller-supplied ref is the
+    caller's business, which is how the "names an artifact that is not there"
+    case is built. ``artifact_sha256=None`` omits the declared digest.
+    """
+    samples = tuple([score] * n_samples) if per_sample_scores is None else per_sample_scores
+    metadata: dict = {
         "sample_indices": list(range(16)) if indices is None else indices,
         "seed": seed,
         "shuffle": shuffle,
         "decoding": DECODING if decoding is None else decoding,
         "prompt_policy": prompt_policy,
     }
+    if artifact_sha256 is _AUTO:
+        digest = hashlib.sha256(
+            _payload(qualified_id, version, score, n_samples, samples).encode("utf-8")
+        ).hexdigest()
+        metadata["artifact_sha256"] = digest
+    elif artifact_sha256 is not None:
+        metadata["artifact_sha256"] = artifact_sha256
     return BenchmarkRun(
         benchmark_qualified_id=qualified_id,
         adapter="lm_eval",
         generation_version=version,
         score=score,
         n_samples=n_samples,
-        per_sample_scores=tuple([score] * n_samples),
+        per_sample_scores=samples,
         metric="exact_match",
         measurement_origin=origin,
-        raw_artifact_ref=artifact_ref,
+        raw_artifact_ref=_slice_ref(version, qualified_id) if artifact_ref is None else artifact_ref,
         metadata=metadata,
     )
 
@@ -165,6 +234,18 @@ def _write_arm(
         )
     runs.extend(slices)
     EvalReport(generation_version=version, runs=tuple(runs)).save(path)
+    # The measurements those rows name, next to the report: the run root (or the
+    # runner, which copies declared inputs in) then holds the bytes each declared
+    # digest is computed over. A row whose ref a test deliberately pointed
+    # elsewhere is left alone, so "names an artifact that is not there" stays
+    # expressible.
+    for run in runs:
+        reference = str(run.raw_artifact_ref or "")
+        if not reference or reference != _canonical_ref(run):
+            continue
+        artifact = path.parent / reference
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(_artifact_payload(run), encoding="utf-8")
     return path
 
 
@@ -234,6 +315,7 @@ def _run_root(
     artifact_digest: str | None = None,
     artifact_ref: str | None = None,
     chosen: bool = True,
+    contamination_pin: Path | str | None = None,
 ) -> Path:
     root = tmp_path / "run"
     root.mkdir(parents=True, exist_ok=True)
@@ -273,9 +355,13 @@ def _run_root(
     (root / "cycle_compute_accounting.json").write_text(
         json.dumps(_accounting() if accounting is None else accounting), encoding="utf-8"
     )
-    (root / "gen2_contamination_manifest.json").write_text(
+    pinned = root / "gen2_contamination_manifest.json"
+    pinned.write_text(
         json.dumps(_contamination() if contamination is None else contamination), encoding="utf-8"
     )
+    # The judged contamination evidence is the artifact the campaign pins, so the
+    # fixture declares the pin it used -- as the frozen manifest does in production.
+    _pin_campaign(tmp_path, root, contamination_pin or pinned)
 
     if chosen:
         artifact, digest = _build_artifact(root)
@@ -294,6 +380,34 @@ def _run_root(
 
 
 # --------------------------------------------------------------------------
+# the judged evidence set is the one the campaign pinned
+# --------------------------------------------------------------------------
+
+
+def _pin_campaign(tmp_path: Path, root: Path, contamination: Path | str) -> Path:
+    """The frozen manifest, with its contamination pin pointed at this root.
+
+    The judge reads the contamination artifact the *campaign* pins, so a fixture
+    that wants a judged root has to declare the pin it used -- exactly as the
+    frozen gen2 manifest does in production, where the pin is the state root's own
+    ``gen2_contamination_manifest.json``. Every other frozen field is untouched.
+    """
+    document = json.loads(FROZEN_CAMPAIGN_MANIFEST.read_text(encoding="utf-8"))
+    document["contamination_manifest_path"] = str(contamination)
+    path = tmp_path / "judge-campaign.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    judge_gen2.CAMPAIGN_MANIFEST = path
+    return path
+
+
+def _judge_output(root: Path) -> tuple[int, str]:
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = judge_gen2.judge(root)
+    return code, buffer.getvalue()
+
+
+# --------------------------------------------------------------------------
 # the clean run certifies; the gen1-shaped defect refuses
 # --------------------------------------------------------------------------
 
@@ -301,6 +415,186 @@ def _run_root(
 def test_judge_certifies_a_clean_run(tmp_path: Path) -> None:
     root = _run_root(tmp_path)
     assert judge_gen2.judge(root) == 0
+
+
+def test_the_run_root_must_carry_the_pinned_contamination_evidence(
+    tmp_path: Path,
+) -> None:
+    """The audit bypass: a campaign pins KNOWN_CONTAMINATION and the run root
+    happens to hold a CLEAN file with the judge's expected name.
+
+    The pinned document is the judged evidence, so the clean file must not carry
+    the gate -- and because the two disagree, the run root is refused outright
+    rather than quietly read from the pin.
+    """
+    root = _run_root(tmp_path, contamination=_contamination())
+    pinned = tmp_path / "pinned-contamination.json"
+    pinned.write_text(
+        json.dumps(
+            _contamination(
+                benchmarks={
+                    INSTRUMENT: {"status": "KNOWN_CONTAMINATION"},
+                    MATH: {"status": "CLEAN"},
+                    MGSM: {"status": "CLEAN"},
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+    _pin_campaign(tmp_path, root, pinned)
+
+    verdict, output = _judge_output(root)
+    assert verdict == 1, f"a CLEAN run-root file certified a pinned KNOWN pin:\n{output}"
+    assert judge_gen2.CONTAMINATION_EVIDENCE_NOT_PINNED in output
+    assert "TAINTED" in output
+
+
+def test_a_pin_and_a_run_root_copy_that_agree_certify(tmp_path: Path) -> None:
+    """The control: pinning the run root's own CLEAN evidence still certifies."""
+    root = _run_root(tmp_path)
+
+    verdict, output = _judge_output(root)
+    assert verdict == 0, output
+    assert "T18" in output and "byte-identical to the pin" in output
+
+
+def test_a_pin_that_is_missing_refuses_rather_than_falling_back(
+    tmp_path: Path,
+) -> None:
+    """A pin that is not there is UNKNOWN -- never a run-root file instead."""
+    root = _run_root(tmp_path)
+    _pin_campaign(tmp_path, root, tmp_path / "never-written.json")
+
+    verdict, output = _judge_output(root)
+    assert verdict == 1
+    assert judge_gen2.CONTAMINATION_PIN_MISSING in output
+    assert "INCONCLUSIVE" in output
+
+
+def test_a_campaign_that_pins_nothing_refuses(tmp_path: Path) -> None:
+    """No declared pin means no judged contamination evidence: no fallback."""
+    root = _run_root(tmp_path)
+    _pin_campaign(tmp_path, root, "")
+
+    verdict, output = _judge_output(root)
+    assert verdict == 1
+    assert judge_gen2.CONTAMINATION_PIN_ABSENT in output
+
+
+def test_a_pinned_known_contamination_refuses_even_when_carried_verbatim(
+    tmp_path: Path,
+) -> None:
+    """A pin the run copied in faithfully is still TAINTED, not certified."""
+    root = _run_root(
+        tmp_path,
+        contamination=_contamination(
+            benchmarks={
+                INSTRUMENT: {"status": "CLEAN"},
+                MATH: {"status": "POSSIBLE"},
+                MGSM: {"status": "CLEAN"},
+            }
+        ),
+    )
+
+    verdict, output = _judge_output(root)
+    assert verdict == 1
+    assert "TAINTED" in output
+
+
+# --------------------------------------------------------------------------
+# every protected measurement is bound to bytes that exist
+# --------------------------------------------------------------------------
+
+
+def _both_slices(math_slice: BenchmarkRun) -> tuple[BenchmarkRun, ...]:
+    return (math_slice, _slice_run(MGSM, "gen2", MEASURED_THIS_GENERATION, 0.0))
+
+
+@pytest.mark.parametrize(
+    "slices, reason",
+    (
+        (
+            _both_slices(
+                _slice_run(
+                    MATH, "gen2", MEASURED_THIS_GENERATION, 0.0,
+                    artifact_ref="raw/never-written.json",
+                )
+            ),
+            judge_gen2.MEASUREMENT_ARTIFACT_MISSING,
+        ),
+        (
+            _both_slices(
+                _slice_run(MATH, "gen2", MEASURED_THIS_GENERATION, 0.0, artifact_sha256=None)
+            ),
+            judge_gen2.MEASUREMENT_DIGEST_ABSENT,
+        ),
+        (
+            _both_slices(
+                _slice_run(
+                    MATH, "gen2", MEASURED_THIS_GENERATION, 0.0, artifact_sha256="a" * 64
+                )
+            ),
+            judge_gen2.MEASUREMENT_DIGEST_MISMATCH,
+        ),
+        (
+            _both_slices(
+                _slice_run(MATH, "gen2", MEASURED_THIS_GENERATION, 0.0, per_sample_scores=())
+            ),
+            judge_gen2.MEASUREMENT_SAMPLES_INCONSISTENT,
+        ),
+        (
+            _both_slices(
+                _slice_run(
+                    MATH, "gen2", MEASURED_THIS_GENERATION, 0.25,
+                    per_sample_scores=tuple([0.0] * 16),
+                )
+            ),
+            judge_gen2.MEASUREMENT_SAMPLES_INCONSISTENT,
+        ),
+        (
+            _both_slices(
+                _slice_run(
+                    MATH, "gen2", MEASURED_THIS_GENERATION, 0.0,
+                    artifact_ref="../escaped.json",
+                )
+            ),
+            judge_gen2.MEASUREMENT_ARTIFACT_ESCAPES_RUN_ROOT,
+        ),
+    ),
+)
+def test_unverifiable_measurements_refuse(
+    tmp_path: Path, slices: tuple[BenchmarkRun, ...], reason: str
+) -> None:
+    """No fallback: an unpinned, unhashed or unsupported measurement cannot certify."""
+    root = _run_root(tmp_path, candidate_slices=slices)
+
+    verdict, output = _judge_output(root)
+    assert verdict == 1, f"the judge certified an unverifiable measurement:\n{output}"
+    assert reason in output
+
+
+def test_a_measurement_artifact_mutated_after_recording_refuses(tmp_path: Path) -> None:
+    """The digest is recomputed over the bytes, not compared to a formatted string."""
+    root = _run_root(tmp_path)
+    assert _judge_output(root)[0] == 0
+
+    slice_artifact = root / "raw" / "gen2-math500-2024-04-slice.json"
+    slice_artifact.write_text("{\"rewritten\": \"after the digest was recorded\"}", encoding="utf-8")
+
+    verdict, output = _judge_output(root)
+    assert verdict == 1
+    assert judge_gen2.MEASUREMENT_DIGEST_MISMATCH in output
+
+
+def test_a_pinned_measurement_with_real_bytes_certifies(tmp_path: Path) -> None:
+    """The control: protocol-exact rows bound to real, hashed artifacts pass."""
+    root = _run_root(tmp_path)
+    slice_artifact = root / "raw" / "gen2-math500-2024-04-slice.json"
+    assert slice_artifact.is_file()
+
+    verdict, output = _judge_output(root)
+    assert verdict == 0, output
+    assert "T11" in output
 
 
 def test_judge_refuses_gen1_shaped_defects(tmp_path: Path) -> None:
@@ -617,8 +911,11 @@ def test_losing_recipe_accounting_is_required(tmp_path: Path) -> None:
 
 
 def test_a_broken_manifest_campaign_is_inconclusive_not_a_crash(tmp_path: Path, monkeypatch) -> None:
+    # Built first (the fixture pins its own declaration), then the declaration is
+    # withdrawn: an unreadable campaign is UNKNOWN, never a crash and never a pass.
+    root = _run_root(tmp_path)
     monkeypatch.setattr(judge_gen2, "CAMPAIGN_MANIFEST", tmp_path / "absent.json")
-    assert judge_gen2.judge(_run_root(tmp_path)) == 1
+    assert judge_gen2.judge(root) == 1
 
 
 # --------------------------------------------------------------------------

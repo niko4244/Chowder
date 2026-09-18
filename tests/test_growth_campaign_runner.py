@@ -17,9 +17,10 @@ declared inputs, the parent digest, the recipe set and the promotion sets.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -476,6 +477,111 @@ def test_a_missing_declared_input_refuses_before_any_subprocess(tmp_path: Path):
         run_campaign(_redeclare(document, project_template_path=""))
     assert "project_template_path" in str(error.value)
     assert runner.commands == []
+
+
+def _bind_row_artifact(
+    report_path: Path, qualified_id: str, *, reference: str, payload: str
+) -> None:
+    """Rebind one row of a written report to an artifact, digest included."""
+    report = EvalReport.load(report_path)
+    runs = tuple(
+        replace(
+            run,
+            raw_artifact_ref=reference,
+            metadata={
+                **(run.metadata or {}),
+                "artifact_sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            },
+        )
+        if run.benchmark_qualified_id == qualified_id
+        else run
+        for run in report.runs
+    )
+    EvalReport(generation_version=report.generation_version, runs=runs).save(report_path)
+
+
+def test_the_run_carries_the_measurements_its_rows_name(tmp_path: Path, monkeypatch):
+    """A row bound to an artifact gets those bytes in the run root.
+
+    The judge recomputes the digest a row declares over the file it names, so the
+    evidence the run writes has to include the measurement, not only the report
+    that points at it.
+    """
+    manifest, runner, _document = _campaign(tmp_path)
+    monkeypatch.setattr(campaign_runner, "default_runner", runner)
+    inputs = tmp_path / "inputs"
+    reference = "raw/candidate-target.json"
+    payload = '{"target": "measured"}'
+    artifact = inputs / reference
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(payload, encoding="utf-8")
+    _bind_row_artifact(
+        inputs / "candidate-eval-report.json", TARGET_ID, reference=reference, payload=payload
+    )
+
+    run = run_campaign(manifest)
+
+    assert run.verdict == "PROMOTED"
+    carried = Path(manifest.state_root) / reference
+    assert carried.read_bytes() == artifact.read_bytes()
+    written = [
+        entry["detail"] for entry in run.phases if entry["phase"] == "certification_evidence"
+    ][0]
+    assert Path(reference).name in written
+
+
+def test_a_row_that_names_a_missing_artifact_refuses_the_run(tmp_path: Path, monkeypatch):
+    """Evidence is not assembled around a measurement nobody can read."""
+    manifest, runner, _document = _campaign(tmp_path)
+    monkeypatch.setattr(campaign_runner, "default_runner", runner)
+    inputs = tmp_path / "inputs"
+    _bind_row_artifact(
+        inputs / "candidate-eval-report.json",
+        TARGET_ID,
+        reference="raw/never-written.json",
+        payload="unused",
+    )
+
+    with pytest.raises(CampaignRunRefusal) as error:
+        run_campaign(manifest)
+
+    assert "raw/never-written.json" in str(error.value)
+    assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
+
+
+def test_two_arms_naming_one_artifact_differently_refuse(tmp_path: Path, monkeypatch):
+    """One run root cannot carry two different measurements under one name."""
+    manifest, runner, _document = _campaign(tmp_path)
+    monkeypatch.setattr(campaign_runner, "default_runner", runner)
+    inputs = tmp_path / "inputs"
+    reference = "raw/shared.json"
+    # Two arms, in different directories, each naming the same relative path: the
+    # refs are relative to the report that declares them, so these are two
+    # different measurements that would land on one run-root path.
+    (inputs / "parent").mkdir(parents=True, exist_ok=True)
+    (inputs / "parent-eval-report.json").replace(
+        inputs / "parent" / "parent-eval-report.json"
+    )
+    for report_path, qualified_id, payload in (
+        (inputs / "candidate-eval-report.json", TARGET_ID, '{"arm": "candidate"}'),
+        (inputs / "parent" / "parent-eval-report.json", PROTECTED_ID, '{"arm": "parent"}'),
+    ):
+        artifact = report_path.parent / reference
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(payload, encoding="utf-8")
+        _bind_row_artifact(
+            report_path, qualified_id, reference=reference, payload=payload
+        )
+    document = json.loads((inputs / "campaign.json").read_text(encoding="utf-8"))
+    document["parent_eval_report_path"] = str(
+        inputs / "parent" / "parent-eval-report.json"
+    )
+    (inputs / "campaign.json").write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(CampaignRunRefusal) as error:
+        run_campaign(CampaignManifest.from_file(inputs / "campaign.json"))
+
+    assert "different content" in str(error.value)
 
 
 def test_a_parent_digest_that_does_not_match_the_tree_refuses_before_compute(tmp_path: Path):
