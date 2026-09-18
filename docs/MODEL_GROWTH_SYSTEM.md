@@ -150,7 +150,9 @@ and the same 16-item protected mini-slices. Promotion requires the target
 rule *and* no protected regression against the parent *and* the ancestor, so
 a candidate cannot promote by matching an unresolved parent. Missing
 evidence is INCONCLUSIVE; contamination is TAINTED; a hard failure is
-REJECTED.
+REJECTED. The pass that hardened this boundary before any Gen-2 compute,
+with its adversarial re-attacks and its verification counts, is
+`docs/growth/GEN2_CERTIFICATION_HARDENING_REPORT_2026-09-18.md`.
 
 ## Campaign manifests: preregistration as configuration
 
