@@ -25,6 +25,30 @@ UNSUPPORTED_HARNESS = "UNSUPPORTED_HARNESS"
 RAW_MODEL = "raw_model"
 AGENT_HARNESS = "agent_harness"
 
+# Measurement provenance: *which system actually produced this row*.
+# This is evidence about the row's origin, deliberately independent of
+# ``generation_version`` (which is a label the caller assigns and which a
+# carried row must never be allowed to borrow):
+#
+# - MEASURED_THIS_GENERATION: produced by executing the named generation's
+#   model (or its adapter) under the row's protocol.
+# - MEASURED_PARENT: produced by executing the parent generation; valid as
+#   parent-side evidence, never as candidate-side evidence.
+# - CARRIED_REFERENCE: copied/quoted from a historical record for context
+#   or display; never satisfies a regression or improvement gate.
+# - UNMEASURED: no measurement exists (benchmark not run, harness
+#   unavailable). "Unmeasured" is not zero and not a pass.
+MEASURED_THIS_GENERATION = "MEASURED_THIS_GENERATION"
+MEASURED_PARENT = "MEASURED_PARENT"
+CARRIED_REFERENCE = "CARRIED_REFERENCE"
+UNMEASURED = "UNMEASURED"
+MEASUREMENT_ORIGINS = (
+    MEASURED_THIS_GENERATION,
+    MEASURED_PARENT,
+    CARRIED_REFERENCE,
+    UNMEASURED,
+)
+
 
 @dataclass(frozen=True)
 class BenchmarkRun:
@@ -44,6 +68,18 @@ class BenchmarkRun:
     raw_artifact_ref: str = ""  # on-disk raw output, preserved as evidence
     notes: str = ""
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    #: Which system actually produced this row. Legacy rows predating this
+    #: field deserialize as UNMEASURED and are refused on the candidate side
+    #: of a promotion input rather than silently trusted.
+    measurement_origin: str = UNMEASURED
+
+    def __post_init__(self) -> None:
+        if self.measurement_origin not in MEASUREMENT_ORIGINS:
+            raise ValueError(
+                f"measurement_origin {self.measurement_origin!r} is not one of "
+                f"{', '.join(MEASUREMENT_ORIGINS)}; provenance that is not one "
+                "of the declared origins is ambiguous evidence"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +97,7 @@ class BenchmarkRun:
             "raw_artifact_ref": self.raw_artifact_ref,
             "notes": self.notes,
             "metadata": dict(self.metadata),
+            "measurement_origin": self.measurement_origin,
         }
 
 

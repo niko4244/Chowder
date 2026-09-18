@@ -46,7 +46,14 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
-from chowder.evals.result import SUPPORTED, BenchmarkRun
+from chowder.evals.result import (
+    CARRIED_REFERENCE,
+    MEASURED_PARENT,
+    MEASURED_THIS_GENERATION,
+    SUPPORTED,
+    UNMEASURED,
+    BenchmarkRun,
+)
 
 from .benchmark_registry import (
     BenchmarkEntry,
@@ -131,6 +138,7 @@ class BoundMeasurement:
             "sample_mean": self.sample_mean,
             "artifact_ref": self.artifact_ref,
             "contamination": self.result.contamination,
+            "measurement_origin": self.result.measurement_origin,
         }
 
 
@@ -152,6 +160,7 @@ class BindingReport:
                     "score": v.score,
                     "samples": list(v.samples),
                     "contamination": v.contamination,
+                    "measurement_origin": v.measurement_origin,
                 }
                 for k, v in self.results.items()
             },
@@ -249,6 +258,7 @@ class MetricBinder:
         run: BenchmarkRun,
         *,
         generation_version: str | None = None,
+        role: str | None = None,
     ) -> BoundMeasurement | BindingRefusal:
         """Place one run on its declared scale, or refuse for a named reason.
 
@@ -256,6 +266,18 @@ class MetricBinder:
         on another generation belongs to another comparison, and binding it
         would silently compare a candidate against a parent that was never
         measured. ``None`` means "do not check" (single-sided use).
+
+        ``role`` is ``"candidate"`` or ``"parent"`` inside a promotion input
+        (``None`` elsewhere). Provenance is enforced per role:
+
+        - candidate side: the row must carry ``MEASURED_THIS_GENERATION``.
+          A parent score relabeled with the candidate's generation string is
+          the classic fabrication this refuses -- the label is caller-assigned,
+          the origin is evidence.
+        - parent side: ``MEASURED_THIS_GENERATION`` or ``MEASURED_PARENT``.
+          Rows predating provenance (``UNMEASURED`` origin) still bind on the
+          parent side, where they cannot inflate a candidate's gates; the
+          dangerous side is the candidate side, and there legacy rows refuse.
         """
         qualified_id = run.benchmark_qualified_id
         if generation_version is not None and run.generation_version != generation_version:
@@ -264,6 +286,38 @@ class MetricBinder:
                 f"{qualified_id}: run records generation {run.generation_version!r} but "
                 f"this binding is for generation {generation_version!r}; a measurement "
                 "from another generation is not evidence about this one",
+                generation_version=run.generation_version,
+            )
+
+        if role == "candidate" and run.measurement_origin != MEASURED_THIS_GENERATION:
+            if run.measurement_origin == MEASURED_PARENT:
+                reason = (
+                    f"{qualified_id}: row is parent-measured but labeled generation "
+                    f"{run.generation_version!r}; a parent measurement relabeled as "
+                    "candidate evidence cannot satisfy a candidate gate"
+                )
+            elif run.measurement_origin == CARRIED_REFERENCE:
+                reason = (
+                    f"{qualified_id}: row is a carried reference (copied from a "
+                    "historical record), not a measurement of this generation"
+                )
+            else:
+                reason = (
+                    f"{qualified_id}: row predates measurement provenance "
+                    f"(origin UNMEASURED); re-emit it with origin "
+                    f"MEASURED_THIS_GENERATION and the artifact that produced it, "
+                    "or record it as an honest non-measurement"
+                )
+            return BindingRefusal(
+                qualified_id,
+                reason,
+                generation_version=run.generation_version,
+            )
+        if role == "parent" and run.measurement_origin == CARRIED_REFERENCE:
+            return BindingRefusal(
+                qualified_id,
+                f"{qualified_id}: row is a carried reference, not a measurement "
+                "of the parent generation",
                 generation_version=run.generation_version,
             )
 
@@ -333,6 +387,7 @@ class MetricBinder:
             score=score,
             samples=samples,
             contamination=self.contamination_status(qualified_id),
+            measurement_origin=run.measurement_origin,
         )
         measurement = BoundMeasurement(
             qualified_id=qualified_id,
@@ -357,6 +412,7 @@ class MetricBinder:
         runs: Iterable[BenchmarkRun],
         *,
         generation_version: str | None = None,
+        role: str | None = None,
     ) -> BindingReport:
         """Bind every run of one generation; bound and refused both survive.
 
@@ -368,7 +424,7 @@ class MetricBinder:
         measurements: dict[str, BoundMeasurement] = {}
         refusals: list[BindingRefusal] = []
         for run in runs:
-            outcome = self.bind(run, generation_version=generation_version)
+            outcome = self.bind(run, generation_version=generation_version, role=role)
             if isinstance(outcome, BindingRefusal):
                 refusals.append(outcome)
                 continue
@@ -417,8 +473,12 @@ class MetricBinder:
             target_benchmarks, protected_benchmarks, broad_battery_benchmarks,
             calibration_benchmarks, reliability_benchmarks,
         )
-        report = self.bind_all(candidate_runs, generation_version=candidate_version)
-        parent_report = self.bind_all(parent_runs, generation_version=parent_version)
+        report = self.bind_all(
+            candidate_runs, generation_version=candidate_version, role="candidate"
+        )
+        parent_report = self.bind_all(
+            parent_runs, generation_version=parent_version, role="parent"
+        )
         data = PromotionInput(
             candidate_version=candidate_version,
             parent_version=parent_version,
