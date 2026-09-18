@@ -79,7 +79,15 @@ evidence that can prove its provenance and its cost:
    projected cost admits the run, actual measured cost (all recipes,
    evaluations, failed attempts — via the cycle compute accounting artifact)
    must stay under the frozen device/wall ceilings after execution or the
-   cycle refuses.
+   cycle refuses. A ceiling is only settled against the unit it was declared
+   in: wall and project ceilings are settled from the trainer's measurements,
+   and a device ceiling is settled only when the run actually separated
+   device time (`ComputeCost.device_measured`) — an unmeasured device figure
+   fails closed with `ACTUAL_DEVICE_GPU_HOURS_UNMEASURED` rather than reading
+   as "device free", so a device ceiling that a run cannot measure stays an
+   admission constraint on the projected plan and the evidence says so
+   (`ceiling_enforcement`). See
+   `docs/growth/DEVICE_CEILING_FAIL_CLOSED_ADDENDUM_2026-09-18.md`.
 
 A real target repair with incomplete full-promotion evidence is
 **INCONCLUSIVE** with `target_repair_validated=true` — deliberately not a

@@ -53,8 +53,12 @@ required by, and not wired into, the growth cycle.
 Integrity pass (2026-09-17): measurement provenance is now first-class
 (candidate gates require candidate-measured rows; carried/parent evidence
 cannot satisfy a regression gate), actual-cost settlement enforces the
-frozen device/wall ceilings post-run (a successful train that overruns
-refuses), the cycle compute accounting artifact covers every recipe
+frozen ceilings post-run against the units they were declared in (a
+successful train that overruns wall or the project budget refuses; a device
+ceiling is settled only when the run separated device time, and an
+unmeasured device figure fails closed — see
+`docs/growth/DEVICE_CEILING_FAIL_CLOSED_ADDENDUM_2026-09-18.md`), the cycle
+compute accounting artifact covers every recipe
 count, candidate selection reads only training-side evidence, and
 verdicts are correctable only via append-only adjudication revisions.
 Gen-1's effective verdict is INCONCLUSIVE (target repair validated)

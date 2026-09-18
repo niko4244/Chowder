@@ -21,6 +21,7 @@ from chowder.growth.campaign import (
     settle_campaign,
 )
 from chowder.growth.compute_cost import (
+    ACTUAL_DEVICE_GPU_HOURS_UNMEASURED,
     ACTUAL_WALL_GPU_HOURS_EXCEEDED,
     ComputeCost,
 )
@@ -107,7 +108,9 @@ def test_campaign_settlement_counts_losing_recipe_overrun() -> None:
     manifest = CampaignManifest.from_mapping(_manifest_doc())
     verdict = settle_campaign(
         manifest,
-        total=ComputeCost(0.0, 1.60, source="cycle ledger total"),
+        total=ComputeCost.measured(
+            device_gpu_hours=0.0, wall_gpu_hours=1.60, source="cycle ledger total"
+        ),
     )
     assert not verdict.compliant
     assert any(ACTUAL_WALL_GPU_HOURS_EXCEEDED in r for r in verdict.failure_reasons)
@@ -117,6 +120,26 @@ def test_campaign_settlement_passes_when_total_fits() -> None:
     manifest = CampaignManifest.from_mapping(_manifest_doc())
     verdict = settle_campaign(
         manifest,
-        total=ComputeCost(0.35, 1.20, source="cycle ledger total"),
+        total=ComputeCost.measured(
+            device_gpu_hours=0.35, wall_gpu_hours=1.20, source="cycle ledger total"
+        ),
     )
     assert verdict.compliant, verdict.failure_reasons
+
+
+def test_campaign_settlement_refuses_a_device_ceiling_it_did_not_measure() -> None:
+    """The real Gen-1 ledger is exactly this shape: wall measured, device not.
+
+    The campaign declares a device ceiling, so a ledger whose device figure
+    was never separated must not settle as compliant.
+    """
+    manifest = CampaignManifest.from_mapping(_manifest_doc())
+    verdict = settle_campaign(
+        manifest,
+        total=ComputeCost.from_wall_only(1.20, source="cycle ledger total"),
+    )
+    assert not verdict.compliant
+    assert any(
+        ACTUAL_DEVICE_GPU_HOURS_UNMEASURED in reason
+        for reason in verdict.failure_reasons
+    )

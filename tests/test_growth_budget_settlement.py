@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 
 from chowder.growth.compute_cost import (
+    ACTUAL_DEVICE_GPU_HOURS_EXCEEDED,
+    ACTUAL_DEVICE_GPU_HOURS_UNMEASURED,
     ACTUAL_EXCEEDS_PROJECTION,
     ACTUAL_WALL_GPU_HOURS_EXCEEDED,
     RESOURCE_OVERRUN,
@@ -42,6 +44,7 @@ def test_wall_only_cost_records_that_device_is_not_separated() -> None:
     cost = ComputeCost.from_wall_only(0.4325, source="attempt:10")
     assert cost.wall_gpu_hours == pytest.approx(0.4325)
     assert cost.device_gpu_hours == 0.0
+    assert cost.device_measured is False
     assert "not separated" in cost.measurement_method
 
 
@@ -70,7 +73,7 @@ def test_settlement_over_projection_under_ceiling_passes() -> None:
 
 
 def test_settlement_over_ceiling_fails_with_machine_reason() -> None:
-    """Estimate 0.24, actual 0.43, ceiling 0.30: RESOURCE_OVERRUN, never a pass."""
+    """Estimate 0.24, actual 0.43, ceiling 0.30: the wall ceiling fails, coded."""
     verdict = settle_cost(
         actual=ComputeCost.from_wall_only(0.43, source="a"),
         projected=ComputeCost(0.0, 0.24, source="p"),
@@ -79,9 +82,7 @@ def test_settlement_over_ceiling_fails_with_machine_reason() -> None:
     )
     assert not verdict.compliant
     assert any(ACTUAL_WALL_GPU_HOURS_EXCEEDED in r for r in verdict.failure_reasons)
-    assert any(RESOURCE_OVERRUN not in r for r in verdict.failure_reasons) or any(
-        RESOURCE_OVERRUN in r for r in verdict.failure_reasons
-    )
+    assert not any(ACTUAL_DEVICE_GPU_HOURS_EXCEEDED in r for r in verdict.failure_reasons)
 
 
 def test_settlement_flags_projection_blowout_even_under_ceiling() -> None:
@@ -96,10 +97,97 @@ def test_settlement_flags_projection_blowout_even_under_ceiling() -> None:
     assert any(ACTUAL_EXCEEDS_PROJECTION in r for r in verdict.failure_reasons)
 
 
+def test_a_declared_device_ceiling_refuses_an_unmeasured_device_figure() -> None:
+    """Zero device hours are not evidence of zero device hours.
+
+    Three shapes all leave device time unseparated and none of them may
+    satisfy a device ceiling: a wall-only cost, an explicitly constructed
+    zero, and a record read back from disk without the measurement flag.
+    """
+    unmeasured = {
+        "wall-only summary": ComputeCost.from_wall_only(0.43, source="a"),
+        "explicit zero": ComputeCost(0.0, 0.43, source="a"),
+        "legacy record": ComputeCost.from_dict(
+            {"device_gpu_hours": 0.0, "wall_gpu_hours": 0.43, "source": "a"}
+        ),
+    }
+    for label, actual in unmeasured.items():
+        assert actual.device_measured is False, label
+        verdict = settle_cost(
+            actual=actual,
+            projected=None,
+            device_ceiling=0.30,
+            wall_ceiling=None,
+        )
+        assert not verdict.compliant, label
+        assert any(
+            ACTUAL_DEVICE_GPU_HOURS_UNMEASURED in r for r in verdict.failure_reasons
+        ), label
+        # The device overrun identifier is not the reason: nothing overran,
+        # the ceiling simply could not be checked.
+        assert not any(
+            ACTUAL_DEVICE_GPU_HOURS_EXCEEDED in r for r in verdict.failure_reasons
+        ), label
+
+
+def test_a_measured_zero_device_figure_can_satisfy_a_device_ceiling() -> None:
+    """An observed zero is a measurement, and the rule must not forbid it."""
+    verdict = settle_cost(
+        actual=ComputeCost.measured(
+            device_gpu_hours=0.0, wall_gpu_hours=0.43, source="cpu-only run"
+        ),
+        projected=None,
+        device_ceiling=0.30,
+        wall_ceiling=None,
+    )
+    assert verdict.compliant, verdict.failure_reasons
+
+
+def test_a_measured_device_overrun_fails_as_an_overrun() -> None:
+    """When device time is measured, the ceiling has real teeth."""
+    verdict = settle_cost(
+        actual=ComputeCost.measured(
+            device_gpu_hours=0.43, wall_gpu_hours=0.43, source="a"
+        ),
+        projected=None,
+        device_ceiling=0.30,
+        wall_ceiling=None,
+    )
+    assert not verdict.compliant
+    assert any(
+        ACTUAL_DEVICE_GPU_HOURS_EXCEEDED in r for r in verdict.failure_reasons
+    )
+    assert not any(
+        ACTUAL_DEVICE_GPU_HOURS_UNMEASURED in r for r in verdict.failure_reasons
+    )
+
+
+def test_device_measurement_survives_a_dict_round_trip_and_defaults_closed() -> None:
+    assert ComputeCost.measured(
+        device_gpu_hours=0.2, wall_gpu_hours=0.3, source="a"
+    ).device_measured
+    assert ComputeCost.from_dict(
+        ComputeCost.measured(
+            device_gpu_hours=0.2, wall_gpu_hours=0.3, source="a"
+        ).to_dict()
+    ).device_measured
+    # A row written before the flag existed reads back unmeasured.
+    assert not ComputeCost.from_dict(
+        {"device_gpu_hours": 0.2, "wall_gpu_hours": 0.3, "source": "a"}
+    ).device_measured
+    # A sum is a measurement only if every contributor was measured.
+    measured = ComputeCost.measured(device_gpu_hours=0.1, wall_gpu_hours=0.1, source="a")
+    unseparated = ComputeCost.from_wall_only(0.1, source="b")
+    assert measured.plus(measured).device_measured
+    assert not measured.plus(unseparated).device_measured
+
+
 def test_settlement_units_cannot_be_interchanged() -> None:
     """A device cost against a wall ceiling must not cancel out."""
     verdict = settle_cost(
-        actual=ComputeCost(device_gpu_hours=0.5, wall_gpu_hours=0.0, source="a"),
+        actual=ComputeCost.measured(
+            device_gpu_hours=0.5, wall_gpu_hours=0.0, source="a"
+        ),
         projected=None,
         device_ceiling=None,
         wall_ceiling=0.30,
@@ -109,7 +197,9 @@ def test_settlement_units_cannot_be_interchanged() -> None:
     # device ceiling, and settle_cost does so separately:
     assert verdict.compliant
     device_verdict = settle_cost(
-        actual=ComputeCost(device_gpu_hours=0.5, wall_gpu_hours=0.0, source="a"),
+        actual=ComputeCost.measured(
+            device_gpu_hours=0.5, wall_gpu_hours=0.0, source="a"
+        ),
         projected=None,
         device_ceiling=0.30,
         wall_ceiling=0.30,

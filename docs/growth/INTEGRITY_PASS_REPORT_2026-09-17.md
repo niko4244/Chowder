@@ -62,6 +62,10 @@ diagnostics 3/16 vs the parent's 1/16. What could not stand was certifying
   `ACTUAL_WALL_GPU_HOURS_EXCEEDED` / `RESOURCE_OVERRUN` /
   `ACTUAL_EXCEEDS_PROJECTION`, artifact and measurements preserved, and the same
   fields ride into promotion so a blown ceiling vetoes **after** execution.
+  *Corrected 2026-09-18:* the device ceiling was settleable against an
+  unmeasured device figure, so it could pass without measuring anything; it now
+  fails closed with `ACTUAL_DEVICE_GPU_HOURS_UNMEASURED`. See
+  `DEVICE_CEILING_FAIL_CLOSED_ADDENDUM_2026-09-18.md`.
 - **Cycle compute accounting** (`CycleCostLedger` → `cycle_compute_accounting.json`):
   winning and losing recipes, per-attempt evaluations, failed attempts, and
   zero-incremental historical references, with a deterministic digest.
@@ -107,9 +111,9 @@ Plus updates to `test_growth_decisions.py`, `test_growth_metric_binding.py` and
 | --- | --- |
 | Can parent evidence still masquerade as candidate evidence? | No. Provenance is explicit and the candidate side refuses anything that is not `MEASURED_THIS_GENERATION`; `generation_version` alone decides nothing. |
 | Can missing candidate measurements satisfy promotion? | No. Unmeasured is not zero and not passing; the row reads `inconclusive`. |
-| Can a candidate exceed a frozen budget and still promote? | No. Settlement compares actual device and wall GPU-hours against the frozen ceilings and vetoes promotion after execution while preserving the artifact. |
+| Can a candidate exceed a frozen budget and still promote? | No. Settlement compares the actual cost against every ceiling it can measure -- wall and the project budget in wall units, plus the device ceiling when the run separated device time -- and vetoes promotion after execution while preserving the artifact. A declared device ceiling that cannot be measured is no longer *certified*: it is enforced against the projected plan at admission and recorded as such. |
 | Can losing-candidate compute disappear from campaign accounting? | No. `CycleCostLedger` totals every recipe, every evaluation and every failed attempt. |
-| Can device and wall GPU-hours be confused? | Not in the growth layer: `ComputeCost` carries both explicitly and validates them; a wall figure cannot be compared to a device ceiling. |
+| Can device and wall GPU-hours be confused? | Not in the growth layer: `ComputeCost` carries both explicitly and validates them, and a wall figure can no longer pass a device ceiling. **Corrected 2026-09-18:** the original answer here was wrong -- a 0.0 device placeholder *was* compared against a device ceiling and passed it, because nothing recorded whether that zero was measured. `ComputeCost.device_measured` now carries that fact and `settle_cost` refuses the comparison when it is false. |
 | Can a historical ledger verdict be silently rewritten? | No. Revisions append; the original record's bytes are unchanged and the effective verdict is a deterministic function of the file. |
 | Can candidate selection peek at protected final scores? | No. `select_candidate` takes training-side evidence only — no parameter accepts protected or broad scores. |
 | Can an unmeasured row become zero? | No. Absence stays `UNMEASURED`/`inconclusive` through the binder and the gates. |
