@@ -43,6 +43,9 @@ ALL_LEVELS = (
 
 NOT_DIRECTLY_COMPARABLE = "NOT DIRECTLY COMPARABLE"
 
+# Ordering for context rendering: how close a reference is to being usable.
+CONFIDENCE_RANK = {"HIGH": 2, "MEDIUM": 1, "LOW": 0}
+
 
 @dataclass(frozen=True)
 class ReferenceScore:
@@ -80,6 +83,31 @@ class ReferenceScore:
         }
 
 
+def protocol_divergence(
+    reference: ReferenceScore,
+    *,
+    benchmark_qualified_id: str,
+    tool_setting: str,
+    reasoning_setting: str,
+) -> tuple[str, ...]:
+    """Which protocol dimensions block a direct comparison (empty = aligned).
+
+    The single source of truth behind :func:`compare_protocol`: the verdict
+    falls out of the divergence list, so a report can name *why* a reference
+    is inert instead of rendering an unexplained "not comparable".
+    """
+    divergences: list[str] = []
+    if reference.benchmark_qualified_id != benchmark_qualified_id:
+        divergences.append(f"benchmark@version={reference.benchmark_qualified_id}")
+    if reference.comparability_confidence != "HIGH":
+        divergences.append(f"comparability_confidence={reference.comparability_confidence}")
+    if reference.tool_setting != tool_setting:
+        divergences.append(f"tool_setting={reference.tool_setting!r}")
+    if reference.reasoning_setting != reasoning_setting:
+        divergences.append(f"reasoning_setting={reference.reasoning_setting!r}")
+    return tuple(divergences)
+
+
 def compare_protocol(
     reference: ReferenceScore,
     *,
@@ -95,13 +123,12 @@ def compare_protocol(
     agent-harness numbers, third-party reproductions of unknown fidelity --
     returns NOT_DIRECTLY_COMPARABLE rather than a fake comparison.
     """
-    if reference.benchmark_qualified_id != benchmark_qualified_id:
-        return NOT_DIRECTLY_COMPARABLE
-    if reference.comparability_confidence != "HIGH":
-        return NOT_DIRECTLY_COMPARABLE
-    if reference.tool_setting != tool_setting:
-        return NOT_DIRECTLY_COMPARABLE
-    if reference.reasoning_setting != reasoning_setting:
+    if protocol_divergence(
+        reference,
+        benchmark_qualified_id=benchmark_qualified_id,
+        tool_setting=tool_setting,
+        reasoning_setting=reasoning_setting,
+    ):
         return NOT_DIRECTLY_COMPARABLE
     return "COMPARABLE"
 
@@ -140,6 +167,104 @@ class GapRow:
             "parity_ratio": self.parity_ratio,
             "comparability": self.comparability,
         }
+
+
+@dataclass(frozen=True)
+class ContextRow:
+    """A named, cited published number that is NOT gate-eligible.
+
+    Context only. These rows exist so an operator can see which published
+    scores were found for a benchmark and exactly which protocol dimension
+    blocks comparison. They never produce a gap, a parity ratio, or a
+    promotion input: ``gap_rows`` (which admits only HIGH-confidence protocol
+    matches) remains the single path into decisions.
+    """
+
+    benchmark_qualified_id: str
+    level: str
+    model: str
+    chowder_score: float
+    reference_score: float
+    comparability: str  # always NOT_DIRECTLY_COMPARABLE in this channel
+    comparability_confidence: str
+    divergence: tuple[str, ...]
+    harness: str
+    reasoning_setting: str
+    source_url: str
+    date: str
+    notes: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "benchmark_qualified_id": self.benchmark_qualified_id,
+            "level": self.level,
+            "model": self.model,
+            "chowder_score": self.chowder_score,
+            "reference_score": self.reference_score,
+            "comparability": self.comparability,
+            "comparability_confidence": self.comparability_confidence,
+            "divergence": list(self.divergence),
+            "harness": self.harness,
+            "reasoning_setting": self.reasoning_setting,
+            "source_url": self.source_url,
+            "date": self.date,
+            "notes": self.notes,
+        }
+
+
+def context_rows(
+    database: FrontierDatabase,
+    chowder: ChowderScore,
+) -> list[ContextRow]:
+    """Best non-HIGH reference at each level, for context rendering only.
+
+    A level appears here only when it holds a reference that
+    ``best_for_benchmark`` refuses (confidence below HIGH). Levels carrying a
+    HIGH reference are ``gap_rows``' business -- they render as a comparable
+    row or as a ``NOT DIRECTLY COMPARABLE`` gap row, never as context.
+
+    Ranking prefers the *most protocol-adjacent* row (MEDIUM before LOW), then
+    the highest score, so a same-harness MEDIUM run is not hidden behind a
+    higher-scoring entry that shares nothing with Chowder's protocol.
+    """
+    rows: list[ContextRow] = []
+    for level in ALL_LEVELS:
+        candidates = [
+            score
+            for score in database.scores()
+            if score.level == level
+            and score.benchmark_qualified_id == chowder.benchmark_qualified_id
+            and score.comparability_confidence != "HIGH"
+        ]
+        if not candidates:
+            continue
+        reference = max(
+            candidates,
+            key=lambda score: (CONFIDENCE_RANK.get(score.comparability_confidence, 0), score.score),
+        )
+        rows.append(
+            ContextRow(
+                benchmark_qualified_id=chowder.benchmark_qualified_id,
+                level=level,
+                model=reference.model,
+                chowder_score=chowder.score,
+                reference_score=reference.score,
+                comparability=NOT_DIRECTLY_COMPARABLE,
+                comparability_confidence=reference.comparability_confidence,
+                divergence=protocol_divergence(
+                    reference,
+                    benchmark_qualified_id=chowder.benchmark_qualified_id,
+                    tool_setting=chowder.tool_setting,
+                    reasoning_setting=chowder.reasoning_setting,
+                ),
+                harness=reference.harness,
+                reasoning_setting=reference.reasoning_setting,
+                source_url=reference.source_url,
+                date=reference.date,
+                notes=reference.notes,
+            )
+        )
+    return rows
 
 
 def frontier_parity(chowder_score: float, reference_score: float) -> float | None:
@@ -211,6 +336,26 @@ class FrontierDatabase:
             if score.level == level
             and score.benchmark_qualified_id == benchmark_qualified_id
             and score.comparability_confidence == "HIGH"
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda score: score.score)
+
+    def context_for_benchmark(
+        self, benchmark_qualified_id: str, level: str
+    ) -> ReferenceScore | None:
+        """Highest non-HIGH reference at the level, else None.
+
+        Deliberately separate from :meth:`best_for_benchmark`: a published
+        number whose protocol does not align is context, not evidence, and
+        must never be reachable through the decision path.
+        """
+        candidates = [
+            score
+            for score in self._scores
+            if score.level == level
+            and score.benchmark_qualified_id == benchmark_qualified_id
+            and score.comparability_confidence != "HIGH"
         ]
         if not candidates:
             return None
