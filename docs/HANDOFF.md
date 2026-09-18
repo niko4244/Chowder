@@ -31,6 +31,28 @@ existed on the candidate side — hence INCONCLUSIVE, not REJECTED and not
 PROMOTED. Gen-1 remains a live candidate; promoting it (or branching gen2
 from it) requires genuine candidate-side protected measurement.
 
+**Gen-2's certification boundary is hardening before any gen2 compute
+(2026-09-18).** The audit that followed the campaign-runner work found the
+frozen gen2 judge could certify things the production path would refuse, so
+the judge, the campaign declaration, the runner and the settlement now say
+the same thing — see `docs/quals/GEN2_PREREG_AMENDMENT1_2026-09-18.md`,
+written before any gen2 model load. In short: the judge's resource gate *is*
+the production `settle_campaign()` (a judge PASS and `chowder growth campaign
+settle` cannot disagree); both required protected mini-slices must exist,
+once each, candidate-measured and protocol-exact (16 items, indices 0–15,
+seed 1234, no shuffle, greedy, 512 tokens, chat template); the parent arm
+comes from its own `parent_evaluation.json` rather than a `parent_score`
+inside the candidate's file; contamination coverage is exact over the frozen
+evaluated set and the training-source section must exist and be CLEAN;
+the candidate artifact digest is **recomputed** with the production
+`directory_digest`; the target gates apply the frozen paired/strict rule
+through `statistics.compare`; and promotion requires no regression against
+the **trusted ancestor (gen0)** as well as the immediate parent, so gen2
+cannot promote by merely matching an unresolved gen1. The device ceilings
+are declared admission-only (`device_time_measured: false`) because nothing
+in the trainer reports device time; the wall ceilings remain post-run
+settlement gates. Gen2 has not been trained.
+
 Earlier state for the record (2026-09-17): the first real Model N → N+1
 cycle executed and was recorded PROMOTED at the time
 (`docs/quals/GEN1_RESULT_2026-09-17.md`; ledger record `gen1` beside

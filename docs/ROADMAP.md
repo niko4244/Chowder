@@ -65,7 +65,15 @@ Gen-1's effective verdict is INCONCLUSIVE (target repair validated)
 per `docs/growth/GEN1_READJUDICATION_ADDENDUM_2026-09-17.md`; campaign
 manifests (`chowder growth campaign validate|plan|run|settle`) declare
 admission/settlement units explicitly and drive a cycle end to end through
-the production engine rather than a `docs/` script.
+the production engine rather than a `docs/` script. Gen-2's certification
+boundary is hardened before any gen2 compute
+(`docs/quals/GEN2_PREREG_AMENDMENT1_2026-09-18.md`): the frozen judge
+settles resources with the production `settle_campaign()`, requires both
+protected mini-slices to be present, candidate-measured and protocol-exact,
+takes the parent arm from its own artifact, enforces exact contamination
+coverage, recomputes the candidate artifact digest, applies the frozen
+paired/strict target rule, and requires no regression against the trusted
+ancestor gen0 as well as the immediate parent.
 
 **Research kernel**
 experiment DAG · hypothesis schema · compute budget enforcement · hard
