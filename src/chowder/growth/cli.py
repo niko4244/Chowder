@@ -435,10 +435,14 @@ def _growth_campaign_settle(args: argparse.Namespace) -> int:
     totals = document.get("totals", {}).get("incremental", {})
     from .compute_cost import ComputeCost
 
+    # The artifact says whether its device figure is a measurement; absent or
+    # false means unmeasured, so a declared device ceiling cannot be settled
+    # against a placeholder read back from disk.
     total = ComputeCost(
         device_gpu_hours=float(totals.get("device_gpu_hours", 0.0)),
         wall_gpu_hours=float(totals.get("wall_gpu_hours", 0.0)),
         source=str(args.accounting),
+        device_measured=bool(totals.get("device_measured", False)),
     )
     verdict = settle_campaign(manifest, total=total)
     return _print_json(

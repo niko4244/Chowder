@@ -49,6 +49,8 @@ from chowder.growth.lineage import GenerationLedger, RegressionMemory
 from chowder.growth.promotion import BenchmarkResult
 from chowder.growth.recipe_planner import TrainingRecipe
 from chowder.growth.training_binding import (
+    STATUS_REFUSED,
+    STATUS_SUCCEEDED,
     GrowthBindingError,
     GrowthEnvelope,
     SubprocessOutcome,
@@ -308,13 +310,19 @@ class _RecordingRunner:
 
     def __init__(self, *, validate_returncode: int = 0, print_summary: bool = True,
                  create_registry_rows: bool = True, write_identity: bool = True,
-                 artifact: bool = True) -> None:
+                 artifact: bool = True, gpu_hours: float = 0.02,
+                 device_gpu_hours: float | None = None) -> None:
         self.commands: list[tuple[str, ...]] = []
         self.validate_returncode = validate_returncode
         self.print_summary = print_summary
         self.create_registry_rows = create_registry_rows
         self.write_identity = write_identity
         self.artifact = artifact
+        #: Wall-charged cost this fake run reports, the way the trainer does.
+        self.gpu_hours = gpu_hours
+        #: Device time, reported only when a run actually separates it. None
+        #: models the trainer's ordinary summary, which reports wall only.
+        self.device_gpu_hours = device_gpu_hours
 
     def __call__(self, command, cwd, environment, timeout):  # noqa: ANN001, ARG002
         self.commands.append(tuple(command))
@@ -333,19 +341,20 @@ class _RecordingRunner:
         artifact_ref = self._write_run(Path(cwd), project) if self.create_registry_rows else None
         stdout = ""
         if self.print_summary:
+            summary: dict[str, Any] = {
+                "project": "growth-binding",
+                "experiment_id": experiment_id,
+                "succeeded": True,
+                "promoted_experiment_id": None,
+                "artifact_ref": artifact_ref,
+                "metrics": {"holdout_loss": 0.5},
+                "gpu_hours": self.gpu_hours,
+                "error": None,
+            }
+            if self.device_gpu_hours is not None:
+                summary["device_gpu_hours"] = self.device_gpu_hours
             stdout = "event: started\n" + json.dumps(
-                {
-                    "project": "growth-binding",
-                    "experiment_id": experiment_id,
-                    "succeeded": True,
-                    "promoted_experiment_id": None,
-                    "artifact_ref": artifact_ref,
-                    "metrics": {"holdout_loss": 0.5},
-                    "gpu_hours": 0.02,
-                    "error": None,
-                },
-                indent=2,
-                sort_keys=True,
+                summary, indent=2, sort_keys=True
             )
         return SubprocessOutcome(
             command=tuple(command), returncode=0, stdout=stdout, stderr="",
@@ -387,8 +396,13 @@ class _RecordingRunner:
                 ExperimentResult(
                     experiment_id=experiment_id,
                     metrics={"holdout_loss": 0.5},
-                    gpu_hours=0.02,
+                    gpu_hours=self.gpu_hours,
                     artifact_ref=str(artifact),
+                    evidence=(
+                        {}
+                        if self.device_gpu_hours is None
+                        else {"device_gpu_hours": self.device_gpu_hours}
+                    ),
                 )
             )
             registry.update_experiment_status(experiment_id, "passed")
@@ -636,6 +650,86 @@ def test_a_refused_recipe_leaves_durable_terminal_evidence(tmp_path: Path):
     assert recorded["status"] == "REFUSED"
     assert recorded["refusal_reason"]
     assert Path(evidence["attempt_dir"]).exists()
+
+
+def test_a_successful_train_that_overruns_its_wall_ceiling_settles_as_refused(tmp_path: Path):
+    """Training succeeds, the frozen envelope does not: REFUSED.
+
+    The pre-launch gate compares the recipe's *projection*; this test pins the
+    post-run one, where the cost that actually happened decides. The train
+    subprocess must have run (a refusal before compute is a different refusal),
+    the artifact and every measurement must survive, and the reason must carry
+    the machine-readable identifier rather than a prose note.
+    """
+    # Projection is 0.035 wall, so the ceiling admits the recipe; the run then
+    # reports 0.08 wall for training plus 0.08 for its evaluation.
+    runner = _RecordingRunner(gpu_hours=0.08)
+    binding = _binding(tmp_path, runner=runner, envelope=_envelope(wall_gpu_hours_ceiling=0.05))
+    items = _items()
+
+    evidence = binding(_recipe(item_ids=[i.item_id for i in items]), items)
+
+    assert evidence["train_started"] is True
+    assert any(command[-2] == "train" for command in runner.commands)
+    assert evidence["status"] == STATUS_REFUSED
+    assert evidence["refused_by"] == "budget_settlement"
+    assert evidence["measured_gpu_hours"] == pytest.approx(0.08)
+    assert evidence["budget_settlement"]["budget_compliant"] is False
+    assert any(
+        "ACTUAL_WALL_GPU_HOURS_EXCEEDED" in reason
+        for reason in evidence["budget_settlement"]["budget_failure_reasons"]
+    )
+    # The artifact and the measurements are preserved, not rolled back.
+    artifact = Path(evidence["artifact_ref"])
+    assert (artifact / "payload.safetensors").exists()
+    assert Path(evidence["evidence_path"]).exists()
+    assert evidence["attempt_row_status"]
+
+
+def test_a_declared_device_ceiling_is_not_settled_against_an_unmeasured_figure(tmp_path: Path):
+    """A wall-only run must not manufacture device compliance.
+
+    The trainer reports wall time; device time stays unseparated. Settlement
+    therefore never reads that placeholder as "device free": the ceiling keeps
+    its admission teeth against the projected plan, and the evidence says so
+    instead of certifying a measurement that never happened.
+    """
+    runner = _RecordingRunner()  # no device time reported, as in production
+    binding = _binding(tmp_path, runner=runner, envelope=_envelope(device_gpu_hours_ceiling=1.0))
+    items = _items()
+
+    evidence = binding(_recipe(item_ids=[i.item_id for i in items]), items)
+
+    assert evidence["status"] == STATUS_SUCCEEDED, evidence
+    assert evidence["actual_cost"]["device_measured"] is False
+    assert evidence["ceiling_enforcement"]["device"] == "admission:projected_plan"
+    assert evidence["budget_settlement"]["budget_compliant"] is True
+    assert any(
+        "device ceiling" in note and "not certified by settlement" in note
+        for note in evidence["notes"]
+    )
+
+
+def test_a_measured_device_figure_lets_the_device_ceiling_settle(tmp_path: Path):
+    """When a run does separate device time, the ceiling has post-run teeth."""
+    # 0.09 device measured by the training leg, ceiling 0.05; the projection
+    # (0.01) admitted the recipe, so only the measured cost can refuse it.
+    runner = _RecordingRunner(device_gpu_hours=0.09)
+    binding = _binding(
+        tmp_path, runner=runner, envelope=_envelope(device_gpu_hours_ceiling=0.05)
+    )
+    items = _items()
+
+    evidence = binding(_recipe(item_ids=[i.item_id for i in items]), items)
+
+    assert evidence["status"] == STATUS_REFUSED
+    assert evidence["refused_by"] == "budget_settlement"
+    assert evidence["actual_cost"]["device_measured"] is True
+    assert evidence["ceiling_enforcement"]["device"] == "settlement:measured"
+    assert any(
+        "ACTUAL_DEVICE_GPU_HOURS_EXCEEDED" in reason
+        for reason in evidence["budget_settlement"]["budget_failure_reasons"]
+    )
 
 
 def test_attempt_directories_are_never_reused(tmp_path: Path):

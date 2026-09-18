@@ -826,21 +826,71 @@ class SubprocessTrainingFn:
         # artifact and every measurement) instead of promoting a run that
         # blew its frozen envelope. The original projection is never
         # rewritten; the disagreement itself is the evidence.
+        #
+        # A ceiling may only be settled against the unit it was declared in.
+        # The trainer reports wall time; device time is reported only when a
+        # run actually separates it, and a wall-only summary leaves device
+        # as a placeholder. Handing that placeholder to settlement as if it
+        # were a measurement is what let a 0.0 device figure satisfy any
+        # device ceiling, so it is never handed over: when device was not
+        # measured the ceiling stays an admission constraint on the recipe's
+        # projected plan and settlement says so in the evidence.
         actual_wall = evidence.get("measured_gpu_hours")
         actual_eval = None
-        if isinstance(evidence.get("evaluation"), Mapping):
-            actual_eval = evidence["evaluation"].get("gpu_hours")
+        evaluation = evidence.get("evaluation")
+        if isinstance(evaluation, Mapping):
+            actual_eval = evaluation.get("gpu_hours")
+        summary_device = (
+            _as_float(dict(summary).get("device_gpu_hours"))
+            if isinstance(summary, Mapping)
+            else None
+        )
+        evaluation_device = (
+            _as_float(dict(evaluation).get("device_gpu_hours"))
+            if isinstance(evaluation, Mapping)
+            else None
+        )
+        evaluation_legs = (
+            int(evaluation.get("outcome_count") or 0)
+            if isinstance(evaluation, Mapping)
+            else 0
+        )
+        # Measured iff every leg that contributed cost also reported device
+        # time: a leg that did not makes the run's device total an estimate.
+        device_measured = summary_device is not None and (
+            evaluation_legs == 0 or evaluation_device is not None
+        )
         from .compute_cost import ComputeCost, settle_cost
 
-        actual_cost = ComputeCost.from_wall_only(
-            (actual_wall or 0.0) + (actual_eval or 0.0),
-            source=f"attempt:{evidence.get('experiment_id', 'unknown')}",
-        )
+        cost_source = f"attempt:{evidence.get('experiment_id', 'unknown')}"
+        if device_measured:
+            device_total = summary_device or 0.0
+            if evaluation_legs:
+                device_total += evaluation_device or 0.0
+            actual_cost = ComputeCost.measured(
+                device_gpu_hours=device_total,
+                wall_gpu_hours=(actual_wall or 0.0) + (actual_eval or 0.0),
+                source=cost_source,
+                measurement_method="trainer-reported device time",
+            )
+        else:
+            actual_cost = ComputeCost.from_wall_only(
+                (actual_wall or 0.0) + (actual_eval or 0.0),
+                source=cost_source,
+            )
         evidence["actual_cost"] = actual_cost.to_dict()
         evidence["projected_cost"] = {
             "projected_device_gpu_hours": float(recipe.projected_device_gpu_hours),
             "projected_wall_gpu_hours": float(recipe.projected_wall_gpu_hours),
         }
+        declared_device_ceiling = self.envelope.device_gpu_hours_ceiling
+        if not device_measured and declared_device_ceiling is not None:
+            evidence["notes"].append(
+                f"the envelope declares device ceiling "
+                f"{declared_device_ceiling:.6f} and this run reported no device "
+                "time: the ceiling was enforced against the recipe's projected "
+                "plan at admission and is not certified by settlement"
+            )
         settlement = settle_cost(
             actual=actual_cost,
             projected=ComputeCost(
@@ -848,11 +898,19 @@ class SubprocessTrainingFn:
                 float(recipe.projected_wall_gpu_hours),
                 source="recipe projection",
             ),
-            device_ceiling=self.envelope.device_gpu_hours_ceiling,
+            # Never settle a ceiling against the unit that was not measured.
+            device_ceiling=declared_device_ceiling if device_measured else None,
             wall_ceiling=self.envelope.wall_gpu_hours_ceiling,
             project_budget_wall_gpu_hours=self.envelope.project_gpu_hour_budget,
         )
         evidence["budget_settlement"] = settlement.to_dict()
+        evidence["ceiling_enforcement"] = {
+            "device": (
+                "settlement:measured" if device_measured else "admission:projected_plan"
+            ),
+            "wall": "settlement:measured",
+            "project": "settlement:measured_wall",
+        }
         if not settlement.compliant:
             reason = "; ".join(settlement.failure_reasons)
             evidence["notes"].append(
@@ -920,7 +978,12 @@ class SubprocessTrainingFn:
         from chowder.registry import RunRegistry
 
         if not registry_path.exists():
-            return {"outcome_count": 0, "metrics": {}, "gpu_hours": None}
+            return {
+                "outcome_count": 0,
+                "metrics": {},
+                "gpu_hours": None,
+                "device_gpu_hours": None,
+            }
         registry = RunRegistry(registry_path)
         try:
             outcomes = list(registry.list_evaluation_outcomes())
@@ -928,13 +991,25 @@ class SubprocessTrainingFn:
             registry.close()
         metrics: dict[str, float] = {}
         hours: float | None = None
+        device_hours: float | None = None
+        device_reported_everywhere = True
         for outcome in outcomes:
             metrics.update({str(k): float(v) for k, v in dict(outcome.metrics).items()})
             hours = float(outcome.gpu_hours) if hours is None else hours + float(outcome.gpu_hours)
+            reported = None
+            if isinstance(outcome.evidence, Mapping):
+                reported = _as_float(dict(outcome.evidence).get("device_gpu_hours"))
+            if reported is None:
+                # One scoring leg without device time makes the total an
+                # estimate, so the aggregate must not pass as a measurement.
+                device_reported_everywhere = False
+            else:
+                device_hours = reported if device_hours is None else device_hours + reported
         return {
             "outcome_count": len(outcomes),
             "metrics": metrics,
             "gpu_hours": hours,
+            "device_gpu_hours": device_hours if device_reported_everywhere else None,
             "run_ids": [str(outcome.run_id) for outcome in outcomes],
         }
 

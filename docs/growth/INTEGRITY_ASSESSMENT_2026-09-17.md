@@ -97,9 +97,14 @@ mutating the historical bytes or inventing a new generation version.
    as inconclusive. Identical copied arrays cannot manufacture paired
    significance because they can no longer enter as candidate samples.
 3. Settlement: after a successful train, compare actual measured cost against
-   the recipe's own projection, the envelope (device and wall separately),
-   and the project budget; overrun => `STATUS_REFUSED`-style failure with
+   the recipe's own projection, the envelope's wall and device ceilings, and
+   the project budget; overrun => `STATUS_REFUSED`-style failure with
    machine-readable `ACTUAL_*_EXCEEDED`, artifact and measurements preserved.
+   *Corrected 2026-09-18:* the device ceiling may only be settled against a
+   measured device figure. `ACTUAL_DEVICE_GPU_HOURS_UNMEASURED` refuses the
+   unmeasured case; a declared ceiling the run cannot measure stays an
+   admission constraint on the projected plan and is recorded as such by the
+   binding. See `DEVICE_CEILING_FAIL_CLOSED_ADDENDUM_2026-09-18.md`.
 4. `ComputeCost` (device/wall pair, validated finite/non-negative) +
    `CycleCostLedger` producing `cycle_compute_accounting.json`: per-recipe
    device/wall, evaluation cost, failed attempts, baseline references at zero

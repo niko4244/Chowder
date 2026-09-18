@@ -40,6 +40,10 @@ RESOURCE_OVERRUN = "RESOURCE_OVERRUN"
 ACTUAL_DEVICE_GPU_HOURS_EXCEEDED = "ACTUAL_DEVICE_GPU_HOURS_EXCEEDED"
 ACTUAL_WALL_GPU_HOURS_EXCEEDED = "ACTUAL_WALL_GPU_HOURS_EXCEEDED"
 ACTUAL_EXCEEDS_PROJECTION = "ACTUAL_EXCEEDS_PROJECTION"
+#: A declared device ceiling was asked to be settled against a device figure
+#: that was never measured. Zero is not evidence of zero: settling it would
+#: certify compliance the run did not demonstrate.
+ACTUAL_DEVICE_GPU_HOURS_UNMEASURED = "ACTUAL_DEVICE_GPU_HOURS_UNMEASURED"
 
 
 def _checked(value: float, label: str) -> float:
@@ -68,10 +72,20 @@ class ComputeCost:
     source: str = "measured"
     incremental: bool = True
     measurement_method: str = ""
+    #: Whether ``device_gpu_hours`` is a *measurement* or just the absence of
+    #: one. Defaults to ``False``: a caller that never separated device time
+    #: has an unmeasured zero, and settlement must not read that as "device
+    #: free". A device ceiling may only be settled against a cost whose device
+    #: figure was measured -- zero measured is fine, zero unmeasured refuses.
+    device_measured: bool = False
 
     def __post_init__(self) -> None:
         _checked(self.device_gpu_hours, "device_gpu_hours")
         _checked(self.wall_gpu_hours, "wall_gpu_hours")
+        if not isinstance(self.device_measured, bool):
+            raise ValueError(
+                f"device_measured must be a bool, got {self.device_measured!r}"
+            )
         if not self.source.strip():
             raise ValueError("ComputeCost.source must name where the cost came from")
 
@@ -80,20 +94,40 @@ class ComputeCost:
         return cls(0.0, 0.0, source=source, incremental=incremental, measurement_method=measurement_method)
 
     @classmethod
+    def measured(
+        cls,
+        *,
+        device_gpu_hours: float,
+        wall_gpu_hours: float,
+        source: str,
+        measurement_method: str = "",
+    ) -> "ComputeCost":
+        """A cost whose device figure really was measured (zero included)."""
+        return cls(
+            device_gpu_hours,
+            wall_gpu_hours,
+            source=source,
+            measurement_method=measurement_method,
+            device_measured=True,
+        )
+
+    @classmethod
     def from_wall_only(cls, wall_gpu_hours: float, *, source: str) -> "ComputeCost":
         """Wrap a wall-charged summary number (the trainer reports wall).
 
         The trainer's ``gpu_hours`` summary field is wall-charged (it counts
         elapsed process time including load and streaming). Device time is
         unknown at that boundary and recorded as 0.0 rather than guessed;
-        consumers must treat device=0 as "device not separated", never as
-        "device free".
+        ``device_measured`` stays ``False`` so no consumer can mistake the
+        placeholder for "device free" -- :func:`settle_cost` refuses to settle
+        a device ceiling against it.
         """
         return cls(
             0.0,
             _checked(wall_gpu_hours, "wall_gpu_hours"),
             source=source,
             measurement_method="wall-charged trainer summary; device time not separated",
+            device_measured=False,
         )
 
     def plus(self, other: "ComputeCost") -> "ComputeCost":
@@ -102,6 +136,10 @@ class ComputeCost:
             self.wall_gpu_hours + other.wall_gpu_hours,
             source=f"{self.source}+{other.source}",
             measurement_method=self.measurement_method or other.measurement_method,
+            # A sum carries a device measurement only if every part it is made
+            # of was measured: one unseparated contributor makes the total an
+            # estimate, not a measurement.
+            device_measured=self.device_measured and other.device_measured,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -111,6 +149,7 @@ class ComputeCost:
             "source": self.source,
             "incremental": self.incremental,
             "measurement_method": self.measurement_method,
+            "device_measured": self.device_measured,
         }
 
     @classmethod
@@ -121,6 +160,10 @@ class ComputeCost:
             source=str(data.get("source", "unspecified")),
             incremental=bool(data.get("incremental", True)),
             measurement_method=str(data.get("measurement_method", "")),
+            # Absent in a record written before the field existed, and absent
+            # means unmeasured -- a stored row does not become a device
+            # measurement by being read back.
+            device_measured=bool(data.get("device_measured", False)),
         )
 
 
@@ -151,11 +194,27 @@ def settle_cost(
     projection-vs-actual comparison at the declared tolerance. Every breach
     is reported with its machine-readable identifier; none is downgraded to
     a warning.
+
+    A device ceiling is settled only against a *measured* device figure.
+    Wall-charged summaries leave device time unseparated (``0.0``), and that
+    placeholder must never be read as "device free": settling it would
+    certify compliance the run never demonstrated, so a declared device
+    ceiling with an unmeasured device figure fails closed with
+    :data:`ACTUAL_DEVICE_GPU_HOURS_UNMEASURED`. Zero is still a legitimate
+    measurement -- ``ComputeCost.measured(device_gpu_hours=0.0, ...)`` passes
+    a ceiling, because that zero was observed.
     """
     if projection_tolerance < 0.0:
         raise ValueError("projection_tolerance must be non-negative")
     reasons: list[str] = []
-    if device_ceiling is not None and actual.device_gpu_hours > device_ceiling + 1e-12:
+    if device_ceiling is not None and not actual.device_measured:
+        reasons.append(
+            f"{ACTUAL_DEVICE_GPU_HOURS_UNMEASURED}: device ceiling "
+            f"{device_ceiling:.6f} cannot be settled against device "
+            f"{actual.device_gpu_hours:.6f}, which was not measured "
+            f"(source {actual.source!r}); unmeasured is not compliance"
+        )
+    elif device_ceiling is not None and actual.device_gpu_hours > device_ceiling + 1e-12:
         reasons.append(
             f"{ACTUAL_DEVICE_GPU_HOURS_EXCEEDED}: actual device "
             f"{actual.device_gpu_hours:.6f} > ceiling {device_ceiling:.6f}"
@@ -239,28 +298,34 @@ class CycleCostLedger:
 
     def total(self, *, incremental_only: bool = True) -> ComputeCost:
         total = ComputeCost.zero(source="total")
+        device_measured = True
         for entry in self.entries:
             cost = entry.cost
             if incremental_only and not cost.incremental:
                 continue
             total = total.plus(cost)
+            device_measured = device_measured and cost.device_measured
         return ComputeCost(
             total.device_gpu_hours,
             total.wall_gpu_hours,
             source="total",
             measurement_method="sum of ledger entries",
+            device_measured=device_measured,
         )
 
     def total_for_recipe(self, recipe_id: str) -> ComputeCost:
         total = ComputeCost.zero(source=f"recipe:{recipe_id}")
+        device_measured = True
         for entry in self.entries:
             if entry.recipe_id == recipe_id:
                 total = total.plus(entry.cost)
+                device_measured = device_measured and entry.cost.device_measured
         return ComputeCost(
             total.device_gpu_hours,
             total.wall_gpu_hours,
             source=f"recipe:{recipe_id}",
             measurement_method="sum of recipe entries",
+            device_measured=device_measured,
         )
 
     def render(self) -> dict[str, Any]:
