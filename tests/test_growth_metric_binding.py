@@ -1026,3 +1026,30 @@ def test_the_cycle_passes_its_reliability_set_into_promotion(tmp_path: Path):
     assert gated.promotion_input.reliability_benchmarks == (RELIABILITY_ID,)
     assert gated.decision.checks["reliability"] == "violated"
     assert gated.decision.verdict == "REJECTED"
+
+
+def test_from_manifest_refuses_benchmarks_section_instead_of_whole_manifest() -> None:
+    """Passing the manifest's `benchmarks` section must refuse, not degrade.
+
+    The section-shaped mistake silently built a binder with no contamination
+    verdicts: every benchmark bound UNKNOWN and promotion reported an honest
+    but *misleading* inconclusive. Fail closed at the call site instead.
+    """
+    section = {
+        "math500@2024-04": {"status": "CLEAN"},
+        "mgsm@2022-11": {"status": "CLEAN"},
+    }
+    with pytest.raises(PromotionBindingError) as excinfo:
+        MetricBinder.from_manifest(_registry(), section)
+    assert "whole contamination manifest" in str(excinfo.value)
+
+
+def test_from_manifest_accepts_whole_manifest() -> None:
+    """The documented contract: whole file in, CLEAN verdicts bound."""
+    manifest = {
+        "benchmarks": {"math500@2024-04": {"status": "CLEAN"}},
+        "policy": "refuse",
+        "training_sources": {},
+    }
+    binder = MetricBinder.from_manifest(_registry(), manifest)
+    assert binder.contamination_status("math500@2024-04") == "CLEAN"
