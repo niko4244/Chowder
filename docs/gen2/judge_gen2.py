@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
 """Frozen mechanical judge for the gen2 response-surface-compliance cycle.
 
-Frozen with ``docs/quals/GEN2_PREREG_2026-09-17.md`` and its amendment
-``docs/quals/GEN2_PREREG_AMENDMENT1_2026-09-18.md``. Thresholds may not
-change after candidate results are visible. Reads the run's durable
-artifacts read-only and emits one verdict table over the branch rules.
+Frozen with ``docs/quals/GEN2_PREREG_2026-09-17.md`` and its amendments
+``GEN2_PREREG_AMENDMENT1/2/3_2026-09-18.md``. Thresholds may not change after
+candidate results are visible. Reads the run's durable artifacts read-only and
+emits one verdict table over the branch rules.
+
+Evidence is verified, never assumed. Two rules follow from that, and both are
+fail-closed:
+
+* the contamination evidence is the artifact the *campaign pinned* --
+  ``contamination_manifest_path``. The judge does not read a file that merely
+  sits in the run root, and it will not accept one that disagrees with the pin:
+  an unpinned artifact cannot certify anything (T12/T18);
+* every protected measurement is bound to bytes that exist. A slice row must
+  name its raw artifact *and* the artifact's sha256, and the judge recomputes
+  that digest from the file (T11). A row whose samples do not add up to its own
+  aggregate, or that names a file which is not there, is refused rather than
+  certified.
 
 The judge owns the *frozen policy*: the benchmark set, the thresholds, the
 branch rules, and how they compose. It deliberately owns no second
@@ -39,13 +52,15 @@ Usage:
     python docs/gen2/judge_gen2.py <run_root>
 
 where ``<run_root>`` holds the three arm artifacts, plus
-``cycle_compute_accounting.json``, ``gen2_contamination_manifest.json`` and
-``chosen_candidate.json``.
+``cycle_compute_accounting.json`` and ``chosen_candidate.json``, and the
+contamination manifest the campaign pinned (``contamination_manifest_path``),
+copied in verbatim by the run.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -93,6 +108,24 @@ PROTECTED_SEED = 1234
 PROTECTED_SHUFFLE = False
 PROTECTED_DECODING = {"temperature": 0.0, "do_sample": False, "max_new_tokens": 512}
 PROTECTED_PROMPT_POLICY = "chat_template"
+
+#: The shape a measurement's declared artifact digest must have before the
+#: judge will recompute it, and the tolerance for "the aggregate *is* the mean
+#: of the per-sample values".
+ARTIFACT_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+SAMPLE_MEAN_TOLERANCE = 1e-6
+
+#: Named reasons, so a refusal says which verification failed rather than only
+#: that something did.
+CONTAMINATION_PIN_ABSENT = "CONTAMINATION_PIN_ABSENT"
+CONTAMINATION_PIN_MISSING = "CONTAMINATION_PIN_MISSING"
+CONTAMINATION_EVIDENCE_NOT_IN_RUN_ROOT = "CONTAMINATION_EVIDENCE_NOT_IN_RUN_ROOT"
+CONTAMINATION_EVIDENCE_NOT_PINNED = "CONTAMINATION_EVIDENCE_NOT_PINNED"
+MEASUREMENT_ARTIFACT_MISSING = "MEASUREMENT_ARTIFACT_MISSING"
+MEASUREMENT_ARTIFACT_ESCAPES_RUN_ROOT = "MEASUREMENT_ARTIFACT_ESCAPES_RUN_ROOT"
+MEASUREMENT_DIGEST_ABSENT = "MEASUREMENT_DIGEST_ABSENT"
+MEASUREMENT_DIGEST_MISMATCH = "MEASUREMENT_DIGEST_MISMATCH"
+MEASUREMENT_SAMPLES_INCONSISTENT = "MEASUREMENT_SAMPLES_INCONSISTENT"
 
 #: Paired-decision constants for the target gates: the minimum effect on the
 #: rate delta, and the strict-improvement count the absolute path requires.
@@ -335,10 +368,40 @@ def _target_gate(
     return FAIL, detail
 
 
+def _measurement_artifact(run_root: Path, ref: str) -> tuple[Path | None, str]:
+    """Resolve a row's ``raw_artifact_ref``, or say why it cannot be verified.
+
+    A relative reference is resolved against the run root -- the evidence set a
+    run root carries is the evidence the judge reads -- and one that climbs out
+    of it is refused rather than followed. Nothing is created, guessed or
+    located elsewhere: either the named bytes are there, or the measurement
+    cannot be verified.
+    """
+    path = Path(ref)
+    if not path.is_absolute():
+        if ".." in path.parts:
+            return None, f"{MEASUREMENT_ARTIFACT_ESCAPES_RUN_ROOT}: {ref!r} points outside the run root"
+        path = run_root / path
+    if not path.exists():
+        return None, (
+            f"{MEASUREMENT_ARTIFACT_MISSING}: raw_artifact_ref {ref!r} does not exist, "
+            "so the measurement cannot be verified against its own bytes"
+        )
+    return path, ""
+
+
 def _protocol_problems(
-    run: BenchmarkRun, *, field: str = "metadata"
+    run: BenchmarkRun, *, run_root: Path, field: str = "metadata"
 ) -> tuple[str, ...]:
-    """Every way a protected slice fails to match the frozen protocol."""
+    """Every way a protected slice fails to match the frozen protocol.
+
+    Beyond the frozen protocol fields, this verifies that the row *is* the
+    measurement it claims: the raw artifact it names must exist, carry a
+    declared sha256 that the judge recomputes over the real bytes, and its
+    per-sample evidence must add up to the aggregate score. A row that names no
+    existing artifact, declares no digest, or reports a score its own samples do
+    not support is refused -- an unhashed or empty measurement cannot certify.
+    """
     metadata = run.metadata or {}
     problems: list[str] = []
     if run.n_samples != PROTECTED_N_SAMPLES:
@@ -364,8 +427,57 @@ def _protocol_problems(
         )
     if not isinstance(run.score, (int, float)) or isinstance(run.score, bool):
         problems.append("score is not a measured number")
+    problems.extend(_evidence_problems(run, run_root=run_root, metadata=metadata))
+    return tuple(problems)
+
+
+def _evidence_problems(
+    run: BenchmarkRun, *, run_root: Path, metadata: Mapping[str, Any]
+) -> tuple[str, ...]:
+    """The measurement-verification half of the protocol check."""
+    problems: list[str] = []
     if not run.raw_artifact_ref:
         problems.append("raw_artifact_ref missing (no underlying evidence named)")
+    else:
+        artifact, reason = _measurement_artifact(run_root, run.raw_artifact_ref)
+        if artifact is None:
+            problems.append(reason)
+        else:
+            declared = metadata.get("artifact_sha256")
+            if not isinstance(declared, str) or not ARTIFACT_SHA256_PATTERN.fullmatch(declared):
+                problems.append(
+                    f"{MEASUREMENT_DIGEST_ABSENT}: artifact_sha256 "
+                    f"{declared!r} is not a 64-character sha256, so the row is not "
+                    "bound to the bytes it names"
+                )
+            else:
+                try:
+                    actual = _digest_of(artifact)
+                except OSError as error:  # unreadable is unverifiable
+                    problems.append(
+                        f"{MEASUREMENT_ARTIFACT_MISSING}: raw artifact "
+                        f"{run.raw_artifact_ref!r} cannot be hashed ({error})"
+                    )
+                else:
+                    if actual != declared:
+                        problems.append(
+                            f"{MEASUREMENT_DIGEST_MISMATCH}: raw artifact "
+                            f"{run.raw_artifact_ref!r} hashes to {actual}, the row "
+                            f"declares {declared}"
+                        )
+    samples = tuple(run.per_sample_scores)
+    if len(samples) != run.n_samples:
+        problems.append(
+            f"{MEASUREMENT_SAMPLES_INCONSISTENT}: per_sample_scores carries "
+            f"{len(samples)} values for n_samples={run.n_samples}"
+        )
+    elif samples and isinstance(run.score, (int, float)) and not isinstance(run.score, bool):
+        mean = sum(float(sample) for sample in samples) / len(samples)
+        if abs(mean - float(run.score)) > SAMPLE_MEAN_TOLERANCE:
+            problems.append(
+                f"{MEASUREMENT_SAMPLES_INCONSISTENT}: score {run.score} is not the "
+                f"mean of per_sample_scores ({mean:.6f})"
+            )
     return tuple(problems)
 
 
@@ -374,6 +486,7 @@ def _slice_status(
     qualified_id: str,
     *,
     label: str,
+    run_root: Path,
 ) -> tuple[str, Any, str]:
     """Locate one required slice in one arm, with its provenance and protocol."""
     if arm is None:
@@ -392,7 +505,7 @@ def _slice_status(
                 f"{arm.expected_origin} refused"
             )
         return UNKNOWN, None, f"{label} arm has no {qualified_id} measurement"
-    problems = _protocol_problems(run)
+    problems = _protocol_problems(run, run_root=run_root)
     if problems:
         return FAIL, run, f"{label} protocol mismatch: " + "; ".join(problems)
     return PASS, run, f"{label} {qualified_id} = {run.score:.4f} ({run.n_samples} items)"
@@ -430,7 +543,7 @@ def judge(run_root: Path) -> int:
     candidate = arms["candidate"]
 
     _instrument_gates(verdict, candidate, arms["parent"])
-    _protected_gates(verdict, arms, campaign)
+    _protected_gates(verdict, arms, campaign, run_root=run_root)
     _contamination_gate(verdict, run_root, campaign)
     _settlement_gates(verdict, run_root, campaign)
     _identity_gate(verdict, run_root)
@@ -446,7 +559,7 @@ def judge(run_root: Path) -> int:
         INFO,
         "frozen policy",
         INFO,
-        "docs/quals/GEN2_PREREG_2026-09-17.md + GEN2_PREREG_AMENDMENT1_2026-09-18.md",
+        "docs/quals/GEN2_PREREG_2026-09-17.md + GEN2_PREREG_AMENDMENT1/2/3_2026-09-18.md",
     )
 
     final = branch_verdict(verdict)
@@ -672,7 +785,11 @@ def _paired_target_gate(
 
 
 def _protected_gates(
-    verdict: Verdict, arms: Mapping[str, Arm | None], campaign: CampaignManifest | None
+    verdict: Verdict,
+    arms: Mapping[str, Arm | None],
+    campaign: CampaignManifest | None,
+    *,
+    run_root: Path,
 ) -> None:
     required = tuple(campaign.protected_benchmarks) if campaign else REQUIRED_PROTECTED
     candidate = arms["candidate"]
@@ -688,12 +805,14 @@ def _protected_gates(
         # parent arm is a specific, adjudicable state rather than a blanket
         # refusal of every protected row.
         for qualified_id in required:
-            status, run, detail = _slice_status(candidate, qualified_id, label="candidate")
+            status, run, detail = _slice_status(
+                candidate, qualified_id, label="candidate", run_root=run_root
+            )
             verdict.add("T11", f"candidate {qualified_id} measured + protocol-exact", status, detail)
             if status != PASS or parent is None:
                 continue
             parent_status, parent_run, parent_detail = _slice_status(
-                parent, qualified_id, label="parent"
+                parent, qualified_id, label="parent", run_root=run_root
             )
             if parent_status != PASS:
                 continue
@@ -721,7 +840,10 @@ def _protected_gates(
             f"undeclared protected rows: {undeclared}" if undeclared else "none",
         )
 
-    _ancestor_gates(verdict, required, candidate=candidate, parent=parent, ancestor=ancestor)
+    _ancestor_gates(
+        verdict, required, candidate=candidate, parent=parent, ancestor=ancestor,
+        run_root=run_root,
+    )
 
 
 def _ancestor_gates(
@@ -731,6 +853,7 @@ def _ancestor_gates(
     candidate: Arm | None,
     parent: Arm | None,
     ancestor: Arm | None,
+    run_root: Path,
 ) -> None:
     """Protection against the last *trusted* generation, not just the parent.
 
@@ -758,10 +881,10 @@ def _ancestor_gates(
         unresolved = False
         for qualified_id in required:
             candidate_status, candidate_run, candidate_detail = _slice_status(
-                candidate, qualified_id, label="candidate"
+                candidate, qualified_id, label="candidate", run_root=run_root
             )
             ancestor_status, ancestor_run, ancestor_detail = _slice_status(
-                ancestor, qualified_id, label="ancestor"
+                ancestor, qualified_id, label="ancestor", run_root=run_root
             )
             if candidate_status != PASS or ancestor_status != PASS:
                 unresolved = True
@@ -793,7 +916,7 @@ def _ancestor_gates(
     trusted_rows = [row for row in verdict.thresholds() if row[0] == "T16"]
     trusted_ok = bool(trusted_rows) and trusted_rows[0][2] == PASS
     parent_slice_evidence = parent is not None and any(
-        _slice_status(parent, qualified_id, label="parent")[0] == PASS
+        _slice_status(parent, qualified_id, label="parent", run_root=run_root)[0] == PASS
         for qualified_id in required
     )
     if not parent_slice_evidence:
@@ -828,10 +951,10 @@ def _ancestor_gates(
     parent_branch_broken = False
     for qualified_id in required:
         candidate_status, candidate_run, candidate_detail = _slice_status(
-            candidate, qualified_id, label="candidate"
+            candidate, qualified_id, label="candidate", run_root=run_root
         )
         parent_status, parent_run, parent_detail = _slice_status(
-            parent, qualified_id, label="parent"
+            parent, qualified_id, label="parent", run_root=run_root
         )
         if candidate_status != PASS or parent_status != PASS:
             unresolved = True
@@ -866,14 +989,96 @@ def _ancestor_gates(
 def _contamination_gate(
     verdict: Verdict, run_root: Path, campaign: CampaignManifest | None
 ) -> None:
-    path = run_root / "gen2_contamination_manifest.json"
-    document = _load_json(path)
-    if not isinstance(document, Mapping):
+    """Contamination evidence is the artifact the campaign *pinned*.
+
+    The judged evidence is ``contamination_manifest_path``, not whatever file
+    happens to sit in the run root. A manifest that declines to pin one, a pin
+    that is not there, and a run-root copy that disagrees with the pin are all
+    refusals (T12/T18): an unpinned artifact cannot certify a release, and a
+    campaign that pins known contamination must not be certified by a clean file
+    that merely shares the run root's naming.
+    """
+    threshold = "T12"
+    name = "contamination CLEAN on the frozen evaluated set"
+    pin_row = "judged contamination evidence is the pinned artifact"
+    declared = str(campaign.contamination_manifest_path) if campaign is not None else ""
+    if not declared:
+        detail = (
+            f"{CONTAMINATION_PIN_ABSENT}: the campaign declaration pins no "
+            "contamination_manifest_path, so the judged contamination evidence "
+            "cannot be identified"
+        )
+        verdict.add(threshold, name, UNKNOWN, detail)
+        verdict.add("T18", pin_row, UNKNOWN, detail)
         verdict.add(
-            "T12", "contamination CLEAN on the frozen evaluated set", UNKNOWN,
-            "gen2_contamination_manifest.json missing or unreadable",
+            threshold, "training-source contamination CLEAN", UNKNOWN,
+            "no pinned contamination manifest to read, so no curriculum was proven non-leaking",
         )
         return
+    pin = Path(declared)
+    if not pin.is_absolute():
+        pin = run_root / pin
+    if not pin.is_file():
+        detail = (
+            f"{CONTAMINATION_PIN_MISSING}: the campaign pins "
+            f"{str(pin)!r}, which does not exist, so the contamination evidence it "
+            "declares cannot be verified"
+        )
+        verdict.add(threshold, name, UNKNOWN, detail)
+        verdict.add("T18", pin_row, UNKNOWN, detail)
+        verdict.add(
+            threshold, "training-source contamination CLEAN", UNKNOWN,
+            "the pinned contamination manifest is missing, so no curriculum was proven non-leaking",
+        )
+        return
+    document = _load_json(pin)
+    if not isinstance(document, Mapping):
+        detail = (
+            f"{CONTAMINATION_PIN_MISSING}: the pinned artifact {str(pin)!r} is not a "
+            "JSON object, so it carries no contamination verdicts"
+        )
+        verdict.add(threshold, name, UNKNOWN, detail)
+        verdict.add("T18", pin_row, UNKNOWN, detail)
+        verdict.add(
+            threshold, "training-source contamination CLEAN", UNKNOWN,
+            "the pinned contamination manifest is unreadable, so no curriculum was proven non-leaking",
+        )
+        return
+
+    # The run root must carry that very evidence, not a different file with the
+    # same name: this is what makes the judged root and the declared evidence the
+    # same object.
+    carried = run_root / "gen2_contamination_manifest.json"
+    if not carried.is_file():
+        detail = (
+            f"{CONTAMINATION_EVIDENCE_NOT_IN_RUN_ROOT}: the run root carries no "
+            "gen2_contamination_manifest.json, so the judged evidence set is "
+            "incomplete"
+        )
+        verdict.add(threshold, name, UNKNOWN, detail)
+        verdict.add("T18", pin_row, UNKNOWN, detail)
+        verdict.add(
+            threshold, "training-source contamination CLEAN", UNKNOWN,
+            "the pinned contamination evidence is absent from the run root",
+        )
+        return
+    if sha256_file(carried) != sha256_file(pin):
+        detail = (
+            f"{CONTAMINATION_EVIDENCE_NOT_PINNED}: the run root's "
+            f"gen2_contamination_manifest.json is not the artifact the campaign "
+            f"pinned ({str(pin)!r}): the two documents differ"
+        )
+        verdict.add("T18", pin_row, FAIL, detail)
+        verdict.add(threshold, name, FAIL, detail)
+        verdict.add(
+            threshold, "training-source contamination CLEAN", FAIL,
+            "the judged contamination evidence is not the pinned evidence",
+        )
+        return
+    verdict.add(
+        "T18", pin_row, PASS,
+        f"the judged contamination evidence is {str(pin)!r}, byte-identical to the pin",
+    )
 
     section = document.get("benchmarks", {})
     # Production owns the interpretation of absence: an unlisted benchmark

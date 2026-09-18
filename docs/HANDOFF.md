@@ -69,6 +69,23 @@ different protocol, and not the gen1 parent arm. With the arm declared, T16 is
 decidable; with it absent the run writes no arm and stays INCONCLUSIVE, which
 is why the declaration had to be written before compute.
 
+`GEN2_PREREG_AMENDMENT3_2026-09-18.md` (also before any compute) closes the
+last two places where the judge checked a declaration instead of evidence. The
+contamination gate now reads the artifact the campaign **pinned** —
+`contamination_manifest_path` — and never a file that merely sits in the run
+root: no pin, a missing pin or the pin absent from the run root is UNKNOWN, and
+a run-root copy that differs from the pin by a byte is FAIL
+(`CONTAMINATION_EVIDENCE_NOT_PINNED`, verdict TAINTED). Gate `T18` records that
+identity check. Every protected measurement must now name an artifact that
+exists and declare `metadata.artifact_sha256`, which the judge recomputes over
+those bytes with the production digest helper, and its `per_sample_scores` must
+be exactly `n_samples` values whose mean is the row's score — so a row naming a
+file that is not there, carrying no digest, or declaring 16 samples with none of
+them cannot certify. The runner carries the named measurements into the run root
+(relative refs, resolved beside the report that declares them; a missing one or
+two arms claiming one path with different content refuse the run before any
+judged artifact is written). No threshold, set, budget or stopping rule moved.
+
 Earlier state for the record (2026-09-17): the first real Model N → N+1
 cycle executed and was recorded PROMOTED at the time
 (`docs/quals/GEN1_RESULT_2026-09-17.md`; ledger record `gen1` beside

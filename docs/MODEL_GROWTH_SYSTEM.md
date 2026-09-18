@@ -136,7 +136,7 @@ chowder growth campaign settle FILE     # re-settle a campaign from its accounti
 
 The frozen gen2 judge (`docs/gen2/judge_gen2.py`, frozen with
 `docs/quals/GEN2_PREREG_2026-09-17.md` and
-`GEN2_PREREG_AMENDMENT1_2026-09-18.md`) owns the frozen policy — benchmark
+`GEN2_PREREG_AMENDMENT1/2/3_2026-09-18.md`) owns the frozen policy — benchmark
 set, thresholds, branch rules, verdict composition — and no second
 implementation of anything production already decides. It hashes artifacts
 with `training_binding.directory_digest`, settles resources with
@@ -175,6 +175,22 @@ untouched dense gen0 parent with `MEASURED_PARENT` rows, referenced at zero
 incremental cost. Absent, off-protocol or wrongly originated, T16 stays
 UNKNOWN/FAIL and the candidate cannot be promoted — an unresolved parent never
 becomes the protection baseline by default.
+
+Where a gate could have been satisfied by a document rather than by the
+measurement it claims, `GEN2_PREREG_AMENDMENT3_2026-09-18.md` states the
+verification rule. Contamination is judged from the artifact the campaign
+**pinned** (`contamination_manifest_path`): no pin, a missing pin, or the pin
+absent from the run root is UNKNOWN — the run root's own file is never a
+fallback — and a run-root copy that differs from the pin is FAIL/T18
+(`CONTAMINATION_EVIDENCE_NOT_PINNED`), so a clean file cannot certify a campaign
+that pinned known contamination. Each protected measurement must name an
+existing raw artifact (`raw_artifact_ref`, relative to the run root or
+absolute), declare its sha256 in `metadata.artifact_sha256`, and carry exactly
+`n_samples` per-sample values whose mean is its own score; the digest is
+recomputed over the real bytes with the production helper, and the runner
+carries those artifacts into the run root so the evidence set is self-contained.
+Missing, unhashed, empty or self-contradictory measurement evidence refuses
+(T11) rather than certifying.
 
 ## Campaign manifests: preregistration as configuration
 

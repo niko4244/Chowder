@@ -540,7 +540,7 @@ def write_certification_evidence(
     rows cannot be parsed) never leaves a half-materialised evidence set for the
     judge to read.
     """
-    arms: list[tuple[str, Path]] = []
+    arms: list[tuple[str, Path, EvalReport]] = []
     for arm, field_name in _EVIDENCE_ARM_SOURCES.items():
         declared = str(getattr(manifest, field_name))
         if not declared:
@@ -550,8 +550,8 @@ def write_certification_evidence(
         )
         # An unreadable report must refuse here rather than reach the judge as an
         # arm whose rows cannot be parsed.
-        EvalReport.load(source)
-        arms.append((arm, source))
+        arms.append((arm, source, EvalReport.load(source)))
+    artifacts = _measurement_artifacts(arms)
     contamination: Path | None = None
     if manifest.contamination_manifest_path:
         contamination = _require_path(
@@ -566,10 +566,18 @@ def write_certification_evidence(
             )
 
     written: list[str] = []
-    for arm, source in arms:
+    for arm, source, _report in arms:
         destination = root / CERTIFICATION_EVIDENCE[arm]
         destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
         written.append(destination.name)
+
+    # The measurements those rows declare, so the run root carries the bytes
+    # each row's digest is computed over.
+    for origin, relative in artifacts:
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(origin.read_bytes())
+        written.append(str(relative))
 
     if contamination is not None:
         destination = root / CERTIFICATION_EVIDENCE["contamination"]
@@ -584,6 +592,53 @@ def write_certification_evidence(
         )
         written.append(destination.name)
     return tuple(written)
+
+
+def _measurement_artifacts(
+    arms: Sequence[tuple[str, Path, EvalReport]],
+) -> list[tuple[Path, Path]]:
+    """Every measurement artifact the arms' rows name, as (origin, relative) pairs.
+
+    A row that names an artifact is bound to it: the judge recomputes the digest
+    the row declares over those bytes, so a run root that lacks them carries a
+    measurement nobody can verify. A reference that resolves to nothing refuses
+    the run -- evidence is not assembled around a missing artifact -- and two arms
+    that name the same relative path with different content refuse too, because
+    one run root cannot be both.
+    """
+    artifacts: list[tuple[Path, Path]] = []
+    seen: dict[Path, Path] = {}
+    for arm, source, report in arms:
+        for run in report.runs:
+            reference = str(run.raw_artifact_ref or "")
+            if not reference:
+                continue
+            relative = Path(reference)
+            if relative.is_absolute():
+                # The row names an absolute artifact; the judge hashes it there.
+                continue
+            if ".." in relative.parts:
+                raise CampaignRunRefusal(
+                    f"the {arm} arm's {run.benchmark_qualified_id} row names raw "
+                    f"artifact {reference!r}, which points outside the run root; the "
+                    "judged evidence set cannot follow it"
+                )
+            origin = source.parent / relative
+            if not origin.is_file():
+                raise CampaignRunRefusal(
+                    f"the {arm} arm's {run.benchmark_qualified_id} row names raw "
+                    f"artifact {reference!r}, which does not exist next to {source}, "
+                    "so the measurement it declares cannot be verified"
+                )
+            previous = seen.get(relative)
+            if previous is not None and previous.read_bytes() != origin.read_bytes():
+                raise CampaignRunRefusal(
+                    f"two arms name {reference!r} with different content, so one run "
+                    "root cannot carry both measurements as verifiable evidence"
+                )
+            seen[relative] = origin
+            artifacts.append((origin, relative))
+    return artifacts
 
 
 def _chosen_candidate_document(
