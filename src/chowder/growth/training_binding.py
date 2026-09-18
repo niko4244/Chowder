@@ -311,6 +311,17 @@ class SubprocessTrainingFn:
     # the TrainingFn contract
     # ------------------------------------------------------------------
 
+    def admit(self, recipe: TrainingRecipe) -> tuple[str, str] | None:
+        """Whether this executor may start the recipe, before any compute.
+
+        The public face of the preflight the run itself applies first, exposed
+        so an orchestrator (the campaign runner) can report admission without
+        re-implementing the comparison: projected cost is checked here, in one
+        place, against the envelope built from the preregistered ceilings.
+        Returns ``None`` when the recipe is admitted, else ``(kind, reason)``.
+        """
+        return self._check_cost(recipe)
+
     def __call__(
         self, recipe: TrainingRecipe, items: Sequence[CurriculumItem]
     ) -> Mapping[str, Any]:

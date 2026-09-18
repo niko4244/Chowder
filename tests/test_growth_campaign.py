@@ -15,10 +15,12 @@ from pathlib import Path
 import pytest
 
 from chowder.growth.campaign import (
+    PROMOTION_POLICY_VERSION,
     CampaignManifest,
     CampaignManifestError,
-    admit_recipe,
     settle_campaign,
+    stops_on_admission_refusal,
+    stops_on_campaign_overrun,
 )
 from chowder.growth.compute_cost import (
     ACTUAL_DEVICE_GPU_HOURS_UNMEASURED,
@@ -86,20 +88,52 @@ def test_bad_digest_refuses() -> None:
         CampaignManifest.from_mapping(_manifest_doc(parent_model_digest="abc"))
 
 
-def test_admission_refuses_over_projection_before_compute() -> None:
-    manifest = CampaignManifest.from_mapping(_manifest_doc())
-    with pytest.raises(CampaignManifestError, match="admission refused"):
-        admit_recipe(
-            manifest,
-            recipe_id="recipe-a",
-            projected=ComputeCost(0.0, 0.90, source="recipe projection"),
-        )
-    # Under ceiling: admitted.
-    admit_recipe(
-        manifest,
-        recipe_id="recipe-a",
-        projected=ComputeCost(0.20, 0.70, source="recipe projection"),
+def test_a_stopping_rule_the_runner_cannot_act_on_refuses() -> None:
+    doc = _manifest_doc(stopping_rules=["stop when the vibe changes"])
+    with pytest.raises(CampaignManifestError, match="stopping rule"):
+        CampaignManifest.from_mapping(doc)
+
+
+def test_the_declared_stopping_rules_map_to_two_real_behaviors() -> None:
+    admission, overrun = CampaignManifest.from_mapping(_manifest_doc()).stopping_rules
+    assert stops_on_admission_refusal((admission,))
+    assert not stops_on_admission_refusal(("stop on campaign overrun",))
+    assert stops_on_campaign_overrun((overrun,))
+    assert not stops_on_campaign_overrun(("stop on admission refusal",))
+    # The historical spellings stay valid and mean the overrun behavior, so a
+    # manifest already on disk keeps its declaration without a rewrite.
+    assert stops_on_campaign_overrun(
+        ("stop on campaign settlement overrun (artifact preserved)",)
     )
+
+
+def test_a_promotion_policy_this_code_cannot_execute_refuses() -> None:
+    doc = _manifest_doc(promotion_policy_version="promotion-policy-v9-imagined")
+    with pytest.raises(CampaignManifestError, match="implemented policy"):
+        CampaignManifest.from_mapping(doc)
+    assert CampaignManifest.from_mapping(_manifest_doc()).promotion_policy_version == (
+        PROMOTION_POLICY_VERSION
+    )
+
+
+def test_the_candidate_version_is_declared_or_derived_never_invented() -> None:
+    assert CampaignManifest.from_mapping(_manifest_doc()).resolved_candidate_version() == "gen2"
+    declared = _manifest_doc(candidate_version="gen2b-experiment")
+    assert (
+        CampaignManifest.from_mapping(declared).resolved_candidate_version()
+        == "gen2b-experiment"
+    )
+    with pytest.raises(CampaignManifestError, match="declare candidate_version"):
+        CampaignManifest.from_mapping(
+            _manifest_doc(parent_version="qwen3.8-9b-base")
+        ).resolved_candidate_version()
+
+
+def test_an_unknown_budget_field_refuses() -> None:
+    doc = _manifest_doc()
+    doc["budget"] = dict(doc["budget"], gpu_hours_ceiling_campaign=1.0)
+    with pytest.raises(CampaignManifestError, match="unknown budget fields"):
+        CampaignManifest.from_mapping(doc)
 
 
 def test_campaign_settlement_counts_losing_recipe_overrun() -> None:
@@ -116,6 +150,17 @@ def test_campaign_settlement_counts_losing_recipe_overrun() -> None:
     assert any(ACTUAL_WALL_GPU_HOURS_EXCEEDED in r for r in verdict.failure_reasons)
 
 
+def test_a_device_ceiling_is_admission_only_when_device_time_is_not_measured() -> None:
+    """The default budget does not claim a device measurement it never took."""
+    manifest = CampaignManifest.from_mapping(_manifest_doc())
+    assert manifest.budget.device_time_measured is False
+    verdict = settle_campaign(
+        manifest,
+        total=ComputeCost.from_wall_only(1.20, source="cycle ledger total"),
+    )
+    assert verdict.compliant, verdict.failure_reasons
+
+
 def test_campaign_settlement_passes_when_total_fits() -> None:
     manifest = CampaignManifest.from_mapping(_manifest_doc())
     verdict = settle_campaign(
@@ -130,10 +175,13 @@ def test_campaign_settlement_passes_when_total_fits() -> None:
 def test_campaign_settlement_refuses_a_device_ceiling_it_did_not_measure() -> None:
     """The real Gen-1 ledger is exactly this shape: wall measured, device not.
 
-    The campaign declares a device ceiling, so a ledger whose device figure
-    was never separated must not settle as compliant.
+    A campaign that declares its executor separates device time must not
+    settle a device ceiling against a ledger whose device figure was never
+    measured.
     """
-    manifest = CampaignManifest.from_mapping(_manifest_doc())
+    doc = _manifest_doc()
+    doc["budget"] = dict(doc["budget"], device_time_measured=True)
+    manifest = CampaignManifest.from_mapping(doc)
     verdict = settle_campaign(
         manifest,
         total=ComputeCost.from_wall_only(1.20, source="cycle ledger total"),

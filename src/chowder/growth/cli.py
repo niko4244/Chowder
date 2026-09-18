@@ -388,6 +388,24 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
     validate.add_argument("manifest", help="Path to the campaign manifest JSON")
     validate.set_defaults(func=_growth_campaign_validate)
 
+    plan = campaign_targets.add_parser(
+        "plan",
+        help="Plan the declared campaign (curriculum + recipe ids) without compute",
+    )
+    plan.add_argument("manifest", help="Path to the campaign manifest JSON")
+    plan.set_defaults(func=_growth_campaign_plan)
+
+    run = campaign_targets.add_parser(
+        "run", help="Execute the declared campaign through the real growth cycle"
+    )
+    run.add_argument("manifest", help="Path to the campaign manifest JSON")
+    run.add_argument(
+        "--state-root",
+        default="",
+        help="Override the manifest's state_root (testing/CI only)",
+    )
+    run.set_defaults(func=_growth_campaign_run)
+
     settle = campaign_targets.add_parser(
         "settle",
         help="Settle actual cycle cost from a compute-accounting artifact",
@@ -424,6 +442,70 @@ def _growth_campaign_validate(args: argparse.Namespace) -> int:
             "promotion_policy_version": manifest.promotion_policy_version,
         }
     )
+
+
+def _growth_campaign_plan(args: argparse.Namespace) -> int:
+    """Print the recipes the declared inputs plan, so `recipes` can name them.
+
+    A preregistration has to declare the recipe ids a run will execute, and the
+    planner owns those ids; this is how a manifest author learns them without
+    starting compute.
+    """
+    from .campaign import CampaignManifest
+    from .campaign_runner import CampaignRunRefusal, plan_campaign
+
+    manifest = CampaignManifest.from_file(Path(args.manifest))
+    try:
+        plan = plan_campaign(manifest)
+    except CampaignRunRefusal as refusal:
+        return _print_json(
+            {
+                "cycle_id": manifest.cycle_id,
+                "status": "REFUSED",
+                "refused_by": "campaign-plan",
+                "refusal_reason": str(refusal),
+            }
+        ) or 1
+    projected = sum(
+        recipe.projected_wall_gpu_hours for recipe in plan.recipes
+    )
+    declared = set(manifest.recipe_ids)
+    proposed = {recipe.recipe_id for recipe in plan.recipes}
+    return _print_json(
+        {
+            "cycle_id": manifest.cycle_id,
+            "status": "PLANNED",
+            "curriculum_items": len(plan.items),
+            "recipes": [recipe.recipe_id for recipe in plan.recipes],
+            "declared_recipes": sorted(declared),
+            "recipes_declared": sorted(declared) == sorted(proposed),
+            "projected_wall_gpu_hours": projected,
+            "wall_gpu_hours_ceiling_campaign": manifest.budget.wall_gpu_hours_ceiling_campaign,
+            "plan": plan.to_dict(),
+        }
+    )
+
+
+def _growth_campaign_run(args: argparse.Namespace) -> int:
+    """Run one manifest-driven campaign and print its mechanical outcome."""
+    from .campaign import CampaignManifest
+    from .campaign_runner import CampaignRunRefusal, run_campaign
+
+    manifest = CampaignManifest.from_file(Path(args.manifest))
+    try:
+        run = run_campaign(
+            manifest, state_root=args.state_root or manifest.state_root
+        )
+    except CampaignRunRefusal as refusal:
+        return _print_json(
+            {
+                "cycle_id": manifest.cycle_id,
+                "verdict": "REFUSED",
+                "refused_by": "campaign-run",
+                "refusal_reason": str(refusal),
+            }
+        ) or 1
+    return _print_json(run.to_dict())
 
 
 def _growth_campaign_settle(args: argparse.Namespace) -> int:
