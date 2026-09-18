@@ -28,10 +28,12 @@ from pathlib import Path
 import pytest
 
 from chowder.cli import main as chowder_main
-from chowder.evals.result import MEASURED_PARENT, MEASURED_THIS_GENERATION
+from chowder.evals.result import MEASURED_PARENT, MEASURED_THIS_GENERATION, EvalReport
 from chowder.growth import campaign_runner
 from chowder.growth.campaign import CampaignManifest
 from chowder.growth.campaign_runner import CERTIFICATION_EVIDENCE
+
+from chowder.growth.training_binding import directory_digest
 
 import test_growth_campaign_runner as campaign_fixture
 from test_growth_gen2_judge import (  # the judge's own fixture builders
@@ -74,16 +76,54 @@ def _slice(qualified_id: str, version: str, origin: str, score: float):
     )
 
 
-def _arms(inputs: Path) -> dict[str, str]:
+CANDIDATE_REPORT = "candidate-report.json"
+
+
+def _identity_digests(tmp_path: Path) -> tuple[str, str]:
+    """The digests the campaign declaration will name, as (base, parent adapter).
+
+    The declaration gives both trees fixed contents, so an arm can be bound to the
+    model it claims before the manifest exists -- which is exactly what binding an
+    evaluation to the bytes it measured requires.
+    """
+    base = tmp_path / "parent-model"
+    base.mkdir(exist_ok=True)
+    (base / "config.json").write_text("{}", encoding="utf-8")
+    adapter = tmp_path / "parent-adapter"
+    adapter.mkdir(exist_ok=True)
+    (adapter / "adapter_model.safetensors").write_text("gen1-parent-weights", encoding="utf-8")
+    return directory_digest(base)[0], directory_digest(adapter)[0]
+
+
+def _arms(
+    inputs: Path,
+    *,
+    base_digest: str,
+    adapter_digest: str,
+    candidate_digest: str = "",
+) -> dict[str, str]:
     """The three arms the judge reads, as *declared inputs* to the campaign.
 
     Provenance is the evaluator's declaration and is copied verbatim by the
-    runner: the candidate arm is candidate-measured, the parent and ancestor
-    arms are parent-measured, and every arm carries the frozen 16-item
-    protocol metadata the judge checks.
+    runner: the candidate arm is candidate-measured, the parent and ancestor arms
+    are parent-measured, and every arm carries the frozen 16-item protocol
+    metadata the judge checks. Each arm also names the bytes it measured: the
+    parent arm the declared adapter, the ancestor arm the dense base, and the
+    candidate arm the artifact the run selected (empty until that is known, which
+    is the state that must not promote).
     """
     inputs.mkdir(parents=True, exist_ok=True)
-    candidate = inputs / "candidate-report.json"
+    # The candidate arm is what the run *produces*, so it is not declared here:
+    # the evaluation seam below is handed this measurement of the artifact the run
+    # selected, and the run writes the arm itself. The digest is bound by the
+    # evaluator from the request, because that is what measuring an artifact
+    # means -- the runner never supplies it on the evaluator's behalf.
+    candidate = inputs / CANDIDATE_REPORT
+    # The candidate and parent arms carry the generation-diagnostics instrument
+    # row: the frozen judge's T1-T10 read it, and the run's record reports that it
+    # sits outside the campaign's declared sets rather than dropping it (the
+    # judge's T11 is what decides whether such a row substitutes for a required
+    # slice).
     _write_arm(
         candidate,
         "gen2",
@@ -95,6 +135,7 @@ def _arms(inputs: Path) -> dict[str, str]:
             _slice(MATH, "gen2", MEASURED_THIS_GENERATION, 0.25),
             _slice(MGSM, "gen2", MEASURED_THIS_GENERATION, 0.0625),
         ),
+        identity={"adapter_digest": candidate_digest} if candidate_digest else {},
     )
     parent = inputs / "parent-report.json"
     _write_arm(
@@ -108,6 +149,7 @@ def _arms(inputs: Path) -> dict[str, str]:
             _slice(MATH, "gen1", MEASURED_PARENT, 0.0),
             _slice(MGSM, "gen1", MEASURED_PARENT, 0.0),
         ),
+        identity={"adapter_digest": adapter_digest},
     )
     ancestor = inputs / "baseline-report.json"
     _write_arm(
@@ -119,9 +161,9 @@ def _arms(inputs: Path) -> dict[str, str]:
             _slice(MATH, "gen0", MEASURED_PARENT, 0.0),
             _slice(MGSM, "gen0", MEASURED_PARENT, 0.0),
         ),
+        identity={"base_model_digest": base_digest},
     )
     return {
-        "candidate_eval_report_path": str(candidate),
         "parent_eval_report_path": str(parent),
         "baseline_eval_report_path": str(ancestor),
     }
@@ -151,21 +193,31 @@ def _contamination(inputs: Path) -> str:
 
 
 def _campaign(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **overrides: object
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    bind_selection: bool = True,
+    **overrides: object,
 ) -> tuple[Path, int, dict]:
-    """Write the declaration, run it through the real CLI, return its outcome."""
+    """Write the declaration, run it through the real CLI, return its outcome.
+
+    ``bind_selection`` models the evaluator's own honesty: on (the default) it
+    measures the artifact it was asked about and names those bytes; off, it
+    returns a report about some other bytes, which the run must refuse.
+    """
     inputs = tmp_path / "inputs"
     inputs.mkdir(parents=True, exist_ok=True)
+    base_digest, adapter_digest = _identity_digests(tmp_path)
     declared: dict[str, object] = {
-        **_arms(inputs),
+        **_arms(inputs, base_digest=base_digest, adapter_digest=adapter_digest),
         "contamination_manifest_path": _contamination(inputs),
+        "protection": dict(campaign_fixture.PROTECTION),
         **overrides,
     }
-    manifest, runner, _document = campaign_fixture._campaign(
+    manifest, runner, document = campaign_fixture._campaign(
         tmp_path,
-        # The judge's required set is the frozen manifest's; the campaign's own
-        # declared sets are the catalog-pinned ids the cycle can bind. Both are
-        # satisfied by rows the candidate arm may legally carry.
+        # The candidate arm carries rows the cycle can bind, so the declared sets
+        # are the ones the frozen slice ids belong to.
         target_benchmarks=[MATH],
         protected_benchmarks=[MGSM],
         broad_benchmarks=[MGSM],
@@ -173,11 +225,13 @@ def _campaign(
     )
     manifest_path = inputs / "campaign.json"
     assert CampaignManifest.from_file(manifest_path).cycle_id == manifest.cycle_id
-    # The judge's benchmark sets stay the frozen ones (that is the certification
-    # contract); only its contamination pin is re-pointed at the evidence this run
-    # produced -- exactly the relationship the frozen declaration has in
-    # production, where the pin *is* the state root's own manifest.
-    judged = json.loads(FROZEN_CAMPAIGN_MANIFEST.read_text(encoding="utf-8"))
+    # The judged policy is the declaration this run was launched from -- in
+    # production exactly the frozen docs/gen2/gen2_campaign.json -- with its
+    # contamination pin pointed at the evidence the run produced (in production
+    # the pin already *is* the state root's own manifest). Keeping the frozen
+    # file's sets here would judge the run against another campaign's identity and
+    # recipe ids, which is a different declaration, not a stricter one.
+    judged = dict(document)
     judged["contamination_manifest_path"] = str(
         Path(manifest.state_root) / CERTIFICATION_EVIDENCE["contamination"]
     )
@@ -185,6 +239,19 @@ def _campaign(
     judged_path.write_text(json.dumps(judged), encoding="utf-8")
     monkeypatch.setattr(judge_gen2, "CAMPAIGN_MANIFEST", judged_path)
     monkeypatch.setattr(campaign_runner, "default_runner", runner)
+    # The evaluation seam: it measures the artifact the run selected and writes
+    # its measurements into the run root, naming them relatively -- which is what
+    # a production instrument does, and what makes the run root the judge's input.
+    monkeypatch.setattr(
+        campaign_runner,
+        "default_evaluator_factory",
+        lambda manifest, *, state_root=None: campaign_fixture._RecordingEvaluator(
+            inputs / CANDIDATE_REPORT,
+            bind=bind_selection,
+            absolute_refs=False,
+            into_run_root=True,
+        ),
+    )
     monkeypatch.setattr(
         sys, "argv", ["chowder", "growth", "campaign", "run", str(manifest_path)]
     )
@@ -249,7 +316,7 @@ def test_absent_evidence_cannot_certify(
 
 
 @pytest.mark.parametrize(
-    "field_name", ("candidate_eval_report_path", "parent_eval_report_path", "baseline_eval_report_path")
+    "field_name", ("parent_eval_report_path", "baseline_eval_report_path")
 )
 def test_a_declared_report_that_does_not_exist_refuses_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field_name: str
@@ -279,10 +346,12 @@ def test_tampered_evidence_is_refused(
     assert _judge(root)[0] == 0
 
     candidate_arm = root / CERTIFICATION_EVIDENCE["candidate"]
+    # Both mutations target MGSM: the slice this campaign protects, so the gate
+    # that must notice is the protected-slice one rather than a target row.
     if mutation == "origin_relabelled":
         document = json.loads(candidate_arm.read_text(encoding="utf-8"))
         for run in document["runs"]:
-            if run["benchmark_qualified_id"] == MATH:
+            if run["benchmark_qualified_id"] == MGSM:
                 run["measurement_origin"] = "CARRIED_REFERENCE"
         candidate_arm.write_text(json.dumps(document), encoding="utf-8")
     elif mutation == "protocol_drifted":
@@ -317,7 +386,7 @@ def test_a_run_root_copy_that_is_not_the_pinned_evidence_refuses(
     assert code == 0
 
     pinned = tmp_path / "inputs" / "campaign-contamination.json"
-    judged = json.loads(FROZEN_CAMPAIGN_MANIFEST.read_text(encoding="utf-8"))
+    judged = json.loads((tmp_path / "inputs" / "campaign.json").read_text(encoding="utf-8"))
     judged["contamination_manifest_path"] = str(pinned)
     judged_path = tmp_path / "judged-external-campaign.json"
     judged_path.write_text(json.dumps(judged), encoding="utf-8")
@@ -351,7 +420,7 @@ def test_a_copied_measurement_artifact_that_changed_refuses(
     assert code == 0
     assert _judge(root)[0] == 0
 
-    artifact = root / "raw" / "gen2-math500-2024-04-slice.json"
+    artifact = root / "raw" / "gen2-mgsm-2022-11-slice.json"
     assert artifact.is_file(), "the run did not carry the measurement it judged"
     artifact.write_text('{"rewritten": "after the digest was recorded"}', encoding="utf-8")
 

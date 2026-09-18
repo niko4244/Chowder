@@ -156,17 +156,33 @@ with its adversarial re-attacks and its verification counts, is
 
 The run root *is* the judge's input. `campaign_runner` materialises the judged
 evidence set from the run's own measurements: the three provenance-bound arms
-(`candidate_eval_report_path`, `parent_eval_report_path`, and the new
+(`candidate_evaluation.json` -- produced by evaluating the artifact the run
+selected, see `GEN2_PREREG_AMENDMENT5_2026-09-18.md` -- `parent_evaluation.json`
+from `parent_eval_report_path`, and `baseline_evaluation.json` from the declared
 `baseline_eval_report_path` naming the gen0 arm branch protection is judged
 against), the winner's identity in `chosen_candidate.json`, and the
 contamination manifest the firewall bound. `chowder growth campaign run`
 followed by `python docs/gen2/judge_gen2.py <state_root>` therefore reads one
-directory. Provenance is copied verbatim -- a row's `measurement_origin` is the
-evaluator's declaration, never the runner's election -- an input the manifest
-does not declare produces no file rather than a placeholder, and
+directory. Provenance is invariant -- a row's `measurement_origin` is the
+evaluator's declaration, the candidate arm's rows must be candidate-measured or
+honestly unmeasured, and a declared arm is copied verbatim -- an input the
+manifest does not declare produces no file rather than a placeholder, and
 `tests/test_growth_certification_coupling.py` proves both directions: the
 frozen judge certifies the root a CLI run just wrote, and absent or tampered
 evidence refuses.
+
+The candidate arm is the run's *output*, bound to the model it measured: the
+runner asks an evaluation seam (`chowder.growth.candidate_evaluation`) to measure
+the artifact it selected, and refuses with `CANDIDATE_EVALUATION_NOT_PRODUCED`
+when no evaluator is wired rather than reading a report from a declared path --
+`candidate_eval_report_path` is retired and its presence refuses at load. What
+the seam returns is checked before any verdict: generation (report and row),
+`adapter_digest` equal to the selected artifact's digest, `base_model_digest`
+equal to the declared base, scored rows `MEASURED_THIS_GENERATION`, coverage of
+every declared benchmark, no duplicate measurement, and the evaluation's
+measured cost charged to the cycle ledger before settlement. This build wires no
+production evaluator, so a real gen2 run refuses; the instrument is the
+remaining build (see ROADMAP).
 
 The gen0 arm itself is declared, not assumed:
 `GEN2_PREREG_AMENDMENT2_2026-09-18.md` pins it in the manifest
