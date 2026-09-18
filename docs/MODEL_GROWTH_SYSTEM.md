@@ -223,6 +223,19 @@ re-derived from the bytes on disk twice -- before it is measured, and before the
 judged evidence set is written -- refusing with `CANDIDATE_ARTIFACT_DIGEST_STALE`,
 so a recorded digest can never become a certified one.
 
+`GEN2_PREREG_AMENDMENT9_2026-09-18.md` exposes that phase to operators as
+`chowder growth campaign readiness <manifest>`: every pre-compute check, zero
+compute, a machine-readable `status`/`checks[]`/`reason_codes[]` result and a
+non-zero exit unless all pass. Its first real use found the base identity cannot
+verify: `base_model_digest` in the shipped manifests is the Gen-0 freeze's
+semantic `model_content_digest` (`59e767aa…`, ten model files), but
+`_verify_digest` uses `training_binding.directory_digest`, which also hashes a
+volatile HuggingFace `.cache/huggingface/**` (`8eb92aa6…`). The model bytes are
+frozen and unchanged; the declared digest is on a different basis than the
+verifier. The parent adapter digest in the same file verifies, so only the base
+field is inconsistent — the top Gen-2 blocker, deliberately left to its own
+preregistered change.
+
 The gen0 arm itself is declared, not assumed:
 `GEN2_PREREG_AMENDMENT2_2026-09-18.md` pins it in the manifest
 (`baseline_eval_report_path`) as a fresh 16-item mini-slice measurement on the

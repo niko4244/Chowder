@@ -95,7 +95,20 @@ evaluator's coverage of every declared benchmark in a `readiness` phase before
 any training starts, an evaluation that reports no measured cost is refused
 rather than charged zero, a refusal after training still writes the accounting,
 the attempts, the selection and its reason, and the selected artifact's digest is
-re-derived from disk both before it is measured and before the verdict is bound.The instrument is no longer a blocker:
+re-derived from disk both before it is measured and before the verdict is bound.
+`GEN2_PREREG_AMENDMENT9_2026-09-18.md` makes that gate inspectable without
+spending anything: `chowder growth campaign readiness <manifest>` reports every
+pre-compute prerequisite with zero compute and a non-zero exit unless all pass,
+using the same helpers `run_campaign` applies. Against the committed Gen-2
+declaration it refuses and names the top blocker: `base_model_digest` is the
+Gen-0 freeze's semantic `model_content_digest` (`59e767aa…`, ten model files),
+but production verifies with `directory_digest`, which also folds in a volatile
+HF `.cache/huggingface/**` (`8eb92aa6…`). The frozen base bytes are unchanged;
+the declared digest is simply on a different basis than the verifier — the one
+thing that must be reconciled, under its own preregistered change, before Gen-2
+can start.
+
+The instrument is no longer a blocker:
 `GEN2_PREREG_AMENDMENT8_2026-09-18.md` ports the generation-diagnostics
 instrument into `src/` (`chowder.growth.generation_diagnostics` computes the
 frozen rules from the observed generations, `chowder.evaluators.generation`
