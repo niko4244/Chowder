@@ -1,0 +1,20 @@
+{
+  "cycle_id": "gen2-campaign",
+  "parent_version": "gen1",
+  "parent_model_path": "F:/llm-models/Qwen3.8-9B-abliterated-25-bf16",
+  "parent_model_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "state_root": "C:/Users/nikma/Chowder-Protected/runs/gen2",
+  "target_benchmarks": ["generation-diagnostics@gen2-eval-protocol-v1"],
+  "protected_benchmarks": ["math500@2024-04", "mgsm@2022-11"],
+  "broad_benchmarks": ["math500@2024-04"],
+  "calibration_benchmarks": [],
+  "reliability_benchmarks": [],
+  "budget": {
+    "device_gpu_hours_ceiling_per_recipe": 0.30,
+    "wall_gpu_hours_ceiling_per_recipe": 0.75,
+    "device_gpu_hours_ceiling_campaign": 0.60,
+    "wall_gpu_hours_ceiling_campaign": 1.50
+  },
+  "recipes": ["recipe-a", "recipe-b"],
+  "candidate_selection_policy": "first_successful"
+}
