@@ -74,10 +74,15 @@ diagnostics 3/16 vs the parent's 1/16. What could not stand was certifying
   `effective_verdict`.
 - **Candidate selection** from training-side evidence only
   (`select_candidate`; no parameter accepts protected scores).
-- **Campaign manifests** (`chowder growth campaign validate|settle`):
+- **Campaign manifests** (`chowder growth campaign validate|plan|run|settle`):
   preregistration as configuration — paths in config, unit-named ceilings,
   unknown-field / unpinned-benchmark refusal, projected admission plus actual
-  settlement. Example: `docs/gen2_campaign_manifest.example.json`.
+  settlement. `run` composes the existing engine (`GrowthCycle`,
+  `SubprocessTrainingFn`, `MetricBinder`, `settle_cost`) rather than a second
+  cycle implementation, and every accepted field is listed in
+  `campaign_runner.FIELD_ENFORCEMENT` (checked against the schema by
+  `assert_every_field_enforced`), so an unimplemented key refuses instead of
+  being ignored. Example: `docs/gen2_campaign_manifest.example.json`.
 - **Scoped repair semantics**: `INCONCLUSIVE` + `target_repair_validated=true`.
   Deliberately **not** a fifth verdict: `PROMOTED` must keep meaning "complete
   evidence".

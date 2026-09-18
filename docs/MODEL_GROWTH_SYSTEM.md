@@ -126,7 +126,30 @@ chowder data contamination    # firewall checks against protected material
 chowder growth profile FILE   # capability profile
 chowder growth curriculum FILE [--protected IDs]   # plan with decision traces
 chowder growth status FILE    # cycle outcome summary
+chowder growth campaign validate FILE   # is this a declaration this code can execute?
+chowder growth campaign plan FILE       # the curriculum items and recipe ids a run will honor
+chowder growth campaign run FILE        # execute the declared campaign end to end
+chowder growth campaign settle FILE     # re-settle a campaign from its accounting artifact
 ```
+
+## Campaign manifests: preregistration as configuration
+
+A campaign manifest (`campaign.CampaignManifest`) is the preregistration a
+run executes: parent identity and digest, promotion sets, recipe set, per
+recipe and campaign ceilings in named units, stopping rules, promotion
+policy version, and every input path the run reads. `campaign_runner`
+turns it into a cycle by *composing* the pieces that already own each
+decision — `GrowthCycle` for sequencing/curriculum/selection/promotion,
+`SubprocessTrainingFn` for execution and projected-cost admission,
+`MetricBinder` for declared metric semantics, `settle_cost`/
+`settle_campaign` for post-run settlement — rather than adding a second
+engine. No phase invents an input: a path the manifest did not declare is
+a named refusal, and the campaign's resource gate is authoritative over
+the lineage record, so a run that overran its own frozen envelope cannot
+record a promoted generation. Every field the schema accepts is listed in
+`campaign_runner.FIELD_ENFORCEMENT` with the behavior it drives, and
+`assert_every_field_enforced` fails if the schema and that table diverge:
+a declared key nobody acts on is refused rather than silently ignored.
 
 ## Status
 

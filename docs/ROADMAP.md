@@ -63,8 +63,9 @@ count, candidate selection reads only training-side evidence, and
 verdicts are correctable only via append-only adjudication revisions.
 Gen-1's effective verdict is INCONCLUSIVE (target repair validated)
 per `docs/growth/GEN1_READJUDICATION_ADDENDUM_2026-09-17.md`; campaign
-manifests (`chowder growth campaign validate|settle`) declare
-admission/settlement units explicitly.
+manifests (`chowder growth campaign validate|plan|run|settle`) declare
+admission/settlement units explicitly and drive a cycle end to end through
+the production engine rather than a `docs/` script.
 
 **Research kernel**
 experiment DAG · hypothesis schema · compute budget enforcement · hard
