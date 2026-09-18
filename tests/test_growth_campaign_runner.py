@@ -45,6 +45,7 @@ from chowder.growth.campaign import (
     stops_on_campaign_overrun,
 )
 from chowder.growth.campaign_runner import (
+    CANDIDATE_ARTIFACT_DIGEST_STALE,
     FIELD_ENFORCEMENT,
     NON_BEHAVIORAL_FIELDS,
     CampaignRunRefusal,
@@ -54,6 +55,9 @@ from chowder.growth.campaign_runner import (
     undeclared_inputs,
 )
 from chowder.growth.candidate_evaluation import (
+    CANDIDATE_EVALUATION_COST_UNMEASURED,
+    CANDIDATE_EVALUATION_COST_UNREPORTED,
+    CANDIDATE_EVALUATION_DUPLICATE_BENCHMARK,
     CANDIDATE_EVALUATION_IDENTITY_UNBOUND,
     CANDIDATE_EVALUATION_NOT_CANDIDATE_MEASURED,
     CANDIDATE_EVALUATION_NOT_PRODUCED,
@@ -444,7 +448,7 @@ def _campaign(
     runner: Any = None,
     planned: bool = True,
     candidate_role_digest: str = "",
-    with_ancestor: bool = False,
+    with_ancestor: bool = True,
     with_parent_adapter: bool = True,
     **overrides: Any,
 ) -> tuple[CampaignManifest, Any, dict[str, Any]]:
@@ -452,6 +456,11 @@ def _campaign(
 
     ``planned=False`` leaves the declared recipe ids alone, so a manifest that
     names recipes the planner never proposed can be exercised.
+
+    The trusted-ancestor arm is declared by default: the run's readiness phase
+    refuses a campaign that cannot be certified before it trains, so a manifest
+    without one never reaches the code these fixtures exercise. Pass
+    ``with_ancestor=False`` to exercise that refusal.
     """
     runner = runner if runner is not None else _RecordingRunner(gpu_hours=ATTEMPT_WALL_GPU_HOURS)
     document = _declaration(
@@ -488,6 +497,16 @@ def _campaign(
 
 def _verbs(runner: Any) -> list[str]:
     return [command[-2] for command in runner.commands]
+
+
+def _refusal(run: Any) -> str:
+    """Every phase detail of a run, joined: a refused run records its reason.
+
+    A run that fails after training returns a REFUSED record rather than raising,
+    because the compute really happened and must stay accounted for. Its reason
+    lives in the phase that refused.
+    """
+    return " | ".join(str(phase.get("detail")) for phase in run.phases)
 
 
 def _phase(run: Any, name: str) -> Mapping[str, Any]:
@@ -543,16 +562,29 @@ def _rewrite_protected(
     ).save(report_path)
 
 
+#: A *reported* zero: an evaluation leg that really held no accelerator, said so,
+#: and named how it was measured. This is the only shape in which a zero charge
+#: is legal -- an unreported cost is refused rather than defaulted to this.
+FREE_EVALUATION = ComputeCost.zero(
+    source="candidate evaluation",
+    measurement_method="recording evaluator: no accelerator held",
+)
+
+
 class _RecordingEvaluator:
     """The evaluation seam production supplies: it measures the artifact the run
-    selected and reports what it measured.
+    selected and reports what it measured, and what that cost.
 
     ``bind`` is on by default because that is what a real evaluator does -- it is
     handed an artifact and a request, and its report names those bytes. With
     ``bind=False`` it returns a report that names other bytes, which is the state
-    the run must refuse. ``absolute_refs=False`` keeps the rows' relative
-    references, so the run-root convention for a run's own measurements can be
-    exercised.
+    the run must refuse. ``into_run_root``/
+    ``absolute_refs`` model production by default: the measurements are written
+    into the run root and named relatively to it. Passing ``absolute_refs=True``
+    models an evaluator whose evidence lives outside the run it measured for,
+    which the run now refuses. ``cost`` defaults to an explicit measured zero
+    (see :data:`FREE_EVALUATION`); passing ``cost=None`` models an evaluator that
+    reports no cost at all, which the run also refuses.
     """
 
     def __init__(
@@ -560,9 +592,9 @@ class _RecordingEvaluator:
         report_path: Path,
         *,
         bind: bool = True,
-        absolute_refs: bool = True,
-        into_run_root: bool = False,
-        cost: ComputeCost | None = None,
+        absolute_refs: bool = False,
+        into_run_root: bool = True,
+        cost: ComputeCost | None = FREE_EVALUATION,
         origin: str | None = None,
     ) -> None:
         self.report_path = Path(report_path)
@@ -639,13 +671,14 @@ def _patch_seams(
     *,
     bind: bool = True,
     evaluator: Any = None,
-    cost: ComputeCost | None = None,
+    cost: ComputeCost | None = FREE_EVALUATION,
     wired: bool = True,
 ) -> None:
     """Install the two seams a run needs: the executor and the evaluator.
 
     ``wired=False`` leaves the production evaluator unwired, which is how a
     build without an instrument behaves and what the refusal is asserted against.
+    ``cost=None`` models a seam that reports no cost, which the run refuses.
     """
     _patch_runner(monkeypatch, runner)
     if not wired:
@@ -674,11 +707,15 @@ def test_an_unbound_candidate_arm_cannot_be_recorded_as_promoted(
     manifest, runner, _document = _campaign(tmp_path, with_ancestor=True)
     _patch_seams(monkeypatch, runner, bind=False)
 
-    with pytest.raises(CampaignRunRefusal) as error:
-        run_campaign(manifest)
+    run = run_campaign(manifest)
 
-    assert CANDIDATE_EVALUATION_IDENTITY_UNBOUND in str(error.value)
-    assert "adapter_digest" in str(error.value)
+    assert run.verdict == "REFUSED"
+    assert CANDIDATE_EVALUATION_IDENTITY_UNBOUND in _refusal(run)
+    assert "adapter_digest" in _refusal(run)
+    # The training spend is closed out even though the run refused.
+    assert Path(run.cost["accounting_path"]).is_file()
+    assert run.cost["wall_gpu_hours"] == pytest.approx(2 * ATTEMPT_WALL_GPU_HOURS)
+    assert [attempt["status"] for attempt in run.attempts]
     ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
     with pytest.raises(KeyError):
         ledger.effective_verdict(CANDIDATE_VERSION)
@@ -882,13 +919,15 @@ def test_every_recognized_stopping_rule_names_what_enforces_it():
 def test_the_committed_gen2_declaration_is_not_runnable_and_says_so():
     """The checked-in gen2 declaration is pinned to its real readiness.
 
-    Seven inputs a run reads from disk, none of them present as an artifact: the
-    historical Gen-1 driver composed four of them in process, the parent profile
-    was never measured from gen1, the contamination manifest is written by the
-    run itself, and the evaluation material the production evaluator now needs
-    does not exist yet. Both entry points refuse before compute and name *every*
-    missing input at once, and the declaration's own notes carry the same
-    statement -- documentation is not allowed to run ahead of what exists.
+    Seven of the eight inputs a run reads from disk, none of them present as an
+    artifact: the historical Gen-1 driver composed four of them in process, the
+    parent profile was never measured from gen1, the evaluation material the
+    production evaluator measures with does not exist yet, and there is no
+    measured parent arm. (The eighth, the contamination manifest, is declared
+    but produced by the run into its own state root.) Both entry points refuse
+    before compute and name *every* missing input at once, and the declaration's
+    own notes carry the same statement -- documentation is not allowed to run
+    ahead of what exists.
     """
     manifest = CampaignManifest.from_file(ROOT / "docs" / "gen2" / "gen2_campaign.json")
 
@@ -899,6 +938,7 @@ def test_the_committed_gen2_declaration_is_not_runnable_and_says_so():
         "hardware_budget_path",
         "parent_profile_path",
         "evaluation_material_path",
+        "parent_eval_report_path",
     )
     assert undeclared_inputs(manifest, phase="plan") == (
         "parent_profile_path",
@@ -1027,11 +1067,15 @@ def test_a_row_that_names_a_missing_artifact_refuses_the_run(tmp_path: Path, mon
         payload="unused",
     )
 
-    with pytest.raises(CampaignRunRefusal) as error:
-        run_campaign(manifest)
+    run = run_campaign(manifest)
 
-    assert "raw/never-written.json" in str(error.value)
+    assert run.verdict == "REFUSED"
+    assert "raw/never-written.json" in _refusal(run)
     assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
+    # The evidence failure happens after training, so the spend it produced is
+    # still recorded rather than lost with the exception.
+    assert Path(run.cost["accounting_path"]).is_file()
+    assert run.cost["wall_gpu_hours"] == pytest.approx(2 * ATTEMPT_WALL_GPU_HOURS)
 
 
 def test_a_candidate_row_the_run_never_wrote_refuses(tmp_path: Path, monkeypatch):
@@ -1045,15 +1089,17 @@ def test_a_candidate_row_the_run_never_wrote_refuses(tmp_path: Path, monkeypatch
     _patch_seams(
         monkeypatch,
         runner,
+        # A relative ref the evaluator never wrote into the run root: it names
+        # bytes nobody can read, so the run cannot carry them as evidence.
         evaluator=_RecordingEvaluator(
-            _candidate_report(tmp_path), absolute_refs=False
+            _candidate_report(tmp_path), absolute_refs=False, into_run_root=False
         ),
     )
 
-    with pytest.raises(CampaignRunRefusal) as error:
-        run_campaign(manifest)
+    run = run_campaign(manifest)
 
-    assert "candidate arm" in str(error.value)
+    assert run.verdict == "REFUSED"
+    assert "candidate arm" in _refusal(run)
     assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
 
 
@@ -1087,14 +1133,14 @@ def test_two_arms_naming_one_artifact_differently_refuse(tmp_path: Path, monkeyp
         monkeypatch,
         runner,
         evaluator=_RecordingEvaluator(
-            _candidate_report(tmp_path), absolute_refs=False
+            _candidate_report(tmp_path), absolute_refs=False, into_run_root=False
         ),
     )
 
-    with pytest.raises(CampaignRunRefusal) as error:
-        run_campaign(manifest)
+    run = run_campaign(manifest)
 
-    assert "different content" in str(error.value)
+    assert run.verdict == "REFUSED"
+    assert "different content" in _refusal(run)
 
 
 def test_a_parent_digest_that_does_not_match_the_tree_refuses_before_compute(tmp_path: Path):
@@ -1216,11 +1262,11 @@ def test_a_declared_set_the_evaluation_never_mentions_refuses(
     manifest, runner, _document = _campaign(tmp_path, calibration_benchmarks=[CALIBRATION_ID])
     _patch_seams(monkeypatch, runner)
 
-    with pytest.raises(CampaignRunRefusal) as error:
-        run_campaign(manifest)
+    run = run_campaign(manifest)
 
-    assert "CANDIDATE_EVALUATION_INCOMPLETE" in str(error.value)
-    assert CALIBRATION_ID in str(error.value)
+    assert run.verdict == "REFUSED"
+    assert "CANDIDATE_EVALUATION_INCOMPLETE" in _refusal(run)
+    assert CALIBRATION_ID in _refusal(run)
 
 
 def test_every_declared_field_is_enforced_or_the_run_refuses():
@@ -1263,21 +1309,208 @@ def test_the_retired_candidate_report_input_is_rejected_with_its_reason(tmp_path
     assert "run output" in str(error.value)
 
 
-def test_a_run_without_a_candidate_evaluator_refuses_and_records_no_generation(
+def test_a_run_that_cannot_measure_its_candidate_refuses_before_compute(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """No instrument means no candidate arm, and no candidate arm means no verdict.
+    """No evaluation material means no instrument, and no candidate arm.
 
-    The refusal names what is missing instead of falling through to a promotion
-    computed on evidence the run never produced.
+    The refusal names what is missing and happens before any compute: a campaign
+    that cannot measure the artifact it is about to train must not spend a
+    training budget discovering that afterwards.
     """
-    manifest, runner, _document = _campaign(tmp_path, with_ancestor=True)
-    _patch_seams(monkeypatch, runner, wired=False)
+    manifest, runner, document = _campaign(tmp_path, with_ancestor=True)
+    _patch_runner(monkeypatch, runner)
+    unprepared = _redeclare(document, evaluation_material_path="")
 
     with pytest.raises(CampaignRunRefusal) as error:
-        run_campaign(manifest)
+        run_campaign(unprepared)
 
-    assert CANDIDATE_EVALUATION_NOT_PRODUCED in str(error.value)
+    assert "evaluation_material_path" in str(error.value)
+    assert not (Path(manifest.state_root) / "cycle_compute_accounting.json").exists()
+    assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
+    ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
+    assert CANDIDATE_VERSION not in ledger.versions()
+
+
+def test_an_evaluator_that_cannot_cover_a_declared_benchmark_refuses_before_compute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The evaluator's admission seam runs before the trainer's.
+
+    Material that names no dataset for a declared benchmark is knowable without
+    a GPU, so the run refuses at its readiness phase with nothing spent -- the
+    mirror of the executor's own projected-cost admission.
+    """
+    manifest, runner, document = _campaign(tmp_path)
+    _patch_runner(monkeypatch, runner)
+    material = json.loads(Path(manifest.evaluation_material_path).read_text(encoding="utf-8"))
+    material["suites"] = [
+        suite
+        for suite in material["suites"]
+        if suite["benchmark_qualified_id"] != PROTECTED_ID
+    ]
+    Path(manifest.evaluation_material_path).write_text(
+        json.dumps(material), encoding="utf-8"
+    )
+    monkeypatch.setattr(campaign_runner, "default_evaluator_factory", None)
+
+    run = run_campaign(manifest)
+
+    assert run.verdict == "REFUSED"
+    assert _phase(run, "readiness")["verdict"] == "refused"
+    assert PROTECTED_ID in _phase(run, "readiness")["detail"]
+    assert "selection" not in {phase["phase"] for phase in run.phases}
+    assert run.attempts == ()
+    assert document["state_root"] == str(Path(manifest.state_root))
+
+
+def test_two_rows_for_one_benchmark_refuse_even_when_both_are_unmeasured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """One benchmark carries one row, measured or not.
+
+    The honest non-measurement path used to skip the duplicate check, so two
+    ``UNMEASURED`` rows under one id were accepted. They cannot manufacture a
+    promotion, but they are ambiguous evidence about coverage -- and the binder
+    pairs on one row per benchmark -- so the arm refuses instead.
+    """
+    manifest, runner, _document = _campaign(tmp_path, calibration_benchmarks=[CALIBRATION_ID])
+    _patch_seams(monkeypatch, runner)
+    report = EvalReport.load(_candidate_report(tmp_path))
+    unmeasured = BenchmarkRun(
+        benchmark_qualified_id=CALIBRATION_ID,
+        adapter="none",
+        generation_version=CANDIDATE_VERSION,
+        score=None,
+        support="UNSUPPORTED_HARNESS",
+        measurement_origin="UNMEASURED",
+        notes="the evaluator could not measure this declared set",
+    )
+    EvalReport(
+        generation_version=report.generation_version,
+        runs=(*report.runs, unmeasured, replace(unmeasured, notes="reported twice")),
+        hardware=report.hardware,
+        model_identity=report.model_identity,
+    ).save(_candidate_report(tmp_path))
+
+    run = run_campaign(manifest)
+
+    assert run.verdict == "REFUSED"
+    assert CANDIDATE_EVALUATION_DUPLICATE_BENCHMARK in _refusal(run)
+    assert CALIBRATION_ID in _refusal(run)
+    assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
+
+
+def test_an_artifact_that_changed_after_training_refuses_before_it_is_measured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A digest recorded at training time is a claim about bytes that can move.
+
+    The run re-derives the selected artifact's digest from disk before it is
+    measured, so a mutated adapter refuses instead of being certified under a
+    digest the frozen judge would later recompute and reject. Nothing is
+    recorded as promoted, and the training spend is still closed out.
+    """
+    manifest, runner, _document = _campaign(tmp_path)
+    _patch_seams(monkeypatch, runner)
+
+    class _MutatingEvaluator(_RecordingEvaluator):
+        """Rewrites the artifact it was asked to measure, as a race would."""
+
+        def __call__(self, request: EvaluationRequest) -> CandidateEvaluation:
+            artifact = Path(request.artifact_ref)
+            if artifact.is_dir():
+                (artifact / "adapter_model.safetensors").write_text(
+                    "bytes that replaced the selected artifact", encoding="utf-8"
+                )
+            return super().__call__(request)
+
+    _patch_seams(
+        monkeypatch,
+        runner,
+        evaluator=_MutatingEvaluator(_candidate_report(tmp_path)),
+    )
+
+    run = run_campaign(manifest)
+
+    assert run.verdict == "REFUSED"
+    assert CANDIDATE_ARTIFACT_DIGEST_STALE in _refusal(run)
+    assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
+    ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
+    assert CANDIDATE_VERSION not in ledger.versions()
+    # The compute really happened, so it is still accounted for.
+    assert Path(run.cost["accounting_path"]).is_file()
+    assert run.cost["wall_gpu_hours"] == pytest.approx(2 * ATTEMPT_WALL_GPU_HOURS)
+    assert run.attempts and all(attempt["recipe_id"] for attempt in run.attempts)
+
+
+def test_an_artifact_that_changed_after_being_measured_refuses_before_the_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The second boundary: bytes that move between measurement and verdict.
+
+    The digest is checked again immediately before the evidence set is written
+    and a verdict is bound to it. An evaluation that measured the artifact
+    honestly and a mutation that landed afterwards must not become a certified
+    promotion -- the frozen judge would recompute the digest of the bytes on
+    disk and reject it.
+    """
+    manifest, runner, _document = _campaign(tmp_path)
+
+    class _MutatingAfterMeasurement(_RecordingEvaluator):
+        """Measures honestly, then lets the artifact change underneath."""
+
+        def __call__(self, request: EvaluationRequest) -> CandidateEvaluation:
+            evaluation = super().__call__(request)
+            artifact = Path(request.artifact_ref)
+            if artifact.is_dir():
+                (artifact / "adapter_model.safetensors").write_text(
+                    "mutated after the measurement was taken", encoding="utf-8"
+                )
+            return evaluation
+
+    _patch_seams(
+        monkeypatch,
+        runner,
+        evaluator=_MutatingAfterMeasurement(_candidate_report(tmp_path)),
+    )
+
+    run = run_campaign(manifest)
+
+    assert run.verdict == "REFUSED"
+    assert CANDIDATE_ARTIFACT_DIGEST_STALE in _refusal(run)
+    # The evaluation ran and was charged; the verdict was never reached.
+    assert _phase(run, "candidate_evaluation")["verdict"] == "measured"
+    assert "certification" not in {phase["phase"] for phase in run.phases}
+    assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
+    ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
+    assert CANDIDATE_VERSION not in ledger.versions()
+    assert Path(run.cost["accounting_path"]).is_file()
+
+
+def test_a_candidate_arm_whose_evidence_lives_outside_the_run_root_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A run's own measurement must live inside the run it measured for.
+
+    An absolute ref would make a certified verdict depend on a directory
+    somebody else can move or delete, so the evidence writer refuses it rather
+    than recording a pointer the judge hashes in place.
+    """
+    manifest, runner, _document = _campaign(tmp_path)
+    _patch_seams(
+        monkeypatch,
+        runner,
+        evaluator=_RecordingEvaluator(
+            _candidate_report(tmp_path), absolute_refs=True, into_run_root=False
+        ),
+    )
+
+    run = run_campaign(manifest)
+
+    assert run.verdict == "REFUSED"
+    assert "absolute artifact" in _refusal(run)
+    assert "run root" in _refusal(run)
     assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
     ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
     assert CANDIDATE_VERSION not in ledger.versions()
@@ -1294,10 +1527,10 @@ def test_parent_rows_returned_as_the_candidate_arm_are_refused(
         evaluator=_RecordingEvaluator(_candidate_report(tmp_path), origin=MEASURED_PARENT),
     )
 
-    with pytest.raises(CampaignRunRefusal) as error:
-        run_campaign(manifest)
+    run = run_campaign(manifest)
 
-    assert CANDIDATE_EVALUATION_NOT_CANDIDATE_MEASURED in str(error.value)
+    assert run.verdict == "REFUSED"
+    assert CANDIDATE_EVALUATION_NOT_CANDIDATE_MEASURED in _refusal(run)
     assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
     ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
     assert CANDIDATE_VERSION not in ledger.versions()
@@ -1346,8 +1579,8 @@ def test_the_evaluations_measured_cost_is_charged_and_can_veto_promotion(
 
     Two attempts at 0.05 wall fit the declared 0.12 campaign ceiling; the 0.05
     the evaluation cost does not. The same run promotes when the evaluation
-    reports no cost, which is what makes this a statement about accounting rather
-    than about the rule.
+    reports an explicit, measured zero -- which is what makes this a statement
+    about accounting rather than about the rule.
     """
     budget = {
         "device_gpu_hours_ceiling_per_recipe": DEVICE_PER_RECIPE,
@@ -1362,7 +1595,7 @@ def test_the_evaluations_measured_cost_is_charged_and_can_veto_promotion(
         campaign_runner,
         "default_evaluator_factory",
         lambda manifest, *, state_root=None: _RecordingEvaluator(
-            _candidate_report(Path(manifest.state_root).parent), cost=None
+            _candidate_report(Path(manifest.state_root).parent), cost=FREE_EVALUATION
         ),
     )
     free = run_campaign(manifest)
@@ -1396,6 +1629,63 @@ def test_the_evaluations_measured_cost_is_charged_and_can_veto_promotion(
     )
     legs = json.dumps(accounting)
     assert "candidate evaluation" in legs
+
+
+def test_an_evaluation_that_reports_no_cost_is_refused_rather_than_charged_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An unreported cost would settle as zero, so it is a refusal.
+
+    The run that reaches this seam is otherwise a clean promotion: certified
+    target improvement, no protected regression. It is refused anyway, and no
+    generation is recorded, because a campaign may not spend compute it cannot
+    account for. The training spend is still written out -- that compute really
+    happened -- which is what makes this a recording failure and not a lost run.
+    """
+    manifest, runner, _document = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner, cost=None)
+
+    run = run_campaign(manifest)
+
+    assert run.verdict == "REFUSED"
+    assert CANDIDATE_EVALUATION_COST_UNREPORTED in _phase(run, "candidate_evaluation")[
+        "detail"
+    ]
+    # The compute that really happened is durably closed out anyway.
+    accounting = Path(run.cost["accounting_path"])
+    assert accounting.is_file()
+    assert run.cost["wall_gpu_hours"] == pytest.approx(2 * ATTEMPT_WALL_GPU_HOURS)
+    assert json.dumps(json.loads(accounting.read_text(encoding="utf-8"))) .count("attempt") >= 2
+    ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
+    assert CANDIDATE_VERSION not in ledger.versions()
+
+
+def test_a_zero_cost_that_names_no_measurement_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A bare zero is indistinguishable from an unreported cost.
+
+    ``ComputeCost.zero(source=...)`` is what a leg that reports nothing looks
+    like, and charging it would make a real evaluation leg vanish from the
+    campaign's accounting. Only a zero that names how it was measured is
+    accepted.
+    """
+    manifest, runner, _document = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(
+        monkeypatch,
+        runner,
+        cost=ComputeCost.zero(source="candidate evaluation"),
+    )
+
+    run = run_campaign(manifest)
+
+    assert run.verdict == "REFUSED"
+    assert CANDIDATE_EVALUATION_COST_UNMEASURED in _phase(run, "candidate_evaluation")[
+        "detail"
+    ]
+    assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
+    ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
+    assert CANDIDATE_VERSION not in ledger.versions()
 
 
 # --------------------------------------------------------------------------

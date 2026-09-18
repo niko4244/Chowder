@@ -505,7 +505,11 @@ def _growth_campaign_run(args: argparse.Namespace) -> int:
                 "refusal_reason": str(refusal),
             }
         ) or 1
-    return _print_json(run.to_dict())
+    # A run that refused is a failure even though its record is durable: the
+    # spend it may have made is written out, and the exit code still says the
+    # campaign did not succeed.
+    _print_json(run.to_dict())
+    return 1 if run.verdict == "REFUSED" else 0
 
 
 def _growth_campaign_settle(args: argparse.Namespace) -> int:

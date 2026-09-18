@@ -57,6 +57,7 @@ from .candidate_evaluation import (
     coerce_evaluation,
     evaluation_detail,
     validate_candidate_report,
+    validate_evaluation_cost,
     write_candidate_evaluation,
 )
 
@@ -78,6 +79,7 @@ from .certification import (
     CertificationRow,
     ProtectionPolicy,
     certify_run_root,
+    digest_of,
 )
 from .compute_cost import ComputeCost, CycleCostLedger
 from .evaluation_binding import EvaluationMaterial, SubprocessEvaluationFn
@@ -178,6 +180,11 @@ DECLARED_INPUT_REQUIREMENTS: Mapping[str, tuple[tuple[str, str], ...]] = {
             "evaluation_material_path",
             "the production evaluator has no data to measure the selected candidate "
             "on, so the run would spend its training compute and refuse afterwards",
+        ),
+        (
+            "parent_eval_report_path",
+            "the promotion rule compares the candidate against its parent, so a run "
+            "without that arm can only reach INCONCLUSIVE",
         ),
     ),
 }
@@ -302,6 +309,10 @@ class CampaignRun:
     selection: Mapping[str, Any]
     promotion: Mapping[str, Any] | None
     record_path: str
+    #: What each attempt produced, compactly. A run that refuses after training
+    #: records the spend and the artifacts here: the compute really happened, and
+    #: a refusal is evidence rather than a lost run.
+    attempts: tuple[Mapping[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -318,7 +329,28 @@ class CampaignRun:
             "selection": dict(self.selection),
             "promotion": self.promotion,
             "record_path": self.record_path,
+            "attempts": [dict(attempt) for attempt in self.attempts],
+            # A refusal names itself here as well as in its phases, so a caller
+            # does not have to know which phase refused to report why.
+            "refused_by": self.refused_by,
+            "refusal_reason": self.refusal_reason,
         }
+
+    @property
+    def refused_by(self) -> str:
+        """The phase that refused this run, or the empty string."""
+        for phase in self.phases:
+            if str(phase.get("verdict")) == "refused":
+                return str(phase.get("phase"))
+        return ""
+
+    @property
+    def refusal_reason(self) -> str:
+        """Why this run refused, in its own words, or the empty string."""
+        for phase in self.phases:
+            if str(phase.get("verdict")) == "refused":
+                return str(phase.get("detail"))
+        return ""
 
 
 def assert_every_field_enforced(manifest_cls: type = CampaignManifest) -> None:
@@ -482,6 +514,71 @@ def run_campaign(
         }
     )
 
+    # Pre-compute readiness: everything the run will need *after* training is
+    # loaded and checked here, while refusing still costs nothing. The framing
+    # is deliberate -- the failure this prevents is spending a training budget
+    # and only then discovering that the evidence a verdict needs cannot be
+    # read, or that no instrument exists to measure what was just produced.
+    try:
+        arms_detail = _preflight_arms(manifest)
+    except CampaignRunRefusal as refusal:
+        phases.append(
+            {"phase": "readiness", "verdict": "refused", "detail": str(refusal)}
+        )
+        return _refuse(manifest, root, candidate_version, phases, admission)
+
+    try:
+        evaluator = (
+            eval_fn if eval_fn is not None else build_evaluator(manifest, state_root=root)
+        )
+    except CampaignRunRefusal as refusal:
+        phases.append(
+            {"phase": "readiness", "verdict": "refused", "detail": str(refusal)}
+        )
+        return _refuse(manifest, root, candidate_version, phases, admission)
+    if evaluator is None:
+        phases.append(
+            {
+                "phase": "readiness",
+                "verdict": "refused",
+                "detail": (
+                    f"{CANDIDATE_EVALUATION_NOT_PRODUCED}: no candidate evaluator "
+                    "is available for this campaign, so nothing could measure the "
+                    "artifact it is about to train"
+                ),
+            }
+        )
+        return _refuse(manifest, root, candidate_version, phases, admission)
+
+    # The evaluator's own admission seam: material coverage, dataset existence
+    # and slice length are all knowable before a GPU is touched, and the
+    # executor's admission is the mirror image of this one.
+    admit_evaluator = getattr(evaluator, "admit", None)
+    if callable(admit_evaluator):
+        evaluator_refusal = admit_evaluator(
+            benchmarks=tuple(manifest.evaluated_benchmarks),
+            protocol=manifest.protection.require_protocol(),
+        )
+        if evaluator_refusal is not None:
+            phases.append(
+                {
+                    "phase": "readiness",
+                    "verdict": "refused",
+                    "detail": "; ".join(str(part) for part in evaluator_refusal),
+                }
+            )
+            return _refuse(manifest, root, candidate_version, phases, admission)
+    phases.append(
+        {
+            "phase": "readiness",
+            "verdict": "ok",
+            "detail": (
+                f"declared evidence readable ({arms_detail}); an evaluator is "
+                "available and covers every declared benchmark"
+            ),
+        }
+    )
+
     ledger = CycleCostLedger(cycle_id=manifest.cycle_id)
     results: list[Mapping[str, Any]] = []
     stopped_by: str | None = None
@@ -551,13 +648,46 @@ def run_campaign(
     # The candidate arm is produced here, from the artifact this run selected,
     # and its measured cost is charged before settlement so evaluation spend
     # counts against the campaign's own ceilings like every other leg.
-    request, evaluation = _evaluate_candidate(
-        manifest, root=root, selected=selected, eval_fn=eval_fn
-    )
+    #
+    # A refusal at this point is *recorded*, not raised: the training compute
+    # really happened, so the accounting, the attempts and the reason are
+    # written out as evidence before the run stops.
+    try:
+        _verify_selected_artifact(selected, purpose="before it is measured")
+        request, evaluation = _evaluate_candidate(
+            manifest, root=root, selected=selected, eval_fn=evaluator
+        )
+    except CampaignRunRefusal as refusal:
+        accounting_digest = ledger.write(accounting_path)
+        total = ledger.total()
+        phases.append(
+            {
+                "phase": "candidate_evaluation",
+                "verdict": "refused",
+                "detail": str(refusal),
+            }
+        )
+        return _refuse(
+            manifest,
+            root,
+            candidate_version,
+            phases,
+            admission,
+            cost={
+                "device_gpu_hours": total.device_gpu_hours,
+                "wall_gpu_hours": total.wall_gpu_hours,
+                "accounting_path": str(accounting_path),
+                "accounting_digest": accounting_digest,
+            },
+            attempts=_attempt_summary(results),
+            selection=selected,
+        )
+    # ``validate_candidate_report`` has already refused an evaluation that
+    # reports no cost, so this is the measured figure -- never a default zero.
     ledger.add(
         "candidate evaluation",
         "evaluation",
-        evaluation.cost or ComputeCost.zero(source="candidate evaluation"),
+        validate_evaluation_cost(evaluation),
         notes=f"{len(evaluation.report.runs)} candidate-measured rows",
     )
     phases.append(
@@ -585,9 +715,40 @@ def run_campaign(
             {"phase": "stopping", "verdict": "stopped", "detail": stopped_by}
         )
 
-    written = write_certification_evidence(
-        manifest, root=root, selected=selected, candidate=evaluation
-    )
+    # The bytes are re-read here, immediately before they are written into the
+    # judged evidence set and bound into a verdict: the digest recorded at
+    # training time is a claim, and this is the boundary where a recorded claim
+    # would otherwise become a certified one.
+    try:
+        _verify_selected_artifact(selected, purpose="before the verdict is recorded")
+        written = write_certification_evidence(
+            manifest, root=root, selected=selected, candidate=evaluation
+        )
+    except CampaignRunRefusal as refusal:
+        accounting_digest = ledger.write(accounting_path)
+        total = ledger.total()
+        phases.append(
+            {
+                "phase": "certification_evidence",
+                "verdict": "refused",
+                "detail": str(refusal),
+            }
+        )
+        return _refuse(
+            manifest,
+            root,
+            candidate_version,
+            phases,
+            admission,
+            cost={
+                "device_gpu_hours": total.device_gpu_hours,
+                "wall_gpu_hours": total.wall_gpu_hours,
+                "accounting_path": str(accounting_path),
+                "accounting_digest": accounting_digest,
+            },
+            attempts=_attempt_summary(results),
+            selection=selected,
+        )
     phases.append(
         {
             "phase": "certification_evidence",
@@ -785,10 +946,11 @@ def write_certification_evidence(
     for arm, source, _report in arms:
         destination = root / CERTIFICATION_EVIDENCE[arm]
         if source is None:
+            # The run's own validated evaluation object rather than a rebuilt
+            # one: it is the object whose measured cost the ledger charged.
+            assert candidate is not None  # the only source-less arm
             write_candidate_evaluation(
-                CandidateEvaluation(report=_report),
-                root=root,
-                name=CERTIFICATION_EVIDENCE[arm],
+                candidate, root=root, name=CERTIFICATION_EVIDENCE[arm]
             )
         else:
             destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
@@ -840,7 +1002,20 @@ def _measurement_artifacts(
                 continue
             relative = Path(reference)
             if relative.is_absolute():
-                # The row names an absolute artifact; the judge hashes it there.
+                if source is None:
+                    # The candidate arm is produced by this run, so it has no
+                    # excuse for pointing outside it: a certified verdict that
+                    # depends on an external directory can be destroyed by
+                    # deleting that directory.
+                    raise CampaignRunRefusal(
+                        f"the candidate arm's {run.benchmark_qualified_id} row "
+                        f"names absolute artifact {reference!r}; the run's own "
+                        "measurement must live inside the run root, so the "
+                        "evidence a verdict rests on cannot be moved out from "
+                        "under it"
+                    )
+                # A declared arm may name an absolute artifact; the judge
+                # hashes it there, so the dependence is recorded below.
                 continue
             if ".." in relative.parts:
                 raise CampaignRunRefusal(
@@ -1503,6 +1678,8 @@ def _refuse(
     admission: list[Mapping[str, Any]],
     *,
     cost: Mapping[str, Any] | None = None,
+    attempts: Sequence[Mapping[str, Any]] = (),
+    selection: Mapping[str, Any] | None = None,
 ) -> CampaignRun:
     run = CampaignRun(
         cycle_id=manifest.cycle_id,
@@ -1515,11 +1692,106 @@ def _refuse(
         settlement={},
         ceiling_enforcement={},
         certification={},
-        selection={},
+        selection=dict(selection or {}),
         promotion=None,
         record_path="",
+        attempts=tuple(dict(attempt) for attempt in attempts),
     )
     return _write_record(run, root, outcome=None)
+
+
+#: The artifact the run selected is not the artifact it measured.
+CANDIDATE_ARTIFACT_DIGEST_STALE = "CANDIDATE_ARTIFACT_DIGEST_STALE"
+
+
+def _attempt_summary(results: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
+    """The durable facts about what each attempt produced, refusal included."""
+    return tuple(
+        {
+            "recipe_id": evidence.get("recipe_id"),
+            "attempt": evidence.get("attempt"),
+            "status": evidence.get("status"),
+            "refused_by": evidence.get("refused_by"),
+            "refusal_reason": evidence.get("refusal_reason"),
+            "failure_reason": evidence.get("failure_reason"),
+            "artifact_ref": evidence.get("artifact_ref"),
+            "artifact_sha256": evidence.get("artifact_sha256"),
+            "measured_gpu_hours": evidence.get("measured_gpu_hours"),
+        }
+        for evidence in results
+    )
+
+
+def _verify_selected_artifact(
+    selected: Mapping[str, Any] | None, *, purpose: str
+) -> None:
+    """Re-read the selected artifact and require its bytes to be unchanged.
+
+    A digest recorded at training time is a claim about bytes that may since
+    have moved. Production re-derives it from disk at both boundaries that
+    matter -- before the artifact is measured, and before a verdict is recorded
+    -- so a run can never certify a digest the frozen judge would later
+    recompute and reject.
+    """
+    if not selected:
+        return
+    artifact_ref = str(selected.get("artifact_ref") or "")
+    recorded = str(selected.get("artifact_sha256") or "")
+    if not artifact_ref or not recorded:
+        return
+    path = Path(artifact_ref)
+    if not path.exists():
+        raise CampaignRunRefusal(
+            f"{CANDIDATE_ARTIFACT_DIGEST_STALE}: the selected artifact "
+            f"{artifact_ref!r} no longer exists, so there is nothing to verify "
+            f"{purpose}"
+        )
+    observed = digest_of(path)
+    if observed != recorded:
+        raise CampaignRunRefusal(
+            f"{CANDIDATE_ARTIFACT_DIGEST_STALE}: the selected artifact "
+            f"{artifact_ref!r} hashes to {observed}, but the run recorded "
+            f"{recorded}; the bytes changed, so nothing measured against the "
+            f"recorded digest can be trusted {purpose}"
+        )
+
+
+def _preflight_arms(manifest: CampaignManifest) -> str:
+    """Load the declared evidence arms before any compute, or say what is wrong.
+
+    Everything here is knowable without touching a GPU: whether the parent and
+    trusted-ancestor reports exist and parse, and whether the contamination
+    evidence the binder already loaded is a real declaration. A run that would
+    refuse on them should refuse before it trains, not after.
+    """
+    checked: list[str] = []
+    for arm, field_name in _EVIDENCE_ARM_SOURCES.items():
+        declared = str(getattr(manifest, field_name))
+        if not declared:
+            raise CampaignRunRefusal(
+                f"the campaign declares no {field_name}, so the {arm} arm of "
+                "adjudication and branch protection cannot be read; the run "
+                "refuses before compute rather than after it"
+            )
+        source = _require_path(
+            declared,
+            field_name,
+            purpose=f"the {arm} arm is read before compute",
+        )
+        try:
+            report = EvalReport.load(source)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise CampaignRunRefusal(
+                f"the declared {arm} arm {source} is unreadable: {error}; a run "
+                "cannot adjudicate against evidence it cannot parse"
+            ) from error
+        if not report.runs:
+            raise CampaignRunRefusal(
+                f"the declared {arm} arm {source} carries no measured rows, so it "
+                "cannot be the evidence this run adjudicates against"
+            )
+        checked.append(f"{arm}={report.generation_version or '(unlabelled)'}/{len(report.runs)} rows")
+    return ", ".join(checked)
 
 
 def _write_record(
@@ -1538,10 +1810,11 @@ def _write_record(
         phases=run.phases,
         admission=run.admission,
         cost=run.cost,
-        settlement=run.settlement,            ceiling_enforcement=run.ceiling_enforcement,
-            certification=run.certification,
-            selection=run.selection,
-            promotion=run.promotion,
-
+        settlement=run.settlement,
+        ceiling_enforcement=run.ceiling_enforcement,
+        certification=run.certification,
+        selection=run.selection,
+        promotion=run.promotion,
         record_path=str(path),
+        attempts=run.attempts,
     )

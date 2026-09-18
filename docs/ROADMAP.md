@@ -88,8 +88,16 @@ dataset into the run root as the slice it measures, and returns digest-bound
 `MEASURED_THIS_GENERATION` rows whose score is the mean of the per-item scores
 in `predictions-<suite>.jsonl`. `build_evaluator` builds it from the manifest's
 newly declared `evaluation_material_path`; a campaign that declares none refuses
-before compute rather than after training. Three builds remain before a real gen2
-cycle can run, and all are honestly labelled rather than simulated:
+before compute rather than after training. `GEN2_PREREG_AMENDMENT7_2026-09-18.md`
+makes that refusal reachable early and the spend always accountable: the run
+builds and admits the evaluator, parses the declared arms and checks the
+evaluator's coverage of every declared benchmark in a `readiness` phase before
+any training starts, an evaluation that reports no measured cost is refused
+rather than charged zero, a refusal after training still writes the accounting,
+the attempts, the selection and its reason, and the selected artifact's digest is
+re-derived from disk both before it is measured and before the verdict is bound.
+Three builds remain before a real gen2 cycle can run, and all are honestly
+labelled rather than simulated:
 
 1. **The generation-diagnostics instrument.** The campaign's *target* set for
 gen2 is `generation-diagnostics@gen2-response-surface-v1`, and the frozen judge's

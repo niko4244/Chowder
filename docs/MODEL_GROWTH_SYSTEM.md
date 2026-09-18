@@ -197,6 +197,20 @@ not yet produce is the *target instrument's* diagnostic metadata (T1-T10), which
 still lives only in the historical gen1 driver; that is the next build (see
 ROADMAP).
 
+Three properties of that seam are enforced before a verdict, not asserted after
+one (`docs/quals/GEN2_PREREG_AMENDMENT7_2026-09-18.md`). The evaluator is built
+and admitted in a `readiness` phase *before* any recipe is admitted, so a run
+cannot spend a training budget and only then discover that no instrument exists
+or that the declared benchmarks are not covered; a refusal after training is
+recorded (accounting, attempts, selection, reason) rather than raised. The
+evaluation's cost is not optional: a bare `EvalReport`, a missing cost, or a zero
+that names no measurement method refuses with `CANDIDATE_EVALUATION_COST_UNREPORTED`
+/ `_COST_UNMEASURED` instead of settling as zero, so evaluation compute cannot
+disappear from the campaign's ceiling. And the selected artifact's digest is
+re-derived from the bytes on disk twice -- before it is measured, and before the
+judged evidence set is written -- refusing with `CANDIDATE_ARTIFACT_DIGEST_STALE`,
+so a recorded digest can never become a certified one.
+
 The gen0 arm itself is declared, not assumed:
 `GEN2_PREREG_AMENDMENT2_2026-09-18.md` pins it in the manifest
 (`baseline_eval_report_path`) as a fresh 16-item mini-slice measurement on the

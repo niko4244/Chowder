@@ -292,14 +292,21 @@ def test_one_run_root_is_the_frozen_judges_input(
 def test_the_runner_does_not_invent_an_arm_the_manifest_never_declared(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No declared ancestor report means no ancestor arm — not a placeholder."""
-    root, code, _payload = _campaign(tmp_path, monkeypatch, baseline_eval_report_path="")
-    assert code == 0
-    assert not (root / CERTIFICATION_EVIDENCE["ancestor"]).exists()
+    """No declared ancestor report means no ancestor arm — not a placeholder.
 
-    verdict, output = _judge(root)
-    assert verdict == 1
-    assert "trusted ancestor" in output
+    The run now refuses *before* compute instead: a campaign that declares no
+    trusted-ancestor evidence cannot be certified, so it must not spend a
+    training budget reaching a verdict it could never promote. What is still
+    proven here is the arm rule -- no declaration produces no arm, never a
+    placeholder the judge could read as evidence.
+    """
+    root, code, payload = _campaign(tmp_path, monkeypatch, baseline_eval_report_path="")
+    assert code == 1
+    assert payload["verdict"] == "REFUSED"
+    assert payload["refused_by"] == "readiness"
+    for arm in CERTIFICATION_EVIDENCE.values():
+        assert not (root / arm).exists(), f"{arm} was written by a refused run"
+    assert not (root / ACCOUNTING).exists(), "a pre-compute refusal spent nothing to account for"
 
 
 def test_absent_evidence_cannot_certify(

@@ -290,6 +290,52 @@ class SubprocessEvaluationFn:
         self.offline = offline
 
     # ------------------------------------------------------------------
+    # admission: what is knowable before any model is loaded
+    # ------------------------------------------------------------------
+
+    def admit(
+        self, *, benchmarks: Sequence[str], protocol: Any
+    ) -> tuple[str, str] | None:
+        """Whether this evaluator could measure these benchmarks, before compute.
+
+        The mirror of ``SubprocessTrainingFn.admit``: the runner asks before it
+        trains, so a campaign cannot spend a training budget and only then
+        discover that its evaluation material is missing, short, or describes a
+        protocol this instrument cannot render. Returns ``None`` when the
+        evaluation is runnable, else ``(kind, reason)``.
+        """
+        missing = self.material.missing(benchmarks)
+        if missing:
+            return (
+                CANDIDATE_EVALUATION_MATERIAL_INCOMPLETE,
+                f"the evaluation material {self.material.source} names no dataset "
+                f"for {list(missing)}, which the campaign declares as measured",
+            )
+        policy = str(protocol.prompt_policy)
+        if policy not in _PROMPT_POLICIES:
+            return (
+                CANDIDATE_EVALUATION_PROTOCOL_CONTRADICTION,
+                f"the declared prompt policy {policy!r} is not one this evaluator "
+                f"can render ({sorted(_PROMPT_POLICIES)})",
+            )
+        for qualified_id in benchmarks:
+            material = self.material.for_benchmark(qualified_id)
+            if not material.dataset.is_file():
+                return (
+                    CANDIDATE_EVALUATION_MATERIAL_INCOMPLETE,
+                    f"the evaluation material names dataset {material.dataset} for "
+                    f"{qualified_id}, which does not exist",
+                )
+            rows = _count_items(material)
+            if rows < int(protocol.n_samples):
+                return (
+                    CANDIDATE_EVALUATION_SLICE_TOO_SHORT,
+                    f"{material.dataset} holds {rows} item(s) and the declared "
+                    f"protocol needs {int(protocol.n_samples)} for {qualified_id}",
+                )
+        return None
+
+    # ------------------------------------------------------------------
     # the CandidateEvaluator contract
     # ------------------------------------------------------------------
 
@@ -728,6 +774,24 @@ class SubprocessEvaluationFn:
         )
 
 
+def _count_items(material: SuiteMaterial) -> int:
+    """How many usable items a declared dataset holds, without loading them all."""
+    count = 0
+    with material.dataset.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, Mapping) and all(
+                field in row for field in (material.prompt_field, material.expected_field)
+            ):
+                count += 1
+    return count
+
+
 def _read_samples(path: Path, *, suite_name: str) -> list[float]:
     """The per-item scores the worker wrote, refusing anything unreadable."""
     samples: list[float] = []
@@ -759,13 +823,22 @@ def _read_samples(path: Path, *, suite_name: str) -> list[float]:
 
 
 def _relative_to_run_root(path: Path, run_root: Path) -> str:
-    """A ref the judge resolves against the run root, never a path that escapes it."""
+    """A ref the judge resolves against the run root, or a refusal.
+
+    The candidate arm must be self-contained: its evidence lives in the run the
+    evaluation was asked to measure for. An artifact outside the run root would
+    make a certified verdict depend on a directory somebody else can move or
+    delete, so it refuses rather than naming an absolute path.
+    """
     resolved = Path(path).resolve()
     root = Path(run_root).resolve()
-    if resolved.is_relative_to(root):
-        return str(resolved.relative_to(root)).replace("\\", "/")
-    # Outside the run root: name it absolutely, which the judge hashes in place.
-    return str(resolved)
+    if not resolved.is_relative_to(root):
+        raise CandidateEvaluationRefusal(
+            f"the evaluation wrote {resolved} outside the run root {root}; the "
+            "candidate arm's evidence must live inside the run it measured for, "
+            "so the verdict does not depend on an external directory"
+        )
+    return str(resolved.relative_to(root)).replace("\\", "/")
 
 
 def _sha256_file(path: Path) -> str:
