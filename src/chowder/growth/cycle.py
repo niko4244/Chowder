@@ -54,6 +54,60 @@ from .recipe_planner import RecipePlanner, TrainingRecipe
 # A training execution: recipe -> durable evidence ref (artifact/eval report).
 TrainingFn = Callable[[TrainingRecipe, Sequence[CurriculumItem]], Mapping[str, Any]]
 
+# Allowed candidate-selection evidence: the per-recipe training outcome and
+# target-instrument smoke scores. Protected/broad/calibration/reliability
+# rows are promotion GATES, not optimization targets -- selection code that
+# could see them could pick the candidate that games the final battery, so
+# the type system keeps them out of the function's reach.
+SelectionEvidence = Mapping[str, Mapping[str, Any]]
+
+
+def select_candidate(
+    results: Sequence[Mapping[str, Any]],
+    *,
+    order: str = "first_successful",
+) -> Mapping[str, Any] | None:
+    """Deterministic candidate selection from allowed evidence only.
+
+    Reads ONLY each attempt's own training evidence: ``status``,
+    ``candidate_succeeded``, ``artifact_ref``/``artifact_sha256``, the
+    recipe id, and the recorded train loss / smoke quality -- the fields the
+    TrainingFn itself produced about its own run. It has no parameter that
+    could accept protected or broad benchmark scores, so recipe selection
+    cannot peek at final-gate evidence by construction.
+
+    Policies:
+    - ``first_successful`` (default): the first recipe (in preregistered
+      order) whose training succeeded and produced an artifact.
+    - ``first_by_loss``: the first-preregistered-tie-break by lowest
+      recorded training loss among successful attempts.
+
+    Ties resolve by the preregistered recipe order. Protected benchmarks
+    stay promotion gates; they are never selection inputs.
+    """
+    if order not in {"first_successful", "first_by_loss"}:
+        raise ValueError(f"unknown candidate-selection policy {order!r}")
+    successful = [
+        r
+        for r in results
+        if (r.get("candidate_succeeded") is True or r.get("status") == "SUCCEEDED")
+        and r.get("artifact_ref")
+    ]
+    if not successful:
+        return None
+    if order == "first_by_loss":
+        # Lowest recorded train loss among successful attempts; ties keep
+        # preregistered order (stable min).
+        return min(
+            successful,
+            key=lambda r: float(
+                (r.get("candidate_metrics") or {}).get("train_loss", float("inf"))
+            ),
+        )
+    # first_successful: the first recipe (in preregistered order) that
+    # succeeded and produced an artifact.
+    return successful[0]
+
 
 @dataclass(frozen=True)
 class CycleConfig:
@@ -196,6 +250,20 @@ class GrowthCycle:
             evidence["projected_device_gpu_hours"] = recipe.projected_device_gpu_hours
             results.append(evidence)
         return tuple(results)
+
+    def select_candidate(
+        self,
+        results: Sequence[Mapping[str, Any]],
+        *,
+        order: str = "first_successful",
+    ) -> Mapping[str, Any] | None:
+        """Phase: pick the candidate from allowed evidence only.
+
+        Delegates to :func:`select_candidate`, which structurally cannot see
+        protected/broad scores: selection happens BEFORE the final
+        evaluation phase and from training-side evidence only.
+        """
+        return select_candidate(results, order=order)
 
     def decide_promotion(
         self,
