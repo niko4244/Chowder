@@ -8,6 +8,7 @@ the measurement origin is evidence. Promotion must read the origin.
 from __future__ import annotations
 
 import dataclasses
+import json
 
 import pytest
 
@@ -17,6 +18,7 @@ from chowder.evals.result import (
     MEASURED_THIS_GENERATION,
     UNMEASURED,
     BenchmarkRun,
+    EvalReport,
 )
 from chowder.growth.benchmark_registry import BenchmarkEntry, Normalization
 from chowder.growth.metric_binding import MetricBinder, PromotionBindingError
@@ -289,3 +291,76 @@ def test_benchmark_run_rejects_unknown_origin() -> None:
 def test_result_to_dict_roundtrips_origin() -> None:
     r = _result("math500@2024-04", 0.5, origin=MEASURED_PARENT)
     assert dataclasses.asdict(r)["measurement_origin"] == MEASURED_PARENT
+
+
+# ---------------- EvalReport serialization preserves provenance ----------------
+
+
+@pytest.mark.parametrize(
+    "origin",
+    (MEASURED_THIS_GENERATION, MEASURED_PARENT, CARRIED_REFERENCE, UNMEASURED),
+)
+def test_eval_report_round_trips_every_origin(tmp_path, origin: str) -> None:
+    """save -> load must not launder (or destroy) a row's provenance.
+
+    A loader that dropped the field would turn durable candidate evidence
+    into UNMEASURED and refuse a gate the measurement actually satisfied.
+    """
+    report = EvalReport(
+        generation_version="gen2",
+        runs=(_run("math500@2024-04", "gen2", 0.5, origin=origin, samples=(1.0, 0.0)),),
+    )
+    path = tmp_path / "report.json"
+    report.save(path)
+    loaded = EvalReport.load(path)
+    assert loaded.runs[0].measurement_origin == origin
+    assert loaded.runs[0].per_sample_scores == (1.0, 0.0)
+
+
+def test_eval_report_round_trip_preserves_mixed_provenance(tmp_path) -> None:
+    """A real report mixes origins; each row keeps its own."""
+    report = EvalReport(
+        generation_version="gen2",
+        runs=(
+            _run("math500@2024-04", "gen2", 0.5, origin=MEASURED_THIS_GENERATION),
+            _run("mgsm@2022-11", "gen1", 0.25, origin=MEASURED_PARENT),
+            _run("mmlu_pro@v2", "gen0", 0.1, origin=CARRIED_REFERENCE),
+        ),
+    )
+    path = tmp_path / "mixed.json"
+    report.save(path)
+    loaded = EvalReport.load(path)
+    assert [r.measurement_origin for r in loaded.runs] == [
+        MEASURED_THIS_GENERATION,
+        MEASURED_PARENT,
+        CARRIED_REFERENCE,
+    ]
+
+
+def test_legacy_report_without_origin_field_loads_as_unmeasured(tmp_path) -> None:
+    """A row written before the field existed must not gain provenance.
+
+    Loading it as MEASURED_THIS_GENERATION would let a historical file
+    certify a gate no candidate measurement ever supported.
+    """
+    path = tmp_path / "legacy.json"
+    path.write_text(
+        json.dumps(
+            {
+                "generation_version": "gen0",
+                "runs": [
+                    {
+                        "benchmark_qualified_id": "math500@2024-04",
+                        "adapter": "lm_eval",
+                        "generation_version": "gen0",
+                        "score": 0.419,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = EvalReport.load(path)
+    assert loaded.runs[0].measurement_origin == UNMEASURED
+    # And provenance is never inferred from the generation label.
+    assert loaded.runs[0].generation_version == "gen0"
