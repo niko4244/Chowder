@@ -1,8 +1,10 @@
 {
   "cycle_id": "gen2-campaign",
   "parent_version": "gen1",
-  "parent_model_path": "F:/llm-models/Qwen3.8-9B-abliterated-25-bf16",
-  "parent_model_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_model_path": "F:/llm-models/Qwen3.8-9B-abliterated-25-bf16",
+  "base_model_digest": "59e767aab1dabceef098ceb367d872ef735114412383ae8e622a95c64297555f",
+  "parent_adapter_path": "C:/Users/nikma/Chowder-Protected/runs/2026-09-17-gen1-protocol-compliance/attempts/attempt-10/work/.chowder/runs/gen1-protocol-compliance-a10-46861b2929bd/adapter",
+  "parent_adapter_digest": "ca8769c5e7e06575c95501391e328811b55f2208d9cbb10b86e95eb40d8786cd",
   "state_root": "C:/Users/nikma/Chowder-Protected/runs/gen2",
   "target_benchmarks": ["generation-diagnostics@gen1-eval-protocol-v1"],
   "protected_benchmarks": ["math500@2024-04", "mgsm@2022-11"],
@@ -31,5 +33,5 @@
   "parent_profile_path": "docs/gen2/inputs/parent-profile.json",
   "parent_eval_report_path": "docs/gen2/inputs/parent-eval-report.json",
   "candidate_eval_report_path": "docs/gen2/inputs/candidate-eval-report.json",
-  "notes": "Example declaration for `chowder growth campaign run`. Every path above is relative to the repository root and must exist before a run; the runner refuses a declared-but-missing input by name. `recipes` must be exactly the ids `chowder growth campaign plan <this file>` prints -- the planner owns recipe identity, and a run refuses an id the planner did not propose. The two ids here are placeholders and deliberately do not match, so `plan` reports \"recipes_declared\": false. `device_time_measured: false` is the honest setting for the current trainer, which charges wall time: the device ceilings then bound the *projected plan* (per recipe and for the campaign as a whole) and the run records that they were not settled against measured device time."
+  "notes": "Example declaration for `chowder growth campaign run`. Identity is two objects: `base_model_path`/`base_model_digest` name the dense base, and `parent_adapter_path`/`parent_adapter_digest` name the parent generation's adapter over it (omit both when the parent *is* the base). Each digest is verified against its own tree before compute; a base digest is never accepted as an adapter digest. Every path above is relative to the repository root and must exist before a run; the runner refuses a declared-but-missing input by name. `recipes` must be exactly the ids `chowder growth campaign plan <this file>` prints -- the planner owns recipe identity, and a run refuses an id the planner did not propose. The two ids here are placeholders and deliberately do not match, so `plan` reports \"recipes_declared\": false. `device_time_measured: false` is the honest setting for the current trainer, which charges wall time: the device ceilings then bound the *projected plan* (per recipe and for the campaign as a whole) and the run records that they were not settled against measured device time."
 }

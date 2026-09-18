@@ -1,8 +1,10 @@
 {
   "cycle_id": "gen2-response-surface-compliance",
   "parent_version": "gen1",
-  "parent_model_path": "F:/llm-models/Qwen3.8-9B-abliterated-25-bf16",
-  "parent_model_digest": "ca8769c5e7e06575c95501391e328811b55f2208d9cbb10b86e95eb40d8786cd",
+  "base_model_path": "F:/llm-models/Qwen3.8-9B-abliterated-25-bf16",
+  "base_model_digest": "59e767aab1dabceef098ceb367d872ef735114412383ae8e622a95c64297555f",
+  "parent_adapter_path": "C:/Users/nikma/Chowder-Protected/runs/2026-09-17-gen1-protocol-compliance/attempts/attempt-10/work/.chowder/runs/gen1-protocol-compliance-a10-46861b2929bd/adapter",
+  "parent_adapter_digest": "ca8769c5e7e06575c95501391e328811b55f2208d9cbb10b86e95eb40d8786cd",
   "state_root": "C:/Users/nikma/Chowder-Protected/runs/2026-09-17-gen2-response-surface",
   "target_benchmarks": [
     "generation-diagnostics@gen2-response-surface-v1"
@@ -21,7 +23,8 @@
     "device_gpu_hours_ceiling_per_recipe": 0.30,
     "wall_gpu_hours_ceiling_per_recipe": 0.75,
     "device_gpu_hours_ceiling_campaign": 0.60,
-    "wall_gpu_hours_ceiling_campaign": 1.50
+    "wall_gpu_hours_ceiling_campaign": 1.50,
+    "device_time_measured": false
   },
   "recipes": [
     "gen2-recipe-a",
@@ -36,5 +39,5 @@
     "never enlarge a frozen threshold after candidate results are visible"
   ],
   "contamination_manifest_path": "C:/Users/nikma/Chowder-Protected/runs/2026-09-17-gen2-response-surface/gen2_contamination_manifest.json",
-  "notes": "Parent evidence state: gen1 effective verdict INCONCLUSIVE with target_repair_validated=true (see docs/growth/GEN1_READJUDICATION_ADDENDUM_2026-09-17.md). Gen2's protected gates are candidate-measured via the frozen 16-item mini-slices; no carried evidence satisfies any gate. Prereg: docs/quals/GEN2_PREREG_2026-09-17.md; judge: docs/gen2/judge_gen2.py."
+  "notes": "Identity is two objects, never one overloaded field: the dense base (content digest 59e767aa…, Generation 0) and the gen1 adapter (ca8769c5…) applied over it, which parent_version=gen1 names. 'parent_model_digest' is deliberately gone: it used to mean the base in prose and the adapter in the file. Parent evidence state: gen1 effective verdict INCONCLUSIVE with target_repair_validated=true (docs/growth/GEN1_READJUDICATION_ADDENDUM_2026-09-17.md). Gen2's protected gates are candidate-measured via the frozen 16-item mini-slices; no carried evidence satisfies any gate. device_time_measured=false per GEN2_PREREG_AMENDMENT1_2026-09-18: the trainer reports wall time, so device ceilings are admission (projected-plan) constraints and wall is the post-run settlement gate. Prereg: docs/quals/GEN2_PREREG_2026-09-17.md; amendment: docs/quals/GEN2_PREREG_AMENDMENT1_2026-09-18.md; judge: docs/gen2/judge_gen2.py."
 }

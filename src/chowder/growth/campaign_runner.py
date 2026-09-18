@@ -69,8 +69,10 @@ FIELD_ENFORCEMENT: Mapping[str, str] = {
     "cycle_id": "names the run, its durable record and its ledger entry",
     "parent_version": "the generation the candidate is compared against",
     "candidate_version": "the generation the verdict is recorded under (derived when empty)",
-    "parent_model_path": "hashed and compared with parent_model_digest before any compute",
-    "parent_model_digest": "must equal the parent tree's digest, else the run refuses",
+    "base_model_path": "hashed and compared with base_model_digest before any compute",
+    "base_model_digest": "must equal the dense base tree's digest, else the run refuses",
+    "parent_adapter_path": "hashed and compared with parent_adapter_digest when declared",
+    "parent_adapter_digest": "must equal the parent adapter tree's digest, else the run refuses",
     "state_root": "attempts, registry, ledger, accounting and campaign-run.json live here",
     "target_benchmarks": "the cycle's target set: the improvement gate",
     "protected_benchmarks": "the cycle's protected set: the regression gate",
@@ -243,7 +245,7 @@ def run_campaign(
         {
             "phase": "identity",
             "verdict": "ok",
-            "detail": f"parent tree digest matches {manifest.parent_model_digest[:12]}",
+            "detail": _identity_detail(manifest),
         }
     )
 
@@ -485,23 +487,51 @@ def _require_path(value: str, field: str, *, purpose: str) -> Path:
     return path
 
 
+def _identity_detail(manifest: CampaignManifest) -> str:
+    """Exactly which objects were hashed and which bytes matched."""
+    detail = f"base tree digest matches {manifest.base_model_digest[:12]}"
+    if manifest.has_parent_adapter():
+        detail += (
+            f"; parent adapter {manifest.parent_adapter_digest[:12]} verified "
+            f"over base for {manifest.parent_version}"
+        )
+    else:
+        detail += f"; {manifest.parent_version} is the base itself (no adapter declared)"
+    return detail
+
+
+def _verify_digest(path: Path, field: str, declared: str, *, of: str) -> None:
+    """The declared digest must match the bytes on disk, or the run refuses."""
+    if not path.exists():
+        raise CampaignRunRefusal(f"{field} {str(path)!r} does not exist ({of})")
+    digest, _entries = directory_digest(path)
+    if digest != declared:
+        raise CampaignRunRefusal(
+            f"{field} {declared[:12]} does not match the tree's digest {digest[:12]} "
+            f"({of}); the campaign would train from a model other than the one it "
+            "preregistered"
+        )
+
+
 def _verify_parent_identity(manifest: CampaignManifest) -> None:
-    if not manifest.parent_model_path:
-        raise CampaignRunRefusal(
-            "the manifest declares no parent_model_path; a candidate without a "
-            "hashed parent is not a generation"
-        )
-    parent = Path(manifest.parent_model_path)
-    if not parent.exists():
-        raise CampaignRunRefusal(
-            f"parent_model_path {manifest.parent_model_path!r} does not exist"
-        )
-    digest, _entries = directory_digest(parent)
-    if digest != manifest.parent_model_digest:
-        raise CampaignRunRefusal(
-            f"parent_model_digest {manifest.parent_model_digest[:12]} does not match "
-            f"the parent tree's digest {digest[:12]}; the campaign would train from a "
-            "model other than the one it preregistered"
+    """Verify the base, and the parent adapter separately when declared.
+
+    A base digest and an adapter digest identify different objects, so each is
+    checked against its own tree. Overloading one field to mean either is what
+    made the gen2 manifest ambiguous.
+    """
+    _verify_digest(
+        Path(manifest.base_model_path),
+        "base_model_digest",
+        manifest.base_model_digest,
+        of="the dense base tree",
+    )
+    if manifest.has_parent_adapter():
+        _verify_digest(
+            Path(manifest.parent_adapter_path),
+            "parent_adapter_digest",
+            manifest.parent_adapter_digest,
+            of=f"the {manifest.parent_version} adapter tree",
         )
 
 
@@ -815,8 +845,7 @@ def _finalize(
     return cycle.finalize(
         decision,
         base_model={
-            "path": manifest.parent_model_path,
-            "sha256": manifest.parent_model_digest,
+            **manifest.model_identity(),
             "version": manifest.parent_version,
         },
         dataset_manifest_ref=selected.get("evidence_path", "") if selected else "",

@@ -132,6 +132,26 @@ chowder growth campaign run FILE        # execute the declared campaign end to e
 chowder growth campaign settle FILE     # re-settle a campaign from its accounting artifact
 ```
 
+## Gen-2 certification boundary
+
+The frozen gen2 judge (`docs/gen2/judge_gen2.py`, frozen with
+`docs/quals/GEN2_PREREG_2026-09-17.md` and
+`GEN2_PREREG_AMENDMENT1_2026-09-18.md`) owns the frozen policy — benchmark
+set, thresholds, branch rules, verdict composition — and no second
+implementation of anything production already decides. It hashes artifacts
+with `training_binding.directory_digest`, settles resources with
+`campaign.settle_campaign`, reads provenance from `evals.result`, interprets
+contamination with `metric_binding.MetricBinder`, compares with
+`statistics.compare`, and parses arms with `evals.result.EvalReport`. Three
+provenance-bound arms are judged: the gen2 candidate
+(`MEASURED_THIS_GENERATION`), the gen1 parent and the trusted ancestor gen0
+(`MEASURED_PARENT`), each measured on the same frozen 16-prompt instrument
+and the same 16-item protected mini-slices. Promotion requires the target
+rule *and* no protected regression against the parent *and* the ancestor, so
+a candidate cannot promote by matching an unresolved parent. Missing
+evidence is INCONCLUSIVE; contamination is TAINTED; a hard failure is
+REJECTED.
+
 ## Campaign manifests: preregistration as configuration
 
 A campaign manifest (`campaign.CampaignManifest`) is the preregistration a
