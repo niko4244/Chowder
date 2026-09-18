@@ -314,6 +314,14 @@ class CampaignManifest:
     #: ``parent_eval_report_path`` because an unresolved parent must not become
     #: the protection baseline: the two arms answer different questions.
     baseline_eval_report_path: str = ""
+    #: What the campaign's own candidate evaluation measures *with*: the
+    #: dataset, fields and scoring for each declared benchmark, as a JSON
+    #: document. The candidate arm is a run **output** (the report is not a
+    #: declaration), but the material it is measured on is an input, exactly
+    #: like ``training_material_path`` -- so the evaluator is told what to
+    #: measure rather than picking datasets of its own choosing. Empty when a
+    #: manifest predates it; the production evaluator then refuses by name.
+    evaluation_material_path: str = ""
     #: The declared branch-protection policy. Empty when a manifest predates it;
     #: certification then refuses rather than substituting a default tolerance.
     protection: ProtectionDeclaration = field(default_factory=ProtectionDeclaration)
@@ -338,7 +346,7 @@ class CampaignManifest:
             "contamination_manifest_path", "notes", "candidate_version",
             "project_template_path", "training_material_path", "data_registry_path",
             "hardware_budget_path", "parent_profile_path", "parent_eval_report_path",
-            "baseline_eval_report_path", "protection",
+            "baseline_eval_report_path", "protection", "evaluation_material_path",
         }
         retired = sorted(set(document) & set(RETIRED_FIELDS))
         if retired:
@@ -466,6 +474,7 @@ class CampaignManifest:
             parent_profile_path=str(document.get("parent_profile_path", "")),
             parent_eval_report_path=str(document.get("parent_eval_report_path", "")),
             baseline_eval_report_path=str(document.get("baseline_eval_report_path", "")),
+            evaluation_material_path=str(document.get("evaluation_material_path", "")),
             # Absent (a manifest predating it) is an *undeclared* policy, which
             # certification refuses; present-but-incomplete is refused here.
             protection=(

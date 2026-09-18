@@ -77,25 +77,40 @@ ancestor gen0 as well as the immediate parent.
 
 **Gen-2 pre-compute blockers (explicitly not done; nothing here is guessed).**
 Certification now runs before the lineage record, the candidate arm is a run
-output rather than a declared input, and every arm is digest- and
-generation-bound (`docs/quals/GEN2_PREREG_AMENDMENT5_2026-09-18.md`). Two builds
-remain before a real gen2 cycle can run, and both are honestly labelled rather
-than simulated:
+output rather than a declared input, every arm is digest- and generation-bound
+(`docs/quals/GEN2_PREREG_AMENDMENT5_2026-09-18.md`), and the instrument that
+*produces* the candidate arm is real
+(`docs/quals/GEN2_PREREG_AMENDMENT6_2026-09-18.md`):
+`chowder.growth.evaluation_binding.SubprocessEvaluationFn` measures the adapter
+the run selected through the production transformers-text worker and its own
+command line, writes the first `protection.n_samples` items of each declared
+dataset into the run root as the slice it measures, and returns digest-bound
+`MEASURED_THIS_GENERATION` rows whose score is the mean of the per-item scores
+in `predictions-<suite>.jsonl`. `build_evaluator` builds it from the manifest's
+newly declared `evaluation_material_path`; a campaign that declares none refuses
+before compute rather than after training. Three builds remain before a real gen2
+cycle can run, and all are honestly labelled rather than simulated:
 
-1. **A production candidate evaluator.** `campaign_runner.build_evaluator`
-   returns `None` in this build, so a run refuses with
-   `CANDIDATE_EVALUATION_NOT_PRODUCED`. The missing piece is the instrument that
-   measures the selected adapter under this campaign's declared protocol and
-   writes per-sample evidence (the production transformers-text worker already
-   records `predictions-<suite>.jsonl` per row, so the measurement exists — the
-   binding into the campaign does not).
+1. **The generation-diagnostics instrument.** The campaign's *target* set for
+gen2 is `generation-diagnostics@gen2-response-surface-v1`, and the frozen judge's
+T1–T10 read one instrument row's diagnostic metadata (`per_prompt` completions,
+`eos_termination_rate`, `max_token_cap_rate`, `obvious_loop_count`,
+`distinct_trigram_ratio_mean`, `unclosed_think_rate`). Those definitions exist
+only in the historical `docs/gen1/run_gen1_cycle.py`; no module in `src/`
+computes them, so the evaluator writes the row's scored items but not its
+diagnostics — which leaves T1–T10 `UNKNOWN` rather than passing. Porting that
+instrument into production is the next build.
 2. **The gen2 declaration's run inputs.** `docs/gen2/gen2_campaign.json`
-   declares identity, benchmark sets, budgets, protection and the Gen-0 arm, but
-   four inputs have no artifact anywhere (`project_template_path`,
-   `training_material_path`, `data_registry_path`, `hardware_budget_path` — the
-   Gen-1 driver composed them in process), `parent_profile_path` has no gen1
-   measurement, and the Gen-0 baseline arm is declared but not yet measured.
-   `plan` and `run` therefore refuse, naming every missing input at once.
+declares identity, benchmark sets, budgets, protection and the Gen-0 arm, but
+five inputs have no artifact anywhere (`project_template_path`,
+`training_material_path`, `data_registry_path`, `hardware_budget_path` — the
+Gen-1 driver composed them in process — and `evaluation_material_path`, the
+datasets the evaluator now measures), `parent_profile_path` has no gen1
+measurement, and the Gen-0 baseline arm is declared but not yet measured.
+`plan` and `run` therefore refuse, naming every missing input at once.
+3. **Measuring the Gen-0 arm.** T16 stays `UNKNOWN` until that declared 16-item
+mini-slice exists at `baseline_eval_report_path`, so gen2 cannot be certified by
+branch protection yet.
 
 **Research kernel**
 experiment DAG · hypothesis schema · compute budget enforcement · hard

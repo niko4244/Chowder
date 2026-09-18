@@ -80,6 +80,7 @@ from .certification import (
     certify_run_root,
 )
 from .compute_cost import ComputeCost, CycleCostLedger
+from .evaluation_binding import EvaluationMaterial, SubprocessEvaluationFn
 from .contamination import ContaminationFirewall
 from .curriculum import CurriculumEngine, CurriculumItem
 from .cycle import CycleConfig, CycleOutcome, GrowthCycle, TrainingFn
@@ -127,6 +128,7 @@ FIELD_ENFORCEMENT: Mapping[str, str] = {
     "hardware_budget_path": "the measured local budget the recipe planner projects against",
     "parent_profile_path": "the parent capability profile the curriculum is planned from",
     "parent_eval_report_path": "the parent side of adjudication, and the parent arm of the judged evidence set",
+    "evaluation_material_path": "the dataset, fields and scoring the production evaluator measures the selected candidate with; a declared-but-missing file, or one that names no dataset for a declared benchmark, refuses before compute",
     "baseline_eval_report_path": "the trusted-ancestor (gen0) arm of the judged evidence set: branch protection is judged against it, never against an unresolved parent",
     "protection": "the declared branch-protection policy (trusted ancestor version + slice regression tolerance) the certification gate applies before any lineage record is written",
     "notes": "documentation only: it drives no behavior and gates nothing",
@@ -171,6 +173,11 @@ DECLARED_INPUT_REQUIREMENTS: Mapping[str, tuple[tuple[str, str], ...]] = {
         (
             "contamination_manifest_path",
             "rows cannot be bound against an unchecked firewall, so every row would bind UNKNOWN",
+        ),
+        (
+            "evaluation_material_path",
+            "the production evaluator has no data to measure the selected candidate "
+            "on, so the run would spend its training compute and refuse afterwards",
         ),
     ),
 }
@@ -1097,20 +1104,46 @@ def envelope_for(manifest: CampaignManifest) -> GrowthEnvelope:
 
 
 def build_evaluator(
-    manifest: CampaignManifest, *, state_root: str | Path | None = None
+    manifest: CampaignManifest,
+    *,
+    state_root: str | Path | None = None,
+    runner: Any = None,
 ) -> CandidateEvaluator | None:
-    """Build the production candidate evaluator, or ``None`` when none is wired.
+    """Build the production candidate evaluator the campaign declared.
 
     The evaluator is what makes the candidate arm a *run output*: it is asked to
     measure the artifact this run selected, under the protocol the campaign
-    declared. This build wires none, and ``None`` is a refusal
-    (:data:`CANDIDATE_EVALUATION_NOT_PRODUCED`) rather than a licence to read a
-    report from somewhere else -- a campaign that cannot evaluate its own
+    declared, and it writes that measurement into the run root. A declared
+    ``default_evaluator_factory`` overrides the production instrument (that
+    seam is what the no-GPU harness supplies); otherwise this builds the real
+    one from the campaign's declared evaluation material.
+
+    ``None`` -- an instrument that cannot be built -- is a refusal
+    (:data:`CANDIDATE_EVALUATION_NOT_PRODUCED`), never a licence to read a
+    report from somewhere else: a campaign that cannot evaluate its own
     candidate has nothing to adjudicate on.
     """
-    if default_evaluator_factory is None:
-        return None
-    return default_evaluator_factory(manifest, state_root=state_root)
+    if default_evaluator_factory is not None:
+        return default_evaluator_factory(manifest, state_root=state_root)
+    if not str(manifest.evaluation_material_path).strip():
+        raise CampaignRunRefusal(
+            f"{CANDIDATE_EVALUATION_NOT_PRODUCED}: the campaign declares no "
+            "evaluation_material_path, so the production evaluator has no "
+            "datasets to measure the selected artifact on; the candidate arm is "
+            "a run output and the material it is measured with is an input"
+        )
+    material = EvaluationMaterial.load(manifest.evaluation_material_path)
+    protocol = manifest.protection.require_protocol(source=manifest.cycle_id)
+    return SubprocessEvaluationFn(
+        run_root=Path(state_root or manifest.state_root),
+        material=material,
+        protocol=protocol,
+        base_model_path=manifest.base_model_path,
+        base_model_digest=manifest.base_model_digest,
+        # Resolved here, in this module's namespace, so one patch point covers
+        # every process this campaign starts (trainer and evaluator alike).
+        runner=runner or default_runner,
+    )
 
 
 def build_executor(

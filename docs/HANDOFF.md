@@ -125,12 +125,27 @@ generation, `adapter_digest` equal to the selected artifact's digest,
 refused by name; an honestly `UNMEASURED` row is kept as unmeasured), coverage of
 every declared benchmark, and no benchmark measured twice. Whatever the
 evaluation reports as its measured cost is charged to the cycle ledger before
-settlement. Two things are deliberately **not** done here: this build wires no
-production evaluator (so a real gen2 run still refuses), and the checked-in
-`docs/gen2/gen2_campaign.json` still provides none of the six inputs a run reads
-from disk — the Gen-1 driver composed four of them in process, gen1 has no
-measured parent profile, and the Gen-0 arm is declared but unmeasured. Both entry
-points refuse before compute, naming **every** missing input at once
+settlement.
+
+`GEN2_PREREG_AMENDMENT6_2026-09-18.md` then supplies the instrument that seam was
+missing. `chowder.growth.evaluation_binding.SubprocessEvaluationFn` measures the
+selected adapter through the production transformers-text worker and its own
+command line, from the datasets the campaign declares in the new manifest key
+`evaluation_material_path`; it writes the first `protection.n_samples` items of
+each declared dataset into the run root as the slice it measures, checks the
+adapter's digest against the real bytes before loading them, and returns rows
+bound to the `predictions-<suite>.jsonl` it produced and the digest of those
+bytes. `chowder growth campaign run` therefore reaches a verdict (including a
+durable promotion) from evidence the run produced, with no injected seam.
+
+Two things are deliberately **not** done here: the target instrument's diagnostic
+metadata (the judge's T1–T10) still exists only in the historical Gen-1 driver
+rather than in `src/`, and the checked-in `docs/gen2/gen2_campaign.json` still
+provides none of the seven inputs a run reads from disk — the Gen-1 driver
+composed four of them in process, gen1 has no measured parent profile, the
+contamination manifest is produced by the run itself, and the evaluation material
+the evaluator measures with does not exist yet. Both entry points refuse before
+compute, naming **every** missing input at once
 (`require_declared_inputs`), and the declaration's own `notes` say so. Producing
 those documents from production code, plus the instrument that measures the
 selected adapter under the declared protocol, is the remaining pre-compute
