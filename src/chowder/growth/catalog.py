@@ -854,6 +854,42 @@ _ROWS: list[dict[str, Any]] = [
         adapter="chowder_custom",
     ),
     dict(
+        benchmark_id="generation-diagnostics",
+        version="gen2-response-surface-v1",
+        name="Chowder generation diagnostics (Gen-2 response surface, 16-prompt protocol)",
+        category="instruction",
+        subcategory="turn-termination / protocol compliance",
+        status="INTERNAL_REFERENCE_ONLY",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=2,
+        scorer="protocol_diagnostics",
+        primary_metric="eos_termination_rate",
+        skills=("instruction.formatting",),
+        dataset_source=(
+            "docs/gen2/judge_gen2.py INSTRUMENT_PROMPTS (the same 16 frozen "
+            "prompts the Gen-1 instrument used; the campaign declares the file "
+            "it measured in evaluation_material_path)"
+        ),
+        implementation_source=(
+            "chowder.growth.generation_diagnostics (the ported instrument) over "
+            "chowder.evaluators.transformers_text_worker observations"
+        ),
+        source="Chowder (this repository)",
+        license="Apache-2.0 (this repository)",
+        release_date="2026-09-18",
+        contamination_risk="low",
+        notes=(
+            "Gen-2 preregistered target instrument (docs/quals/GEN2_PREREG_2026-09-17.md "
+            "and its amendments): the same 16 prompts, seed 1234, chat-template "
+            "prompts and 512 max new tokens, scored 1.0 for a generation that "
+            "stops on EOS and 0.0 for one that runs into the cap, so the row's "
+            "score is its eos_termination_rate. The frozen judge's T1-T10 read "
+            "this row. A behavioral protocol instrument: its score never enters "
+            "capability-skill aggregation."
+        ),
+        adapter="chowder_custom",
+    ),
+    dict(
         benchmark_id="bfcl_assertive_safety",
         version="v4",
         name="BFCL safety/injection probes",

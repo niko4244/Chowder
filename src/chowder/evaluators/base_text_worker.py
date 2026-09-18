@@ -16,9 +16,9 @@ from ..lifecycle import (
     sampling_device,
 )
 from .base_text import BaseTextEvalSpec
-from .generation import resolve_eos_token_ids
+from .generation import observed_generation, resolve_eos_token_ids
 from .rendering import render_prompt
-from .scoring import final_answer, final_number, normalize, score
+from .scoring import final_answer, final_number, normalize, observed_score, score
 from .vram import MemorySampler, peak_vram as _peak_vram
 from .placement import dispatch_offloaded, placement_note
 from .transformers_text import EvalSuiteSpec
@@ -206,7 +206,22 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
                     prediction = tokenizer.decode(
                         generated[0, prompt_tokens:], skip_special_tokens=True
                     )
-                    row_score = _score(prediction, expected, suite.scoring)
+                    # The same facts and the same scoring rule the transformers
+                    # arm uses: a baseline scored by one worker and a candidate
+                    # by the other must leave behind comparable observations, or
+                    # the two arms' diagnostics measure different things.
+                    observation = observed_generation(
+                        generated=generated,
+                        prompt_tokens=prompt_tokens,
+                        eos_token_id=resolved_eos_token_id,
+                        max_new_tokens=suite.max_new_tokens,
+                    )
+                    observed = observed_score(observation, suite.scoring)
+                    row_score = (
+                        observed
+                        if observed is not None
+                        else _score(prediction, expected, suite.scoring)
+                    )
                     correct += row_score
                     output.write(
                         json.dumps(
@@ -215,6 +230,7 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
                                 "expected": expected,
                                 "prediction": prediction,
                                 "score": row_score,
+                                **observation,
                             },
                             ensure_ascii=False,
                         )

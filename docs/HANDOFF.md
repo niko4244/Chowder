@@ -154,9 +154,28 @@ before it is measured and again before the judged evidence set is written
 (`CANDIDATE_ARTIFACT_DIGEST_STALE`), so no run can certify a digest the frozen
 judge would recompute and reject.
 
-Two things are deliberately **not** done here: the target instrument's diagnostic
-metadata (the judge's T1–T10) still exists only in the historical Gen-1 driver
-rather than in `src/`, and the checked-in `docs/gen2/gen2_campaign.json` still
+`GEN2_PREREG_AMENDMENT8_2026-09-18.md` then moves the instrument itself into
+`src/`. The frozen judge's T1–T10 read one row — the campaign's declared target,
+`generation-diagnostics@gen2-response-surface-v1` — for the completions of the 16
+frozen prompts and five aggregates over the raw generations. Those definitions
+lived only in `docs/gen1/run_gen1_cycle.py`, so every production run left T1–T10
+`UNKNOWN`. Now `chowder.growth.generation_diagnostics` computes the frozen rules
+(same triggers, same denominators) from the worker's own per-item rows;
+`chowder.evaluators.generation.observed_generation` records the two facts only the
+generating worker can observe — tokens produced and whether generation stopped on
+EOS — beside every prediction in both text workers; and
+`chowder.evaluators.scoring.observed_score` defines the observation scoring
+`eos_termination`, so the row's own score is its `eos_termination_rate`, exactly
+as the Gen-1 instrument scored it. The evaluation binding merges the diagnostics
+into the row metadata flat, where the judge reads them, and refuses with
+`GENERATION_DIAGNOSTICS_UNMEASURED` when an item carries no observation — an
+unevaluated termination fact must not become a termination failure. The version
+the judge pins is registered in the benchmark catalog now too; until this
+transfer it was an id no registry knew, so a campaign could not even plan against
+its declared target.
+
+One thing is deliberately **not** done here: the checked-in
+`docs/gen2/gen2_campaign.json` still
 provides none of the seven inputs a run reads from disk — the Gen-1 driver
 composed four of them in process, gen1 has no measured parent profile, the
 contamination manifest is produced by the run itself, and the evaluation material

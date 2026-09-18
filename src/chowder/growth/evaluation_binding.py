@@ -73,6 +73,7 @@ from .candidate_evaluation import (
     CandidateEvaluationRefusal,
 )
 from .compute_cost import ComputeCost
+from .generation_diagnostics import GenerationDiagnostics
 from .training_binding import (
     SubprocessOutcome,
     default_runner,
@@ -672,7 +673,8 @@ class SubprocessEvaluationFn:
                     f"fingerprint evidence for {material.name!r} does not hash to "
                     f"the digest the worker declared ({fingerprint_digest!r})"
                 )
-            samples = _read_samples(predictions, suite_name=material.name)
+            items = _read_items(predictions, suite_name=material.name)
+            samples = [float(item["score"]) for item in items]
             if len(samples) != int(protocol.n_samples):
                 raise CandidateEvaluationRefusal(
                     f"{CANDIDATE_EVALUATION_EVIDENCE_INVALID}: {material.name!r} "
@@ -697,6 +699,16 @@ class SubprocessEvaluationFn:
                         # The bytes these numbers came from, recomputed by
                         # certification from the file itself.
                         "artifact_sha256": _sha256_file(predictions),
+                        # What the generations actually did, from the same file
+                        # the score came from: the campaign's declared target set
+                        # is the generation-diagnostics instrument, and the frozen
+                        # judge reads these keys directly (T1-T10).
+                        **GenerationDiagnostics.from_items(
+                            items,
+                            max_new_tokens=int(protocol.decoding["max_new_tokens"]),
+                            seed=int(protocol.seed),
+                            source=str(predictions),
+                        ).to_metadata(),
                         "sample_indices": list(range(len(samples))),
                         "seed": int(protocol.seed),
                         "shuffle": bool(protocol.shuffle),
@@ -792,9 +804,14 @@ def _count_items(material: SuiteMaterial) -> int:
     return count
 
 
-def _read_samples(path: Path, *, suite_name: str) -> list[float]:
-    """The per-item scores the worker wrote, refusing anything unreadable."""
-    samples: list[float] = []
+def _read_items(path: Path, *, suite_name: str) -> list[dict[str, Any]]:
+    """The per-item rows the worker wrote, refusing anything unreadable.
+
+    One parser for these bytes: the row's score, its per-sample values and its
+    generation diagnostics all come from this single read, so a report cannot
+    carry a score from one parsing and diagnostics from another.
+    """
+    items: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
@@ -806,20 +823,25 @@ def _read_samples(path: Path, *, suite_name: str) -> list[float]:
                     f"{CANDIDATE_EVALUATION_EVIDENCE_INVALID}: {path}:{line_number} "
                     f"is not JSON: {error}"
                 ) from error
-            score = row.get("score") if isinstance(row, Mapping) else None
+            if not isinstance(row, Mapping):
+                raise CandidateEvaluationRefusal(
+                    f"{CANDIDATE_EVALUATION_EVIDENCE_INVALID}: {path}:{line_number} "
+                    "is not an object, so it is not a scored item"
+                )
+            score = row.get("score")
             if isinstance(score, bool) or not isinstance(score, (int, float)):
                 raise CandidateEvaluationRefusal(
                     f"{CANDIDATE_EVALUATION_EVIDENCE_INVALID}: {path}:{line_number} "
                     f"carries no numeric score, so {suite_name!r} has no measurement "
                     "for that item"
                 )
-            samples.append(float(score))
-    if not samples:
+            items.append({**row, "score": float(score)})
+    if not items:
         raise CandidateEvaluationRefusal(
             f"{CANDIDATE_EVALUATION_EVIDENCE_INVALID}: {path} holds no scored item, "
             f"so {suite_name!r} was not measured"
         )
-    return samples
+    return items
 
 
 def _relative_to_run_root(path: Path, run_root: Path) -> str:
