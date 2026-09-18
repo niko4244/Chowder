@@ -54,8 +54,13 @@ from chowder.growth.evaluation_binding import (
     SubprocessEvaluationFn,
     digest_of,
 )
+from chowder.growth.generation_diagnostics import (
+    GENERATION_DIAGNOSTICS_UNMEASURED,
+    GenerationDiagnostics,
+)
 from chowder.growth.lineage import GenerationLedger
 from chowder.growth.training_binding import SubprocessOutcome
+from chowder.evaluators.scoring import observed_score
 
 import test_growth_campaign_runner as campaign_fixture
 from test_growth_campaign_runner import (
@@ -92,6 +97,8 @@ class _RecordingWorker:
         fail: bool = False,
         omit_result: bool = False,
         omit_predictions_for: str = "",
+        omit_generation_facts: bool = False,
+        prediction_of=None,
         score_of=lambda name, index: 1.0 if index % 2 == 0 else 0.0,
     ) -> None:
         self.gpu_count = gpu_count
@@ -99,6 +106,11 @@ class _RecordingWorker:
         self.fail = fail
         self.omit_result = omit_result
         self.omit_predictions_for = omit_predictions_for
+        # The production worker records how each generation ended (EOS or the
+        # token cap). A worker that does not is the shape the diagnostics
+        # refuse, so the flag has to be expressible here.
+        self.omit_generation_facts = omit_generation_facts
+        self.prediction_of = prediction_of or (lambda name, index, row: str(row.get("expected", "")))
         self.score_of = score_of
         self.commands: list[Sequence[str]] = []
         self.specs: list[dict[str, Any]] = []
@@ -141,24 +153,34 @@ class _RecordingWorker:
                 metrics[name] = float(self.score_of(name, 0))
                 predictions = output_dir / f"predictions-{name}.jsonl"
             else:
-                scores = [float(self.score_of(name, index)) for index in range(len(rows))]
+                items: list[dict[str, Any]] = []
+                for index, row in enumerate(rows):
+                    score = float(self.score_of(name, index))
+                    facts = (
+                        {} if self.omit_generation_facts else _generation_facts(suite, index)
+                    )
+                    # A scoring defined over the observation is computed from the
+                    # facts the worker recorded, exactly as production does -- the
+                    # recording worker must not be the only place that rule lives
+                    # in two implementations.
+                    observed = observed_score(facts, str(suite.get("scoring", "")))
+                    if observed is not None:
+                        score = float(observed)
+                    items.append(
+                        {
+                            "prompt": row.get("prompt", ""),
+                            "expected": row.get("expected", ""),
+                            "prediction": self.prediction_of(name, index, row),
+                            "score": score,
+                            **facts,
+                        }
+                    )
                 predictions = output_dir / f"predictions-{name}.jsonl"
                 predictions.write_text(
-                    "".join(
-                        json.dumps(
-                            {
-                                "prompt": row.get("prompt", ""),
-                                "expected": row.get("expected", ""),
-                                "prediction": str(row.get("expected", "")),
-                                "score": score,
-                            }
-                        )
-                        + "\n"
-                        for row, score in zip(rows, scores)
-                    ),
+                    "".join(json.dumps(item) + "\n" for item in items),
                     encoding="utf-8",
                 )
-                metrics[name] = sum(scores) / len(scores)
+                metrics[name] = sum(item["score"] for item in items) / len(items)
             fingerprints = output_dir / f"holdout-fingerprints-{name}.jsonl"
             fingerprints.write_text(
                 "".join(
@@ -210,6 +232,17 @@ class _RecordingWorker:
             seconds=self.seconds,
             timed_out=False,
         )
+
+
+def _generation_facts(suite: Mapping[str, Any], index: int) -> dict[str, Any]:
+    """What the production worker records beside each prediction.
+
+    Deterministically shorter than the declared cap, so the recorded facts are
+    self-consistent (a terminated generation stops short of the cap) and the
+    diagnostics the binding computes are reproducible.
+    """
+    cap = int(suite["max_new_tokens"])
+    return {"generated_tokens": min(1 + index % 3, cap - 1), "eos_terminated": True}
 
 
 def _digest(path: Path) -> str:
@@ -450,6 +483,96 @@ def test_a_worker_that_failed_is_not_a_measurement(tmp_path: Path):
         )
 
     assert CANDIDATE_EVALUATION_PROCESS_FAILED in str(error.value)
+
+
+def test_a_worker_that_did_not_observe_its_generations_is_not_an_arm(tmp_path: Path):
+    """The instrument's facts are read, not assumed.
+
+    The campaign's declared target set is the generation-diagnostics
+    instrument, and its rates are defined over how each generation ended. A
+    worker whose rows carry only the decoded text cannot say whether a
+    generation stopped on EOS or ran into the cap, so the row is refused rather
+    than diagnosed from a guess.
+    """
+    manifest, _runner, _document = _campaign(tmp_path)
+    artifact = _artifact(tmp_path)
+    evaluator = SubprocessEvaluationFn(
+        run_root=Path(manifest.state_root),
+        material=EvaluationMaterial.load(manifest.evaluation_material_path),
+        protocol=manifest.protection.require_protocol(),
+        base_model_path=manifest.base_model_path,
+        runner=_RecordingWorker(omit_generation_facts=True),
+    )
+
+    with pytest.raises(CandidateEvaluationRefusal) as error:
+        evaluator(
+            _request(manifest, artifact_ref=str(artifact), artifact_sha256=digest_of(artifact))
+        )
+
+    assert GENERATION_DIAGNOSTICS_UNMEASURED in str(error.value)
+    assert "generated_tokens" in str(error.value)
+
+
+def test_the_target_row_carries_the_diagnostics_computed_from_its_own_bytes(
+    tmp_path: Path,
+):
+    """T1-T10's evidence, produced by the measurement that took it.
+
+    The declared target set is the generation-diagnostics instrument: its row's
+    ``per_prompt`` completions and five aggregate rates are what the frozen
+    judge reads. They are recomputed here from the predictions file the row
+    itself names, so a row cannot carry diagnostics from bytes other than the
+    ones it digested.
+    """
+    manifest, _runner, _document = _campaign(tmp_path)
+    artifact = _artifact(tmp_path)
+    evaluator = SubprocessEvaluationFn(
+        run_root=Path(manifest.state_root),
+        material=EvaluationMaterial.load(manifest.evaluation_material_path),
+        protocol=manifest.protection.require_protocol(),
+        base_model_path=manifest.base_model_path,
+        runner=_RecordingWorker(
+            # The target instrument's completions are the answers, so the
+            # diagnostics describe generations that actually terminated.
+            prediction_of=lambda name, index, row: (
+                str(row.get("expected", ""))
+                if name == TARGET_ID.split("@", 1)[0]
+                else f"wrong answer {index}"
+            ),
+            score_of=lambda name, index: 1.0 if name == TARGET_ID.split("@", 1)[0] else 0.0,
+        ),
+    )
+
+    evaluation = evaluator(
+        _request(manifest, artifact_ref=str(artifact), artifact_sha256=digest_of(artifact))
+    )
+
+    target = next(
+        run for run in evaluation.report.runs if run.benchmark_qualified_id == TARGET_ID
+    )
+    predictions = Path(manifest.state_root) / str(target.raw_artifact_ref)
+    items = [
+        json.loads(line)
+        for line in predictions.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    recomputed = GenerationDiagnostics.from_items(
+        items,
+        max_new_tokens=manifest.protection.require_protocol().decoding["max_new_tokens"],
+        seed=manifest.protection.require_protocol().seed,
+        source=str(predictions),
+    ).to_metadata()
+
+    for key, value in recomputed.items():
+        assert target.metadata[key] == value, f"metadata[{key!r}] is not from these bytes"
+    # Every generation in this fixture terminated short of the cap, which is
+    # what the recorded facts say and what T6/T7 read.
+    assert target.metadata["eos_termination_rate"] == 1.0
+    assert target.metadata["max_token_cap_rate"] == 0.0
+    assert len(target.metadata["per_prompt"]) == target.n_samples
+    entry = target.metadata["per_prompt"][0]
+    assert entry["prompt"] == items[0]["prompt"]
+    assert entry["completion"] == items[0]["prediction"]
 
 
 def test_a_worker_that_wrote_no_per_item_evidence_is_not_an_arm(tmp_path: Path):

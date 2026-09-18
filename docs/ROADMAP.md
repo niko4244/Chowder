@@ -95,19 +95,17 @@ evaluator's coverage of every declared benchmark in a `readiness` phase before
 any training starts, an evaluation that reports no measured cost is refused
 rather than charged zero, a refusal after training still writes the accounting,
 the attempts, the selection and its reason, and the selected artifact's digest is
-re-derived from disk both before it is measured and before the verdict is bound.
-Three builds remain before a real gen2 cycle can run, and all are honestly
-labelled rather than simulated:
+re-derived from disk both before it is measured and before the verdict is bound.The instrument is no longer a blocker:
+`GEN2_PREREG_AMENDMENT8_2026-09-18.md` ports the generation-diagnostics
+instrument into `src/` (`chowder.growth.generation_diagnostics` computes the
+frozen rules from the observed generations, `chowder.evaluators.generation`
+records the two facts only the worker can observe, and the evaluation binding
+merges them into the row's metadata flat, where T1–T10 read them). The scoring is
+the Gen-1 rule, so the row's own score *is* its `eos_termination_rate`, and the
+version the judge pins is now a registered benchmark rather than an id no
+registry knew. Two builds remain before a real gen2 cycle can run, and both are
+honestly labelled rather than simulated:
 
-1. **The generation-diagnostics instrument.** The campaign's *target* set for
-gen2 is `generation-diagnostics@gen2-response-surface-v1`, and the frozen judge's
-T1–T10 read one instrument row's diagnostic metadata (`per_prompt` completions,
-`eos_termination_rate`, `max_token_cap_rate`, `obvious_loop_count`,
-`distinct_trigram_ratio_mean`, `unclosed_think_rate`). Those definitions exist
-only in the historical `docs/gen1/run_gen1_cycle.py`; no module in `src/`
-computes them, so the evaluator writes the row's scored items but not its
-diagnostics — which leaves T1–T10 `UNKNOWN` rather than passing. Porting that
-instrument into production is the next build.
 2. **The gen2 declaration's run inputs.** `docs/gen2/gen2_campaign.json`
 declares identity, benchmark sets, budgets, protection and the Gen-0 arm, but
 five inputs have no artifact anywhere (`project_template_path`,
@@ -119,6 +117,13 @@ measurement, and the Gen-0 baseline arm is declared but not yet measured.
 3. **Measuring the Gen-0 arm.** T16 stays `UNKNOWN` until that declared 16-item
 mini-slice exists at `baseline_eval_report_path`, so gen2 cannot be certified by
 branch protection yet.
+
+The port is proven end to end without a GPU:
+`tests/test_growth_certification_coupling.py` drives a manifest through the real
+CLI with the production evaluator (only the child process is a recording worker)
+over the frozen diagnostic prompts, then hands that run root to the frozen judge
+and requires `VERDICT: PROMOTED` with T1–T10 each named PASS — so the instrument
+no longer has to be prepared outside the runner.
 
 **Research kernel**
 experiment DAG · hypothesis schema · compute budget enforcement · hard

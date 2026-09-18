@@ -65,11 +65,18 @@ def _completion(*, duplicate: bool = False, echo: bool = False, answer: str = "p
 
 
 def _prompt_entries(*, dup: int, echo: int, correct: bool = True) -> list[dict]:
+    """The frozen instrument's per-prompt evidence, keyed the way producers key it.
+
+    No ``prompt_id``: an instrument arm identifies an item by the frozen prompt
+    text, which is what the Gen-1 driver's own ``per_prompt`` rows carried and
+    what the production evaluator writes. An invented id here would pair only
+    with itself, and the frozen judge would report T2/T3 ``UNKNOWN`` for every
+    arm a real producer makes.
+    """
     entries = []
     for index, (prompt, expected) in enumerate(judge_gen2.INSTRUMENT_PROMPTS):
         entries.append(
             {
-                "prompt_id": f"gen1-diag-{index:02d}",
                 "prompt": prompt,
                 "expected": expected,
                 "completion": _completion(
@@ -108,7 +115,17 @@ def _instrument_run(
         generation_version=version,
         score=0.0,
         n_samples=len(entries),
-        metric="response_surface_compliance",
+        # One score per item, like the real instrument wrote: the Gen-1 driver
+        # recorded a 1.0/0.0 EOS flag per prompt, so an instrument row without
+        # per-item values is not a row any producer writes -- and promotion
+        # pairs the candidate's per-item values against the parent's.
+        per_sample_scores=tuple(0.0 for _entry in entries),
+        # The metric the registry declares for this instrument, and the one its
+        # frozen protocol is scored on: the row is a termination rate, so binding
+        # it against any other declared metric would be a mislabel. The Gen-1
+        # fixture said "response_surface_compliance" for the same reason the
+        # judge does not read it -- which is exactly how a row escapes binding.
+        metric="eos_termination_rate",
         measurement_origin=origin,
         raw_artifact_ref=f"raw/{version}-instrument.json",
         metadata=metadata,
@@ -1147,17 +1164,27 @@ def test_the_absolute_threshold_path_can_pass_without_a_paired_signal() -> None:
 # --------------------------------------------------------------------------
 
 
-def _reorder_and_relabel(arm_path: Path, *, ids: dict | None = None) -> None:
+def _rewrite_prompts(arm_path: Path, mutate) -> None:
+    """Rewrite one arm's per-prompt evidence, keeping everything else intact."""
     report = json.loads(arm_path.read_text(encoding="utf-8"))
     for run in report["runs"]:
         per_prompt = (run.get("metadata") or {}).get("per_prompt")
         if not per_prompt:
             continue
-        if ids is not None:
-            for entry in per_prompt:
-                entry["prompt_id"] = ids[entry["prompt_id"]]
-        run["metadata"]["per_prompt"] = list(reversed(per_prompt))
+        run["metadata"]["per_prompt"] = mutate(list(per_prompt))
     arm_path.write_text(json.dumps(report), encoding="utf-8")
+
+
+def _reorder_and_relabel(arm_path: Path, *, duplicate_identity: bool = False) -> None:
+    def mutate(per_prompt: list) -> list:
+        if duplicate_identity:
+            # An arm that claims all of its items are the same item: pairing on
+            # that identity would compare a prompt with itself.
+            for entry in per_prompt:
+                entry["prompt_id"] = "one-and-the-same-item"
+        return list(reversed(per_prompt))
+
+    _rewrite_prompts(arm_path, mutate)
 
 
 def test_reordered_but_identity_equivalent_prompts_still_pair(tmp_path: Path) -> None:
@@ -1168,11 +1195,22 @@ def test_reordered_but_identity_equivalent_prompts_still_pair(tmp_path: Path) ->
 
 def test_a_duplicated_prompt_identity_refuses_to_pair(tmp_path: Path) -> None:
     root = _run_root(tmp_path)
-    _reorder_and_relabel(
-        root / "parent_evaluation.json",
-        ids={f"gen1-diag-{i:02d}": "gen1-diag-00" for i in range(16)},
-    )
+    _reorder_and_relabel(root / "parent_evaluation.json", duplicate_identity=True)
     assert judge_gen2.judge(root) == 1
+
+
+def test_explicit_item_ids_on_both_arms_still_pair(tmp_path: Path) -> None:
+    """An explicit item id is a legal identity -- if both arms carry the same one."""
+    root = _run_root(tmp_path)
+    for arm in ("candidate_evaluation.json", "parent_evaluation.json"):
+        _rewrite_prompts(
+            root / arm,
+            lambda per_prompt: [
+                {**entry, "prompt_id": f"gen1-diag-{index:02d}"}
+                for index, entry in enumerate(per_prompt)
+            ],
+        )
+    assert judge_gen2.judge(root) == 0
 
 
 def test_a_missing_parent_prompt_refuses_to_pair(tmp_path: Path) -> None:

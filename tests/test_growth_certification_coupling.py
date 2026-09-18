@@ -33,6 +33,7 @@ from chowder.growth import campaign_runner
 from chowder.growth.campaign import CampaignManifest
 from chowder.growth.campaign_runner import CERTIFICATION_EVIDENCE
 
+from chowder.growth.evaluation_binding import EvaluationMaterial
 from chowder.growth.training_binding import directory_digest
 
 import test_growth_campaign_runner as campaign_fixture
@@ -41,6 +42,10 @@ from test_growth_gen2_judge import (  # the judge's own fixture builders
     judge_gen2,
     _slice_run,
     _write_arm,
+)
+from test_growth_evaluation_binding import (  # the recording worker, not a second one
+    _RecordingWorker,
+    _both_processes,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -169,6 +174,38 @@ def _arms(
     }
 
 
+def _declare_the_frozen_instrument(manifest: CampaignManifest) -> None:
+    """Point the target's declared dataset at the frozen diagnostic prompts.
+
+    The instrument the judge scores is a specific set of prompts: T4 locates the
+    eight constrained ones by their exact text and T5 reads the expected answer
+    out of each completion. The campaign fixture writes synthetic items for
+    whatever is declared, so the target's dataset is replaced here with the same
+    pairs the judge was frozen against -- the fixture stands in for the campaign's
+    real declared dataset, and it must be that dataset, not an easier one.
+    """
+    material = EvaluationMaterial.load(manifest.evaluation_material_path)
+    dataset = material.for_benchmark(INSTRUMENT).dataset
+    dataset.write_text(
+        "".join(
+            json.dumps({"prompt": prompt, "expected": expected}) + "\n"
+            for prompt, expected in judge_gen2.INSTRUMENT_PROMPTS
+        ),
+        encoding="utf-8",
+    )
+    # The instrument is scored over what the generations did, not over their
+    # text: 1.0 for a generation that stopped on EOS, so the row's score *is* its
+    # eos_termination_rate, which is the metric this declaration names.
+    document = json.loads(Path(manifest.evaluation_material_path).read_text(encoding="utf-8"))
+    for suite in document["suites"]:
+        if suite["benchmark_qualified_id"] == INSTRUMENT:
+            suite["scoring"] = "eos_termination"
+            suite["metric"] = "eos_termination_rate"
+    Path(manifest.evaluation_material_path).write_text(
+        json.dumps(document, indent=2), encoding="utf-8"
+    )
+
+
 def _contamination(inputs: Path) -> str:
     """CLEAN on the frozen evaluated set, with a declared training source.
 
@@ -197,6 +234,7 @@ def _campaign(
     monkeypatch: pytest.MonkeyPatch,
     *,
     bind_selection: bool = True,
+    production: bool = False,
     **overrides: object,
 ) -> tuple[Path, int, dict]:
     """Write the declaration, run it through the real CLI, return its outcome.
@@ -204,6 +242,11 @@ def _campaign(
     ``bind_selection`` models the evaluator's own honesty: on (the default) it
     measures the artifact it was asked about and names those bytes; off, it
     returns a report about some other bytes, which the run must refuse.
+
+    ``production`` runs the *production* instrument instead of an injected
+    report: the declared target becomes the generation-diagnostics instrument,
+    measured through the real worker command line from the frozen diagnostic
+    prompts, so the judged arm is one the production code produced.
     """
     inputs = tmp_path / "inputs"
     inputs.mkdir(parents=True, exist_ok=True)
@@ -214,15 +257,29 @@ def _campaign(
         "protection": dict(campaign_fixture.PROTECTION),
         **overrides,
     }
-    manifest, runner, document = campaign_fixture._campaign(
-        tmp_path,
-        # The candidate arm carries rows the cycle can bind, so the declared sets
-        # are the ones the frozen slice ids belong to.
-        target_benchmarks=[MATH],
-        protected_benchmarks=[MGSM],
-        broad_benchmarks=[MGSM],
-        **declared,
+    sets: dict[str, object] = (
+        # The production instrument measures the campaign's *declared target*,
+        # and the declared target is the generation-diagnostics instrument: the
+        # frozen judge's T1-T10 read that row, so the run has to produce it.
+        {
+            "target_benchmarks": [INSTRUMENT],
+            "protected_benchmarks": [MATH],
+            "broad_benchmarks": [MGSM],
+        }
+        if production
+        else {
+            # The candidate arm carries rows the cycle can bind, so the declared
+            # sets are the ones the frozen slice ids belong to.
+            "target_benchmarks": [MATH],
+            "protected_benchmarks": [MGSM],
+            "broad_benchmarks": [MGSM],
+        }
     )
+    manifest, runner, document = campaign_fixture._campaign(
+        tmp_path, **sets, **declared
+    )
+    if production:
+        _declare_the_frozen_instrument(manifest)
     manifest_path = inputs / "campaign.json"
     assert CampaignManifest.from_file(manifest_path).cycle_id == manifest.cycle_id
     # The judged policy is the declaration this run was launched from -- in
@@ -238,6 +295,42 @@ def _campaign(
     judged_path = tmp_path / "judged-campaign.json"
     judged_path.write_text(json.dumps(judged), encoding="utf-8")
     monkeypatch.setattr(judge_gen2, "CAMPAIGN_MANIFEST", judged_path)
+    if production:
+        # No injected evaluation seam: the production instrument measures the
+        # selected adapter through the real worker command line, and only the
+        # process it launches is replaced. What promotes is then the arm the
+        # production code produced, not a report a fixture prepared.
+        monkeypatch.setattr(
+            campaign_runner,
+            "default_runner",
+            _both_processes(
+                runner,
+                _RecordingWorker(
+                    seconds=36.0,
+                    # The target instrument's completions are its answers, so
+                    # they terminate, close no thinking block and echo nothing;
+                    # its item score comes from that observation, not from the
+                    # text. The slices answer a quarter and a sixteenth.
+                    prediction_of=lambda name, index, row: (
+                        str(row.get("expected", ""))
+                        if name == INSTRUMENT.split("@", 1)[0]
+                        else f"unrelated continuation {index}"
+                    ),
+                    score_of=lambda name, index: (
+                        1.0
+                        if index < (4 if name == MATH.split("@", 1)[0] else 1)
+                        else 0.0
+                    ),
+                ),
+            ),
+        )
+        monkeypatch.setattr(
+            sys, "argv", ["chowder", "growth", "campaign", "run", str(manifest_path)]
+        )
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = chowder_main()
+        return Path(manifest.state_root), code, json.loads(buffer.getvalue() or "{}")
     monkeypatch.setattr(campaign_runner, "default_runner", runner)
     # The evaluation seam: it measures the artifact the run selected and writes
     # its measurements into the run root, naming them relatively -- which is what
@@ -307,6 +400,67 @@ def test_the_runner_does_not_invent_an_arm_the_manifest_never_declared(
     for arm in CERTIFICATION_EVIDENCE.values():
         assert not (root / arm).exists(), f"{arm} was written by a refused run"
     assert not (root / ACCOUNTING).exists(), "a pre-compute refusal spent nothing to account for"
+
+
+def test_the_runs_own_instrument_row_is_what_the_frozen_judge_scores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ported instrument, end to end: production measures it, the judge scores it.
+
+    The campaign's declared target is the generation-diagnostics instrument, and
+    the run measures it through the production evaluation binding: real worker
+    command line, real slice files, the completion and per-item facts read back
+    from the predictions the worker wrote. Before the instrument lived in
+    ``src/``, the only way to fill that row was to prepare it by hand, and every
+    run a production path could make left T1-T10 ``UNKNOWN``.
+
+    ``VERDICT: PROMOTED`` is the strongest statement available here: the frozen
+    judge returns it only when *no* threshold is ``UNKNOWN`` or ``FAIL``, so this
+    asserts T1-T10 are all PASS on evidence the run produced, without restating
+    a single threshold in the test.
+    """
+    root, code, payload = _campaign(tmp_path, monkeypatch, production=True)
+
+    assert code == 0, payload.get("refusal_reason") or payload
+    assert payload["verdict"] == "PROMOTED", payload.get("promotion")
+    # The judged arm is the production evaluator's: bound to the artifact this
+    # run selected, and written where the judge reads it.
+    arm = EvalReport.load(root / CERTIFICATION_EVIDENCE["candidate"])
+    assert arm.model_identity["adapter_digest"] == payload["selection"]["artifact_sha256"]
+    target = next(
+        row for row in arm.runs if row.benchmark_qualified_id == judge_gen2.INSTRUMENT_ID
+    )
+    assert target.measurement_origin == MEASURED_THIS_GENERATION
+    # The completions the judge's T4/T5 read are the instrument's own prompts,
+    # and the diagnostics T6-T10 read come from the worker's observations.
+    assert [entry["prompt"] for entry in target.metadata["per_prompt"]] == [
+        prompt for prompt, _expected in judge_gen2.INSTRUMENT_PROMPTS
+    ]
+    assert target.metadata["eos_termination_rate"] == 1.0
+    assert target.metadata["max_token_cap_rate"] == 0.0
+    assert target.metadata["obvious_loop_count"] == 0
+
+    verdict, output = _judge(root)
+
+    assert verdict == 0, f"the frozen judge refused the run's own instrument row:\n{output}"
+    assert "VERDICT: PROMOTED" in output
+    # Named so a regression says which of T1-T10 stopped being decidable: the
+    # instrument gates are the first ten rows of the judge's table.
+    for threshold in (
+        "T1",
+        "T2",
+        "T3",
+        "T4",
+        "T5",
+        "T6",
+        "T7",
+        "T8",
+        "T9",
+        "T10",
+    ):
+        assert re.search(rf"^{threshold}\b.*\bPASS\b", output, re.MULTILINE), (
+            f"{threshold} was not decided PASS on the run's own evidence:\n{output}"
+        )
 
 
 def test_absent_evidence_cannot_certify(

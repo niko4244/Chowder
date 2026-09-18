@@ -31,12 +31,43 @@ Consequence, stated plainly: thinking models under tight `max_new_tokens` score
 *lower* here than under the old transformers-worker rule. That is the correction,
 not a regression. Raise `max_new_tokens` if the budget is the binding constraint --
 do not loosen the scorer to hide it.
+
+A second kind of scoring lives here too: one defined over what the generation
+*was observed to do* rather than over its text. `eos_termination` scores an item
+1.0 when the model stopped on its own end-of-turn token and 0.0 when it ran into
+the token cap, which makes the row's mean -- the score every consumer reads --
+the EOS termination rate itself. That is the Gen-1 instrument's definition, kept
+here so the two workers cannot implement it two ways.
 """
 from __future__ import annotations
 
 import re
+from typing import Any, Mapping
 
-__all__ = ["normalize", "final_answer", "final_number", "score"]
+__all__ = [
+    "OBSERVED_SCORINGS",
+    "final_answer",
+    "final_number",
+    "normalize",
+    "observed_score",
+    "score",
+]
+
+#: Scorings defined over the recorded observation instead of the decoded text.
+OBSERVED_SCORINGS = ("eos_termination",)
+
+
+def observed_score(observation: Mapping[str, Any], scoring: str) -> float | None:
+    """The item score for an observation-defined scoring, else ``None``.
+
+    ``None`` -- not 0.0 -- means "this is a text scoring": the caller then
+    scores the prediction against the expected answer with :func:`score`. The
+distinction matters because a silent 0.0 here would score every item of every
+suite as a failure.
+    """
+    if scoring == "eos_termination":
+        return 1.0 if observation.get("eos_terminated") else 0.0
+    return None
 
 
 def normalize(text: str) -> str:

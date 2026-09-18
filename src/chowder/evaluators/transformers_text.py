@@ -20,11 +20,22 @@ from ..models import Experiment
 from ..protocol import protocol_fingerprint
 from .placement import validate_placement
 from ..provenance import sha256_directory, sha256_file
+from .scoring import OBSERVED_SCORINGS
 
 # final_number_match compares the LAST number on each side, for arithmetic word
 # problems where the model shows its work; see the workers for the extraction
 # rules and the documented bug that motivated them.
-_ALLOWED_SCORING = {"exact_match", "normalized_exact_match", "final_number_match"}
+#
+# The observation-defined scorings come from their one owner in `.scoring`
+# rather than being repeated here: a mode this spec accepts and the workers do
+# not implement would refuse only after a model was loaded (and cost time), and
+# a mode the workers implement but this spec rejects could never be declared.
+_ALLOWED_SCORING = {
+    "exact_match",
+    "normalized_exact_match",
+    "final_number_match",
+    *OBSERVED_SCORINGS,
+}
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
 _ALLOWED_QUANTIZATION = {"none", "4bit"}
 

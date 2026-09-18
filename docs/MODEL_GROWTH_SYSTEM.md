@@ -192,10 +192,22 @@ each declared dataset into the run root as the slice it measures, verifies the
 adapter's digest against the bytes before loading them, and returns rows whose
 `raw_artifact_ref` is the `predictions-<suite>.jsonl` it produced, whose
 `metadata.artifact_sha256` is that file's digest, and whose score is the mean of
-its per-item scores -- the exact evidence certification recomputes. What it does
-not yet produce is the *target instrument's* diagnostic metadata (T1-T10), which
-still lives only in the historical gen1 driver; that is the next build (see
-ROADMAP).
+its per-item scores -- the exact evidence certification recomputes.
+
+The *target instrument's* diagnostic metadata (T1-T10) is produced by the same
+row now (`docs/quals/GEN2_PREREG_AMENDMENT8_2026-09-18.md`):
+`chowder.growth.generation_diagnostics` computes the frozen rules -- EOS
+termination, cap-hit, unclosed `<think>`, three-in-a-row loops, distinct trigram
+ratio -- from the per-item generations the worker recorded, and the binding
+merges them into the row's `metadata` flat, where the frozen judge reads them.
+The facts they are defined over are recorded by
+`chowder.evaluators.generation.observed_generation` beside every prediction (a
+decoded completion cannot say whether it stopped on EOS or ran into the cap), the
+item score is the observation-defined `eos_termination` mode in
+`chowder.evaluators.scoring` -- so the row's score *is* its
+`eos_termination_rate` -- and an item with no observation refuses with
+`GENERATION_DIAGNOSTICS_UNMEASURED` instead of counting an unmeasured generation
+as a termination failure.
 
 Three properties of that seam are enforced before a verdict, not asserted after
 one (`docs/quals/GEN2_PREREG_AMENDMENT7_2026-09-18.md`). The evaluator is built
