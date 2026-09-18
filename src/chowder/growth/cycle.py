@@ -203,6 +203,9 @@ class GrowthCycle:
         candidate_results: Mapping[str, BenchmarkResult],
         parent_results: Mapping[str, BenchmarkResult],
         device_gpu_hours: float,
+        actual_wall_gpu_hours: float | None = None,
+        actual_device_gpu_hours: float | None = None,
+        wall_gpu_hours_ceiling: float | None = None,
     ) -> PromotionDecision:
         """Phase: the single predeclared promotion rule."""
         return evaluate_promotion(
@@ -220,6 +223,9 @@ class GrowthCycle:
                 max_protected_regression=self.config.max_protected_regression,
                 device_gpu_hours=device_gpu_hours,
                 device_gpu_hours_ceiling=self.config.device_gpu_hours_ceiling,
+                actual_wall_gpu_hours=actual_wall_gpu_hours,
+                actual_device_gpu_hours=actual_device_gpu_hours,
+                wall_gpu_hours_ceiling=wall_gpu_hours_ceiling,
             )
         )
 
@@ -230,6 +236,8 @@ class GrowthCycle:
         candidate_runs: Sequence[BenchmarkRun],
         parent_runs: Sequence[BenchmarkRun],
         device_gpu_hours: float = 0.0,
+        actual_wall_gpu_hours: float | None = None,
+        wall_gpu_hours_ceiling: float | None = None,
     ) -> PromotionAssembly:
         """Phase: measured runs -> the single predeclared promotion rule.
 
@@ -255,6 +263,8 @@ class GrowthCycle:
             max_protected_regression=self.config.max_protected_regression,
             device_gpu_hours=device_gpu_hours,
             device_gpu_hours_ceiling=self.config.device_gpu_hours_ceiling,
+            actual_wall_gpu_hours=actual_wall_gpu_hours,
+            wall_gpu_hours_ceiling=wall_gpu_hours_ceiling,
         )
 
     def finalize(

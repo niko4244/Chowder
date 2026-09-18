@@ -82,6 +82,16 @@ class PromotionInput:
     max_reliability_regression: float = 0.02
     device_gpu_hours: float = 0.0
     device_gpu_hours_ceiling: float | None = None
+    #: Settlement fields (Phase 5): actual measured compute is authoritative.
+    #: ``actual_wall_gpu_hours`` is the cycle's total measured wall cost
+    #: (all recipes, evaluations, failed attempts); ``wall_gpu_hours_ceiling``
+    #: is the preregistered hard envelope. An actual value above its ceiling
+    #: vetoes promotion mechanically -- a successful training process does
+    #: not imply a budget-compliant experiment.
+    actual_wall_gpu_hours: float | None = None
+    actual_device_gpu_hours: float | None = None
+    projected_wall_gpu_hours: float | None = None
+    wall_gpu_hours_ceiling: float | None = None
 
 
 @dataclass(frozen=True)
@@ -91,15 +101,30 @@ class PromotionDecision:
     checks: Mapping[str, str]  # check name -> improved/regressed/flat/inconclusive/ok/violated
     target_deltas: Mapping[str, float] = field(default_factory=dict)
     protected_deltas: Mapping[str, float] = field(default_factory=dict)
+    #: Scoped-repair semantics (a design decision, not a verdict class): when
+    #: the target genuinely improved under candidate measurement but the full
+    #: promotion evidence (protected/broad/calibration/reliability) is
+    #: incomplete, the verdict stays INCONCLUSIVE while this flag records that
+    #: the *repair itself* is validated. It never authorizes a generation; it
+    #: says the candidate remains a live candidate for later full evaluation.
+    #: Deliberately NOT a new verdict: PROMOTED must mean "complete evidence,
+    #: all gates passed", and a fifth verdict would invite exactly the
+    #: threshold-drift this field exists to avoid.
+    target_repair_validated: bool | None = None
+    target_repair_metrics: Mapping[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "verdict": self.verdict,
             "reasons": list(self.reasons),
             "checks": dict(self.checks),
             "target_deltas": dict(self.target_deltas),
             "protected_deltas": dict(self.protected_deltas),
         }
+        if self.target_repair_validated is not None:
+            payload["target_repair_validated"] = self.target_repair_validated
+            payload["target_repair_metrics"] = dict(self.target_repair_metrics)
+        return payload
 
 
 def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
@@ -362,18 +387,50 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
     if reliability_violations:
         reasons.append(f"{reliability_violations} reliability regression(s)")
 
-    # 6. Resource envelope.
+    # 6. Resource envelope. Both units are checked against their own
+    #    ceiling; a wall overrun is as disqualifying as a device overrun.
+    resource_violations: list[str] = []
     if data.device_gpu_hours_ceiling is not None:
-        if data.device_gpu_hours > data.device_gpu_hours_ceiling:
-            checks["resource_envelope"] = "violated"
-            reasons.append(
+        if data.device_gpu_hours > data.device_gpu_hours_ceiling + 1e-12:
+            resource_violations.append(
                 f"device GPU-h {data.device_gpu_hours:.4f} exceeds ceiling "
                 f"{data.device_gpu_hours_ceiling:.4f}"
             )
-        else:
-            checks["resource_envelope"] = "ok"
+    if data.actual_device_gpu_hours is not None and data.device_gpu_hours_ceiling is not None:
+        if data.actual_device_gpu_hours > data.device_gpu_hours_ceiling + 1e-12:
+            resource_violations.append(
+                f"actual device GPU-h {data.actual_device_gpu_hours:.4f} exceeds "
+                f"ceiling {data.device_gpu_hours_ceiling:.4f}"
+            )
+    if data.actual_wall_gpu_hours is not None and data.wall_gpu_hours_ceiling is not None:
+        if data.actual_wall_gpu_hours > data.wall_gpu_hours_ceiling + 1e-12:
+            resource_violations.append(
+                f"actual wall GPU-h {data.actual_wall_gpu_hours:.4f} exceeds "
+                f"preregistered wall ceiling {data.wall_gpu_hours_ceiling:.4f}"
+            )
+    if resource_violations:
+        checks["resource_envelope"] = "violated"
+        reasons.extend(resource_violations)
+    elif (
+        data.actual_wall_gpu_hours is not None
+        or data.actual_device_gpu_hours is not None
+        or data.device_gpu_hours_ceiling is not None
+    ):
+        checks["resource_envelope"] = "ok"
     else:
         checks["resource_envelope"] = "unmeasured"
+
+    # Scoped-repair determination: the target improved under candidate
+    # measurement (real evidence, correct provenance) even if the rest of
+    # the promotion evidence is incomplete. Recorded on every decision so
+    # "the repair is real" is separable from "the generation is promoted".
+    target_repair_validated: bool | None = None
+    target_repair_metrics: dict[str, float] = {}
+    if improved_targets > 0:
+        target_repair_validated = True
+        target_repair_metrics = {
+            bid: delta for bid, delta in target_deltas.items()
+        }
 
     # Verdict assembly. Hard failures decide first: a protected regression,
     # calibration violation, reliability violation, or resource-envelope
@@ -392,6 +449,8 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
             checks=checks,
             target_deltas=target_deltas,
             protected_deltas=protected_deltas,
+            target_repair_validated=target_repair_validated,
+            target_repair_metrics=target_repair_metrics,
         )
     if improved_targets == 0 and not target_missing:
         # Complete, clean evidence and the candidate still improved nothing it
@@ -403,6 +462,8 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
                 checks=checks,
                 target_deltas=target_deltas,
                 protected_deltas=protected_deltas,
+                target_repair_validated=target_repair_validated,
+                target_repair_metrics=target_repair_metrics,
             )
     if improved_targets > 0 and checks["protected_regression"] == "ok" and not calibration_violations:
         # A declared reliability set must have been measured to promote:
@@ -423,6 +484,8 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
                 checks=checks,
                 target_deltas=target_deltas,
                 protected_deltas=protected_deltas,
+                target_repair_validated=target_repair_validated,
+                target_repair_metrics=target_repair_metrics,
             )
         if checks["broad_battery"] == "inconclusive" or checks["evidence_integrity"] == "inconclusive":
             return PromotionDecision(
@@ -431,6 +494,8 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
                 checks=checks,
                 target_deltas=target_deltas,
                 protected_deltas=protected_deltas,
+                target_repair_validated=target_repair_validated,
+                target_repair_metrics=target_repair_metrics,
             )
     return PromotionDecision(
         verdict="INCONCLUSIVE",
@@ -438,4 +503,6 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
         checks=checks,
         target_deltas=target_deltas,
         protected_deltas=protected_deltas,
+        target_repair_validated=target_repair_validated,
+        target_repair_metrics=target_repair_metrics,
     )

@@ -467,6 +467,10 @@ class MetricBinder:
         max_calibration_regression: float = 0.02,
         device_gpu_hours: float = 0.0,
         device_gpu_hours_ceiling: float | None = None,
+        actual_wall_gpu_hours: float | None = None,
+        actual_device_gpu_hours: float | None = None,
+        projected_wall_gpu_hours: float | None = None,
+        wall_gpu_hours_ceiling: float | None = None,
     ) -> PromotionAssembly:
         """Bind both generations' runs and adjudicate with the declared rule."""
         self._check_declared(
@@ -495,6 +499,10 @@ class MetricBinder:
             max_calibration_regression=max_calibration_regression,
             device_gpu_hours=device_gpu_hours,
             device_gpu_hours_ceiling=device_gpu_hours_ceiling,
+            actual_wall_gpu_hours=actual_wall_gpu_hours,
+            actual_device_gpu_hours=actual_device_gpu_hours,
+            projected_wall_gpu_hours=projected_wall_gpu_hours,
+            wall_gpu_hours_ceiling=wall_gpu_hours_ceiling,
         )
         return PromotionAssembly(
             promotion_input=data,
