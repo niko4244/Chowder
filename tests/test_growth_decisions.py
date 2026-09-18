@@ -23,6 +23,7 @@ from chowder.growth.frontier_reference import (
     compare_protocol,
     gap_rows,
 )
+from chowder.evals.result import MEASURED_PARENT, MEASURED_THIS_GENERATION
 from chowder.growth.lineage import GenerationLedger
 from chowder.growth.promotion import BenchmarkResult, PromotionInput, evaluate_promotion
 from chowder.growth.statistics import compare
@@ -147,7 +148,12 @@ def test_significant_but_tiny_change_reports_flat():
     assert result.verdict == "flat"  # below declared minimum meaningful effect
 
 
-def _results(scores: dict[str, float], samples: dict[str, tuple[float, ...]] | None = None):
+def _results(
+    scores: dict[str, float],
+    samples: dict[str, tuple[float, ...]] | None = None,
+    *,
+    origin: str = MEASURED_THIS_GENERATION,
+):
     samples = samples or {}
     return {
         benchmark: BenchmarkResult(
@@ -155,6 +161,7 @@ def _results(scores: dict[str, float], samples: dict[str, tuple[float, ...]] | N
             score=score,
             samples=samples.get(benchmark, ()),
             contamination="CLEAN",
+            measurement_origin=origin,
         )
         for benchmark, score in scores.items()
     }
@@ -192,7 +199,7 @@ def _promotion_input(candidate_targets, candidate_protected, *, contamination="C
         GPQA: _samples(candidate_protected),
         MATH500: _samples(0.52),
     }
-    parent = _results(parent_scores, parent_samples)
+    parent = _results(parent_scores, parent_samples, origin=MEASURED_PARENT)
     candidate = _results(candidate_scores, candidate_samples)
     for result in candidate.values():
         result_dict = {
@@ -200,6 +207,7 @@ def _promotion_input(candidate_targets, candidate_protected, *, contamination="C
             "score": result.score,
             "samples": result.samples,
             "contamination": contamination,
+            "measurement_origin": MEASURED_THIS_GENERATION,
         }
         candidate[result.benchmark_qualified_id] = BenchmarkResult(**result_dict)
     return PromotionInput(
@@ -525,18 +533,21 @@ def test_degenerate_parent_floor_target_improvement_is_recognized():
         score=0.0,
         samples=(0.0,) * n,          # floor: zero variance, zero mean
         contamination="CLEAN",
+        measurement_origin=MEASURED_PARENT,
     )
     candidate = BenchmarkResult(
         benchmark_qualified_id="instrument@v1",
         score=1.0,
         samples=(1.0,) * n,          # ceiling: zero variance, full lift
         contamination="CLEAN",
+        measurement_origin=MEASURED_THIS_GENERATION,
     )
     protected = BenchmarkResult(
         benchmark_qualified_id="protected@v1",
         score=0.5,
         samples=(0.5, 0.5, 0.5, 0.5),
         contamination="CLEAN",
+        measurement_origin=MEASURED_THIS_GENERATION,
     )
     data = PromotionInput(
         candidate_version="v0.2",

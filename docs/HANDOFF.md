@@ -14,27 +14,30 @@ for it:
   [`TEACHER_FABRIC_BRIEF.md`](TEACHER_FABRIC_BRIEF.md) — read it before
   any Teacher Fabric slice; it is the source of the non-negotiable rules.
 
-## Current state (updated 2026-09-17) — READ THE HEADLINE FIRST
+## Current state (updated 2026-09-17, integrity re-adjudication) — READ THE HEADLINE FIRST
 
-**The first real Model N → N+1 cycle has executed and closed: gen1 is
-PROMOTED.** Generation 0 — the dense Qwen3.8-9B abliterated parent — is
-frozen evaluation-only (`docs/gen0/GEN0_EVAL_RESULT_2026-09-17.md`, freeze
-digest `5c8b18ab…`, immutable snapshot `gen0-frontier`, ledger record
-`gen0`); measured baseline: math500 0.0, mgsm-en 0.0, EOS termination 0.000,
-cap-hit 1.000 (no literal loops). The cycle's TrainingFn is bound to the
-real production trainer with qualified refusals, and promotion inputs bind
-to declared metric semantics with reliability as a hard gate (#167). The
-first cycle ran for real against prereg + amendments 1–3
-(`docs/quals/GEN1_PREREG_2026-09-17.md`, executed under
-`GEN1_PREREG_AMENDMENT3_2026-09-17`'s measured physics): both recipes
-trained 30/30 steps through `SubprocessTrainingFn`, the independent
-evaluator measured EOS 1.000 / cap-hit 0.000 / unclosed-think 0.000 / loops
-0 / trigram 0.9732, and the frozen rule adjudicated
-**PROMOTED** (`docs/quals/GEN1_RESULT_2026-09-17.md`; ledger record `gen1`
-beside `gen0`). Two promotion-rule defects the cycle exposed (zero-variance
-target pairs; aggregate-only protected rows) are fixed with regression
-tests. The next cycle's target must again come from fresh measured
-evidence — the growth loop is now proven, repeatable infrastructure.
+**Gen-1's effective verdict is now INCONCLUSIVE (target repair validated);
+the original PROMOTED record is preserved history.** The post-merge
+integrity audit found the original adjudication had been fed carried
+parent evidence (relabeled as candidate rows) and incomplete cost
+accounting. The corrected policy (`promotion-policy-v2-provenance-settlement`)
+makes this structurally impossible: candidate gates require candidate-measured
+provenance, actual cost settles against frozen ceilings, and corrections are
+append-only adjudication revisions. The re-adjudication
+(`docs/growth/GEN1_READJUDICATION_ADDENDUM_2026-09-17.md`) verified the
+adapter digest, found the EOS-termination repair genuinely candidate-measured
+(target_repair_validated=true), and found protected/broad evidence never
+existed on the candidate side — hence INCONCLUSIVE, not REJECTED and not
+PROMOTED. Gen-1 remains a live candidate; promoting it (or branching gen2
+from it) requires genuine candidate-side protected measurement.
+
+Earlier state for the record (2026-09-17): the first real Model N → N+1
+cycle executed and was recorded PROMOTED at the time
+(`docs/quals/GEN1_RESULT_2026-09-17.md`; ledger record `gen1` beside
+`gen0`, dense parent frozen evaluation-only, freeze digest `5c8b18ab…`).
+Two promotion-rule defects (zero-variance target pairs; aggregate-only
+protected rows) were already fixed then; the two deeper integrity defects
+above were found and fixed by the follow-up audit.
 
 **Sparse-program context (2026-09-11, unchanged below):** the sparse
 program's central mechanism does not work, and this is now measured, not
