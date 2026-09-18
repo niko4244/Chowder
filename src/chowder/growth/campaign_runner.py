@@ -19,6 +19,12 @@ Nothing here re-implements any of those, and nothing here invents an input: a
 phase that needs a path the manifest did not declare refuses with the field
 named, because a default would be a policy nobody preregistered.
 
+The same run root is also the frozen judge's input: the runner materialises
+:data:`CERTIFICATION_EVIDENCE` -- the three provenance-bound arms, the
+winner's identity and the contamination evidence the run bound -- from the
+run's own measurements, so the verdict a campaign records and the verdict the
+judge certifies are read from one directory.
+
 Every key a manifest may declare is listed in :data:`FIELD_ENFORCEMENT` with
 the behavior it drives. ``assert_every_field_enforced`` fails if the schema and
 that table ever diverge, so a new field cannot land as decoration.
@@ -73,7 +79,7 @@ FIELD_ENFORCEMENT: Mapping[str, str] = {
     "base_model_digest": "must equal the dense base tree's digest, else the run refuses",
     "parent_adapter_path": "hashed and compared with parent_adapter_digest when declared",
     "parent_adapter_digest": "must equal the parent adapter tree's digest, else the run refuses",
-    "state_root": "attempts, registry, ledger, accounting and campaign-run.json live here",
+    "state_root": "attempts, registry, ledger, accounting, the judged evidence set and campaign-run.json live here",
     "target_benchmarks": "the cycle's target set: the improvement gate",
     "protected_benchmarks": "the cycle's protected set: the regression gate",
     "broad_benchmarks": "the cycle's broad battery: no material deterioration",
@@ -90,8 +96,9 @@ FIELD_ENFORCEMENT: Mapping[str, str] = {
     "data_registry_path": "the admitted data sources the executor may draw on",
     "hardware_budget_path": "the measured local budget the recipe planner projects against",
     "parent_profile_path": "the parent capability profile the curriculum is planned from",
-    "parent_eval_report_path": "the parent side of adjudication",
-    "candidate_eval_report_path": "the candidate side of adjudication",
+    "parent_eval_report_path": "the parent side of adjudication, and the parent arm of the judged evidence set",
+    "candidate_eval_report_path": "the candidate side of adjudication, and the candidate arm of the judged evidence set",
+    "baseline_eval_report_path": "the trusted-ancestor (gen0) arm of the judged evidence set: branch protection is judged against it, never against an unresolved parent",
     "notes": "documentation only: it drives no behavior and gates nothing",
 }
 
@@ -413,6 +420,19 @@ def run_campaign(
         }
     )
 
+    written = write_certification_evidence(manifest, root=root, selected=selected)
+    phases.append(
+        {
+            "phase": "certification_evidence",
+            "verdict": "ok",
+            "detail": (
+                "wrote " + ", ".join(written)
+                if written
+                else "the manifest declares no evaluation evidence to materialise"
+            ),
+        }
+    )
+
     assembly = _adjudicate(manifest, cycle=cycle, binder=binder, total=total)
     decision = assembly.decision
     phases.append(
@@ -468,6 +488,118 @@ def run_campaign(
         record_path="",
     )
     return _write_record(run, root, outcome=outcome)
+
+
+# --------------------------------------------------------------------------
+# certification evidence: the run writes what the frozen judge reads
+# --------------------------------------------------------------------------
+
+#: The artifacts ``docs/gen2/judge_gen2.py`` reads from a run root. The runner
+#: writes exactly these, so one run root is both the run's output and the
+#: judge's input; ``tests/test_growth_certification_coupling.py`` compares this
+#: mapping against the judge's own literals, so the two cannot drift into a
+#: boundary that certifies nothing the pipeline produces.
+CERTIFICATION_EVIDENCE: Mapping[str, str] = {
+    "candidate": "candidate_evaluation.json",
+    "parent": "parent_evaluation.json",
+    "ancestor": "baseline_evaluation.json",
+    "selection": "chosen_candidate.json",
+    "contamination": "gen2_contamination_manifest.json",
+}
+
+#: Which declared manifest field supplies each measured arm.
+_EVIDENCE_ARM_SOURCES: Mapping[str, str] = {
+    "candidate": "candidate_eval_report_path",
+    "parent": "parent_eval_report_path",
+    "ancestor": "baseline_eval_report_path",
+}
+
+
+def write_certification_evidence(
+    manifest: CampaignManifest,
+    *,
+    root: Path,
+    selected: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Materialise the judged artifacts from the run's own evidence.
+
+    Every file here is derived from something the run actually has: the
+    declared evaluation reports (copied verbatim, so a row's
+    ``measurement_origin`` is the evaluator's declaration and not the runner's
+    election), the contamination manifest the firewall bound, and the adapter
+    artifact the winning attempt produced -- digested over its bytes.
+
+    An input the manifest does not declare produces **no** file rather than a
+    placeholder: the judge then reports that gate UNKNOWN, which is the honest
+    answer. Nothing here can invent a measurement the run never took, and no
+    gate is loosened by writing these: they are the same numbers the run
+    already adjudicated with, at the paths the frozen judge reads.
+    """
+    written: list[str] = []
+    for arm, field_name in _EVIDENCE_ARM_SOURCES.items():
+        declared = str(getattr(manifest, field_name))
+        if not declared:
+            continue
+        source = _require_path(
+            declared, field_name, purpose="the judged evidence set is built from it"
+        )
+        # Read it before copying: an unreadable report must refuse here rather
+        # than reach the judge as an arm whose rows cannot be parsed.
+        EvalReport.load(source)
+        destination = root / CERTIFICATION_EVIDENCE[arm]
+        destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        written.append(destination.name)
+
+    if manifest.contamination_manifest_path:
+        source = _require_path(
+            manifest.contamination_manifest_path,
+            "contamination_manifest_path",
+            purpose="the run's contamination evidence is copied for the judge",
+        )
+        destination = root / CERTIFICATION_EVIDENCE["contamination"]
+        destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        written.append(destination.name)
+
+    chosen = _chosen_candidate_document(selected)
+    if chosen is not None:
+        destination = root / CERTIFICATION_EVIDENCE["selection"]
+        destination.write_text(
+            json.dumps(chosen, indent=2, sort_keys=True), encoding="utf-8"
+        )
+        written.append(destination.name)
+    return tuple(written)
+
+
+def _chosen_candidate_document(
+    selected: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """The winner's identity, or None when the run produced no artifact.
+
+    The digest is the one the binding already measured over the artifact's
+    bytes, recomputed here only when the attempt recorded none. A candidate
+    with no artifact gets no record rather than a formatted placeholder the
+    judge would have to reject.
+    """
+    if not selected:
+        return None
+    artifact_ref = selected.get("artifact_ref")
+    if not isinstance(artifact_ref, str) or not artifact_ref.strip():
+        return None
+    artifact = Path(artifact_ref)
+    if not artifact.exists():
+        return None
+    digest = selected.get("artifact_sha256")
+    if not isinstance(digest, str) or len(digest) != 64:
+        try:
+            digest, _entries = directory_digest(artifact)
+        except OSError:
+            return None
+    return {
+        "recipe_id": str(selected.get("recipe_id", "")),
+        "artifact_ref": str(artifact),
+        "artifact_sha256": digest,
+        "attempt": selected.get("attempt"),
+    }
 
 
 # --------------------------------------------------------------------------
