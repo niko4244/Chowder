@@ -85,6 +85,8 @@ from chowder.evals.result import (  # noqa: E402
     EvalReport,
 )
 from chowder.growth.campaign import CampaignManifest, settle_campaign  # noqa: E402
+from chowder.growth import certification as _certification  # noqa: E402
+from chowder.growth.certification import ArmError, MeasuredArm  # noqa: E402
 from chowder.growth.catalog import default_registry  # noqa: E402
 from chowder.growth.compute_cost import ComputeCost  # noqa: E402
 from chowder.growth.metric_binding import MetricBinder  # noqa: E402
@@ -121,11 +123,9 @@ CONTAMINATION_PIN_ABSENT = "CONTAMINATION_PIN_ABSENT"
 CONTAMINATION_PIN_MISSING = "CONTAMINATION_PIN_MISSING"
 CONTAMINATION_EVIDENCE_NOT_IN_RUN_ROOT = "CONTAMINATION_EVIDENCE_NOT_IN_RUN_ROOT"
 CONTAMINATION_EVIDENCE_NOT_PINNED = "CONTAMINATION_EVIDENCE_NOT_PINNED"
-MEASUREMENT_ARTIFACT_MISSING = "MEASUREMENT_ARTIFACT_MISSING"
-MEASUREMENT_ARTIFACT_ESCAPES_RUN_ROOT = "MEASUREMENT_ARTIFACT_ESCAPES_RUN_ROOT"
-MEASUREMENT_DIGEST_ABSENT = "MEASUREMENT_DIGEST_ABSENT"
-MEASUREMENT_DIGEST_MISMATCH = "MEASUREMENT_DIGEST_MISMATCH"
-MEASUREMENT_SAMPLES_INCONSISTENT = "MEASUREMENT_SAMPLES_INCONSISTENT"
+#: The measurement reason codes are production's (see the verification block
+#: below): the judge re-exports them so a refusal is named identically wherever
+#: it is raised.
 
 #: Paired-decision constants for the target gates: the minimum effect on the
 #: rate delta, and the strict-improvement count the absolute path requires.
@@ -237,41 +237,40 @@ def _prompt_key(entry: Mapping[str, Any]) -> str | None:
     return None
 
 
-class _ArmError(Exception):
+class _ArmError(Exception):  # noqa: D101 - retained for older call sites/tests
     """The arm artifact is missing, unreadable, or not usable as evidence."""
 
 
-class Arm:
-    """One measured generation's durable evidence, parsed by production."""
+class Arm(MeasuredArm):
+    """One measured generation's durable evidence, parsed and gated by production.
 
-    def __init__(self, path: Path, *, expected_origin: str, label: str) -> None:
-        self.label = label
-        self.path = path
-        if not path.is_file():
-            raise _ArmError(f"{label} artifact {path.name} is missing")
-        try:
-            self.report = EvalReport.load(path)
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            raise _ArmError(f"{label} artifact {path.name} is unreadable: {error}") from error
-        self.expected_origin = expected_origin
+    Production owns what an arm *is*: its provenance, its generation and the
+    bytes its ``model_identity`` names. The judge adds only what is specific to
+    scoring this cycle's instrument (the per-prompt completions).
+    """
 
-    def run_for(self, qualified_id: str) -> BenchmarkRun | None:
-        """The single run for a benchmark, or None when absent/duplicated."""
-        matches = [
-            run for run in self.report.runs if run.benchmark_qualified_id == qualified_id
-        ]
-        if len(matches) != 1:
-            return None
-        run = matches[0]
-        if run.measurement_origin != self.expected_origin:
-            return None
-        return run
-
-    def duplicate_ids(self) -> tuple[str, ...]:
-        counts: dict[str, int] = {}
-        for run in self.report.runs:
-            counts[run.benchmark_qualified_id] = counts.get(run.benchmark_qualified_id, 0) + 1
-        return tuple(sorted(qid for qid, n in counts.items() if n > 1))
+    @classmethod
+    def open(
+        cls,
+        path: Path,
+        *,
+        expected_origin: str,
+        expected_generation: str,
+        label: str,
+    ) -> "Arm":
+        loaded = MeasuredArm.load(
+            path,
+            expected_origin=expected_origin,
+            expected_generation=expected_generation,
+            label=label,
+        )
+        return cls(
+            label=loaded.label,
+            origin=loaded.origin,
+            generation=loaded.generation,
+            report=loaded.report,
+            path=loaded.path,
+        )
 
     def per_prompt(self) -> list[Mapping[str, Any]]:
         run = self.run_for(INSTRUMENT_ID)
@@ -368,147 +367,55 @@ def _target_gate(
     return FAIL, detail
 
 
-def _measurement_artifact(run_root: Path, ref: str) -> tuple[Path | None, str]:
-    """Resolve a row's ``raw_artifact_ref``, or say why it cannot be verified.
+# ---------------------------------------------------------------------------
+# measurement verification and slice protocol: production owns the mechanism
+# ---------------------------------------------------------------------------
 
-    A relative reference is resolved against the run root -- the evidence set a
-    run root carries is the evidence the judge reads -- and one that climbs out
-    of it is refused rather than followed. Nothing is created, guessed or
-    located elsewhere: either the named bytes are there, or the measurement
-    cannot be verified.
-    """
-    path = Path(ref)
-    if not path.is_absolute():
-        if ".." in path.parts:
-            return None, f"{MEASUREMENT_ARTIFACT_ESCAPES_RUN_ROOT}: {ref!r} points outside the run root"
-        path = run_root / path
-    if not path.exists():
-        return None, (
-            f"{MEASUREMENT_ARTIFACT_MISSING}: raw_artifact_ref {ref!r} does not exist, "
-            "so the measurement cannot be verified against its own bytes"
-        )
-    return path, ""
-
-
-def _protocol_problems(
-    run: BenchmarkRun, *, run_root: Path, field: str = "metadata"
-) -> tuple[str, ...]:
-    """Every way a protected slice fails to match the frozen protocol.
-
-    Beyond the frozen protocol fields, this verifies that the row *is* the
-    measurement it claims: the raw artifact it names must exist, carry a
-    declared sha256 that the judge recomputes over the real bytes, and its
-    per-sample evidence must add up to the aggregate score. A row that names no
-    existing artifact, declares no digest, or reports a score its own samples do
-    not support is refused -- an unhashed or empty measurement cannot certify.
-    """
-    metadata = run.metadata or {}
-    problems: list[str] = []
-    if run.n_samples != PROTECTED_N_SAMPLES:
-        problems.append(f"n_samples={run.n_samples} (expected {PROTECTED_N_SAMPLES})")
-    indices = metadata.get("sample_indices")
-    if not isinstance(indices, list) or tuple(indices) != PROTECTED_SAMPLE_INDICES:
-        problems.append(f"sample_indices={indices!r} (expected 0..{PROTECTED_N_SAMPLES - 1})")
-    if metadata.get("seed") != PROTECTED_SEED:
-        problems.append(f"seed={metadata.get('seed')!r} (expected {PROTECTED_SEED})")
-    if metadata.get("shuffle") is not PROTECTED_SHUFFLE:
-        problems.append(f"shuffle={metadata.get('shuffle')!r} (expected {PROTECTED_SHUFFLE})")
-    decoding = metadata.get("decoding")
-    if not isinstance(decoding, Mapping):
-        problems.append("decoding metadata missing")
-    else:
-        for key, expected in PROTECTED_DECODING.items():
-            if decoding.get(key) != expected:
-                problems.append(f"decoding.{key}={decoding.get(key)!r} (expected {expected!r})")
-    if metadata.get("prompt_policy") != PROTECTED_PROMPT_POLICY:
-        problems.append(
-            f"prompt_policy={metadata.get('prompt_policy')!r} "
-            f"(expected {PROTECTED_PROMPT_POLICY!r})"
-        )
-    if not isinstance(run.score, (int, float)) or isinstance(run.score, bool):
-        problems.append("score is not a measured number")
-    problems.extend(_evidence_problems(run, run_root=run_root, metadata=metadata))
-    return tuple(problems)
-
-
-def _evidence_problems(
-    run: BenchmarkRun, *, run_root: Path, metadata: Mapping[str, Any]
-) -> tuple[str, ...]:
-    """The measurement-verification half of the protocol check."""
-    problems: list[str] = []
-    if not run.raw_artifact_ref:
-        problems.append("raw_artifact_ref missing (no underlying evidence named)")
-    else:
-        artifact, reason = _measurement_artifact(run_root, run.raw_artifact_ref)
-        if artifact is None:
-            problems.append(reason)
-        else:
-            declared = metadata.get("artifact_sha256")
-            if not isinstance(declared, str) or not ARTIFACT_SHA256_PATTERN.fullmatch(declared):
-                problems.append(
-                    f"{MEASUREMENT_DIGEST_ABSENT}: artifact_sha256 "
-                    f"{declared!r} is not a 64-character sha256, so the row is not "
-                    "bound to the bytes it names"
-                )
-            else:
-                try:
-                    actual = _digest_of(artifact)
-                except OSError as error:  # unreadable is unverifiable
-                    problems.append(
-                        f"{MEASUREMENT_ARTIFACT_MISSING}: raw artifact "
-                        f"{run.raw_artifact_ref!r} cannot be hashed ({error})"
-                    )
-                else:
-                    if actual != declared:
-                        problems.append(
-                            f"{MEASUREMENT_DIGEST_MISMATCH}: raw artifact "
-                            f"{run.raw_artifact_ref!r} hashes to {actual}, the row "
-                            f"declares {declared}"
-                        )
-    samples = tuple(run.per_sample_scores)
-    if len(samples) != run.n_samples:
-        problems.append(
-            f"{MEASUREMENT_SAMPLES_INCONSISTENT}: per_sample_scores carries "
-            f"{len(samples)} values for n_samples={run.n_samples}"
-        )
-    elif samples and isinstance(run.score, (int, float)) and not isinstance(run.score, bool):
-        mean = sum(float(sample) for sample in samples) / len(samples)
-        if abs(mean - float(run.score)) > SAMPLE_MEAN_TOLERANCE:
-            problems.append(
-                f"{MEASUREMENT_SAMPLES_INCONSISTENT}: score {run.score} is not the "
-                f"mean of per_sample_scores ({mean:.6f})"
-            )
-    return tuple(problems)
+#: The verification the judge applies is the production one (PR: "the campaign
+#: cannot promote before certification says it may"), so the runner that certifies
+#: a run and the judge that audits it cannot disagree about the same row. Only the
+#: policy values below -- which benchmarks, which protocol, which tolerance -- are
+#: frozen here.
+_measurement_artifact = _certification.measurement_artifact
+_evidence_problems = _certification.evidence_problems
+_protocol_problems = _certification.protocol_problems
 
 
 def _slice_status(
-    arm: Arm | None,
+    arm: MeasuredArm | None,
     qualified_id: str,
     *,
     label: str,
     run_root: Path,
+    protocol: Any,
 ) -> tuple[str, Any, str]:
-    """Locate one required slice in one arm, with its provenance and protocol."""
-    if arm is None:
-        return UNKNOWN, None, f"{label} arm unavailable"
-    duplicates = arm.duplicate_ids()
-    if qualified_id in duplicates:
-        return FAIL, None, f"{label} arm carries {qualified_id} more than once"
-    run = arm.run_for(qualified_id)
-    if run is None:
-        present = arm.report.runs and any(
-            r.benchmark_qualified_id == qualified_id for r in arm.report.runs
-        )
-        if present:
-            return FAIL, None, (
-                f"{label} arm carries {qualified_id} with provenance "
-                f"{arm.expected_origin} refused"
-            )
-        return UNKNOWN, None, f"{label} arm has no {qualified_id} measurement"
-    problems = _protocol_problems(run, run_root=run_root)
-    if problems:
-        return FAIL, run, f"{label} protocol mismatch: " + "; ".join(problems)
-    return PASS, run, f"{label} {qualified_id} = {run.score:.4f} ({run.n_samples} items)"
+    """Production's slice verdict, as the (status, run, detail) the table reads."""
+    check = _certification.slice_status(
+        arm, qualified_id, label=label, run_root=run_root, protocol=protocol
+    )
+    return check.status, check.run, check.detail
+ARTIFACT_SHA256_PATTERN = _certification.ARTIFACT_SHA256_PATTERN
+SAMPLE_MEAN_TOLERANCE = _certification.SAMPLE_MEAN_TOLERANCE
+MEASUREMENT_ARTIFACT_MISSING = _certification.MEASUREMENT_ARTIFACT_MISSING
+MEASUREMENT_ARTIFACT_ESCAPES_RUN_ROOT = _certification.MEASUREMENT_ARTIFACT_ESCAPES_RUN_ROOT
+MEASUREMENT_DIGEST_ABSENT = _certification.MEASUREMENT_DIGEST_ABSENT
+MEASUREMENT_DIGEST_MISMATCH = _certification.MEASUREMENT_DIGEST_MISMATCH
+MEASUREMENT_SAMPLES_INCONSISTENT = _certification.MEASUREMENT_SAMPLES_INCONSISTENT
+ARM_GENERATION_MISMATCH = _certification.ARM_GENERATION_MISMATCH
+ARM_ADAPTER_DIGEST_MISSING = _certification.ARM_ADAPTER_DIGEST_MISSING
+ARM_ADAPTER_DIGEST_MISMATCH = _certification.ARM_ADAPTER_DIGEST_MISMATCH
+ARM_BASE_DIGEST_MISSING = _certification.ARM_BASE_DIGEST_MISSING
+ARM_BASE_DIGEST_MISMATCH = _certification.ARM_BASE_DIGEST_MISMATCH
+
+#: The declared protocol, as this judge's own frozen constants above (they are
+#: the policy; the mechanism that applies them is production's).
+JUDGE_PROTOCOL = _certification.ProtocolSpec(
+    n_samples=PROTECTED_N_SAMPLES,
+    seed=PROTECTED_SEED,
+    decoding=dict(PROTECTED_DECODING),
+    prompt_policy=PROTECTED_PROMPT_POLICY,
+    shuffle=PROTECTED_SHUFFLE,
+)
 
 
 def _digest_of(path: Path) -> str:
@@ -528,15 +435,28 @@ def judge(run_root: Path) -> int:
     verdict = Verdict()
     campaign = _load_campaign()
 
+    # Each arm's generation is pinned: the candidate must be the version this
+    # campaign is judged under, the parent its declared parent, and the trusted
+    # ancestor the frozen one. A protocol-correct row of the wrong generation is
+    # not the measurement it claims.
+    candidate_version = (
+        campaign.resolved_candidate_version() if campaign is not None else TRUSTED_ANCESTOR_VERSION
+    )
+    parent_version = campaign.parent_version if campaign is not None else ""
     arms: dict[str, Arm | None] = {}
-    for key, filename, origin, label in (
-        ("candidate", "candidate_evaluation.json", MEASURED_THIS_GENERATION, "candidate"),
-        ("parent", "parent_evaluation.json", MEASURED_PARENT, "parent (gen1)"),
-        ("ancestor", "baseline_evaluation.json", MEASURED_PARENT, "trusted ancestor (gen0)"),
+    for key, filename, origin, label, generation in (
+        ("candidate", "candidate_evaluation.json", MEASURED_THIS_GENERATION, "candidate", candidate_version),
+        ("parent", "parent_evaluation.json", MEASURED_PARENT, "parent (gen1)", parent_version),
+        ("ancestor", "baseline_evaluation.json", MEASURED_PARENT, "trusted ancestor (gen0)", TRUSTED_ANCESTOR_VERSION),
     ):
         try:
-            arms[key] = Arm(run_root / filename, expected_origin=origin, label=label)
-        except _ArmError as error:
+            arms[key] = Arm.open(
+                run_root / filename,
+                expected_origin=origin,
+                expected_generation=generation,
+                label=label,
+            )
+        except ArmError as error:
             arms[key] = None
             if key == "candidate":
                 verdict.add("T1", "candidate measured evidence", UNKNOWN, str(error))
@@ -544,6 +464,8 @@ def judge(run_root: Path) -> int:
 
     _instrument_gates(verdict, candidate, arms["parent"])
     _protected_gates(verdict, arms, campaign, run_root=run_root)
+    _evidence_identity_gate(verdict, run_root, arms, campaign)
+    _protection_agreement_gate(verdict, campaign)
     _contamination_gate(verdict, run_root, campaign)
     _settlement_gates(verdict, run_root, campaign)
     _identity_gate(verdict, run_root)
@@ -559,7 +481,7 @@ def judge(run_root: Path) -> int:
         INFO,
         "frozen policy",
         INFO,
-        "docs/quals/GEN2_PREREG_2026-09-17.md + GEN2_PREREG_AMENDMENT1/2/3_2026-09-18.md",
+        "docs/quals/GEN2_PREREG_2026-09-17.md + GEN2_PREREG_AMENDMENT1/2/3/4_2026-09-18.md",
     )
 
     final = branch_verdict(verdict)
@@ -806,13 +728,15 @@ def _protected_gates(
         # refusal of every protected row.
         for qualified_id in required:
             status, run, detail = _slice_status(
-                candidate, qualified_id, label="candidate", run_root=run_root
+                candidate, qualified_id, label="candidate", run_root=run_root,
+                protocol=JUDGE_PROTOCOL
             )
             verdict.add("T11", f"candidate {qualified_id} measured + protocol-exact", status, detail)
             if status != PASS or parent is None:
                 continue
             parent_status, parent_run, parent_detail = _slice_status(
-                parent, qualified_id, label="parent", run_root=run_root
+                parent, qualified_id, label="parent", run_root=run_root,
+                protocol=JUDGE_PROTOCOL
             )
             if parent_status != PASS:
                 continue
@@ -825,12 +749,26 @@ def _protected_gates(
             )
 
     if campaign is not None:
+        # Declared *anywhere* in the campaign: a target or broad row is a declared
+        # measurement, not a substitute for a required protected slice. What must
+        # not happen is an undeclared benchmark standing in for one.
+        declared_elsewhere = {
+            qualified_id
+            for declared_set in (
+                campaign.target_benchmarks,
+                campaign.protected_benchmarks,
+                campaign.broad_benchmarks,
+                campaign.calibration_benchmarks,
+                campaign.reliability_benchmarks,
+            )
+            for qualified_id in declared_set
+        }
         undeclared = sorted(
             {
                 run.benchmark_qualified_id
                 for run in (candidate.report.runs if candidate else ())
                 if run.benchmark_qualified_id != INSTRUMENT_ID
-                and run.benchmark_qualified_id not in required
+                and run.benchmark_qualified_id not in declared_elsewhere
             }
         )
         verdict.add(
@@ -881,10 +819,12 @@ def _ancestor_gates(
         unresolved = False
         for qualified_id in required:
             candidate_status, candidate_run, candidate_detail = _slice_status(
-                candidate, qualified_id, label="candidate", run_root=run_root
+                candidate, qualified_id, label="candidate", run_root=run_root,
+                protocol=JUDGE_PROTOCOL
             )
             ancestor_status, ancestor_run, ancestor_detail = _slice_status(
-                ancestor, qualified_id, label="ancestor", run_root=run_root
+                ancestor, qualified_id, label="ancestor", run_root=run_root,
+                protocol=JUDGE_PROTOCOL
             )
             if candidate_status != PASS or ancestor_status != PASS:
                 unresolved = True
@@ -916,7 +856,8 @@ def _ancestor_gates(
     trusted_rows = [row for row in verdict.thresholds() if row[0] == "T16"]
     trusted_ok = bool(trusted_rows) and trusted_rows[0][2] == PASS
     parent_slice_evidence = parent is not None and any(
-        _slice_status(parent, qualified_id, label="parent", run_root=run_root)[0] == PASS
+        _slice_status(parent, qualified_id, label="parent", run_root=run_root,
+                protocol=JUDGE_PROTOCOL)[0] == PASS
         for qualified_id in required
     )
     if not parent_slice_evidence:
@@ -951,10 +892,12 @@ def _ancestor_gates(
     parent_branch_broken = False
     for qualified_id in required:
         candidate_status, candidate_run, candidate_detail = _slice_status(
-            candidate, qualified_id, label="candidate", run_root=run_root
+            candidate, qualified_id, label="candidate", run_root=run_root,
+                protocol=JUDGE_PROTOCOL
         )
         parent_status, parent_run, parent_detail = _slice_status(
-            parent, qualified_id, label="parent", run_root=run_root
+            parent, qualified_id, label="parent", run_root=run_root,
+                protocol=JUDGE_PROTOCOL
         )
         if candidate_status != PASS or parent_status != PASS:
             unresolved = True
@@ -1187,12 +1130,174 @@ def _settlement_gates(
         and entry.get("kind") in {"training", "evaluation", "failed_attempt"}
         and entry.get("recipe_id")
     }
+    # The declared recipe set, not merely "two recipes": a campaign that accounted
+    # for a different set than it declared has not accounted for its own run.
+    declared = tuple(campaign.recipe_ids) if campaign is not None else ()
+    if not declared:
+        verdict.add(
+            "T14",
+            "all recipes accounted",
+            PASS if len(recipe_ids) >= REQUIRED_RECIPES_MIN else FAIL,
+            f"recipe ids in accounting: {sorted(recipe_ids)} (no declared set to compare)",
+        )
+        return
+    missing = sorted(set(declared) - recipe_ids)
+    extra = sorted(recipe_ids - set(declared))
     verdict.add(
         "T14",
         "all recipes accounted",
-        PASS if len(recipe_ids) >= REQUIRED_RECIPES_MIN else FAIL,
-        f"recipe ids in accounting: {sorted(recipe_ids)}",
+        PASS if not missing and not extra else FAIL,
+        (
+            f"accounted {sorted(recipe_ids)} against the declared {sorted(declared)}"
+            if not missing and not extra
+            else f"declared but unaccounted: {missing}; accounted but undeclared: {extra}"
+        ),
     )
+
+
+def _protection_agreement_gate(verdict: Verdict, campaign: CampaignManifest | None) -> None:
+    """The campaign declaration and the frozen judge must state the same policy.
+
+    The runner certifies a run with the manifest's declared protection (ancestor,
+    tolerance, protocol); the judge audits with its frozen constants. If the two
+    ever disagree, one of them is enforcing a policy the other does not know
+    about -- so the disagreement is a hard failure here rather than a silent
+    difference of opinion between the run and its audit.
+    """
+    requirement = "the campaign declares the policy this judge enforces"
+    if campaign is None:
+        verdict.add(
+            "T20", requirement, UNKNOWN,
+            "the campaign manifest is unreadable, so its declared policy cannot be "
+            "compared with the frozen one",
+        )
+        return
+    protection = campaign.protection
+    if (
+        protection.protocol is None
+        or not protection.trusted_ancestor_version
+        or protection.slice_regression_max is None
+    ):
+        verdict.add(
+            "T20", requirement, UNKNOWN,
+            "the campaign declares no protection policy (trusted ancestor, "
+            "tolerance, protocol), so the run cannot certify what this judge audits",
+        )
+        return
+    declared = (
+        protection.trusted_ancestor_version,
+        float(protection.slice_regression_max),
+        protection.protocol.to_dict(),
+    )
+    frozen = (
+        TRUSTED_ANCESTOR_VERSION,
+        float(SLICE_REGRESSION_MAX),
+        JUDGE_PROTOCOL.to_dict(),
+    )
+    verdict.add(
+        "T20",
+        requirement,
+        PASS if declared == frozen else FAIL,
+        (
+            f"declared {declared} == frozen {frozen}"
+            if declared == frozen
+            else f"the campaign declares {declared}, this judge enforces {frozen}"
+        ),
+    )
+
+
+def _evidence_identity_gate(
+    verdict: Verdict,
+    run_root: Path,
+    arms: Mapping[str, Arm | None],
+    campaign: CampaignManifest | None,
+) -> None:
+    """Each arm's report must name the bytes it measured -- and those bytes the
+    campaign's.
+
+    This is what makes ``candidate_evaluation.json`` and ``chosen_candidate.json``
+    one truth: the candidate arm must name the digest of the artifact the campaign
+    selected, the parent arm the declared parent adapter, and the ancestor arm the
+    declared dense base. A report that names nothing is UNDECIDED; a report that
+    names a different model is a hard failure, because it is evidence about some
+    other model wearing this generation's label.
+    """
+    # Report-level generation identity first, decided by the same production
+    # mechanism the runner's own pre-ledger certification applies
+    # (``MeasuredArm.identity_problems``). A protocol-correct row set inside a
+    # report labelled for another generation is not this arm: the ancestor arm
+    # answers "did the branch regress against the trusted ancestor", and reading a
+    # gen1 report as gen0 would move that comparison to the immediate parent.
+    for role in ("candidate", "parent", "ancestor"):
+        arm = arms.get(role)
+        if arm is None:
+            continue
+        generation_problems = tuple(
+            problem
+            for problem in arm.identity_problems()
+            if ARM_GENERATION_MISMATCH in problem
+        )
+        verdict.add(
+            "T19",
+            f"{role} report is labelled for the generation it claims",
+            PASS if not generation_problems else FAIL,
+            "; ".join(generation_problems)
+            or (
+                f"{role} report carries generation "
+                f"{arm.report.generation_version!r}"
+            ),
+        )
+
+    chosen = _load_json(run_root / "chosen_candidate.json")
+    selected = str(chosen.get("artifact_sha256", "")) if isinstance(chosen, Mapping) else ""
+    expectations: list[tuple[str, str, str, str]] = []
+    if selected:
+        expectations.append(("candidate", selected, "adapter_digest", "the selected candidate artifact"))
+    if campaign is not None and campaign.has_parent_adapter() and campaign.parent_adapter_digest:
+        expectations.append(
+            ("parent", campaign.parent_adapter_digest, "adapter_digest", "the declared parent adapter")
+        )
+    if campaign is not None and campaign.base_model_digest:
+        expectations.append(
+            ("ancestor", campaign.base_model_digest, "base_model_digest", "the declared dense base")
+        )
+    if not expectations:
+        verdict.add(
+            "T19", "evaluation evidence names the bytes it measured", UNKNOWN,
+            "no campaign declaration names the artifacts the arms must be bound to",
+        )
+        return
+    for role, expected, key, what in expectations:
+        requirement = f"{role} evidence names {what}"
+        arm = arms.get(role)
+        if arm is None:
+            verdict.add("T19", requirement, UNKNOWN, f"{role} arm unavailable")
+            continue
+        identity = arm.report.model_identity or {}
+        declared_digest = str(identity.get(key, "")) if isinstance(identity, Mapping) else ""
+        if not declared_digest:
+            verdict.add(
+                "T19", requirement, UNKNOWN,
+                (
+                    f"{ARM_ADAPTER_DIGEST_MISSING if key == 'adapter_digest' else ARM_BASE_DIGEST_MISSING}: "
+                    f"the {role} report declares no {key}, so it is not bound to the "
+                    "bytes it measured"
+                ),
+            )
+        elif declared_digest != expected:
+            verdict.add(
+                "T19", requirement, FAIL,
+                (
+                    f"{ARM_ADAPTER_DIGEST_MISMATCH if key == 'adapter_digest' else ARM_BASE_DIGEST_MISMATCH}: "
+                    f"the {role} report measured {declared_digest}, the campaign "
+                    f"declares {expected} for {what}"
+                ),
+            )
+        else:
+            verdict.add(
+                "T19", requirement, PASS,
+                f"{role} measured {what} (digest {declared_digest[:12]})",
+            )
 
 
 def _identity_gate(verdict: Verdict, run_root: Path) -> None:

@@ -22,6 +22,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+from typing import Mapping
 
 import pytest
 
@@ -212,6 +213,23 @@ def _slice_run(
     )
 
 
+def _model_identity(role: str, **overrides: str) -> dict:
+    """What an arm declares it measured, matching the frozen declarations.
+
+    The judge binds each arm to the bytes its role names: the candidate to the
+    selected artifact, the parent to the declared parent adapter, the ancestor to
+    the declared dense base (the frozen manifest's own digests).
+    """
+    frozen = json.loads(FROZEN_CAMPAIGN_MANIFEST.read_text(encoding="utf-8"))
+    identity = {
+        "candidate": {"adapter_digest": "c" * 64},
+        "parent": {"adapter_digest": frozen["parent_adapter_digest"]},
+        "ancestor": {"base_model_digest": frozen["base_model_digest"]},
+    }[role]
+    identity.update(overrides)
+    return identity
+
+
 def _write_arm(
     path: Path,
     version: str,
@@ -223,6 +241,7 @@ def _write_arm(
     slices: tuple[BenchmarkRun, ...] = (),
     metadata_override: dict | None = None,
     with_instrument: bool = True,
+    identity: Mapping[str, str] | None = None,
 ) -> Path:
     runs = []
     if with_instrument:
@@ -233,7 +252,11 @@ def _write_arm(
             )
         )
     runs.extend(slices)
-    EvalReport(generation_version=version, runs=tuple(runs)).save(path)
+    EvalReport(
+        generation_version=version,
+        runs=tuple(runs),
+        model_identity=dict(identity or {}),
+    ).save(path)
     # The measurements those rows name, next to the report: the run root (or the
     # runner, which copies declared inputs in) then holds the bytes each declared
     # digest is computed over. A row whose ref a test deliberately pointed
@@ -320,6 +343,25 @@ def _run_root(
     root = tmp_path / "run"
     root.mkdir(parents=True, exist_ok=True)
 
+    # Selection first: the candidate arm has to name the bytes the campaign
+    # selected, so the artifact (and the digest chosen_candidate.json records)
+    # exists before the arms are written.
+    candidate_digest = ""
+    if chosen:
+        artifact, digest = _build_artifact(root)
+        reference = artifact_ref if artifact_ref is not None else str(artifact)
+        candidate_digest = artifact_digest if artifact_digest is not None else digest
+        (root / "chosen_candidate.json").write_text(
+            json.dumps(
+                {
+                    "recipe_id": "gen2-recipe-b",
+                    "artifact_ref": reference,
+                    "artifact_sha256": candidate_digest,
+                }
+            ),
+            encoding="utf-8",
+        )
+
     if candidate_slices is None:
         candidate_slices = (
             _slice_run(MATH, "gen2", MEASURED_THIS_GENERATION, 0.0),
@@ -336,20 +378,27 @@ def _run_root(
             _slice_run(MGSM, "gen0", MEASURED_PARENT, 0.0),
         )
 
+    # The candidate arm must name the artifact the campaign selected: the fixture
+    # records a digest in chosen_candidate.json and the candidate arm declares the
+    # same one, so the two agree unless a test deliberately breaks one of them.
+    candidate_identity = {"adapter_digest": candidate_digest} if candidate_digest else {}
     _write_arm(
         root / "candidate_evaluation.json", "gen2", MEASURED_THIS_GENERATION,
         dup=candidate_dup, echo=candidate_echo, correct=candidate_correct,
         slices=candidate_slices, metadata_override=candidate_instrument_metadata,
+        identity=candidate_identity,
     )
     if parent_arm:
         _write_arm(
             root / "parent_evaluation.json", "gen1", MEASURED_PARENT,
             dup=parent_dup, echo=parent_echo, slices=parent_slices,
+            identity=_model_identity("parent"),
         )
     if ancestor_arm:
         _write_arm(
             root / "baseline_evaluation.json", "gen0", MEASURED_PARENT,
             slices=ancestor_slices,
+            identity=_model_identity("ancestor"),
         )
 
     (root / "cycle_compute_accounting.json").write_text(
@@ -363,19 +412,6 @@ def _run_root(
     # fixture declares the pin it used -- as the frozen manifest does in production.
     _pin_campaign(tmp_path, root, contamination_pin or pinned)
 
-    if chosen:
-        artifact, digest = _build_artifact(root)
-        reference = artifact_ref if artifact_ref is not None else str(artifact)
-        (root / "chosen_candidate.json").write_text(
-            json.dumps(
-                {
-                    "recipe_id": "gen2-recipe-b",
-                    "artifact_ref": reference,
-                    "artifact_sha256": artifact_digest if artifact_digest is not None else digest,
-                }
-            ),
-            encoding="utf-8",
-        )
     return root
 
 
@@ -415,6 +451,27 @@ def _judge_output(root: Path) -> tuple[int, str]:
 def test_judge_certifies_a_clean_run(tmp_path: Path) -> None:
     root = _run_root(tmp_path)
     assert judge_gen2.judge(root) == 0
+
+
+def test_the_frozen_policy_and_the_declared_mechanism_agree() -> None:
+    """The judge's frozen values and production's declared ones are one set.
+
+    The runner certifies a run with the manifest's declared protection; the judge
+    audits with these frozen constants. If the two ever drift, one of them is
+    enforcing a policy the other does not know about -- which is what gate T20
+    refuses. Checked here on the shipped declaration, not on a fixture.
+    """
+    from chowder.growth.campaign import CampaignManifest
+    from chowder.growth.certification import GEN2_PROTOCOL
+
+    assert judge_gen2.JUDGE_PROTOCOL.to_dict() == GEN2_PROTOCOL.to_dict()
+
+    shipped = CampaignManifest.from_file(REPO / "docs" / "gen2" / "gen2_campaign.json")
+    assert shipped.protection.trusted_ancestor_version == judge_gen2.TRUSTED_ANCESTOR_VERSION
+    assert shipped.protection.slice_regression_max == pytest.approx(
+        judge_gen2.SLICE_REGRESSION_MAX
+    )
+    assert shipped.protection.require_protocol().to_dict() == judge_gen2.JUDGE_PROTOCOL.to_dict()
 
 
 def test_the_run_root_must_carry_the_pinned_contamination_evidence(
@@ -946,6 +1003,87 @@ def test_a_missing_artifact_refuses(tmp_path: Path) -> None:
 
     shutil.rmtree(chosen["artifact_ref"])
     assert judge_gen2.judge(root) == 1
+
+
+# --------------------------------------------------------------------------
+# generation identity is part of an arm's identity
+# --------------------------------------------------------------------------  # noqa: E501
+
+
+def test_the_ancestor_arm_must_carry_gen0_rows_not_gen1_rows(tmp_path: Path) -> None:
+    """A protocol-correct gen1 row is not the gen0 arm.
+
+    The rows here are measured, protocol-exact and parent-measured -- every
+    property except the one that says *which generation produced them*. The
+    ancestor arm answers "did the branch regress against the trusted ancestor",
+    so a gen1 row standing in for gen0 would silently move the comparison to the
+    immediate parent, which is the case branch protection exists to catch.
+    """
+    root = _run_root(
+        tmp_path,
+        ancestor_slices=(
+            _slice_run(MATH, "gen1", MEASURED_PARENT, 0.0),
+            _slice_run(MGSM, "gen1", MEASURED_PARENT, 0.0),
+        ),
+    )
+
+    code, output = _judge_output(root)
+
+    assert code == 1, f"a gen1 row certified as the gen0 arm:\n{output}"
+    assert "generation" in output
+
+
+def test_an_ancestor_report_labelled_gen1_refuses(tmp_path: Path) -> None:
+    """Report-level generation identity is enforced too, not only the rows."""
+    root = _run_root(tmp_path)
+    assert _judge_output(root)[0] == 0
+    arm = root / "baseline_evaluation.json"
+    document = json.loads(arm.read_text(encoding="utf-8"))
+    document["generation_version"] = "gen1"
+    arm.write_text(json.dumps(document), encoding="utf-8")
+
+    code, output = _judge_output(root)
+
+    assert code == 1, f"a mislabelled ancestor report certified:\n{output}"
+    assert "generation" in output
+
+
+# --------------------------------------------------------------------------
+# the cycle accounts for exactly the declared recipe set
+# --------------------------------------------------------------------------
+
+
+def test_the_declared_recipe_set_must_be_accounted_exactly(tmp_path: Path) -> None:
+    """T14 compares sets, not counts: a third recipe is as wrong as a missing one."""
+    assert _judge_output(_run_root(tmp_path))[0] == 0
+
+    fixture = _accounting()
+    declared = [entry for entry in fixture["entries"]]
+    assert {entry["recipe_id"] for entry in declared} == {
+        "gen2-recipe-a",
+        "gen2-recipe-b",
+    }
+
+    extra = json.loads(json.dumps(fixture))
+    extra["entries"] = [
+        *declared,
+        {"kind": "training", "recipe_id": "gen2-recipe-c"},
+    ]
+    root = _run_root(tmp_path / "extra", accounting=extra)
+    code, output = _judge_output(root)
+    assert code == 1, f"an undeclared recipe certified:\n{output}"
+    assert "T14" in output
+    assert "gen2-recipe-c" in output
+
+    renamed = json.loads(json.dumps(fixture))
+    renamed["entries"] = [
+        {"kind": "training", "recipe_id": "gen2-recipe-a"},
+        {"kind": "training", "recipe_id": "something-else"},
+    ]
+    root = _run_root(tmp_path / "renamed", accounting=renamed)
+    code, output = _judge_output(root)
+    assert code == 1, f"a renamed recipe certified:\n{output}"
+    assert "gen2-recipe-b" in output
 
 
 # --------------------------------------------------------------------------

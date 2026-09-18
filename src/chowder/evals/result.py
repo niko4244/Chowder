@@ -109,6 +109,14 @@ class EvalReport:
     runs: tuple[BenchmarkRun, ...]
     hardware: Mapping[str, Any] = field(default_factory=dict)
     date: str = ""
+    #: Which bytes this pass measured, as explicit (path, digest) pairs --
+    #: ``base_model_path``/``base_model_digest`` and, when an adapter was
+    #: loaded, ``adapter_path``/``adapter_digest``. Certification binds an arm
+    #: to the artifact the campaign selected through these digests, so an
+    #: evaluation cannot describe a different model than the one it names.
+    #: Historical reports declare none (empty), which reads as undecided
+    #: evidence rather than as agreement.
+    model_identity: Mapping[str, str] = field(default_factory=dict)
 
     def supported_runs(self) -> tuple[BenchmarkRun, ...]:
         return tuple(run for run in self.runs if run.support == SUPPORTED)
@@ -119,6 +127,7 @@ class EvalReport:
             "runs": [run.to_dict() for run in self.runs],
             "hardware": dict(self.hardware),
             "date": self.date,
+            "model_identity": dict(self.model_identity),
         }
 
     def save(self, path: Path | str) -> None:
@@ -159,6 +168,10 @@ class EvalReport:
             ),
             hardware=data.get("hardware", {}),
             date=data.get("date", ""),
+            # Identity survives the round trip too: a report that names the
+            # bytes it measured still names them after being written and read
+            # back, and a report that named none does not acquire any.
+            model_identity=data.get("model_identity", {}),
         )
 
 

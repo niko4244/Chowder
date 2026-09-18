@@ -51,8 +51,18 @@ from chowder.growth.campaign_runner import (
     assert_every_field_enforced,
     plan_campaign,
     run_campaign,
+    undeclared_inputs,
+)
+from chowder.growth.candidate_evaluation import (
+    CANDIDATE_EVALUATION_IDENTITY_UNBOUND,
+    CANDIDATE_EVALUATION_NOT_CANDIDATE_MEASURED,
+    CANDIDATE_EVALUATION_NOT_PRODUCED,
+    CandidateEvaluation,
+    CandidateEvaluationRefusal,
+    EvaluationRequest,
 )
 from chowder.growth.capability import ALL_SKILLS, CapabilityProfile, SkillEstimate
+from chowder.growth.compute_cost import ComputeCost
 from chowder.growth.lineage import GenerationLedger
 from chowder.growth.training_binding import directory_digest
 
@@ -98,6 +108,30 @@ EXAMPLE_MANIFEST = ROOT / "docs" / "gen2_campaign_manifest.example.json"
 # --------------------------------------------------------------------------
 
 
+#: The declared protection policy this fixture campaigns with: the frozen
+#: 16-item mini-slice protocol, a gen0 trusted ancestor, and the frozen tolerance.
+PROTECTION: dict[str, Any] = {
+    "trusted_ancestor_version": "gen0",
+    "slice_regression_max": 0.0625,
+    "n_samples": 16,
+    "seed": 1234,
+    "shuffle": False,
+    "decoding": {"temperature": 0.0, "do_sample": False, "max_new_tokens": 512},
+    "prompt_policy": "chat_template",
+}
+
+
+#: Sixteen per-sample values, the frozen mini-slice size, so the protected row a
+#: campaign certifies against is the shape certification requires.
+PROTECTED_SAMPLES: tuple[float, ...] = (0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1)
+
+
+def _protected_artifact_ref(version: str) -> str:
+    """Version-scoped, so two arms never claim one run-root path with two sets of
+    bytes (which the evidence writer refuses, correctly)."""
+    return f"raw/protected-{version}-slice.json"
+
+
 def _row(
     qualified_id: str,
     version: str,
@@ -105,7 +139,24 @@ def _row(
     samples: Sequence[float],
     *,
     metric: str = "accuracy",
+    protocol: bool = False,
+    artifact: tuple[str, str] | None = None,
 ) -> BenchmarkRun:
+    metadata: dict[str, Any] = {}
+    if protocol:
+        metadata.update(
+            {
+                "sample_indices": list(range(len(samples))),
+                "seed": 1234,
+                "shuffle": False,
+                "decoding": dict(PROTECTION["decoding"]),
+                "prompt_policy": "chat_template",
+            }
+        )
+    reference = ""
+    if artifact is not None:
+        reference, digest = artifact
+        metadata["artifact_sha256"] = digest
     return BenchmarkRun(
         benchmark_qualified_id=qualified_id,
         adapter="chowder_custom",
@@ -115,34 +166,112 @@ def _row(
         per_sample_scores=tuple(float(value) for value in samples),
         metric=metric,
         measurement_origin=origin,
+        raw_artifact_ref=reference,
+        metadata=metadata,
     )
 
 
-def _write_reports(inputs: Path) -> dict[str, str]:
-    """Parent-measured and candidate-measured rows, written by the producer."""
-    parent_runs = (
-        _row(TARGET_ID, PARENT_VERSION, MEASURED_PARENT, (0, 0, 0, 0, 1, 0, 0, 0), metric=TARGET_METRIC),
-        _row(PROTECTED_ID, PARENT_VERSION, MEASURED_PARENT, (0, 1, 0, 1, 0, 1, 0, 1)),
-        _row(BROAD_ID, PARENT_VERSION, MEASURED_PARENT, (0, 1, 1, 0, 0, 1, 1, 0)),
+def _slice_artifact(report_path: Path, *, version: str, qualified_id: str) -> tuple[str, str]:
+    """The raw bytes one protected row names, written beside the report."""
+    payload = json.dumps(
+        {"generation_version": version, "benchmark": qualified_id, "n": 16}, sort_keys=True
     )
-    candidate_runs = (
-        _row(TARGET_ID, CANDIDATE_VERSION, MEASURED_THIS_GENERATION, (1, 1, 1, 1, 1, 1, 1, 1), metric=TARGET_METRIC),
-        _row(PROTECTED_ID, CANDIDATE_VERSION, MEASURED_THIS_GENERATION, (0, 1, 0, 1, 0, 1, 0, 1)),
-        _row(BROAD_ID, CANDIDATE_VERSION, MEASURED_THIS_GENERATION, (0, 1, 1, 0, 0, 1, 1, 0)),
-    )
-    EvalReport(generation_version=PARENT_VERSION, runs=parent_runs).save(
-        inputs / "parent-eval-report.json"
-    )
-    EvalReport(generation_version=CANDIDATE_VERSION, runs=candidate_runs).save(
-        inputs / "candidate-eval-report.json"
-    )
-    return {
-        "parent_eval_report_path": str(inputs / "parent-eval-report.json"),
-        "candidate_eval_report_path": str(inputs / "candidate-eval-report.json"),
-    }
+    reference = _protected_artifact_ref(f"{version}-{qualified_id.replace('@', '-')}")
+    artifact = report_path.parent / reference
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(payload, encoding="utf-8")
+    return reference, hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _declaration(tmp_path: Path, *, recipe_count: int = 2, **overrides: Any) -> dict[str, Any]:
+def _protocol_rows(
+    report_path: Path,
+    *,
+    version: str,
+    origin: str,
+    samples: Sequence[float],
+) -> tuple[BenchmarkRun, ...]:
+    """One declared-protocol measurement per protected/broad id in the arm."""
+    return tuple(
+        _row(
+            qualified_id,
+            version,
+            origin,
+            samples,
+            protocol=True,
+            artifact=_slice_artifact(report_path, version=version, qualified_id=qualified_id),
+        )
+        for qualified_id in (PROTECTED_ID, BROAD_ID)
+    )
+
+
+def _write_reports(
+    inputs: Path,
+    *,
+    adapter_digest: str,
+    candidate_digest: str = "",
+    with_ancestor: bool = False,
+    base_digest: str = "",
+) -> dict[str, str]:
+    """The measured arms, written the way a producer writes them.
+
+    The protected rows carry the declared protocol, the per-sample values, a
+    real artifact beside the report and its digest -- the evidence certification
+    verifies. Each arm's ``model_identity`` names the bytes it measured: the
+    parent arm the frozen parent adapter, the ancestor arm the dense base, and
+    the candidate arm whatever digest the caller passes (absent by default,
+    because a candidate arm bound to nothing is exactly the state that must not
+    promote).
+    """
+    parent_path = inputs / "parent-eval-report.json"
+    EvalReport(
+        generation_version=PARENT_VERSION,
+        runs=(
+            _row(TARGET_ID, PARENT_VERSION, MEASURED_PARENT, (0, 0, 0, 0, 1, 0, 0, 0), metric=TARGET_METRIC),
+            *_protocol_rows(
+                parent_path, version=PARENT_VERSION, origin=MEASURED_PARENT,
+                samples=PROTECTED_SAMPLES,
+            ),
+        ),
+        model_identity={"adapter_digest": adapter_digest} if adapter_digest else {},
+    ).save(parent_path)
+
+    candidate_path = inputs / "candidate-eval-report.json"
+    EvalReport(
+        generation_version=CANDIDATE_VERSION,
+        runs=(
+            _row(TARGET_ID, CANDIDATE_VERSION, MEASURED_THIS_GENERATION, (1, 1, 1, 1, 1, 1, 1, 1), metric=TARGET_METRIC),
+            *_protocol_rows(
+                candidate_path, version=CANDIDATE_VERSION,
+                origin=MEASURED_THIS_GENERATION, samples=PROTECTED_SAMPLES,
+            ),
+        ),
+        model_identity={"adapter_digest": candidate_digest} if candidate_digest else {},
+    ).save(candidate_path)
+
+    declared = {"parent_eval_report_path": str(parent_path)}
+    if with_ancestor:
+        ancestor_path = inputs / "baseline-eval-report.json"
+        EvalReport(
+            generation_version="gen0",
+            runs=_protocol_rows(
+                ancestor_path, version="gen0", origin=MEASURED_PARENT,
+                samples=PROTECTED_SAMPLES,
+            ),
+            model_identity={"base_model_digest": base_digest} if base_digest else {},
+        ).save(ancestor_path)
+        declared["baseline_eval_report_path"] = str(ancestor_path)
+    return declared
+
+
+def _declaration(
+    tmp_path: Path,
+    *,
+    recipe_count: int = 2,
+    candidate_role_digest: str = "",
+    with_ancestor: bool = False,
+    with_parent_adapter: bool = True,
+    **overrides: Any,
+) -> dict[str, Any]:
     """The manifest document, with every declared input it names on disk."""
     inputs = tmp_path / "inputs"
     inputs.mkdir(parents=True, exist_ok=True)
@@ -150,6 +279,10 @@ def _declaration(tmp_path: Path, *, recipe_count: int = 2, **overrides: Any) -> 
     parent.mkdir(exist_ok=True)
     (parent / "config.json").write_text("{}", encoding="utf-8")
     digest, _entries = directory_digest(parent)
+    adapter = tmp_path / "parent-adapter"
+    adapter.mkdir(exist_ok=True)
+    (adapter / "adapter_model.safetensors").write_text("gen1-parent-weights", encoding="utf-8")
+    adapter_digest, _adapter_entries = directory_digest(adapter)
 
     profile = CapabilityProfile(
         model_version=PARENT_VERSION,
@@ -213,9 +346,24 @@ def _declaration(tmp_path: Path, *, recipe_count: int = 2, **overrides: Any) -> 
         "data_registry_path": str(inputs / "data-registry.json"),
         "hardware_budget_path": str(inputs / "hardware-budget.json"),
         "parent_profile_path": str(inputs / "parent-profile.json"),
+        # The declared branch-protection policy: what the campaign must show the
+        # candidate held against, and within what tolerance. Certification runs
+        # before any lineage record, so a declaration without it cannot promote.
+        "protection": dict(PROTECTION),
         "notes": "campaign-runner fixture",
     }
-    document.update(_write_reports(inputs))
+    if with_parent_adapter:
+        document["parent_adapter_path"] = str(adapter)
+        document["parent_adapter_digest"] = adapter_digest
+    document.update(
+        _write_reports(
+            inputs,
+            adapter_digest=adapter_digest if with_parent_adapter else "",
+            candidate_digest=candidate_role_digest,
+            with_ancestor=with_ancestor,
+            base_digest=digest,
+        )
+    )
     document.update(overrides)
     return document
 
@@ -225,6 +373,9 @@ def _campaign(
     *,
     runner: Any = None,
     planned: bool = True,
+    candidate_role_digest: str = "",
+    with_ancestor: bool = False,
+    with_parent_adapter: bool = True,
     **overrides: Any,
 ) -> tuple[CampaignManifest, Any, dict[str, Any]]:
     """Write the declaration, plan it with production, declare its recipes.
@@ -233,7 +384,13 @@ def _campaign(
     names recipes the planner never proposed can be exercised.
     """
     runner = runner if runner is not None else _RecordingRunner(gpu_hours=ATTEMPT_WALL_GPU_HOURS)
-    document = _declaration(tmp_path, **overrides)
+    document = _declaration(
+        tmp_path,
+        candidate_role_digest=candidate_role_digest,
+        with_ancestor=with_ancestor,
+        with_parent_adapter=with_parent_adapter,
+        **overrides,
+    )
     inputs = tmp_path / "inputs"
     manifest_path = inputs / "campaign.json"
     manifest_path.write_text(json.dumps(document), encoding="utf-8")
@@ -279,17 +436,232 @@ def _redeclare(document: Mapping[str, Any], **changes: Any) -> CampaignManifest:
 # --------------------------------------------------------------------------
 
 
-def test_a_declared_campaign_reaches_a_recorded_promotion(
+#: A protected slice the candidate holds at the floor: gen1 regressed on it, and a
+#: gen2 that merely matches that gen1 inherits the regression.
+PARENT_SAMPLES: tuple[float, ...] = (0,) * 16
+
+
+def _rewrite_protected(
+    report_path: Path, version: str, samples: Sequence[float]
+) -> None:
+    """Re-measure an arm's protected slices, artifacts and digests included."""
+    report = EvalReport.load(report_path)
+    runs = tuple(
+        _row(
+            run.benchmark_qualified_id,
+            run.generation_version,
+            run.measurement_origin,
+            samples,
+            metric=run.metric,
+            protocol=True,
+            artifact=_slice_artifact(
+                report_path,
+                version=f"{version}-remade",
+                qualified_id=run.benchmark_qualified_id,
+            ),
+        )
+        if run.benchmark_qualified_id in (PROTECTED_ID, BROAD_ID)
+        else run
+        for run in report.runs
+    )
+    EvalReport(
+        generation_version=report.generation_version,
+        runs=runs,
+        hardware=report.hardware,
+        date=report.date,
+        model_identity=report.model_identity,
+    ).save(report_path)
+
+
+class _RecordingEvaluator:
+    """The evaluation seam production supplies: it measures the artifact the run
+    selected and reports what it measured.
+
+    ``bind`` is on by default because that is what a real evaluator does -- it is
+    handed an artifact and a request, and its report names those bytes. With
+    ``bind=False`` it returns a report that names other bytes, which is the state
+    the run must refuse. ``absolute_refs=False`` keeps the rows' relative
+    references, so the run-root convention for a run's own measurements can be
+    exercised.
+    """
+
+    def __init__(
+        self,
+        report_path: Path,
+        *,
+        bind: bool = True,
+        absolute_refs: bool = True,
+        into_run_root: bool = False,
+        cost: ComputeCost | None = None,
+        origin: str | None = None,
+    ) -> None:
+        self.report_path = Path(report_path)
+        self.bind = bind
+        self.absolute_refs = absolute_refs
+        self.into_run_root = into_run_root
+        self.cost = cost
+        self.origin = origin
+        self.requests: list[EvaluationRequest] = []
+
+    def __call__(self, request: EvaluationRequest) -> CandidateEvaluation:
+        self.requests.append(request)
+        if not self.report_path.is_file():
+            raise CandidateEvaluationRefusal(
+                f"the evaluation report {self.report_path} does not exist, so "
+                "there is no measurement of the selected artifact"
+            )
+        if self.into_run_root:
+            # A production instrument writes its measurements into the run it was
+            # asked to measure for, and names them relatively to that root.
+            root = Path(request.output_root)
+            source = EvalReport.load(self.report_path)
+            for run in source.runs:
+                reference = str(run.raw_artifact_ref or "")
+                if not reference or Path(reference).is_absolute():
+                    continue
+                origin = self.report_path.parent / reference
+                destination = root / reference
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(origin.read_bytes())
+        report = EvalReport.load(self.report_path)
+        runs = tuple(
+            replace(
+                run,
+                measurement_origin=self.origin or run.measurement_origin,
+                raw_artifact_ref=(
+                    str((self.report_path.parent / run.raw_artifact_ref).resolve())
+                    if self.absolute_refs
+                    and run.raw_artifact_ref
+                    and not Path(run.raw_artifact_ref).is_absolute()
+                    else run.raw_artifact_ref
+                ),
+            )
+            for run in report.runs
+        )
+        identity = dict(report.model_identity)
+        if self.bind:
+            identity["adapter_digest"] = request.artifact_sha256
+            identity["base_model_digest"] = request.base_model_digest
+        return CandidateEvaluation(
+            report=EvalReport(
+                generation_version=report.generation_version,
+                runs=runs,
+                hardware=report.hardware,
+                date=report.date,
+                model_identity=identity,
+            ),
+            cost=self.cost,
+        )
+
+
+def _candidate_report(tmp_path: Path) -> Path:
+    return tmp_path / "inputs" / "candidate-eval-report.json"
+
+
+def _patch_runner(monkeypatch: pytest.MonkeyPatch, runner: Any) -> None:
+    """Install the executor's process seam (the recording trainer subprocess)."""
+    monkeypatch.setattr(campaign_runner, "default_runner", runner)
+
+
+def _patch_seams(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: Any,
+    *,
+    bind: bool = True,
+    evaluator: Any = None,
+    cost: ComputeCost | None = None,
+    wired: bool = True,
+) -> None:
+    """Install the two seams a run needs: the executor and the evaluator.
+
+    ``wired=False`` leaves the production evaluator unwired, which is how a
+    build without an instrument behaves and what the refusal is asserted against.
+    """
+    _patch_runner(monkeypatch, runner)
+    if not wired:
+        monkeypatch.setattr(campaign_runner, "default_evaluator_factory", None)
+        return
+    monkeypatch.setattr(
+        campaign_runner,
+        "default_evaluator_factory",
+        lambda manifest, *, state_root=None: evaluator
+        if evaluator is not None
+        else _RecordingEvaluator(_candidate_report(Path(manifest.state_root).parent), bind=bind, cost=cost),
+    )
+
+
+def test_an_unbound_candidate_arm_cannot_be_recorded_as_promoted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Plan -> admission -> train -> settle -> adjudicate -> ledger, all driven
-    by the declaration and nothing else."""
-    manifest, runner, _document = _campaign(tmp_path)
-    monkeypatch.setattr(campaign_runner, "default_runner", runner)
+    """The order that matters: the run refuses a candidate arm that names other
+    bytes, before any verdict or lineage record.
+
+    The rule would promote (candidate target 1.0 vs parent 0.125, no protected
+    regression) and the envelope is compliant, but the evaluated report does not
+    name the artifact the run selected -- so the campaign refuses at the seam and
+    the ledger has no generation for it.
+    """
+    manifest, runner, _document = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner, bind=False)
+
+    with pytest.raises(CampaignRunRefusal) as error:
+        run_campaign(manifest)
+
+    assert CANDIDATE_EVALUATION_IDENTITY_UNBOUND in str(error.value)
+    assert "adapter_digest" in str(error.value)
+    ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
+    with pytest.raises(KeyError):
+        ledger.effective_verdict(CANDIDATE_VERSION)
+
+
+def test_a_candidate_that_matches_a_regressed_parent_cannot_promote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The branch-protection case, adjudicated before the ledger is written.
+
+    gen2 merely matches gen1, which itself regressed against the trusted ancestor:
+    the generic parent-vs-candidate rule sees no regression and would promote; the
+    trusted-ancestor gate fails first and no promoted generation is recorded.
+    """
+    manifest, runner, _document = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+
+    # The parent arm joins the candidate at the floor while the ancestor holds
+    # the protected slice: gen1 regressed, gen2 inherited it.
+    inputs = tmp_path / "inputs"
+    _rewrite_protected(inputs / "parent-eval-report.json", PARENT_VERSION, PARENT_SAMPLES)
+    _rewrite_protected(inputs / "candidate-eval-report.json", CANDIDATE_VERSION, PARENT_SAMPLES)
+
+    run = run_campaign(manifest)
+
+    assert run.verdict == "REJECTED"
+    assert "trusted-ancestor protection" in _phase(run, "certification_veto")["detail"]
+    assert _phase(run, "promotion")["verdict"] == "PROMOTED"
+    ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
+    with pytest.raises(KeyError):
+        ledger.effective_verdict(CANDIDATE_VERSION)
+
+
+def test_a_certified_campaign_reaches_a_recorded_promotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Plan -> admission -> train -> evaluate -> settle -> certify -> adjudicate ->
+    ledger, all driven by the declaration and nothing else."""
+    manifest, runner, _document = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
 
     run = run_campaign(manifest)
 
     assert run.verdict == "PROMOTED"
+    # The candidate arm is the run's own measurement of the artifact it selected:
+    # the evaluator was asked about that artifact, and the arm it wrote names it.
+    request = campaign_runner.build_evaluator(manifest, state_root=Path(manifest.state_root))
+    assert request is not None
+    candidate_arm = EvalReport.load(
+        Path(manifest.state_root) / "candidate_evaluation.json"
+    )
+    assert candidate_arm.model_identity["adapter_digest"] == run.selection["artifact_sha256"]
+    assert _phase(run, "certification")["verdict"] == "PASS"
     assert (run.parent_version, run.candidate_version) == (PARENT_VERSION, CANDIDATE_VERSION)
     # Admission is the executor's decision, asked once per declared recipe.
     assert [entry["admitted"] for entry in run.admission] == [True, True]
@@ -353,7 +725,7 @@ def test_a_campaign_ceiling_breach_stops_the_remaining_recipes_and_vetoes_promot
     """The declared stopping rule changes how much compute runs, and a
     campaign that blew its own envelope does not promote."""
     manifest, runner, _document = _campaign(tmp_path, budget=_tight_campaign_budget())
-    monkeypatch.setattr(campaign_runner, "default_runner", runner)
+    _patch_seams(monkeypatch, runner)
 
     run = run_campaign(manifest)
 
@@ -382,7 +754,7 @@ def test_without_the_overrun_rule_every_recipe_runs_and_the_resource_gate_still_
         budget=_tight_campaign_budget(),
         stopping_rules=[STOPPING_RULE_ON_ADMISSION_REFUSAL],
     )
-    monkeypatch.setattr(campaign_runner, "default_runner", runner)
+    _patch_seams(monkeypatch, runner)
 
     run = run_campaign(manifest)
 
@@ -435,6 +807,41 @@ def test_every_recognized_stopping_rule_names_what_enforces_it():
     # A rule for a different behavior does not trigger either branch.
     assert not stops_on_campaign_overrun(("stop on admission refusal",))
     assert not stops_on_admission_refusal(("stop on campaign overrun",))
+
+
+def test_the_committed_gen2_declaration_is_not_runnable_and_says_so():
+    """The checked-in gen2 declaration is pinned to its real readiness.
+
+    Six inputs a run reads from disk, none of them present as an artifact: the
+    historical Gen-1 driver composed four of them in process, the parent profile
+    was never measured from gen1, and the contamination manifest is written by
+    the run itself. Both entry points refuse before compute and name *every*
+    missing input at once, and the declaration's own notes carry the same
+    statement -- documentation is not allowed to run ahead of what exists.
+    """
+    manifest = CampaignManifest.from_file(ROOT / "docs" / "gen2" / "gen2_campaign.json")
+
+    assert undeclared_inputs(manifest, phase="run") == (
+        "project_template_path",
+        "training_material_path",
+        "data_registry_path",
+        "hardware_budget_path",
+        "parent_profile_path",
+    )
+    assert undeclared_inputs(manifest, phase="plan") == (
+        "parent_profile_path",
+        "hardware_budget_path",
+    )
+    with pytest.raises(CampaignRunRefusal) as error:
+        plan_campaign(manifest)
+    for field_name in ("parent_profile_path", "hardware_budget_path"):
+        assert field_name in str(error.value)
+    with pytest.raises(CampaignRunRefusal) as error:
+        run_campaign(manifest)
+    for field_name in undeclared_inputs(manifest, phase="run"):
+        assert field_name in str(error.value)
+    assert "GEN2_PREREG_AMENDMENT5" in manifest.notes
+    assert "run output" in manifest.notes
 
 
 def test_the_committed_gen2_preregistration_manifest_still_loads():
@@ -497,26 +904,32 @@ def _bind_row_artifact(
         else run
         for run in report.runs
     )
-    EvalReport(generation_version=report.generation_version, runs=runs).save(report_path)
+    EvalReport(
+        generation_version=report.generation_version,
+        runs=runs,
+        hardware=report.hardware,
+        date=report.date,
+        model_identity=report.model_identity,
+    ).save(report_path)
 
 
 def test_the_run_carries_the_measurements_its_rows_name(tmp_path: Path, monkeypatch):
-    """A row bound to an artifact gets those bytes in the run root.
+    """A declared arm's row bound to an artifact gets those bytes in the run root.
 
     The judge recomputes the digest a row declares over the file it names, so the
     evidence the run writes has to include the measurement, not only the report
     that points at it.
     """
-    manifest, runner, _document = _campaign(tmp_path)
-    monkeypatch.setattr(campaign_runner, "default_runner", runner)
+    manifest, runner, _document = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
     inputs = tmp_path / "inputs"
-    reference = "raw/candidate-target.json"
+    reference = "raw/parent-target.json"
     payload = '{"target": "measured"}'
     artifact = inputs / reference
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_text(payload, encoding="utf-8")
     _bind_row_artifact(
-        inputs / "candidate-eval-report.json", TARGET_ID, reference=reference, payload=payload
+        inputs / "parent-eval-report.json", TARGET_ID, reference=reference, payload=payload
     )
 
     run = run_campaign(manifest)
@@ -533,10 +946,10 @@ def test_the_run_carries_the_measurements_its_rows_name(tmp_path: Path, monkeypa
 def test_a_row_that_names_a_missing_artifact_refuses_the_run(tmp_path: Path, monkeypatch):
     """Evidence is not assembled around a measurement nobody can read."""
     manifest, runner, _document = _campaign(tmp_path)
-    monkeypatch.setattr(campaign_runner, "default_runner", runner)
+    _patch_seams(monkeypatch, runner)
     inputs = tmp_path / "inputs"
     _bind_row_artifact(
-        inputs / "candidate-eval-report.json",
+        inputs / "parent-eval-report.json",
         TARGET_ID,
         reference="raw/never-written.json",
         payload="unused",
@@ -549,37 +962,65 @@ def test_a_row_that_names_a_missing_artifact_refuses_the_run(tmp_path: Path, mon
     assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
 
 
+def test_a_candidate_row_the_run_never_wrote_refuses(tmp_path: Path, monkeypatch):
+    """The candidate arm's relative refs resolve against the run root.
+
+    An evaluation that names a relative measurement the run root does not hold
+    cannot be verified, so the run refuses instead of writing an arm pointing at
+    bytes nobody can read.
+    """
+    manifest, runner, _document = _campaign(tmp_path)
+    _patch_seams(
+        monkeypatch,
+        runner,
+        evaluator=_RecordingEvaluator(
+            _candidate_report(tmp_path), absolute_refs=False
+        ),
+    )
+
+    with pytest.raises(CampaignRunRefusal) as error:
+        run_campaign(manifest)
+
+    assert "candidate arm" in str(error.value)
+    assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
+
+
 def test_two_arms_naming_one_artifact_differently_refuse(tmp_path: Path, monkeypatch):
     """One run root cannot carry two different measurements under one name."""
     manifest, runner, _document = _campaign(tmp_path)
-    monkeypatch.setattr(campaign_runner, "default_runner", runner)
     inputs = tmp_path / "inputs"
     reference = "raw/shared.json"
-    # Two arms, in different directories, each naming the same relative path: the
-    # refs are relative to the report that declares them, so these are two
+    # Two arms naming the same relative path: the declared arm's ref is relative
+    # to its own report, the candidate arm's to the run root, so these are two
     # different measurements that would land on one run-root path.
-    (inputs / "parent").mkdir(parents=True, exist_ok=True)
-    (inputs / "parent-eval-report.json").replace(
-        inputs / "parent" / "parent-eval-report.json"
+    parent_artifact = inputs / reference
+    parent_artifact.parent.mkdir(parents=True, exist_ok=True)
+    parent_artifact.write_text('{"arm": "parent"}', encoding="utf-8")
+    _bind_row_artifact(
+        inputs / "parent-eval-report.json",
+        PROTECTED_ID,
+        reference=reference,
+        payload='{"arm": "parent"}',
     )
-    for report_path, qualified_id, payload in (
-        (inputs / "candidate-eval-report.json", TARGET_ID, '{"arm": "candidate"}'),
-        (inputs / "parent" / "parent-eval-report.json", PROTECTED_ID, '{"arm": "parent"}'),
-    ):
-        artifact = report_path.parent / reference
-        artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact.write_text(payload, encoding="utf-8")
-        _bind_row_artifact(
-            report_path, qualified_id, reference=reference, payload=payload
-        )
-    document = json.loads((inputs / "campaign.json").read_text(encoding="utf-8"))
-    document["parent_eval_report_path"] = str(
-        inputs / "parent" / "parent-eval-report.json"
+    run_root_artifact = Path(manifest.state_root) / reference
+    run_root_artifact.parent.mkdir(parents=True, exist_ok=True)
+    run_root_artifact.write_text('{"arm": "candidate"}', encoding="utf-8")
+    _bind_row_artifact(
+        _candidate_report(tmp_path),
+        TARGET_ID,
+        reference=reference,
+        payload='{"arm": "candidate"}',
     )
-    (inputs / "campaign.json").write_text(json.dumps(document), encoding="utf-8")
+    _patch_seams(
+        monkeypatch,
+        runner,
+        evaluator=_RecordingEvaluator(
+            _candidate_report(tmp_path), absolute_refs=False
+        ),
+    )
 
     with pytest.raises(CampaignRunRefusal) as error:
-        run_campaign(CampaignManifest.from_file(inputs / "campaign.json"))
+        run_campaign(manifest)
 
     assert "different content" in str(error.value)
 
@@ -665,12 +1106,49 @@ def test_the_plan_prints_the_ids_a_run_will_honor_without_compute(tmp_path: Path
 def test_a_declared_calibration_set_is_not_promoted_without_its_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """A declared set the evaluator could not measure stays unmeasured, and an
+    unmeasured hard gate is not a pass: the run reaches no promotion."""
     manifest, runner, _document = _campaign(tmp_path, calibration_benchmarks=[CALIBRATION_ID])
-    monkeypatch.setattr(campaign_runner, "default_runner", runner)
+    _patch_seams(monkeypatch, runner)
+    # The evaluator was asked for the calibration set and could not measure it.
+    # That is an honest non-measurement, not a missing row.
+    report = EvalReport.load(_candidate_report(tmp_path))
+    EvalReport(
+        generation_version=report.generation_version,
+        runs=(
+            *report.runs,
+            BenchmarkRun(
+                benchmark_qualified_id=CALIBRATION_ID,
+                adapter="none",
+                generation_version=CANDIDATE_VERSION,
+                score=None,
+                support="UNSUPPORTED_HARNESS",
+                measurement_origin="UNMEASURED",
+                notes="the evaluator could not measure this declared set",
+            ),
+        ),
+        hardware=report.hardware,
+        model_identity=report.model_identity,
+    ).save(_candidate_report(tmp_path))
 
     run = run_campaign(manifest)
 
     assert run.verdict == "INCONCLUSIVE"
+    assert _phase(run, "candidate_evaluation")["verdict"] == "measured"
+
+
+def test_a_declared_set_the_evaluation_never_mentions_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An unevaluated declaration is a missing measurement, not an omission."""
+    manifest, runner, _document = _campaign(tmp_path, calibration_benchmarks=[CALIBRATION_ID])
+    _patch_seams(monkeypatch, runner)
+
+    with pytest.raises(CampaignRunRefusal) as error:
+        run_campaign(manifest)
+
+    assert "CANDIDATE_EVALUATION_INCOMPLETE" in str(error.value)
+    assert CALIBRATION_ID in str(error.value)
 
 
 def test_every_declared_field_is_enforced_or_the_run_refuses():
@@ -692,6 +1170,163 @@ class _DriftedManifest(CampaignManifest):
 
 
 # --------------------------------------------------------------------------
+# the candidate arm is a run output, never a declared input
+# --------------------------------------------------------------------------
+
+
+def test_the_retired_candidate_report_input_is_rejected_with_its_reason(tmp_path: Path):
+    """A campaign cannot hand the run a pre-existing candidate report.
+
+    The declaration is refused at load with the reason, rather than being read as
+    a typo: the candidate arm is measured by the run, so a report prepared outside
+    it is not the candidate side of promotion.
+    """
+    _manifest, _runner, document = _campaign(tmp_path)
+    document["candidate_eval_report_path"] = str(_candidate_report(tmp_path))
+
+    with pytest.raises(CampaignManifestError) as error:
+        CampaignManifest.from_mapping(document)
+
+    assert "candidate_eval_report_path" in str(error.value)
+    assert "run output" in str(error.value)
+
+
+def test_a_run_without_a_candidate_evaluator_refuses_and_records_no_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """No instrument means no candidate arm, and no candidate arm means no verdict.
+
+    The refusal names what is missing instead of falling through to a promotion
+    computed on evidence the run never produced.
+    """
+    manifest, runner, _document = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner, wired=False)
+
+    with pytest.raises(CampaignRunRefusal) as error:
+        run_campaign(manifest)
+
+    assert CANDIDATE_EVALUATION_NOT_PRODUCED in str(error.value)
+    assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
+    ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
+    assert CANDIDATE_VERSION not in ledger.versions()
+
+
+def test_parent_rows_returned_as_the_candidate_arm_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A provenance substitution is refused by name, never rebound."""
+    manifest, runner, _document = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(
+        monkeypatch,
+        runner,
+        evaluator=_RecordingEvaluator(_candidate_report(tmp_path), origin=MEASURED_PARENT),
+    )
+
+    with pytest.raises(CampaignRunRefusal) as error:
+        run_campaign(manifest)
+
+    assert CANDIDATE_EVALUATION_NOT_CANDIDATE_MEASURED in str(error.value)
+    assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
+    ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
+    assert CANDIDATE_VERSION not in ledger.versions()
+
+
+def test_a_selected_candidate_with_no_artifact_refuses_with_its_accounting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A cycle that trained nothing evaluable records a refusal, not a promotion.
+
+    The compute was really spent, so the accounting is written and carried by the
+    refusal record: the refusal is evidence, not a silent no-op.
+    """
+    manifest, runner, _document = _campaign(tmp_path)
+    _patch_seams(monkeypatch, runner)
+
+    class _FailingExecutor:
+        firewall = campaign_runner.ContaminationFirewall()
+
+        def admit(self, recipe: Any) -> None:
+            return None
+
+        def __call__(self, recipe: Any, items: Any) -> Mapping[str, Any]:
+            return {
+                "recipe_id": recipe.recipe_id,
+                "attempt": "attempt-01",
+                "status": "FAILED",
+                "artifact_ref": None,
+                "measured_gpu_hours": 0.01,
+            }
+
+    run = run_campaign(manifest, train_fn=_FailingExecutor())
+
+    assert run.verdict == "REFUSED"
+    assert CANDIDATE_EVALUATION_NOT_PRODUCED in _phase(run, "candidate_evaluation")["detail"]
+    accounting = Path(run.cost["accounting_path"])
+    assert accounting.is_file()
+    assert run.cost["wall_gpu_hours"] == pytest.approx(2 * 0.01)
+    assert not (Path(manifest.state_root) / "candidate_evaluation.json").exists()
+
+
+def test_the_evaluations_measured_cost_is_charged_and_can_veto_promotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Measuring the candidate is compute, and it counts.
+
+    Two attempts at 0.05 wall fit the declared 0.12 campaign ceiling; the 0.05
+    the evaluation cost does not. The same run promotes when the evaluation
+    reports no cost, which is what makes this a statement about accounting rather
+    than about the rule.
+    """
+    budget = {
+        "device_gpu_hours_ceiling_per_recipe": DEVICE_PER_RECIPE,
+        "wall_gpu_hours_ceiling_per_recipe": WALL_PER_RECIPE,
+        "device_gpu_hours_ceiling_campaign": 0.60,
+        "wall_gpu_hours_ceiling_campaign": 0.12,
+    }
+    manifest, runner, _document = _campaign(tmp_path, with_ancestor=True, budget=budget)
+
+    _patch_runner(monkeypatch, runner)
+    monkeypatch.setattr(
+        campaign_runner,
+        "default_evaluator_factory",
+        lambda manifest, *, state_root=None: _RecordingEvaluator(
+            _candidate_report(Path(manifest.state_root).parent), cost=None
+        ),
+    )
+    free = run_campaign(manifest)
+    assert free.verdict == "PROMOTED"
+    assert free.cost["wall_gpu_hours"] == pytest.approx(2 * ATTEMPT_WALL_GPU_HOURS)
+
+    manifest2, runner2, _document2 = _campaign(tmp_path / "charged", with_ancestor=True, budget=budget)
+    _patch_runner(monkeypatch, runner2)
+    monkeypatch.setattr(
+        campaign_runner,
+        "default_evaluator_factory",
+        lambda manifest, *, state_root=None: _RecordingEvaluator(
+            _candidate_report(Path(manifest.state_root).parent),
+            cost=ComputeCost.from_wall_only(0.05, source="candidate evaluation"),
+        ),
+    )
+    charged = run_campaign(manifest2)
+
+    assert charged.verdict == "REJECTED"
+    assert charged.settlement["budget_compliant"] is False
+    assert charged.cost["wall_gpu_hours"] == pytest.approx(0.15)
+    assert any(
+        "WALL" in reason for reason in charged.settlement["budget_failure_reasons"]
+    )
+    ledger = GenerationLedger(Path(manifest2.state_root) / "ledger")
+    assert CANDIDATE_VERSION not in ledger.versions()
+    # The evaluation leg is in the durable accounting artifact, not only in the
+    # campaign's own summary of itself.
+    accounting = json.loads(
+        Path(charged.cost["accounting_path"]).read_text(encoding="utf-8")
+    )
+    legs = json.dumps(accounting)
+    assert "candidate evaluation" in legs
+
+
+# --------------------------------------------------------------------------
 # the committed example, planned and run through the real CLI
 # --------------------------------------------------------------------------
 
@@ -706,8 +1341,11 @@ def test_the_example_manifest_is_planned_and_run_through_the_cli(
     ceilings, how many recipes -- is the committed example's, and the recipe
     ids it runs are the ones the CLI's own ``plan`` printed.
     """
-    manifest, runner, document = _campaign(tmp_path)
-    monkeypatch.setattr(campaign_runner, "default_runner", runner)
+    manifest, runner, document = _campaign(tmp_path, with_ancestor=True)
+    # The run's two seams: the trainer subprocess and the candidate evaluator.
+    # The evaluator measures the artifact the run selected, which is what makes
+    # the candidate arm a run output rather than a declared input.
+    _patch_seams(monkeypatch, runner)
 
     example = json.loads(EXAMPLE_MANIFEST.read_text(encoding="utf-8"))
     for field_name, value in document.items():
@@ -732,11 +1370,16 @@ def test_the_example_manifest_is_planned_and_run_through_the_cli(
 
     example["recipes"] = list(planned["recipes"])
     example_path.write_text(json.dumps(example), encoding="utf-8")
+    # A fresh executor and evaluator for the run below: the command counts
+    # asserted here describe exactly that run.
+    runner = _RecordingRunner(gpu_hours=ATTEMPT_WALL_GPU_HOURS)
+    _patch_seams(monkeypatch, runner)
     monkeypatch.setattr(sys, "argv", ["chowder", "growth", "campaign", "run", str(example_path)])
     assert chowder_main() == 0
     outcome = json.loads(capsys.readouterr().out)
 
     assert outcome["verdict"] == "PROMOTED"
+    assert outcome["certification"]["status"] == "PASS"
     assert outcome["cycle_id"] == example["cycle_id"]
     assert outcome["candidate_version"] == CANDIDATE_VERSION
     assert Path(outcome["record_path"]).exists()

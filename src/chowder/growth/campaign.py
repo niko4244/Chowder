@@ -43,6 +43,8 @@ from .compute_cost import (
 #: The promotion rule this package implements. A campaign that declares any
 #: other version is refused: the manifest is a preregistration, so it must not
 #: name a policy the code cannot execute.
+from .certification import ProtocolSpec
+
 PROMOTION_POLICY_VERSION = "promotion-policy-v2-provenance-settlement"
 
 #: The stopping rules this runner recognizes, each mapped to the behavior that
@@ -116,6 +118,20 @@ def _require_sha256(value: Any, field: str, source: str) -> None:
         )
 
 
+#: Fields that used to be declared inputs and are deliberately not anymore.
+#: A retired key refuses with its reason instead of reading as a typo: the
+#: candidate arm is the measurement the run produces, so declaring a
+#: pre-existing candidate report would be handing the run evidence about an
+#: artifact it did not make.
+RETIRED_FIELDS: Mapping[str, str] = {
+    "candidate_eval_report_path": (
+        "the candidate arm is a run output: the campaign evaluates the artifact "
+        "it selected, and a report prepared outside the run cannot be the "
+        "candidate side of promotion"
+    ),
+}
+
+
 #: Benchmarks named in promotion sets must be pinned (``name@version``).
 def _require_pinned(qualified_id: str, where: str) -> None:
     if "@" not in str(qualified_id) or str(qualified_id).split("@")[1].strip().lower() in {
@@ -170,6 +186,85 @@ class CampaignBudget:
 
 
 @dataclass(frozen=True)
+class ProtectionDeclaration:
+    """The branch-protection policy a campaign declares, and nothing assumed.
+
+    Certification runs **before** any lineage record is written, so these two
+    values -- not a production default -- decide whether a measured generation
+    may be recorded as promoted: the generation the candidate must hold against
+    as well as its immediate parent, and the tolerance it must hold within.
+    An undeclared policy is refused rather than defaulted: a campaign that
+    cannot say what protects it cannot certify anything.
+    """
+
+    trusted_ancestor_version: str = ""
+    slice_regression_max: float | None = None
+    #: The declared mini-slice protocol. Certification matches every protected
+    #: row against these declared values, so the campaign -- not a production
+    #: default -- says what counts as its measurement.
+    protocol: ProtocolSpec | None = None
+
+    _PROTOCOL_KEYS = ("n_samples", "seed", "shuffle", "decoding", "prompt_policy")
+
+    @classmethod
+    def from_mapping(
+        cls, document: Mapping[str, Any], *, source: str = "<memory>"
+    ) -> "ProtectionDeclaration":
+        if not isinstance(document, Mapping):
+            raise CampaignManifestError(f"{source}: protection must be an object")
+        allowed = {"trusted_ancestor_version", "slice_regression_max", *cls._PROTOCOL_KEYS}
+        unknown = sorted(set(document) - allowed)
+        if unknown:
+            raise CampaignManifestError(
+                f"{source}: unknown protection fields {unknown}; an unrecognised "
+                "protection key would silently change what protects the branch"
+            )
+        missing = sorted(allowed - set(document))
+        if missing:
+            raise CampaignManifestError(f"{source}: protection is missing fields {missing}")
+        ancestor = document["trusted_ancestor_version"]
+        if not isinstance(ancestor, str) or not ancestor:
+            raise CampaignManifestError(
+                f"{source}: protection.trusted_ancestor_version must name the "
+                "generation the candidate is protected against"
+            )
+        tolerance = document["slice_regression_max"]
+        if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)):
+            raise CampaignManifestError(
+                f"{source}: protection.slice_regression_max must be a finite number"
+            )
+        if not math.isfinite(float(tolerance)) or float(tolerance) < 0:
+            raise CampaignManifestError(
+                f"{source}: protection.slice_regression_max must be finite and "
+                "non-negative"
+            )
+        try:
+            protocol = ProtocolSpec.from_mapping(document, source=source)
+        except ValueError as error:
+            raise CampaignManifestError(str(error)) from error
+        return cls(
+            trusted_ancestor_version=ancestor,
+            slice_regression_max=float(tolerance),
+            protocol=protocol,
+        )
+
+    def require_protocol(self, *, source: str = "<campaign>") -> ProtocolSpec:
+        if self.protocol is None:
+            raise CampaignManifestError(
+                f"{source}: the campaign declares no protection protocol, so its "
+                "protected slices cannot be certified"
+            )
+        return self.protocol
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "trusted_ancestor_version": self.trusted_ancestor_version,
+            "slice_regression_max": self.slice_regression_max,
+            **(self.protocol.to_dict() if self.protocol is not None else {}),
+        }
+
+
+@dataclass(frozen=True)
 class CampaignManifest:
     """One preregistered campaign, and nothing this runner may invent.
 
@@ -215,11 +310,13 @@ class CampaignManifest:
     hardware_budget_path: str = ""
     parent_profile_path: str = ""
     parent_eval_report_path: str = ""
-    candidate_eval_report_path: str = ""
     #: The trusted-ancestor (gen0) side of branch protection. Separate from
     #: ``parent_eval_report_path`` because an unresolved parent must not become
     #: the protection baseline: the two arms answer different questions.
     baseline_eval_report_path: str = ""
+    #: The declared branch-protection policy. Empty when a manifest predates it;
+    #: certification then refuses rather than substituting a default tolerance.
+    protection: ProtectionDeclaration = field(default_factory=ProtectionDeclaration)
     notes: str = ""
 
     @classmethod
@@ -241,8 +338,14 @@ class CampaignManifest:
             "contamination_manifest_path", "notes", "candidate_version",
             "project_template_path", "training_material_path", "data_registry_path",
             "hardware_budget_path", "parent_profile_path", "parent_eval_report_path",
-            "candidate_eval_report_path", "baseline_eval_report_path",
+            "baseline_eval_report_path", "protection",
         }
+        retired = sorted(set(document) & set(RETIRED_FIELDS))
+        if retired:
+            raise CampaignManifestError(
+                f"{source}: {retired} is no longer an input a campaign may "
+                f"declare; {RETIRED_FIELDS[retired[0]]}"
+            )
         unknown = sorted(set(document) - allowed)
         if unknown:
             raise CampaignManifestError(
@@ -362,8 +465,14 @@ class CampaignManifest:
             hardware_budget_path=str(document.get("hardware_budget_path", "")),
             parent_profile_path=str(document.get("parent_profile_path", "")),
             parent_eval_report_path=str(document.get("parent_eval_report_path", "")),
-            candidate_eval_report_path=str(document.get("candidate_eval_report_path", "")),
             baseline_eval_report_path=str(document.get("baseline_eval_report_path", "")),
+            # Absent (a manifest predating it) is an *undeclared* policy, which
+            # certification refuses; present-but-incomplete is refused here.
+            protection=(
+                ProtectionDeclaration.from_mapping(document["protection"], source=source)
+                if "protection" in document
+                else ProtectionDeclaration()
+            ),
             notes=str(document.get("notes", "")),
         )
 

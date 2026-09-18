@@ -86,6 +86,56 @@ them cannot certify. The runner carries the named measurements into the run root
 two arms claiming one path with different content refuse the run before any
 judged artifact is written). No threshold, set, budget or stopping rule moved.
 
+`GEN2_PREREG_AMENDMENT4_2026-09-18.md` (also before any compute) fixes the order
+that mattered most: **certification now runs before the lineage record**. The
+runner applies the production certification mechanism
+(`chowder.growth.certification`) to the evidence set it just wrote and hands the
+vetoed decision to `finalize`, so a certification `FAIL` is `REJECTED`, an
+undecidable one is `INCONCLUSIVE`, and no ledger row claims a generation the
+certification refused — previously the generic parent-vs-candidate rule could
+record a `PROMOTED` gen2 that merely matched an already-regressed gen1, and the
+frozen judge would only have said so afterwards. Three more bindings came with
+it: the campaign **declares** its protection policy (`protection`:
+trusted ancestor, tolerance and mini-slice protocol; a campaign that declares
+none cannot promote, and judge gate **T20** fails if a declaration and the frozen
+constants disagree); every arm must **name the bytes it measured**
+(`model_identity`: the candidate the digest of the selected artifact, the parent
+the declared parent adapter, the ancestor the declared dense base — judge gate
+**T19**, and the same code on both paths); and a row's **generation** is part of
+its identity, so a protocol-correct gen1 row can no longer stand in for the gen0
+arm. Judge gate T14 now compares the accounting's recipes against the declared
+recipe set exactly, rather than counting that two exist. The judge delegates the
+mechanism (slice verification, branch protection) to production and keeps only
+its frozen policy values; T11, T16, T17, T18, T19 and T20 are decided by that
+shared code. What remains for a *real* gen2 run is measurement rather than policy:
+a candidate evaluation produced by the run for the artifact it selected, and the
+declared input documents the gen2 manifest still names as paths rather than
+provides.
+
+`GEN2_PREREG_AMENDMENT5_2026-09-18.md` closes the first of those two and states
+the second precisely. **The candidate arm is now a run output**: the manifest key
+`candidate_eval_report_path` is *retired* (declaring it refuses at load with its
+reason), the runner asks an evaluation seam to measure the artifact it selected
+after selection, and it refuses with `CANDIDATE_EVALUATION_NOT_PRODUCED` when no
+seam is wired rather than adjudicating on a report from somewhere else. The
+returned report is bound before anything reads it: report-level and row-level
+generation, `adapter_digest` equal to the selected artifact's digest,
+`base_model_digest` equal to the declared base, every scored row
+`MEASURED_THIS_GENERATION` (a `MEASURED_PARENT` or `CARRIED_REFERENCE` row is
+refused by name; an honestly `UNMEASURED` row is kept as unmeasured), coverage of
+every declared benchmark, and no benchmark measured twice. Whatever the
+evaluation reports as its measured cost is charged to the cycle ledger before
+settlement. Two things are deliberately **not** done here: this build wires no
+production evaluator (so a real gen2 run still refuses), and the checked-in
+`docs/gen2/gen2_campaign.json` still provides none of the six inputs a run reads
+from disk — the Gen-1 driver composed four of them in process, gen1 has no
+measured parent profile, and the Gen-0 arm is declared but unmeasured. Both entry
+points refuse before compute, naming **every** missing input at once
+(`require_declared_inputs`), and the declaration's own `notes` say so. Producing
+those documents from production code, plus the instrument that measures the
+selected adapter under the declared protocol, is the remaining pre-compute
+build; nothing is invented to make the declaration look runnable.
+
 Earlier state for the record (2026-09-17): the first real Model N → N+1
 cycle executed and was recorded PROMOTED at the time
 (`docs/quals/GEN1_RESULT_2026-09-17.md`; ledger record `gen1` beside

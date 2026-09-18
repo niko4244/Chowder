@@ -25,6 +25,16 @@
     "stop on campaign overrun"
   ],
   "promotion_policy_version": "promotion-policy-v2-provenance-settlement",
+  "protection": {
+    "trusted_ancestor_version": "gen0",
+    "slice_regression_max": 0.0625,
+    "n_samples": 16,
+    "seed": 1234,
+    "shuffle": false,
+    "decoding": {"temperature": 0.0, "do_sample": false, "max_new_tokens": 512},
+    "prompt_policy": "chat_template"
+  },
+  "baseline_eval_report_path": "docs/gen2/inputs/gen0-baseline-evaluation.json",
   "contamination_manifest_path": "docs/gen2/inputs/contamination.json",
   "project_template_path": "docs/gen2/inputs/project-template.json",
   "training_material_path": "docs/gen2/inputs/training-material.json",
@@ -32,6 +42,5 @@
   "hardware_budget_path": "docs/gen2/inputs/hardware-budget.json",
   "parent_profile_path": "docs/gen2/inputs/parent-profile.json",
   "parent_eval_report_path": "docs/gen2/inputs/parent-eval-report.json",
-  "candidate_eval_report_path": "docs/gen2/inputs/candidate-eval-report.json",
-  "notes": "Example declaration for `chowder growth campaign run`. Identity is two objects: `base_model_path`/`base_model_digest` name the dense base, and `parent_adapter_path`/`parent_adapter_digest` name the parent generation's adapter over it (omit both when the parent *is* the base). Each digest is verified against its own tree before compute; a base digest is never accepted as an adapter digest. Every path above is relative to the repository root and must exist before a run; the runner refuses a declared-but-missing input by name. `recipes` must be exactly the ids `chowder growth campaign plan <this file>` prints -- the planner owns recipe identity, and a run refuses an id the planner did not propose. The two ids here are placeholders and deliberately do not match, so `plan` reports \"recipes_declared\": false. `device_time_measured: false` is the honest setting for the current trainer, which charges wall time: the device ceilings then bound the *projected plan* (per recipe and for the campaign as a whole) and the run records that they were not settled against measured device time."
+  "notes": "Example declaration for `chowder growth campaign run`. Identity is two objects: `base_model_path`/`base_model_digest` name the dense base, and `parent_adapter_path`/`parent_adapter_digest` name the parent generation's adapter over it (omit both when the parent *is* the base). Each digest is verified against its own tree before compute; a base digest is never accepted as an adapter digest. Every path above is relative to the repository root and must exist before a run; the runner refuses a declared-but-missing input by name. `recipes` must be exactly the ids `chowder growth campaign plan <this file>` prints -- the planner owns recipe identity, and a run refuses an id the planner did not propose. The two ids here are placeholders and deliberately do not match, so `plan` reports \"recipes_declared\": false. `device_time_measured: false` is the honest setting for the current trainer, which charges wall time: the device ceilings then bound the *projected plan* (per recipe and for the campaign as a whole) and the run records that they were not settled against measured device time. `protection` declares the branch-protection policy certification applies *before* any lineage record: the trusted ancestor (`gen0`), the regression tolerance, and the mini-slice protocol a protected row must match. `baseline_eval_report_path` is the arm those slices are compared against. The candidate arm is deliberately absent from this list: it is a run *output*, produced by evaluating the adapter the run trained and selected (the run requires an evaluation seam and refuses without one), and a report prepared outside the run is no longer an accepted input. A campaign that declares no protection policy, or whose candidate evaluation does not name the artifact the run selected, refuses or reaches INCONCLUSIVE and records no promoted generation."
 }

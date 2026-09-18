@@ -75,6 +75,28 @@ coverage, recomputes the candidate artifact digest, applies the frozen
 paired/strict target rule, and requires no regression against the trusted
 ancestor gen0 as well as the immediate parent.
 
+**Gen-2 pre-compute blockers (explicitly not done; nothing here is guessed).**
+Certification now runs before the lineage record, the candidate arm is a run
+output rather than a declared input, and every arm is digest- and
+generation-bound (`docs/quals/GEN2_PREREG_AMENDMENT5_2026-09-18.md`). Two builds
+remain before a real gen2 cycle can run, and both are honestly labelled rather
+than simulated:
+
+1. **A production candidate evaluator.** `campaign_runner.build_evaluator`
+   returns `None` in this build, so a run refuses with
+   `CANDIDATE_EVALUATION_NOT_PRODUCED`. The missing piece is the instrument that
+   measures the selected adapter under this campaign's declared protocol and
+   writes per-sample evidence (the production transformers-text worker already
+   records `predictions-<suite>.jsonl` per row, so the measurement exists — the
+   binding into the campaign does not).
+2. **The gen2 declaration's run inputs.** `docs/gen2/gen2_campaign.json`
+   declares identity, benchmark sets, budgets, protection and the Gen-0 arm, but
+   four inputs have no artifact anywhere (`project_template_path`,
+   `training_material_path`, `data_registry_path`, `hardware_budget_path` — the
+   Gen-1 driver composed them in process), `parent_profile_path` has no gen1
+   measurement, and the Gen-0 baseline arm is declared but not yet measured.
+   `plan` and `run` therefore refuse, naming every missing input at once.
+
 **Research kernel**
 experiment DAG · hypothesis schema · compute budget enforcement · hard
 regression gate · candidate tournament (`tournament.py`, `ranking.py`) ·
