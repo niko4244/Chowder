@@ -216,6 +216,10 @@ class CampaignManifest:
     parent_profile_path: str = ""
     parent_eval_report_path: str = ""
     candidate_eval_report_path: str = ""
+    #: The trusted-ancestor (gen0) side of branch protection. Separate from
+    #: ``parent_eval_report_path`` because an unresolved parent must not become
+    #: the protection baseline: the two arms answer different questions.
+    baseline_eval_report_path: str = ""
     notes: str = ""
 
     @classmethod
@@ -237,7 +241,7 @@ class CampaignManifest:
             "contamination_manifest_path", "notes", "candidate_version",
             "project_template_path", "training_material_path", "data_registry_path",
             "hardware_budget_path", "parent_profile_path", "parent_eval_report_path",
-            "candidate_eval_report_path",
+            "candidate_eval_report_path", "baseline_eval_report_path",
         }
         unknown = sorted(set(document) - allowed)
         if unknown:
@@ -359,6 +363,7 @@ class CampaignManifest:
             parent_profile_path=str(document.get("parent_profile_path", "")),
             parent_eval_report_path=str(document.get("parent_eval_report_path", "")),
             candidate_eval_report_path=str(document.get("candidate_eval_report_path", "")),
+            baseline_eval_report_path=str(document.get("baseline_eval_report_path", "")),
             notes=str(document.get("notes", "")),
         )
 

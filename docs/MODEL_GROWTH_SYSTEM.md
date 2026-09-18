@@ -154,6 +154,20 @@ REJECTED. The pass that hardened this boundary before any Gen-2 compute,
 with its adversarial re-attacks and its verification counts, is
 `docs/growth/GEN2_CERTIFICATION_HARDENING_REPORT_2026-09-18.md`.
 
+The run root *is* the judge's input. `campaign_runner` materialises the judged
+evidence set from the run's own measurements: the three provenance-bound arms
+(`candidate_eval_report_path`, `parent_eval_report_path`, and the new
+`baseline_eval_report_path` naming the gen0 arm branch protection is judged
+against), the winner's identity in `chosen_candidate.json`, and the
+contamination manifest the firewall bound. `chowder growth campaign run`
+followed by `python docs/gen2/judge_gen2.py <state_root>` therefore reads one
+directory. Provenance is copied verbatim -- a row's `measurement_origin` is the
+evaluator's declaration, never the runner's election -- an input the manifest
+does not declare produces no file rather than a placeholder, and
+`tests/test_growth_certification_coupling.py` proves both directions: the
+frozen judge certifies the root a CLI run just wrote, and absent or tampered
+evidence refuses.
+
 ## Campaign manifests: preregistration as configuration
 
 A campaign manifest (`campaign.CampaignManifest`) is the preregistration a

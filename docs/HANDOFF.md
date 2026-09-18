@@ -53,6 +53,15 @@ are declared admission-only (`device_time_measured: false`) because nothing
 in the trainer reports device time; the wall ceilings remain post-run
 settlement gates. Gen2 has not been trained.
 
+The run root is also the judge's input: the runner writes the judged evidence
+set -- the three provenance-bound arms (the gen0 ancestor arm comes from the
+declared `baseline_eval_report_path`), the winner's `chosen_candidate.json` and
+the contamination evidence the firewall bound -- from the run's own
+measurements, so `chowder growth campaign run`'s state root is what the judge
+certifies. Nothing is invented: an undeclared input yields no file and the
+judge reports that gate UNKNOWN. `tests/test_growth_certification_coupling.py`
+holds both directions.
+
 Earlier state for the record (2026-09-17): the first real Model N → N+1
 cycle executed and was recorded PROMOTED at the time
 (`docs/quals/GEN1_RESULT_2026-09-17.md`; ledger record `gen1` beside
