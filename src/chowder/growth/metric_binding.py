@@ -206,7 +206,22 @@ class MetricBinder:
     def from_manifest(
         cls, registry: BenchmarkRegistry, manifest: Mapping[str, Any]
     ) -> "MetricBinder":
-        """Build a binder from a firewall ``contamination_manifest.json``."""
+        """Build a binder from a whole firewall ``contamination_manifest.json``.
+
+        The argument is the manifest *file's* mapping (``benchmarks`` /
+        ``policy`` / ``training_sources``), not its ``benchmarks`` section:
+        passing the section would silently build a binder with no
+        contamination verdicts, and every benchmark would bind UNKNOWN --
+        fail-open inconclusiveness instead of an error. Section-shaped input
+        is refused so the mistake surfaces at the call site.
+        """
+        if any("@" in str(key) for key in manifest):
+            raise PromotionBindingError(
+                "from_manifest expects the whole contamination manifest "
+                "(keys like 'benchmarks', 'policy', 'training_sources'), not a "
+                "benchmarks section (keys look like 'name@version'); a section "
+                "would silently bind every benchmark as UNKNOWN"
+            )
         section = manifest.get("benchmarks", {})
         if not isinstance(section, Mapping):
             raise PromotionBindingError(
