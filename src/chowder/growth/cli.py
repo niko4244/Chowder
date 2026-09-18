@@ -395,6 +395,13 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
     plan.add_argument("manifest", help="Path to the campaign manifest JSON")
     plan.set_defaults(func=_growth_campaign_plan)
 
+    readiness = campaign_targets.add_parser(
+        "readiness",
+        help="Check every pre-compute prerequisite without starting compute",
+    )
+    readiness.add_argument("manifest", help="Path to the campaign manifest JSON")
+    readiness.set_defaults(func=_growth_campaign_readiness)
+
     run = campaign_targets.add_parser(
         "run", help="Execute the declared campaign through the real growth cycle"
     )
@@ -484,6 +491,22 @@ def _growth_campaign_plan(args: argparse.Namespace) -> int:
             "plan": plan.to_dict(),
         }
     )
+
+
+def _growth_campaign_readiness(args: argparse.Namespace) -> int:
+    """Report every pre-compute prerequisite of a declared campaign.
+
+    Zero compute by construction: it reads the declaration and the files it
+    names and starts nothing. READY means a run will not refuse before it
+    trains; the exit code is non-zero otherwise, so CI can gate on it.
+    """
+    from .campaign import CampaignManifest
+    from .campaign_runner import check_campaign_readiness
+
+    manifest = CampaignManifest.from_file(Path(args.manifest))
+    report = check_campaign_readiness(manifest)
+    _print_json(report.to_dict())
+    return 0 if report.ready else 1
 
 
 def _growth_campaign_run(args: argparse.Namespace) -> int:

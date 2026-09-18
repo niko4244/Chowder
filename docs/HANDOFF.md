@@ -154,6 +154,21 @@ before it is measured and again before the judged evidence set is written
 (`CANDIDATE_ARTIFACT_DIGEST_STALE`), so no run can certify a digest the frozen
 judge would recompute and reject.
 
+`GEN2_PREREG_AMENDMENT9_2026-09-18.md` adds the operator-facing half of that
+phase: `chowder growth campaign readiness <manifest>` runs every pre-compute
+check with zero compute and no model load, reports a machine-readable
+`status`/`checks[]`/`reason_codes[]` document, and exits non-zero unless all
+pass. It composes the same helpers `run_campaign` uses, so a `READY` report is a
+run that will not refuse before it trains. Run against the committed Gen-2
+declaration it refuses, and surfaced a pre-existing defect: `base_model_digest`
+pins the Gen-0 freeze's semantic `model_content_digest` (`59e767aa…`), while
+production verifies it with `directory_digest`, which also folds in a volatile
+HuggingFace `.cache/huggingface/**`. The frozen base itself is unchanged (all ten
+semantic files still match the freeze); the two identity fields in the manifest
+were simply populated on two different bases. Base identity therefore cannot
+verify, and Gen-2 stays blocked until the basis is reconciled (repin, or verify
+on the freeze's basis) under its own preregistered change.
+
 `GEN2_PREREG_AMENDMENT8_2026-09-18.md` then moves the instrument itself into
 `src/`. The frozen judge's T1–T10 read one row — the campaign's declared target,
 `generation-diagnostics@gen2-response-surface-v1` — for the completions of the 16
