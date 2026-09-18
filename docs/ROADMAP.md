@@ -50,6 +50,18 @@ gates (`docs/FRONTIER_REFERENCE_SEED_2026-09-17.md`). Successive-halving
 search remains a library capability with no production caller — not
 required by, and not wired into, the growth cycle.
 
+Integrity pass (2026-09-17): measurement provenance is now first-class
+(candidate gates require candidate-measured rows; carried/parent evidence
+cannot satisfy a regression gate), actual-cost settlement enforces the
+frozen device/wall ceilings post-run (a successful train that overruns
+refuses), the cycle compute accounting artifact covers every recipe
+count, candidate selection reads only training-side evidence, and
+verdicts are correctable only via append-only adjudication revisions.
+Gen-1's effective verdict is INCONCLUSIVE (target repair validated)
+per `docs/growth/GEN1_READJUDICATION_ADDENDUM_2026-09-17.md`; campaign
+manifests (`chowder growth campaign validate|settle`) declare
+admission/settlement units explicitly.
+
 **Research kernel**
 experiment DAG · hypothesis schema · compute budget enforcement · hard
 regression gate · candidate tournament (`tournament.py`, `ranking.py`) ·
