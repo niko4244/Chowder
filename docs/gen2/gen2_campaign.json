@@ -1,0 +1,40 @@
+{
+  "cycle_id": "gen2-response-surface-compliance",
+  "parent_version": "gen1",
+  "parent_model_path": "F:/llm-models/Qwen3.8-9B-abliterated-25-bf16",
+  "parent_model_digest": "ca8769c5e7e06575c95501391e328811b55f2208d9cbb10b86e95eb40d8786cd",
+  "state_root": "C:/Users/nikma/Chowder-Protected/runs/2026-09-17-gen2-response-surface",
+  "target_benchmarks": [
+    "generation-diagnostics@gen2-response-surface-v1"
+  ],
+  "protected_benchmarks": [
+    "math500@2024-04",
+    "mgsm@2022-11"
+  ],
+  "broad_benchmarks": [
+    "math500@2024-04",
+    "mgsm@2022-11"
+  ],
+  "calibration_benchmarks": [],
+  "reliability_benchmarks": [],
+  "budget": {
+    "device_gpu_hours_ceiling_per_recipe": 0.30,
+    "wall_gpu_hours_ceiling_per_recipe": 0.75,
+    "device_gpu_hours_ceiling_campaign": 0.60,
+    "wall_gpu_hours_ceiling_campaign": 1.50
+  },
+  "recipes": [
+    "gen2-recipe-a",
+    "gen2-recipe-b"
+  ],
+  "candidate_selection_policy": "first_successful",
+  "promotion_policy_version": "promotion-policy-v2-provenance-settlement",
+  "stopping_rules": [
+    "stop before compute on admission refusal",
+    "stop on contamination refusal (KNOWN/POSSIBLE on any declared source)",
+    "stop on campaign settlement overrun (artifact preserved)",
+    "never enlarge a frozen threshold after candidate results are visible"
+  ],
+  "contamination_manifest_path": "C:/Users/nikma/Chowder-Protected/runs/2026-09-17-gen2-response-surface/gen2_contamination_manifest.json",
+  "notes": "Parent evidence state: gen1 effective verdict INCONCLUSIVE with target_repair_validated=true (see docs/growth/GEN1_READJUDICATION_ADDENDUM_2026-09-17.md). Gen2's protected gates are candidate-measured via the frozen 16-item mini-slices; no carried evidence satisfies any gate. Prereg: docs/quals/GEN2_PREREG_2026-09-17.md; judge: docs/gen2/judge_gen2.py."
+}
