@@ -105,6 +105,17 @@ def stops_on_campaign_overrun(stopping_rules: Sequence[str]) -> bool:
     """Whether exceeding a campaign ceiling stops the remaining recipes."""
     return any(rule in _OVERRUN_SPELLINGS for rule in stopping_rules)
 
+def _require_sha256(value: Any, field: str, source: str) -> None:
+    """A model digest is 64 lowercase hex characters or it is not identity."""
+    if not isinstance(value, str) or len(value) != 64 or any(
+        ch not in "0123456789abcdef" for ch in value
+    ):
+        raise CampaignManifestError(
+            f"{source}: {field} must be a sha256 hex digest (64 lowercase hex "
+            f"characters), got {value!r}"
+        )
+
+
 #: Benchmarks named in promotion sets must be pinned (``name@version``).
 def _require_pinned(qualified_id: str, where: str) -> None:
     if "@" not in str(qualified_id) or str(qualified_id).split("@")[1].strip().lower() in {
@@ -171,8 +182,14 @@ class CampaignManifest:
 
     cycle_id: str
     parent_version: str
-    parent_model_path: str
-    parent_model_digest: str
+    #: Model identity is deliberately two objects, never one overloaded field:
+    #: a generation is (dense base, optional parent adapter), and a base
+    #: digest must never be compared against an adapter tree (or vice versa).
+    #: ``parent_adapter_*`` is empty when the parent generation *is* the base.
+    base_model_path: str
+    base_model_digest: str
+    parent_adapter_path: str
+    parent_adapter_digest: str
     state_root: str
     target_benchmarks: tuple[str, ...]
     protected_benchmarks: tuple[str, ...]
@@ -212,7 +229,8 @@ class CampaignManifest:
     @classmethod
     def from_mapping(cls, document: Mapping[str, Any], *, source: str = "<memory>") -> "CampaignManifest":
         allowed = {
-            "cycle_id", "parent_version", "parent_model_path", "parent_model_digest",
+            "cycle_id", "parent_version", "base_model_path", "base_model_digest",
+            "parent_adapter_path", "parent_adapter_digest",
             "state_root", "target_benchmarks", "protected_benchmarks", "broad_benchmarks",
             "calibration_benchmarks", "reliability_benchmarks", "budget", "recipes",
             "candidate_selection_policy", "stopping_rules", "promotion_policy_version",
@@ -228,7 +246,7 @@ class CampaignManifest:
                 "silently change what the campaign declares"
             )
         required = {
-            "cycle_id", "parent_version", "parent_model_path", "parent_model_digest",
+            "cycle_id", "parent_version", "base_model_path", "base_model_digest",
             "state_root", "target_benchmarks", "protected_benchmarks", "broad_benchmarks",
             "calibration_benchmarks", "reliability_benchmarks", "budget", "recipes",
             "candidate_selection_policy",
@@ -294,21 +312,33 @@ class CampaignManifest:
                 "not a preregistration"
             )
 
-        for path_field in ("parent_model_path", "state_root"):
+        for path_field in ("base_model_path", "state_root"):
             value = document[path_field]
             if not isinstance(value, str) or not value.strip():
                 raise CampaignManifestError(f"{source}: {path_field} must be a non-empty path string")
 
-        if not isinstance(document["parent_model_digest"], str) or len(document["parent_model_digest"]) != 64:
+        _require_sha256(document["base_model_digest"], "base_model_digest", source)
+
+        # The adapter pair is all-or-nothing: a path without a digest would be
+        # an unverifiable parent, and a digest without a path cannot be checked.
+        adapter_path = document.get("parent_adapter_path", "")
+        adapter_digest = document.get("parent_adapter_digest", "")
+        if bool(str(adapter_path).strip()) != bool(str(adapter_digest).strip()):
             raise CampaignManifestError(
-                f"{source}: parent_model_digest must be a sha256 hex digest"
+                f"{source}: parent_adapter_path and parent_adapter_digest must be "
+                "declared together or both omitted; a parent adapter is either "
+                "identity-verified or not declared"
             )
+        if str(adapter_digest).strip():
+            _require_sha256(adapter_digest, "parent_adapter_digest", source)
 
         return cls(
             cycle_id=str(document["cycle_id"]),
             parent_version=str(document["parent_version"]),
-            parent_model_path=str(document["parent_model_path"]),
-            parent_model_digest=str(document["parent_model_digest"]),
+            base_model_path=str(document["base_model_path"]),
+            base_model_digest=str(document["base_model_digest"]),
+            parent_adapter_path=str(adapter_path),
+            parent_adapter_digest=str(adapter_digest),
             state_root=str(document["state_root"]),
             target_benchmarks=tuple(document["target_benchmarks"]),
             protected_benchmarks=tuple(document["protected_benchmarks"]),
@@ -348,6 +378,25 @@ class CampaignManifest:
                 "candidate version cannot be derived; declare candidate_version"
             )
         return f"gen{int(parent[3:]) + 1}"
+
+    def has_parent_adapter(self) -> bool:
+        """Whether the parent generation carries an adapter over its base."""
+        return bool(self.parent_adapter_digest)
+
+    def model_identity(self) -> dict[str, str]:
+        """The parent identity as explicit (path, digest) pairs.
+
+        Recorded into lineage so a reader can tell base from adapter, which one
+        ``parent_version`` names, and which bytes were verified.
+        """
+        identity = {
+            "base_model_path": self.base_model_path,
+            "base_model_digest": self.base_model_digest,
+        }
+        if self.has_parent_adapter():
+            identity["parent_adapter_path"] = self.parent_adapter_path
+            identity["parent_adapter_digest"] = self.parent_adapter_digest
+        return identity
 
 
 @dataclass(frozen=True)

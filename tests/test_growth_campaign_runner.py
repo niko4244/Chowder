@@ -187,8 +187,8 @@ def _declaration(tmp_path: Path, *, recipe_count: int = 2, **overrides: Any) -> 
     document: dict[str, Any] = {
         "cycle_id": "gen2-campaign",
         "parent_version": PARENT_VERSION,
-        "parent_model_path": str(parent),
-        "parent_model_digest": digest,
+        "base_model_path": str(parent),
+        "base_model_digest": digest,
         "state_root": str(tmp_path / "state"),
         "target_benchmarks": [TARGET_ID],
         "protected_benchmarks": [PROTECTED_ID],
@@ -464,8 +464,46 @@ def test_a_missing_declared_input_refuses_before_any_subprocess(tmp_path: Path):
 def test_a_parent_digest_that_does_not_match_the_tree_refuses_before_compute(tmp_path: Path):
     _manifest, runner, document = _campaign(tmp_path)
     with pytest.raises(CampaignRunRefusal) as error:
-        run_campaign(_redeclare(document, parent_model_digest="b" * 64))
+        run_campaign(_redeclare(document, base_model_digest="b" * 64))
     assert "does not match" in str(error.value)
+    assert runner.commands == []
+
+
+def test_a_parent_adapter_is_digest_verified_separately_from_the_base(tmp_path: Path):
+    """A base digest must never be accepted as proof of an adapter tree."""
+    _manifest, runner, document = _campaign(tmp_path)
+    adapter = tmp_path / "gen1-adapter"
+    adapter.mkdir()
+    (adapter / "adapter_model.safetensors").write_text("weights", encoding="utf-8")
+    adapter_digest, _entries = directory_digest(adapter)
+
+    # Correct adapter digest: verified, and the phase says which object it was.
+    _manifest2, runner2, document2 = _campaign(tmp_path / "ok")
+    ok_adapter = tmp_path / "ok" / "gen1-adapter"
+    ok_adapter.mkdir()
+    (ok_adapter / "adapter_model.safetensors").write_text("weights", encoding="utf-8")
+    ok_digest, _entries2 = directory_digest(ok_adapter)
+    accepted = run_campaign(
+        _redeclare(
+            document2,
+            parent_adapter_path=str(ok_adapter),
+            parent_adapter_digest=ok_digest,
+        )
+    )
+    assert _phase(accepted, "identity")["verdict"] == "ok"
+    assert ok_digest[:12] in _phase(accepted, "identity")["detail"]
+
+    # The base's digest is not an adapter digest: the run refuses before compute.
+    with pytest.raises(CampaignRunRefusal) as error:
+        run_campaign(
+            _redeclare(
+                document,
+                parent_adapter_path=str(adapter),
+                parent_adapter_digest=document["base_model_digest"],
+            )
+        )
+    assert "adapter" in str(error.value)
+    assert adapter_digest not in str(error.value) or "does not match" in str(error.value)
     assert runner.commands == []
 
 
@@ -552,9 +590,14 @@ def test_the_example_manifest_is_planned_and_run_through_the_cli(
     for field_name, value in document.items():
         if field_name.endswith("_path"):
             example[field_name] = value
-    example["parent_model_path"] = document["parent_model_path"]
-    example["parent_model_digest"] = document["parent_model_digest"]
+    example["base_model_path"] = document["base_model_path"]
+    example["base_model_digest"] = document["base_model_digest"]
     example["state_root"] = str(tmp_path / "example-state")
+    # The committed example demonstrates the adapter identity fields; this
+    # fixture has no adapter on disk, so the declared pair is dropped rather
+    # than pointed at machine-specific bytes a test must not depend on.
+    example.pop("parent_adapter_path", None)
+    example.pop("parent_adapter_digest", None)
     example_path = tmp_path / "example-campaign.json"
     example_path.write_text(json.dumps(example), encoding="utf-8")
 
