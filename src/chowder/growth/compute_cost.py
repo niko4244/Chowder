@@ -44,6 +44,13 @@ ACTUAL_EXCEEDS_PROJECTION = "ACTUAL_EXCEEDS_PROJECTION"
 #: that was never measured. Zero is not evidence of zero: settling it would
 #: certify compliance the run did not demonstrate.
 ACTUAL_DEVICE_GPU_HOURS_UNMEASURED = "ACTUAL_DEVICE_GPU_HOURS_UNMEASURED"
+#: A campaign's *planned* spend was refused against its declared campaign
+#: ceilings before compute. A plan needs no measurement claim, so these are
+#: deliberately separate codes from the actual-vs-ceiling ones above: admission
+#: and settlement are different controls and are never substituted for one
+#: another.
+PROJECTED_DEVICE_GPU_HOURS_EXCEEDED = "PROJECTED_DEVICE_GPU_HOURS_EXCEEDED"
+PROJECTED_WALL_GPU_HOURS_EXCEEDED = "PROJECTED_WALL_GPU_HOURS_EXCEEDED"
 
 
 def _checked(value: float, label: str) -> float:

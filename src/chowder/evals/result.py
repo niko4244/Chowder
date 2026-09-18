@@ -149,6 +149,11 @@ class EvalReport:
                     raw_artifact_ref=run.get("raw_artifact_ref", ""),
                     notes=run.get("notes", ""),
                     metadata=run.get("metadata", {}),
+                    # Provenance survives the round trip: a report written by
+                    # the candidate and read back is still candidate-measured,
+                    # and a row that never declared an origin still reads as
+                    # UNMEASURED rather than gaining provenance from the file.
+                    measurement_origin=run.get("measurement_origin", UNMEASURED),
                 )
                 for run in data["runs"]
             ),
