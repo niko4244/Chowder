@@ -174,15 +174,28 @@ evidence refuses.
 The candidate arm is the run's *output*, bound to the model it measured: the
 runner asks an evaluation seam (`chowder.growth.candidate_evaluation`) to measure
 the artifact it selected, and refuses with `CANDIDATE_EVALUATION_NOT_PRODUCED`
-when no evaluator is wired rather than reading a report from a declared path --
-`candidate_eval_report_path` is retired and its presence refuses at load. What
-the seam returns is checked before any verdict: generation (report and row),
+when no evaluator can be built rather than reading a report from a declared path
+-- `candidate_eval_report_path` is retired and its presence refuses at load.
+What the seam returns is checked before any verdict: generation (report and row),
 `adapter_digest` equal to the selected artifact's digest, `base_model_digest`
 equal to the declared base, scored rows `MEASURED_THIS_GENERATION`, coverage of
 every declared benchmark, no duplicate measurement, and the evaluation's
-measured cost charged to the cycle ledger before settlement. This build wires no
-production evaluator, so a real gen2 run refuses; the instrument is the
-remaining build (see ROADMAP).
+measured cost charged to the cycle ledger before settlement.
+
+The seam itself is real: `chowder.growth.evaluation_binding.SubprocessEvaluationFn`
+(`docs/quals/GEN2_PREREG_AMENDMENT6_2026-09-18.md`) measures the selected adapter
+through the production transformers-text worker -- the same
+`--spec/--result/--chowder-identity` command line and the same injectable process
+runner the trainer binding uses -- from the datasets the campaign declares in
+`evaluation_material_path`. It writes the first `protection.n_samples` items of
+each declared dataset into the run root as the slice it measures, verifies the
+adapter's digest against the bytes before loading them, and returns rows whose
+`raw_artifact_ref` is the `predictions-<suite>.jsonl` it produced, whose
+`metadata.artifact_sha256` is that file's digest, and whose score is the mean of
+its per-item scores -- the exact evidence certification recomputes. What it does
+not yet produce is the *target instrument's* diagnostic metadata (T1-T10), which
+still lives only in the historical gen1 driver; that is the next build (see
+ROADMAP).
 
 The gen0 arm itself is declared, not assumed:
 `GEN2_PREREG_AMENDMENT2_2026-09-18.md` pins it in the manifest
