@@ -60,7 +60,14 @@ the contamination evidence the firewall bound -- from the run's own
 measurements, so `chowder growth campaign run`'s state root is what the judge
 certifies. Nothing is invented: an undeclared input yields no file and the
 judge reports that gate UNKNOWN. `tests/test_growth_certification_coupling.py`
-holds both directions.
+holds both directions. `GEN2_PREREG_AMENDMENT2_2026-09-18.md` then declared the
+trusted-ancestor (gen0) arm the judge's T16 gate reads
+(`baseline_eval_report_path`): a fresh 16-item mini-slice measurement on the
+untouched dense gen0 parent, `MEASURED_PARENT` rows, referenced at zero
+incremental cost — not the 2026-09-16 gen0 freeze report, which used a
+different protocol, and not the gen1 parent arm. With the arm declared, T16 is
+decidable; with it absent the run writes no arm and stays INCONCLUSIVE, which
+is why the declaration had to be written before compute.
 
 Earlier state for the record (2026-09-17): the first real Model N → N+1
 cycle executed and was recorded PROMOTED at the time

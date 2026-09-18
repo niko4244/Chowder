@@ -168,6 +168,14 @@ does not declare produces no file rather than a placeholder, and
 frozen judge certifies the root a CLI run just wrote, and absent or tampered
 evidence refuses.
 
+The gen0 arm itself is declared, not assumed:
+`GEN2_PREREG_AMENDMENT2_2026-09-18.md` pins it in the manifest
+(`baseline_eval_report_path`) as a fresh 16-item mini-slice measurement on the
+untouched dense gen0 parent with `MEASURED_PARENT` rows, referenced at zero
+incremental cost. Absent, off-protocol or wrongly originated, T16 stays
+UNKNOWN/FAIL and the candidate cannot be promoted — an unresolved parent never
+becomes the protection baseline by default.
+
 ## Campaign manifests: preregistration as configuration
 
 A campaign manifest (`campaign.CampaignManifest`) is the preregistration a

@@ -534,8 +534,13 @@ def write_certification_evidence(
     answer. Nothing here can invent a measurement the run never took, and no
     gate is loosened by writing these: they are the same numbers the run
     already adjudicated with, at the paths the frozen judge reads.
+
+    Every declared input is read and validated *before* the first file is
+    written, so a refusal (a declared report that does not exist, or one whose
+    rows cannot be parsed) never leaves a half-materialised evidence set for the
+    judge to read.
     """
-    written: list[str] = []
+    arms: list[tuple[str, Path]] = []
     for arm, field_name in _EVIDENCE_ARM_SOURCES.items():
         declared = str(getattr(manifest, field_name))
         if not declared:
@@ -543,21 +548,32 @@ def write_certification_evidence(
         source = _require_path(
             declared, field_name, purpose="the judged evidence set is built from it"
         )
-        # Read it before copying: an unreadable report must refuse here rather
-        # than reach the judge as an arm whose rows cannot be parsed.
+        # An unreadable report must refuse here rather than reach the judge as an
+        # arm whose rows cannot be parsed.
         EvalReport.load(source)
-        destination = root / CERTIFICATION_EVIDENCE[arm]
-        destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-        written.append(destination.name)
-
+        arms.append((arm, source))
+    contamination: Path | None = None
     if manifest.contamination_manifest_path:
-        source = _require_path(
+        contamination = _require_path(
             manifest.contamination_manifest_path,
             "contamination_manifest_path",
             purpose="the run's contamination evidence is copied for the judge",
         )
-        destination = root / CERTIFICATION_EVIDENCE["contamination"]
+        if not isinstance(json.loads(contamination.read_text(encoding="utf-8")), Mapping):
+            raise CampaignRunRefusal(
+                f"contamination manifest {contamination} is not a JSON object, so "
+                "it cannot be the contamination evidence the judge reads"
+            )
+
+    written: list[str] = []
+    for arm, source in arms:
+        destination = root / CERTIFICATION_EVIDENCE[arm]
         destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        written.append(destination.name)
+
+    if contamination is not None:
+        destination = root / CERTIFICATION_EVIDENCE["contamination"]
+        destination.write_text(contamination.read_text(encoding="utf-8"), encoding="utf-8")
         written.append(destination.name)
 
     chosen = _chosen_candidate_document(selected)
