@@ -62,15 +62,31 @@ benchmark-native agent suites, and Chowder-native diagnostics into one
 
 ## Promotion (never one number)
 
-A candidate is **PROMOTED** only when *all* of the predeclared checks pass:
+A candidate is **PROMOTED** only when *all* of the predeclared checks pass —
+and since the integrity pass (2026-09-17), every check consumes only
+evidence that can prove its provenance and its cost:
 
-1. target improvement, statistically significant and ≥ the declared minimum;
-2. no protected regression beyond tolerance;
-3. no material broad-battery deterioration;
+1. target improvement, statistically significant and ≥ the declared minimum,
+   measured on the candidate (`measurement_origin=MEASURED_THIS_GENERATION`);
+2. no protected regression beyond tolerance, from candidate-measured rows
+   only — a carried parent row reads inconclusive, never "not-regressed";
+3. no material broad-battery deterioration, from candidate-measured rows
+   only;
 4. no calibration/hallucination regression;
 5. reliability (survives repeated samples where practical);
 6. evidence integrity — no contamination (`TAINTED` otherwise);
-7. resource envelope respected.
+7. resource envelope respected **by settlement as well as admission**:
+   projected cost admits the run, actual measured cost (all recipes,
+   evaluations, failed attempts — via the cycle compute accounting artifact)
+   must stay under the frozen device/wall ceilings after execution or the
+   cycle refuses.
+
+A real target repair with incomplete full-promotion evidence is
+**INCONCLUSIVE** with `target_repair_validated=true` — deliberately not a
+new verdict class: PROMOTED must mean "complete evidence, all gates passed".
+Historical verdicts are corrected only by append-only adjudication revisions
+(`GenerationLedger.append_adjudication_revision`); original records never
+change.
 
 Frontier scores never decide promotion. A candidate below GPT-class can be a
 legitimate generation if it beats its parent without regressions.
@@ -114,8 +130,11 @@ TrainingFn is bound to the real trainer and its promotion inputs to
 declared metric semantics (#167), with the binding qualified in
 `docs/GROWTH_TRAINFN_BINDING_QUALIFICATION_2026-09-16.md` and
 `docs/GROWTH_PROMOTION_BINDING_QUALIFICATION_2026-09-16.md`. The first
-real Model N → N+1 cycle has now **executed and closed: gen1 is PROMOTED**
-(`docs/quals/GEN1_RESULT_2026-09-17.md`; prereg
+real Model N → N+1 cycle has now **executed and closed: gen1 was recorded
+PROMOTED, and after the integrity audit its effective verdict is
+INCONCLUSIVE with target_repair_validated=true**
+(`docs/growth/GEN1_READJUDICATION_ADDENDUM_2026-09-17.md`; original result
+`docs/quals/GEN1_RESULT_2026-09-17.md`; prereg
 `docs/quals/GEN1_PREREG_2026-09-17.md` under amendments 1–3 — both recipes
 trained 30/30 steps through the production binding, and the frozen rule
 adjudicated the candidate from independent evaluation). The proven,

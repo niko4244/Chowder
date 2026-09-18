@@ -377,5 +377,82 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
     status.add_argument("ledger", help="Path to a cycle outcome JSON")
     status.set_defaults(func=_growth_status)
 
+    campaign = growth_targets.add_parser(
+        "campaign", help="Validate a campaign manifest and show admission/settlement"
+    )
+    campaign_targets = campaign.add_subparsers(dest="campaign_target", required=True)
+
+    validate = campaign_targets.add_parser(
+        "validate", help="Refuse a malformed manifest before any compute"
+    )
+    validate.add_argument("manifest", help="Path to the campaign manifest JSON")
+    validate.set_defaults(func=_growth_campaign_validate)
+
+    settle = campaign_targets.add_parser(
+        "settle",
+        help="Settle actual cycle cost from a compute-accounting artifact",
+    )
+    settle.add_argument("manifest", help="Path to the campaign manifest JSON")
+    settle.add_argument(
+        "accounting",
+        help="Path to the cycle_compute_accounting.json produced by the cycle",
+    )
+    settle.set_defaults(func=_growth_campaign_settle)
+
+
+def _growth_campaign_validate(args: argparse.Namespace) -> int:
+    """Load and validate a campaign manifest; print the declaration it pins."""
+    from .campaign import CampaignManifest
+
+    manifest = CampaignManifest.from_file(Path(args.manifest))
+    return _print_json(
+        {
+            "status": "VALID",
+            "cycle_id": manifest.cycle_id,
+            "parent_version": manifest.parent_version,
+            "target_benchmarks": list(manifest.target_benchmarks),
+            "protected_benchmarks": list(manifest.protected_benchmarks),
+            "broad_benchmarks": list(manifest.broad_benchmarks),
+            "budget": {
+                "device_gpu_hours_ceiling_per_recipe": manifest.budget.device_gpu_hours_ceiling_per_recipe,
+                "wall_gpu_hours_ceiling_per_recipe": manifest.budget.wall_gpu_hours_ceiling_per_recipe,
+                "device_gpu_hours_ceiling_campaign": manifest.budget.device_gpu_hours_ceiling_campaign,
+                "wall_gpu_hours_ceiling_campaign": manifest.budget.wall_gpu_hours_ceiling_campaign,
+            },
+            "recipes": list(manifest.recipe_ids),
+            "candidate_selection_policy": manifest.candidate_selection_policy,
+            "promotion_policy_version": manifest.promotion_policy_version,
+        }
+    )
+
+
+def _growth_campaign_settle(args: argparse.Namespace) -> int:
+    """Settle the campaign's actual cost from its durable accounting artifact."""
+    from .campaign import CampaignManifest, settle_campaign
+
+    manifest = CampaignManifest.from_file(Path(args.manifest))
+    document = json.loads(Path(args.accounting).read_text(encoding="utf-8"))
+    totals = document.get("totals", {}).get("incremental", {})
+    from .compute_cost import ComputeCost
+
+    total = ComputeCost(
+        device_gpu_hours=float(totals.get("device_gpu_hours", 0.0)),
+        wall_gpu_hours=float(totals.get("wall_gpu_hours", 0.0)),
+        source=str(args.accounting),
+    )
+    verdict = settle_campaign(manifest, total=total)
+    return _print_json(
+        {
+            "cycle_id": manifest.cycle_id,
+            "budget_compliant": verdict.compliant,
+            "budget_failure_reasons": list(verdict.failure_reasons),
+            "actual": total.to_dict(),
+            "ceilings": {
+                "device_gpu_hours_ceiling_campaign": manifest.budget.device_gpu_hours_ceiling_campaign,
+                "wall_gpu_hours_ceiling_campaign": manifest.budget.wall_gpu_hours_ceiling_campaign,
+            },
+        }
+    )
+
 
 __all__ = ["register_growth_subcommands"]

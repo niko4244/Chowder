@@ -20,18 +20,46 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
+from chowder.evals.result import (
+    CARRIED_REFERENCE,
+    MEASURED_PARENT,
+    MEASURED_THIS_GENERATION,
+    UNMEASURED,
+)
+
 from .statistics import compare
 
 
 @dataclass(frozen=True)
 class BenchmarkResult:
-    """One measured score with its samples (for statistical comparison)."""
+    """One measured score with its samples (for statistical comparison).
+
+    ``measurement_origin`` records which system actually produced the row.
+    A promotion gate may only be *satisfied* by a row measured on the
+    generation being adjudicated; parent-measured or carried rows are
+    context, never evidence for the candidate side.
+    """
 
     benchmark_qualified_id: str
     score: float  # 0..1 normalized
     samples: tuple[float, ...] = ()  # per-question/per-run scores
     contamination: str = "UNKNOWN"  # from the firewall manifest
     measurement_confidence: float = 0.8
+    measurement_origin: str = UNMEASURED
+
+    @property
+    def candidate_measured(self) -> bool:
+        return self.measurement_origin == MEASURED_THIS_GENERATION
+
+    @property
+    def gate_eligible(self) -> bool:
+        """May this row satisfy a promotion gate at all?
+
+        Only rows actually measured on this generation count. Carried and
+        parent rows may render in reports; unmeasured rows are the absence
+        of evidence.
+        """
+        return self.measurement_origin == MEASURED_THIS_GENERATION
 
 
 @dataclass(frozen=True)
@@ -54,6 +82,16 @@ class PromotionInput:
     max_reliability_regression: float = 0.02
     device_gpu_hours: float = 0.0
     device_gpu_hours_ceiling: float | None = None
+    #: Settlement fields (Phase 5): actual measured compute is authoritative.
+    #: ``actual_wall_gpu_hours`` is the cycle's total measured wall cost
+    #: (all recipes, evaluations, failed attempts); ``wall_gpu_hours_ceiling``
+    #: is the preregistered hard envelope. An actual value above its ceiling
+    #: vetoes promotion mechanically -- a successful training process does
+    #: not imply a budget-compliant experiment.
+    actual_wall_gpu_hours: float | None = None
+    actual_device_gpu_hours: float | None = None
+    projected_wall_gpu_hours: float | None = None
+    wall_gpu_hours_ceiling: float | None = None
 
 
 @dataclass(frozen=True)
@@ -63,15 +101,30 @@ class PromotionDecision:
     checks: Mapping[str, str]  # check name -> improved/regressed/flat/inconclusive/ok/violated
     target_deltas: Mapping[str, float] = field(default_factory=dict)
     protected_deltas: Mapping[str, float] = field(default_factory=dict)
+    #: Scoped-repair semantics (a design decision, not a verdict class): when
+    #: the target genuinely improved under candidate measurement but the full
+    #: promotion evidence (protected/broad/calibration/reliability) is
+    #: incomplete, the verdict stays INCONCLUSIVE while this flag records that
+    #: the *repair itself* is validated. It never authorizes a generation; it
+    #: says the candidate remains a live candidate for later full evaluation.
+    #: Deliberately NOT a new verdict: PROMOTED must mean "complete evidence,
+    #: all gates passed", and a fifth verdict would invite exactly the
+    #: threshold-drift this field exists to avoid.
+    target_repair_validated: bool | None = None
+    target_repair_metrics: Mapping[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "verdict": self.verdict,
             "reasons": list(self.reasons),
             "checks": dict(self.checks),
             "target_deltas": dict(self.target_deltas),
             "protected_deltas": dict(self.protected_deltas),
         }
+        if self.target_repair_validated is not None:
+            payload["target_repair_validated"] = self.target_repair_validated
+            payload["target_repair_metrics"] = dict(self.target_repair_metrics)
+        return payload
 
 
 def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
@@ -115,6 +168,13 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
             or not parent.samples
         ):
             return None
+        # Identical arrays on both sides are the signature of a carried row
+        # relabeled as candidate evidence: they manufacture fake statistical
+        # confidence (a degenerate "flat" or a floor-to-ceiling "improved"
+        # built from one real measurement). Only candidate-measured rows may
+        # supply the candidate side of a pair.
+        if not candidate.gate_eligible:
+            return None
         return (parent.samples, candidate.samples)
 
     # 2. Target improvement: at least one target benchmark statistically
@@ -122,6 +182,16 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
     improved_targets = 0
     target_missing: list[str] = []
     for benchmark_id in data.target_benchmarks:
+        candidate = data.candidate_results.get(benchmark_id)
+        if candidate is not None and not candidate.gate_eligible:
+            # A target row without candidate-measured provenance is not a
+            # measurement of this candidate, no matter what its label says.
+            target_missing.append(benchmark_id)
+            reasons.append(
+                f"target benchmark has no candidate-measured evidence "
+                f"(origin {candidate.measurement_origin}): {benchmark_id}"
+            )
+            continue
         pair = _paired(benchmark_id)
         if pair is None:
             target_missing.append(benchmark_id)
@@ -158,6 +228,19 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
             checks[f"protected:{benchmark_id}"] = "inconclusive"
             protected_inconclusive += 1
             reasons.append(f"protected benchmark unmeasured: {benchmark_id}")
+            continue
+        if not candidate.gate_eligible:
+            # The row exists but was not measured on the candidate (carried
+            # or parent-origin). A parent score relabeled as candidate
+            # evidence is exactly what this gate must never certify -- and a
+            # parent pinned at 0.0 must not create a "cannot regress"
+            # shortcut. Not measured => not certified.
+            checks[f"protected:{benchmark_id}"] = "inconclusive"
+            protected_inconclusive += 1
+            reasons.append(
+                f"protected benchmark has no candidate-measured evidence "
+                f"(origin {candidate.measurement_origin}): {benchmark_id}"
+            )
             continue
         delta = candidate.score - parent.score
         protected_deltas[benchmark_id] = delta
@@ -199,7 +282,9 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
     if protected_violations:
         reasons.append(f"{protected_violations} protected regression(s)")
 
-    # 4. Broad battery: aggregate must not materially deteriorate.
+    # 4. Broad battery: aggregate must not materially deteriorate. Only
+    #    candidate-measured rows feed the means -- carried parent values in
+    #    the aggregate would compare the parent against itself.
     broad_before = [
         data.parent_results[b].score for b in data.broad_battery_benchmarks if b in data.parent_results
     ]
@@ -207,8 +292,10 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
         data.candidate_results[b].score
         for b in data.broad_battery_benchmarks
         if b in data.candidate_results
+        and data.candidate_results[b].gate_eligible
     ]
-    if broad_before and broad_after:
+    broad_declared = len(data.broad_battery_benchmarks)
+    if broad_before and broad_after and len(broad_after) == broad_declared:
         mean_before = sum(broad_before) / len(broad_before)
         mean_after = sum(broad_after) / len(broad_after)
         if mean_after < mean_before - data.max_broad_regression:
@@ -221,24 +308,48 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
             checks["broad_battery"] = "ok"
     else:
         checks["broad_battery"] = "inconclusive"
-        reasons.append("broad battery insufficiently measured")
+        if broad_declared and len(broad_after) < broad_declared:
+            missing = sorted(
+                set(data.broad_battery_benchmarks)
+                - {
+                    b
+                    for b in data.broad_battery_benchmarks
+                    if b in data.candidate_results
+                    and data.candidate_results[b].gate_eligible
+                }
+            )
+            reasons.append(
+                "broad battery insufficiently measured (no candidate-measured "
+                f"evidence for: {', '.join(missing)})"
+            )
+        else:
+            reasons.append("broad battery insufficiently measured")
 
     # 5. Calibration: hallucination/overconfidence must not increase past
     #    tolerance.
     calibration_violations = 0
+    calibration_inconclusive = 0
     for benchmark_id in data.calibration_benchmarks:
         candidate = data.candidate_results.get(benchmark_id)
         parent = data.parent_results.get(benchmark_id)
-        if candidate is None or parent is None:
+        if candidate is None or parent is None or not candidate.gate_eligible:
+            checks[f"calibration:{benchmark_id}"] = "inconclusive"
+            calibration_inconclusive += 1
+            reasons.append(f"calibration benchmark unmeasured on candidate: {benchmark_id}")
             continue
         if candidate.score < parent.score - data.max_calibration_regression:
             checks[f"calibration:{benchmark_id}"] = "violated"
             calibration_violations += 1
         else:
             checks[f"calibration:{benchmark_id}"] = "ok"
-    checks["calibration"] = "violated" if calibration_violations else (
-        "ok" if data.calibration_benchmarks else "unmeasured"
-    )
+    if not data.calibration_benchmarks:
+        checks["calibration"] = "unmeasured"
+    elif calibration_violations:
+        checks["calibration"] = "violated"
+    elif calibration_inconclusive:
+        checks["calibration"] = "inconclusive"
+    else:
+        checks["calibration"] = "ok"
     if calibration_violations:
         reasons.append(f"{calibration_violations} calibration regression(s)")
 
@@ -254,10 +365,10 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
     for benchmark_id in data.reliability_benchmarks:
         candidate = data.candidate_results.get(benchmark_id)
         parent = data.parent_results.get(benchmark_id)
-        if candidate is None or parent is None:
+        if candidate is None or parent is None or not candidate.gate_eligible:
             checks[f"reliability:{benchmark_id}"] = "inconclusive"
             reliability_inconclusive += 1
-            reasons.append(f"reliability benchmark unmeasured: {benchmark_id}")
+            reasons.append(f"reliability benchmark unmeasured on candidate: {benchmark_id}")
             continue
         delta = candidate.score - parent.score
         if delta < -data.max_reliability_regression:
@@ -276,18 +387,50 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
     if reliability_violations:
         reasons.append(f"{reliability_violations} reliability regression(s)")
 
-    # 6. Resource envelope.
+    # 6. Resource envelope. Both units are checked against their own
+    #    ceiling; a wall overrun is as disqualifying as a device overrun.
+    resource_violations: list[str] = []
     if data.device_gpu_hours_ceiling is not None:
-        if data.device_gpu_hours > data.device_gpu_hours_ceiling:
-            checks["resource_envelope"] = "violated"
-            reasons.append(
+        if data.device_gpu_hours > data.device_gpu_hours_ceiling + 1e-12:
+            resource_violations.append(
                 f"device GPU-h {data.device_gpu_hours:.4f} exceeds ceiling "
                 f"{data.device_gpu_hours_ceiling:.4f}"
             )
-        else:
-            checks["resource_envelope"] = "ok"
+    if data.actual_device_gpu_hours is not None and data.device_gpu_hours_ceiling is not None:
+        if data.actual_device_gpu_hours > data.device_gpu_hours_ceiling + 1e-12:
+            resource_violations.append(
+                f"actual device GPU-h {data.actual_device_gpu_hours:.4f} exceeds "
+                f"ceiling {data.device_gpu_hours_ceiling:.4f}"
+            )
+    if data.actual_wall_gpu_hours is not None and data.wall_gpu_hours_ceiling is not None:
+        if data.actual_wall_gpu_hours > data.wall_gpu_hours_ceiling + 1e-12:
+            resource_violations.append(
+                f"actual wall GPU-h {data.actual_wall_gpu_hours:.4f} exceeds "
+                f"preregistered wall ceiling {data.wall_gpu_hours_ceiling:.4f}"
+            )
+    if resource_violations:
+        checks["resource_envelope"] = "violated"
+        reasons.extend(resource_violations)
+    elif (
+        data.actual_wall_gpu_hours is not None
+        or data.actual_device_gpu_hours is not None
+        or data.device_gpu_hours_ceiling is not None
+    ):
+        checks["resource_envelope"] = "ok"
     else:
         checks["resource_envelope"] = "unmeasured"
+
+    # Scoped-repair determination: the target improved under candidate
+    # measurement (real evidence, correct provenance) even if the rest of
+    # the promotion evidence is incomplete. Recorded on every decision so
+    # "the repair is real" is separable from "the generation is promoted".
+    target_repair_validated: bool | None = None
+    target_repair_metrics: dict[str, float] = {}
+    if improved_targets > 0:
+        target_repair_validated = True
+        target_repair_metrics = {
+            bid: delta for bid, delta in target_deltas.items()
+        }
 
     # Verdict assembly. Hard failures decide first: a protected regression,
     # calibration violation, reliability violation, or resource-envelope
@@ -306,6 +449,8 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
             checks=checks,
             target_deltas=target_deltas,
             protected_deltas=protected_deltas,
+            target_repair_validated=target_repair_validated,
+            target_repair_metrics=target_repair_metrics,
         )
     if improved_targets == 0 and not target_missing:
         # Complete, clean evidence and the candidate still improved nothing it
@@ -317,16 +462,21 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
                 checks=checks,
                 target_deltas=target_deltas,
                 protected_deltas=protected_deltas,
+                target_repair_validated=target_repair_validated,
+                target_repair_metrics=target_repair_metrics,
             )
     if improved_targets > 0 and checks["protected_regression"] == "ok" and not calibration_violations:
         # A declared reliability set must have been measured to promote:
         # "unmeasured" means the set was never declared (backward-compatible
-        # default), "inconclusive" means it was declared and dodged.
+        # default), "inconclusive" means it was declared and dodged. Same for
+        # a declared calibration set.
         reliability_measured = checks["reliability"] in {"ok", "unmeasured"}
+        calibration_measured = checks["calibration"] in {"ok", "unmeasured"}
         if (
             checks["broad_battery"] == "ok"
             and checks["evidence_integrity"] == "ok"
             and reliability_measured
+            and calibration_measured
         ):
             return PromotionDecision(
                 verdict="PROMOTED",
@@ -334,6 +484,8 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
                 checks=checks,
                 target_deltas=target_deltas,
                 protected_deltas=protected_deltas,
+                target_repair_validated=target_repair_validated,
+                target_repair_metrics=target_repair_metrics,
             )
         if checks["broad_battery"] == "inconclusive" or checks["evidence_integrity"] == "inconclusive":
             return PromotionDecision(
@@ -342,6 +494,8 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
                 checks=checks,
                 target_deltas=target_deltas,
                 protected_deltas=protected_deltas,
+                target_repair_validated=target_repair_validated,
+                target_repair_metrics=target_repair_metrics,
             )
     return PromotionDecision(
         verdict="INCONCLUSIVE",
@@ -349,4 +503,6 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
         checks=checks,
         target_deltas=target_deltas,
         protected_deltas=protected_deltas,
+        target_repair_validated=target_repair_validated,
+        target_repair_metrics=target_repair_metrics,
     )

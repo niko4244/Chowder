@@ -75,8 +75,9 @@ model (workload + one model load, ×1.5 safety) is the budget template.
 
 ## Readiness verdict
 
-**Infrastructure: READY. Campaign: STEP 1 COMPLETE — the first real cycle
-executed and adjudicated PROMOTED (2026-09-17).**
+**Infrastructure: READY. Campaign: STEP 1 EXECUTED; STEP 1 ADJUDICATION
+REVISED TO INCONCLUSIVE by the integrity audit (2026-09-17) — target repair
+validated, full promotion pending candidate-side protected measurement.**
 
 Generation-0's evaluation freeze landed through protected CI (#168), and the
 first Model N → N+1 cycle ran against prereg + amendments 1–3
@@ -84,12 +85,18 @@ first Model N → N+1 cycle ran against prereg + amendments 1–3
 `GEN1_PREREG_AMENDMENT3_2026-09-17`'s measured physics): recipe-a/b trained
 30/30 steps through the production `SubprocessTrainingFn`, the independent
 evaluator measured EOS 1.000 / cap-hit 0.000 / unclosed-think 0.000, and the
-frozen rule adjudicated **PROMOTED**
+frozen rule adjudicated **PROMOTED** at the time
 (`docs/quals/GEN1_RESULT_2026-09-17.md`; ledger `gen1` beside `gen0`).
-Two promotion-rule defects the cycle exposed are fixed with regression
-tests. The next cycle starts from the durable records — no manual
-evidence reconstruction — and its target must again come from fresh
-measured evidence.
+The integrity audit then found the protected/broad evidence had been
+carried from the parent and relabeled as candidate rows, and that cost
+accounting covered only the winning recipe. Under the corrected policy
+(`promotion-policy-v2-provenance-settlement`) the effective verdict is
+**INCONCLUSIVE, target_repair_validated=true**
+(`docs/growth/GEN1_READJUDICATION_ADDENDUM_2026-09-17.md`; revision
+`gen1-adjudication-001` appended to the ledger — original record intact).
+The next cycle starts from the durable records — no manual evidence
+reconstruction — and its target must again come from fresh measured
+evidence.
 
 ## The 12 questions this system must answer
 

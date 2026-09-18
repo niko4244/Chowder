@@ -44,6 +44,7 @@ from chowder.growth.cycle import CycleConfig, GrowthCycle
 from chowder.growth.data_registry import DataRegistry, DataSource, admit
 from chowder.growth.failure_bank import FailureBank
 from chowder.growth.frontier_reference import SnapshotStore
+from chowder.evals.result import MEASURED_PARENT, MEASURED_THIS_GENERATION
 from chowder.growth.lineage import GenerationLedger, RegressionMemory
 from chowder.growth.promotion import BenchmarkResult
 from chowder.growth.recipe_planner import TrainingRecipe
@@ -244,31 +245,34 @@ def test_s0_a_fake_training_fn_drives_the_cycle_to_a_recorded_promotion(tmp_path
         # sample cannot be called significant without inventing variance.
         return (mean - 0.03,) * 3 + (mean + 0.03,) * 3
 
-    def _measured(score: float, other: float) -> dict[str, BenchmarkResult]:
+    def _measured(score: float, other: float, *, origin: str) -> dict[str, BenchmarkResult]:
         return {
             TARGET_ID: BenchmarkResult(
                 benchmark_qualified_id=TARGET_ID,
                 score=score,
                 samples=_samples(score),
                 contamination="CLEAN",
+                measurement_origin=origin,
             ),
             PROTECTED_ID: BenchmarkResult(
                 benchmark_qualified_id=PROTECTED_ID,
                 score=other,
                 samples=_samples(other),
                 contamination="CLEAN",
+                measurement_origin=origin,
             ),
             BROAD_ID: BenchmarkResult(
                 benchmark_qualified_id=BROAD_ID,
                 score=other,
                 samples=_samples(other),
                 contamination="CLEAN",
+                measurement_origin=origin,
             ),
         }
 
     decision = cycle.decide_promotion(
-        candidate_results=_measured(0.62, 0.80),
-        parent_results=_measured(0.30, 0.80),
+        candidate_results=_measured(0.62, 0.80, origin=MEASURED_THIS_GENERATION),
+        parent_results=_measured(0.30, 0.80, origin=MEASURED_PARENT),
         device_gpu_hours=results[0]["measured_gpu_hours"],
     )
     assert decision.verdict == "PROMOTED", decision.reasons

@@ -34,6 +34,7 @@ import pytest
 
 from chowder.evals.result import (
     AGENT_HARNESS,
+    MEASURED_THIS_GENERATION,
     NOT_APPLICABLE_MODALITY,
     RAW_MODEL,
     SUPPORTED,
@@ -116,6 +117,7 @@ def _run(
     generation_version: str = "gen1",
     support: str = SUPPORTED,
     metadata: dict | None = None,
+    measurement_origin: str = MEASURED_THIS_GENERATION,
 ) -> BenchmarkRun:
     return BenchmarkRun(
         benchmark_qualified_id=qualified_id,
@@ -128,6 +130,7 @@ def _run(
         per_sample_scores=samples,
         metric=metric,
         metadata=metadata or {},
+        measurement_origin=measurement_origin,
     )
 
 
