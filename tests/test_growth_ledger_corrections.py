@@ -54,8 +54,8 @@ def test_original_record_untouched_by_revision(tmp_path: Path) -> None:
     assert before == after  # original bytes unchanged
 
 
-def test_revision_appends_and_chains(tmp_path: Path) -> Path:
-    path = tmp_path
+def _append_two_revisions(path: Path) -> Path:
+    """Record a generation, append two chained revisions, return the ledger root."""
     _record(GenerationLedger(path))
     ledger = GenerationLedger(path)
     first = ledger.append_adjudication_revision(
@@ -80,8 +80,13 @@ def test_revision_appends_and_chains(tmp_path: Path) -> Path:
     return path
 
 
+def test_revision_appends_and_chains(tmp_path: Path) -> None:
+    path = _append_two_revisions(tmp_path)
+    assert GenerationLedger(path).effective_verdict("gen1") == "PROMOTED"
+
+
 def test_effective_verdict_is_deterministic(tmp_path: Path) -> None:
-    path = test_revision_appends_and_chains(tmp_path)
+    path = _append_two_revisions(tmp_path)
     # Reload from disk each time: resolution is a function of the file, not
     # of any in-memory state.
     for _ in range(3):
