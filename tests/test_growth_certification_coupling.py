@@ -35,6 +35,7 @@ from chowder.growth.campaign_runner import CERTIFICATION_EVIDENCE
 
 import test_growth_campaign_runner as campaign_fixture
 from test_growth_gen2_judge import (  # the judge's own fixture builders
+    FROZEN_CAMPAIGN_MANIFEST,
     judge_gen2,
     _slice_run,
     _write_arm,
@@ -172,6 +173,17 @@ def _campaign(
     )
     manifest_path = inputs / "campaign.json"
     assert CampaignManifest.from_file(manifest_path).cycle_id == manifest.cycle_id
+    # The judge's benchmark sets stay the frozen ones (that is the certification
+    # contract); only its contamination pin is re-pointed at the evidence this run
+    # produced -- exactly the relationship the frozen declaration has in
+    # production, where the pin *is* the state root's own manifest.
+    judged = json.loads(FROZEN_CAMPAIGN_MANIFEST.read_text(encoding="utf-8"))
+    judged["contamination_manifest_path"] = str(
+        Path(manifest.state_root) / CERTIFICATION_EVIDENCE["contamination"]
+    )
+    judged_path = tmp_path / "judged-campaign.json"
+    judged_path.write_text(json.dumps(judged), encoding="utf-8")
+    monkeypatch.setattr(judge_gen2, "CAMPAIGN_MANIFEST", judged_path)
     monkeypatch.setattr(campaign_runner, "default_runner", runner)
     monkeypatch.setattr(
         sys, "argv", ["chowder", "growth", "campaign", "run", str(manifest_path)]
@@ -289,6 +301,63 @@ def test_tampered_evidence_is_refused(
 
     verdict, output = _judge(root)
     assert verdict == 1, f"the judge certified tampered evidence ({mutation}):\n{output}"
+
+
+def test_a_run_root_copy_that_is_not_the_pinned_evidence_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: the judged contamination evidence is the pin, not the copy.
+
+    The runner copies the campaign's declared artifact into the run root, so the
+    two agree. When the copy no longer matches the pin, the judged evidence set is
+    not the evidence the run bound -- a refusal, not a preference for one of the
+    two documents.
+    """
+    root, code, _payload = _campaign(tmp_path, monkeypatch)
+    assert code == 0
+
+    pinned = tmp_path / "inputs" / "campaign-contamination.json"
+    judged = json.loads(FROZEN_CAMPAIGN_MANIFEST.read_text(encoding="utf-8"))
+    judged["contamination_manifest_path"] = str(pinned)
+    judged_path = tmp_path / "judged-external-campaign.json"
+    judged_path.write_text(json.dumps(judged), encoding="utf-8")
+    monkeypatch.setattr(judge_gen2, "CAMPAIGN_MANIFEST", judged_path)
+
+    assert _judge(root)[0] == 0, "identical bytes must certify"
+
+    (root / CERTIFICATION_EVIDENCE["contamination"]).write_text(
+        json.dumps(
+            {
+                "benchmarks": {
+                    qualified_id: {"status": "CLEAN"}
+                    for qualified_id in (INSTRUMENT, MATH, MGSM)
+                },
+                "training_sources": {"src-1": {"status": "CLEAN"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    verdict, output = _judge(root)
+    assert verdict == 1, f"an unpinned copy certified the release:\n{output}"
+    assert judge_gen2.CONTAMINATION_EVIDENCE_NOT_PINNED in output
+
+
+def test_a_copied_measurement_artifact_that_changed_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: the run carries the bytes its measurements name, and the judge
+    recomputes the digest over them rather than trusting the recorded string."""
+    root, code, _payload = _campaign(tmp_path, monkeypatch)
+    assert code == 0
+    assert _judge(root)[0] == 0
+
+    artifact = root / "raw" / "gen2-math500-2024-04-slice.json"
+    assert artifact.is_file(), "the run did not carry the measurement it judged"
+    artifact.write_text('{"rewritten": "after the digest was recorded"}', encoding="utf-8")
+
+    verdict, output = _judge(root)
+    assert verdict == 1, f"a mutated measurement certified:\n{output}"
+    assert judge_gen2.MEASUREMENT_DIGEST_MISMATCH in output
 
 
 def test_the_judged_artifact_names_match_the_frozen_judge() -> None:
