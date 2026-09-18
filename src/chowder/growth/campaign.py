@@ -327,6 +327,27 @@ class CampaignManifest:
     protection: ProtectionDeclaration = field(default_factory=ProtectionDeclaration)
     notes: str = ""
 
+    @property
+    def evaluated_benchmarks(self) -> tuple[str, ...]:
+        """Every benchmark the campaign declares as measured, deduplicated.
+
+        One list for the evaluator's admission and its coverage rule: a
+        benchmark named in two sets (gen2 declares its mini-slices protected
+        *and* broad) is one measurement, not two.
+        """
+        ordered: list[str] = []
+        for set_name in (
+            "target_benchmarks",
+            "protected_benchmarks",
+            "broad_benchmarks",
+            "calibration_benchmarks",
+            "reliability_benchmarks",
+        ):
+            for qualified_id in getattr(self, set_name):
+                if qualified_id not in ordered:
+                    ordered.append(qualified_id)
+        return tuple(ordered)
+
     @classmethod
     def from_file(cls, path: Path | str) -> "CampaignManifest":
         path = Path(path)

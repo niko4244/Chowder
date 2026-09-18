@@ -68,6 +68,11 @@ CANDIDATE_EVALUATION_IDENTITY_UNBOUND = "CANDIDATE_EVALUATION_IDENTITY_UNBOUND"
 CANDIDATE_EVALUATION_WRONG_GENERATION = "CANDIDATE_EVALUATION_WRONG_GENERATION"
 #: One benchmark measured more than once in one evaluation.
 CANDIDATE_EVALUATION_DUPLICATE_BENCHMARK = "CANDIDATE_EVALUATION_DUPLICATE_BENCHMARK"
+#: The evaluation reported no cost, so its compute cannot be charged.
+CANDIDATE_EVALUATION_COST_UNREPORTED = "CANDIDATE_EVALUATION_COST_UNREPORTED"
+#: A zero cost that names no measurement method is an unreported cost wearing a
+#: zero: only an explicit, stated zero may be charged as zero.
+CANDIDATE_EVALUATION_COST_UNMEASURED = "CANDIDATE_EVALUATION_COST_UNMEASURED"
 
 
 class CandidateEvaluationRefusal(RuntimeError):
@@ -191,29 +196,70 @@ class CandidateEvaluation:
     ``cost`` is the compute this evaluation actually consumed. It is charged to
     the cycle's ledger before settlement, so a campaign cannot spend compute on
     evaluation without that spend counting against its own declared ceilings.
+
+    It is therefore **not** optional at the boundary: an evaluation that reports
+    no cost is charged as zero, and a zero charge is exactly how a real
+    evaluation leg disappears from the campaign's accounting. A zero is legal
+    only as an explicit, measured zero (see :func:`validate_evaluation_cost`).
     """
 
     report: EvalReport
     cost: ComputeCost | None = None
 
 
-#: The seam. An evaluator takes the request and returns the measured report --
-#: a bare :class:`~chowder.evals.result.EvalReport` or a
-#: :class:`CandidateEvaluation` when it also reports its cost.
+#: The seam. An evaluator takes the request and returns a
+#: :class:`CandidateEvaluation` -- the measurement *and* the compute it cost.
+#: A bare report is refused rather than defaulted to zero cost.
 CandidateEvaluator = Callable[[EvaluationRequest], Any]
 
 
 def coerce_evaluation(value: Any) -> CandidateEvaluation:
-    """Accept either shape a seam may return, refusing everything else."""
+    """Accept the seam's one shape, refusing everything else.
+
+    A bare :class:`~chowder.evals.result.EvalReport` used to be accepted and
+    silently became a zero-cost evaluation. It is refused now: the campaign
+    charges the evaluation leg against its own ceilings, and an evaluator that
+    does not say what it spent cannot be charged.
+    """
     if isinstance(value, CandidateEvaluation):
         return value
     if isinstance(value, EvalReport):
-        return CandidateEvaluation(report=value)
+        raise CandidateEvaluationRefusal(
+            f"{CANDIDATE_EVALUATION_COST_UNREPORTED}: the evaluator returned a "
+            "bare EvalReport, which reports no compute; a report without a cost "
+            "would be charged as zero, so it is refused. Return a "
+            "CandidateEvaluation carrying the measured ComputeCost, and use an "
+            "explicit measured zero for a leg that really spent nothing"
+        )
     raise CandidateEvaluationRefusal(
-        f"the evaluator returned {type(value).__name__}, which is not an "
-        "EvalReport or CandidateEvaluation; the run will not guess at measured "
-        "evidence"
+        f"the evaluator returned {type(value).__name__}, which is not a "
+        "CandidateEvaluation; the run will not guess at measured evidence"
     )
+
+
+def validate_evaluation_cost(evaluation: CandidateEvaluation) -> ComputeCost:
+    """The compute this evaluation must be charged for, or a refusal.
+
+    Fail-closed in the two ways that let evaluation spend vanish: a cost that
+    was never reported, and a zero that names no measurement method -- which is
+    indistinguishable from "not reported" and would make every free-looking
+    evaluation leg disappear from the campaign's accounting.
+    """
+    cost = evaluation.cost
+    if cost is None:
+        raise CandidateEvaluationRefusal(
+            f"{CANDIDATE_EVALUATION_COST_UNREPORTED}: the evaluation reports no "
+            "cost, so its compute cannot be charged; measuring the candidate is "
+            "spend like any other leg and an unreported cost would settle as zero"
+        )
+    if cost.wall_gpu_hours == 0.0 and not cost.measurement_method.strip():
+        raise CandidateEvaluationRefusal(
+            f"{CANDIDATE_EVALUATION_COST_UNMEASURED}: the evaluation reports zero "
+            "wall GPU-hours without naming how that was measured, so the zero is "
+            "indistinguishable from an unreported cost; a measured zero must say "
+            "what was measured (ComputeCost.zero(measurement_method=...))"
+        )
+    return cost
 
 
 def validate_candidate_report(
@@ -232,6 +278,11 @@ def validate_candidate_report(
             f"{CANDIDATE_EVALUATION_EMPTY}: the evaluator measured nothing for "
             f"{declared}"
         )
+    # The cost is validated here, at the boundary, so every consumer downstream
+    # may treat it as present and charged. Before this rule a report without a
+    # cost settled as zero and the campaign could stay inside a budget it had
+    # actually spent.
+    validate_evaluation_cost(evaluation)
     if report.generation_version != request.candidate_version:
         raise CandidateEvaluationRefusal(
             f"{CANDIDATE_EVALUATION_WRONG_GENERATION}: the evaluation is labelled "
@@ -281,7 +332,15 @@ def validate_candidate_report(
             # evaluator was asked and could not measure. It covers the declared
             # benchmark (the question was put to it) and stays unmeasured all the
             # way through, which is how a gate refuses to read it as a pass.
-            seen.setdefault(qualified_id, run)
+            # It is still one row per benchmark: two unmeasured rows under one
+            # id are ambiguous evidence, exactly like two measured ones.
+            if qualified_id in seen:
+                raise CandidateEvaluationRefusal(
+                    f"{CANDIDATE_EVALUATION_DUPLICATE_BENCHMARK}: {qualified_id} has "
+                    "more than one row (at least one of them unmeasured); one "
+                    "benchmark carries one row, measured or not"
+                )
+            seen[qualified_id] = run
             continue
         if run.generation_version != request.candidate_version:
             raise CandidateEvaluationRefusal(
@@ -383,6 +442,8 @@ def _is_sha256(value: Any) -> bool:
 
 
 __all__ = [
+    "CANDIDATE_EVALUATION_COST_UNMEASURED",
+    "CANDIDATE_EVALUATION_COST_UNREPORTED",
     "CANDIDATE_EVALUATION_DUPLICATE_BENCHMARK",
     "CANDIDATE_EVALUATION_EMPTY",
     "CANDIDATE_EVALUATION_IDENTITY_UNBOUND",
@@ -398,5 +459,6 @@ __all__ = [
     "evaluation_detail",
     "undeclared_rows",
     "validate_candidate_report",
+    "validate_evaluation_cost",
     "write_candidate_evaluation",
 ]

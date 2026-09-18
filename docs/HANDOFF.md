@@ -138,6 +138,22 @@ bound to the `predictions-<suite>.jsonl` it produced and the digest of those
 bytes. `chowder growth campaign run` therefore reaches a verdict (including a
 durable promotion) from evidence the run produced, with no injected seam.
 
+`GEN2_PREREG_AMENDMENT7_2026-09-18.md` closes the three ways that instrument
+could still spend or record something the campaign could not account for. The
+evaluation's computed cost is no longer optional: a seam that returns a bare
+`EvalReport`, or a `CandidateEvaluation` with no cost, or a zero naming no
+measurement method, refuses with `CANDIDATE_EVALUATION_COST_UNREPORTED` /
+`_COST_UNMEASURED` instead of being charged as zero. The evaluator is built and
+admitted *before* training (`readiness` phase: arms parse, an evaluator exists,
+it covers every declared benchmark, its datasets hold the declared slice size),
+so a run cannot spend a training budget and only then find it has no instrument;
+and a refusal after training is recorded rather than raised — accounting,
+per-attempt facts, the selection and the reason are written and the CLI exits
+non-zero. The selected artifact's digest is re-derived from disk immediately
+before it is measured and again before the judged evidence set is written
+(`CANDIDATE_ARTIFACT_DIGEST_STALE`), so no run can certify a digest the frozen
+judge would recompute and reject.
+
 Two things are deliberately **not** done here: the target instrument's diagnostic
 metadata (the judge's T1–T10) still exists only in the historical Gen-1 driver
 rather than in `src/`, and the checked-in `docs/gen2/gen2_campaign.json` still
