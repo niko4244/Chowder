@@ -237,7 +237,27 @@ side: `campaign_runner._verify_base_identity` verifies a base with
 payload files only, so cache churn cannot move base identity and a substituted
 payload file still refuses. The adapter keeps `directory_digest` as its own
 field. Readiness against the committed declaration now reports
-`base_identity: ok`; the remaining refusal is the undeclared inputs.
+`base_identity: ok`.
+
+`GEN2_PREREG_AMENDMENT11_2026-09-18.md` produces the declared inputs from
+production code, so readiness no longer refuses on `READINESS_DECLARED_INPUT`.
+`chowder growth campaign prepare <manifest> --out-dir DIR --parent-evidence ROOT`
+emits every input from durable evidence: a real device probe for the hardware
+budget, the pinned local dataset caches (and the in-repo, production-owned
+16-prompt diagnostics instrument) for the evaluation material, the parent
+generation's own run root for the parent arm and profile, and the production
+planner's own curriculum item ids for the corpus, registry and project template.
+The parent **arm** is strict (`MEASURED_PARENT` only for the exact declared
+benchmark; a carried slice stays `UNMEASURED`), while the **profile** keeps
+whatever the parent durably measured -- the two answer different questions.
+`--write-declaration` also fills `recipes` with the ids the planner actually
+proposes. `chowder growth campaign measure-ancestor <manifest>` then measures the
+untouched dense Gen-0 base through the same production worker with **no adapter
+loaded** and writes the declared `baseline_eval_report_path` with
+`MEASURED_PARENT` / trusted-ancestor rows, per-item scores and digest-bound
+artifacts, referenced at zero incremental campaign cost. One pre-compute blocker
+is *reported* rather than papered over: the parent arm holds no measurement under
+the Gen-2 target instrument, so the target comparison still lacks a parent row.
 
 The production verdict and the frozen judge are held to one invariant by
 `tests/test_growth_gen2_dry_run_matrix.py`: across clean promotion, an inherited

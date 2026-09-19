@@ -209,9 +209,28 @@ composed four of them in process, gen1 has no measured parent profile, the
 contamination manifest is produced by the run itself, and the evaluation material
 the evaluator measures with does not exist yet. Both entry points refuse before
 compute, naming **every** missing input at once
-(`require_declared_inputs`), and the declaration's own `notes` say so. Producing
-those documents from production code, plus the instrument that measures the
-selected adapter under the declared protocol, is the remaining pre-compute
+(`require_declared_inputs`), and the declaration's own `notes` say so.
+`GEN2_PREREG_AMENDMENT11_2026-09-18.md` then produces those documents from
+production code. `chowder growth campaign prepare <manifest> --out-dir DIR
+--parent-evidence ROOT` emits every declared input from durable evidence: a real
+device probe for the hardware budget, the pinned local caches (and the in-repo
+production-owned 16-prompt diagnostics instrument) for the evaluation material,
+the parent generation's own run root for the parent arm and profile, and the
+production planner's own curriculum item ids for the corpus, registry and project
+template. The parent **arm** is strict (`MEASURED_PARENT` only for the exact
+declared benchmark; a carried slice is `UNMEASURED`), while the **profile** keeps
+whatever the parent durably measured — arm and profile are different questions.
+`--write-declaration` also fills `recipes` with the ids production proposes.
+`prepare` against the committed declaration produced every input, so readiness no
+longer reports `READINESS_DECLARED_INPUT`. And `chowder growth campaign
+measure-ancestor <manifest>` measures the untouched dense Gen-0 base through the
+same production worker with no adapter loaded, writing the declared
+`baseline_eval_report_path` with `MEASURED_PARENT` / gen0 rows, per-item scores
+and digest-bound artifacts at zero incremental campaign cost. One pre-compute
+blocker is *reported*, not papered over: the parent arm has no measurement under
+the Gen-2 target instrument, so the target comparison still lacks a parent row
+and Gen-2 can only reach `INCONCLUSIVE` on target until that is resolved. The
+remaining pre-compute
 build; nothing is invented to make the declaration look runnable.
 
 Earlier state for the record (2026-09-17): the first real Model N → N+1

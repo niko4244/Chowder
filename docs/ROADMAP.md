@@ -128,20 +128,40 @@ records the two facts only the worker can observe, and the evaluation binding
 merges them into the row's metadata flat, where T1–T10 read them). The scoring is
 the Gen-1 rule, so the row's own score *is* its `eos_termination_rate`, and the
 version the judge pins is now a registered benchmark rather than an id no
-registry knew. Two builds remain before a real gen2 cycle can run, and both are
-honestly labelled rather than simulated:
+registry knew. `GEN2_PREREG_AMENDMENT11_2026-09-18.md` closes the readiness side of that build
+with production code rather than a script. `chowder growth campaign prepare
+<manifest> --out-dir DIR --parent-evidence ROOT` emits the declaration's
+required inputs from evidence the repository already holds: a **real device
+probe** for the hardware budget, the **pinned local dataset caches** (and the
+in-repo, production-owned 16-prompt generation-diagnostics instrument, pinned
+byte-identical to the frozen judge's copy by a test) for the evaluation
+material, the **parent generation's own durable run root** for the parent arm and
+profile, and the **production planner's own curriculum item ids** for the corpus,
+registry and project template. The parent *arm* is strict — a row is
+`MEASURED_PARENT` only for the exact declared benchmark, and a slice the parent
+carried is `UNMEASURED` rather than relabelled — while the *profile* keeps
+whatever the parent durably measured. `--write-declaration` also fills `recipes`
+with the ids production proposes, which were not knowable before the hardware and
+profile existed.
 
-2. **The gen2 declaration's run inputs.** `docs/gen2/gen2_campaign.json`
-declares identity, benchmark sets, budgets, protection and the Gen-0 arm, but
-five inputs have no artifact anywhere (`project_template_path`,
-`training_material_path`, `data_registry_path`, `hardware_budget_path` — the
-Gen-1 driver composed them in process — and `evaluation_material_path`, the
-datasets the evaluator now measures), `parent_profile_path` has no gen1
-measurement, and the Gen-0 baseline arm is declared but not yet measured.
-`plan` and `run` therefore refuse, naming every missing input at once.
-3. **Measuring the Gen-0 arm.** T16 stays `UNKNOWN` until that declared 16-item
-mini-slice exists at `baseline_eval_report_path`, so gen2 cannot be certified by
-branch protection yet.
+`chowder growth campaign measure-ancestor <manifest>` is the second half: it
+drives the **same production worker** the candidate evaluator uses with **no
+adapter loaded**, so the untouched dense Gen-0 base is what is measured. Its rows
+are `MEASURED_PARENT` under the declared trusted-ancestor label with per-item
+scores and digest-bound artifacts, and it is referenced at zero incremental
+campaign cost. (This required one narrow evaluator change: the spec now accepts
+`adapter_dir=None` as a *declared base-only measurement* — the worker already had
+the branch, and an empty string stays refused.)
+
+Against the committed declaration, `prepare` now produces every declared input,
+so readiness no longer reports `READINESS_DECLARED_INPUT`; its remaining codes
+were `READINESS_ANCESTOR_ARM` (now addressable by `measure-ancestor`) and
+`READINESS_RECIPE_SET` (addressable by the recipe fill). One pre-compute blocker
+is *reported* rather than papered over: the parent arm has no measurement under
+the Gen-2 target instrument (`gen2-response-surface-v1`), so the promotion rule's
+target comparison still lacks a parent row and Gen-2 can only reach
+`INCONCLUSIVE` on target until the parent is measured under that instrument or
+the campaign declares the parent's own instrument.
 
 The port is proven end to end without a GPU:
 `tests/test_growth_certification_coupling.py` drives a manifest through the real
