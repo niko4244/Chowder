@@ -263,3 +263,42 @@ def test_plan_prints_the_next_target_without_composing_a_declaration(
     assert payload["proposal"]["target_skill"]
     assert payload["proposal"]["target_benchmarks"]
     assert not list(tmp_path.glob("gen3-a1-*")), "planning must not freeze anything"
+
+
+def test_plan_refuses_a_profile_measured_on_another_generation(
+    tmp_path: Path, capsys
+) -> None:
+    """The operator seam is where a wrong generation gets handed in.
+
+    ``--parent-evidence`` names a run root; nothing about a well-formed report
+    says it measured *this* declaration's parent. Rewriting the same fixture's
+    arm to be the previous generation's -- the shape a hand-assembled evidence
+    directory has -- must refuse rather than plan the next target from it.
+    """
+    manifest_path, policy_path, evidence = _fixture(tmp_path)
+    report = json.loads((evidence / "candidate_evaluation.json").read_text(encoding="utf-8"))
+    report["generation_version"] = "gen1"
+    for run in report["runs"]:
+        run["generation_version"] = "gen1"
+    (evidence / "candidate_evaluation.json").write_text(
+        json.dumps(report, indent=2), encoding="utf-8"
+    )
+
+    exit_code = _main(
+        "growth",
+        "loop",
+        "plan",
+        str(policy_path),
+        "--parent",
+        str(manifest_path),
+        "--parent-evidence",
+        str(evidence),
+        "--state-root",
+        str(tmp_path / "mismatch-state"),
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["decision"]["action"] == "STOP_UNCERTAIN"
+    assert "PROFILE_GENERATION_MISMATCH" in payload["decision"]["reason_codes"]
+    assert not list(tmp_path.glob("gen3-a1-*")), "nothing may be composed from it"

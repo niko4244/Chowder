@@ -38,7 +38,7 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .campaign import CampaignManifest
 from .next_campaign import (
@@ -91,6 +91,7 @@ PROMOTION_WITHOUT_DECLARATION = "PROMOTION_WITHOUT_DECLARATION"
 CONSECUTIVE_NON_PROMOTIONS = "CONSECUTIVE_NON_PROMOTIONS"
 GENERATION_LIMIT_REACHED = "GENERATION_LIMIT_REACHED"
 NOTHING_LEFT_TO_IMPROVE = "NOTHING_LEFT_TO_IMPROVE"
+PROFILE_GENERATION_MISMATCH = "PROFILE_GENERATION_MISMATCH"
 
 #: Treatments that the loop will never start on its own, whatever the score.
 #: They are not "bad targets": they are targets whose safety this loop cannot
@@ -550,15 +551,54 @@ class GrowthLoop:
 
     # -- one iteration -----------------------------------------------------
 
-    def _one_generation(self, *, index: int, exhausted: set[str]) -> "_Step":
+    def plan_next(self, *, exhausted: Iterable[str] = ()) -> Any:
+        """What the loop would attempt next, decided by the loop's own gates.
+
+        Returns the :class:`TargetProposal` it would build a campaign for, or the
+        :class:`LoopDecision` it would stop on instead. Read-only: no declaration
+        is frozen, no target is recorded, nothing is spent.
+
+        This exists so a dry run cannot advertise something a run would refuse.
+        The gates live in ``_proposal_or_decision`` and both callers go through
+        them, rather than a plan re-deriving the selector call and quietly
+        skipping the profile, treatment and envelope checks the run applies.
+        """
+        proposal, decision = self._proposal_or_decision(set(exhausted))
+        return decision if decision is not None else proposal
+
+    def _proposal_or_decision(
+        self, exhausted: set[str]
+    ) -> tuple[Any | None, LoopDecision | None]:
+        """The gates that stand between the loop and spending, in one place.
+
+        Returns either the proposal it may build a campaign for, or the decision
+        it must take instead -- never both, and never neither.
+        """
         if self._profile is None or not self._profile.measured:
-            return _Step(
-                LoopDecision(
-                    STOP_UNCERTAIN,
-                    "the parent has no measured capability profile, so no target can "
-                    "be chosen from evidence",
-                    (NO_MEASURED_CAPABILITY,),
-                )
+            return None, LoopDecision(
+                STOP_UNCERTAIN,
+                "the parent has no measured capability profile, so no target can "
+                "be chosen from evidence",
+                (NO_MEASURED_CAPABILITY,),
+            )
+        # The profile must be a measurement of the generation it is used as the
+        # parent *of*. It is handed in from outside (a run root, or a stated
+        # file), so the loop is the only place that can pair it with the
+        # declaration it will be attributed to -- and a loop given one
+        # generation's arm while declaring another as the parent would choose
+        # the next target from evidence about a different model, then record the
+        # choice against this one. A mismatch is refused, never relabelled: the
+        # two are independent claims and neither can be inferred from the other.
+        declared = str(self.parent_declaration.resolved_candidate_version() or "")
+        measured = str(getattr(self._profile, "generation", "") or "")
+        if declared and measured != declared:
+            return None, LoopDecision(
+                STOP_UNCERTAIN,
+                f"the capability profile measures {measured!r} and the parent "
+                f"declaration's candidate is {declared!r}; planning the next "
+                "target from it would choose from evidence about a different "
+                "model while declaring this one as the parent",
+                (PROFILE_GENERATION_MISMATCH,),
             )
         try:
             proposal = self.selector.propose(
@@ -570,32 +610,26 @@ class GrowthLoop:
                 exclude_skills=exhausted,
             )
         except ValueError as error:
-            return _Step(
-                LoopDecision(
-                    STOP_SUCCESS,
-                    f"no target this loop is allowed to improve remains: {error}",
-                    (NOTHING_LEFT_TO_IMPROVE,),
-                )
+            return None, LoopDecision(
+                STOP_SUCCESS,
+                f"no target this loop is allowed to improve remains: {error}",
+                (NOTHING_LEFT_TO_IMPROVE,),
             )
 
         if str(proposal.suggested_training_type) in REVIEW_TREATMENTS:
-            return _Step(
-                LoopDecision(
-                    REQUIRES_HUMAN_REVIEW,
-                    f"the target {proposal.target_skill!r} needs "
-                    f"{proposal.suggested_training_type!r}: {proposal.treatment_reason}",
-                    (TREATMENT_REQUIRES_REVIEW,),
-                )
+            return None, LoopDecision(
+                REQUIRES_HUMAN_REVIEW,
+                f"the target {proposal.target_skill!r} needs "
+                f"{proposal.suggested_training_type!r}: {proposal.treatment_reason}",
+                (TREATMENT_REQUIRES_REVIEW,),
             )
         if not self.policy.allows_treatment(proposal.suggested_training_type):
-            return _Step(
-                LoopDecision(
-                    REQUIRES_HUMAN_REVIEW,
-                    f"the target {proposal.target_skill!r} wants "
-                    f"{proposal.suggested_training_type!r}, which this policy does "
-                    "not allow; widening the policy is a human decision",
-                    (TREATMENT_REQUIRES_REVIEW,),
-                )
+            return None, LoopDecision(
+                REQUIRES_HUMAN_REVIEW,
+                f"the target {proposal.target_skill!r} wants "
+                f"{proposal.suggested_training_type!r}, which this policy does "
+                "not allow; widening the policy is a human decision",
+                (TREATMENT_REQUIRES_REVIEW,),
             )
 
         # Admission *before* building or spending: the loop must be able to
@@ -606,7 +640,15 @@ class GrowthLoop:
             )
         )
         if not affordable:
-            return _Step(LoopDecision(STOP_BUDGET, reason, (REMAINING_ENVELOPE_TOO_SMALL,)))
+            return None, LoopDecision(
+                STOP_BUDGET, reason, (REMAINING_ENVELOPE_TOO_SMALL,)
+            )
+        return proposal, None
+
+    def _one_generation(self, *, index: int, exhausted: set[str]) -> "_Step":
+        proposal, refusal = self._proposal_or_decision(exhausted)
+        if refusal is not None:
+            return _Step(refusal)
 
         # Generations live beside the parent's run root. The *name* of this
         # attempt belongs to the builder, which is the only owner of the cycle
