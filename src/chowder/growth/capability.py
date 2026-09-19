@@ -121,6 +121,75 @@ class CapabilityProfile:
         return None
 
     @classmethod
+    def from_skill_profile(
+        cls, profile: Any, *, model_version: str | None = None  # noqa: ANN401 - a SkillProfile
+    ) -> "CapabilityProfile":
+        """A **derived view** of an evidence-attributed ``SkillProfile``.
+
+        The attributed profile (``target_selection.SkillProfile``) is the one
+        authoritative representation of what a model can do: each skill keeps the
+        benchmarks that measured it, its own estimate, and ``None`` when nothing
+        measured it. Two things in the codebase still want the flatter shape this
+        class has -- the curriculum engine reads ``skills`` as a list and the
+        legacy frontier/parity helpers read ``raw_scores`` -- so this adapter
+        exists rather than a second profile being computed from the same rows.
+
+        It is a *view*, and it is lossy in one named way: ``SkillEstimate``
+        cannot express "unknown". An unmeasured skill is therefore carried at
+        ``confidence=0.0`` with no evidence, which is what the curriculum's
+        ``confidence <= 0.05`` filter already reads as "do not prioritize". The
+        skills that lost their number are named in ``notes['unmeasured']`` so the
+        loss is visible in the view instead of looking like a measured zero.
+
+        No averaging happens here: a skill's estimate is the estimate computed
+        from *its own* benchmarks. That is the defect this replaces -- the old
+        prepared profile gave every skill the mean of whatever was measured.
+        """
+        estimates = tuple(getattr(profile, "estimates", ()))
+        skills: list[SkillEstimate] = []
+        unmeasured: list[str] = []
+        raw_scores: dict[str, float] = {}
+        tainted: list[str] = []
+        for estimate in estimates:
+            skill = str(getattr(estimate, "skill", ""))
+            value = getattr(estimate, "estimate", None)
+            if value is None:
+                unmeasured.append(skill)
+                skills.append(
+                    SkillEstimate(skill=skill, estimate=0.0, confidence=0.0, evidence=())
+                )
+                continue
+            evidence = tuple(str(item) for item in (getattr(estimate, "supporting_benchmarks", ()) or ()))
+            skills.append(
+                SkillEstimate(
+                    skill=skill,
+                    estimate=float(value),
+                    confidence=float(getattr(estimate, "confidence", 0.0) or 0.0),
+                    evidence=evidence,
+                )
+            )
+            for benchmark, score in dict(
+                getattr(estimate, "benchmark_measurements", {}) or {}
+            ).items():
+                raw_scores[str(benchmark)] = float(score)
+            # A skill that was measured is not tainted; the attributed profile
+            # excludes carried/grey rows before it ever produces an estimate, so
+            # this view has no tainted benchmarks to report.
+        return cls(
+            model_version=str(model_version or getattr(profile, "generation", "")),
+            raw_scores=raw_scores,
+            skills=tuple(skills),
+            tainted=tuple(tainted),
+            notes={
+                "view": "derived from the attributed skill profile; not a measurement itself",
+                "authoritative_profile": "SkillProfile",
+                "unmeasured": sorted(unmeasured),
+                "aggregation": str(getattr(profile, "aggregation", ""))
+                or getattr(profile, "notes", ""),
+            },
+        )
+
+    @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "CapabilityProfile":
         """Rebuild a profile from :meth:`to_dict` output (e.g. an eval pass)."""
         return cls(

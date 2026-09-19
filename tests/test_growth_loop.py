@@ -40,7 +40,13 @@ from chowder.growth.growth_loop import (
 )
 from chowder.growth.simulator import skill_profile
 from chowder.growth.target_selection import GrowthState
-from fixtures_growth_loop import RecordingExecutor, outcome, parent_manifest, policy_from
+from fixtures_growth_loop import (
+    RecordingExecutor,
+    outcome,
+    parent_manifest,
+    planned_recipes,
+    policy_from,
+)
 
 START = {
     "math.reasoning": 0.62,
@@ -72,7 +78,7 @@ def _loop(
         # The generation the profile was measured on is part of the evidence, not
         # a detail: the loop refuses to plan from a profile of another model.
         parent_profile=skill_profile(profile, generation=generation) if profile else None,
-        prepare=lambda frozen: None,
+        prepare=planned_recipes,
         readiness=lambda frozen: True,
     )
     return loop, state

@@ -222,17 +222,22 @@ def test_the_parent_arm_marks_what_the_parent_did_not_measure(tmp_path: Path) ->
 def test_a_parent_measured_under_another_instrument_is_not_this_arm(tmp_path: Path) -> None:
     """A row for a different instrument version is not a measurement of this one."""
     manifest = _load_manifest(tmp_path, _manifest_document(tmp_path))
-    prepared = prepare_campaign(
-        manifest,
-        out_dir=tmp_path / "prepared",
-        parent_evidence=_parent_evidence(
-            tmp_path / "gen1", instrument="generation-diagnostics@gen1-other"
-        ),
-        probe=_probe,
-        slice_source=_slice_source(),
-    )
+    # Two honest consequences, and both are asserted: the arm carries no
+    # measurement of the declared benchmark, and preparation then refuses -- a
+    # parent with nothing measured under this protocol leaves no evidence to
+    # plan a curriculum from, which is `evaluation_needed`, not a training run.
+    with pytest.raises(CampaignPrepareRefusal):
+        prepare_campaign(
+            manifest,
+            out_dir=tmp_path / "prepared",
+            parent_evidence=_parent_evidence(
+                tmp_path / "gen1", instrument="generation-diagnostics@gen1-other"
+            ),
+            probe=_probe,
+            slice_source=_slice_source(),
+        )
     report = json.loads(
-        Path(prepared.inputs["parent_eval_report_path"]).read_text(encoding="utf-8")
+        (tmp_path / "prepared" / "parent-eval-report.json").read_text(encoding="utf-8")
     )
     assert all(run["measurement_origin"] == "UNMEASURED" for run in report["runs"])
 

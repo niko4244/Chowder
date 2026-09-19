@@ -55,6 +55,13 @@ NEXT_CAMPAIGN_TARGET_TOO_EXPENSIVE = "NEXT_CAMPAIGN_TARGET_TOO_EXPENSIVE"
 NEXT_CAMPAIGN_ALREADY_FROZEN = "NEXT_CAMPAIGN_ALREADY_FROZEN"
 NEXT_CAMPAIGN_PARENT_IDENTITY = "NEXT_CAMPAIGN_PARENT_IDENTITY"
 NEXT_CAMPAIGN_SCHEMA = "NEXT_CAMPAIGN_SCHEMA"
+#: A declaration was about to be frozen while it still carried the placeholder
+#: recipe identities a draft uses only to size the planner's proposal. Freezing
+#: those would preregister a recipe set no planner proposed.
+NEXT_CAMPAIGN_RECIPE_SET_UNPLANNED = "NEXT_CAMPAIGN_RECIPE_SET_UNPLANNED"
+#: Preparation ran but reported no recipe set, so the exact recipes the run
+#: would execute are unknown and nothing may be frozen.
+NEXT_CAMPAIGN_RECIPE_SET_ABSENT = "NEXT_CAMPAIGN_RECIPE_SET_ABSENT"
 
 POLICY_SCHEMA = "growth-loop-policy/1"
 PREREGISTRATION_SCHEMA = "growth-preregistration/1"
@@ -295,8 +302,202 @@ class FrozenCampaign:
         }
 
 
+#: The prefix a draft's placeholder recipe ids carry. A frozen declaration may
+#: never contain one, and :meth:`NextCampaignBuilder.freeze` refuses if it does.
+UNPLANNED_RECIPE_PREFIX = "unplanned-recipe-"
+
+
 def _slug(value: str) -> str:
     return "".join(character if character.isalnum() else "-" for character in value).strip("-")
+
+
+@dataclass(frozen=True)
+class ParentEvidenceRef:
+    """Which model the next generation learns from, named rather than inferred.
+
+    Every field is a *declared* fact about one generation, not a guess from the
+    shape of a directory tree.  The loop used to find the parent's evidence with
+    an expression like ``state_root.parent.parent``, which happens to point at
+    the right place only while one layout holds: a sibling campaign, a moved run
+    root or a re-run generation silently redirects the whole lineage to another
+    model's numbers.
+
+    The ref is carried forward only by a promotion, and it is carried *whole*:
+    the adapter digest, the base identity and the path to the arm that measured
+    the promoted model all travel together, so a resume cannot pair one
+    generation's adapter with another's measurement.
+    """
+
+    generation: str
+    run_root: str
+    base_model_path: str
+    base_model_digest: str
+    adapter_path: str = ""
+    adapter_digest: str = ""
+    #: The report whose rows are this model's measurements under the campaign's
+    #: declared protocol. Defaults to the run root's own candidate arm; a
+    #: generation measured separately (an arm re-measured under a newer
+    #: instrument) names that file here instead, so preparation reads the fresh
+    #: measurement rather than an older instrument that merely shares the root.
+    candidate_evaluation_path: str = ""
+    #: The attributed capability profile this generation produced, when it was
+    #: written to disk. Empty means "derive it from the arm", never "assume".
+    capability_profile_ref: str = ""
+
+    @property
+    def identity(self) -> tuple[str, str] | None:
+        """The (path, sha256) this ref pins as the model, or ``None`` for base."""
+        if not self.adapter_path.strip():
+            return None
+        return (self.adapter_path, self.adapter_digest)
+
+    @property
+    def measured_arm_path(self) -> str:
+        """The file holding this model's measurements, by declared convention."""
+        return self.candidate_evaluation_path or str(
+            Path(self.run_root) / "candidate_evaluation.json"
+        )
+
+    @classmethod
+    def from_declaration(
+        cls,
+        manifest: CampaignManifest,
+        *,
+        candidate_evaluation_path: str = "",
+        capability_profile_ref: str = "",
+    ) -> "ParentEvidenceRef":
+        """Read a generation's lineage facts from its own declaration.
+
+        A declaration states its generation, its run root, its dense base and the
+        adapter it trained from -- so the parent's evidence ref is a *projection*
+        of declared fields rather than an inference about layout.
+        """
+        return cls(
+            generation=str(manifest.resolved_candidate_version()),
+            run_root=str(manifest.state_root),
+            base_model_path=str(manifest.base_model_path),
+            base_model_digest=str(manifest.base_model_digest),
+            adapter_path=str(manifest.parent_adapter_path),
+            adapter_digest=str(manifest.parent_adapter_digest),
+            candidate_evaluation_path=str(candidate_evaluation_path),
+            capability_profile_ref=str(capability_profile_ref),
+        )
+
+    def verify(self, manifest: CampaignManifest) -> None:
+        """Refuse a ref that does not describe the declaration's own lineage.
+
+        Cheap and structural on purpose: byte-level digest verification is the
+        readiness gate's job and runs against the real artifact. What is checked
+        here is that the ref and the declaration cannot describe two different
+        models, which is the failure that makes the *wrong* adapter the parent.
+        """
+        if not self.generation.strip():
+            raise NextCampaignRefusal(
+                f"{NEXT_CAMPAIGN_PARENT_IDENTITY}: the parent evidence ref names no "
+                "generation, so the lineage it describes cannot be attributed"
+            )
+        if not self.run_root.strip():
+            raise NextCampaignRefusal(
+                f"{NEXT_CAMPAIGN_PARENT_IDENTITY}: the parent evidence ref for "
+                f"{self.generation!r} names no run root, so its measurements "
+                "cannot be located"
+            )
+        if self.generation != str(manifest.resolved_candidate_version()):
+            raise NextCampaignRefusal(
+                f"{NEXT_CAMPAIGN_PARENT_IDENTITY}: the parent evidence ref measures "
+                f"{self.generation!r} and the declaration's candidate is "
+                f"{manifest.resolved_candidate_version()!r}; the next generation "
+                "would train from one model while recording another as its parent"
+            )
+        if self.run_root != str(manifest.state_root):
+            # The ref must name *this* generation's own run root. The defect this
+            # replaces located it with ``state_root.parent.parent``, which points
+            # at the right place only while one directory layout holds -- a
+            # sibling campaign or a moved root silently redirects the lineage to
+            # another model's numbers.
+            raise NextCampaignRefusal(
+                f"{NEXT_CAMPAIGN_PARENT_IDENTITY}: the parent evidence ref reads "
+                f"{self.run_root!r} and the declaration's run root is "
+                f"{manifest.state_root!r}; the evidence the next generation would "
+                "learn from is not the evidence this generation produced"
+            )
+        # The adapter is deliberately *not* compared against the declaration's
+        # ``parent_adapter_*``: those name the adapter that declaration trained
+        # *from*, while this ref names the model the declaration produced. For a
+        # derived ref the two coincide; for a promoted one they are one
+        # generation apart, and conflating them would make a promotion's own
+        # evidence look like a mismatch.
+        if self.adapter_path.strip() and len(self.adapter_digest) != 64:
+            raise NextCampaignRefusal(
+                f"{NEXT_CAMPAIGN_PARENT_IDENTITY}: the parent evidence ref pins "
+                "an adapter path without a sha256, so the bytes it names are "
+                "unverified"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "generation": self.generation,
+            "run_root": self.run_root,
+            "base_model_path": self.base_model_path,
+            "base_model_digest": self.base_model_digest,
+            "adapter_path": self.adapter_path,
+            "adapter_digest": self.adapter_digest,
+            "candidate_evaluation_path": self.candidate_evaluation_path,
+            "capability_profile_ref": self.capability_profile_ref,
+        }
+
+    @classmethod
+    def from_mapping(cls, document: Mapping[str, Any]) -> "ParentEvidenceRef":
+        return cls(
+            generation=str(document.get("generation", "")),
+            run_root=str(document.get("run_root", "")),
+            base_model_path=str(document.get("base_model_path", "")),
+            base_model_digest=str(document.get("base_model_digest", "")),
+            adapter_path=str(document.get("adapter_path", "")),
+            adapter_digest=str(document.get("adapter_digest", "")),
+            candidate_evaluation_path=str(document.get("candidate_evaluation_path", "")),
+            capability_profile_ref=str(document.get("capability_profile_ref", "")),
+        )
+
+
+@dataclass(frozen=True)
+class CampaignDraft:
+    """A composed declaration *before* anyone knows which recipes will run.
+
+    A draft is deliberately not a preregistered campaign.  Its recipe entries are
+    placeholders whose only job is to tell the production planner how many
+    candidates the policy allows; the real identities come back from planning and
+    only :meth:`NextCampaignBuilder.freeze` may write them into a declaration.
+
+    Nothing is written to disk by composition, so a draft can be prepared,
+    planned against, refused and discarded without leaving a frozen artifact
+    that a later attempt would collide with.
+    """
+
+    cycle_id: str
+    candidate_version: str
+    generation_root: Path
+    directory: Path
+    attempt: int
+    manifest: CampaignManifest
+    document: Mapping[str, Any]
+    target: TargetProposal
+    policy_digest: str
+    placeholder_recipe_ids: tuple[str, ...]
+    parent_evidence: ParentEvidenceRef
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "cycle_id": self.cycle_id,
+            "candidate_version": self.candidate_version,
+            "directory": str(self.directory),
+            "attempt": self.attempt,
+            "target": self.target.to_dict(),
+            "policy_digest": self.policy_digest,
+            "placeholder_recipe_ids": list(self.placeholder_recipe_ids),
+            "parent_evidence": self.parent_evidence.to_dict(),
+            "frozen": False,
+        }
 
 
 class NextCampaignBuilder:
@@ -307,16 +508,16 @@ class NextCampaignBuilder:
 
     # -- composition -------------------------------------------------------
 
-    def build(
+    def draft(
         self,
         *,
         parent: CampaignManifest,
         target: TargetProposal,
         generation_root: str | Path,
         attempt: int = 1,
-        parent_identity: tuple[str, str] | None = None,
-    ) -> FrozenCampaign:
-        """Write the frozen declaration for one campaign attempt.
+        parent_evidence: ParentEvidenceRef | None = None,
+    ) -> CampaignDraft:
+        """Compose one campaign attempt, leaving the recipe set to be planned.
 
         ``parent`` is the last trusted declaration: the durable facts about the
         dense base, the trusted-ancestor arm and the promotion policy are
@@ -351,21 +552,27 @@ class NextCampaignBuilder:
                 f"campaign ceiling is {ceiling}; a campaign that cannot fit its own "
                 "envelope is not a campaign"
             )
-        adapter_path = ""
-        adapter_digest = ""
-        if parent_identity is not None:
-            adapter_path, adapter_digest = (str(parent_identity[0]), str(parent_identity[1]))
-            if not adapter_path.strip() or len(adapter_digest) != 64:
-                raise NextCampaignRefusal(
-                    f"{NEXT_CAMPAIGN_PARENT_IDENTITY}: the parent identity "
-                    f"{parent_identity!r} is not a (path, sha256) pair, so the next "
-                    "generation would train from an unbound adapter"
-                )
+        # The parent's evidence ref is stated, not discovered: it is either the
+        # caller's (the promoted run the loop remembered) or a projection of this
+        # declaration's own lineage fields. Never a search of the filesystem.
+        evidence = parent_evidence or ParentEvidenceRef.from_declaration(parent)
+        evidence.verify(parent)
+        # The adapter the next generation trains from *is* the ref's identity:
+        # there is one owner of "what model is the parent", so a caller cannot
+        # hand in a promoted identity alongside a ref describing another model.
+        adapter_path = evidence.adapter_path
+        adapter_digest = evidence.adapter_digest
 
         cycle_id = f"{candidate_version}-a{int(attempt)}-{_slug(target.target_skill)}"
         directory = Path(generation_root) / cycle_id
         directory.mkdir(parents=True, exist_ok=True)
         inputs = prepared_input_paths(directory)
+        # Placeholders, not a recipe set: their count is the authority the
+        # planner reads, their names are never frozen.
+        placeholder_recipe_ids = tuple(
+            f"{candidate_version}-{UNPLANNED_RECIPE_PREFIX}{index}"
+            for index in range(1, int(self.policy.maximum_candidates) + 1)
+        )
 
         document: dict[str, Any] = {
             "cycle_id": cycle_id,
@@ -387,10 +594,7 @@ class NextCampaignBuilder:
                 "wall_gpu_hours_ceiling_campaign": self.policy.campaign_budget.wall_gpu_hours_ceiling_campaign,
                 "device_time_measured": self.policy.campaign_budget.device_time_measured,
             },
-            "recipes": [
-                f"{candidate_version}-recipe-{index}"
-                for index in range(1, int(self.policy.maximum_candidates) + 1)
-            ],
+            "recipes": list(placeholder_recipe_ids),
             "candidate_selection_policy": self.policy.candidate_selection_policy,
             "stopping_rules": list(self.policy.stopping_rules),
             "promotion_policy_version": self.policy.promotion_policy_version,
@@ -413,13 +617,18 @@ class NextCampaignBuilder:
                 f"{NEXT_CAMPAIGN_SCHEMA}: the composed declaration is not loadable: {error}"
             ) from error
 
-        return self._freeze(
-            manifest=manifest,
-            document=document,
-            directory=directory,
+        return CampaignDraft(
             cycle_id=cycle_id,
             candidate_version=candidate_version,
+            generation_root=Path(generation_root),
+            directory=directory,
+            attempt=int(attempt),
+            manifest=manifest,
+            document=document,
             target=target,
+            policy_digest=self.policy.digest(),
+            placeholder_recipe_ids=placeholder_recipe_ids,
+            parent_evidence=evidence,
         )
 
     # -- the policy boundary ----------------------------------------------
@@ -474,7 +683,63 @@ class NextCampaignBuilder:
 
     # -- freezing ----------------------------------------------------------
 
-    def _freeze(
+    def freeze(
+        self, draft: CampaignDraft, *, recipe_ids: Sequence[str]
+    ) -> FrozenCampaign:
+        """Write the frozen declaration, now that the exact recipes are known.
+
+        ``recipe_ids`` are the identities the *production* planner proposed for
+        this draft. They are passed in rather than inferred so the recipe set has
+        one owner: preparation, which ran the planner. A placeholder id, an empty
+        set or a set larger than the policy allows is refused here -- the
+        declaration is the last point at which a wrong recipe set can still be
+        stopped, and after the freeze the run can only refuse it.
+
+        This is the only writer of a frozen declaration. The moment it returns,
+        the target, thresholds, benchmark sets, recipes, budgets, trusted
+        ancestor and parent identity are fixed; a later change is a new attempt
+        in a new directory, never an edit.
+        """
+        ids = tuple(str(value) for value in recipe_ids)
+        placeholders = set(draft.placeholder_recipe_ids)
+        if not ids:
+            raise NextCampaignRefusal(
+                f"{NEXT_CAMPAIGN_RECIPE_SET_ABSENT}: preparation reported no "
+                "recipe set for this draft, so the recipes the run would execute "
+                "are unknown; nothing is frozen until the production planner has "
+                "proposed them"
+            )
+        if placeholders & set(ids):
+            raise NextCampaignRefusal(
+                f"{NEXT_CAMPAIGN_RECIPE_SET_UNPLANNED}: the recipe set still "
+                f"carries placeholder ids {sorted(placeholders & set(ids))}; a "
+                "draft's placeholders size the planner's proposal and are never "
+                "a frozen recipe set"
+            )
+        if len(ids) > int(self.policy.maximum_candidates):
+            raise NextCampaignRefusal(
+                f"{NEXT_CAMPAIGN_SCHEMA}: {len(ids)} recipes were planned and this "
+                f"policy allows at most {self.policy.maximum_candidates}; a "
+                "campaign cannot run more candidates than its policy admits"
+            )
+        document = dict(draft.document)
+        document["recipes"] = list(ids)
+        try:
+            manifest = CampaignManifest.from_mapping(document, source=draft.cycle_id)
+        except CampaignManifestError as error:
+            raise NextCampaignRefusal(
+                f"{NEXT_CAMPAIGN_SCHEMA}: the composed declaration is not loadable: {error}"
+            ) from error
+        return self._write(
+            manifest=manifest,
+            document=document,
+            directory=draft.directory,
+            cycle_id=draft.cycle_id,
+            candidate_version=draft.candidate_version,
+            target=draft.target,
+        )
+
+    def _write(
         self,
         *,
         manifest: CampaignManifest,

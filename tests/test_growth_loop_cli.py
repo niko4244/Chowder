@@ -167,6 +167,11 @@ def test_run_reaches_a_terminal_refusal_without_launching_training(
     Preparation is asked for the campaign's inputs from the parent generation's
     evidence, and this fixture's layout holds none, so the loop must refuse
     *before* the executor -- the whole point of gating readiness ahead of spend.
+
+    The refusal lands in preparation, which is also the phase that runs the
+    recipe planner. Nothing is frozen: a declaration naming recipes no planner
+    proposed is refused by the runner, and a preregistration cannot be
+    un-written, so the freeze waits until the exact recipe set is known.
     """
     manifest_path, policy_path, evidence = _fixture(tmp_path)
 
@@ -192,12 +197,14 @@ def test_run_reaches_a_terminal_refusal_without_launching_training(
     assert payload["budget"]["spent_wall_gpu_hours"] == 0.0
     assert payload["budget"]["remaining_wall_gpu_hours"] == 6.0
 
-    # The next generation was composed from evidence and frozen before the
-    # refusal -- that is what makes the refusal about *this* campaign.
-    frozen = sorted(tmp_path.glob("gen3-a1-*"))
-    assert len(frozen) == 1
-    assert (frozen[0] / "campaign.json").is_file()
-    assert (frozen[0] / "preregistration.json").is_file()
+    # The next generation was composed from evidence -- one attempt directory,
+    # named by the builder's one owner of cycle identity -- and nothing in it is
+    # frozen, because no recipe set was ever planned.
+    attempts = sorted(tmp_path.glob("gen3-a1-*"))
+    assert len(attempts) == 1
+    assert not (attempts[0] / "campaign.json").exists()
+    assert not (attempts[0] / "preregistration.json").exists()
+    assert "PREPARATION_REFUSED" in payload["decision"]["reason_codes"]
 
 
 def test_resume_adopts_the_durable_verdict_without_running_anything(

@@ -316,6 +316,7 @@ def prepare_campaign(
     *,
     out_dir: str | Path,
     parent_evidence: str | Path | None = None,
+    parent_measurement: str | Path | None = None,
     probe: HardwareProbe | None = None,
     slice_source: SliceSource | None = None,
     material: Mapping[str, Sequence[str]] | None = None,
@@ -323,11 +324,17 @@ def prepare_campaign(
 ) -> PreparedCampaign:
     """Produce the manifest's declared inputs from durable evidence.
 
-    ``parent_evidence`` is the parent generation's durable run root (the
-    directory holding its ``candidate_evaluation.json`` and lineage records).
-    It is required: a parent arm and a parent profile are read from the parent
+    ``parent_evidence`` is the parent generation's durable run root. It is
+    required: a parent arm and a parent profile are read from the parent
     generation's own evidence, and a campaign that cannot name it has nothing
     to adjudicate against.
+
+    ``parent_measurement`` names the report whose rows *are* the parent's
+    measurements under this campaign's declared protocol. It defaults to the run
+    root's own ``candidate_evaluation.json``; a parent re-measured under a newer
+    instrument names that file here, so the profile the curriculum is planned
+    from is the fresh measurement rather than an older instrument that merely
+    lives in the same run root.
     """
     root = Path(out_dir)
     if not str(root).strip():
@@ -349,7 +356,10 @@ def prepare_campaign(
 
     # 3. the parent arm and profile, read from the parent generation's evidence.
     parent_eval_path, parent_profile_path, parent_notes = _write_parent_evidence(
-        manifest, root, parent_evidence=parent_evidence
+        manifest,
+        root,
+        parent_evidence=parent_evidence,
+        measurement=parent_measurement,
     )
     notes.extend(parent_notes)
 
@@ -536,7 +546,11 @@ def _slug(qualified_id: str) -> str:
 
 
 def _write_parent_evidence(
-    manifest: Any, root: Path, *, parent_evidence: str | Path | None
+    manifest: Any,
+    root: Path,
+    *,
+    parent_evidence: str | Path | None,
+    measurement: str | Path | None = None,
 ) -> tuple[Path, Path, list[str]]:
     """Derive the parent arm and profile from the parent generation's evidence.
 
@@ -561,13 +575,27 @@ def _write_parent_evidence(
             f"{PREPARE_PARENT_EVIDENCE_INVALID}: parent evidence root {source} "
             "does not exist"
         )
-    candidate_doc = _read_json_object(source / "candidate_evaluation.json")
-    if candidate_doc is None:
-        raise CampaignPrepareRefusal(
-            f"{PREPARE_PARENT_EVIDENCE_INVALID}: {source} holds no readable "
-            "candidate_evaluation.json, so the parent generation's measured "
-            "target evidence cannot be located"
-        )
+    # The arm that actually measured this model under this campaign's protocol.
+    # An explicit path wins over the run root's own arm by declared convention;
+    # naming a file that is not there refuses rather than silently falling back
+    # to a different instrument's numbers.
+    if measurement is not None and str(measurement).strip():
+        measurement_path = Path(measurement)
+        candidate_doc = _read_json_object(measurement_path)
+        if candidate_doc is None:
+            raise CampaignPrepareRefusal(
+                f"{PREPARE_PARENT_EVIDENCE_INVALID}: the declared parent "
+                f"measurement {measurement_path} is absent or unreadable, so the "
+                "parent's measurements under this protocol cannot be located"
+            )
+    else:
+        candidate_doc = _read_json_object(source / "candidate_evaluation.json")
+        if candidate_doc is None:
+            raise CampaignPrepareRefusal(
+                f"{PREPARE_PARENT_EVIDENCE_INVALID}: {source} holds no readable "
+                "candidate_evaluation.json, so the parent generation's measured "
+                "target evidence cannot be located"
+            )
 
     notes: list[str] = []
     parent_version = str(manifest.parent_version)
@@ -584,7 +612,6 @@ def _write_parent_evidence(
     # benchmark.  The *profile* is a capability summary, so it keeps whatever
     # the parent durably measured, under the instrument it measured it with --
     # the two are deliberately different questions.
-    raw_scores = _parent_durable_scores(candidate_doc)
     for qualified_id in declared:
         measured = _parent_measured_row(
             candidate_doc, qualified_id, parent_version=parent_version
@@ -610,9 +637,7 @@ def _write_parent_evidence(
         ),
     ).save(parent_eval_path)
 
-    profile_path = _write_parent_profile(
-        manifest, root, raw_scores=raw_scores, notes=notes
-    )
+    profile_path = _write_parent_profile(manifest, root, runs=tuple(runs), notes=notes)
     return parent_eval_path, profile_path, notes
 
 
@@ -764,48 +789,33 @@ def _write_parent_profile(
     manifest: Any,
     root: Path,
     *,
-    raw_scores: Mapping[str, float],
+    runs: Sequence[Any],
     notes: Sequence[str],
 ) -> Path:
-    """Build the parent capability profile from the parent arm's own rows.
+    """Write the parent's capability profile, attributed to its own benchmarks.
 
-    The profile is what the curriculum is planned from, so it is built from the
-    parent generation's measured/reference rows -- not from the Gen-0 freeze and
-    not from the child.  Benchmarks with no parent measurement are named in
-    ``notes`` rather than scored as zero: an unmeasured capability is not a
-    capability of zero.
+    This is the *one* authoritative representation the autonomous loop and the
+    curriculum both read: ``target_selection.build_skill_profile`` attributes each
+    measurement to the skills its benchmark declares, so a skill is estimated
+    only from benchmarks that measure it and a skill nobody measured stays
+    ``None`` -- unknown, which is not zero.
+
+    It replaces a profile that gave *every* known skill the mean of whatever the
+    parent happened to have measured. Measured nothing but the diagnostics
+    instrument, as Gen-1 did, and the old shape reported a confident estimate for
+    all fifty skills, so the curriculum had no way to tell a strong capability
+    from an unmeasured one.
     """
-    from chowder.growth.capability import ALL_SKILLS, CapabilityProfile, SkillEstimate
+    from chowder.growth.target_selection import build_skill_profile
 
     parent_version = str(manifest.parent_version)
-    measured = {key: float(value) for key, value in raw_scores.items()}
-    # One skill estimate per known skill, carried at the mean of what the
-    # parent actually measured, with a low confidence when little was measured.
-    confidence = 0.9 if measured else 0.0
-    estimate = (
-        sum(measured.values()) / len(measured) if measured else 0.0
-    )
-    skills = tuple(
-        SkillEstimate(
-            skill=skill,
-            estimate=round(estimate, 6),
-            confidence=confidence,
-            evidence=tuple(sorted(measured)),
-        )
-        for skill in ALL_SKILLS
-    )
-    profile = CapabilityProfile(
-        model_version=parent_version,
-        raw_scores=measured,
-        skills=skills,
-        notes={
-            "prepared_by": "chowder.growth.campaign_prepare",
-            "measured_benchmarks": sorted(measured),
-            "provenance": "the parent generation's own durable run root",
-            "unmeasured": list(notes),
-        },
-    )
-    return _write_json(root / "parent-profile.json", profile.to_dict())
+    profile = build_skill_profile(generation=parent_version, runs=tuple(runs))
+    document = profile.to_dict()
+    document["prepared_by"] = "chowder.growth.campaign_prepare"
+    document["provenance"] = "the parent generation's own durable measured rows"
+    document["unmeasured"] = list(notes)
+    document["view"] = "SkillProfile (authoritative)"
+    return _write_json(root / "parent-profile.json", document)
 
 
 # -- planning, corpus, registry, template ----------------------------------

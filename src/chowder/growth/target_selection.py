@@ -170,6 +170,41 @@ class SkillProfile:
         )
 
 
+def protected_skills_for(
+    benchmarks: Sequence[str], *, registry: Any = None
+) -> frozenset[str]:
+    """The skills a policy's protected benchmarks measure, from the registry.
+
+    Protection is declared as *benchmark* ids (a gate is a measurement, not a
+    capability), but target selection reasons about skills.  Resolving the one
+    into the other is a single, testable step -- and it refuses rather than
+    skipping: a protected benchmark the registry does not describe would
+    silently protect nothing, which is how a gate that looks enforced stops
+    being one.
+
+    The rule for a skill supported by both protected and targetable evidence is
+    deliberately conservative and stated once here: **any** protected support
+    makes the skill a gate.  Training a target benchmark that shares a skill
+    with a protected one is exactly the change the protected set exists to
+    detect, so the skill is left out of optimization rather than being split
+    into a targetable half and a protected half.
+    """
+    from .catalog import default_registry
+
+    registry = registry if registry is not None else default_registry()
+    resolved: set[str] = set()
+    for benchmark in benchmarks:
+        entry = registry.get(str(benchmark))
+        if entry is None:
+            raise ValueError(
+                f"protected benchmark {benchmark!r} is not in the benchmark "
+                "registry, so the skills it protects cannot be derived; an "
+                "unresolvable protected set is refused rather than treated as empty"
+            )
+        resolved.update(str(skill) for skill in entry.skills)
+    return frozenset(resolved)
+
+
 def _support_confidence(run: Any, entry: Any) -> float:
     """How much one measurement should count, from its support and provenance."""
     if str(run.measurement_origin) not in _ESTIMATING_ORIGINS:
@@ -378,12 +413,14 @@ class GrowthState:
         training_type: str,
         cycle_id: str,
         generation: str,
+        parent_version: str = "",
         cost_gpu_hours: float = 0.0,
         candidate_result: str = "",
         promotion_result: str = "",
         measured_effect: float | None = None,
         regressions: Sequence[str] = (),
         promoted_identity: tuple[str, str] | None = None,
+        parent_evidence: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         document = {
             "target_skill": str(target_skill),
@@ -396,6 +433,20 @@ class GrowthState:
                 if promoted_identity
                 else None
             ),
+            #: The whole parent-evidence ref this generation advanced the lineage
+            #: to: the exact run root, base identity, adapter identity and the
+            #: arm that measured it. Written on promotion only, so a rejection
+            #: leaves the previous parent authoritative.
+            "parent_evidence": dict(parent_evidence) if parent_evidence else None,
+            #: The generation this row leaves in the lineage -- the candidate when
+            #: it promoted, the parent when it did not. A reader asking "which
+            #: model is current?" must not be answered by the candidate of a
+            #: generation that was rejected.
+            "effective_generation": (
+                str(generation)
+                if str(promotion_result).lower() == "promoted"
+                else str(parent_version)
+            ),
             "cycle_id": str(cycle_id),
             "generation": str(generation),
             "cost_gpu_hours": float(cost_gpu_hours),
@@ -406,6 +457,19 @@ class GrowthState:
         }
         _append_jsonl(self._path("interventions"), document)
         return document
+
+    def parent_evidence(self) -> dict[str, Any] | None:
+        """The parent evidence the durable record currently stands on.
+
+        Read from the *last* intervention that promoted, in write order. A row
+        that did not promote carries no ref, so a rejection cannot advance the
+        pointer by accident.
+        """
+        for row in reversed(_read_jsonl(self._path("interventions"))):
+            recorded = row.get("parent_evidence")
+            if isinstance(recorded, Mapping) and recorded:
+                return dict(recorded)
+        return None
 
     def interventions(self, *, target_skill: str | None = None) -> tuple[dict[str, Any], ...]:
         rows = _read_jsonl(self._path("interventions"))
@@ -872,7 +936,18 @@ class NextTargetSelector:
             max_same_target_attempts=self.max_same_target_attempts,
         )
         why_not: dict[str, str] = {}
-        # The unmeasured skills are named first: "we did not have evidence" is
+        # Protected skills are named before the unmeasured ones: "this is a
+        # gate" is a different fact from "we have no evidence", and a reader who
+        # sees a skill missing from the ranking must be able to learn which it
+        # was rather than guessing the selector forgot it was protected.
+        for estimate in profile.estimates:
+            if estimate.skill in self.protected_skills:
+                why_not.setdefault(
+                    estimate.skill,
+                    "protected evidence: a gate this cannot regress through, "
+                    "never an optimization target",
+                )
+        # The unmeasured skills are named next: "we did not have evidence" is
         # the most useful thing a reader can learn about why an alternative was
         # not chosen, and it must not be crowded out by the scored runners-up.
         for estimate in profile.unmeasured:

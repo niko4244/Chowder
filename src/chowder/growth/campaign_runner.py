@@ -1216,7 +1216,27 @@ def _load_binder(manifest: CampaignManifest) -> MetricBinder:
     return MetricBinder.from_manifest(registry, document)
 
 
+#: The declared parent profile is not the evidence-attributed profile a
+#: curriculum may be planned from. The shape a preparation pass used to write --
+#: every known skill carrying the mean of whatever was measured -- cannot say
+#: which skills have evidence, so planning from it trains against numbers no
+#: benchmark produced.
+PARENT_PROFILE_NOT_ATTRIBUTED = "PARENT_PROFILE_NOT_ATTRIBUTED"
+
+
 def _load_profile(manifest: CampaignManifest) -> CapabilityProfile:
+    """The parent's attributed capability profile, as the curriculum's view.
+
+    The authoritative document is a ``SkillProfile`` (benchmark-attributed, with
+    unknown capabilities left unknown); the curriculum engine reads the flat
+    ``CapabilityProfile`` shape, so the view is derived here through the explicit
+    adapter in :mod:`chowder.growth.capability` rather than by a second profile
+    computation. A legacy flat document is **refused by name**: accepting one
+    would silently put an un-attributed mean back in front of the planner, which
+    is precisely the defect this shape replaces.
+    """
+    from chowder.growth.target_selection import SkillProfile
+
     path = _require_path(
         manifest.parent_profile_path,
         "parent_profile_path",
@@ -1225,7 +1245,17 @@ def _load_profile(manifest: CampaignManifest) -> CapabilityProfile:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
         raise CampaignRunRefusal(f"parent profile {path} is not a JSON object")
-    return CapabilityProfile.from_dict(dict(payload))
+    if not isinstance(payload.get("estimates"), list):
+        raise CampaignRunRefusal(
+            f"{PARENT_PROFILE_NOT_ATTRIBUTED}: the parent profile {path} carries "
+            "no benchmark-attributed estimates, so which capability each number "
+            "belongs to cannot be recovered; prepare the campaign again rather "
+            "than planning a curriculum from an unattributed mean"
+        )
+    return CapabilityProfile.from_skill_profile(
+        SkillProfile.from_dict(dict(payload)),
+        model_version=str(manifest.parent_version),
+    )
 
 
 def _load_material(manifest: CampaignManifest) -> tuple[dict[str, str], dict[str, list[str]]]:
