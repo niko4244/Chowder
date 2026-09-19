@@ -24,6 +24,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Mapping
 
 import pytest
 
@@ -107,6 +108,8 @@ def _arms(
     base_digest: str,
     adapter_digest: str,
     candidate_digest: str = "",
+    scores: Mapping[str, float] | None = None,
+    ancestor_base_digest: str | None = None,
 ) -> dict[str, str]:
     """The three arms the judge reads, as *declared inputs* to the campaign.
 
@@ -118,6 +121,7 @@ def _arms(
     candidate arm the artifact the run selected (empty until that is known, which
     is the state that must not promote).
     """
+    scores = scores or {}
     inputs.mkdir(parents=True, exist_ok=True)
     # The candidate arm is what the run *produces*, so it is not declared here:
     # the evaluation seam below is handed this measurement of the artifact the run
@@ -138,8 +142,10 @@ def _arms(
         echo=0,
         correct=True,
         slices=(
-            _slice(MATH, "gen2", MEASURED_THIS_GENERATION, 0.25),
-            _slice(MGSM, "gen2", MEASURED_THIS_GENERATION, 0.0625),
+            _slice(MATH, "gen2", MEASURED_THIS_GENERATION, scores.get("candidate_math", 0.25)),
+            _slice(
+                MGSM, "gen2", MEASURED_THIS_GENERATION, scores.get("candidate_mgsm", 0.0625)
+            ),
         ),
         identity={"adapter_digest": candidate_digest} if candidate_digest else {},
     )
@@ -152,8 +158,8 @@ def _arms(
         echo=7,
         correct=True,
         slices=(
-            _slice(MATH, "gen1", MEASURED_PARENT, 0.0),
-            _slice(MGSM, "gen1", MEASURED_PARENT, 0.0),
+            _slice(MATH, "gen1", MEASURED_PARENT, scores.get("parent_math", 0.0)),
+            _slice(MGSM, "gen1", MEASURED_PARENT, scores.get("parent_mgsm", 0.0)),
         ),
         identity={"adapter_digest": adapter_digest},
     )
@@ -164,10 +170,10 @@ def _arms(
         MEASURED_PARENT,
         with_instrument=False,
         slices=(
-            _slice(MATH, "gen0", MEASURED_PARENT, 0.0),
-            _slice(MGSM, "gen0", MEASURED_PARENT, 0.0),
+            _slice(MATH, "gen0", MEASURED_PARENT, scores.get("ancestor_math", 0.0)),
+            _slice(MGSM, "gen0", MEASURED_PARENT, scores.get("ancestor_mgsm", 0.0)),
         ),
-        identity={"base_model_digest": base_digest},
+        identity={"base_model_digest": ancestor_base_digest or base_digest},
     )
     return {
         "parent_eval_report_path": str(parent),
@@ -230,12 +236,47 @@ def _contamination(inputs: Path) -> str:
     return str(path)
 
 
+class _MutatingEvaluator(campaign_fixture._RecordingEvaluator):
+    """Measures honestly, with the selected artifact changing under it.
+
+    ``before`` rewrites the bytes after training but before they are read, which
+    is the race the pre-measurement re-verification exists to catch; ``after``
+    lets the measurement land and then moves the bytes, which is the
+    pre-verdict one. Both must refuse, and neither may leave a promoted root.
+    """
+
+    def __init__(self, *args: object, mutate: str, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self._mutate = mutate
+
+    def _change(self, request: object) -> None:
+        artifact = Path(str(getattr(request, "artifact_ref")))
+        if artifact.is_dir():
+            (artifact / "adapter_model.safetensors").write_text(
+                f"bytes replaced by a {self._mutate}-measurement mutation",
+                encoding="utf-8",
+            )
+
+    def __call__(self, request):
+        if self._mutate == "before":
+            self._change(request)
+        evaluation = super().__call__(request)
+        if self._mutate == "after":
+            self._change(request)
+        return evaluation
+
+
 def _campaign(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     bind_selection: bool = True,
     production: bool = False,
+    scores: Mapping[str, float] | None = None,
+    ancestor_base_digest: str | None = None,
+    cost: object = campaign_fixture.FREE_EVALUATION,
+    wired: bool = True,
+    mutate: str | None = None,
     **overrides: object,
 ) -> tuple[Path, int, dict]:
     """Write the declaration, run it through the real CLI, return its outcome.
@@ -253,7 +294,13 @@ def _campaign(
     inputs.mkdir(parents=True, exist_ok=True)
     base_digest, adapter_digest = _identity_digests(tmp_path)
     declared: dict[str, object] = {
-        **_arms(inputs, base_digest=base_digest, adapter_digest=adapter_digest),
+        **_arms(
+            inputs,
+            base_digest=base_digest,
+            adapter_digest=adapter_digest,
+            scores=scores,
+            ancestor_base_digest=ancestor_base_digest,
+        ),
         "contamination_manifest_path": _contamination(inputs),
         "protection": dict(campaign_fixture.PROTECTION),
         **overrides,
@@ -336,16 +383,30 @@ def _campaign(
     # The evaluation seam: it measures the artifact the run selected and writes
     # its measurements into the run root, naming them relatively -- which is what
     # a production instrument does, and what makes the run root the judge's input.
-    monkeypatch.setattr(
-        campaign_runner,
-        "default_evaluator_factory",
-        lambda manifest, *, state_root=None: campaign_fixture._RecordingEvaluator(
-            inputs / CANDIDATE_REPORT,
-            bind=bind_selection,
-            absolute_refs=False,
-            into_run_root=True,
-        ),
-    )
+    # ``wired=False`` leaves the production seam unwired, which is how a build
+    # with no instrument behaves; ``cost=None`` models one that reports none; and
+    # ``mutate`` moves the bytes under a measurement that is otherwise honest.
+    if not wired:
+        # A build with no instrument at all: the production factory is not
+        # supplied and no evaluator can be built, which is a pre-compute fact.
+        monkeypatch.setattr(campaign_runner, "build_evaluator", lambda *a, **k: None)
+    else:
+        evaluator_class = (
+            campaign_fixture._RecordingEvaluator if mutate is None else _MutatingEvaluator
+        )
+        extra: dict[str, object] = {} if mutate is None else {"mutate": mutate}
+        monkeypatch.setattr(
+            campaign_runner,
+            "default_evaluator_factory",
+            lambda manifest, *, state_root=None, _cls=evaluator_class, _extra=extra: _cls(
+                inputs / CANDIDATE_REPORT,
+                bind=bind_selection,
+                absolute_refs=False,
+                into_run_root=True,
+                cost=cost,
+                **_extra,
+            ),
+        )
     monkeypatch.setattr(
         sys, "argv", ["chowder", "growth", "campaign", "run", str(manifest_path)]
     )
