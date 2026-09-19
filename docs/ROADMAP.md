@@ -944,9 +944,15 @@ for a promotion it cannot bind to an adapter. `run(resume=True)` adopts the
 durable record instead of re-spending. The fake-compute simulator runs the real
 loop against six pinned terminal states, and `chowder growth loop
 status|plan|run|resume` exposes it with no injectable training seam, so a run
-that cannot proceed refuses having spent nothing. (PR #193.) Still manual or
-missing at that point, and still missing now: the task-specific training-data
-providers and their quality gate, and bounded production candidate search.
+that cannot proceed refuses having spent nothing. (PR #193.) Still missing now:
+bounded production candidate search. The task-specific training-data providers
+and their quality gate have since been delivered: `data_providers` dispatches
+each curriculum item to the provider that serves its declared skill and
+verification, records provider/source/generation/skill/verification/contamination
+per admitted example, refuses an item no provider serves, refuses a protected
+evaluation text as training material, and measures the corpus (counts, duplicate
+rate, verifier pass rate, skill and source composition) so a thin, duplicated,
+unverified or contaminated corpus refuses before any compute.
 
 **Autonomous growth is production-wired, with one service behind the interface
 and the CLI.** Four cross-generation defects that let *simulated* autonomy
@@ -971,5 +977,6 @@ start, stop after the current campaign, resume and growth history, with Start
 enabled by the service's readiness verdict alone. The Gen-1 parent arm has since
 been measured under the Gen-2 instrument (target 0.5625, math500/mgsm 0.0), so
 the target comparison is decidable. Still missing, and deliberately not claimed:
-task-specific training-data providers with a corpus quality gate, and bounded
-production candidate search. No real Gen-2 candidate training has been run.
+bounded production candidate search (successive halving has no production caller
+on the growth path and `run_project` has no `search` section). No real Gen-2
+candidate training has been run.

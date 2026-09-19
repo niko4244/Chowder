@@ -376,8 +376,18 @@ def prepare_campaign(
             parent_profile_path=str(parent_profile_path),
         )
     )
-    training_material_path, data_registry_path = _write_corpus(
+    (
+        training_material_path,
+        data_registry_path,
+        corpus_quality_path,
+    ) = _write_corpus(
         manifest, root, plan=plan, material=material, source_id=source_id
+    )
+    notes.append(
+        "corpus quality: "
+        + json.dumps(
+            _read_json_object(corpus_quality_path) or {}, sort_keys=True
+        )
     )
     project_template_path = _write_project_template(
         manifest, root, evaluation_material_path=evaluation_material_path
@@ -835,30 +845,64 @@ def _write_corpus(
     plan: Any,
     material: Mapping[str, Sequence[str]] | None,
     source_id: str,
-) -> tuple[Path, Path]:
-    """Emit the training material the run will train on, and its registry.
+) -> tuple[Path, Path, Path]:
+    """Emit the training material the run will train on, its registry, and its
+    measured quality report.
 
     The corpus is keyed by the planner's own curriculum item ids, so the
-    material a run writes is the material it planned -- an item with no
-    material refuses inside the binding rather than training on nothing.
+    material a run writes is the material it planned.  Each item is dispatched
+    to a named provider that serves its declared skill and verification (see
+    ``data_providers``); an item no provider serves refuses rather than training
+    on nothing.  The corpus is then measured against the declared protected
+    slices and admitted only if the quality gate passes, so a thin, duplicated,
+    unverified or contaminated corpus cannot reach the trainer merely because it
+    exists.
     """
+    from chowder.growth import data_providers
+
     items = tuple(getattr(plan, "items", ()))
     if not items:
         raise CampaignPrepareRefusal(
             f"{PREPARE_SCHEMA}: the parent profile produced no curriculum items, "
             "so there is no material a run may train on"
         )
-    lines = (
-        {item.item_id: list(material[item.item_id]) for item in items}
-        if material is not None
-        else {item.item_id: _default_material(item) for item in items}
+    generation = str(
+        getattr(manifest, "candidate_version", "")
+        or getattr(manifest, "parent_version", "")
     )
-    missing = [item.item_id for item in items if not lines.get(item.item_id)]
-    if missing:
-        raise CampaignPrepareRefusal(
-            f"{PREPARE_SCHEMA}: no material for curriculum item(s) {missing[:5]}"
+    seeds: Mapping[str, Sequence[str]] = material or {
+        item.item_id: _default_material(item) for item in items
+    }
+    requests = tuple(
+        data_providers.TrainingDataRequest(
+            item_id=str(item.item_id),
+            skill=str(item.skill),
+            training_type=str(item.training_type),
+            role=str(item.role),
+            verification_method=str(item.verification_method),
+            generation=generation,
+            example_count=int(item.example_count),
+            difficulty_band=str(item.difficulty_band),
+            seed_material=tuple(str(line) for line in seeds.get(item.item_id, ())),
         )
-    sources = {item.item_id: source_id for item in items}
+        for item in items
+    )
+    # The same firewall the manifest is built from decides each line's verdict:
+    # a line that duplicates protected evaluation material refuses here rather
+    # than being trained on and noticed later.
+    firewall, protected_texts = _protected_material(manifest, root)
+    corpus = data_providers.materialise(
+        requests,
+        protected_texts=protected_texts,
+        contamination_check=lambda text: firewall.check_text(text).verdict,
+    )
+    report = data_providers.assess_corpus(corpus)
+    quality_path = _write_json(root / "corpus-quality.json", report.to_dict())
+    data_providers.assert_corpus_quality(
+        report, expected_skills=tuple(str(item.skill) for item in items)
+    )
+    lines = {item_id: list(rows) for item_id, rows in corpus.material.items()}
+    sources = dict(corpus.sources)
     material_path = _write_json(
         root / "training-material.json",
         {
@@ -868,26 +912,40 @@ def _write_corpus(
                 "generator": "chowder.growth.campaign_prepare",
                 "source_id": source_id,
                 "note": (
-                    "item -> GOLD synthetic pair, template-generated and "
-                    "programmatically verifiable, keyed by the planner's own "
-                    "curriculum item ids"
+                    "item -> provider-materialised example, keyed by the "
+                    "planner's own curriculum item ids; every item names the "
+                    "provider that produced it and the verification it passed"
                 ),
+                "examples": {
+                    item_id: [example.to_dict() for example in rows]
+                    for item_id, rows in corpus.examples.items()
+                },
+                "quality_report": str(quality_path.name),
             },
         },
     )
+    by_source: dict[str, int] = {}
+    verification_by_source: dict[str, str] = {}
+    for item_id, rows in lines.items():
+        name = sources[item_id]
+        by_source[name] = by_source.get(name, 0) + len(rows)
+        for example in corpus.examples[item_id]:
+            verification_by_source.setdefault(name, example.verification)
     registry_path = _write_json(
         root / "data-registry.json",
         {
             "sources": [
                 _source_document(
-                    source_id,
-                    example_count=sum(len(value) for value in lines.values()),
-                    token_estimate=sum(len(value) for value in lines.values()) * 60,
+                    name,
+                    example_count=count,
+                    token_estimate=count * 60,
+                    verification=verification_by_source[name],
                 )
+                for name, count in sorted(by_source.items())
             ]
         },
     )
-    return material_path, registry_path
+    return material_path, registry_path, quality_path
 
 
 def _default_material(item: Any) -> list[str]:
@@ -918,9 +976,32 @@ def _default_material(item: Any) -> list[str]:
     return rows
 
 
+#: Which trust class each provider verification honestly supports.  A source
+#: that claims GOLD on judge-verified material would be claiming objective
+#: verification it did not have.
+_TRUST_CLASS_FOR_VERIFICATION: Mapping[str, str] = {
+    "executable_tests": "GOLD",
+    "symbolic_numeric": "GOLD",
+    "authoritative_key": "GOLD",
+    "multi_judge": "SILVER",
+    "citation_supported": "SILVER",
+    "curated_trusted": "SILVER",
+    "heuristic_filter": "BRONZE",
+}
+
+
 def _source_document(
-    source_id: str, *, example_count: int, token_estimate: int
+    source_id: str,
+    *,
+    example_count: int,
+    token_estimate: int,
+    verification: str = "symbolic_numeric",
 ) -> dict[str, Any]:
+    if verification not in _TRUST_CLASS_FOR_VERIFICATION:
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: source {source_id!r} declares verification "
+            f"{verification!r}, which backs no trust class this repository admits"
+        )
     return {
         "source_id": source_id,
         "dataset_name": source_id,
@@ -931,8 +1012,8 @@ def _source_document(
         "domain": "synthetic-protocol",
         "language": "en",
         "source_type": "synthetic",
-        "verification": "symbolic_numeric",
-        "trust_class": "GOLD",
+        "verification": verification,
+        "trust_class": _TRUST_CLASS_FOR_VERIFICATION[verification],
         "example_count": example_count,
         "token_estimate": token_estimate,
         "provenance": (
@@ -947,6 +1028,31 @@ def _source_document(
         "secrets_reviewed": True,
         "inclusion_decision": "included",
     }
+
+
+def _protected_material(
+    manifest: Any, root: Path
+) -> tuple[Any, tuple[str, ...]]:
+    """The firewall registered with the real protected slices, and their texts.
+
+    One owner of the question "what is protected": the corpus materialiser and
+    the contamination manifest are both built from this firewall, so a line can
+    never be admitted by one and condemned by the other.
+    """
+    from chowder.growth.contamination import ContaminationFirewall
+
+    firewall = ContaminationFirewall()
+    protected_by_benchmark = _load_protected_fingerprints(manifest, root)
+    for qualified_id, texts in protected_by_benchmark.items():
+        if texts:
+            firewall.register_protected(qualified_id, texts)
+    protected_texts = tuple(
+        text
+        for texts in protected_by_benchmark.values()
+        for text in texts
+        if str(text).strip()
+    )
+    return firewall, protected_texts
 
 
 def _write_contamination_manifest(
@@ -964,8 +1070,6 @@ def _write_contamination_manifest(
     on), and the resulting manifest is what the binder loads.  A non-CLEAN
     verdict is recorded, not overridden -- the run then refuses on it.
     """
-    from chowder.growth.contamination import ContaminationFirewall
-
     material = _read_json_object(training_material_path) or {}
     rows = material.get("material", {})
     samples = [
@@ -973,11 +1077,7 @@ def _write_contamination_manifest(
         for value in (rows.values() if isinstance(rows, Mapping) else ())
         for line in value
     ]
-    firewall = ContaminationFirewall()
-    protected_by_benchmark = _load_protected_fingerprints(manifest, root)
-    for qualified_id, texts in protected_by_benchmark.items():
-        if texts:
-            firewall.register_protected(qualified_id, texts)
+    firewall, _protected_texts = _protected_material(manifest, root)
     document = firewall.manifest(
         evaluated_benchmarks=tuple(_evaluated_benchmarks(manifest)),
         training_sources=(source_id,),
