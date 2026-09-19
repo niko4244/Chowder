@@ -463,21 +463,9 @@ async def test_the_max_generations_input_is_honoured() -> None:
         assert service.start_kwargs["max_generations"] == 2
 
 
-@pytest.mark.asyncio
-async def test_the_workspace_is_reachable_from_the_chowder_interface() -> None:
-    """The workspace lives in the real app, not a separate program."""
-    from chowder.tui import ChowderTUI
-
-    app = ChowderTUI(project_path=Path("chowder-project.json"))
-    async with app.run_test(size=(140, 90)) as pilot:
-        await pilot.pause()
-        assert app.query_one("#growth", Button) is not None
-
-        await _press(app, pilot, "growth")
-        await pilot.pause()
-        assert isinstance(app.screen, AutonomousGrowthScreen)
-        # And it opened over the production service, not a stub.
-        assert app.screen.query_one("#growth_start", Button).disabled
+# Reaching the workspace from the real ``ChowderTUI`` is asserted in
+# ``tests/test_tui.py``, where the app's own entry point is tested -- this file
+# drives the screen itself.
 
 
 def test_a_running_campaign_is_never_cancelled_mid_kernel() -> None:

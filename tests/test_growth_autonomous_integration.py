@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from chowder.evals.result import MEASURED_PARENT, BenchmarkRun, EvalReport
 from chowder.growth.campaign import CampaignManifest
 from chowder.growth.growth_loop import GrowthLoop, PreparedAttempt, production_prepare
@@ -38,6 +40,33 @@ from test_growth_campaign_prepare import (
     _slice_source,
 )
 from fixtures_growth_loop import RecordingExecutor, planned_recipes, policy_from
+
+def _device_can_be_measured() -> bool:
+    """Whether preparation's hardware budget can be a *real* measurement here.
+
+    The tests below drive preparation through the production service, which
+    probes the local accelerator for its measured step timings and **refuses**
+    when there is nothing to probe. Handing it a fabricated budget would be the
+    same dishonesty this mission exists to remove, so on a machine (or CI runner)
+    with no CUDA device these two tests skip rather than weaken: nothing is lost,
+    because a campaign cannot run on such a machine either.
+    """
+    try:
+        import torch
+    except Exception:  # noqa: BLE001 - any import failure means no probe
+        return False
+    return bool(torch.cuda.is_available())
+
+
+#: Preparation measures the device. No device, no measurement, no test.
+_NEEDS_A_MEASURED_DEVICE = pytest.mark.skipif(
+    not _device_can_be_measured(),
+    reason=(
+        "preparation's hardware budget is a real device probe; no CUDA device is "
+        "available here, so the production service refuses by design"
+    ),
+)
+
 
 #: The generation the parent declaration *produced*. A declaration states the
 #: generation it advances from and the generation it produces; the loop stands on
@@ -153,6 +182,7 @@ def test_the_prepared_profile_keeps_a_strong_skill_strong_and_an_unmeasured_one_
     assert coding.confidence == 0.0
 
 
+@_NEEDS_A_MEASURED_DEVICE
 def test_the_service_previews_exactly_what_the_loop_would_run(tmp_path: Path) -> None:
     """One decision engine: service, CLI and loop cannot disagree."""
     loop, state, manifest_path, profile_path = _production_loop(tmp_path)
@@ -308,6 +338,7 @@ def test_the_loop_refuses_to_plan_from_a_profile_of_another_generation(
     assert "PROFILE_GENERATION_MISMATCH" in planned.reason_codes
 
 
+@_NEEDS_A_MEASURED_DEVICE
 def test_a_frozen_declaration_is_never_rewritten_through_the_service(
     tmp_path: Path,
 ) -> None:
