@@ -421,7 +421,7 @@ class AutonomousGrowthService:
     def status(self) -> StatusView:
         """Durable state: what has been spent, and what the loop last decided."""
         rows = self.state.interventions()
-        spent = sum(float(row.get("cost_gpu_hours", 0.0) or 0.0) for row in rows)
+        spent = spent_wall_gpu_hours(self.state)
         stopping = self.state.stopping_state()
         return StatusView(
             state_root=str(self.state.root),
@@ -462,6 +462,18 @@ class AutonomousGrowthService:
         mid-kernel safely.
         """
         self.state.request_stop(reason=reason)
+
+
+def spent_wall_gpu_hours(state: GrowthState) -> float:
+    """Wall GPU-hours the durable record has charged. One owner of the sum.
+
+    The interface and the CLI both report a session's spend, and two sums over
+    the same rows are two chances to disagree about the number an operator uses
+    to decide whether to keep going.
+    """
+    return sum(
+        float(row.get("cost_gpu_hours", 0.0) or 0.0) for row in state.interventions()
+    )
 
 
 def history_from_state(state: GrowthState) -> tuple[HistoryRow, ...]:

@@ -881,7 +881,7 @@ def _loop_refusal(reason: str) -> int:
 
 def _growth_loop_status(args: argparse.Namespace) -> int:
     """Print the durable state the loop decides from, without deciding anything."""
-    from .service import history_from_state
+    from .service import history_from_state, spent_wall_gpu_hours
     from .target_selection import GrowthState
 
     state = GrowthState(root=Path(args.state_root))
@@ -889,10 +889,7 @@ def _growth_loop_status(args: argparse.Namespace) -> int:
         "state_root": str(state.root),
         "stopping_state": state.stopping_state(),
         "generations_recorded": len(state.interventions()),
-        "spent_wall_gpu_hours": sum(
-            float(row.get("cost_gpu_hours", 0.0) or 0.0)
-            for row in state.interventions()
-        ),
+        "spent_wall_gpu_hours": spent_wall_gpu_hours(state),
         "operator_stop": state.operator_stop() or {},
         "targets": [
             {

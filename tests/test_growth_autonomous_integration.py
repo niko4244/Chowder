@@ -385,3 +385,45 @@ def test_a_policy_that_does_not_cover_every_declared_benchmark_refuses(
         assert "not in the benchmark registry" in str(error)
     else:  # pragma: no cover - the refusal is the assertion
         raise AssertionError("an unresolvable protected set must refuse")
+
+
+def test_the_cli_and_the_interface_report_the_same_session_spend(
+    tmp_path: Path, capsys
+) -> None:
+    """The number an operator uses to decide whether to continue has one owner.
+
+    A resumed session that under-reported its spend would spend past its
+    envelope, so the CLI's status and the interface's status must be the same
+    arithmetic over the same durable rows -- not two sums that happen to match.
+    """
+    from chowder.cli import build_parser
+
+    loop, state, manifest_path, profile_path = _production_loop(tmp_path)
+    state.record_intervention(
+        target_skill="instruction.formatting",
+        training_type="targeted_repair",
+        cycle_id="gen2-a1-instruction-formatting",
+        generation="gen2",
+        parent_version=PARENT_GENERATION,
+        cost_gpu_hours=0.42,
+        candidate_result="PROMOTED",
+        promotion_result="promoted",
+        measured_effect=0.2,
+    )
+    policy_path = tmp_path / "loop-policy.json"
+    policy_path.write_text(json.dumps(loop.policy.to_dict()), encoding="utf-8")
+    service = AutonomousGrowthService.open_from_paths(
+        policy_path=policy_path,
+        parent_declaration_path=manifest_path,
+        state_root=state.root,
+        parent_profile_path=profile_path,
+        executor=RecordingExecutor([]),
+    )
+
+    args = build_parser().parse_args(["growth", "loop", "status", str(state.root)])
+    assert args.func(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["spent_wall_gpu_hours"] == 0.42
+    assert payload["spent_wall_gpu_hours"] == service.status().spent_wall_gpu_hours
+    assert payload["generations_recorded"] == len(service.history())
