@@ -599,7 +599,10 @@ def test_offloaded_dispatch_gives_the_weights_their_buffers(monkeypatch: pytest.
     The buffers ride with their weights so the trusted-ancestor arm can be
     measured at all.
     """
-    import accelerate
+    # ``accelerate`` is an optional dependency of the offload path (the import
+    # inside ``dispatch_offloaded`` is lazy for exactly this reason), so a host
+    # without it skips rather than failing.
+    accelerate = pytest.importorskip("accelerate")
 
     from chowder.evaluators.placement import dispatch_offloaded
 
