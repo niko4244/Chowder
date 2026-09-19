@@ -1,0 +1,143 @@
+# The autonomous growth control plane
+
+This document describes the layer that turns Chowder's single-generation
+growth engine (Model N → N+1) into a loop that can advance generation after
+generation. It states plainly what is built and what is not: an overstated
+control plane is worse than a missing one, because a loop built on it can only
+be trusted as far as its own documentation.
+
+The trusted lower layer is unchanged: training binding, evaluation binding,
+certification, settlement and the frozen judge. The control plane orchestrates
+campaigns; it never replaces or loosens them.
+
+## Status
+
+| Component | State |
+|---|---|
+| Production parent-measurement path (`measure-parent`) | **delivered** (#191) |
+| Offloaded evaluation path stability (both arms measurable) | **delivered** (#191) |
+| Persistent growth state | **delivered** (`target_selection.GrowthState`) |
+| Benchmark → skill attributed profiling | **delivered** (`build_skill_profile`) |
+| Intervention classifier | **delivered** (`classify_intervention`) |
+| NextTargetSelector + TargetProposal | **delivered** (`NextTargetSelector`) |
+| Persistent FailureBank restore (`FailureBank.from_records`) | **delivered** |
+| Automatic next-campaign builder + preregistration freeze | **not built** |
+| Loop/session budget, plateau rules, stop/review policy | **not built** |
+| Task-specific training-data providers + corpus quality gate | **not built** |
+| Bounded production candidate search (successive halving) | **not built** |
+| `GrowthLoop` outer controller, resume/recovery, simulator | **not built** |
+| Real Gen-2 run | **not run** (readiness not READY) |
+
+## The pieces that exist
+
+### Persistent state (`chowder.growth.target_selection.GrowthState`)
+
+Append-only JSONL memory under one root, read back before the next generation
+is planned:
+
+```text
+growth-state/
+  failure-bank.jsonl            failures, with recurrence and repair state
+  intervention-history.jsonl    what was tried, what it cost, what it did
+  target-history.jsonl          every TargetProposal ever made
+  capability-history.jsonl      every generation's measured profile
+  stopping-state.json           the loop's own durable state
+```
+
+Nothing is overwritten. `failure_bank()` rebuilds a live `FailureBank` from
+disk, so generation N's failures are present while generation N+1 is planned —
+the behaviour the per-campaign `FailureBank()` never had.
+
+### Benchmark-attributed profiling (`build_skill_profile`)
+
+A skill's estimate is computed **only** from the benchmarks the registry
+declares for that skill, weighted by each measurement's sample support and
+provenance. Consequences:
+
+* a skill nobody measured is `estimate=None`, `confidence=0`, `uncertainty=1`
+  — **unknown, not zero**;
+* two skills measured by different benchmarks get different estimates (the old
+  flat mean gave one number to every skill);
+* carried/grey rows contribute nothing: a reference is not a measurement;
+* the aggregation method is recorded on every estimate.
+
+### Intervention classification (`classify_intervention`)
+
+Before a campaign exists, the weakness is classified:
+
+```text
+targeted_repair | sft | continued_pretrain | preference
+data_acquisition | evaluation_needed | architecture_research
+untrainable_with_current_path
+```
+
+Order matters and encodes the falsification the mission asks for: no evidence →
+*measure*, don't train; a known structural limit → research; a calibration
+defect → preference; missing external knowledge → data acquisition; a target
+already tried to its ceiling → stop. `evaluation_needed`,
+`architecture_research` and `untrainable_with_current_path` require human
+review and never start a campaign on their own.
+
+### Target selection (`NextTargetSelector`)
+
+The selector's inputs are the parent's measured profile, durable memory and
+policy. It **cannot** see a campaign's candidate results: `propose()` takes no
+runs, and a test pins its signature so an undeclared campaign's scores can never
+become a selection signal. Protected skills are excluded from candidacy
+entirely — they are gates, never objectives.
+
+The score is an explicit product of named factors, damped by named penalties
+(see `TargetScoreFactors`), not "the lowest benchmark":
+
+```text
+weakness × confidence × importance × (1 + recurrence) × (1 + frontier gap)
+        × trainability × (0.5 + novelty) × efficiency
+  damped by (1 − 0.5·regression_risk)(1 − 0.5·repeat_penalty)(1 − 0.5·uncertainty)
+```
+
+Every `TargetProposal` records its `weakness_evidence`, its `factors`, and a
+`why_not_other_targets` map that names unmeasured candidates as
+`insufficient evidence (unmeasured, not zero)` before it names the scored
+runners-up.
+
+## The pieces that do not exist yet
+
+The chain from "selected target" to "campaign ran" is still manual for the
+autonomous case:
+
+* no `NextCampaignBuilder` (a human still composes the next manifest);
+* no automatic preregistration freeze for an autogenerated campaign;
+* no loop/session budget aggregation from campaign accounting artifacts;
+* no plateau detection or `LoopDecision` (continue / stop / review);
+* no task-specific training-data providers (the corpus is still the
+  protocol-repair template);
+* no bounded production candidate search;
+* no `GrowthLoop` controller, resume/recovery, or fake-compute simulator.
+
+Until those exist, Chowder cannot advance generations without a human choosing
+the target and composing the campaign. It must not claim otherwise.
+
+## Invariants the control plane must never break
+
+1. Candidate results cannot alter frozen thresholds.
+2. Protected evaluation content never enters training material.
+3. Parent evidence cannot masquerade as candidate evidence.
+4. Carried evidence cannot masquerade as a fresh measurement.
+5. Every promoted candidate is bound to exact artifact bytes.
+6. All compute after campaign start is durably accounted.
+7. Promotion cannot occur unless production certification passes.
+8. Production `PROMOTED` and the frozen judge may not disagree for the same
+   immutable run root.
+9. New generations cannot overwrite historical evidence.
+10. Missing evidence remains UNKNOWN/UNMEASURED, never zero.
+11. A target cannot be selected from protected-set performance of competing
+    candidates.
+12. Loop policy cannot enlarge its own global budget.
+13. The control plane cannot modify its safety/integrity gates in response to
+    candidate results.
+14. Architecture/model-family changes require explicit review.
+15. There must always be a finite stopping condition.
+
+The delivered pieces honour 1–14 by construction; invariant 15 has no owner
+yet, because the stopping policy is not built. That is the next component, not
+an oversight in this one.

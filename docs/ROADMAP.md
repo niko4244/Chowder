@@ -914,3 +914,21 @@ above being stable:
   commissioned and no student-improvement claim exists — none has been
   measured. The hard
   regression gate remains the sole promotion authority and is untouched.
+
+**Autonomous growth control plane (started).** The single-generation engine is
+proven; the layer that lets one generation teach the next began landing in
+`docs/AUTONOMOUS_GROWTH_LOOP.md`. `chowder.growth.target_selection` supplies the
+durable learning memory (`GrowthState`: failures, interventions, targets and
+capability history, append-only and read back before the next generation is
+planned; `FailureBank.from_records` is its public load half),
+benchmark-attributed profiling (`build_skill_profile` computes a skill's
+estimate only from the benchmarks the registry declares for it, weighted by
+sample support and provenance, so a skill nobody measured stays *unknown* rather
+than zero), an intervention classifier that decides whether a weakness is even
+trainable on the current path before any campaign exists, and
+`NextTargetSelector`, whose `propose()` takes no candidate runs at all — a test
+pins its signature so an undeclared campaign's scores cannot become a selection
+signal, and protected skills are excluded from candidacy entirely. Still manual:
+the next manifest, its preregistration, the loop budget, plateau/stop policy,
+training-data providers, bounded candidate search and the `GrowthLoop`
+controller. (PR #192.)
