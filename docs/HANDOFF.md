@@ -1396,10 +1396,19 @@ prepare docs/gen2/gen2_campaign.json --out-dir <prepared-v2> --parent-evidence
 <gen1 run root>`): every pre-compute prerequisite passes, both arms included,
 and the declaration now declares the recipe ids the planner actually proposes
 (declaring hand-written ids was the last refusal, `READINESS_RECIPE_SET`).
-Readiness is not an outcome: with the parent arm unmeasured under this
-campaign's own instrument, a Gen-2 run would reach `INCONCLUSIVE` on the target
-comparison. The Gen-0 trusted-ancestor arm **is** measured -- `math500@2024-04`
-0.0 and `mgsm@2022-11` 0.0, 16 rows each, at the declared batch size 16 -- which
-also means ancestor *regression* protection is vacuous for this lineage, since a
-floor of zero cannot be regressed through. That is recorded in the loop
-document, not hidden.
+Readiness is not an outcome, but both sides of every comparison are now
+measured: the Gen-0 ancestor arm (`math500@2024-04` 0.0, `mgsm@2022-11` 0.0, 16
+rows each, 2818 s) and the Gen-1 parent arm under this campaign's own instrument
+(target `generation-diagnostics@gen2-response-surface-v1` **0.5625**, math500
+0.0, mgsm 0.0, 16 rows each, 3706 s) -- both inside the declared 7200 s worker
+timeout. The parent arm's first attempt was *killed* at that timeout with the
+same three suites, because attaching a PEFT adapter silently re-placed the model
+onto the host CPU; PR #194 fixed that (`cuda=3` and 82% GPU utilisation instead
+of `cuda=0` and ~15%), and the suite timings are the evidence (diagnostics 6 min
+fixed vs 18 min broken; math500 27 min fixed vs never).
+
+The numbers also set the honest bar: the target gate is real (0.5625 is a bar a
+Gen-2 candidate must clear), while the protected/broad gates compare two measured
+zeros -- neither the base nor the gen1 adapter answers math500/mgsm under this
+protocol, so `candidate - parent >= 0` cannot fail there. The loop document
+states both consequences rather than leaving them to be inferred.
