@@ -402,6 +402,45 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
     readiness.add_argument("manifest", help="Path to the campaign manifest JSON")
     readiness.set_defaults(func=_growth_campaign_readiness)
 
+    prepare = campaign_targets.add_parser(
+        "prepare",
+        help="Emit the declaration's required inputs from durable evidence",
+    )
+    prepare.add_argument("manifest", help="Path to the campaign manifest JSON")
+    prepare.add_argument(
+        "--out-dir",
+        required=True,
+        help="Directory the prepared inputs are written into",
+    )
+    prepare.add_argument(
+        "--parent-evidence",
+        default="",
+        help="The parent generation's durable run root (its candidate_evaluation.json)",
+    )
+    prepare.add_argument(
+        "--write-declaration",
+        default="",
+        help="Write the declaration with the prepared inputs filled in to this path",
+    )
+    prepare.set_defaults(func=_growth_campaign_prepare)
+
+    ancestor = campaign_targets.add_parser(
+        "measure-ancestor",
+        help="Measure the trusted-ancestor arm on the untouched dense base",
+    )
+    ancestor.add_argument("manifest", help="Path to the campaign manifest JSON")
+    ancestor.add_argument(
+        "--out",
+        default="",
+        help="Where to write the arm (default: the declared baseline_eval_report_path)",
+    )
+    ancestor.add_argument(
+        "--placement",
+        default="offload",
+        help="Worker placement: resident or offload (default: offload)",
+    )
+    ancestor.set_defaults(func=_growth_campaign_measure_ancestor)
+
     run = campaign_targets.add_parser(
         "run", help="Execute the declared campaign through the real growth cycle"
     )
@@ -507,6 +546,93 @@ def _growth_campaign_readiness(args: argparse.Namespace) -> int:
     report = check_campaign_readiness(manifest)
     _print_json(report.to_dict())
     return 0 if report.ready else 1
+
+
+def _growth_campaign_prepare(args: argparse.Namespace) -> int:
+    """Produce the declaration's required inputs from durable evidence.
+
+    The seven inputs the run phase reads from disk (plus the contamination
+    manifest) are emitted from evidence the repository already holds: a real
+    device probe, the pinned dataset caches, the parent generation's own run
+    root, and the production planner. Nothing is fabricated, so a prepared
+    declaration's readiness stops reporting READINESS_DECLARED_INPUT for real.
+    """
+    from pathlib import Path as _Path
+
+    from .campaign import CampaignManifest
+    from .campaign_prepare import CampaignPrepareRefusal, prepare_campaign
+
+    manifest = CampaignManifest.from_file(_Path(args.manifest))
+    try:
+        prepared = prepare_campaign(
+            manifest,
+            out_dir=args.out_dir,
+            parent_evidence=args.parent_evidence or None,
+        )
+    except CampaignPrepareRefusal as refusal:
+        return _print_json(
+            {
+                "cycle_id": manifest.cycle_id,
+                "status": "REFUSED",
+                "refused_by": "campaign-prepare",
+                "refusal_reason": str(refusal),
+            }
+        ) or 1
+    if args.write_declaration:
+        document = json.loads(_Path(args.manifest).read_text(encoding="utf-8"))
+        document.update(prepared.inputs)
+        # The recipe ids depend on the measured hardware and the parent profile,
+        # so they were not knowable when the declaration was written; the
+        # planner's own proposals are what a run will execute.
+        if prepared.recipe_ids:
+            document["recipes"] = list(prepared.recipe_ids)
+        _Path(args.write_declaration).write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return _print_json(
+        {
+            "cycle_id": prepared.cycle_id,
+            "status": "PREPARED",
+            "directory": str(prepared.directory),
+            "inputs": dict(prepared.inputs),
+            "recipe_ids": list(prepared.recipe_ids),
+            "write_declaration": args.write_declaration,
+            "notes": list(prepared.notes),
+        }
+    )
+
+
+def _growth_campaign_measure_ancestor(args: argparse.Namespace) -> int:
+    """Measure the trusted-ancestor (Gen-0) arm through the production worker.
+
+    Real evaluation compute, not training: the untouched dense base is measured
+    under the frozen 16-item protocol, and the arm is written to the declared
+    baseline path with MEASURED_PARENT rows. Its cost is recorded as a prior
+    evaluation job referenced at zero incremental campaign cost.
+    """
+    from pathlib import Path as _Path
+
+    from .campaign import CampaignManifest
+    from .campaign_prepare import CampaignPrepareRefusal, measure_ancestor_arm
+
+    manifest = CampaignManifest.from_file(_Path(args.manifest))
+    try:
+        arm = measure_ancestor_arm(
+            manifest,
+            out_path=args.out or None,
+            placement=args.placement,
+        )
+    except CampaignPrepareRefusal as refusal:
+        return _print_json(
+            {
+                "cycle_id": manifest.cycle_id,
+                "status": "REFUSED",
+                "refused_by": "campaign-measure-ancestor",
+                "refusal_reason": str(refusal),
+            }
+        ) or 1
+    return _print_json({"cycle_id": manifest.cycle_id, "status": "MEASURED", **arm.to_dict()})
 
 
 def _growth_campaign_run(args: argparse.Namespace) -> int:

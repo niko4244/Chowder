@@ -43,6 +43,31 @@ GENERATION_DIAGNOSTICS_UNMEASURED = "GENERATION_DIAGNOSTICS_UNMEASURED"
 #: first, so a worker cannot report one fact and disagree with the other.
 _TEXT_FIELDS = ("prompt", "expected", "prediction")
 
+#: The 16 frozen prompts of the generation-diagnostics instrument: the dataset
+#: the target benchmark is measured on, in dataset order, indices 0..15.  This
+#: is the production owner of the instrument's items so a campaign can *declare*
+#: the dataset its evaluator measures (``evaluation_material_path``) rather than
+#: leaving the target slice to be assembled by hand.  It is byte-identical to the
+#: frozen judge's ``INSTRUMENT_PROMPTS``; a test asserts the two cannot drift.
+INSTRUMENT_PROMPTS: tuple[tuple[str, str], ...] = (
+    ("Reply with exactly: ping", "ping"),
+    ("What is 17 * 23? Answer with the number only.", "391"),
+    ("Name the capital of Australia in one word.", "Canberra"),
+    ("Write one sentence describing rain.", "rain"),
+    ("Count from 1 to 5, digits only.", "5"),
+    ("What is the boiling point of water in Celsius?", "100"),
+    ("Translate 'good morning' into French.", "bonjour"),
+    ("Complete: The opposite of hot is", "cold"),
+    ("List the first three prime numbers.", "2"),
+    ("Who wrote Romeo and Juliet?", "Shakespeare"),
+    ("What is 100 divided by 4?", "25"),
+    ("Say 'done' and nothing else.", "done"),
+    ("Give one synonym for 'happy'.", "joyful"),
+    ("How many continents are there?", "7"),
+    ("What color is a banana?", "yellow"),
+    ("Answer with a single word: 2 + 2 =", "4"),
+)
+
 
 @dataclass(frozen=True)
 class GenerationDiagnostics:

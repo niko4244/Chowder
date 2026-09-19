@@ -77,7 +77,12 @@ class EvalSuiteSpec:
 @dataclass(frozen=True)
 class TransformersTextEvalSpec:
     base_model: str
-    adapter_dir: str
+    #: The adapter to measure, or ``None`` to measure the dense base itself.
+    #: ``None`` is a *declared* base-only measurement -- how a trusted-ancestor
+    #: arm is taken on the untouched parent -- and the worker already loads the
+    #: base when it sees it. An empty string stays refused: it names no model at
+    #: all, which is a malformed spec rather than a base-only one.
+    adapter_dir: str | None
     output_dir: str
     suites: tuple[EvalSuiteSpec, ...]
     revision: str | None = None
@@ -95,8 +100,12 @@ class TransformersTextEvalSpec:
     def __post_init__(self) -> None:
         if not self.base_model.strip():
             raise ValueError("evaluation base_model is required")
-        if not self.adapter_dir.strip():
-            raise ValueError("evaluation adapter_dir is required")
+        if self.adapter_dir is not None and not self.adapter_dir.strip():
+            raise ValueError(
+                "evaluation adapter_dir is required unless this is a declared "
+                "base-only measurement (adapter_dir=None); an empty string names "
+                "no model"
+            )
         if not self.suites:
             raise ValueError("at least one evaluation suite is required")
         names = [suite.name for suite in self.suites]
