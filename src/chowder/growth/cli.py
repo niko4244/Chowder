@@ -480,6 +480,40 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
     )
     settle.set_defaults(func=_growth_campaign_settle)
 
+    loop = growth_targets.add_parser(
+        "loop",
+        help="Advance generations unattended, one bounded campaign at a time",
+    )
+    loop_targets = loop.add_subparsers(dest="loop_target", required=True)
+
+    loop_status = loop_targets.add_parser(
+        "status", help="Show the durable state the loop decides from"
+    )
+    loop_status.add_argument(
+        "state_root", help="The loop's durable state root (holds its JSONL history)"
+    )
+    loop_status.set_defaults(func=_growth_loop_status)
+
+    loop_plan = loop_targets.add_parser(
+        "plan", help="Show the target the loop would attempt next, without composing it"
+    )
+    _add_loop_arguments(loop_plan, parent_required=True)
+    loop_plan.set_defaults(func=_growth_loop_plan)
+
+    loop_run = loop_targets.add_parser(
+        "run",
+        help="Run generations until the loop reaches a terminal decision",
+    )
+    _add_loop_arguments(loop_run, parent_required=True)
+    loop_run.set_defaults(func=_growth_loop_run)
+
+    loop_resume = loop_targets.add_parser(
+        "resume",
+        help="Adopt the durable record of a session that already ended",
+    )
+    _add_loop_arguments(loop_resume, parent_required=True)
+    loop_resume.set_defaults(func=_growth_loop_run, resume=True)
+
 
 def _growth_campaign_validate(args: argparse.Namespace) -> int:
     """Load and validate a campaign manifest; print the declaration it pins."""
@@ -741,6 +775,180 @@ def _growth_campaign_settle(args: argparse.Namespace) -> int:
             },
         }
     )
+
+
+# --------------------------------------------------------------------------
+# the autonomous loop
+# --------------------------------------------------------------------------
+
+#: Terminal decisions that mean the loop stopped *correctly*: it either finished
+#: improving, ran out of envelope, or stopped repeating itself. The remaining
+#: terminals (UNCERTAIN, REVIEW, error states) are not success, and the exit code
+#: has to say so -- a run that refused must not look like a run that promoted.
+_LOOP_OK_DECISIONS = {"STOP_SUCCESS", "STOP_PLATEAU", "STOP_BUDGET"}
+
+
+def _add_loop_arguments(parser: argparse.ArgumentParser, *, parent_required: bool) -> None:
+    parser.add_argument("policy", help="Path to the loop policy JSON (the immutable envelope)")
+    parser.add_argument(
+        "--parent",
+        required=parent_required,
+        default="",
+        help="The last trusted campaign declaration to advance from",
+    )
+    parser.add_argument(
+        "--profile",
+        default="",
+        help="The parent's *measured* capability profile JSON",
+    )
+    parser.add_argument(
+        "--parent-evidence",
+        default="",
+        help=(
+            "The parent generation's durable run root; its own candidate "
+            "evaluation is profiled rather than a profile file being trusted"
+        ),
+    )
+    parser.add_argument(
+        "--state-root",
+        default="",
+        help="The loop's durable state root (default: beside the parent's run root)",
+    )
+    parser.add_argument(
+        "--max-generations",
+        type=int,
+        default=0,
+        help="Advance at most this many generations (never more than the policy allows)",
+    )
+
+
+def _loop_state_root(args: argparse.Namespace, parent: Any) -> Path:
+    if args.state_root:
+        return Path(args.state_root)
+    return Path(parent.state_root).parent / "growth-state"
+
+
+def _loop_profile(args: argparse.Namespace) -> Any:
+    """The parent's measured capability, from durable evidence or a stated file."""
+    from .growth_loop import load_profile_from, profile_from_run_root
+
+    if args.profile:
+        return load_profile_from(args.profile)
+    if args.parent_evidence:
+        return profile_from_run_root(args.parent_evidence)
+    return None
+
+
+def _loop_refusal(reason: str) -> int:
+    return _print_json(
+        {"status": "REFUSED", "refused_by": "growth-loop", "refusal_reason": reason}
+    ) or 1
+
+
+def _growth_loop_status(args: argparse.Namespace) -> int:
+    """Print what the loop would decide from, without deciding anything."""
+    from .target_selection import GrowthState
+
+    state = GrowthState(root=Path(args.state_root))
+    rows = state.interventions()
+    return _print_json(
+        {
+            "state_root": str(state.root),
+            "stopping_state": state.stopping_state(),
+            "generations_recorded": len(rows),
+            "spent_wall_gpu_hours": sum(
+                float(row.get("cost_gpu_hours", 0.0) or 0.0) for row in rows
+            ),
+            "targets": [
+                {
+                    "target_skill": row.get("target_skill", ""),
+                    "training_type": row.get("training_type", ""),
+                    "candidate_result": row.get("candidate_result", ""),
+                    "measured_effect": row.get("measured_effect"),
+                }
+                for row in rows
+            ],
+            "banked_failures": len(state.failure_bank()),
+            "repaired_classes": list(state.repaired_classes()),
+        }
+    )
+
+
+def _growth_loop_plan(args: argparse.Namespace) -> int:
+    """Print the target the loop would attempt next, and why -- no declaration written.
+
+    The composition itself is owned by the loop (and its builder), so this prints
+    the selector's proposal from the same evidence the loop would use rather than
+    rebuilding a declaration here, where a second owner of the cycle identity
+    would be able to disagree with the loop's.
+    """
+    from .campaign import CampaignManifest
+    from .growth_loop import GrowthLoop
+    from .next_campaign import LoopPolicy
+    from .target_selection import GrowthState
+
+    parent = CampaignManifest.from_file(Path(args.parent))
+    profile = _loop_profile(args)
+    if profile is None:
+        return _loop_refusal(
+            "no measured parent capability profile: pass --profile with the parent's "
+            "profile JSON, or --parent-evidence pointing at a run root that holds a "
+            "candidate_evaluation.json; a target chosen from an unmeasured profile is "
+            "not evidence-backed"
+        )
+    state = GrowthState(root=_loop_state_root(args, parent))
+    loop = GrowthLoop(
+        policy=LoopPolicy.from_file(Path(args.policy)),
+        state=state,
+        parent_declaration=parent,
+        parent_profile=profile,
+    )
+    proposal = loop.selector.propose(
+        parent_version=parent.resolved_candidate_version(),
+        profile=profile,
+        state=state,
+        known_skills=tuple(estimate.skill for estimate in profile.estimates),
+    )
+    return _print_json(
+        {
+            "parent_version": parent.resolved_candidate_version(),
+            "proposal": proposal.to_dict(),
+            "state_root": str(state.root),
+        }
+    )
+
+
+def _growth_loop_run(args: argparse.Namespace) -> int:
+    """Advance generations until the loop stops, and report how it stopped."""
+    from .campaign import CampaignManifest
+    from .growth_loop import GrowthLoop
+    from .next_campaign import LoopPolicy
+    from .target_selection import GrowthState
+
+    parent = CampaignManifest.from_file(Path(args.parent))
+    profile = _loop_profile(args)
+    resume = bool(getattr(args, "resume", False))
+    if profile is None and not resume:
+        return _loop_refusal(
+            "no measured parent capability profile: pass --profile with the parent's "
+            "profile JSON, or --parent-evidence pointing at a run root that holds a "
+            "candidate_evaluation.json; a target chosen from an unmeasured profile is "
+            "not evidence-backed"
+        )
+    loop = GrowthLoop(
+        policy=LoopPolicy.from_file(Path(args.policy)),
+        state=GrowthState(root=_loop_state_root(args, parent)),
+        parent_declaration=parent,
+        parent_profile=profile,
+    )
+    report = loop.run(
+        max_generations=args.max_generations or None,
+        resume=resume,
+    )
+    payload = report.to_dict()
+    payload["decision_ok"] = report.decision.action in _LOOP_OK_DECISIONS
+    _print_json(payload)
+    return 0 if payload["decision_ok"] else 1
 
 
 __all__ = ["register_growth_subcommands"]

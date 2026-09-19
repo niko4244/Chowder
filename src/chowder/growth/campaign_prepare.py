@@ -401,6 +401,30 @@ def prepare_campaign(
     )
 
 
+def prepared_input_paths(root: str | Path) -> dict[str, str]:
+    """The documents ``prepare_campaign`` writes into ``root``, without writing.
+
+    An automatic declaration has to *name* the inputs it will be given before
+    preparation runs, because the declaration is frozen before any compute (see
+    ``next_campaign``). The names are therefore a convention two owners touch:
+    this function and :func:`prepare_campaign`.
+    ``test_growth_campaign_prepare.test_the_predicted_input_paths_are_exactly_what_preparation_writes``
+    runs both against one directory and fails if they ever disagree, so the
+    convention cannot drift into a declaration that names files nothing writes.
+    """
+    base = Path(root)
+    return {
+        "project_template_path": str(base / "project-template.json"),
+        "training_material_path": str(base / "training-material.json"),
+        "data_registry_path": str(base / "data-registry.json"),
+        "hardware_budget_path": str(base / "hardware-budget.json"),
+        "parent_profile_path": str(base / "parent-profile.json"),
+        "parent_eval_report_path": str(base / "parent-eval-report.json"),
+        "evaluation_material_path": str(base / "evaluation-material.json"),
+        CONTAMINATION_MANIFEST_FIELD: str(base / "contamination.json"),
+    }
+
+
 def _require_hardware_fields(hardware: Mapping[str, Any]) -> None:
     steps = hardware.get("measured_step_seconds_at_seq")
     if not isinstance(steps, Mapping) or not steps:

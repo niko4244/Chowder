@@ -317,11 +317,21 @@ def test_the_production_evaluator_measures_the_sliced_declared_material(tmp_path
         assert run.metadata["seed"] == 1234
         assert run.metadata["shuffle"] is False
         assert run.metadata["prompt_policy"] == "chat_template"
-        assert run.metadata["decoding"] == {
+        # The declared protocol keys, plus the execution batch size beside them.
+        # Certification compares the keys the protocol *names* and tolerates
+        # execution annotations, so the throughput the arm was measured at is
+        # recorded on the row without becoming part of the frozen protocol.
+        assert {
+            key: run.metadata["decoding"][key]
+            for key in ("temperature", "do_sample", "max_new_tokens")
+        } == {
             "temperature": 0.0,
             "do_sample": False,
             "max_new_tokens": 512,
         }
+        assert run.metadata["decoding"]["batch_size"] == (
+            manifest.evaluation_execution.batch_size
+        )
         # The score is the mean of the item scores, and the row is bound to the
         # bytes those numbers came from.
         artifact_path = Path(manifest.state_root) / str(run.raw_artifact_ref)

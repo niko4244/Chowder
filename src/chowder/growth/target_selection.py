@@ -383,10 +383,19 @@ class GrowthState:
         promotion_result: str = "",
         measured_effect: float | None = None,
         regressions: Sequence[str] = (),
+        promoted_identity: tuple[str, str] | None = None,
     ) -> dict[str, Any]:
         document = {
             "target_skill": str(target_skill),
             "training_type": str(training_type),
+            #: The (path, sha256) this generation promoted, recorded so a resumed
+            #: session knows which adapter the next generation must train from.
+            #: Absent rather than guessed when the generation did not promote.
+            "promoted_identity": (
+                [str(promoted_identity[0]), str(promoted_identity[1])]
+                if promoted_identity
+                else None
+            ),
             "cycle_id": str(cycle_id),
             "generation": str(generation),
             "cost_gpu_hours": float(cost_gpu_hours),
@@ -695,9 +704,15 @@ class NextTargetSelector:
         expected_cost_gpu_hours: float = 0.4,
         max_same_target_attempts: int = 2,
         importance: Mapping[str, float] | None = None,
+        structural_skills: Sequence[str] = (),
     ) -> None:
         self.registry = registry
         self.protected_skills = frozenset(protected_skills)
+        #: Skills the *policy* declares to be a known structural limit of the
+        #: current training path. A weakness there is routed to human review by
+        #: the intervention classifier instead of being trained again, which is
+        #: the one thing the selector cannot infer from measurements alone.
+        self.structural_skills = frozenset(structural_skills)
         self.frontier = dict(frontier or {})
         self.expected_cost_gpu_hours = float(expected_cost_gpu_hours)
         self.max_same_target_attempts = int(max_same_target_attempts)
@@ -812,19 +827,30 @@ class NextTargetSelector:
         category_counts: Mapping[str, int] | None = None,
         known_skills: Sequence[str] | None = None,
         max_targets_reported: int = 4,
+        exclude_skills: Sequence[str] = (),
     ) -> TargetProposal:
         """Return the best-scoring measured target, with the runners-up named.
 
         The returned proposal is a pure function of its arguments: the same
         profile, state and policy always produce the same proposal.
+
+        ``exclude_skills`` lets the loop ask a *different* question after a
+        target has been exhausted (see ``growth_loop.detect_plateau``): "what is
+        the best target other than these?" Slots that were already tried to
+        their limit are not re-proposed while a treatment or a skill remains,
+        which is what keeps a loop from spending its envelope re-running the
+        same unsuccessful experiment.
         """
         counts = dict(category_counts or {})
+        excluded = {str(skill) for skill in exclude_skills}
         candidates: list[tuple[SkillEstimateEvidence, TargetScoreFactors, int]] = []
         for estimate in profile.estimates:
             if not estimate.measured:
                 continue
             if estimate.skill in self.protected_skills:
                 # Protected capabilities are gates, never optimization targets.
+                continue
+            if estimate.skill in excluded:
                 continue
             recurrence = int(counts.get(estimate.skill, 0))
             factors = self.score_skill(estimate, state=state, recurrence=recurrence)
@@ -842,6 +868,7 @@ class NextTargetSelector:
         decision = classify_intervention(
             estimate=best_estimate,
             attempts=state.attempts_on(best_estimate.skill),
+            structural=best_estimate.skill in self.structural_skills,
             max_same_target_attempts=self.max_same_target_attempts,
         )
         why_not: dict[str, str] = {}
