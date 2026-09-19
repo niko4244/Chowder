@@ -441,6 +441,23 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
     )
     ancestor.set_defaults(func=_growth_campaign_measure_ancestor)
 
+    parent_arm = campaign_targets.add_parser(
+        "measure-parent",
+        help="Measure the parent generation under this campaign's declared protocol",
+    )
+    parent_arm.add_argument("manifest", help="Path to the campaign manifest JSON")
+    parent_arm.add_argument(
+        "--out",
+        default="",
+        help="Where to write the arm (default: the declared parent_eval_report_path)",
+    )
+    parent_arm.add_argument(
+        "--placement",
+        default="offload",
+        help="Worker placement: resident or offload (default: offload)",
+    )
+    parent_arm.set_defaults(func=_growth_campaign_measure_parent)
+
     run = campaign_targets.add_parser(
         "run", help="Execute the declared campaign through the real growth cycle"
     )
@@ -629,6 +646,38 @@ def _growth_campaign_measure_ancestor(args: argparse.Namespace) -> int:
                 "cycle_id": manifest.cycle_id,
                 "status": "REFUSED",
                 "refused_by": "campaign-measure-ancestor",
+                "refusal_reason": str(refusal),
+            }
+        ) or 1
+    return _print_json({"cycle_id": manifest.cycle_id, "status": "MEASURED", **arm.to_dict()})
+
+
+def _growth_campaign_measure_parent(args: argparse.Namespace) -> int:
+    """Measure the parent generation under this campaign's declared protocol.
+
+    The parent arm is a declared input read by adjudication. Measuring it here
+    (the parent adapter over the declared base, under the declared instrument)
+    is what gives the target comparison a real parent row; the rows are
+    MEASURED_PARENT under the parent's own generation label.
+    """
+    from pathlib import Path as _Path
+
+    from .campaign import CampaignManifest
+    from .campaign_prepare import CampaignPrepareRefusal, measure_parent_arm
+
+    manifest = CampaignManifest.from_file(_Path(args.manifest))
+    try:
+        arm = measure_parent_arm(
+            manifest,
+            out_path=args.out or None,
+            placement=args.placement,
+        )
+    except CampaignPrepareRefusal as refusal:
+        return _print_json(
+            {
+                "cycle_id": manifest.cycle_id,
+                "status": "REFUSED",
+                "refused_by": "campaign-measure-parent",
                 "refusal_reason": str(refusal),
             }
         ) or 1
