@@ -267,6 +267,7 @@ class SubprocessEvaluationFn:
         device: str = "auto",
         placement: str = "resident",
         offline: bool = False,
+        batch_size: int = 1,
     ) -> None:
         self.run_root = Path(run_root)
         self.material = material
@@ -289,6 +290,13 @@ class SubprocessEvaluationFn:
         self.device = device
         self.placement = placement
         self.offline = offline
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise CandidateEvaluationRefusal(
+                f"the declared evaluation execution batch_size {batch_size!r} is "
+                "not a positive integer, so the campaign does not say how its "
+                "candidate is decoded"
+            )
+        self.batch_size = batch_size
 
     # ------------------------------------------------------------------
     # admission: what is knowable before any model is loaded
@@ -406,6 +414,7 @@ class SubprocessEvaluationFn:
                     scoring=self.material.for_benchmark(qualified_id).scoring,
                     max_new_tokens=int(decoding["max_new_tokens"]),
                     use_chat_template=_PROMPT_POLICIES[prompt_policy],
+                    batch_size=self.batch_size,
                 )
                 for qualified_id, slice_path in slices.items()
             ),
@@ -712,7 +721,12 @@ class SubprocessEvaluationFn:
                         "sample_indices": list(range(len(samples))),
                         "seed": int(protocol.seed),
                         "shuffle": bool(protocol.shuffle),
-                        "decoding": dict(protocol.decoding),
+                        # The declared decoding, plus the execution parameter the
+                        # declared decoding does not cover. The judge enforces the
+                        # keys the *declared protocol* names and ignores extras
+                        # (certification.protocol_problems), so this is recorded
+                        # evidence rather than a changed measurement rule.
+                        "decoding": {**dict(protocol.decoding), "batch_size": self.batch_size},
                         "prompt_policy": str(protocol.prompt_policy),
                         "suite": material.name,
                         "holdout_fingerprints_ref": _relative_to_run_root(

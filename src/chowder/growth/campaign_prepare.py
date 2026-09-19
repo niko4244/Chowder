@@ -1167,6 +1167,7 @@ def measure_arm(
     from .training_binding import default_runner
 
     protocol = manifest.protection.require_protocol(source=manifest.cycle_id)
+    batch_size = int(manifest.evaluation_execution.batch_size)
     benchmarks = tuple(dict.fromkeys(benchmarks))
     if not benchmarks:
         raise CampaignPrepareRefusal(
@@ -1217,6 +1218,14 @@ def measure_arm(
                 scoring="normalized_exact_match",
                 max_new_tokens=int(protocol.decoding["max_new_tokens"]),
                 use_chat_template=str(protocol.prompt_policy) == "chat_template",
+                # The campaign declares how many rows one generation call
+                # decodes, and every arm is measured the way the candidate will
+                # be. At one row per call this measurement does not finish: the
+                # offloaded weights are re-streamed per decode step, so 16 rows
+                # x 512 tokens is 16 full passes over the model (~5.9 hours per
+                # suite, measured), and the arm timed out at 7200 s without
+                # writing anything. Batched at the whole slice it is one pass.
+                batch_size=batch_size,
             )
         )
 
@@ -1305,7 +1314,12 @@ def measure_arm(
                     "sample_indices": list(range(len(samples))),
                     "seed": int(protocol.seed),
                     "shuffle": bool(protocol.shuffle),
-                    "decoding": dict(protocol.decoding),
+                    # The declared decoding, plus the execution parameter it does
+                    # not cover: the judge enforces the keys the declared
+                    # protocol names and ignores extras, so an arm measured at a
+                    # different throughput is visible in its own evidence rather
+                    # than silently indistinguishable.
+                    "decoding": {**dict(protocol.decoding), "batch_size": batch_size},
                     "prompt_policy": str(protocol.prompt_policy),
                     "suite": suite.name,
                     "slice_sha256": _sha256_file(work_dir / f"slice-{_slug(qualified_id)}.jsonl"),

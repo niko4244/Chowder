@@ -5,7 +5,7 @@ import json
 import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from ..adapter_guard import assert_adapter_is_live
 from ..contamination import write_holdout_fingerprint_index
@@ -16,7 +16,7 @@ from ..lifecycle import (
     evaluation_lifecycle_ledger,
     sampling_device,
 )
-from .generation import observed_generation, resolve_eos_token_ids
+from .generation import observed_span, resolve_eos_token_ids
 from .rendering import render_prompt
 from .scoring import final_answer, final_number, normalize, observed_score, score
 from .vram import MemorySampler, peak_vram as _peak_vram
@@ -63,6 +63,14 @@ def _resolve_device(torch: Any, requested: str) -> str:
     if requested.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError(f"{requested} requested but CUDA is unavailable")
     return requested
+
+
+def _batches(rows: list[dict[str, Any]], size: int) -> Iterator[list[dict[str, Any]]]:
+    """Split a suite's rows into the declared generation batches."""
+    if size < 1:
+        raise RuntimeError(f"evaluation batch_size must be at least 1, got {size}")
+    for start in range(0, len(rows), size):
+        yield rows[start : start + size]
 
 
 def _load_rows(suite: EvalSuiteSpec) -> list[dict[str, Any]]:
@@ -188,23 +196,34 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
             correct = 0.0
             predictions_path = output_dir / f"predictions-{suite.name}.jsonl"
             with predictions_path.open("w", encoding="utf-8", newline="\n") as output:
-                for row in rows:
-                    prompt = str(row[suite.prompt_field])
-                    expected = str(row[suite.expected_field])
-                    # One renderer for both text workers (see
-                    # evaluators/rendering.py). This arm previously ignored
-                    # `canonical_rendering` entirely: a suite asking for the
-                    # pinned template silently rendered through the
-                    # checkpoint's own instead, so baseline and candidate
-                    # scored different prompt bytes under one protocol entry.
-                    rendered, render_evidence = render_prompt(
-                        tokenizer=tokenizer,
-                        prompt=prompt,
-                        suite_name=suite.name,
-                        use_chat_template=suite.use_chat_template,
-                        canonical_rendering=suite.canonical_rendering,
+                for chunk in _batches(rows, suite.batch_size):
+                    rendered_batch: list[tuple[str, str]] = []
+                    for row in chunk:
+                        prompt = str(row[suite.prompt_field])
+                        expected = str(row[suite.expected_field])
+                        # One renderer for both text workers (see
+                        # evaluators/rendering.py). This arm previously ignored
+                        # `canonical_rendering` entirely: a suite asking for the
+                        # pinned template silently rendered through the
+                        # checkpoint's own instead, so baseline and candidate
+                        # scored different prompt bytes under one protocol entry.
+                        rendered, render_evidence = render_prompt(
+                            tokenizer=tokenizer,
+                            prompt=prompt,
+                            suite_name=suite.name,
+                            use_chat_template=suite.use_chat_template,
+                            canonical_rendering=suite.canonical_rendering,
+                        )
+                        rendered_batch.append((prompt, expected, rendered))
+                    # padding=True pads with the tokenizer's pad token on the
+                    # declared side; the mask it returns is what keeps the pads
+                    # out of attention, so a padded row sees the same context it
+                    # would have seen alone.
+                    encoded = tokenizer(
+                        [item[2] for item in rendered_batch],
+                        return_tensors="pt",
+                        padding=len(rendered_batch) > 1,
                     )
-                    encoded = tokenizer(rendered, return_tensors="pt")
                     encoded = {key: value.to(device) for key, value in encoded.items()}
                     generated = model.generate(
                         **encoded,
@@ -213,43 +232,62 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                         pad_token_id=tokenizer.pad_token_id,
                         eos_token_id=resolved_eos_token_id,
                     )
-                    prompt_tokens = encoded["input_ids"].shape[1]
-                    prediction = tokenizer.decode(
-                        generated[0, prompt_tokens:], skip_special_tokens=True
-                    )
-                    # What the generation did, recorded rather than re-derived:
-                    # the completion text cannot say whether it stopped on EOS or
-                    # ran into the cap, and the generation diagnostics (the
-                    # campaign's target instrument) are defined over exactly that.
-                    observation = observed_generation(
-                        generated=generated,
-                        prompt_tokens=prompt_tokens,
-                        eos_token_id=resolved_eos_token_id,
-                        max_new_tokens=suite.max_new_tokens,
-                    )
-                    observed = observed_score(observation, suite.scoring)
-                    row_score = (
-                        observed
-                        if observed is not None
-                        else _score(prediction, expected, suite.scoring)
-                    )
-                    correct += row_score
-                    output.write(
-                        json.dumps(
-                            {
-                                "prompt": prompt,
-                                "expected": expected,
-                                "prediction": prediction,
-                                "score": row_score,
-                                **observation,
-                            },
-                            ensure_ascii=False,
+                    width = int(encoded["input_ids"].shape[1])
+                    for index, (prompt, expected, _) in enumerate(rendered_batch):
+                        # What the generation did, recorded rather than
+                        # re-derived: the completion text cannot say whether it
+                        # stopped on EOS or ran into the cap, and the generation
+                        # diagnostics (the campaign's target instrument) are
+                        # defined over exactly that.
+                        own_tokens, produced, stopped = observed_span(
+                            continuation=generated[index, width:].tolist(),
+                            max_new_tokens=suite.max_new_tokens,
+                            # Only a multi-row call can have padded this row
+                            # after it finished.
+                            pad_token_id=(
+                                tokenizer.pad_token_id
+                                if len(rendered_batch) > 1
+                                else None
+                            ),
                         )
-                        + "\n"
-                    )
+                        prediction = tokenizer.decode(
+                            own_tokens, skip_special_tokens=True
+                        )
+                        observation = {
+                            "generated_tokens": max(0, produced),
+                            "eos_terminated": bool(
+                                stopped and resolved_eos_token_id is not None
+                            ),
+                        }
+                        observed = observed_score(observation, suite.scoring)
+                        row_score = (
+                            observed
+                            if observed is not None
+                            else _score(prediction, expected, suite.scoring)
+                        )
+                        correct += row_score
+                        output.write(
+                            json.dumps(
+                                {
+                                    "prompt": prompt,
+                                    "expected": expected,
+                                    "prediction": prediction,
+                                    "score": row_score,
+                                    **observation,
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n"
+                        )
+                        output.flush()
             metrics[suite.name] = correct / len(rows)
             suite_evidence[suite.name] = {
                 "rows": len(rows),
+                # Execution evidence, not protocol identity: what it took to
+                # produce these rows, so a batched arm and a single-row arm are
+                # distinguishable in the artifact even though the declared
+                # decoding is the same.
+                "batch_size": suite.batch_size,
                 "scoring": suite.scoring,
                 "predictions_file": str(predictions_path),
                 "holdout_fingerprints_file": str(fingerprint_path),

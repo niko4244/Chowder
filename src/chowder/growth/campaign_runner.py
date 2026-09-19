@@ -135,6 +135,7 @@ FIELD_ENFORCEMENT: Mapping[str, str] = {
     "evaluation_material_path": "the dataset, fields and scoring the production evaluator measures the selected candidate with; a declared-but-missing file, or one that names no dataset for a declared benchmark, refuses before compute",
     "baseline_eval_report_path": "the trusted-ancestor (gen0) arm of the judged evidence set: branch protection is judged against it, never against an unresolved parent",
     "protection": "the declared branch-protection policy (trusted ancestor version + slice regression tolerance) the certification gate applies before any lineage record is written",
+    "evaluation_execution": "how many rows one generate call decodes, for every arm and for the candidate: the candidate evaluator and both arm measurements read this one value, and each records it in its own evidence; batching changes generated tokens (measured: 14/16 rows agree with a single-row pass), so the arms and the candidate must share it and never be chosen per path",
     "notes": "documentation only: it drives no behavior and gates nothing",
 }
 
@@ -1353,6 +1354,9 @@ def build_evaluator(
         protocol=protocol,
         base_model_path=manifest.base_model_path,
         base_model_digest=manifest.base_model_digest,
+        # The declared execution throughput, so the candidate arm is measured
+        # the same way the parent and ancestor arms were declared to be.
+        batch_size=manifest.evaluation_execution.batch_size,
         # Resolved here, in this module's namespace, so one patch point covers
         # every process this campaign starts (trainer and evaluator alike).
         runner=runner or default_runner,
