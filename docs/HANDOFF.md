@@ -1374,7 +1374,32 @@ plus `FailureBank.from_records` as the public load half), benchmark-attributed
 profiling where an unmeasured skill is *unknown rather than zero*,
 `classify_intervention` (a weakness with no evidence is a measurement problem,
 not a training problem), and `NextTargetSelector`, whose `propose()` cannot read
-candidate results and never targets a protected skill. The next manifest, its
-preregistration, the loop budget, plateau/stop policy, training-data providers,
-bounded candidate search and the `GrowthLoop` controller are **not** built; the
-document says so explicitly.
+candidate results and never targets a protected skill. PR #193 lands the loop
+above it: `NextCampaignBuilder` (target → frozen declaration + preregistration,
+write-once, policy-owned ceilings), `GrowthLoop` (finite stopping condition,
+measured-cost accounting, plateau rules, continue/stop/review decisions,
+`resume` from durable state) and the fake-compute simulator that pins six
+terminal states. Two defects were found by exercising it rather than reading it:
+the loop's documented "no measured cost" refusal was unreachable (`charge`
+raised first, so the loop crashed instead of recording a terminal decision) and
+`run()` never read the stopping state it wrote, so a restart re-spent the
+session; both are fixed and covered. Still **not** built: task-specific
+training-data providers and their quality gate, and bounded production candidate
+search. Two integration gaps are named in `docs/AUTONOMOUS_GROWTH_LOOP.md`
+rather than papered over: the Gen-1 parent arm is not measured under the Gen-2
+instrument, and `campaign_prepare` emits a `CapabilityProfile` where the loop
+consumes a `SkillProfile`, so the loop refuses with `NO_MEASURED_CAPABILITY`
+rather than reading a mean as a capability.
+
+**Gen-2 readiness is READY** as of `prepared-v2` (`chowder growth campaign
+prepare docs/gen2/gen2_campaign.json --out-dir <prepared-v2> --parent-evidence
+<gen1 run root>`): every pre-compute prerequisite passes, both arms included,
+and the declaration now declares the recipe ids the planner actually proposes
+(declaring hand-written ids was the last refusal, `READINESS_RECIPE_SET`).
+Readiness is not an outcome: with the parent arm unmeasured under this
+campaign's own instrument, a Gen-2 run would reach `INCONCLUSIVE` on the target
+comparison. The Gen-0 trusted-ancestor arm **is** measured -- `math500@2024-04`
+0.0 and `mgsm@2022-11` 0.0, 16 rows each, at the declared batch size 16 -- which
+also means ancestor *regression* protection is vacuous for this lineage, since a
+floor of zero cannot be regressed through. That is recorded in the loop
+document, not hidden.
