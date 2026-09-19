@@ -29,17 +29,22 @@ campaigns; it never replaces or loosens them.
 | Task-specific training-data providers + corpus quality gate | **not built** |
 | Bounded production candidate search (successive halving) | **not built** |
 | Gen-0 trusted-ancestor arm | **measured** — `math500@2024-04` 0.0, `mgsm@2022-11` 0.0 (16 rows each) |
-| Gen-1 parent arm under the *Gen-2* instrument | **not measured** (its rows are gen1-instrument; measured honestly as unmeasured) |
+| Gen-1 parent arm under the *Gen-2* instrument | **measured** — target `generation-diagnostics@gen2-response-surface-v1` 0.5625, `math500@2024-04` 0.0, `mgsm@2022-11` 0.0 (16 rows each, `MEASURED_PARENT`, bound to the gen1 adapter digest) |
 | Gen-2 readiness gate | **READY** (all pre-compute prerequisites pass) |
 | Real Gen-2 candidate training run | **not run** |
 
-Readiness being READY is a statement about prerequisites, not about outcome.
-The two are different questions and the table says so: with the Gen-1 parent arm
-unmeasured under this campaign's own instrument, a Gen-2 run would train and
-evaluate real candidates and then reach `INCONCLUSIVE` on the target comparison
--- because the parent side of that comparison does not exist yet. The honest
-next step is `chowder growth campaign measure-parent`, not a training run whose
-expected verdict is already known to be inconclusive.
+Readiness being READY is a statement about prerequisites, not about outcome --
+but it now also means every comparison a Gen-2 verdict is made of has a measured
+arm on both sides, because both arms have since been measured (the target row for
+the parent is 0.5625, so the target gate is decidable rather than vacuous). What
+READY still does *not* say is how the protected and broad gates will behave: both
+arms sit at 0.0 there (see below), so those gates compare two measured zeros.
+
+Both arm measurements were made under the frozen 16-item protocol with the dense
+weights off the card: the trusted-ancestor arm is 2 suites in 2818 s, the parent
+arm is 3 suites in 3706 s. Both fit the declared 7200 s worker timeout, and the
+parent arm only does so with the adapter placement fix recorded in PR #194 --
+without it the same three suites could not finish inside the timeout at all.
 
 ## The pieces that exist
 
@@ -182,17 +187,33 @@ Still manual or missing for the autonomous case:
 Until those exist, Chowder cannot advance generations without a human choosing
 the target and composing the campaign. It must not claim otherwise.
 
-## What the measured ancestor arm implies
+## What the measured arms imply
 
-The Gen-0 trusted-ancestor arm is measured, and the untouched dense base scores
-**0.0 on both protected slices** under the frozen protocol (it emits no EOS, so
-every generation runs the full 512-token cap and no answer is extracted). That
-is an honest measurement of the floor, and it has a consequence worth stating
-plainly: a floor at zero makes ancestor *regression* protection vacuous for this
-lineage, because `candidate - ancestor >= 0` cannot fail. The gate is not
-broken -- it compares two measured arms, which is the property that matters --
-but it is weak here, and a reviewer should read "no ancestor regression" as "the
-floor cannot answer" rather than as evidence of capability retention.
+Both arms are measured now, and on the protected and broad slices they read the
+same number:
+
+```
+                          math500@2024-04   mgsm@2022-11   generation-diagnostics@gen2-response-surface-v1
+Gen-0 base (ancestor)          0.000000       0.000000        (not measured under this protocol)
+Gen-1 parent (gen1 adapter)    0.000000       0.000000        0.562500
+```
+
+The untouched dense base emits no EOS, so every generation runs the full
+512-token cap and no answer is extracted; the gen1 parent, measured for the
+first time under *this* instrument, terminates (16/16 EOS-terminated, mean 31
+tokens) and scores 0.5625 on the target -- the protocol repair, visible on the
+instrument that is supposed to see it. On math500 and mgsm it also reads 0.0.
+
+Two consequences, stated plainly because a reader should not have to infer them:
+
+* the **target** gate is meaningful and non-vacuous: 0.5625 is a real bar that a
+  Gen-2 candidate has to clear under its own measurement;
+* the **protected/broad** regression gates are decided between two measured
+  zeros, so `candidate - parent >= 0` cannot fail. The gate is not broken -- it
+  compares like-for-like measured arms, which is the property that matters --
+  but it is weak here, and "no measured regression on math500" should be read as
+  "neither model answers these items under this protocol" rather than as
+  evidence of retained capability.
 
 ## Invariants the control plane must never break
 
