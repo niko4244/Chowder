@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from .failure_taxonomy import FailureTaxonomy
 
@@ -63,6 +63,23 @@ class FailureBank:
     def __init__(self, taxonomy: FailureTaxonomy | None = None) -> None:
         self.taxonomy = taxonomy or FailureTaxonomy()
         self._failures: dict[str, FailureRecord] = {}
+
+    @classmethod
+    def from_records(
+        cls, records: Iterable[FailureRecord], taxonomy: FailureTaxonomy | None = None
+    ) -> "FailureBank":
+        """Rebuild a bank from already-classified records (durable memory).
+
+        The load half of persistence: a growth loop keeps its failures on disk
+        across processes and reads them back here, rather than planning every
+        generation against a fresh empty bank.  Records carry their own
+        taxonomy categories, so nothing is re-derived from raw text (which the
+        bank never persists in the first place).
+        """
+        bank = cls(taxonomy)
+        for record in records:
+            bank._failures[record.failure_id] = record
+        return bank
 
     def __len__(self) -> int:
         return len(self._failures)

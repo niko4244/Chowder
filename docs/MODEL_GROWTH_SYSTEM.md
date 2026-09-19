@@ -332,3 +332,35 @@ production train → independent evaluation → mechanical promotion → ledger.
 
 Known limitations are listed in `docs/DATA_POLICY.md` and
 `docs/BENCHMARK_CONTAMINATION_POLICY.md`.
+
+## Autonomous growth control plane (started)
+
+The generation engine below is single-generation: a campaign is composed by a
+human and planned from a fresh in-memory `FailureBank()`, so nothing one
+generation learns survives into the next. `docs/AUTONOMOUS_GROWTH_LOOP.md` (PR
+#192) starts the layer above it. `chowder.growth.target_selection` now owns:
+
+* **durable learning memory** — `GrowthState` keeps failures, interventions,
+  target proposals and capability history in append-only JSONL under one root
+  and rebuilds a live bank (`FailureBank.from_records`, the public load half)
+  before the next generation is planned;
+* **benchmark-attributed profiling** — `build_skill_profile` computes a skill's
+  estimate only from the benchmarks the registry declares for that skill,
+  weighted by sample support and provenance. A skill nobody measured is
+  `estimate=None` with `confidence=0` — unknown, not zero — so an autonomous
+  chooser reads it as "measure, don't train";
+* **intervention classification** — `classify_intervention` decides, before any
+  campaign exists, whether the weakness is a repair, an SFT job, a preference
+  problem, missing data, an unmeasured skill (measure first), a structural limit
+  (research) or an exhausted target (stop). The last three require human review;
+* **target selection** — `NextTargetSelector.propose()` reads the measured
+  profile, durable memory and policy only. It cannot read a campaign's candidate
+  results (a test pins its signature), and protected skills are never
+  candidates. The score is an explicit product of named factors with named
+  damping, and every proposal records its evidence, its factors and a
+  `why_not_other_targets` map.
+
+Not built yet, and not claimed: automatic campaign construction and
+preregistration, loop/session budget aggregation, plateau and stop/review
+policy, task-specific training-data providers, bounded candidate search, and the
+`GrowthLoop` controller with resume/recovery and a fake-compute simulator.

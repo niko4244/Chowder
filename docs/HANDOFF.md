@@ -1360,3 +1360,21 @@ section (replace, do not append — old state is in git history), keep
 hazard list accurate, and land the update through the same PR/CI
 discipline as code. If you did not merge anything, still update this doc
 if environment facts or hazards changed.
+
+## Autonomous growth control plane (started)
+
+PR #191 made both evaluation arms measurable: `dispatch_offloaded` now passes
+`offload_buffers=True` (the offloaded layers' buffers ride with their weights,
+which is exactly what accelerate warns is needed for this model class), and
+`chowder growth campaign measure-parent` measures the parent adapter over the
+declared base under *this campaign's* instrument. PR #192 starts the control
+plane above the generation engine in `docs/AUTONOMOUS_GROWTH_LOOP.md`:
+`chowder.growth.target_selection` owns durable learning memory (`GrowthState`,
+plus `FailureBank.from_records` as the public load half), benchmark-attributed
+profiling where an unmeasured skill is *unknown rather than zero*,
+`classify_intervention` (a weakness with no evidence is a measurement problem,
+not a training problem), and `NextTargetSelector`, whose `propose()` cannot read
+candidate results and never targets a protected skill. The next manifest, its
+preregistration, the loop budget, plateau/stop policy, training-data providers,
+bounded candidate search and the `GrowthLoop` controller are **not** built; the
+document says so explicitly.
