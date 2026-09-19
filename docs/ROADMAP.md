@@ -99,14 +99,17 @@ re-derived from disk both before it is measured and before the verdict is bound.
 `GEN2_PREREG_AMENDMENT9_2026-09-18.md` makes that gate inspectable without
 spending anything: `chowder growth campaign readiness <manifest>` reports every
 pre-compute prerequisite with zero compute and a non-zero exit unless all pass,
-using the same helpers `run_campaign` applies. Against the committed Gen-2
-declaration it refuses and names the top blocker: `base_model_digest` is the
-Gen-0 freeze's semantic `model_content_digest` (`59e767aa…`, ten model files),
-but production verifies with `directory_digest`, which also folds in a volatile
-HF `.cache/huggingface/**` (`8eb92aa6…`). The frozen base bytes are unchanged;
-the declared digest is simply on a different basis than the verifier — the one
-thing that must be reconciled, under its own preregistered change, before Gen-2
-can start.
+using the same helpers `run_campaign` applies. Its first real use found the base
+identity could not verify: `base_model_digest` was the Gen-0 freeze's semantic
+`model_content_digest` (`59e767aa…`, ten model files), but production verified
+with `directory_digest`, which also folds in a volatile HF
+`.cache/huggingface/**` (`8eb92aa6…`).
+`GEN2_PREREG_AMENDMENT10_2026-09-18.md` reconciles the basis: a base is verified
+by `local_model_manifest.model_content_digest`, over its payload files only, so a
+cache touch cannot move its identity and a substituted config still refuses.
+`campaign_runner._verify_base_identity` owns that check for both the run and the
+readiness report. Readiness now reports `base_identity: ok` and refuses on the
+undeclared inputs alone (`READINESS_DECLARED_INPUT`).
 
 The instrument is no longer a blocker:
 `GEN2_PREREG_AMENDMENT8_2026-09-18.md` ports the generation-diagnostics

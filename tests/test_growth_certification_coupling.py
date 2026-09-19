@@ -35,6 +35,7 @@ from chowder.growth.campaign_runner import CERTIFICATION_EVIDENCE
 
 from chowder.growth.evaluation_binding import EvaluationMaterial
 from chowder.growth.training_binding import directory_digest
+from chowder.local_model_manifest import model_content_digest
 
 import test_growth_campaign_runner as campaign_fixture
 from test_growth_gen2_judge import (  # the judge's own fixture builders
@@ -97,7 +98,7 @@ def _identity_digests(tmp_path: Path) -> tuple[str, str]:
     adapter = tmp_path / "parent-adapter"
     adapter.mkdir(exist_ok=True)
     (adapter / "adapter_model.safetensors").write_text("gen1-parent-weights", encoding="utf-8")
-    return directory_digest(base)[0], directory_digest(adapter)[0]
+    return model_content_digest(base).digest, directory_digest(adapter)[0]
 
 
 def _arms(

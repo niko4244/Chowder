@@ -12,10 +12,12 @@ import json
 import pytest
 
 from chowder.local_model_manifest import (
+    MODEL_CONTENT_DIGEST_BASIS,
     FileRecord,
     LocalModelManifestError,
     build_local_model_manifest,
     manifest_summary,
+    model_content_digest,
     verify_local_model_manifest,
     write_manifest_file,
 )
@@ -249,3 +251,68 @@ def test_write_manifest_file_round_trips(tmp_path):
     assert file_digest == hashlib.sha256(out.read_bytes()).hexdigest()
     reloaded = type(manifest).from_dict(json.loads(out.read_text(encoding="utf-8")))
     assert reloaded.manifest_sha256 == manifest.manifest_sha256
+
+
+# ---------------------------------------------------------------------------
+# model_content_digest: the frozen basis a base identity is pinned to
+# ---------------------------------------------------------------------------
+
+
+def test_model_content_digest_covers_only_the_payload(tmp_path):
+    """Weights and semantic metadata, in the canonical order -- nothing else.
+
+    A real base directory grows a HuggingFace download cache and provenance
+    files (``README.md``, ``.gitattributes``, ``processor_config.json``) that are
+    not part of the model. The digest names exactly the payload so its value does
+    not move when those do.
+    """
+    root = _make_model_dir(tmp_path / "model", shard_bytes=(4, 8))
+    digest = model_content_digest(root)
+
+    assert [record.path for record in digest.files] == [
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+        "model.safetensors.index.json",
+        "tokenizer_config.json",
+        "config.json",
+    ]
+    assert digest.basis == MODEL_CONTENT_DIGEST_BASIS
+    assert len(digest.digest) == 64
+
+
+def test_a_volatile_cache_does_not_move_the_model_content_digest(tmp_path):
+    """The exact defect this basis exists to close.
+
+    A cache touch or a README change is not a model change, so the identity must
+    not move. A whole-tree directory digest *does* move, which is why the base is
+    not pinned to one.
+    """
+    root = _make_model_dir(tmp_path / "model", shard_bytes=(4, 8))
+    before = model_content_digest(root).digest
+
+    cache = root / ".cache" / "huggingface" / "download"
+    cache.mkdir(parents=True)
+    (cache / "model-00001-of-00002.safetensors.metadata").write_text("churn", encoding="utf-8")
+    (cache / "CACHEDIR.TAG").write_text("tag", encoding="utf-8")
+    (root / "README.md").write_text("# model card", encoding="utf-8")
+    (root / ".gitattributes").write_text("*.safetensors filter=lfs\n", encoding="utf-8")
+    (root / "processor_config.json").write_text("{}", encoding="utf-8")
+
+    assert model_content_digest(root).digest == before
+
+
+def test_a_payload_change_moves_the_model_content_digest(tmp_path):
+    root = _make_model_dir(tmp_path / "model", shard_bytes=(4, 8))
+    before = model_content_digest(root).digest
+    (root / "config.json").write_text('{"model_type": "changed"}', encoding="utf-8")
+    assert model_content_digest(root).digest != before
+
+
+def test_model_content_digest_refuses_a_directory_with_no_payload(tmp_path):
+    empty = tmp_path / "not-a-model"
+    empty.mkdir()
+    (empty / "README.md").write_text("nothing here", encoding="utf-8")
+    with pytest.raises(LocalModelManifestError, match="payload"):
+        model_content_digest(empty)
+    with pytest.raises(LocalModelManifestError, match="existing directory"):
+        model_content_digest(tmp_path / "absent")

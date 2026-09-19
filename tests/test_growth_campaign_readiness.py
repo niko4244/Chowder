@@ -142,6 +142,33 @@ def test_readiness_refuses_bytes_that_do_not_match_the_declared_digest(tmp_path:
     )
 
 
+def test_readiness_ignores_a_volatile_cache_but_not_a_payload_change(tmp_path: Path):
+    """The base is pinned to its model-content digest, not its whole tree.
+
+    A cache touch or a provenance file is not a model change; a config change is.
+    The first must stay READY and the second must refuse, or the base identity is
+    either unstable against churn or blind to a real substitution.
+    """
+    manifest, _runner, document = _campaign(tmp_path)
+    base = Path(document["base_model_path"])
+
+    cache = base / ".cache" / "huggingface" / "download"
+    cache.mkdir(parents=True)
+    (cache / "config.json.metadata").write_text("churn", encoding="utf-8")
+    (base / "README.md").write_text("# model card", encoding="utf-8")
+    (base / ".gitattributes").write_text("*.safetensors filter=lfs\n", encoding="utf-8")
+    (base / "processor_config.json").write_text("{}", encoding="utf-8")
+
+    assert check_campaign_readiness(manifest).ready is True
+
+    (base / "config.json").write_text('{"model_type": "substituted"}', encoding="utf-8")
+    report = check_campaign_readiness(manifest)
+
+    assert READINESS_BASE_IDENTITY in report.reason_codes
+    detail = next(c.detail for c in report.checks if c.check == "base_identity")
+    assert "model-content digest" in detail
+
+
 def test_readiness_refuses_a_campaign_with_no_trusted_ancestor(tmp_path: Path):
     manifest, _runner, _document = _campaign(tmp_path, with_ancestor=False)
 
