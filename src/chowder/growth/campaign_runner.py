@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from chowder.evals.result import BenchmarkRun, EvalReport
+from chowder.local_model_manifest import LocalModelManifestError, model_content_digest
 
 from .candidate_evaluation import (
     CANDIDATE_EVALUATION_NOT_PRODUCED,
@@ -92,6 +93,7 @@ from .frontier_reference import SnapshotStore
 from .lineage import GenerationLedger, RegressionMemory
 from .metric_binding import MetricBinder, PromotionAssembly
 from .recipe_planner import HardwareBudget, RecipePlanner, TrainingRecipe
+
 from .training_binding import (
     STATUS_SUCCEEDED,
     GrowthEnvelope,
@@ -109,9 +111,9 @@ FIELD_ENFORCEMENT: Mapping[str, str] = {
     "parent_version": "the generation the candidate is compared against",
     "candidate_version": "the generation the verdict is recorded under (derived when empty)",
     "base_model_path": "hashed and compared with base_model_digest before any compute",
-    "base_model_digest": "must equal the dense base tree's digest, else the run refuses",
+    "base_model_digest": "must equal the dense base tree's model-content digest (payload files only), else the run refuses",
     "parent_adapter_path": "hashed and compared with parent_adapter_digest when declared",
-    "parent_adapter_digest": "must equal the parent adapter tree's digest, else the run refuses",
+    "parent_adapter_digest": "must equal the parent adapter tree's directory digest, else the run refuses",
     "state_root": "attempts, registry, ledger, accounting, the judged evidence set and campaign-run.json live here",
     "target_benchmarks": "the cycle's target set: the improvement gate",
     "protected_benchmarks": "the cycle's protected set: the regression gate",
@@ -1112,7 +1114,7 @@ def _require_path(value: str, field: str, *, purpose: str) -> Path:
 
 def _identity_detail(manifest: CampaignManifest) -> str:
     """Exactly which objects were hashed and which bytes matched."""
-    detail = f"base tree digest matches {manifest.base_model_digest[:12]}"
+    detail = f"base model-content digest matches {manifest.base_model_digest[:12]}"
     if manifest.has_parent_adapter():
         detail += (
             f"; parent adapter {manifest.parent_adapter_digest[:12]} verified "
@@ -1121,6 +1123,46 @@ def _identity_detail(manifest: CampaignManifest) -> str:
     else:
         detail += f"; {manifest.parent_version} is the base itself (no adapter declared)"
     return detail
+
+
+def _verify_base_identity(manifest: CampaignManifest) -> str:
+    """The dense base must hash, on the frozen model-content basis, as declared.
+
+    A base is a HuggingFace directory that acquires a download cache
+    (``.cache/huggingface/**``) and provenance-only files (``README.md``,
+    ``.gitattributes``) after it is downloaded. A whole-tree
+    :func:`directory_digest` therefore is not a stable identity for a base: it
+    moves whenever the cache moves, while nothing about the model changed. The
+    frozen Gen-0 identity is a *model-content* digest over the payload files
+    only (:func:`chowder.local_model_manifest.model_content_digest`), and that is
+    the basis a base digest must be pinned to.
+
+    The adapter tree keeps the directory digest: it is a small byte-stable
+    directory a run writes itself, with no cache in it.
+    """
+    path = Path(manifest.base_model_path)
+    if not path.is_dir():
+        raise CampaignRunRefusal(
+            f"base_model_path {str(path)!r} is not an existing directory "
+            "(the dense base tree)"
+        )
+    try:
+        measured = model_content_digest(path)
+    except LocalModelManifestError as error:
+        raise CampaignRunRefusal(
+            f"base_model_digest cannot be verified: {error}"
+        ) from error
+    if measured.digest != manifest.base_model_digest:
+        raise CampaignRunRefusal(
+            f"base_model_digest {manifest.base_model_digest[:12]} does not match "
+            f"the model-content digest {measured.digest[:12]} of {path} "
+            f"(basis {measured.basis}, {len(measured.files)} payload files); the "
+            "campaign would train from a base other than the one it preregistered"
+        )
+    return (
+        f"base model-content digest matches {manifest.base_model_digest[:12]} "
+        f"over {len(measured.files)} payload files (basis {measured.basis})"
+    )
 
 
 def _verify_digest(path: Path, field: str, declared: str, *, of: str) -> None:
@@ -1139,16 +1181,12 @@ def _verify_digest(path: Path, field: str, declared: str, *, of: str) -> None:
 def _verify_parent_identity(manifest: CampaignManifest) -> None:
     """Verify the base, and the parent adapter separately when declared.
 
-    A base digest and an adapter digest identify different objects, so each is
-    checked against its own tree. Overloading one field to mean either is what
-    made the gen2 manifest ambiguous.
+    A base digest and an adapter digest identify different objects on different
+    bases, so each is checked against its own tree and its own construction.
+    Overloading one field to mean either is what made the gen2 manifest
+    ambiguous; overloading one basis is the same defect one level down.
     """
-    _verify_digest(
-        Path(manifest.base_model_path),
-        "base_model_digest",
-        manifest.base_model_digest,
-        of="the dense base tree",
-    )
+    _verify_base_identity(manifest)
     if manifest.has_parent_adapter():
         _verify_digest(
             Path(manifest.parent_adapter_path),
@@ -1946,13 +1984,7 @@ def check_campaign_readiness(
     ))
 
     def base_identity() -> str:
-        _verify_digest(
-            Path(manifest.base_model_path),
-            "base_model_digest",
-            manifest.base_model_digest,
-            of="the dense base tree",
-        )
-        return f"base tree digest matches {manifest.base_model_digest[:12]}"
+        return _verify_base_identity(manifest)
 
     check("base_identity", READINESS_BASE_IDENTITY, ("schema",), base_identity)
 

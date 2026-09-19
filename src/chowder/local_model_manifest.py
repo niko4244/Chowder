@@ -73,9 +73,69 @@ _SEMANTIC_FILES: tuple[str, ...] = (
 #: in full mode. Nothing else in the directory is treated as weights.
 _WEIGHT_SUFFIXES: frozenset[str] = frozenset({".safetensors"})
 
+#: The order the identity-bearing metadata files are hashed in by
+#: :func:`model_content_digest`: weight shards first (name-sorted), then these,
+#: in this exact sequence. The sequence is the one the Gen-0 freeze used, and it
+#: is load-bearing: the digest is over the joined lines, so it is order-sensitive
+#: and cannot be recovered from a different ordering. Any other semantic file
+#: present in the directory follows these, in `_SEMANTIC_FILES` order.
+#:
+#: Note the freeze's own `model_content_digest_basis` string reads *"sha256 over
+#: sorted 'name size sha256' lines of files[]"*. That string does not describe the
+#: digest its producer actually wrote -- the producer joined the lines in a fixed
+#: list order, and a sorted-line digest of the same files is a different value.
+#: This constant is the real order; it reproduces the frozen figure exactly.
+_MODEL_CONTENT_FILE_ORDER: tuple[str, ...] = (
+    "model.safetensors.index.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "chat_template.jinja",
+    "generation_config.json",
+    "config.json",
+)
+
+#: Names the digest's own basis so a reader can tell which construction produced
+#: a figure, rather than assuming every digest in the repo is the same one.
+MODEL_CONTENT_DIGEST_BASIS = "chowder.model-content.v1"
+
 
 class LocalModelManifestError(ValueError):
     """A local model directory cannot be manifested honestly."""
+
+
+@dataclass(frozen=True)
+class ModelContentDigest:
+    """A model-content digest over the payload files that decide semantics.
+
+    Deliberately *not* a digest of everything under the directory: a HuggingFace
+    download cache (``.cache/huggingface/**``), ``README.md``, ``.gitattributes``
+    and similar provenance-only files are not part of the model, and folding
+    them in makes the identity move when nothing about the model did. The
+    payload is the weight shards plus the metadata files in
+    `_MODEL_CONTENT_FILE_ORDER` -- the same file set the Gen-0 freeze recorded.
+    """
+
+    root: str
+    digest: str
+    basis: str
+    files: tuple["FileRecord", ...]
+
+    def __post_init__(self) -> None:
+        if len(self.digest) != 64:
+            raise ValueError("model content digest must be 64 hex chars")
+        if not self.files:
+            raise LocalModelManifestError(
+                "a model content digest over no payload files would look like "
+                "evidence of a model it cannot back"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "root": self.root,
+            "digest": self.digest,
+            "basis": self.basis,
+            "files": [f.to_dict() for f in self.files],
+        }
 
 
 @dataclass(frozen=True)
@@ -168,6 +228,66 @@ class LocalModelManifest:
     @property
     def total_weight_bytes(self) -> int:
         return sum(record.size_bytes for record in self.weight_files)
+
+
+def _payload_file_names(root: Path) -> list[str]:
+    """The payload file names, in the digest's canonical order.
+
+    Weight shards first, name-sorted, then the metadata files in
+    `_MODEL_CONTENT_FILE_ORDER`, then any other semantic file present. Only
+    files that exist are named; a checkpoint that legitimately lacks a file is
+    not an error here (its absence is part of what is hashed).
+    """
+    names: list[str] = [
+        entry.name
+        for entry in sorted(root.iterdir(), key=lambda p: p.name)
+        if entry.is_file() and entry.suffix.lower() in _WEIGHT_SUFFIXES
+    ]
+    for name in _MODEL_CONTENT_FILE_ORDER:
+        if (root / name).is_file():
+            names.append(name)
+    for name in _SEMANTIC_FILES:
+        if name not in _MODEL_CONTENT_FILE_ORDER and (root / name).is_file():
+            names.append(name)
+    return names
+
+
+def model_content_digest(model_dir: str | Path) -> ModelContentDigest:
+    """The model-content digest of a local directory: payload files only.
+
+    Reads weight shards and the semantic metadata files, ignoring the volatile
+    HuggingFace cache and provenance-only files, and hashes
+    ``"<name> <size> <sha256>"`` lines joined by newlines in the canonical
+    order. This is the basis the frozen Gen-0 ``model_content_digest``
+    (``59e767aa...``) was written on, so a base pinned to that figure verifies
+    here even though its directory digest (which folds in the cache) does not.
+    """
+    root = Path(model_dir)
+    if not root.is_dir():
+        raise LocalModelManifestError(f"model dir is not an existing directory: {root}")
+    records: list[FileRecord] = []
+    for name in _payload_file_names(root):
+        path = root / name
+        records.append(
+            FileRecord(
+                path=name,
+                size_bytes=path.stat().st_size,
+                sha256=sha256_file(path),
+            )
+        )
+    if not records:
+        raise LocalModelManifestError(
+            f"no model payload files found under {root}; a directory with no "
+            "weight shards cannot be given a model-content identity"
+        )
+    lines = [f"{r.path} {r.size_bytes} {r.sha256}" for r in records]
+    digest = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+    return ModelContentDigest(
+        root=str(root),
+        digest=digest,
+        basis=MODEL_CONTENT_DIGEST_BASIS,
+        files=tuple(records),
+    )
 
 
 def build_local_model_manifest(model_dir: str | Path, *, mode: str = "fast") -> LocalModelManifest:

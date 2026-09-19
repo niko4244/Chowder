@@ -226,15 +226,25 @@ so a recorded digest can never become a certified one.
 `GEN2_PREREG_AMENDMENT9_2026-09-18.md` exposes that phase to operators as
 `chowder growth campaign readiness <manifest>`: every pre-compute check, zero
 compute, a machine-readable `status`/`checks[]`/`reason_codes[]` result and a
-non-zero exit unless all pass. Its first real use found the base identity cannot
-verify: `base_model_digest` in the shipped manifests is the Gen-0 freeze's
+non-zero exit unless all pass. Its first real use found the base identity could
+not verify: `base_model_digest` in the shipped manifests is the Gen-0 freeze's
 semantic `model_content_digest` (`59e767aa…`, ten model files), but
-`_verify_digest` uses `training_binding.directory_digest`, which also hashes a
-volatile HuggingFace `.cache/huggingface/**` (`8eb92aa6…`). The model bytes are
-frozen and unchanged; the declared digest is on a different basis than the
-verifier. The parent adapter digest in the same file verifies, so only the base
-field is inconsistent — the top Gen-2 blocker, deliberately left to its own
-preregistered change.
+`_verify_digest` used `training_binding.directory_digest`, which also hashes a
+volatile HuggingFace `.cache/huggingface/**` (`8eb92aa6…`).
+`GEN2_PREREG_AMENDMENT10_2026-09-18.md` reconciles the basis on the freeze's
+side: `campaign_runner._verify_base_identity` verifies a base with
+`local_model_manifest.model_content_digest`, a *model-content* digest over the
+payload files only, so cache churn cannot move base identity and a substituted
+payload file still refuses. The adapter keeps `directory_digest` as its own
+field. Readiness against the committed declaration now reports
+`base_identity: ok`; the remaining refusal is the undeclared inputs.
+
+The production verdict and the frozen judge are held to one invariant by
+`tests/test_growth_gen2_dry_run_matrix.py`: across clean promotion, an inherited
+trusted-ancestor regression, an artifact mutated under its own measurement, an
+evaluation overrun, an unwired evaluator, an unreported cost, a contamination
+mismatch and base/ancestor identity mismatches, a manifest-driven run can never
+record `PROMOTED` on a root the judge would refuse.
 
 The gen0 arm itself is declared, not assumed:
 `GEN2_PREREG_AMENDMENT2_2026-09-18.md` pins it in the manifest

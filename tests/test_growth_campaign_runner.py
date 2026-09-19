@@ -69,6 +69,7 @@ from chowder.growth.capability import ALL_SKILLS, CapabilityProfile, SkillEstima
 from chowder.growth.compute_cost import ComputeCost
 from chowder.growth.lineage import GenerationLedger
 from chowder.growth.training_binding import directory_digest
+from chowder.local_model_manifest import model_content_digest
 
 from test_growth_training_binding import _RecordingRunner, _source, _template
 
@@ -291,7 +292,11 @@ def _declaration(
     parent = tmp_path / "parent-model"
     parent.mkdir(exist_ok=True)
     (parent / "config.json").write_text("{}", encoding="utf-8")
-    digest, _entries = directory_digest(parent)
+    # The base is pinned to its *model-content* digest (payload files only), not
+    # its whole-tree directory digest: a real base tree grows a HuggingFace
+    # download cache after it is fetched, and a whole-tree digest would move with
+    # the cache while the model itself was unchanged.
+    digest = model_content_digest(parent).digest
     adapter = tmp_path / "parent-adapter"
     adapter.mkdir(exist_ok=True)
     (adapter / "adapter_model.safetensors").write_text("gen1-parent-weights", encoding="utf-8")
