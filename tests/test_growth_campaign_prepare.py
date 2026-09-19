@@ -519,3 +519,89 @@ def test_the_predicted_input_paths_are_exactly_what_preparation_writes(
     )
 
     assert prepared_input_paths(out_dir) == dict(prepared.inputs)
+
+
+def test_the_prepared_corpus_records_its_providers_and_passes_the_gate(
+    tmp_path: Path,
+) -> None:
+    """Materialisation is by dispatch, and its quality is measured, not assumed.
+
+    The corpus a run trains on must name the provider that produced each item
+    and the verification it passed -- and it must have been admitted by the
+    quality gate, against the real protected slices, before any compute.
+    """
+    manifest = _load_manifest(tmp_path, _manifest_document(tmp_path))
+    out_dir = tmp_path / "prepared"
+    prepared = prepare_campaign(
+        manifest,
+        out_dir=out_dir,
+        parent_evidence=_parent_evidence(tmp_path / "gen1"),
+        probe=_probe,
+        slice_source=_slice_source(),
+    )
+
+    material = json.loads(
+        Path(prepared.inputs["training_material_path"]).read_text(encoding="utf-8")
+    )
+    provenance = material["provenance"]
+    examples = provenance["examples"]
+    assert examples, "every curriculum item must record its admitted examples"
+    assert set(examples) == set(material["material"])
+    providers: set[str] = set()
+    for rows in examples.values():
+        for row in rows:
+            providers.add(row["provider"])
+            assert row["generation"]
+            assert row["target_skill"]
+            assert row["verification"] != "unverified"
+            assert row["contamination"] == "CLEAN"
+    assert providers, "the corpus must name the providers it came from"
+
+    quality_path = out_dir / provenance["quality_report"]
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    assert quality["contamination_result"] == "CLEAN"
+    assert quality["verifier_pass_rate"] == 1.0
+    assert quality["example_count"] > 0
+    assert quality["provider_composition"]
+
+    # Every source the material cites is registered, and vice versa.
+    registry = json.loads(
+        Path(prepared.inputs["data_registry_path"]).read_text(encoding="utf-8")
+    )
+    registered = {row["source_id"] for row in registry["sources"]}
+    assert set(material["sources"].values()) == registered
+
+
+def test_no_protected_slice_text_enters_the_prepared_corpus(tmp_path: Path) -> None:
+    """The mission's protected-leak case, checked against the real slice files."""
+    manifest = _load_manifest(tmp_path, _manifest_document(tmp_path))
+    out_dir = tmp_path / "prepared"
+    prepared = prepare_campaign(
+        manifest,
+        out_dir=out_dir,
+        parent_evidence=_parent_evidence(tmp_path / "gen1"),
+        probe=_probe,
+        slice_source=_slice_source(),
+    )
+
+    material = json.loads(
+        Path(prepared.inputs["training_material_path"]).read_text(encoding="utf-8")
+    )
+    corpus_text = "\n".join(
+        line for rows in material["material"].values() for line in rows
+    )
+    slices = json.loads(
+        Path(prepared.inputs["evaluation_material_path"]).read_text(encoding="utf-8")
+    )
+    protected_prompts: list[str] = []
+    for suite in slices.get("suites", ()):
+        if suite.get("benchmark_qualified_id") not in manifest.protected_benchmarks:
+            continue
+        dataset = Path(str(suite["dataset"]))
+        if dataset.is_file():
+            for line in dataset.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    protected_prompts.append(str(json.loads(line).get("prompt", "")))
+    assert protected_prompts, "the fixture must have real protected slices to leak"
+    for prompt in protected_prompts:
+        assert prompt not in corpus_text

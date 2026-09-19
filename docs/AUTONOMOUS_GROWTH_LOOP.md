@@ -33,8 +33,8 @@ campaigns; it never replaces or loosens them.
 | Exact production recipe ids frozen before preregistration | **delivered** (`FinalCampaignManifest`) |
 | Protected skills derived from the policy's protected benchmarks | **delivered** (`protected_skills_for_policy`) |
 | One shared plan/run decision path | **delivered** (`GrowthLoop.plan_next`, used by CLI and TUI) |
-| Task-specific training-data providers + corpus quality gate | **not built** |
-| Bounded production candidate search (successive halving) | **not built** |
+| Task-specific training-data providers + corpus quality gate | **delivered** (`data_providers`: dispatch by skill/verification, measured quality report, refusal on thin/duplicated/unverified/contaminated corpora) |
+| Bounded production candidate search (successive halving) | **not built** — `run_successive_halving` still has no production caller on the growth path and `run_project` has no `search` section for it to read; recipe identity/mixture travel in `to_dict()` while LoRA rank/alpha stay proposed-but-unmapped |
 | Gen-0 trusted-ancestor arm | **measured** — `math500@2024-04` 0.0, `mgsm@2022-11` 0.0 (16 rows each) |
 | Gen-1 parent arm under the *Gen-2* instrument | **measured** — target `generation-diagnostics@gen2-response-surface-v1` 0.5625, `math500@2024-04` 0.0, `mgsm@2022-11` 0.0 (16 rows each, `MEASURED_PARENT`, bound to the gen1 adapter digest) |
 | Gen-2 readiness gate | **READY** (all pre-compute prerequisites pass) |
@@ -209,20 +209,52 @@ Three rules are enforced rather than documented:
   both targetable and protected evidence keeps its targetable evidence and is
   reported in `regression_risks`.
 
+### Training-data providers and the corpus quality gate (`data_providers`)
+
+A curriculum item says *what* to train (skill, role, training type, size, and the
+verification its examples must satisfy); it does not say *where the examples come
+from*. `data_providers` owns that question by dispatch: each item goes to the
+ground provider that serves its declared skill and verification -- protocol
+repair (programmatically checked), maths (computed key), coding (executable
+tests), replay (curated parent material), failure analogues (judged) and the
+remaining judged repair skills -- and every admitted example records its
+provider, source, generation, target skill, verification and contamination
+verdict.
+
+The rules are enforced, not trusted:
+
+* an item no provider serves **refuses** (with the skill and verification named);
+* a provider that would verify by a method other than the one declared is not a
+  provider for that item;
+* a protected evaluation example can never become a training example -- the
+  materialiser refuses a duplicate of a protected slice text;
+* an unmeasured contamination verdict is `UNKNOWN`, and `UNKNOWN` is not `CLEAN`.
+
+`assess_corpus` then measures the corpus (example and token counts, duplicate
+rate, verifier pass rate, skill and source composition, contamination) and
+`assert_corpus_quality` refuses it against thresholds declared before any corpus
+exists. The report is written as `corpus-quality.json` beside the material, and
+`chowder growth campaign prepare` runs both before the campaign can spend
+anything.
+
 ## The pieces that do not exist yet
 
 Still manual or missing for the autonomous case:
 
-* task-specific training-data providers (the corpus is still the protocol-repair
-  template), and the corpus quality gate that refuses a poor self-generated set;
 * bounded production candidate search (successive halving) -- an existing library
-  implementation that is not yet wired, not something to reimplement;
+  implementation (`successive_halving.run_successive_halving`) that is not yet
+  wired: it drives `ExperimentCycleRunner` rounds, while the growth path trains
+  recipes through `training_binding`, and `run_project` has no `search` section
+  for it to read. Recipe identity and mixture travel in `to_dict()`, and LoRA
+  rank/alpha stay proposed-but-unmapped in the planner's own words. Wiring it is
+  a pass of its own, not something to reimplement;
 * a measured Gen-2 outcome: readiness is READY and no real Gen-2 candidate
   training has been run, so nothing here is evidence about Gen-2's verdict.
 
-Until the first two exist, Chowder can compose, freeze, plan and monitor the next
-campaign without a human, but it cannot yet *choose better data* for it. It must
-not claim otherwise.
+Until candidate search is wired, Chowder can compose, freeze, plan, prepare and
+monitor the next campaign without a human, and the corpus it trains on is
+provider-attributed and quality-gated -- but it still cannot *compete* candidates
+for that corpus. It must not claim otherwise.
 
 ## What the measured arms imply
 

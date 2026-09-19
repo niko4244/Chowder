@@ -360,7 +360,11 @@ generation learns survives into the next. `docs/AUTONOMOUS_GROWTH_LOOP.md` (PR
   damping, and every proposal records its evidence, its factors and a
   `why_not_other_targets` map.
 
-Not built yet, and not claimed: automatic campaign construction and
-preregistration, loop/session budget aggregation, plateau and stop/review
-policy, task-specific training-data providers, bounded candidate search, and the
-`GrowthLoop` controller with resume/recovery and a fake-compute simulator.
+Snapshot of the #192 starting point; `docs/AUTONOMOUS_GROWTH_LOOP.md` is the
+current status. Not built at that point, and not claimed then: automatic
+campaign construction and preregistration, loop/session budget aggregation,
+plateau and stop/review policy, task-specific training-data providers, bounded
+candidate search, and the `GrowthLoop` controller with resume/recovery and a
+fake-compute simulator. Since then, everything in that list except bounded
+candidate search has been delivered -- including the provider framework and
+corpus quality gate, which live in `chowder.growth.data_providers`.

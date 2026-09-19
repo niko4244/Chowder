@@ -1456,7 +1456,23 @@ and machine reason codes rather than one red state. Start is enabled only by the
 service's readiness verdict, and a programmatic click on a refused campaign
 spends nothing.
 
-Still **not** built, and not claimed: task-specific training-data providers and
-their corpus quality gate, and bounded production candidate search (successive
-halving). Both are named in `docs/AUTONOMOUS_GROWTH_LOOP.md`. No real Gen-2
-candidate training has been run.
+Still **not** built, and not claimed: bounded production candidate search
+(successive halving) -- the library controller drives `ExperimentCycleRunner`
+rounds while the growth path trains through `training_binding`, and
+`run_project` has no `search` section to read, so wiring it is a pass of its own.
+No real Gen-2 candidate training has been run.
+
+**The corpus is now provider-attributed and quality-gated.** `data_providers`
+dispatches each curriculum item to the provider that serves its declared skill
+and verification -- protocol repair (programmatically checked), maths (computed
+key), coding (executable tests), replay (curated parent material), failure
+analogues and the remaining judged repair skills -- and every admitted example
+records its provider, source, generation, target skill, verification and
+contamination verdict. An item no provider serves refuses with the skill and
+verification named; a protected evaluation text can never become a training
+text; an unmeasured contamination verdict is `UNKNOWN`, and `UNKNOWN` is not
+`CLEAN`. `assess_corpus` measures the corpus (counts, duplicate rate, verifier
+pass rate, skill and source composition) and `assert_corpus_quality` refuses it
+against thresholds declared before any corpus exists, writing
+`corpus-quality.json` beside the material -- so `chowder growth campaign prepare`
+now measures the corpus it is about to train on instead of assuming it.
