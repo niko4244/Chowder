@@ -1094,9 +1094,17 @@ ANCESTOR_ARM_SLICE_TOO_SHORT = "ANCESTOR_ARM_SLICE_TOO_SHORT"
 
 
 @dataclass(frozen=True)
-class AncestorArm:
-    """The measured Gen-0 trusted-ancestor arm and where it was written."""
+class MeasuredArm:
+    """One measured evaluation arm and where it was written.
 
+    ``which`` names the arm: the trusted ancestor (the dense base, no adapter)
+    or the parent (its adapter over that base).  Either way the rows carry
+    ``MEASURED_PARENT`` provenance under the generation label of the thing that
+    was actually measured, so a parent measurement can never be read as a
+    candidate's.
+    """
+
+    which: str
     generation_version: str
     report_path: Path
     rows: tuple[str, ...]
@@ -1106,6 +1114,7 @@ class AncestorArm:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "which": self.which,
             "generation_version": self.generation_version,
             "report_path": str(self.report_path),
             "rows": list(self.rows),
@@ -1116,26 +1125,35 @@ class AncestorArm:
         }
 
 
-def measure_ancestor_arm(
+#: Kept as an alias: the trusted-ancestor arm was the first caller of the one
+#: arm-measuring path, and the name still reads for that use.
+AncestorArm = MeasuredArm
+
+
+def measure_arm(
     manifest: Any,
     *,
-    out_path: str | Path | None = None,
+    which: str,
+    benchmarks: Sequence[str],
+    generation_version: str,
+    adapter_dir: str | Path | None,
+    out_path: str | Path,
     slice_source: SliceSource | None = None,
     runner: Any = None,
     python: str | None = None,
     state_root: str | Path | None = None,
     placement: str = "offload",
     timeout_seconds: float = 7200.0,
-) -> AncestorArm:
-    """Measure the trusted-ancestor (Gen-0) arm on the untouched dense base.
+) -> MeasuredArm:
+    """Measure one evaluation arm (ancestor or parent) through production.
 
-    The arm is a *real* measurement through the same production worker the
-    candidate evaluator uses, with no adapter loaded: the base model is what is
-    measured.  Its rows carry ``measurement_origin=MEASURED_PARENT`` and the
-    trusted-ancestor generation label, one digest-bound raw artifact each, and
-    the report names the base digest it measured.  The arm is referenced by the
-    campaign at zero incremental cost, so it is returned with that fact stated
-    rather than charged to the recipe envelope.
+    One path for both: the arm is a *real* measurement through the same
+    production worker the candidate evaluator uses, differing only in whether
+    an adapter is loaded and which generation label it is recorded under.  Rows
+    carry ``measurement_origin=MEASURED_PARENT``, one digest-bound raw artifact
+    each, and the report names the bytes it measured.  The arm is referenced by
+    the campaign at zero incremental cost, so it is returned with that fact
+    stated rather than charged to the recipe envelope.
     """
     import sys as _sys
 
@@ -1149,16 +1167,21 @@ def measure_ancestor_arm(
     from .training_binding import default_runner
 
     protocol = manifest.protection.require_protocol(source=manifest.cycle_id)
-    benchmarks = tuple(dict.fromkeys((*manifest.protected_benchmarks, *manifest.broad_benchmarks)))
+    benchmarks = tuple(dict.fromkeys(benchmarks))
     if not benchmarks:
         raise CampaignPrepareRefusal(
-            f"{PREPARE_SCHEMA}: the campaign declares no protected/broad benchmark, "
-            "so there is no ancestor arm to measure"
+            f"{PREPARE_SCHEMA}: the campaign declares no benchmark for the "
+            f"{which} arm, so there is nothing to measure"
+        )
+    if not str(out_path).strip():
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: the {which} arm has no declared path to be "
+            "written to"
         )
     source = slice_source or load_pinned_slices
     size = int(protocol.n_samples)
     root = Path(state_root or manifest.state_root)
-    work_dir = root / "ancestor-arm"
+    work_dir = root / f"{which}-arm"
     work_dir.mkdir(parents=True, exist_ok=True)
 
     suites: list[Any] = []
@@ -1199,7 +1222,7 @@ def measure_ancestor_arm(
 
     spec = TransformersTextEvalSpec(
         base_model=str(manifest.base_model_path),
-        adapter_dir=None,
+        adapter_dir=None if adapter_dir is None else str(adapter_dir),
         output_dir=str(work_dir),
         suites=tuple(suites),
         precision="bf16",
@@ -1242,7 +1265,6 @@ def measure_ancestor_arm(
             "measurements"
         )
 
-    generation_version = str(manifest.protection.trusted_ancestor_version)
     runs: list[BenchmarkRun] = []
     for qualified_id, suite in zip(benchmarks, suites):
         evidence = suite_evidence.get(suite.name)
@@ -1292,30 +1314,105 @@ def measure_ancestor_arm(
             )
         )
 
-    target = Path(out_path or manifest.baseline_eval_report_path)
-    if not str(target).strip():
-        raise CampaignPrepareRefusal(
-            f"{PREPARE_SCHEMA}: the declaration names no baseline_eval_report_path, "
-            "so the measured ancestor arm has nowhere to be written"
+    target = Path(out_path)
+    identity: dict[str, str] = {
+        "base_model_path": str(manifest.base_model_path),
+        "base_model_digest": str(manifest.base_model_digest),
+    }
+    if adapter_dir is not None:
+        identity["adapter_path"] = str(adapter_dir)
+        identity["adapter_digest"] = str(
+            getattr(manifest, "parent_adapter_digest", "") or ""
         )
     EvalReport(
         generation_version=generation_version,
         runs=tuple(runs),
         date=_utc_now(),
-        model_identity={
-            "base_model_path": str(manifest.base_model_path),
-            "base_model_digest": str(manifest.base_model_digest),
-        },
+        model_identity=identity,
     ).save(target)
     runtime = payload.get("runtime", {}) if isinstance(payload, Mapping) else {}
     gpu_count = int(runtime.get("gpu_count", 0) or 0) if isinstance(runtime, Mapping) else 0
-    return AncestorArm(
+    return MeasuredArm(
+        which=which,
         generation_version=generation_version,
         report_path=target,
         rows=tuple(run.benchmark_qualified_id for run in runs),
         work_dir=work_dir,
         seconds=float(outcome.seconds),
         gpu_count=gpu_count,
+    )
+
+
+def measure_ancestor_arm(
+    manifest: Any,
+    *,
+    out_path: str | Path | None = None,
+    slice_source: SliceSource | None = None,
+    runner: Any = None,
+    python: str | None = None,
+    state_root: str | Path | None = None,
+    placement: str = "offload",
+    timeout_seconds: float = 7200.0,
+) -> MeasuredArm:
+    """Measure the trusted-ancestor (Gen-0) arm on the untouched dense base."""
+    return measure_arm(
+        manifest,
+        which="ancestor",
+        benchmarks=tuple(
+            dict.fromkeys((*manifest.protected_benchmarks, *manifest.broad_benchmarks))
+        ),
+        generation_version=str(manifest.protection.trusted_ancestor_version),
+        adapter_dir=None,
+        out_path=out_path or manifest.baseline_eval_report_path,
+        slice_source=slice_source,
+        runner=runner,
+        python=python,
+        state_root=state_root,
+        placement=placement,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def measure_parent_arm(
+    manifest: Any,
+    *,
+    out_path: str | Path | None = None,
+    slice_source: SliceSource | None = None,
+    runner: Any = None,
+    python: str | None = None,
+    state_root: str | Path | None = None,
+    placement: str = "offload",
+    timeout_seconds: float = 7200.0,
+) -> MeasuredArm:
+    """Measure the parent generation's adapter under this campaign's protocol.
+
+    The parent arm is the side of adjudication a run compares its candidate
+    against.  A parent measured under a *different* instrument version cannot
+    serve that comparison, which is exactly why the durable Gen-1 evidence left
+    the target row ``UNMEASURED``: this measures the parent adapter over the
+    declared base with the *declared* instrument, so the target comparison has
+    a real parent row instead of a missing one.  The rows are
+    ``MEASURED_PARENT`` under the parent's own generation label -- never
+    candidate-measured.
+    """
+    if not manifest.has_parent_adapter():
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: the campaign declares no parent adapter, so there "
+            "is no parent arm to measure; the parent is the base itself"
+        )
+    return measure_arm(
+        manifest,
+        which="parent",
+        benchmarks=tuple(_evaluated_benchmarks(manifest)),
+        generation_version=str(manifest.parent_version),
+        adapter_dir=manifest.parent_adapter_path,
+        out_path=out_path or manifest.parent_eval_report_path,
+        slice_source=slice_source,
+        runner=runner,
+        python=python,
+        state_root=state_root,
+        placement=placement,
+        timeout_seconds=timeout_seconds,
     )
 
 

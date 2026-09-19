@@ -80,11 +80,19 @@ def dispatch_offloaded(model: Any, device_name: str) -> Any:
         )
     device_map: dict[Any, Any] = {"": main}
     device_map.update({f"model.layers.{i}": "cpu" for i in range(len(layers))})
+    # ``offload_buffers=True`` puts the offloaded layers' buffers on the host
+    # too. accelerate warns for exactly this model class that the buffers "do
+    # not fit any GPU's remaining memory", and with the residual on the card a
+    # 16 GB host OOMs on the first forward even with several GB nominally free
+    # -- observed here as a 64 MiB allocation failure during generation. Letting
+    # the buffers ride with their weights is what makes a base-only measurement
+    # (the trusted-ancestor arm) run on this hardware at all.
     dispatch_model(
         model,
         device_map=device_map,
         offload_dir=_offload_dir(),
         main_device=0,
+        offload_buffers=True,
     )
     return model
 

@@ -367,7 +367,9 @@ def test_the_ancestor_arm_refuses_a_short_slice(tmp_path: Path) -> None:
         measure_ancestor_arm,
     )
 
-    manifest = _load_manifest(tmp_path, _manifest_document(tmp_path))
+    document = _manifest_document(tmp_path)
+    document["baseline_eval_report_path"] = str(tmp_path / "gen0" / "baseline.json")
+    manifest = _load_manifest(tmp_path, document)
     with pytest.raises(CampaignPrepareRefusal) as error:
         measure_ancestor_arm(
             manifest,
@@ -436,3 +438,53 @@ def test_cli_prepare_writes_a_declaration(tmp_path: Path, monkeypatch: pytest.Mo
     for field_name in PREPARED_INPUT_FIELDS:
         assert Path(written[field_name]).is_file()
     assert Path(written[CONTAMINATION_MANIFEST_FIELD]).is_file()
+
+
+def _with_parent_adapter(tmp_path: Path, document: dict[str, Any]) -> dict[str, Any]:
+    adapter = tmp_path / "parent-adapter"
+    adapter.mkdir(exist_ok=True)
+    (adapter / "adapter_model.safetensors").write_text("gen1-parent", encoding="utf-8")
+    from chowder.growth.training_binding import directory_digest
+
+    digest, _entries = directory_digest(adapter)
+    document["parent_adapter_path"] = str(adapter)
+    document["parent_adapter_digest"] = digest
+    document["parent_eval_report_path"] = str(tmp_path / "parent" / "parent-eval.json")
+    return document
+
+
+def test_the_parent_arm_measures_the_parent_under_the_declared_instrument(tmp_path: Path) -> None:
+    """The parent arm gets a real target row under this campaign's instrument."""
+    from chowder.growth.campaign_prepare import measure_parent_arm
+
+    document = _with_parent_adapter(tmp_path, _manifest_document(tmp_path))
+    manifest = _load_manifest(tmp_path, document)
+    runner = _RecordingEvalRunner()
+    arm = measure_parent_arm(
+        manifest,
+        slice_source=_slice_source(),
+        runner=runner,
+        state_root=tmp_path / "state",
+    )
+    report = json.loads(Path(arm.report_path).read_text(encoding="utf-8"))
+    assert report["generation_version"] == "gen1"
+    by_id = {run["benchmark_qualified_id"]: run for run in report["runs"]}
+    # The declared target instrument now has a real parent row.
+    assert by_id[TARGET_ID]["measurement_origin"] == "MEASURED_PARENT"
+    assert by_id[TARGET_ID]["generation_version"] == "gen1"
+    assert by_id[TARGET_ID]["n_samples"] == 16
+    assert len(by_id[TARGET_ID]["per_sample_scores"]) == 16
+    assert report["model_identity"]["adapter_digest"] == document["parent_adapter_digest"]
+    parent_spec = json.loads(
+        (arm.work_dir / "ancestor-eval-spec.json").read_text(encoding="utf-8")
+    )
+    assert parent_spec["adapter_dir"] == document["parent_adapter_path"]
+    assert arm.which == "parent"
+
+
+def test_the_parent_arm_refuses_when_no_adapter_is_declared(tmp_path: Path) -> None:
+    from chowder.growth.campaign_prepare import CampaignPrepareRefusal, measure_parent_arm
+
+    manifest = _load_manifest(tmp_path, _manifest_document(tmp_path))
+    with pytest.raises(CampaignPrepareRefusal):
+        measure_parent_arm(manifest, slice_source=_slice_source(), runner=_RecordingEvalRunner())
