@@ -111,6 +111,15 @@ cache touch cannot move its identity and a substituted config still refuses.
 readiness report. Readiness now reports `base_identity: ok` and refuses on the
 undeclared inputs alone (`READINESS_DECLARED_INPUT`).
 
+The certification boundary is now exercised as a matrix rather than a handful of
+cases: `tests/test_growth_gen2_dry_run_matrix.py` drives a manifest through the
+real CLI and then hands the same run root to the frozen judge across clean
+promotion, an inherited trusted-ancestor regression, an artifact that moves under
+its own measurement, an evaluation overrun, an unwired evaluator, an unreported
+evaluation cost, a contamination mismatch and identity mismatches on the base and
+ancestor arms — asserting in every state that the campaign cannot record
+`PROMOTED` where the judge would refuse.
+
 The instrument is no longer a blocker:
 `GEN2_PREREG_AMENDMENT8_2026-09-18.md` ports the generation-diagnostics
 instrument into `src/` (`chowder.growth.generation_diagnostics` computes the
