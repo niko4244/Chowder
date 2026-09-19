@@ -338,6 +338,12 @@ STATE_FILES = {
 STOPPING_FILE = "stopping-state.json"
 
 
+def _utc_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _append_jsonl(path: Path, document: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -530,11 +536,61 @@ class GrowthState:
             return {}
         return dict(document) if isinstance(document, Mapping) else {}
 
-    def set_stopping_state(self, document: Mapping[str, Any]) -> None:
+    def set_stopping_state(
+        self, document: Mapping[str, Any], *, preserve_operator_stop: bool = True
+    ) -> None:
+        """Record the session's own verdict, without erasing the operator's.
+
+        The two are independent facts that share this file: the loop's decision,
+        and a stop an operator asked for. A verdict write must not throw the
+        request away -- otherwise a stop raised while a campaign is running is
+        lost the moment that campaign records its outcome, and the loop happily
+        starts the next generation the operator asked it not to. ``clear_stop``
+        is the one caller that means to remove it.
+        """
+        merged = dict(document)
+        existing = self.stopping_state().get("operator_stop")
+        if preserve_operator_stop and existing is not None and "operator_stop" not in merged:
+            merged["operator_stop"] = existing
         path = self.root / STOPPING_FILE
         path.write_text(
-            json.dumps(dict(document), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            json.dumps(merged, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
+
+    # -- operator stop -----------------------------------------------------
+
+    def request_stop(self, *, reason: str) -> dict[str, Any]:
+        """Record an operator stop durably, beside the session's own verdict.
+
+        Durable because the request has to survive the process boundary a UI
+        and a run live on either side of: the loop re-reads it at each
+        generation boundary rather than being told in memory.
+        """
+        document = self.stopping_state()
+        request = {"requested": True, "reason": str(reason), "at": _utc_now()}
+        document["operator_stop"] = request
+        self.set_stopping_state(document)
+        return request
+
+    def operator_stop(self) -> dict[str, Any] | None:
+        """The pending stop request, or ``None`` when there is nothing to honour."""
+        request = self.stopping_state().get("operator_stop")
+        if isinstance(request, Mapping) and request.get("requested"):
+            return dict(request)
+        return None
+
+    def clear_stop(self) -> None:
+        """Drop a stop request, so a resumed session can start a generation.
+
+        Only ever called because an operator asked to start or resume: a stop
+        that could not be cleared would leave the session permanently wedged, and
+        clearing it silently inside the loop would ignore the operator.
+        """
+        document = self.stopping_state()
+        if "operator_stop" not in document:
+            return
+        document.pop("operator_stop", None)
+        self.set_stopping_state(document, preserve_operator_stop=False)
 
     # -- helpers -----------------------------------------------------------
 

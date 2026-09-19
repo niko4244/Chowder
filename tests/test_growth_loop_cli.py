@@ -305,7 +305,10 @@ def test_plan_refuses_a_profile_measured_on_another_generation(
     )
     payload = json.loads(capsys.readouterr().out)
 
-    assert exit_code == 0
+    # A plan that *refuses* exits non-zero: the machine reason code is the point
+    # of the command, and a refusal printed with a success exit code would look
+    # like a plan.
+    assert exit_code == 1
     assert payload["decision"]["action"] == "STOP_UNCERTAIN"
     assert "PROFILE_GENERATION_MISMATCH" in payload["decision"]["reason_codes"]
     assert not list(tmp_path.glob("gen3-a1-*")), "nothing may be composed from it"

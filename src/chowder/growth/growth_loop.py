@@ -66,6 +66,10 @@ STOP_BUDGET = "STOP_BUDGET"
 STOP_PLATEAU = "STOP_PLATEAU"
 STOP_UNCERTAIN = "STOP_UNCERTAIN"
 STOP_UNTRAINABLE = "STOP_UNTRAINABLE"
+#: An operator asked the loop to finish the campaign it is running and start no
+#: more. It is an *honest* stop: nothing claims a mid-kernel cancellation that
+#: the campaign stack cannot safely perform.
+STOP_OPERATOR = "STOP_OPERATOR"
 REQUIRES_HUMAN_REVIEW = "REQUIRES_HUMAN_REVIEW"
 
 TERMINAL_DECISIONS = frozenset(
@@ -75,6 +79,7 @@ TERMINAL_DECISIONS = frozenset(
         STOP_PLATEAU,
         STOP_UNCERTAIN,
         STOP_UNTRAINABLE,
+        STOP_OPERATOR,
         REQUIRES_HUMAN_REVIEW,
     }
 )
@@ -99,6 +104,7 @@ NOTHING_LEFT_TO_IMPROVE = "NOTHING_LEFT_TO_IMPROVE"
 PROFILE_GENERATION_MISMATCH = "PROFILE_GENERATION_MISMATCH"
 PREPARATION_PRODUCED_NO_RECIPE_SET = "PREPARATION_PRODUCED_NO_RECIPE_SET"
 FROZEN_RECIPE_SET_REFUSED = "FROZEN_RECIPE_SET_REFUSED"
+OPERATOR_STOP_REQUESTED = "OPERATOR_STOP_REQUESTED"
 
 #: Treatments that the loop will never start on its own, whatever the score.
 #: They are not "bad targets": they are targets whose safety this loop cannot
@@ -482,6 +488,11 @@ class GrowthLoop:
             maximum_total_wall_gpu_hours=policy.maximum_total_wall_gpu_hours
         )
 
+    @property
+    def profile(self) -> SkillProfile | None:
+        """The parent's measured capability, as the loop plans from it."""
+        return self._profile
+
     # -- the loop ----------------------------------------------------------
 
     def run(
@@ -507,13 +518,22 @@ class GrowthLoop:
         )
         records: list[GenerationRecord] = []
         if resume:
+            # Resuming *is* the operator overriding their own stop request. The
+            # flag is durable precisely so a session can be stopped from one
+            # process and continued from another; leaving it set would make the
+            # resume refuse forever with no way to un-say the stop.
+            self.state.clear_stop()
             restored = self._restore_from_durable_state()
             if isinstance(restored, LoopDecision):
                 self.state.set_stopping_state(restored.to_dict())
                 return self._report(restored, [])
             records = list(restored)
             settled = self.state.stopping_state()
-            if settled.get("terminal"):
+            # An operator stop is deliberately *not* an ended session: "finish the
+            # current campaign, start no more" is only useful if the operator can
+            # later say "carry on". Every other terminal verdict is a conclusion
+            # about the work, so resuming adopts it instead of repeating it.
+            if settled.get("terminal") and settled.get("action") != STOP_OPERATOR:
                 return self._report(
                     LoopDecision(
                         str(settled.get("action", STOP_UNCERTAIN)),
@@ -528,6 +548,21 @@ class GrowthLoop:
         decision = LoopDecision(CONTINUE, "the loop has not attempted a generation yet")
 
         for index in range(1, limit + 1):
+            # The operator stop is checked at the *generation boundary*, which is
+            # the only boundary this loop can honour honestly: it means "finish
+            # the campaign in flight, start no more". A stop request that
+            # pretended to interrupt a trainer would be a promise the campaign
+            # stack cannot keep.
+            requested = self.state.operator_stop()
+            if requested:
+                decision = LoopDecision(
+                    STOP_OPERATOR,
+                    f"an operator asked the loop to stop after the current "
+                    f"campaign: {requested.get('reason', '')}",
+                    (OPERATOR_STOP_REQUESTED,),
+                )
+                self.state.set_stopping_state(decision.to_dict())
+                return self._report(decision, records)
             step = self._one_generation(
                 index=index,
                 exhausted=exhausted,
@@ -729,10 +764,25 @@ class GrowthLoop:
             )
         return proposal, None
 
-    def _one_generation(self, *, index: int, exhausted: set[str]) -> "_Step":
-        proposal, refusal = self._proposal_or_decision(exhausted)
+    def prepare_next(
+        self, *, exhausted: Iterable[str] = ()
+    ) -> "PreparedAttempt | LoopDecision":
+        """Draft, prepare and freeze the next attempt -- or say why it cannot.
+
+        This is the whole no-candidate-compute front half of a generation in one
+        place: select a target, compose a draft, run the production preparation
+        (which is what runs the real curriculum and recipe planners), freeze the
+        exact recipe set the planner proposed, and record the target.
+
+        Read-only clients and the run itself both go through it, so what a
+        readiness preview shows is what a run will actually execute. Returns a
+        :class:`LoopDecision` when the attempt cannot even be composed -- never
+        a partially prepared attempt, and never a frozen declaration carrying a
+        recipe set nobody planned.
+        """
+        proposal, refusal = self._proposal_or_decision(set(exhausted))
         if refusal is not None:
-            return _Step(refusal)
+            return refusal
 
         # Generations live beside the parent's run root. The *name* of this
         # attempt belongs to the builder, which is the only owner of the cycle
@@ -750,12 +800,10 @@ class GrowthLoop:
         except NextCampaignRefusal as error:
             # A policy-conformant declaration that cannot be composed is a
             # reviewable event, not a silent skip.
-            return _Step(
-                LoopDecision(
-                    REQUIRES_HUMAN_REVIEW,
-                    f"the next campaign could not be composed: {error}",
-                    (TREATMENT_REQUIRES_REVIEW,),
-                )
+            return LoopDecision(
+                REQUIRES_HUMAN_REVIEW,
+                f"the next campaign could not be composed: {error}",
+                (TREATMENT_REQUIRES_REVIEW,),
             )
         self.state.record_target(proposal)
 
@@ -767,22 +815,36 @@ class GrowthLoop:
         # preregistration cannot be un-written.
         recipe_ids, prepare_reason = self._run_prepare(draft)
         if recipe_ids is None:
-            return _Step(
-                LoopDecision(STOP_UNCERTAIN, prepare_reason, (PREPARATION_REFUSED,)),
-                draft=draft,
-            )
+            return LoopDecision(STOP_UNCERTAIN, prepare_reason, (PREPARATION_REFUSED,))
 
         try:
             frozen = self.builder.freeze(draft, recipe_ids=recipe_ids)
         except NextCampaignRefusal as error:
-            return _Step(
-                LoopDecision(
-                    STOP_UNCERTAIN,
-                    f"the planned recipe set could not be frozen for "
-                    f"{draft.cycle_id}: {error}",
-                    (FROZEN_RECIPE_SET_REFUSED,),
-                )
+            return LoopDecision(
+                STOP_UNCERTAIN,
+                f"the planned recipe set could not be frozen for "
+                f"{draft.cycle_id}: {error}",
+                (FROZEN_RECIPE_SET_REFUSED,),
             )
+        return PreparedAttempt(
+            proposal=proposal, draft=draft, frozen=frozen, recipe_ids=recipe_ids
+        )
+
+    def readiness_of(self, frozen: FrozenCampaign) -> Any:  # noqa: ANN401 - a ReadinessReport
+        """The production zero-compute readiness gate for a frozen attempt.
+
+        Wrapped, not reimplemented: the same check a run performs before it
+        spends, exposed so a preview reports the identical verdict.
+        """
+        return self._readiness(frozen)
+
+    def _one_generation(self, *, index: int, exhausted: set[str]) -> "_Step":
+        prepared = self.prepare_next(exhausted=exhausted)
+        if isinstance(prepared, LoopDecision):
+            return _Step(prepared)
+        proposal = prepared.proposal
+        frozen = prepared.frozen
+
         ready, readiness_reason = self._run_readiness(frozen)
         if not ready:
             return _Step(
@@ -1101,6 +1163,31 @@ class GrowthLoop:
         )
 
 
+@dataclass(frozen=True)
+class PreparedAttempt:
+    """A planned, prepared and frozen attempt, before the readiness gate.
+
+    Everything up to (but not including) any candidate compute: the target, the
+    draft it was composed into, the recipe ids the production planner proposed,
+    and the frozen declaration that names them.
+    """
+
+    proposal: TargetProposal
+    draft: CampaignDraft
+    frozen: FrozenCampaign
+    recipe_ids: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "cycle_id": self.frozen.cycle_id,
+            "candidate_version": self.frozen.candidate_version,
+            "target": self.proposal.to_dict(),
+            "recipe_ids": list(self.recipe_ids),
+            "frozen_digest": self.frozen.digest,
+            "directory": str(self.frozen.directory),
+        }
+
+
 @dataclass
 class _Step:
     """One iteration's outcome: what was decided, and what it ran."""
@@ -1171,22 +1258,44 @@ def _coerce_profile(value: SkillProfile | Mapping[str, Any] | None) -> SkillProf
         return None
 
 
-def _production_prepare(draft: CampaignDraft) -> Any:
+def production_prepare(
+    *,
+    probe: Any = None,  # noqa: ANN401 - a hardware probe
+    slice_source: Any = None,  # noqa: ANN401 - a benchmark slice source
+) -> Callable[[CampaignDraft], Any]:
     """The real preparation step: the draft's own inputs, from evidence.
 
     ``parent_evidence`` comes from the draft's declared parent identity rather
     than from the shape of its state root: which model's evidence the next
     generation learns from is a lineage fact, not a path convention (see
     ``ParentEvidenceRef``).
-    """
-    from .campaign_prepare import prepare_campaign
 
-    return prepare_campaign(
-        draft.manifest,
-        out_dir=draft.directory,
-        parent_evidence=draft.parent_evidence.run_root,
-        parent_measurement=draft.parent_evidence.measured_arm_path,
-    )
+    ``probe`` and ``slice_source`` are the two *measurement* seams
+    :func:`chowder.growth.campaign_prepare.prepare_campaign` already exposes.
+    Both default to production; an integration test stands in for them so it can
+    exercise the real planner, freezer and readiness gate without depending on
+    which accelerator this machine happens to have. Everything else -- the
+    curriculum, the recipes, the corpus, the registry, the template, the
+    contamination manifest and the freeze -- is the production path either way.
+    """
+
+    def prepare(draft: CampaignDraft) -> Any:  # noqa: ANN401 - a PreparedCampaign
+        from .campaign_prepare import prepare_campaign
+
+        return prepare_campaign(
+            draft.manifest,
+            out_dir=draft.directory,
+            parent_evidence=draft.parent_evidence.run_root,
+            parent_measurement=draft.parent_evidence.measured_arm_path,
+            probe=probe,
+            slice_source=slice_source,
+        )
+
+    return prepare
+
+
+#: The production preparation seam: real device probe, real pinned slices.
+_production_prepare = production_prepare()
 
 
 def _production_readiness(frozen: FrozenCampaign) -> Any:

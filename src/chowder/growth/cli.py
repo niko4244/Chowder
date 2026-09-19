@@ -514,6 +514,35 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
     _add_loop_arguments(loop_resume, parent_required=True)
     loop_resume.set_defaults(func=_growth_loop_run, resume=True)
 
+    loop_prepare = loop_targets.add_parser(
+        "prepare",
+        help=(
+            "Plan, prepare and freeze the next generation, then report every "
+            "readiness check -- without training anything"
+        ),
+    )
+    _add_loop_arguments(loop_prepare, parent_required=True)
+    loop_prepare.set_defaults(func=_growth_loop_prepare)
+
+    loop_history = loop_targets.add_parser(
+        "history",
+        help="Show every generation the durable record remembers, and what it cost",
+    )
+    loop_history.add_argument(
+        "--state-root", required=True, help="The loop's durable state root"
+    )
+    loop_history.set_defaults(func=_growth_loop_history)
+
+    loop_stop = loop_targets.add_parser(
+        "stop",
+        help="Ask a running session to finish the current campaign and start no more",
+    )
+    loop_stop.add_argument(
+        "--state-root", required=True, help="The loop's durable state root"
+    )
+    loop_stop.add_argument("--reason", default="operator stop", help="Why, for the record")
+    loop_stop.set_defaults(func=_growth_loop_stop)
+
 
 def _growth_campaign_validate(args: argparse.Namespace) -> int:
     """Load and validate a campaign manifest; print the declaration it pins."""
@@ -822,21 +851,26 @@ def _add_loop_arguments(parser: argparse.ArgumentParser, *, parent_required: boo
     )
 
 
-def _loop_state_root(args: argparse.Namespace, parent: Any) -> Path:
-    if args.state_root:
-        return Path(args.state_root)
-    return Path(parent.state_root).parent / "growth-state"
+def _loop_service(
+    args: argparse.Namespace, *, require_profile: bool = False
+) -> Any:  # noqa: ANN401 - a service
+    """The one production service every loop subcommand is a client of.
 
+    The handlers below wire paths into it and print what it says. None of them
+    selects a target, composes a declaration, restores state or decides a
+    verdict -- the terminal UI is a client of this same object, so the two
+    cannot drift into previewing different work.
+    """
+    from .service import AutonomousGrowthService
 
-def _loop_profile(args: argparse.Namespace) -> Any:
-    """The parent's measured capability, from durable evidence or a stated file."""
-    from .growth_loop import load_profile_from, profile_from_run_root
-
-    if args.profile:
-        return load_profile_from(args.profile)
-    if args.parent_evidence:
-        return profile_from_run_root(args.parent_evidence)
-    return None
+    return AutonomousGrowthService.open_from_paths(
+        policy_path=args.policy,
+        parent_declaration_path=args.parent,
+        state_root=args.state_root or None,
+        parent_profile_path=args.profile,
+        parent_evidence_path=args.parent_evidence,
+        require_profile=require_profile,
+    )
 
 
 def _loop_refusal(reason: str) -> int:
@@ -846,115 +880,117 @@ def _loop_refusal(reason: str) -> int:
 
 
 def _growth_loop_status(args: argparse.Namespace) -> int:
-    """Print what the loop would decide from, without deciding anything."""
+    """Print the durable state the loop decides from, without deciding anything."""
+    from .service import history_from_state
     from .target_selection import GrowthState
 
     state = GrowthState(root=Path(args.state_root))
-    rows = state.interventions()
+    payload = {
+        "state_root": str(state.root),
+        "stopping_state": state.stopping_state(),
+        "generations_recorded": len(state.interventions()),
+        "spent_wall_gpu_hours": sum(
+            float(row.get("cost_gpu_hours", 0.0) or 0.0)
+            for row in state.interventions()
+        ),
+        "operator_stop": state.operator_stop() or {},
+        "targets": [
+            {
+                "target_skill": row.target_skill,
+                "training_type": row.treatment,
+                "candidate_result": row.candidate_result,
+                "promotion_result": row.promotion_result,
+                "measured_effect": row.measured_effect,
+            }
+            for row in history_from_state(state)
+        ],
+        "banked_failures": len(state.failure_bank()),
+        "repaired_classes": list(state.repaired_classes()),
+    }
+    return _print_json(payload)
+
+
+def _growth_loop_history(args: argparse.Namespace) -> int:
+    """Every generation the durable record remembers, with what it cost."""
+    from .service import history_from_state
+    from .target_selection import GrowthState
+
+    state = GrowthState(root=Path(args.state_root))
     return _print_json(
         {
             "state_root": str(state.root),
-            "stopping_state": state.stopping_state(),
-            "generations_recorded": len(rows),
-            "spent_wall_gpu_hours": sum(
-                float(row.get("cost_gpu_hours", 0.0) or 0.0) for row in rows
-            ),
-            "targets": [
-                {
-                    "target_skill": row.get("target_skill", ""),
-                    "training_type": row.get("training_type", ""),
-                    "candidate_result": row.get("candidate_result", ""),
-                    "measured_effect": row.get("measured_effect"),
-                }
-                for row in rows
-            ],
-            "banked_failures": len(state.failure_bank()),
-            "repaired_classes": list(state.repaired_classes()),
+            "generations": [row.to_dict() for row in history_from_state(state)],
         }
     )
+
+
+def _growth_loop_stop(args: argparse.Namespace) -> int:
+    """Record a durable stop request for a session that is running elsewhere.
+
+    The request is honoured at the next generation boundary, so it means
+    "finish the campaign in flight, start no more" -- not a mid-kernel cancel.
+    """
+    from .target_selection import GrowthState
+
+    state = GrowthState(root=Path(args.state_root))
+    request = state.request_stop(reason=args.reason)
+    return _print_json({"state_root": str(state.root), "operator_stop": request})
+
+
+def _growth_loop_prepare(args: argparse.Namespace) -> int:
+    """Plan, prepare and freeze the next generation; report readiness. No compute."""
+    from .service import GrowthServiceRefusal
+
+    try:
+        service = _loop_service(args)
+    except GrowthServiceRefusal as error:
+        return _loop_refusal(str(error))
+    view = service.prepare_next()
+    payload = view.to_dict()
+    payload["lineage"] = service.inspect().to_dict()
+    _print_json(payload)
+    if view.decision is not None:
+        return 0 if view.decision.get("action") in _LOOP_OK_DECISIONS else 1
+    return 0 if view.ready else 1
 
 
 def _growth_loop_plan(args: argparse.Namespace) -> int:
-    """Print the target the loop would attempt next, and why -- no declaration written.
+    """Print the target the loop would attempt next, and why -- nothing written.
 
-    The composition itself is owned by the loop (and its builder), so this prints
-    the selector's proposal from the same evidence the loop would use rather than
-    rebuilding a declaration here, where a second owner of the cycle identity
-    would be able to disagree with the loop's.
+    The loop decides and the plan only prints: a dry run that called the
+    selector itself would skip the profile, treatment and envelope gates a run
+    applies, and would therefore advertise work the run then refuses.
     """
-    from .campaign import CampaignManifest
-    from .growth_loop import GrowthLoop
-    from .next_campaign import LoopPolicy
-    from .target_selection import GrowthState
+    from .service import GrowthServiceRefusal
 
-    parent = CampaignManifest.from_file(Path(args.parent))
-    profile = _loop_profile(args)
-    if profile is None:
-        return _loop_refusal(
-            "no measured parent capability profile: pass --profile with the parent's "
-            "profile JSON, or --parent-evidence pointing at a run root that holds a "
-            "candidate_evaluation.json; a target chosen from an unmeasured profile is "
-            "not evidence-backed"
-        )
-    from .growth_loop import LoopDecision
-
-    state = GrowthState(root=_loop_state_root(args, parent))
-    loop = GrowthLoop(
-        policy=LoopPolicy.from_file(Path(args.policy)),
-        state=state,
-        parent_declaration=parent,
-        parent_profile=profile,
-    )
-    # The loop decides, the plan only prints: a dry run that called the selector
-    # itself would skip the profile, treatment and envelope gates a run applies,
-    # and would therefore advertise work the run then refuses.
-    planned = loop.plan_next()
-    if isinstance(planned, LoopDecision):
-        return _print_json(
-            {
-                "parent_version": parent.resolved_candidate_version(),
-                "decision": planned.to_dict(),
-                "state_root": str(state.root),
-            }
-        )
-    return _print_json(
-        {
-            "parent_version": parent.resolved_candidate_version(),
-            "proposal": planned.to_dict(),
-            "state_root": str(state.root),
-        }
+    try:
+        service = _loop_service(args, require_profile=True)
+    except GrowthServiceRefusal as error:
+        return _loop_refusal(str(error))
+    payload = service.plan_next().to_dict()
+    payload["state_root"] = str(service.state.root)
+    _print_json(payload)
+    return 0 if payload["decision"] is None else (
+        0 if payload["decision"]["action"] in _LOOP_OK_DECISIONS else 1
     )
 
 
 def _growth_loop_run(args: argparse.Namespace) -> int:
     """Advance generations until the loop stops, and report how it stopped."""
-    from .campaign import CampaignManifest
-    from .growth_loop import GrowthLoop
-    from .next_campaign import LoopPolicy
-    from .target_selection import GrowthState
+    from .service import GrowthServiceRefusal, loop_run_was_successful
 
-    parent = CampaignManifest.from_file(Path(args.parent))
-    profile = _loop_profile(args)
     resume = bool(getattr(args, "resume", False))
-    if profile is None and not resume:
-        return _loop_refusal(
-            "no measured parent capability profile: pass --profile with the parent's "
-            "profile JSON, or --parent-evidence pointing at a run root that holds a "
-            "candidate_evaluation.json; a target chosen from an unmeasured profile is "
-            "not evidence-backed"
-        )
-    loop = GrowthLoop(
-        policy=LoopPolicy.from_file(Path(args.policy)),
-        state=GrowthState(root=_loop_state_root(args, parent)),
-        parent_declaration=parent,
-        parent_profile=profile,
-    )
-    report = loop.run(
-        max_generations=args.max_generations or None,
-        resume=resume,
+    try:
+        # A resumed session restores its parent from the durable record, so only
+        # a fresh session needs the profile stated up front.
+        service = _loop_service(args, require_profile=not resume)
+    except GrowthServiceRefusal as error:
+        return _loop_refusal(str(error))
+    report = service.start(
+        max_generations=args.max_generations or None, resume=resume
     )
     payload = report.to_dict()
-    payload["decision_ok"] = report.decision.action in _LOOP_OK_DECISIONS
+    payload["decision_ok"] = loop_run_was_successful(report)
     _print_json(payload)
     return 0 if payload["decision_ok"] else 1
 
