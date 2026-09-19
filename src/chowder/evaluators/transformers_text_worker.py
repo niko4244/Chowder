@@ -20,7 +20,11 @@ from .generation import observed_span, resolve_eos_token_ids
 from .rendering import render_prompt
 from .scoring import final_answer, final_number, normalize, observed_score, score
 from .vram import MemorySampler, peak_vram as _peak_vram
-from .placement import dispatch_offloaded, placement_note
+from .placement import (
+    dispatch_offloaded,
+    needs_redispatch_after_adapter,
+    placement_note,
+)
 from .transformers_text import EvalSuiteSpec, TransformersTextEvalSpec
 
 
@@ -163,6 +167,7 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         # Refuse to score an adapter that cannot change the model. PEFT only
         # warns when no saved key matches, leaving every LoRA B at zero.
         adapter_liveness = assert_adapter_is_live(model, spec.adapter_dir)
+        base = placement_after_adapter(base, spec=spec, device_name=device_name)
     model.eval()
     if spec.placement == "offload":
         # Reported per run: "offload" means nothing unless the dense weights
@@ -344,6 +349,27 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
             "bitsandbytes": _package_version("bitsandbytes"),
         },
     }
+
+
+def placement_after_adapter(base: Any, *, spec: Any, device_name: str) -> Any:
+    """Re-assert the declared placement once an adapter has been attached.
+
+    The adapter wrapper re-places the model it wraps, which silently turns a
+    bounded arm measurement into an unbounded one (see
+    :func:`chowder.evaluators.placement.needs_redispatch_after_adapter` for the
+    measurement). The decision lives in that function and this one only applies
+    it, so there is exactly one owner of "does the placement need re-applying".
+    """
+    if not needs_redispatch_after_adapter(
+        quantization=spec.quantization,
+        placement=spec.placement,
+        adapter=True,
+    ):
+        return base
+    # Re-asserted on the bare base the wrapper holds, which is the module graph
+    # the adapter's LoRA layers were injected into: the wrapper generates through
+    # it, so the placement applies to the model that will actually run.
+    return dispatch_offloaded(base, device_name)
 
 
 def main() -> int:

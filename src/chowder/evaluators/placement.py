@@ -97,6 +97,27 @@ def dispatch_offloaded(model: Any, device_name: str) -> Any:
     return model
 
 
+def needs_redispatch_after_adapter(
+    *, quantization: str, placement: str, adapter: bool
+) -> bool:
+    """Whether the placement has to be re-applied once an adapter is attached.
+
+    Attaching a PEFT adapter re-places the model it wraps: the wrapper
+    re-dispatches the base against its existing device map, which materialises
+    every offloaded parameter on the host and drops the ``offload_buffers``
+    setting accelerate needs for this model class. The result is not an error
+    but a silently unbounded measurement -- observed on the gen1 parent arm
+    (2026-09-19): the base-only arm reported ``cuda=3 cpu=0 other=424`` and
+    finished the math500 slice in 23 minutes, while the adapter arm reported
+    ``cuda=0 cpu=683 other=0`` and was killed by the declared 7200 s worker
+    timeout still inside that same slice.
+
+    This is the one place that decides it, so the worker cannot quietly decide
+    otherwise.
+    """
+    return bool(adapter) and quantization == "none" and placement == "offload"
+
+
 def placement_note(model: Any) -> str:
     """Where the model's parameters actually live, counted from the model."""
     counts = {"cuda": 0, "cpu": 0, "other": 0}
