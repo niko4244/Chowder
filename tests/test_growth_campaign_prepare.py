@@ -488,3 +488,29 @@ def test_the_parent_arm_refuses_when_no_adapter_is_declared(tmp_path: Path) -> N
     manifest = _load_manifest(tmp_path, _manifest_document(tmp_path))
     with pytest.raises(CampaignPrepareRefusal):
         measure_parent_arm(manifest, slice_source=_slice_source(), runner=_RecordingEvalRunner())
+
+
+def test_the_predicted_input_paths_are_exactly_what_preparation_writes(
+    tmp_path: Path,
+) -> None:
+    """The composer's names and the writer's names must be the same names.
+
+    An automatic declaration is frozen *before* any compute, so the component
+    that composes it has to name the inputs preparation will produce. If those
+    two owners drift, a frozen declaration points at files nothing writes, and
+    the campaign refuses later for a reason unrelated to the science.
+    """
+    from chowder.growth.campaign_prepare import prepared_input_paths
+
+    manifest = _load_manifest(tmp_path, _manifest_document(tmp_path))
+    out_dir = tmp_path / "prepared"
+
+    prepared = prepare_campaign(
+        manifest,
+        out_dir=out_dir,
+        parent_evidence=_parent_evidence(tmp_path / "gen1"),
+        probe=_probe,
+        slice_source=_slice_source(),
+    )
+
+    assert prepared_input_paths(out_dir) == dict(prepared.inputs)

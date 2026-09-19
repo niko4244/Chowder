@@ -928,7 +928,24 @@ than zero), an intervention classifier that decides whether a weakness is even
 trainable on the current path before any campaign exists, and
 `NextTargetSelector`, whose `propose()` takes no candidate runs at all — a test
 pins its signature so an undeclared campaign's scores cannot become a selection
-signal, and protected skills are excluded from candidacy entirely. Still manual:
-the next manifest, its preregistration, the loop budget, plateau/stop policy,
-training-data providers, bounded candidate search and the `GrowthLoop`
-controller. (PR #192.)
+signal, and protected skills are excluded from candidacy entirely. (PR #192.)
+
+**Autonomous growth control plane (loop landed).** The chain from a selected
+target to a frozen campaign is now automatic. `NextCampaignBuilder` composes the
+next declaration from the target and an immutable `LoopPolicy` and freezes it
+write-once with its preregistration, carrying the trusted ancestor, the declared
+execution throughput and the budget ceilings from the policy rather than from
+the template it starts from -- a template that disagrees with the policy is
+refused, not merged. `GrowthLoop` owns the finite stopping condition, charges
+itself the *measured* cost each campaign reports (a campaign reporting none ends
+the session with a durable decision rather than being charged zero), re-checks
+the envelope before each generation, and refuses to advance the parent pointer
+for a promotion it cannot bind to an adapter. `run(resume=True)` adopts the
+durable record instead of re-spending. The fake-compute simulator runs the real
+loop against six pinned terminal states, and `chowder growth loop
+status|plan|run|resume` exposes it with no injectable training seam, so a run
+that cannot proceed refuses having spent nothing. Still manual or missing: the
+task-specific training-data providers and their quality gate, bounded production
+candidate search, the Gen-1 parent arm under the Gen-2 instrument, and the
+`CapabilityProfile`→`SkillProfile` reconciliation in `campaign_prepare`
+(measured, not yet built). (PR #193.)

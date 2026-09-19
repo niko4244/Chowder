@@ -168,6 +168,17 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
     generation_timer.__enter__()
     with torch.inference_mode():
         for suite in spec.suites:
+            if suite.batch_size != 1:
+                # Refused, not ignored: this worker decodes one row per call, so
+                # honouring the declaration is impossible here and dropping it
+                # silently would leave a suite claiming an execution it did not
+                # perform. The transformers-text worker implements batching.
+                raise RuntimeError(
+                    f"this worker decodes one row per generation; suite "
+                    f"{suite.name!r} declares batch_size={suite.batch_size}. "
+                    "Declare batch_size=1 here or measure this suite with the "
+                    "transformers-text worker"
+                )
             rows = _rows(suite)
             fingerprint_path = output_dir / f"holdout-fingerprints-{suite.name}.jsonl"
             fingerprint_sha = write_holdout_fingerprint_index(

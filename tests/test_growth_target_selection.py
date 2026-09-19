@@ -217,6 +217,9 @@ def test_selector_takes_no_candidate_evidence() -> None:
         "category_counts",
         "known_skills",
         "max_targets_reported",
+        # Not candidate evidence: the targets the running loop has already
+        # exhausted, which the loop learns from its own durable record.
+        "exclude_skills",
     }
 
 

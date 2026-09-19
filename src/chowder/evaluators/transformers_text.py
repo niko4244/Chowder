@@ -54,6 +54,16 @@ class EvalSuiteSpec:
     # (canonical_chat_template.py) instead of the tokenizer's own. Part of
     # the suite fingerprint.
     canonical_rendering: bool = False
+    #: How many of this suite's rows are decoded in one ``generate`` call. An
+    #: *execution* parameter, not a measurement one: the declared decoding
+    #: (temperature/do_sample/max_new_tokens) is unchanged, and the worker
+    #: decides each row's own termination from the batch (see
+    #: ``generation.observed_span``), so a batched row reports what a single-row
+    #: pass would have reported. What it changes is cost: with the dense weights
+    #: off the card the per-token PCIe re-stream dominates, and batching
+    #: amortises one re-stream over ``batch_size`` rows -- measured on the
+    #: frozen Gen-0 base at 2.60 s/token for 1 row against 2.77 s/token for 16.
+    batch_size: int = 1
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -64,6 +74,14 @@ class EvalSuiteSpec:
             raise ValueError(f"unsupported scoring method: {self.scoring}")
         if self.max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
+        if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int):
+            raise ValueError(
+                f"evaluation suite {self.name!r} batch_size must be an integer"
+            )
+        if self.batch_size < 1:
+            raise ValueError(
+                f"evaluation suite {self.name!r} batch_size must be at least 1"
+            )
         if self.canonical_rendering and not self.use_chat_template:
             # Refuse the contradictory request at construction: canonical
             # rendering is a *way* of applying a chat template, so this would
@@ -175,6 +193,7 @@ class TransformersTextEvalSpec:
                     # template while the protocol claimed otherwise. The field
                     # exists on the shared EvalSuiteSpec; it is now parsed here.
                     canonical_rendering=bool(raw.get("canonical_rendering", False)),
+                    batch_size=int(raw.get("batch_size", 1)),
                 )
             )
 

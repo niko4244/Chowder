@@ -265,6 +265,51 @@ class ProtectionDeclaration:
 
 
 @dataclass(frozen=True)
+class EvaluationExecution:
+    """How declared evaluations are executed, as distinct from what they mean.
+
+    The measurement protocol -- which items, which decoding, which seed -- is
+    frozen in ``protection`` and audited by the judge. How many of those rows
+    one ``generate`` call decodes is neither of those things: it changes what the
+    evaluation costs, not what it measures (the worker decides each row's own
+    termination from the batch, so a batched row reports what a single-row pass
+    would have reported). It is declared here rather than defaulted so the arms
+    and the candidate cannot silently be measured at different throughputs, and
+    so a campaign that wants a single-row execution can say so.
+    """
+
+    #: Rows per ``generate`` call. 1 means one row at a time.
+    batch_size: int = 1
+
+    _ALLOWED = ("batch_size",)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int):
+            raise CampaignManifestError("evaluation_execution.batch_size must be an integer")
+        if self.batch_size < 1:
+            raise CampaignManifestError(
+                "evaluation_execution.batch_size must be at least 1"
+            )
+
+    @classmethod
+    def from_mapping(
+        cls, document: Mapping[str, Any], *, source: str = "<memory>"
+    ) -> "EvaluationExecution":
+        if not isinstance(document, Mapping):
+            raise CampaignManifestError(f"{source}: evaluation_execution must be an object")
+        unknown = sorted(set(document) - set(cls._ALLOWED))
+        if unknown:
+            raise CampaignManifestError(
+                f"{source}: unknown evaluation_execution fields {unknown}; an "
+                "execution key nothing reads is not a declaration"
+            )
+        return cls(**{key: document[key] for key in cls._ALLOWED if key in document})
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"batch_size": self.batch_size}
+
+
+@dataclass(frozen=True)
 class CampaignManifest:
     """One preregistered campaign, and nothing this runner may invent.
 
@@ -325,6 +370,10 @@ class CampaignManifest:
     #: The declared branch-protection policy. Empty when a manifest predates it;
     #: certification then refuses rather than substituting a default tolerance.
     protection: ProtectionDeclaration = field(default_factory=ProtectionDeclaration)
+    #: How the declared evaluations are executed (throughput, not protocol).
+    evaluation_execution: EvaluationExecution = field(
+        default_factory=EvaluationExecution
+    )
     notes: str = ""
 
     @property
@@ -368,6 +417,7 @@ class CampaignManifest:
             "project_template_path", "training_material_path", "data_registry_path",
             "hardware_budget_path", "parent_profile_path", "parent_eval_report_path",
             "baseline_eval_report_path", "protection", "evaluation_material_path",
+            "evaluation_execution",
         }
         retired = sorted(set(document) & set(RETIRED_FIELDS))
         if retired:
@@ -502,6 +552,15 @@ class CampaignManifest:
                 ProtectionDeclaration.from_mapping(document["protection"], source=source)
                 if "protection" in document
                 else ProtectionDeclaration()
+            ),
+            # Absent means one row per call, which is what every manifest that
+            # predates this block was measured at.
+            evaluation_execution=(
+                EvaluationExecution.from_mapping(
+                    document["evaluation_execution"], source=source
+                )
+                if "evaluation_execution" in document
+                else EvaluationExecution()
             ),
             notes=str(document.get("notes", "")),
         )

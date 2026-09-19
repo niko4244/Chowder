@@ -401,6 +401,30 @@ def prepare_campaign(
     )
 
 
+def prepared_input_paths(root: str | Path) -> dict[str, str]:
+    """The documents ``prepare_campaign`` writes into ``root``, without writing.
+
+    An automatic declaration has to *name* the inputs it will be given before
+    preparation runs, because the declaration is frozen before any compute (see
+    ``next_campaign``). The names are therefore a convention two owners touch:
+    this function and :func:`prepare_campaign`.
+    ``test_growth_campaign_prepare.test_the_predicted_input_paths_are_exactly_what_preparation_writes``
+    runs both against one directory and fails if they ever disagree, so the
+    convention cannot drift into a declaration that names files nothing writes.
+    """
+    base = Path(root)
+    return {
+        "project_template_path": str(base / "project-template.json"),
+        "training_material_path": str(base / "training-material.json"),
+        "data_registry_path": str(base / "data-registry.json"),
+        "hardware_budget_path": str(base / "hardware-budget.json"),
+        "parent_profile_path": str(base / "parent-profile.json"),
+        "parent_eval_report_path": str(base / "parent-eval-report.json"),
+        "evaluation_material_path": str(base / "evaluation-material.json"),
+        CONTAMINATION_MANIFEST_FIELD: str(base / "contamination.json"),
+    }
+
+
 def _require_hardware_fields(hardware: Mapping[str, Any]) -> None:
     steps = hardware.get("measured_step_seconds_at_seq")
     if not isinstance(steps, Mapping) or not steps:
@@ -1167,6 +1191,7 @@ def measure_arm(
     from .training_binding import default_runner
 
     protocol = manifest.protection.require_protocol(source=manifest.cycle_id)
+    batch_size = int(manifest.evaluation_execution.batch_size)
     benchmarks = tuple(dict.fromkeys(benchmarks))
     if not benchmarks:
         raise CampaignPrepareRefusal(
@@ -1217,6 +1242,14 @@ def measure_arm(
                 scoring="normalized_exact_match",
                 max_new_tokens=int(protocol.decoding["max_new_tokens"]),
                 use_chat_template=str(protocol.prompt_policy) == "chat_template",
+                # The campaign declares how many rows one generation call
+                # decodes, and every arm is measured the way the candidate will
+                # be. At one row per call this measurement does not finish: the
+                # offloaded weights are re-streamed per decode step, so 16 rows
+                # x 512 tokens is 16 full passes over the model (~5.9 hours per
+                # suite, measured), and the arm timed out at 7200 s without
+                # writing anything. Batched at the whole slice it is one pass.
+                batch_size=batch_size,
             )
         )
 
@@ -1305,7 +1338,12 @@ def measure_arm(
                     "sample_indices": list(range(len(samples))),
                     "seed": int(protocol.seed),
                     "shuffle": bool(protocol.shuffle),
-                    "decoding": dict(protocol.decoding),
+                    # The declared decoding, plus the execution parameter it does
+                    # not cover: the judge enforces the keys the declared
+                    # protocol names and ignores extras, so an arm measured at a
+                    # different throughput is visible in its own evidence rather
+                    # than silently indistinguishable.
+                    "decoding": {**dict(protocol.decoding), "batch_size": batch_size},
                     "prompt_policy": str(protocol.prompt_policy),
                     "suite": suite.name,
                     "slice_sha256": _sha256_file(work_dir / f"slice-{_slug(qualified_id)}.jsonl"),

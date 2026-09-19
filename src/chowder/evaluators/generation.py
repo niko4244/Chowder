@@ -1,6 +1,46 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
+
+
+def observed_span(
+    *, continuation: Sequence[int], max_new_tokens: int, pad_token_id: int | None = None
+) -> tuple[list[int], int, bool]:
+    """The one rule for what a generation did, batched or not.
+
+    Returns the row's own tokens (as they must be decoded), how many tokens it
+    produced, and whether it stopped before the cap.
+
+    One generation at a time a row's tensor is the row, so the caller can read
+    its last position. A *batched* generation keeps decoding for the rows still
+    running and marks the rows that finished, so a row's own span can be shorter
+    than the tensor it sits in. Two things can appear after a row is done, and
+    which one does depends on the ``transformers`` version: the step that
+    produced the terminator holds it (this checkout's version), or that step is
+    rewritten to ``pad_token_id`` while later steps are pads. This rule finds
+    the row's end under either -- a trailing run of pads delimits it, and a stop
+    token inside that delimitation is the terminator -- so a batched row reports
+    the same facts a single-row pass in the same environment would report.
+
+    ``pad_token_id`` is what the batched call pads with; ``None`` means the row
+    sits alone and nothing can have been padded after it. Note the rule needs no
+    stop-token set: the padding itself says where the row ended.
+    """
+    tokens = [int(token) for token in continuation]
+    trailing = 0
+    if pad_token_id is not None:
+        while trailing < len(tokens) and tokens[len(tokens) - 1 - trailing] == pad_token_id:
+            trailing += 1
+    produced = len(tokens) - trailing
+    if trailing:
+        # The batch kept decoding after this row was done. The row's span is
+        # what precedes the padding, and it ended on its own terminator.
+        stopped = True
+    else:
+        # Nothing was padded after it: either it ran into the cap, or the whole
+        # batch finished and its last step was a terminator.
+        stopped = produced < max_new_tokens
+    return tokens[: max(0, produced)], max(0, produced), stopped
 
 
 def observed_generation(
@@ -24,15 +64,17 @@ def observed_generation(
 
     The rule is the Gen-1 instrument's, kept in one place so the two workers
     cannot drift apart on it: stopping on EOS means stopping *before* the cap.
+    It is :func:`observed_span` with no padding, so a batched row and a single
+    row are decided by the same code.
     """
-    produced = int(generated.shape[1]) - int(prompt_tokens)
-    stopped = False
-    if produced > 0 and eos_token_id is not None:
-        stops = (
-            {eos_token_id} if isinstance(eos_token_id, int) else set(eos_token_id)
-        )
-        stopped = produced < max_new_tokens and int(generated[0, -1]) in stops
-    return {"generated_tokens": max(0, produced), "eos_terminated": stopped}
+    _, produced, stopped = observed_span(
+        continuation=generated[0, int(prompt_tokens):].tolist(),
+        max_new_tokens=max_new_tokens,
+    )
+    return {
+        "generated_tokens": max(0, produced),
+        "eos_terminated": bool(stopped and eos_token_id is not None),
+    }
 
 
 def resolve_eos_token_ids(tokenizer: Any, model: Any) -> int | list[int]:
