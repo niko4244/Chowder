@@ -896,6 +896,8 @@ def _growth_loop_plan(args: argparse.Namespace) -> int:
             "candidate_evaluation.json; a target chosen from an unmeasured profile is "
             "not evidence-backed"
         )
+    from .growth_loop import LoopDecision
+
     state = GrowthState(root=_loop_state_root(args, parent))
     loop = GrowthLoop(
         policy=LoopPolicy.from_file(Path(args.policy)),
@@ -903,16 +905,22 @@ def _growth_loop_plan(args: argparse.Namespace) -> int:
         parent_declaration=parent,
         parent_profile=profile,
     )
-    proposal = loop.selector.propose(
-        parent_version=parent.resolved_candidate_version(),
-        profile=profile,
-        state=state,
-        known_skills=tuple(estimate.skill for estimate in profile.estimates),
-    )
+    # The loop decides, the plan only prints: a dry run that called the selector
+    # itself would skip the profile, treatment and envelope gates a run applies,
+    # and would therefore advertise work the run then refuses.
+    planned = loop.plan_next()
+    if isinstance(planned, LoopDecision):
+        return _print_json(
+            {
+                "parent_version": parent.resolved_candidate_version(),
+                "decision": planned.to_dict(),
+                "state_root": str(state.root),
+            }
+        )
     return _print_json(
         {
             "parent_version": parent.resolved_candidate_version(),
-            "proposal": proposal.to_dict(),
+            "proposal": planned.to_dict(),
             "state_root": str(state.root),
         }
     )

@@ -10,6 +10,7 @@ invented its own limits would prove the loop works on limits nobody will use.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -63,6 +64,20 @@ def policy_from(parent: CampaignManifest, **overrides: Any) -> LoopPolicy:
     return LoopPolicy.from_mapping(document, source="test-policy")
 
 
+def _measured_generation(frozen: Any, verdict: str) -> str:  # noqa: ANN401 - the seam
+    """Which model a served outcome's capability profile is a measurement of.
+
+    The same rule the production executor obeys by construction, because it
+    derives the profile from the run root of the artifact the run selected: a
+    promotion leaves the candidate it trained in the lineage, a rejection leaves
+    the parent it started from. Stated once here so a test cannot accidentally
+    attribute a measurement to whichever generation makes its assertion pass.
+    """
+    if str(verdict).upper() == "PROMOTED":
+        return str(frozen.candidate_version)
+    return str(frozen.manifest.parent_version)
+
+
 class RecordingExecutor:
     """Serves declared outcomes in order and refuses to invent another one.
 
@@ -83,7 +98,11 @@ class RecordingExecutor:
                 f"test declares {len(self.outcomes)}"
             )
         self.calls.append(frozen.cycle_id)
-        return self.outcomes[len(self.calls) - 1]
+        served = self.outcomes[len(self.calls) - 1]
+        if served.profile is None:
+            return served
+        generation = _measured_generation(frozen, served.verdict)
+        return replace(served, profile={**dict(served.profile), "generation": generation})
 
 
 def outcome(

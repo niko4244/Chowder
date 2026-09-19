@@ -131,12 +131,17 @@ class SimulationError(AssertionError):
     """A scenario whose outcome is not the one it declared."""
 
 
-def skill_profile(scores: Mapping[str, float]) -> SkillProfile:
+def skill_profile(scores: Mapping[str, float], *, generation: str = "gen2") -> SkillProfile:
     """A measured profile with one benchmark per skill (evidence, not a mean).
 
     Public because it is the one place that says what "a measured capability"
     looks like to the control plane: the loop's tests and the simulation must
     agree on that shape, or they would be proving different things.
+
+    ``generation`` is which model the scores were measured on, and it is a
+    caller's obligation rather than a constant: the loop pairs a profile with
+    the parent it will be attributed to and refuses a mismatch, so a simulated
+    promotion must report the profile of the generation it just produced.
     """
 
     from .target_selection import SkillEstimateEvidence
@@ -150,13 +155,13 @@ def skill_profile(scores: Mapping[str, float]) -> SkillProfile:
             supporting_benchmarks=(f"{skill}-bench@2026-01",),
             benchmark_measurements={f"{skill}-bench@2026-01": score} if measured else {},
             n_measurements=16 if measured else 0,
-            generation="gen2",
+            generation=generation,
             provenance=MEASURED_PARENT if measured else UNMEASURED,
             aggregation="single benchmark",
         )
 
     return SkillProfile(
-        generation="gen2",
+        generation=generation,
         estimates=tuple(estimate(skill, score) for skill, score in scores.items()),
     )
 
@@ -191,6 +196,14 @@ class _SimulatedExecutor:
         promoted = step.verdict.upper() == PROMOTED
         if promoted:
             self._scores.update({skill: float(score) for skill, score in step.improves.items()})
+        # Which model these scores are a measurement *of*. A promotion hands the
+        # lineage the artifact this run selected; a rejection leaves the parent
+        # in place, so the scores still describe the parent -- labelling them
+        # with the rejected candidate's version would attribute a measurement to
+        # a model that is not the parent, which the loop refuses.
+        measured_generation = str(
+            frozen.candidate_version if promoted else frozen.manifest.parent_version
+        )
         return CampaignOutcome(
             verdict=step.verdict,
             wall_gpu_hours=step.wall_gpu_hours,
@@ -201,7 +214,9 @@ class _SimulatedExecutor:
                 if promoted
                 else None
             ),
-            profile=skill_profile(self._scores).to_dict(),
+            profile=skill_profile(
+                self._scores, generation=measured_generation
+            ).to_dict(),
             failures=(),
             regressions=step.regressions,
             run_root=str(frozen.directory),

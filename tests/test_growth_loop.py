@@ -28,6 +28,7 @@ import pytest
 from chowder.growth.growth_loop import (
     CAMPAIGN_SPENT_NO_MEASURED_COST,
     NO_MEASURED_CAPABILITY,
+    PROFILE_GENERATION_MISMATCH,
     PROMOTION_WITHOUT_IDENTITY,
     PROMOTION_WITHOUT_PROFILE,
     REMAINING_ENVELOPE_TOO_SMALL,
@@ -50,7 +51,16 @@ PROMOTED_AFTER_FORMATTING = {**START, "instruction.formatting": 0.88}
 IDENTITY = ("adapters/gen3", "a" * 64)
 
 
-def _loop(tmp_path: Path, executor, *, policy=None, parent=None, profile=START, state=None):
+def _loop(
+    tmp_path: Path,
+    executor,
+    *,
+    policy=None,
+    parent=None,
+    profile=START,
+    generation="gen2",
+    state=None,
+):
     parent = parent or parent_manifest(tmp_path)
     policy = policy or policy_from(parent)
     state = state or GrowthState(root=tmp_path / "growth-state")
@@ -59,7 +69,9 @@ def _loop(tmp_path: Path, executor, *, policy=None, parent=None, profile=START, 
         state=state,
         executor=executor,
         parent_declaration=parent,
-        parent_profile=skill_profile(profile) if profile else None,
+        # The generation the profile was measured on is part of the evidence, not
+        # a detail: the loop refuses to plan from a profile of another model.
+        parent_profile=skill_profile(profile, generation=generation) if profile else None,
         prepare=lambda frozen: None,
         readiness=lambda frozen: True,
     )
@@ -285,6 +297,8 @@ def test_resuming_restores_the_adapter_and_declaration_a_promotion_produced(
         second,
         policy=policy,
         parent=parent_manifest(tmp_path),
+        profile=PROMOTED_AFTER_FORMATTING,
+        generation="gen3",
         state=state,
     )
     report = resumed_loop.run(resume=True)
@@ -296,6 +310,53 @@ def test_resuming_restores_the_adapter_and_declaration_a_promotion_produced(
     assert resumed_loop.parent_identity == IDENTITY
     assert len(report.generations) == 2
     assert report.budget["spent_wall_gpu_hours"] == pytest.approx(0.42 + 0.31)
+
+
+def test_a_resumed_loop_handed_the_pre_promotion_profile_refuses(tmp_path: Path) -> None:
+    """The profile is evidence about *a* generation, and the pairing is checked.
+
+    A resumed loop restores the declaration the promotion produced (gen3 here),
+    so a profile measured on the generation before it describes a different
+    model. Choosing the next target from it would attribute gen3's weaknesses to
+    gen2 -- and would do so invisibly, because both objects are individually
+    well-formed. The loop stops instead, having launched nothing.
+    """
+    first = RecordingExecutor(
+        [
+            outcome(
+                "PROMOTED",
+                wall_gpu_hours=0.42,
+                measured_target_effect=0.18,
+                promoted_identity=IDENTITY,
+                profile_scores=PROMOTED_AFTER_FORMATTING,
+            )
+        ]
+    )
+    parent = parent_manifest(tmp_path)
+    policy = policy_from(parent, maximum_generations=1)
+    loop, state = _loop(tmp_path, first, policy=policy, parent=parent)
+    loop.run()
+    (state.root / "stopping-state.json").unlink()
+
+    second = RecordingExecutor(
+        [outcome("REJECTED", wall_gpu_hours=0.31, measured_target_effect=0.0)]
+    )
+    # Deliberately the *pre-promotion* profile while resuming from the promotion.
+    resumed, _ = _loop(
+        tmp_path,
+        second,
+        policy=policy,
+        parent=parent_manifest(tmp_path),
+        profile=START,
+        generation="gen2",
+        state=state,
+    )
+    report = resumed.run(resume=True)
+
+    assert second.calls == [], "nothing may be trained from a mislabelled profile"
+    assert report.decision.action == STOP_UNCERTAIN
+    assert PROFILE_GENERATION_MISMATCH in report.decision.reason_codes
+    assert "gen3" in report.decision.reason and "gen2" in report.decision.reason
 
 
 def test_resuming_a_promotion_whose_adapter_was_never_recorded_is_refused(
