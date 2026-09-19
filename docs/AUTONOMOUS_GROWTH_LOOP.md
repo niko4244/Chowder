@@ -26,6 +26,13 @@ campaigns; it never replaces or loosens them.
 | `GrowthLoop` outer controller, resume/recovery | **delivered** |
 | Deterministic fake-compute simulator (six scenarios) | **delivered** (`simulator`) |
 | CLI entrypoint (`growth loop status\|plan\|run\|resume`) | **delivered** |
+| One production service used by CLI, TUI, loop and tests | **delivered** (`AutonomousGrowthService`) |
+| Autonomous Growth workspace in the Chowder interface | **delivered** (`ChowderTUI` → Autonomous Growth) |
+| One authoritative benchmark-attributed profile | **delivered** (`SkillProfile`; `CapabilityProfile` is a named derived view) |
+| Explicit parent-evidence lineage object | **delivered** (`ParentEvidenceRef` in durable state, verified against disk) |
+| Exact production recipe ids frozen before preregistration | **delivered** (`FinalCampaignManifest`) |
+| Protected skills derived from the policy's protected benchmarks | **delivered** (`protected_skills_for_policy`) |
+| One shared plan/run decision path | **delivered** (`GrowthLoop.plan_next`, used by CLI and TUI) |
 | Task-specific training-data providers + corpus quality gate | **not built** |
 | Bounded production candidate search (successive halving) | **not built** |
 | Gen-0 trusted-ancestor arm | **measured** — `math500@2024-04` 0.0, `mgsm@2022-11` 0.0 (16 rows each) |
@@ -167,6 +174,41 @@ legitimately proceed refuses having spent nothing. Its exit code is 0 only for
 the terminal decisions that mean the loop stopped *correctly* (finished
 improving, exhausted its envelope, stopped repeating itself); refusals exit 1.
 
+## How the interface, the CLI and the loop stay one system
+
+`chowder.growth.service.AutonomousGrowthService` is the only place that composes
+production objects. `inspect()`, `plan_next()`, `prepare_next()`, `status()`,
+`history()`, `request_stop()` and `start()` are thin orchestrations of
+`NextCampaignBuilder`, `campaign_prepare`, `check_campaign_readiness`,
+`GrowthLoop` and `GrowthState` -- no decision is made in the service, the CLI or
+the interface.
+
+```
+AutonomousGrowthService            (composition only)
+        Δ                                      Δ
+   chowder growth loop ...            AutonomousGrowthScreen (ChowderTUI)
+        Δ                                      Δ
+        └──────────── GrowthLoop.plan_next / _one_generation ────────┘
+```
+
+Three rules are enforced rather than documented:
+
+* **`plan` and `run` ask the same question.** `GrowthLoop.plan_next()` runs the
+  same profile, target, treatment, protected-exclusion and envelope gates the run
+  applies, and returns a `TargetProposal` or a terminal `LoopDecision` without
+  writing a frozen campaign or spending compute. The CLI `plan` and the interface
+  both go through it; neither calls `selector.propose()` directly.
+* **the profile must belong to the parent.** A profile measured on another
+  generation is `PROFILE_GENERATION_MISMATCH` before any composition, on `run`,
+  on `plan` and on `resume` -- resuming after a promotion means the *promoted*
+  run's profile, not the one the session started with.
+* **protected evidence is not optimizable.** The protected skill set the selector
+  excludes is derived from the policy's `protected_benchmarks` through the
+  benchmark registry (`protected_skills_for_policy`), so a skill known only
+  through a protected benchmark can never be proposed as a target. A skill with
+  both targetable and protected evidence keeps its targetable evidence and is
+  reported in `regression_risks`.
+
 ## The pieces that do not exist yet
 
 Still manual or missing for the autonomous case:
@@ -175,17 +217,12 @@ Still manual or missing for the autonomous case:
   template), and the corpus quality gate that refuses a poor self-generated set;
 * bounded production candidate search (successive halving) -- an existing library
   implementation that is not yet wired, not something to reimplement;
-* the Gen-1 parent arm under the Gen-2 instrument, without which a Gen-2 target
-  comparison cannot be decided;
-* one integration seam: `campaign_prepare` emits its parent profile as
-  `capability.CapabilityProfile` (a flat mean over raw scores), while the control
-  plane consumes `target_selection.SkillProfile` (per-skill, attributable). The
-  loop therefore refuses with `NO_MEASURED_CAPABILITY` rather than guessing at a
-  mean; reconciling the two schemas is required before the loop can plan from a
-  prepared declaration.
+* a measured Gen-2 outcome: readiness is READY and no real Gen-2 candidate
+  training has been run, so nothing here is evidence about Gen-2's verdict.
 
-Until those exist, Chowder cannot advance generations without a human choosing
-the target and composing the campaign. It must not claim otherwise.
+Until the first two exist, Chowder can compose, freeze, plan and monitor the next
+campaign without a human, but it cannot yet *choose better data* for it. It must
+not claim otherwise.
 
 ## What the measured arms imply
 

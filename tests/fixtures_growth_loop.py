@@ -23,6 +23,12 @@ from chowder.growth.simulator import DEFAULT_PARENT_DECLARATION
 #: takes its policy from, so the two cannot drift into proving different things.
 GEN2_MANIFEST = DEFAULT_PARENT_DECLARATION
 
+#: An outcome run root that says "this campaign named none". The recording
+#: executor fills the real root in otherwise, because a real executor reports
+#: where it wrote -- so a test that wants the *absent* case must say so rather
+#: than rely on an empty string, which is also the default.
+NO_RUN_ROOT = "<campaign-named-no-run-root>"
+
 
 def parent_manifest(tmp_path: Path, **overrides: Any) -> CampaignManifest:
     """The real Gen-2 declaration, with its run root relocated into a tmp dir."""
@@ -99,10 +105,39 @@ class RecordingExecutor:
             )
         self.calls.append(frozen.cycle_id)
         served = self.outcomes[len(self.calls) - 1]
+        # A real executor reports the run root it wrote, and the loop refuses a
+        # promotion it cannot locate; a fixture that left it empty would be
+        # modelling a campaign that cannot name its own evidence. An outcome
+        # that names a root of its own keeps it, so a test can model the
+        # promotion-without-a-locatable-run case deliberately.
+        served = replace(
+            served,
+            run_root="" if served.run_root == NO_RUN_ROOT else str(frozen.directory),
+        )
         if served.profile is None:
             return served
         generation = _measured_generation(frozen, served.verdict)
         return replace(served, profile={**dict(served.profile), "generation": generation})
+
+
+def planned_recipes(draft: Any) -> Any:  # noqa: ANN401 - a CampaignDraft
+    """A recording stand-in for preparation that *does* report its recipe set.
+
+    Preparation is the phase that runs the production planner, so the loop
+    freezes whatever recipe identities it reports. A no-op seam would leave the
+    loop unable to freeze anything at all (which is the honest production
+    behaviour), so a loop test that wants a campaign to run must say what the
+    planner proposed.
+    """
+    from chowder.growth.growth_loop import PreparationResult
+
+    return PreparationResult(
+        recipe_ids=tuple(
+            f"recipe-{index:02d}-lr0.0001-r16-replay0.1"
+            for index in range(len(draft.placeholder_recipe_ids))
+        ),
+        detail="recording preparation",
+    )
 
 
 def outcome(
@@ -112,6 +147,7 @@ def outcome(
     measured_target_effect: float | None = None,
     promoted_identity: tuple[str, str] | None = None,
     profile_scores: dict[str, float] | None = None,
+    run_root: str | None = None,
 ) -> CampaignOutcome:
     """One campaign's reported result, shaped like the production executor's."""
     from chowder.growth.simulator import skill_profile
@@ -125,6 +161,6 @@ def outcome(
         profile=skill_profile(profile_scores).to_dict() if profile_scores else None,
         failures=(),
         regressions=(),
-        run_root="",
+        run_root=run_root if run_root is not None else "",
         reason=verdict,
     )

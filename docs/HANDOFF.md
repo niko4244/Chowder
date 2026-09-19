@@ -1412,3 +1412,51 @@ Gen-2 candidate must clear), while the protected/broad gates compare two measure
 zeros -- neither the base nor the gen1 adapter answers math500/mgsm under this
 protocol, so `candidate - parent >= 0` cannot fail there. The loop document
 states both consequences rather than leaving them to be inferred.
+
+**Autonomous growth is one service, and the interface is a client of it.** Four
+cross-generation defects were found by exercising the loop against the *real*
+prepared declaration rather than the simulator, and fixed at their owners:
+
+1. **A profile from another generation could plan the next target.**
+   `GrowthLoop` accepted any well-formed profile and paired it with whatever
+   parent declaration it was handed. Both objects are individually valid, so
+   nothing caught it; `--parent-evidence <run root>` (the operator seam) accepted
+   any run root whose `candidate_evaluation.json` parsed, and `resume` restored a
+   declaration whose profile was still the pre-promotion one. The loop now
+   refuses with `PROFILE_GENERATION_MISMATCH` before target selection,
+   composition or spend, on `run`, `plan` and `resume`.
+2. **`plan` did not ask the run's question.** The CLI `plan` re-derived the
+   selector call itself, so the dry run skipped the profile, treatment and
+   envelope gates a run applies and could advertise work the run then refused.
+   The gates live in one `_proposal_or_decision`, used by `_one_generation` and a
+   read-only `plan_next()`; the CLI and the interface go through the loop.
+3. **`campaign_prepare` and the control plane disagreed about capability.**
+   Preparation emitted `capability.CapabilityProfile` (a flat mean over raw
+   scores) where the loop consumes `target_selection.SkillProfile` (per-skill,
+   benchmark-attributed, unmeasured ≠ zero), so the loop refused with
+   `NO_MEASURED_CAPABILITY` on a declaration it had just prepared. Preparation now
+   produces the same attributed profile the loop consumes, from the run the
+   profile names; `CapabilityProfile` survives only as a named derived view.
+4. **The autonomous builder froze recipe ids the planner would never propose.**
+   `gen3-recipe-1` against the planner's `recipe-00-lr0.0001-r16-replay0.1` is a
+   guaranteed `READINESS_RECIPE_SET` refusal, and substituting ids at run time
+   would mean the frozen preregistration was not the campaign. Composition is now
+   phased -- draft, plan, freeze -- so the exact production recipe ids are known
+   before anything is frozen, and a post-freeze change refuses.
+
+The same pass added the explicit `ParentEvidenceRef` lineage object (a promoted
+run's own root, adapter path and digest become the next generation's parent
+evidence; a rejection leaves the pointer alone; nothing infers a parent from
+directory naming), derived the selector's protected skill set from the policy's
+`protected_benchmarks` through the registry, and gave the interface a real
+**Autonomous Growth** workspace in `ChowderTUI` built on
+`AutonomousGrowthService` -- inspect, plan, prepare + readiness, start, stop after
+the current campaign, resume, and growth history, with per-check readiness badges
+and machine reason codes rather than one red state. Start is enabled only by the
+service's readiness verdict, and a programmatic click on a refused campaign
+spends nothing.
+
+Still **not** built, and not claimed: task-specific training-data providers and
+their corpus quality gate, and bounded production candidate search (successive
+halving). Both are named in `docs/AUTONOMOUS_GROWTH_LOOP.md`. No real Gen-2
+candidate training has been run.

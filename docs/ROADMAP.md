@@ -944,8 +944,32 @@ for a promotion it cannot bind to an adapter. `run(resume=True)` adopts the
 durable record instead of re-spending. The fake-compute simulator runs the real
 loop against six pinned terminal states, and `chowder growth loop
 status|plan|run|resume` exposes it with no injectable training seam, so a run
-that cannot proceed refuses having spent nothing. Still manual or missing: the
-task-specific training-data providers and their quality gate, bounded production
-candidate search, the Gen-1 parent arm under the Gen-2 instrument, and the
-`CapabilityProfile`→`SkillProfile` reconciliation in `campaign_prepare`
-(measured, not yet built). (PR #193.)
+that cannot proceed refuses having spent nothing. (PR #193.) Still manual or
+missing at that point, and still missing now: the task-specific training-data
+providers and their quality gate, and bounded production candidate search.
+
+**Autonomous growth is production-wired, with one service behind the interface
+and the CLI.** Four cross-generation defects that let *simulated* autonomy
+succeed while the production path refused were found by exercising the loop
+against the real prepared declaration, and fixed at their owners: a capability
+profile measured on another generation could plan the next target (now
+`PROFILE_GENERATION_MISMATCH` on `run`, `plan` and `resume`); the CLI `plan`
+re-derived the selector call and skipped the run's own gates (now one
+`_proposal_or_decision` behind both, so the dry run previews exactly what a run
+would refuse); `campaign_prepare` emitted a flat `CapabilityProfile` where the
+loop consumes an attributed `SkillProfile` (preparation now produces the profile
+the loop consumes, and `CapabilityProfile` is a named derived view); and the
+builder froze placeholder recipe ids the production `RecipePlanner` would never
+propose (composition is now phased -- draft, plan, freeze -- so the exact recipe
+ids are known before anything is frozen). An explicit `ParentEvidenceRef` makes
+the lineage pointer a verified object rather than a directory-shape inference (a
+promotion advances it; a rejection leaves it alone), the selector's protected
+skill set is derived from the policy's `protected_benchmarks` through the
+registry, and the Chowder interface now has a first-class **Autonomous Growth**
+workspace over `AutonomousGrowthService` -- inspect, plan, prepare + readiness,
+start, stop after the current campaign, resume and growth history, with Start
+enabled by the service's readiness verdict alone. The Gen-1 parent arm has since
+been measured under the Gen-2 instrument (target 0.5625, math500/mgsm 0.0), so
+the target comparison is decidable. Still missing, and deliberately not claimed:
+task-specific training-data providers with a corpus quality gate, and bounded
+production candidate search. No real Gen-2 candidate training has been run.

@@ -18,12 +18,16 @@ from __future__ import annotations
 import dataclasses
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from chowder.growth.next_campaign import (
     NEXT_CAMPAIGN_ALREADY_FROZEN,
     NEXT_CAMPAIGN_PARENT_IDENTITY,
+    NEXT_CAMPAIGN_RECIPE_SET_ABSENT,
+    NEXT_CAMPAIGN_RECIPE_SET_UNPLANNED,
+    ParentEvidenceRef,
     NEXT_CAMPAIGN_POLICY_DRIFT,
     NEXT_CAMPAIGN_TARGET_TOO_EXPENSIVE,
     NEXT_CAMPAIGN_TARGET_UNUSABLE,
@@ -62,14 +66,39 @@ def _proposal(tmp_path: Path, **overrides) -> TargetProposal:
     return dataclasses.replace(proposal, **overrides) if overrides else proposal
 
 
-def _build(tmp_path: Path, **kwargs):
+def _planned_ids(draft: Any) -> tuple[str, ...]:
+    """The recipe ids a production planner would propose, standing in for it.
+
+    Shaped like ``RecipePlanner``'s own ids so a frozen declaration here is the
+    shape a real one is; the production planner itself is exercised by the
+    campaign-runner and integration suites, not by this unit fixture.
+    """
+    return tuple(
+        f"recipe-{index:02d}-lr0.0001-r16-replay0.1"
+        for index in range(len(draft.placeholder_recipe_ids))
+    )
+
+
+def _draft(tmp_path: Path, **kwargs: Any) -> Any:
     parent = kwargs.pop("parent", None) or parent_manifest(tmp_path)
     policy = kwargs.pop("policy", None) or policy_from(parent)
-    return NextCampaignBuilder(policy=policy).build(
+    builder = NextCampaignBuilder(policy=policy)
+    draft = builder.draft(
         parent=parent,
         target=kwargs.pop("target", None) or _proposal(tmp_path),
         generation_root=kwargs.pop("generation_root", tmp_path / "generations"),
         **kwargs,
+    )
+    return builder, draft
+
+
+def _build(tmp_path: Path, **kwargs: Any) -> Any:
+    """Draft, plan, then freeze -- the order the loop is required to use."""
+    recipe_ids = kwargs.pop("recipe_ids", None)
+    builder, draft = _draft(tmp_path, **kwargs)
+    return builder.freeze(
+        draft,
+        recipe_ids=recipe_ids if recipe_ids is not None else _planned_ids(draft),
     )
 
 
@@ -129,13 +158,15 @@ def test_a_second_build_into_the_same_attempt_refuses(tmp_path: Path) -> None:
     policy = policy_from(parent)
     builder = NextCampaignBuilder(policy=policy)
 
-    builder.build(
-        parent=parent, target=proposal, generation_root=tmp_path / "generations"
-    )
-    with pytest.raises(NextCampaignRefusal, match=NEXT_CAMPAIGN_ALREADY_FROZEN):
-        builder.build(
+    def _freeze_once() -> Any:
+        draft = builder.draft(
             parent=parent, target=proposal, generation_root=tmp_path / "generations"
         )
+        return builder.freeze(draft, recipe_ids=_planned_ids(draft))
+
+    _freeze_once()
+    with pytest.raises(NextCampaignRefusal, match=NEXT_CAMPAIGN_ALREADY_FROZEN):
+        _freeze_once()
 
 
 def test_a_target_that_names_a_protected_benchmark_refuses(tmp_path: Path) -> None:
@@ -192,16 +223,82 @@ def test_a_parent_declaration_without_a_trusted_ancestor_refuses(tmp_path: Path)
         _build(tmp_path, parent=drifted, policy=policy_from(parent))
 
 
-def test_a_parent_identity_that_is_not_a_digest_pair_refuses(tmp_path: Path) -> None:
+def test_a_parent_evidence_ref_that_pins_no_digest_refuses(tmp_path: Path) -> None:
+    parent = parent_manifest(tmp_path)
+    builder = NextCampaignBuilder(policy=policy_from(parent))
     with pytest.raises(NextCampaignRefusal, match=NEXT_CAMPAIGN_PARENT_IDENTITY):
-        _build(tmp_path, parent_identity=("adapters/gen2", "not-a-digest"))
+        builder.draft(
+            parent=parent,
+            target=_proposal(tmp_path),
+            generation_root=tmp_path / "generations",
+            parent_evidence=dataclasses.replace(
+                ParentEvidenceRef.from_declaration(parent), adapter_digest="not-a-digest"
+            ),
+        )
+
+
+def test_a_parent_evidence_ref_of_another_generation_refuses(tmp_path: Path) -> None:
+    """The defect itself: a ref measured on one generation, declared as another."""
+    parent = parent_manifest(tmp_path)
+    builder = NextCampaignBuilder(policy=policy_from(parent))
+    with pytest.raises(NextCampaignRefusal, match=NEXT_CAMPAIGN_PARENT_IDENTITY):
+        builder.draft(
+            parent=parent,
+            target=_proposal(tmp_path),
+            generation_root=tmp_path / "generations",
+            parent_evidence=dataclasses.replace(
+                ParentEvidenceRef.from_declaration(parent), generation="gen7"
+            ),
+        )
 
 
 def test_the_promoted_adapter_becomes_the_next_generation_s_parent(tmp_path: Path) -> None:
-    frozen = _build(tmp_path, parent_identity=IDENTITY)
+    """What the loop hands the builder after a promotion.
+
+    The ref names the *promoted* run's own adapter, not the declaration's
+    ``parent_adapter_*`` -- those name the adapter the previous generation
+    trained *from*, one generation behind the model that just advanced the
+    lineage.
+    """
+    parent = parent_manifest(tmp_path)
+    frozen = _build(
+        tmp_path,
+        parent=parent,
+        parent_evidence=dataclasses.replace(
+            ParentEvidenceRef.from_declaration(parent),
+            adapter_path=IDENTITY[0],
+            adapter_digest=IDENTITY[1],
+        ),
+    )
 
     assert frozen.manifest.parent_adapter_path == IDENTITY[0]
     assert frozen.manifest.parent_adapter_digest == IDENTITY[1]
+
+
+def test_a_draft_is_not_a_frozen_campaign_and_freezing_placeholders_refuses(
+    tmp_path: Path,
+) -> None:
+    """Composition leaves the recipe set to the planner; freezing needs it."""
+    builder, draft = _draft(tmp_path)
+    assert not (draft.directory / "campaign.json").exists()
+    assert set(draft.manifest.recipe_ids) == set(draft.placeholder_recipe_ids)
+
+    with pytest.raises(NextCampaignRefusal, match=NEXT_CAMPAIGN_RECIPE_SET_UNPLANNED):
+        builder.freeze(draft, recipe_ids=draft.placeholder_recipe_ids)
+
+    with pytest.raises(NextCampaignRefusal, match=NEXT_CAMPAIGN_RECIPE_SET_ABSENT):
+        builder.freeze(draft, recipe_ids=())
+
+
+def test_a_frozen_declaration_names_exactly_the_recipes_it_was_planned_with(
+    tmp_path: Path,
+) -> None:
+    builder, draft = _draft(tmp_path)
+    planned = _planned_ids(draft)
+    frozen = builder.freeze(draft, recipe_ids=planned)
+
+    assert frozen.manifest.recipe_ids == planned
+    assert not set(frozen.manifest.recipe_ids) & set(draft.placeholder_recipe_ids)
 
 
 def test_an_unknown_policy_key_refuses_rather_than_being_ignored(tmp_path: Path) -> None:

@@ -172,6 +172,7 @@ class ChowderTUI(App[None]):
                 yield Button("Start Training", id="start", variant="success")
                 yield Button("Cancel", id="cancel", variant="error", disabled=True)
                 yield Button("View History", id="history")
+                yield Button("Autonomous Growth", id="growth")
                 yield Button("Quit", id="quit")
             yield Static("Ready", id="status")
             yield Static("Not running", id="run_status")
@@ -637,6 +638,21 @@ class ChowderTUI(App[None]):
                 self._cancellation.request()
                 self._set_status("Cancelling…")
                 self._append_log("[yellow]Cancelling…[/]")
+            return
+        if event.button.id == "growth":
+            # The workspace is another client of the same production service the
+            # `chowder growth loop` commands use -- it does not shell out to
+            # them, and it owns none of their decisions.
+            from .tui_growth import AutonomousGrowthScreen
+
+            self.push_screen(
+                AutonomousGrowthScreen(
+                    defaults={
+                        "parent_declaration_path": str(self.project_path),
+                        "state_root": str(self.project_path.parent / "growth-state"),
+                    }
+                )
+            )
             return
         if event.button.id == "history":
             try:

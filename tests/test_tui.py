@@ -26,6 +26,7 @@ from chowder.run_events import (
     TrainingProgressEvent,
 )
 from chowder.tui import ChowderTUI
+from chowder.tui_growth import AutonomousGrowthScreen
 
 
 def _snapshot(n_gpus: int) -> HardwareSnapshot:
@@ -940,3 +941,40 @@ async def test_run_status_panel_updates_live_through_the_real_event_pipeline(
     assert "Repair: depth 1" in panel_text
     assert "Failures harvested: 2" in panel_text
     assert "Promoted: e1 (quality=0.9500)" in panel_text
+
+
+@pytest.mark.asyncio
+async def test_the_interface_offers_the_autonomous_growth_workspace(tmp_path):
+    """The workspace is reachable from the actual Chowder interface, not only
+    from a command line. Pressing the button must not open the service: opening
+    a session is a decision, and rendering a screen is not one."""
+    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
+    async with app.run_test() as pilot:
+        button = app.query_one("#growth", Button)
+        assert not button.disabled
+
+        button.press()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert isinstance(app.screen, AutonomousGrowthScreen)
+
+
+@pytest.mark.asyncio
+async def test_the_growth_workspace_shows_the_inputs_it_resolved(tmp_path):
+    """A silently guessed parent run is a lineage pointing at another model, so
+    the workspace displays what it would open before anything is opened."""
+    project = tmp_path / "gen2_campaign.json"
+    app = ChowderTUI(project_path=str(project))
+    async with app.run_test() as pilot:
+        app.query_one("#growth", Button).press()
+        await pilot.pause()
+        await pilot.pause()
+
+        screen = app.screen
+        assert isinstance(screen, AutonomousGrowthScreen)
+        resolved = str(screen.query_one("#growth_resolved", Static).render())
+        assert "parent declaration" in resolved
+        assert str(project) in resolved
+        assert screen._service is None, "showing the screen must not open a session"
+        assert screen.query_one("#growth_start", Button).disabled

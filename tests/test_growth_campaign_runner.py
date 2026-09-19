@@ -65,7 +65,7 @@ from chowder.growth.candidate_evaluation import (
     CandidateEvaluationRefusal,
     EvaluationRequest,
 )
-from chowder.growth.capability import ALL_SKILLS, CapabilityProfile, SkillEstimate
+from chowder.growth.target_selection import build_skill_profile
 from chowder.growth.compute_cost import ComputeCost
 from chowder.growth.lineage import GenerationLedger
 from chowder.growth.training_binding import directory_digest
@@ -302,12 +302,16 @@ def _declaration(
     (adapter / "adapter_model.safetensors").write_text("gen1-parent-weights", encoding="utf-8")
     adapter_digest, _adapter_entries = directory_digest(adapter)
 
-    profile = CapabilityProfile(
-        model_version=PARENT_VERSION,
-        raw_scores={TARGET_ID: 0.125, PROTECTED_ID: 0.5, BROAD_ID: 0.5},
-        skills=tuple(
-            SkillEstimate(skill=skill, estimate=0.25, confidence=0.9, evidence=(TARGET_ID,))
-            for skill in ALL_SKILLS
+    # The prepared profile is the *attributed* one production writes: each skill
+    # is estimated only from the benchmarks that measure it. A fixture that
+    # carried the old flat mean would prove the planner works on a document
+    # nothing produces.
+    profile = build_skill_profile(
+        generation=PARENT_VERSION,
+        runs=(
+            _parent_row(TARGET_ID, 0.125),
+            _parent_row(PROTECTED_ID, 0.5),
+            _parent_row(BROAD_ID, 0.5),
         ),
     )
     (inputs / "parent-profile.json").write_text(json.dumps(profile.to_dict()), encoding="utf-8")
@@ -445,6 +449,18 @@ def _write_evaluation_material(inputs: Path, document: Mapping[str, Any]) -> Pat
         json.dumps({"suites": suites}, indent=2), encoding="utf-8"
     )
     return path
+
+
+def _parent_row(qualified_id: str, score: float) -> BenchmarkRun:
+    """One real parent-side measurement, as preparation would write it."""
+    return BenchmarkRun(
+        benchmark_qualified_id=qualified_id,
+        adapter="chowder_custom",
+        generation_version=PARENT_VERSION,
+        score=score,
+        n_samples=16,
+        measurement_origin=MEASURED_PARENT,
+    )
 
 
 def _campaign(

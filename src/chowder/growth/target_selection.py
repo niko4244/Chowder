@@ -170,6 +170,41 @@ class SkillProfile:
         )
 
 
+def protected_skills_for(
+    benchmarks: Sequence[str], *, registry: Any = None
+) -> frozenset[str]:
+    """The skills a policy's protected benchmarks measure, from the registry.
+
+    Protection is declared as *benchmark* ids (a gate is a measurement, not a
+    capability), but target selection reasons about skills.  Resolving the one
+    into the other is a single, testable step -- and it refuses rather than
+    skipping: a protected benchmark the registry does not describe would
+    silently protect nothing, which is how a gate that looks enforced stops
+    being one.
+
+    The rule for a skill supported by both protected and targetable evidence is
+    deliberately conservative and stated once here: **any** protected support
+    makes the skill a gate.  Training a target benchmark that shares a skill
+    with a protected one is exactly the change the protected set exists to
+    detect, so the skill is left out of optimization rather than being split
+    into a targetable half and a protected half.
+    """
+    from .catalog import default_registry
+
+    registry = registry if registry is not None else default_registry()
+    resolved: set[str] = set()
+    for benchmark in benchmarks:
+        entry = registry.get(str(benchmark))
+        if entry is None:
+            raise ValueError(
+                f"protected benchmark {benchmark!r} is not in the benchmark "
+                "registry, so the skills it protects cannot be derived; an "
+                "unresolvable protected set is refused rather than treated as empty"
+            )
+        resolved.update(str(skill) for skill in entry.skills)
+    return frozenset(resolved)
+
+
 def _support_confidence(run: Any, entry: Any) -> float:
     """How much one measurement should count, from its support and provenance."""
     if str(run.measurement_origin) not in _ESTIMATING_ORIGINS:
@@ -303,6 +338,12 @@ STATE_FILES = {
 STOPPING_FILE = "stopping-state.json"
 
 
+def _utc_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _append_jsonl(path: Path, document: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -378,12 +419,14 @@ class GrowthState:
         training_type: str,
         cycle_id: str,
         generation: str,
+        parent_version: str = "",
         cost_gpu_hours: float = 0.0,
         candidate_result: str = "",
         promotion_result: str = "",
         measured_effect: float | None = None,
         regressions: Sequence[str] = (),
         promoted_identity: tuple[str, str] | None = None,
+        parent_evidence: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         document = {
             "target_skill": str(target_skill),
@@ -396,6 +439,20 @@ class GrowthState:
                 if promoted_identity
                 else None
             ),
+            #: The whole parent-evidence ref this generation advanced the lineage
+            #: to: the exact run root, base identity, adapter identity and the
+            #: arm that measured it. Written on promotion only, so a rejection
+            #: leaves the previous parent authoritative.
+            "parent_evidence": dict(parent_evidence) if parent_evidence else None,
+            #: The generation this row leaves in the lineage -- the candidate when
+            #: it promoted, the parent when it did not. A reader asking "which
+            #: model is current?" must not be answered by the candidate of a
+            #: generation that was rejected.
+            "effective_generation": (
+                str(generation)
+                if str(promotion_result).lower() == "promoted"
+                else str(parent_version)
+            ),
             "cycle_id": str(cycle_id),
             "generation": str(generation),
             "cost_gpu_hours": float(cost_gpu_hours),
@@ -406,6 +463,19 @@ class GrowthState:
         }
         _append_jsonl(self._path("interventions"), document)
         return document
+
+    def parent_evidence(self) -> dict[str, Any] | None:
+        """The parent evidence the durable record currently stands on.
+
+        Read from the *last* intervention that promoted, in write order. A row
+        that did not promote carries no ref, so a rejection cannot advance the
+        pointer by accident.
+        """
+        for row in reversed(_read_jsonl(self._path("interventions"))):
+            recorded = row.get("parent_evidence")
+            if isinstance(recorded, Mapping) and recorded:
+                return dict(recorded)
+        return None
 
     def interventions(self, *, target_skill: str | None = None) -> tuple[dict[str, Any], ...]:
         rows = _read_jsonl(self._path("interventions"))
@@ -466,11 +536,61 @@ class GrowthState:
             return {}
         return dict(document) if isinstance(document, Mapping) else {}
 
-    def set_stopping_state(self, document: Mapping[str, Any]) -> None:
+    def set_stopping_state(
+        self, document: Mapping[str, Any], *, preserve_operator_stop: bool = True
+    ) -> None:
+        """Record the session's own verdict, without erasing the operator's.
+
+        The two are independent facts that share this file: the loop's decision,
+        and a stop an operator asked for. A verdict write must not throw the
+        request away -- otherwise a stop raised while a campaign is running is
+        lost the moment that campaign records its outcome, and the loop happily
+        starts the next generation the operator asked it not to. ``clear_stop``
+        is the one caller that means to remove it.
+        """
+        merged = dict(document)
+        existing = self.stopping_state().get("operator_stop")
+        if preserve_operator_stop and existing is not None and "operator_stop" not in merged:
+            merged["operator_stop"] = existing
         path = self.root / STOPPING_FILE
         path.write_text(
-            json.dumps(dict(document), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            json.dumps(merged, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
+
+    # -- operator stop -----------------------------------------------------
+
+    def request_stop(self, *, reason: str) -> dict[str, Any]:
+        """Record an operator stop durably, beside the session's own verdict.
+
+        Durable because the request has to survive the process boundary a UI
+        and a run live on either side of: the loop re-reads it at each
+        generation boundary rather than being told in memory.
+        """
+        document = self.stopping_state()
+        request = {"requested": True, "reason": str(reason), "at": _utc_now()}
+        document["operator_stop"] = request
+        self.set_stopping_state(document)
+        return request
+
+    def operator_stop(self) -> dict[str, Any] | None:
+        """The pending stop request, or ``None`` when there is nothing to honour."""
+        request = self.stopping_state().get("operator_stop")
+        if isinstance(request, Mapping) and request.get("requested"):
+            return dict(request)
+        return None
+
+    def clear_stop(self) -> None:
+        """Drop a stop request, so a resumed session can start a generation.
+
+        Only ever called because an operator asked to start or resume: a stop
+        that could not be cleared would leave the session permanently wedged, and
+        clearing it silently inside the loop would ignore the operator.
+        """
+        document = self.stopping_state()
+        if "operator_stop" not in document:
+            return
+        document.pop("operator_stop", None)
+        self.set_stopping_state(document, preserve_operator_stop=False)
 
     # -- helpers -----------------------------------------------------------
 
@@ -872,7 +992,18 @@ class NextTargetSelector:
             max_same_target_attempts=self.max_same_target_attempts,
         )
         why_not: dict[str, str] = {}
-        # The unmeasured skills are named first: "we did not have evidence" is
+        # Protected skills are named before the unmeasured ones: "this is a
+        # gate" is a different fact from "we have no evidence", and a reader who
+        # sees a skill missing from the ranking must be able to learn which it
+        # was rather than guessing the selector forgot it was protected.
+        for estimate in profile.estimates:
+            if estimate.skill in self.protected_skills:
+                why_not.setdefault(
+                    estimate.skill,
+                    "protected evidence: a gate this cannot regress through, "
+                    "never an optimization target",
+                )
+        # The unmeasured skills are named next: "we did not have evidence" is
         # the most useful thing a reader can learn about why an alternative was
         # not chosen, and it must not be crowded out by the scored runners-up.
         for estimate in profile.unmeasured:

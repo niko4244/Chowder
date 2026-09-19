@@ -50,8 +50,9 @@ from .growth_loop import (
     GrowthLoop,
     LoopDecision,
     LoopRunReport,
+    PreparationResult,
 )
-from .next_campaign import LoopPolicy
+from .next_campaign import UNPLANNED_RECIPE_PREFIX, LoopPolicy
 from .target_selection import GrowthState, SkillProfile
 
 #: Reused verbatim rather than spelled as literals: the provenance vocabulary is
@@ -163,6 +164,25 @@ def skill_profile(scores: Mapping[str, float], *, generation: str = "gen2") -> S
     return SkillProfile(
         generation=generation,
         estimates=tuple(estimate(skill, score) for skill, score in scores.items()),
+    )
+
+
+def _simulated_prepare(draft: Any) -> Any:  # noqa: ANN401 - a CampaignDraft
+    """The simulation's planner: deterministic recipe identities.
+
+    The simulator fabricates compute, so it also *declares* the recipes it will
+    pretend to run -- through the same seam and the same freeze path production
+    uses, so the declaration this produces is validated by the same rule that
+    refuses a placeholder. It is deliberately not a no-op: a preparation seam
+    that reported no recipe set would leave the loop unable to freeze anything,
+    which is the honest production behaviour the simulator must not paper over.
+    """
+    return PreparationResult(
+        recipe_ids=tuple(
+            str(placeholder).replace(UNPLANNED_RECIPE_PREFIX, "sim-recipe-")
+            for placeholder in draft.placeholder_recipe_ids
+        ),
+        detail="simulated recipe set",
     )
 
 
@@ -312,7 +332,7 @@ def run_scenario(
         executor=executor,
         parent_declaration=parent,
         parent_profile=profile,
-        prepare=lambda frozen: None,
+        prepare=_simulated_prepare,
         readiness=lambda frozen: True,
     )
     report = loop.run()
