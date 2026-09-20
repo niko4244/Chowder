@@ -1567,6 +1567,13 @@ def build_executor(
         sources=sources,
         material=material,
         runner=runner or default_runner,
+        # One attempt's process holds training *and* the in-run evaluation, so
+        # the default 3600 s could not cover both: attempt-09 trained in 1766 s
+        # and came within 34 s of this bound while its evaluation was still
+        # running. The declared suites measure in 3706 s (the parent arm), so an
+        # attempt needs ~5500 s. 7200 s is the worker timeout the arm
+        # measurements already run under, with margin over that sum.
+        timeout_seconds=7200.0,
     )
 
 

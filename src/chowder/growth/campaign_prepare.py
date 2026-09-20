@@ -1358,7 +1358,16 @@ def _write_project_template(
                 "placement": "offload",
                 "device": "cuda",
                 "trust_remote_code": False,
-                "runtime": {"timeout_seconds": 1800.0},
+                # The in-run evaluation measures exactly what an arm measures:
+                # the declared suites at the declared batch size. The parent arm
+                # took 3706 s over these three suites x 16 rows, so 1800 s could
+                # never finish -- both gen2 attempts trained their full horizon
+                # and were then killed here, 1800 s into the evaluation. This
+                # must also leave room inside the attempt's own process budget
+                # (``SubprocessTrainingFn.timeout_seconds``), which holds
+                # training *and* this evaluation: ~1766 s of training plus 5400 s
+                # here fits the 7200 s that budget now allows.
+                "runtime": {"timeout_seconds": 5400.0},
                 "suites": suites,
             },
         },
