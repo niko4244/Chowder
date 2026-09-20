@@ -390,7 +390,10 @@ def prepare_campaign(
         )
     )
     project_template_path = _write_project_template(
-        manifest, root, evaluation_material_path=evaluation_material_path
+        manifest,
+        root,
+        evaluation_material_path=evaluation_material_path,
+        parent_eval_path=parent_eval_path,
     )
 
     # 5. the contamination manifest the binder loads before any row binds.
@@ -1178,14 +1181,73 @@ def _load_protected_fingerprints(
     return fingerprints
 
 
+def _suite_name(qualified_id: str) -> str:
+    """The suite name a declared benchmark id is evaluated under."""
+    return qualified_id.split("@", 1)[0]
+
+
+def _baseline_metrics(parent_eval_path: Path, suite_names: Sequence[str]) -> dict[str, float]:
+    """The parent's measured scores, as the project's fixed baseline.
+
+    The preregistration is explicit about which baseline a growth attempt runs
+    against: "the parent's instrument + slice measurement is referenced at zero
+    incremental cost (``baseline.mode: fixed``), never re-paid per recipe."
+    That rules out ``auto``, which evaluates the untouched base once per attempt
+    -- the re-payment the declaration forbids -- and it names the numbers: the
+    parent arm's own measurements, which preparation has already written.
+
+    Keyed by suite name, because ``ProjectSpec`` requires the goal metrics, the
+    evaluation suites and therefore the baseline to be the same set of names.
+    An empty ``metrics`` under ``fixed`` is not a baseline at all: ``project.py``
+    refuses it, so every attempt was refused before compute by
+    ``project-validate``.
+    """
+    report = _read_json_object(parent_eval_path) or {}
+    measured: dict[str, float] = {}
+    for entry in report.get("runs", ()) or ():
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("measurement_origin", "")) != MEASURED_PARENT:
+            continue
+        name = _suite_name(str(entry.get("benchmark_qualified_id", "")))
+        score = entry.get("score")
+        if name in suite_names and isinstance(score, (int, float)) and not isinstance(score, bool):
+            measured[name] = float(score)
+    if not measured:
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: the parent arm holds no measured score for any "
+            f"declared benchmark {sorted(suite_names)}, so the fixed baseline "
+            "the preregistration references does not exist; measure the parent "
+            "under this campaign's instrument rather than running against an "
+            "empty bar"
+        )
+    # A benchmark the parent never measured carries no baseline entry. Writing a
+    # zero for it would assert a score nobody took -- the substitution this
+    # whole path exists to refuse -- so the bar is what was measured and the
+    # rest is simply ungated here, as the parent arm's UNMEASURED rows record.
+    return measured
+
+
+#: What the cycle reserves for a candidate's in-run evaluation when the
+#: evaluator cannot profile itself (``cycle._declared_evaluation_reserve``).
+#: The training reservation must leave this much of the per-recipe ceiling
+#: free, or ``engine.resize_reservation`` refuses the lifecycle estimate.
+EVALUATION_GPU_HOUR_RESERVE = 0.05
+
+
 def _write_project_template(
-    manifest: Any, root: Path, *, evaluation_material_path: Path
+    manifest: Any,
+    root: Path,
+    *,
+    evaluation_material_path: Path,
+    parent_eval_path: Path,
 ) -> Path:
     """The executor's project template, derived from the declaration.
 
-    Not a docs-script reconstruction: the base model, the budget and the
-    evaluation suites all come from the manifest and the material this
-    preparation produced, so a change to the declaration moves the template.
+    Not a docs-script reconstruction: the base model, the budget, the evaluation
+    suites and the fixed baseline all come from the manifest and the evidence
+    this preparation produced, so a change to the declaration moves the
+    template.
     """
     budget = manifest.budget
     material = _read_json_object(evaluation_material_path) or {}
@@ -1206,21 +1268,43 @@ def _write_project_template(
                 "use_chat_template": True,
             }
         )
+    suite_names = [str(suite["name"]) for suite in suites]
     template = {
         "schema_version": 1,
         "name": str(manifest.cycle_id),
         "seed": 7,
         "goal": {
-            "metrics": [{"name": "quality", "direction": "maximize"}],
+            # ProjectSpec requires the goal metrics and the evaluation suites to
+            # be the same set of names, so the goal is the declared benchmarks
+            # themselves rather than a "quality" aggregate nothing measures.
+            "metrics": [
+                {"name": name, "direction": "maximize"} for name in suite_names
+            ],
             "gpu_hour_budget": float(budget.wall_gpu_hours_ceiling_per_recipe),
             "max_parallel_candidates": 1,
             "minimum_promotion_gain": 0.0,
             "require_protocol_match": False,
         },
-        "baseline": {"mode": "fixed", "experiment_id": "baseline", "metrics": {}, "gpu_hours": 0.0},
+        # Referenced at zero incremental cost, never re-paid per recipe: the
+        # parent's own measurement of the declared target benchmark.
+        "baseline": {
+            "mode": "fixed",
+            "experiment_id": "baseline",
+            "metrics": _baseline_metrics(parent_eval_path, suite_names),
+            "gpu_hours": 0.0,
+        },
         "experiment": {
             "experiment_id": str(manifest.cycle_id),
-            "estimated_gpu_hours": float(budget.wall_gpu_hours_ceiling_per_recipe),
+            # The training reservation is the ceiling *less* what evaluation
+            # reserves, so the two together fit the declared per-recipe ceiling
+            # exactly. Reserving the whole ceiling here left no remaining budget
+            # for the lifecycle resize to grow into, so the engine's preflight
+            # refused every attempt -- at any ceiling -- before a single step.
+            "estimated_gpu_hours": max(
+                0.0,
+                float(budget.wall_gpu_hours_ceiling_per_recipe)
+                - EVALUATION_GPU_HOUR_RESERVE,
+            ),
             "hypothesis": {
                 "observation": "the parent generation's remaining measured weaknesses",
                 "suspected_cause": "declared by the gen2 preregistration",
@@ -1268,7 +1352,7 @@ def _write_project_template(
             },
             "evaluation": {
                 "type": "transformers-text",
-                "estimated_gpu_hours": 0.05,
+                "estimated_gpu_hours": EVALUATION_GPU_HOUR_RESERVE,
                 "precision": "bf16",
                 "quantization": "none",
                 "placement": "offload",
