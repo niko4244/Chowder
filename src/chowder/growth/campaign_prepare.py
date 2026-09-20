@@ -717,17 +717,84 @@ def _parent_durable_scores(document: Mapping[str, Any]) -> dict[str, float]:
     return scores
 
 
+def _eval_report_measured_row(
+    document: Mapping[str, Any], qualified_id: str, *, parent_version: str
+) -> BenchmarkRun | None:
+    """This benchmark's row in an ``EvalReport``, when it is a real measurement.
+
+    The admission rule is deliberately narrow, because this is the seam a fresh
+    ``measure-parent`` report enters the profile through: everything the row
+    claims must match what was declared, or the row is not this parent's
+    measurement of this benchmark and the caller falls through to the honest
+    unmeasured path.
+    """
+    runs = document.get("runs")
+    if not isinstance(runs, Sequence) or isinstance(runs, (str, bytes)):
+        return None
+    for entry in runs:
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("benchmark_qualified_id", "")) != qualified_id:
+            continue
+        if str(entry.get("measurement_origin", "")) != MEASURED_PARENT:
+            continue
+        if str(entry.get("generation_version", "")) != parent_version:
+            continue
+        metric = str(entry.get("metric", ""))
+        if metric != _metric_for(qualified_id):
+            continue
+        score = entry.get("score")
+        if not isinstance(score, (int, float)) or isinstance(score, bool):
+            continue
+        per_sample = entry.get("per_sample_scores") or ()
+        return BenchmarkRun(
+            benchmark_qualified_id=qualified_id,
+            adapter=str(entry.get("adapter", "chowder_custom")),
+            generation_version=parent_version,
+            score=float(score),
+            n_samples=int(entry.get("n_samples", 0) or 0),
+            per_sample_scores=tuple(per_sample),
+            metric=metric,
+            measurement_origin=MEASURED_PARENT,
+            raw_artifact_ref=str(entry.get("raw_artifact_ref", "")),
+            metadata={
+                **{
+                    key: value
+                    for key, value in (entry.get("metadata") or {}).items()
+                },
+                "source": "declared parent measurement report",
+            },
+        )
+    return None
+
+
 def _parent_measured_row(
     document: Mapping[str, Any], qualified_id: str, *, parent_version: str
 ) -> BenchmarkRun | None:
     """A real parent measurement of this exact benchmark, or ``None``.
 
-    The only durable per-benchmark shape the parent run root holds today is the
+    Two durable shapes carry a parent measurement, and both are read here.
+
+    An ``EvalReport`` (``runs``) is what ``chowder growth campaign
+    measure-parent`` writes when the parent is re-measured under *this*
+    campaign's instrument; it is the document ``--parent-measurement`` names.
+    A row of one counts only when it is a real measurement of this exact
+    benchmark, of this parent: the declared id, the declared metric, a numeric
+    score, and ``MEASURED_PARENT`` origin for this ``parent_version``.  An
+    ``UNMEASURED`` row, a carried row, a row of another generation or a row of
+    another benchmark is not a measurement and is left to the unmeasured path.
+
+    Otherwise the run root's own ``candidate_evaluation.json`` holds the
     diagnostics instrument's aggregate, recorded under the parent's own
     instrument version.  It is used only when it matches the declared benchmark
     id: a measurement of a *different* instrument version is not a measurement
     of this one.
     """
+    row = _eval_report_measured_row(
+        document, qualified_id, parent_version=parent_version
+    )
+    if row is not None:
+        return row
     durable = _diagnostics_instrument(document)
     if durable is None:
         return None

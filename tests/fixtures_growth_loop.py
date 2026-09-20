@@ -133,7 +133,7 @@ def planned_recipes(draft: Any) -> Any:  # noqa: ANN401 - a CampaignDraft
 
     return PreparationResult(
         recipe_ids=tuple(
-            f"recipe-{index:02d}-lr0.0001-r16-replay0.1"
+            f"recipe-{index:02d}-lr0.0001"
             for index in range(len(draft.placeholder_recipe_ids))
         ),
         detail="recording preparation",

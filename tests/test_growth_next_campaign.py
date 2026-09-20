@@ -74,7 +74,7 @@ def _planned_ids(draft: Any) -> tuple[str, ...]:
     campaign-runner and integration suites, not by this unit fixture.
     """
     return tuple(
-        f"recipe-{index:02d}-lr0.0001-r16-replay0.1"
+        f"recipe-{index:02d}-lr0.0001"
         for index in range(len(draft.placeholder_recipe_ids))
     )
 
@@ -100,6 +100,60 @@ def _build(tmp_path: Path, **kwargs: Any) -> Any:
         draft,
         recipe_ids=recipe_ids if recipe_ids is not None else _planned_ids(draft),
     )
+
+
+SEARCH: dict[str, Any] = {
+    "rounds": 2,
+    "initial_max_steps": 12,
+    "step_multiplier": 2.0,
+    "survival_fraction": 0.5,
+    "min_survivors": 1,
+    "device_gpu_hours_ceiling": 0.30,
+    "wall_gpu_hours_ceiling": 0.20,
+}
+
+
+def test_a_policy_that_declares_a_search_freezes_it_into_the_generation(
+    tmp_path: Path,
+) -> None:
+    """The search is preregistered with everything else, never widened after.
+
+    A policy declares the bounded candidate search once; every generation it
+    composes carries that declaration into its frozen manifest, so the search a
+    run performs is the search that was admitted.
+    """
+    parent = parent_manifest(tmp_path)
+    frozen = _build(tmp_path, parent=parent, policy=policy_from(parent, candidate_search=dict(SEARCH)))
+
+    document = json.loads(frozen.manifest_path.read_text(encoding="utf-8"))
+    assert document["candidate_search"] == SEARCH
+    assert frozen.manifest.candidate_search.declared is True
+    assert frozen.manifest.candidate_search.rounds == 2
+
+
+def test_a_policy_that_declares_no_search_composes_exactly_as_before(
+    tmp_path: Path,
+) -> None:
+    """No key, no rounds: the digest of an undeclared policy does not move."""
+    parent = parent_manifest(tmp_path)
+    policy = policy_from(parent)
+
+    document = policy.to_dict()
+    assert "candidate_search" not in document
+    assert policy.candidate_search.declared is False
+
+    frozen = _build(tmp_path, parent=parent, policy=policy)
+    manifest_document = json.loads(frozen.manifest_path.read_text(encoding="utf-8"))
+    assert "candidate_search" not in manifest_document
+
+
+def test_an_unknown_search_key_in_a_policy_refuses_rather_than_being_ignored(
+    tmp_path: Path,
+) -> None:
+    parent = parent_manifest(tmp_path)
+    with pytest.raises(NextCampaignRefusal) as error:
+        policy_from(parent, candidate_search={**SEARCH, "patience": 3})
+    assert "unknown candidate_search fields" in str(error.value)
 
 
 def test_a_frozen_declaration_and_preregistration_are_written_before_any_compute(

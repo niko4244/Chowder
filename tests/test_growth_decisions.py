@@ -470,7 +470,14 @@ def test_recipe_patch_maps_into_the_peft_backend_namespace():
     patch = recipe.to_config_patch(backend_type="transformers-peft")
 
     assert set(patch) == {"backend"}
-    assert set(patch["backend"]) == {"max_length", "training"}
+    # ``lora`` is emitted too: the declared rank/alpha land in the namespace the
+    # peft spec constructor reads, so a recipe's rank is the rank the run
+    # actually trains at rather than provenance the backend ignores.
+    assert set(patch["backend"]) == {"max_length", "lora", "training"}
+    assert patch["backend"]["lora"] == {
+        "r": recipe.lora_rank,
+        "alpha": recipe.lora_alpha,
+    }
     assert set(patch["backend"]["training"]) == {
         "max_steps",
         "learning_rate",

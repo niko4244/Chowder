@@ -789,8 +789,9 @@ def _seed_registry(path: Path, experiment_id: str) -> None:
 
 def test_the_composed_project_carries_the_recipe_and_never_a_search_section(tmp_path: Path):
     """Property 1 and the plan's honesty rule: the recipe's knobs reach the
-    validated config, and no `search` section is invented for a controller that
-    has no production caller."""
+    validated config, and no `search` section is invented -- bounded candidate
+    search is declared on the campaign and driven above the project, not
+    smuggled into the config a backend validates."""
     runner = _RecordingRunner()
     binding = _binding(tmp_path, runner=runner)
     items = _items()

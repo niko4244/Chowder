@@ -20,17 +20,13 @@ registry. No phase body in this module converts a metric by hand -- a score
 computed inline here would be a promotion scale nobody declared.
 
 Recipe competition is bounded by this package's own planner and budget
-envelope. Chowder's successive-halving controller
-(``successive_halving.run_successive_halving``,
-``candidate_selection.prioritize_candidates``) is a proven library
-capability, but no production caller invokes it: wiring it into
-``project_runner.py`` is open in ``docs/ROADMAP.md`` and "must not be
-inferred from the library implementation or its integration tests". There is
-therefore no ``search`` project config for this package to target today. A
-caller that wants real successive-halving rounds on top of this cycle runs
-them through its own ``TrainingFn``; teaching the cycle to consume a wired
-controller is part of that wiring change, not an interface that can be
-assumed here.
+envelope. Real successive-halving rounds are driven *above* this cycle, by
+``chowder.growth.candidate_search``, which allocates each round's budget and
+chooses survivors through ``successive_halving.HalvingSchedule`` -- one owner
+of that policy, shared with the ``EvolutionEngine`` controller. Nothing here
+invents a ``search`` project config for the cycle to target: ``run_project``
+has no search section, so the rounds live in the campaign's declared search
+and are executed through this cycle's own ``TrainingFn``.
 """
 
 from __future__ import annotations

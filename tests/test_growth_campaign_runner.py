@@ -34,6 +34,14 @@ from chowder.evals.result import (
     EvalReport,
 )
 from chowder.growth import campaign_runner
+from chowder.growth.campaign_runner import (
+    NON_BEHAVIORAL_FIELDS,
+    assert_every_field_enforced,
+    CANDIDATE_ARTIFACT_DIGEST_STALE,
+    FIELD_ENFORCEMENT,
+    build_evaluator,
+    CampaignRunRefusal,
+)
 from chowder.growth.campaign import (
     STOPPING_RULE_ENFORCEMENT,
     STOPPING_RULE_ON_ADMISSION_REFUSAL,
@@ -41,19 +49,20 @@ from chowder.growth.campaign import (
     STOPPING_RULES,
     CampaignManifest,
     CampaignManifestError,
-    stops_on_admission_refusal,
-    stops_on_campaign_overrun,
 )
 from chowder.growth.campaign_runner import (
-    CANDIDATE_ARTIFACT_DIGEST_STALE,
-    FIELD_ENFORCEMENT,
-    NON_BEHAVIORAL_FIELDS,
-    CampaignRunRefusal,
-    assert_every_field_enforced,
     plan_campaign,
     run_campaign,
+    stops_on_admission_refusal,
+    stops_on_campaign_overrun,
     undeclared_inputs,
 )
+from chowder.growth.candidate_search import (
+    SEARCH_SCHEMA,
+    CandidateSearchRefusal,
+    SearchPlan,
+)
+from chowder.growth.campaign_runner import CANDIDATE_ARTIFACT_DIGEST_STALE, build_evaluator
 from chowder.growth.candidate_evaluation import (
     CANDIDATE_EVALUATION_COST_UNMEASURED,
     CANDIDATE_EVALUATION_COST_UNREPORTED,
@@ -1783,3 +1792,117 @@ def test_the_cli_refuses_a_malformed_manifest_without_touching_compute(
         chowder_main()
     assert "unknown manifest fields" in str(error.value)
     assert capsys.readouterr().out == ""
+
+
+# --------------------------------------------------------------------------
+# the declared bounded candidate search, through the real run surface
+# --------------------------------------------------------------------------
+
+#: A search that fits this fixture's ceilings: two rounds over the declared
+#: recipes, the second at twice the step budget.
+SEARCH_DECLARATION: Mapping[str, Any] = {
+    "rounds": 2,
+    "initial_max_steps": 12,
+    "step_multiplier": 2.0,
+    "survival_fraction": 0.5,
+    "min_survivors": 1,
+    "device_gpu_hours_ceiling": 0.30,
+    "wall_gpu_hours_ceiling": 0.20,
+}
+
+
+def test_a_declared_search_runs_bounded_rounds_and_records_every_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The search is declared, projected, then actually run -- and it is one pass.
+
+    Round 0 runs both candidates at the cheap budget, only the survivor earns
+    round 1, and every attempt (including the cheap round's) stays in the record
+    and in the accounting: losing-candidate compute does not disappear.
+    """
+    manifest, runner, _document = _campaign(
+        tmp_path, with_ancestor=True, candidate_search=dict(SEARCH_DECLARATION)
+    )
+    _patch_seams(monkeypatch, runner)
+
+    run = run_campaign(manifest)
+
+    plan_phase = _phase(run, "candidate_search")
+    assert plan_phase["verdict"] == "ok"
+    assert "2 declared round(s)" in plan_phase["detail"]
+    ran = _phase(run, "candidate_search_run")
+    assert ran["verdict"] == "ok"
+    assert "2 round(s) ran" in ran["detail"]
+
+    rounds = [attempt["search_round"] for attempt in run.attempts]
+    assert rounds == [0, 0, 1], run.attempts
+    assert [attempt["search_max_steps"] for attempt in run.attempts] == [12, 12, 24]
+    # Three attempts really ran and all three were charged.
+    assert run.cost["wall_gpu_hours"] == pytest.approx(3 * ATTEMPT_WALL_GPU_HOURS)
+    assert Path(run.cost["accounting_path"]).is_file()
+
+
+def test_a_search_over_its_declared_envelope_refuses_before_any_compute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The bound has teeth: an unfittable search never starts training."""
+    _planned, runner, document = _campaign(
+        tmp_path, with_ancestor=True, candidate_search=dict(SEARCH_DECLARATION)
+    )
+    # The declaration is a preregistration, so an unfittable envelope is
+    # *declared* and then refused, not discovered at planning time.
+    manifest = _redeclare(
+        document, candidate_search={**SEARCH_DECLARATION, "device_gpu_hours_ceiling": 1e-9}
+    )
+    _patch_seams(monkeypatch, runner)
+
+    run = run_campaign(manifest)
+
+    assert run.verdict == "REFUSED"
+    assert SEARCH_SCHEMA in _refusal(run)
+    assert _phase(run, "candidate_search")["verdict"] == "refused"
+    # Nothing trained: the refusal is a pre-compute one.
+    assert "train" not in _verbs(runner)
+    assert run.cost == {}
+
+
+def test_an_undeclared_campaign_is_still_a_single_pass(tmp_path: Path) -> None:
+    """Absent the field, behaviour is exactly what every earlier manifest ran."""
+    manifest, _runner, _document = _campaign(tmp_path, with_ancestor=True)
+
+    plan = plan_campaign(manifest)
+
+    assert plan.search.declared is False
+    assert plan.search.rounds == ()
+    assert len(manifest.recipe_ids) == 2
+
+
+def test_the_plan_command_prints_the_declared_search(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """The bounded search is visible before it is run, through the real CLI."""
+    _manifest, _runner, _document = _campaign(
+        tmp_path, with_ancestor=True, candidate_search=dict(SEARCH_DECLARATION)
+    )
+    monkeypatch_argv = [
+        "chowder",
+        "growth",
+        "campaign",
+        "plan",
+        str(tmp_path / "inputs" / "campaign.json"),
+    ]
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(sys, "argv", monkeypatch_argv)
+        code = chowder_main()
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "PLANNED"
+    assert payload["candidate_search_declared"] is True
+    assert payload["candidate_search_rounds"] == 2
+    rounds = payload["plan"]["candidate_search"]["rounds"]
+    assert [row["max_steps"] for row in rounds] == [12, 24]
+    # The printed projection is the search's worst case, not a single pass.
+    assert payload["projected_wall_gpu_hours"] == pytest.approx(
+        payload["plan"]["candidate_search"]["total_wall_gpu_hours"]
+    )

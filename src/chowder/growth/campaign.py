@@ -33,6 +33,7 @@ from typing import Any, Mapping, Sequence
 
 import json
 
+from .candidate_search import CandidateSearchDeclaration
 from .compute_cost import (
     PROJECTED_DEVICE_GPU_HOURS_EXCEEDED,
     PROJECTED_WALL_GPU_HOURS_EXCEEDED,
@@ -374,6 +375,16 @@ class CampaignManifest:
     evaluation_execution: EvaluationExecution = field(
         default_factory=EvaluationExecution
     )
+    #: The declared bounded candidate search (successive halving over this
+    #: campaign's own recipes). Absent means ``rounds == 0``: one pass over the
+    #: declared recipe set, exactly as every manifest that predates it ran.
+    #: Declared, it is a preregistered schedule -- round count, starting budget,
+    #: multiplier, survival rule and its own device/wall envelope -- and a search
+    #: that cannot fit that envelope (or the campaign's ceilings) refuses before
+    #: any compute.
+    candidate_search: CandidateSearchDeclaration = field(
+        default_factory=CandidateSearchDeclaration
+    )
     notes: str = ""
 
     @property
@@ -417,7 +428,7 @@ class CampaignManifest:
             "project_template_path", "training_material_path", "data_registry_path",
             "hardware_budget_path", "parent_profile_path", "parent_eval_report_path",
             "baseline_eval_report_path", "protection", "evaluation_material_path",
-            "evaluation_execution",
+            "evaluation_execution", "candidate_search",
         }
         retired = sorted(set(document) & set(RETIRED_FIELDS))
         if retired:
@@ -561,6 +572,14 @@ class CampaignManifest:
                 )
                 if "evaluation_execution" in document
                 else EvaluationExecution()
+            ),
+            # Absent means no search: the declared recipes run once each.
+            candidate_search=(
+                CandidateSearchDeclaration.from_mapping(
+                    document["candidate_search"], source=source
+                )
+                if "candidate_search" in document
+                else CandidateSearchDeclaration()
             ),
             notes=str(document.get("notes", "")),
         )

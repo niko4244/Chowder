@@ -4,10 +4,13 @@ Given the curriculum plan and measured hardware reality (the device
 preflight numbers Chowder's routers/PEFT backends already measure), propose
 a small set of competing recipes whose projected cost fits the preregistered
 budget. The planner proposes; selection is whatever the caller's `TrainingFn`
-and the cycle's predeclared promotion rule decide. Chowder's successive-halving
-controller would be the qualified selector, but it has no production caller
-yet and `run_project` has no `search` config for it to read
-(`docs/ROADMAP.md`), so nothing here may assume that interface exists.
+and the cycle's predeclared promotion rule decide, and how much budget each
+candidate gets is the declared bounded candidate search's decision
+(`chowder.growth.candidate_search`, over
+`successive_halving.HalvingSchedule`). It does not vary anything the production
+backend would ignore: :data:`SEARCH_AXES` is the learning rate, the one field
+every supported backend's config reader consumes, and
+:func:`assert_search_axes_consumed` refuses an inert axis.
 
 Variables stay inside the currently qualified training path: LoRA-family
 post-training with measured memory/step/load budgets. Architecture changes
@@ -20,6 +23,114 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from .curriculum import CurriculumItem
+
+#: Which recipe fields actually reach the production backend's config reader,
+#: per backend type. A field absent from this table is *recorded* by ``to_dict``
+#: as provenance but never consumed, so it cannot be a search axis: varying it
+#: would produce candidates that differ in name and not in the run.
+#:
+#: Read from the backends themselves, not from a comment:
+#:
+#: * ``transformers-peft`` (``backends/transformers_peft.py``, the spec
+#:   constructor around its ``training``/``lora`` sections):
+#:   ``backend.max_length``, ``backend.lora.{r,alpha}``,
+#:   ``backend.training.{learning_rate,lr_scheduler_type,warmup_steps,max_steps,
+#:   batch_size,gradient_accumulation_steps,...}``;
+#: * ``router-healing`` (``training_binding._compose``'s documented namespace):
+#:   ``backend.router_healing.{max_steps,learning_rate,seq_len}``.
+CONSUMED_RECIPE_FIELDS: Mapping[str, frozenset[str]] = {
+    "transformers-peft": frozenset(
+        {
+            "learning_rate",
+            "scheduler",
+            "warmup_steps",
+            "max_steps",
+            "seq_len",
+            "lora_rank",
+            "lora_alpha",
+        }
+    ),
+    "router-healing": frozenset({"learning_rate", "max_steps", "seq_len"}),
+}
+
+#: Every recipe field, so "recorded only" can be stated as a difference rather
+#: than rediscovered from whatever is missing.
+ALL_RECIPE_FIELDS: frozenset[str] = frozenset(
+    {
+        "recipe_id",
+        "curriculum_item_ids",
+        "mixture",
+        "learning_rate",
+        "scheduler",
+        "warmup_steps",
+        "lora_rank",
+        "lora_alpha",
+        "target_modules",
+        "seq_len",
+        "batch_size",
+        "gradient_accumulation",
+        "max_steps",
+        "objective",
+        "replay_rate",
+        "dataset_manifest",
+        "projected_device_gpu_hours",
+        "projected_wall_gpu_hours",
+        "notes",
+    }
+)
+
+#: The recipe fields the planner is allowed to vary between candidates. A field
+#: may participate in search only when *every* supported backend consumes it:
+#: an axis that is live for one backend and inert for another would make the
+#: same candidate set mean different things depending on the project template.
+#:
+#: The step budget is deliberately *not* here: successive halving owns it, and
+#: ``chowder.growth.candidate_search`` allocates it per round from a declared
+#: schedule. A candidate therefore differs from its siblings in learning rate
+#: and nothing else, which is what makes a survivor's second round a larger
+#: budget for the same proposal rather than a different proposal.
+SEARCH_AXES: tuple[str, ...] = ("learning_rate",)
+
+
+def consumed_recipe_fields(backend_type: str) -> frozenset[str]:
+    """The recipe fields this backend's config reader actually consumes."""
+    try:
+        return CONSUMED_RECIPE_FIELDS[backend_type]
+    except KeyError:
+        raise ValueError(
+            f"recipe knobs have no recorded consumer for backend type "
+            f"{backend_type!r}; search-active fields cannot be established, so "
+            "the planner refuses rather than assuming a mapping"
+        ) from None
+
+
+def recorded_only_recipe_fields(backend_type: str) -> frozenset[str]:
+    """Recipe fields this backend records as provenance but never consumes."""
+    return ALL_RECIPE_FIELDS - consumed_recipe_fields(backend_type)
+
+
+def assert_search_axes_consumed(
+    axes: Sequence[str] = SEARCH_AXES,
+    *,
+    backend_types: Sequence[str] | None = None,
+) -> None:
+    """Refuse a search axis that any supported backend would ignore.
+
+    Called before a candidate set is proposed, so an edit that adds an inert
+    axis fails here rather than silently producing candidates that differ only
+    in their names.
+    """
+    supported = tuple(backend_types or sorted(CONSUMED_RECIPE_FIELDS))
+    for backend_type in supported:
+        consumed = consumed_recipe_fields(backend_type)
+        inert = sorted(axis for axis in axes if axis not in consumed)
+        if inert:
+            raise ValueError(
+                f"search axes {inert} are not consumed by backend "
+                f"{backend_type!r}, so varying them would produce candidates "
+                "that differ in name and not in the run; a search axis must be "
+                "read by every backend a recipe can be composed for"
+            )
 
 
 @dataclass(frozen=True)
@@ -100,9 +211,12 @@ class TrainingRecipe:
 
         - ``router-healing``: the router engine's knobs.
         - ``transformers-peft``: the same training knobs in the peft
-          validator's namespace (``backend.training.*`` plus ``max_length``).
-          Note the peft path has no ``seq_len``: sequence length is the
-          backend-level ``max_length``.
+          validator's namespace (``backend.training.*`` plus ``max_length``),
+          and the LoRA rank/alpha in the namespace the peft spec constructor
+          reads (``backend.lora.{r,alpha}``) -- so a recipe's declared rank is
+          the rank the run actually trains at, not provenance only. Note the
+          peft path has no ``seq_len``: sequence length is the backend-level
+          ``max_length``.
 
         ``ExperimentGraph`` resolves a patch by merging it with
         ``deep_merge_config``, so any other key -- bookkeeping included --
@@ -111,15 +225,17 @@ class TrainingRecipe:
         recipe's knobs; emitting router-healing keys into another backend
         would fail validation anyway (both discovered on real runs).
 
-        LoRA rank/alpha, and anything else the target path names inside its
-        own spec, stay proposed-but-unmapped: inventing a namespace for them
-        here would be drift, not integration. Recipe identity, mixture, and
-        projections travel in ``to_dict()``, which is what the cycle ledger
-        records.
+        Every field this emits appears in :data:`CONSUMED_RECIPE_FIELDS` for
+        that backend, and every field it does not is reported by
+        :func:`recorded_only_recipe_fields` -- named, rather than implied to
+        have driven the run. Recipe identity, mixture, and projections travel
+        in ``to_dict()``, which is what the cycle ledger records.
 
         There is no project-level ``search`` config to target: ``run_project``
-        has no search section and Chowder's successive-halving controller has
-        no production caller yet (``docs/ROADMAP.md``).
+        has no search section, so bounded candidate search is declared on the
+        campaign and executed by the runner over these recipes (see
+        ``chowder.growth.candidate_search``) rather than by inventing a project
+        section nothing reads.
         """
         if backend_type == "router-healing":
             return {
@@ -135,6 +251,7 @@ class TrainingRecipe:
             return {
                 "backend": {
                     "max_length": self.seq_len,
+                    "lora": {"r": self.lora_rank, "alpha": self.lora_alpha},
                     "training": {
                         "max_steps": self.max_steps,
                         "learning_rate": self.learning_rate,
@@ -183,11 +300,20 @@ class RecipePlanner:
     ) -> tuple[TrainingRecipe, ...]:
         """A deterministic spread of recipes around evidence-based defaults.
 
-        The spread is over the highest-leverage hyperparameters for small
-        LoRA post-training (LR x rank x replay), each projected against the
-        measured budget; recipes that bust either ceiling are refused, not
+        The spread is over :data:`SEARCH_AXES` only -- the learning rate, the
+        one knob every supported backend's config reader consumes -- so every
+        candidate differs in the run and not merely in its name.
+        ``lora_rank``/``replay_rate``/``batch_size`` and the rest stay recorded
+        properties of the proposal (``recorded_only_recipe_fields`` names
+        them); they are not search axes, because a router-healing project would
+        ignore them. The step budget is not a search axis either: successive
+        halving owns it (``chowder.growth.candidate_search``).
+
+        Each candidate is projected against the measured budget, and a recipe
+        that cannot be scaled to fit either ceiling raises rather than being
         silently included.
         """
+        assert_search_axes_consumed()
         if not items:
             return ()
         item_ids = tuple(item.item_id for item in items)
@@ -201,15 +327,10 @@ class RecipePlanner:
         total_examples = sum(item.example_count for item in items) or base_examples
         steps_estimate = max(12, min(400, total_examples // 30))
 
-        # LR x rank x replay grid: 2 x 2 x 2 candidates, truncated to `count`.
-        grid = [
-            (lr, rank, replay)
-            for lr in (1e-4, 2e-4)
-            for rank in (16, 32)
-            for replay in (0.1, 0.25)
-        ]
+        # LR grid over SEARCH_AXES, truncated to `count`.
+        grid = [(lr,) for lr in (5e-5, 1e-4, 2e-4, 4e-4)]
         recipes: list[TrainingRecipe] = []
-        for index, (lr, rank, replay) in enumerate(grid[:count]):
+        for index, (lr,) in enumerate(grid[:count]):
             seq_len = 2048
             device, wall = self.project_cost(seq_len=seq_len, max_steps=steps_estimate)
             if device > self.max_device or wall > self.max_wall:
@@ -226,11 +347,12 @@ class RecipePlanner:
                         f"{wall:.4f} wall GPU-h vs ceilings {self.max_device:.4f}/"
                         f"{self.max_wall:.4f}"
                     )
+            rank = 16
             recipes.append(
                 TrainingRecipe(
-                    recipe_id=f"recipe-{index:02d}-lr{lr:g}-r{rank}-replay{replay:g}",
+                    recipe_id=f"recipe-{index:02d}-lr{lr:g}",
                     curriculum_item_ids=item_ids,
-                    mixture={"TARGET": 0.5, "PRESERVE": 0.15, "GENERAL": 0.2, "REPLAY": replay, "STRETCH": 0.1},
+                    mixture={"TARGET": 0.5, "PRESERVE": 0.15, "GENERAL": 0.2, "REPLAY": 0.1, "STRETCH": 0.1},
                     learning_rate=lr,
                     scheduler="cosine",
                     warmup_steps=max(2, steps_estimate // 10),
@@ -242,11 +364,15 @@ class RecipePlanner:
                     gradient_accumulation=4,
                     max_steps=steps_estimate,
                     objective="sft",
-                    replay_rate=replay,
+                    replay_rate=0.1,
                     dataset_manifest=dataset_manifest,
                     projected_device_gpu_hours=device,
                     projected_wall_gpu_hours=wall,
-                    notes=f"projected from measured step cost {self.budget.step_seconds(seq_len):.3f}s/step @ {seq_len}",
+                    notes=(
+                        f"search axis lr {lr:g} at {steps_estimate} base steps; "
+                        f"projected from measured step cost "
+                        f"{self.budget.step_seconds(seq_len):.3f}s/step @ {seq_len}"
+                    ),
                 )
             )
         return tuple(recipes)
