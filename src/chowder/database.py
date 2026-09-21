@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 6
 # SQLite application_id is a 32-bit marker stored in the database header.
 # 0x43484F57 == ASCII "CHOW".
 CHOWDER_APPLICATION_ID = 0x43484F57
@@ -81,10 +81,74 @@ def _migration_3_recursive_recovery_claims(connection: sqlite3.Connection) -> No
     )
 
 
+def _migration_4_goal_lifecycle(connection: sqlite3.Connection) -> None:
+    """Persist frozen objective identity, assessments, and terminal decisions."""
+
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS goal_objectives (
+               objective_version TEXT PRIMARY KEY,
+               identity_json TEXT NOT NULL,
+               goal_json TEXT NOT NULL,
+               created_at TEXT NOT NULL
+           )"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS goal_assessments (
+               assessment_id TEXT PRIMARY KEY,
+               objective_version TEXT NOT NULL,
+               artifact_identity TEXT NOT NULL,
+               status TEXT NOT NULL,
+               assessment_json TEXT NOT NULL,
+               recorded_at TEXT NOT NULL,
+               FOREIGN KEY(objective_version) REFERENCES goal_objectives(objective_version)
+           )"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS goal_terminal_events (
+               event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+               objective_version TEXT NOT NULL,
+               terminal_state TEXT NOT NULL,
+               artifact_identity TEXT NOT NULL,
+               recorded_at TEXT NOT NULL,
+               FOREIGN KEY(objective_version) REFERENCES goal_objectives(objective_version)
+           )"""
+    )
+
+
+def _migration_5_goal_protocol_migrations(connection: sqlite3.Connection) -> None:
+    """Persist explicit human-approved legacy protocol-contract migrations."""
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS goal_objective_migrations (
+               migration_id TEXT PRIMARY KEY,
+               source_objective_version TEXT NOT NULL,
+               target_objective_version TEXT NOT NULL UNIQUE,
+               source_identity_json TEXT NOT NULL,
+               target_identity_json TEXT NOT NULL,
+               protocol_contract_digest TEXT NOT NULL,
+               approval_json TEXT NOT NULL,
+               provenance_json TEXT NOT NULL,
+               recorded_at TEXT NOT NULL,
+               FOREIGN KEY(source_objective_version) REFERENCES goal_objectives(objective_version),
+               FOREIGN KEY(target_objective_version) REFERENCES goal_objectives(objective_version)
+           )"""
+    )
+
+
+def _migration_6_timestamp_bound_migration_hashes(connection: sqlite3.Connection) -> None:
+    """Version migration hashes so legacy records remain verifiable."""
+    connection.execute(
+        "ALTER TABLE goal_objective_migrations "
+        "ADD COLUMN migration_hash_version INTEGER NOT NULL DEFAULT 1"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline-version-marker", _migration_1_baseline),
     Migration(2, "execution-incidents", _migration_2_execution_incidents),
     Migration(3, "recursive-recovery-claims", _migration_3_recursive_recovery_claims),
+    Migration(4, "goal-lifecycle", _migration_4_goal_lifecycle),
+    Migration(5, "goal-protocol-contract-migrations", _migration_5_goal_protocol_migrations),
+    Migration(6, "timestamp-bound-migration-hashes", _migration_6_timestamp_bound_migration_hashes),
 )
 
 

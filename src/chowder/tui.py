@@ -15,7 +15,7 @@ from .hardware import HardwareSnapshot, detect_hardware
 from .memory import HardwareProfile
 from .memory_preflight import MemoryEstimate, estimate_memory_requirements
 from .project import ProjectValidationError, write_project
-from .project_runner import hardware_profile_from_snapshot, run_project
+from .project_runner import ProjectRunOutcome, hardware_profile_from_snapshot, run_project
 from .recursive_repair import RecursiveRepairStopReason
 from .registry import RunRegistry
 from .run_events import (
@@ -28,6 +28,32 @@ from .run_events import (
     TrainingProgressEvent,
     format_event,
 )
+
+
+def _outcome_status(outcome: ProjectRunOutcome) -> str:
+    """Render status from the canonical project outcome, never candidate success."""
+    if outcome.succeeded:
+        return "Complete — goals met"
+
+    terminal_state = outcome.generation.goal_terminal_state
+    if terminal_state is not None:
+        return f"Stopped — {terminal_state}"
+
+    candidate = outcome.generation.candidates[-1] if outcome.generation.candidates else None
+    if candidate is not None and candidate.error is not None:
+        if candidate.error.startswith("cancelled"):
+            return "Cancelled"
+        return f"Failed: {candidate.error}"
+
+    if (
+        outcome.repair is not None
+        and outcome.repair.stop_reason is RecursiveRepairStopReason.CANCELLED
+    ):
+        return "Cancelled"
+
+    if outcome.promoted_experiment_id is not None:
+        return f"Incomplete — promoted {outcome.promoted_experiment_id}; goal not met"
+    return "Incomplete — goal not met"
 
 
 class ChowderTUI(App[None]):
@@ -769,37 +795,10 @@ class ChowderTUI(App[None]):
 
         try:
             outcome = run_project(project_path, on_event=event_sink, cancellation=token)
-            candidate = outcome.generation.candidates[0]
-            # A cancellation can surface two ways: the last-run candidate's
-            # own error is prefixed "cancelled" (it was interrupted
-            # mid-training/evaluation), or -- if it completed normally right
-            # before the token was set -- the repair loop's own stop reason
-            # is CANCELLED instead. Either must read as "Cancelled" to the
-            # user, not as an unexplained failure.
-            candidate_cancelled = candidate.error is not None and candidate.error.startswith(
-                "cancelled"
-            )
-            repair_cancelled = (
-                outcome.repair is not None
-                and outcome.repair.stop_reason is RecursiveRepairStopReason.CANCELLED
-            )
-            if candidate_cancelled or repair_cancelled:
-                message = "Cancelled"
-                self.call_from_thread(self._set_status, message)
-                self.call_from_thread(self._append_log, f"[yellow]{message}[/]")
-            elif candidate.error is not None:
-                message = f"Failed: {candidate.error}"
-                self.call_from_thread(self._set_status, message)
-                self.call_from_thread(self._append_log, f"[red]{message}[/]")
-            else:
-                promoted = outcome.promoted_experiment_id
-                message = (
-                    f"Complete — promoted {promoted}"
-                    if promoted
-                    else "Complete — candidate was not promoted"
-                )
-                self.call_from_thread(self._set_status, message)
-                self.call_from_thread(self._append_log, f"[green]{message}[/]")
+            message = _outcome_status(outcome)
+            color = "green" if outcome.succeeded else "yellow"
+            self.call_from_thread(self._set_status, message)
+            self.call_from_thread(self._append_log, f"[{color}]{message}[/]")
         except Exception as exc:
             message = f"Run failed: {type(exc).__name__}: {exc}"
             self.call_from_thread(self._set_status, message)

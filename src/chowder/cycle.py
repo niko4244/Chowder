@@ -17,6 +17,8 @@ from .execution_failure import ExecutionFailure, ExecutionStage, normalize_execu
 from .executor_investigator import ExecutorFailureAnalysis, analyze_execution_failure
 from .executors import EvaluationExecutor, EvaluationOutcome, ExecutionContext, TrainingArtifact, TrainingExecutor
 from .failures import FailureRecord, RepairPlan, cluster_failures, plan_repairs
+from .goal_assessment import GoalAssessment
+from .goal_lifecycle import GoalLifecycle
 from .investigation import RemediationRegistry
 from .memory_preflight import resolve_memory_fit
 from .models import Experiment, ExperimentResult, ExperimentStatus
@@ -50,6 +52,8 @@ class GenerationOutcome:
     candidates: tuple[CandidateCycleOutcome, ...]
     ranking: tuple[RankedCandidate, ...]
     promoted: ExperimentResult | None
+    goal_assessment: GoalAssessment | None = None
+    goal_terminal_state: str | None = None
 
     @property
     def failures(self) -> tuple[CandidateCycleOutcome, ...]:
@@ -313,6 +317,7 @@ class ExperimentCycleRunner:
     executor_investigation_budget: float = 0.25
     cancellation: CancellationToken | None = None
     progress_callback: Callable[[TrainingProgressEvent], None] | None = None
+    goal_lifecycle: GoalLifecycle | None = None
 
     def __post_init__(self) -> None:
         budget = float(self.executor_investigation_budget)
@@ -616,10 +621,55 @@ class ExperimentCycleRunner:
         goes through) without an early, cheap-budget round's winner ever
         being promoted over the real current baseline.
         """
+        experiments = tuple(experiments)
+        goal_assessment: GoalAssessment | None = None
+        goal_terminal_state: str | None = None
+        if self.goal_lifecycle is not None:
+            if self.goal_lifecycle.terminal_state is not None:
+                persisted = self.goal_lifecycle.terminal_result()
+                return GenerationOutcome(
+                    candidates=(),
+                    ranking=(),
+                    promoted=None,
+                    goal_assessment=persisted.assessment,
+                    goal_terminal_state=persisted.terminal_state.value,
+                )
+            parent = self.goal_lifecycle.assess_parent_result(self.engine.baseline)
+            goal_assessment = parent.assessment
+            if parent.terminal_state is not None:
+                reserved_ids = tuple(
+                    experiment.experiment_id
+                    for experiment in experiments
+                    if self.engine.has_reservation(experiment.experiment_id)
+                )
+                if reserved_ids:
+                    self.engine.withdraw_proposals(reserved_ids)
+                return GenerationOutcome(
+                    candidates=(),
+                    ranking=(),
+                    promoted=None,
+                    goal_assessment=goal_assessment,
+                    goal_terminal_state=parent.terminal_state.value,
+                )
+
         candidates = tuple(self._run_candidate(experiment) for experiment in experiments)
         results = tuple(candidate.result for candidate in candidates if candidate.result is not None)
         ranking = self.engine.adjudicate(results) if results else ()
         promoted = self.engine.promote(ranking) if promote else None
+
+        if self.goal_lifecycle is not None and results:
+            lifecycle_result = self.goal_lifecycle.assess_result(
+                promoted if promoted is not None else results[0],
+                promoted=promoted is not None,
+                generation_index=1,
+                budget_exhausted=self.engine.remaining_budget <= 1e-12,
+            )
+            goal_assessment = lifecycle_result.assessment
+            goal_terminal_state = (
+                lifecycle_result.terminal_state.value
+                if lifecycle_result.terminal_state is not None
+                else None
+            )
 
         if self.registry is not None:
             for candidate in candidates:
@@ -627,4 +677,10 @@ class ExperimentCycleRunner:
                 if node is not None:
                     self.registry.update_experiment_status(candidate.experiment_id, node.status.value)
 
-        return GenerationOutcome(candidates=candidates, ranking=ranking, promoted=promoted)
+        return GenerationOutcome(
+            candidates=candidates,
+            ranking=ranking,
+            promoted=promoted,
+            goal_assessment=goal_assessment,
+            goal_terminal_state=goal_terminal_state,
+        )

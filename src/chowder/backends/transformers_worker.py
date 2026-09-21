@@ -14,6 +14,7 @@ from typing import Any
 
 from ..hf_resilience import cache_status, with_hub_retries
 from ..provenance import sha256_directory
+from .activation_offload_hooks import offload_pack, offload_unpack
 from .transformers_peft import TransformersPeftRunSpec
 
 
@@ -711,34 +712,30 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
 
     activation_offload_bytes_transferred: int | None = None
     if spec.activation_offload:
-        # Nested (not module-level) for the same reason _ProgressReporting
-        # Callback is: torch is only importable after the lazy import at
-        # the top of this function, so these close over the local `torch`
-        # rather than needing a second import at module scope. Identical
-        # mechanism to the one proven in
-        # activation_offload_worker.run_experiment -- moves a tensor to
-        # CPU when it's saved for backward, and back to its original
-        # device when backward actually needs it. Value-transparent: the
-        # computed values are identical either way, only where the
-        # intermediate tensor physically lives changes (see
+        # Moves a tensor to CPU when it's saved for backward, and back to
+        # its original device when backward actually needs it.
+        # Value-transparent: the computed values are identical either way,
+        # only where the intermediate tensor physically lives changes (see
         # TransformersPeftRunSpec.recipe_digest's docstring for why this
-        # is excluded from checkpoint-compatibility).
+        # is excluded from checkpoint-compatibility). offload_pack/
+        # offload_unpack (see activation_offload_hooks.py) additionally
+        # preserve the exact strides of a non-contiguous saved tensor --
+        # e.g. transformers' expanded/broadcast 4D attention bias -- a
+        # naive `.to()` round trip silently changes those strides, which a
+        # strict fused-attention backward kernel can reject outright.
         activation_offload_bytes_transferred = 0
 
         def _activation_offload_pack(tensor: Any) -> Any:
             nonlocal activation_offload_bytes_transferred
-            if not tensor.is_cuda:
-                return tensor
-            activation_offload_bytes_transferred += tensor.numel() * tensor.element_size()
-            return (tensor.device, tensor.to("cpu", non_blocking=True))
+            packed, moved = offload_pack(tensor)
+            activation_offload_bytes_transferred += moved
+            return packed
 
         def _activation_offload_unpack(packed: Any) -> Any:
             nonlocal activation_offload_bytes_transferred
-            if not isinstance(packed, tuple):
-                return packed
-            original_device, cpu_tensor = packed
-            activation_offload_bytes_transferred += cpu_tensor.numel() * cpu_tensor.element_size()
-            return cpu_tensor.to(original_device, non_blocking=True)
+            tensor, moved = offload_unpack(packed)
+            activation_offload_bytes_transferred += moved
+            return tensor
 
         with torch.autograd.graph.saved_tensors_hooks(
             _activation_offload_pack, _activation_offload_unpack

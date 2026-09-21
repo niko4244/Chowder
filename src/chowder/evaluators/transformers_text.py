@@ -15,7 +15,10 @@ from ..models import Experiment
 from ..protocol import protocol_fingerprint
 from ..provenance import sha256_directory, sha256_file
 
-_ALLOWED_SCORING = {"exact_match", "normalized_exact_match"}
+# v4: refusal_classification scores the behavior suite (comply/refuse
+# classification), replacing the exact-match mode that could never match
+# a free-text generation.
+_ALLOWED_SCORING = {"exact_match", "normalized_exact_match", "refusal_classification"}
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
 _ALLOWED_QUANTIZATION = {"none", "4bit"}
 

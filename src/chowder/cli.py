@@ -71,20 +71,38 @@ def _train(args: argparse.Namespace) -> int:
     def event_sink(event: RunEventPayload) -> None:
         print(format_event(event), flush=True)
 
-    outcome = run_project(args.project, on_event=event_sink)
-    candidate = outcome.generation.candidates[0]
+    try:
+        outcome = run_project(args.project, on_event=event_sink)
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "succeeded": False,
+                    "terminal_state": None,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 1
+
+    candidate = outcome.generation.candidates[-1] if outcome.generation.candidates else None
+    assessment = outcome.generation.goal_assessment
     summary = {
         "project": outcome.project.name,
-        "experiment_id": candidate.experiment_id,
-        "succeeded": candidate.succeeded,
+        "experiment_id": candidate.experiment_id if candidate else None,
+        "succeeded": outcome.succeeded,
+        "terminal_state": outcome.generation.goal_terminal_state,
+        "goal_status": assessment.status.value if assessment else None,
         "promoted_experiment_id": outcome.promoted_experiment_id,
-        "artifact_ref": candidate.artifact.artifact_ref if candidate.artifact else None,
-        "metrics": dict(candidate.result.metrics) if candidate.result else None,
-        "gpu_hours": candidate.result.gpu_hours if candidate.result else None,
-        "error": candidate.error,
+        "artifact_ref": candidate.artifact.artifact_ref if candidate and candidate.artifact else None,
+        "metrics": dict(candidate.result.metrics) if candidate and candidate.result else None,
+        "gpu_hours": candidate.result.gpu_hours if candidate and candidate.result else None,
+        "error": candidate.error if candidate else None,
     }
     print(json.dumps(summary, indent=2, sort_keys=True))
-    return 0 if candidate.succeeded else 1
+    return 0 if outcome.succeeded else 1
 
 
 def _tui(args: argparse.Namespace) -> int:

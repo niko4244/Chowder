@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -12,13 +14,22 @@ from .evaluators.base_text import BaseModelTextEvaluator
 from .evaluators.transformers_text import TransformersTextEvaluator
 from .executors import EvaluationOutcome, ExecutionContext
 from .failures import harvest_transformers_text_failures
+from .goal_lifecycle import GoalLifecycle, GoalLifecycleError
+from .improvement.constitution import Constitution, goal_digest
 from .hardware import HardwareSnapshot, detect_hardware
 from .local_corpus_provider import LocalCorpusRepairProvider
 from .memory import HardwareProfile
 from .models import Experiment, ExperimentResult, Hypothesis
+from .protocol import protocol_fingerprint, result_protocol_fingerprint
 from .project import ProjectSpec, load_project
+from .provenance import sha256_file
 from .recursive_repair import RecursiveRepairOutcome, run_bounded_autonomous_repair
-from .registry import RunRegistry
+from .registry import (
+    GoalObjectiveMigrationApproval as ProtocolContractMigrationApproval,
+    GoalObjectiveMigrationProvenance,
+    RegistryInvariantError,
+    RunRegistry,
+)
 from .run_events import (
     CheckpointEvent,
     FailureEvent,
@@ -46,7 +57,13 @@ class ProjectRunOutcome:
 
     @property
     def succeeded(self) -> bool:
-        return any(candidate.succeeded for candidate in self.generation.candidates)
+        """Return true only when the frozen lifecycle reports goal completion.
+
+        Training/evaluation success, promotion, and a clean process exit are
+        not product success. Bounded stops, refusal, cancellation, crashes,
+        and incomplete evidence all remain non-success.
+        """
+        return self.generation.goal_terminal_state == "STOP_GOALS_MET"
 
     @property
     def promoted_experiment_id(self) -> str | None:
@@ -201,13 +218,233 @@ def _run_automatic_baseline(
     return result, _resolved_revision_from_outcome(outcome)
 
 
+def _project_benchmark_digest(project: ProjectSpec) -> str:
+    """Hash the configured benchmark contract and its current dataset bytes."""
+    evaluation = project.config.get("evaluation", {})
+    suites = evaluation.get("suites", ()) if isinstance(evaluation, Mapping) else ()
+    benchmark_suites: list[dict[str, Any]] = []
+    for row in suites:
+        if not isinstance(row, Mapping):
+            continue
+        dataset = Path(str(row.get("dataset", "")))
+        if not dataset.is_absolute():
+            dataset = project.work_dir / dataset
+        benchmark_suites.append(
+            {
+                "name": str(row.get("name", "")),
+                "dataset_sha256": sha256_file(dataset),
+                "prompt_field": str(row.get("prompt_field", "prompt")),
+                "expected_field": str(row.get("expected_field", "expected")),
+                "scoring": str(row.get("scoring", "normalized_exact_match")),
+                "max_new_tokens": int(row.get("max_new_tokens", 64)),
+                "use_chat_template": bool(row.get("use_chat_template", False)),
+            }
+        )
+    payload = json.dumps(benchmark_suites, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _protocol_contract_digest(project: ProjectSpec) -> str:
+    """Hash the complete static evaluation/training contract for this project."""
+    config = project.config
+    backend = config.get("backend", {})
+    evaluation = config.get("evaluation", {})
+    if not isinstance(backend, Mapping) or not isinstance(evaluation, Mapping):
+        raise ValueError("project protocol contract requires backend and evaluation mappings")
+
+    backend_contract = dict(backend)
+    dataset = Path(str(backend_contract.get("dataset", "")))
+    if not dataset.is_absolute():
+        dataset = project.work_dir / dataset
+    backend_contract["dataset_sha256"] = sha256_file(dataset)
+    backend_contract.pop("dataset", None)
+
+    evaluation_contract = dict(evaluation)
+    suites = evaluation_contract.get("suites", ())
+    normalized_suites: list[dict[str, object]] = []
+    if not isinstance(suites, (list, tuple)):
+        raise ValueError("evaluation.suites must be a list")
+    for row in suites:
+        if not isinstance(row, Mapping):
+            raise ValueError("evaluation suite must be a mapping")
+        suite = dict(row)
+        dataset = Path(str(suite.get("dataset", "")))
+        if not dataset.is_absolute():
+            dataset = project.work_dir / dataset
+        suite["dataset_sha256"] = sha256_file(dataset)
+        suite.pop("dataset", None)
+        normalized_suites.append(suite)
+    evaluation_contract["suites"] = normalized_suites
+
+    payload = {
+        "seed": project.seed,
+        "config_seed": config.get("seed", project.seed),
+        "backend": backend_contract,
+        "evaluation": evaluation_contract,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _open_project_lifecycle(
+    project: ProjectSpec,
+    registry: RunRegistry,
+    *,
+    baseline: ExperimentResult | None = None,
+) -> GoalLifecycle:
+    """Construct the sole goal authority for the canonical project path."""
+    stored = registry.get_goal_objective(project.objective_version)
+    if stored is not None:
+        identity = stored["identity"]
+        baseline = baseline or next(
+            (
+                result
+                for result in registry.list_results()
+                if result.experiment_id == "baseline"
+            ),
+            None,
+        )
+        contract_digest = _protocol_contract_digest(project)
+        current_measured_digest = (
+            result_protocol_fingerprint(baseline.evidence)
+            if baseline is not None
+            else None
+        )
+        if (
+            current_measured_digest is not None
+            and current_measured_digest != str(identity["evaluation_protocol_digest"])
+        ):
+            raise GoalLifecycleError(
+                "objective identity changed (evaluation protocol evidence); refusing to resume objective"
+            )
+        return GoalLifecycle.open(
+            registry,
+            objective_version=project.objective_version,
+            goal=project.goal,
+            benchmark_digest=_project_benchmark_digest(project),
+            evaluation_protocol_digest=str(identity["evaluation_protocol_digest"]),
+            constitution=Constitution(),
+            objective_metadata={"protocol_contract_digest": contract_digest},
+            resume=True,
+        )
+
+    protocol_digest = (
+        result_protocol_fingerprint(baseline.evidence)
+        if baseline is not None
+        else protocol_fingerprint({"evaluation": project.config.get("evaluation", {})})
+    )
+    contract_digest = _protocol_contract_digest(project)
+    return GoalLifecycle.open(
+        registry,
+        objective_version=project.objective_version,
+        goal=project.goal,
+        benchmark_digest=_project_benchmark_digest(project),
+        evaluation_protocol_digest=protocol_digest,
+        constitution=Constitution(),
+        objective_metadata={"protocol_contract_digest": contract_digest},
+    )
+
+
+def migrate_legacy_protocol_contract(
+    project: ProjectSpec,
+    *,
+    new_objective_version: str,
+    approval: ProtocolContractMigrationApproval | None = None,
+) -> ProjectSpec:
+    """Migrate only a legacy objective's missing protocol contract.
+
+    This operation is deliberately explicit and never called by ``run_project``.
+    It preserves the legacy objective and appends a new objective plus an
+    approval/provenance migration record. The returned project is the only
+    version permitted to resume after migration.
+    """
+    if approval is None:
+        raise GoalLifecycleError(
+            "protocol-contract migration requires explicit human approval"
+        )
+    if not isinstance(new_objective_version, str) or not new_objective_version.strip():
+        raise GoalLifecycleError("migration requires a non-empty new objective version")
+    if new_objective_version == project.objective_version:
+        raise GoalLifecycleError("protocol-contract migration requires a new objective version")
+    project.validate_files()
+
+    with RunRegistry(project.registry_path) as registry:
+        stored = registry.get_goal_objective(project.objective_version)
+        if stored is None:
+            raise GoalLifecycleError(
+                f"cannot migrate unknown objective: {project.objective_version}"
+            )
+        stored_goal = stored["goal"]
+        if not isinstance(stored_goal, Mapping):
+            raise GoalLifecycleError("persisted objective payload is invalid")
+        if "protocol_contract_digest" in stored_goal:
+            raise GoalLifecycleError("objective already has a protocol contract")
+        stored_identity = stored["identity"]
+        if goal_digest(project.goal) != stored_identity["goal_digest"]:
+            raise GoalLifecycleError("current goal differs; migration scope is protocol contract only")
+        current_benchmark = _project_benchmark_digest(project)
+        if current_benchmark != stored_identity["benchmark_digest"]:
+            raise GoalLifecycleError("current benchmark differs; migration scope is protocol contract only")
+
+        target_identity = Constitution().new_objective_identity(
+            objective_version=new_objective_version,
+            goal=project.goal,
+            benchmark_digest=str(stored_identity["benchmark_digest"]),
+            evaluation_protocol_digest=str(stored_identity["evaluation_protocol_digest"]),
+        )
+        contract_digest = _protocol_contract_digest(project)
+        target_goal_payload = dict(stored_goal)
+        target_goal_payload["protocol_contract_digest"] = contract_digest
+        source_identity_json = json.dumps(stored_identity, sort_keys=True, separators=(",", ":"))
+        target_identity_payload = {
+            "objective_version": target_identity.objective_version,
+            "goal_digest": target_identity.goal_digest,
+            "benchmark_digest": target_identity.benchmark_digest,
+            "evaluation_protocol_digest": target_identity.evaluation_protocol_digest,
+            "constitution_digest": target_identity.constitution_digest,
+        }
+        target_identity_json = json.dumps(
+            target_identity_payload, sort_keys=True, separators=(",", ":")
+        )
+        provenance = GoalObjectiveMigrationProvenance(
+            operation="legacy_protocol_contract_migration",
+            source_objective_version=project.objective_version,
+            target_objective_version=new_objective_version,
+            source_identity_digest=hashlib.sha256(
+                source_identity_json.encode("utf-8")
+            ).hexdigest(),
+            target_identity_digest=hashlib.sha256(
+                target_identity_json.encode("utf-8")
+            ).hexdigest(),
+            protocol_contract_digest=contract_digest,
+            registry_path=str(project.registry_path),
+        )
+        try:
+            registry.record_goal_objective_migration(
+                source_objective_version=project.objective_version,
+                target_identity=target_identity,
+                target_goal_payload=target_goal_payload,
+                protocol_contract_digest=contract_digest,
+                approval=approval.to_dict(),
+                provenance=provenance,
+            )
+        except (KeyError, TypeError, ValueError, RegistryInvariantError) as exc:
+            raise GoalLifecycleError(str(exc)) from exc
+    return replace(project, objective_version=new_objective_version)
+
+
 def run_project(
     project_or_path: ProjectSpec | str | Path,
     *,
     on_event: EventCallback | None = None,
     cancellation: CancellationToken | None = None,
+    goal_lifecycle: GoalLifecycle | None = None,
 ) -> ProjectRunOutcome:
-    """Execute one real (baseline if automatic) → train → evaluate → gate project generation.
+    """Execute one lifecycle-authoritative project generation.
+
+    The canonical path always creates or resumes a frozen ``GoalLifecycle``;
+    ``ProjectRunOutcome.succeeded`` is true only for ``STOP_GOALS_MET``.
+    Training/evaluation success and promotion are deliberately not enough.
 
     `cancellation`, if given, is checked before each candidate (and each
     autonomous-repair hop) starts, and is bound to the real trainer/evaluator
@@ -225,6 +462,27 @@ def run_project(
 
     with RunRegistry(project.registry_path) as registry:
         _emit_stage(on_event, registry, "prepare", f"Loaded project {project.name!r}")
+        stored_objective = registry.get_goal_objective(project.objective_version)
+        lifecycle = goal_lifecycle
+        if lifecycle is None and stored_objective is not None:
+            lifecycle = _open_project_lifecycle(
+                project,
+                registry,
+                baseline=project.baseline,
+            )
+        if lifecycle is not None and lifecycle.terminal_state is not None:
+            persisted = lifecycle.terminal_result()
+            return ProjectRunOutcome(
+                project=project,
+                hardware=detect_hardware(project.work_dir),
+                generation=GenerationOutcome(
+                    candidates=(),
+                    ranking=(),
+                    promoted=None,
+                    goal_assessment=persisted.assessment,
+                    goal_terminal_state=persisted.terminal_state.value,
+                ),
+            )
         hardware = detect_hardware(project.work_dir)
         profile = hardware_profile_from_snapshot(hardware)
         if hardware.accelerators:
@@ -248,9 +506,20 @@ def run_project(
         )
 
         if project.baseline_mode == "auto":
-            baseline, resolved_revision = _run_automatic_baseline(
-                project, context, registry, on_event
-            )
+            if lifecycle is not None:
+                baseline = next(
+                    (result for result in registry.list_results() if result.experiment_id == "baseline"),
+                    None,
+                )
+                if baseline is None:
+                    raise RuntimeError(
+                        "persisted objective has no baseline result; refusing to bypass lifecycle"
+                    )
+                resolved_revision = None
+            else:
+                baseline, resolved_revision = _run_automatic_baseline(
+                    project, context, registry, on_event
+                )
             training_config: Mapping[str, Any] = (
                 _config_with_bound_revision(project.config, resolved_revision)
                 if resolved_revision
@@ -260,6 +529,24 @@ def run_project(
             assert project.baseline is not None  # enforced by ProjectSpec.__post_init__
             baseline = project.baseline
             training_config = project.config
+
+        if lifecycle is None:
+            lifecycle = _open_project_lifecycle(project, registry, baseline=baseline)
+
+        if lifecycle.last_assessment is None:
+            parent_result = lifecycle.assess_parent_result(baseline)
+            if parent_result.terminal_state is not None:
+                return ProjectRunOutcome(
+                    project=project,
+                    hardware=hardware,
+                    generation=GenerationOutcome(
+                        candidates=(),
+                        ranking=(),
+                        promoted=None,
+                        goal_assessment=parent_result.assessment,
+                        goal_terminal_state=parent_result.terminal_state.value,
+                    ),
+                )
 
         engine = EvolutionEngine(
             goal=project.goal,
@@ -287,6 +574,7 @@ def run_project(
             # transitions, repair/failure/promotion events, and checkpoints
             # already are.
             progress_callback=on_event,
+            goal_lifecycle=lifecycle,
         )
         accepted = engine.propose((project.experiment,))
         if not accepted:
@@ -302,7 +590,8 @@ def run_project(
             experiment_id=project.experiment.experiment_id,
         )
         generation = runner.run_generation(accepted)
-        _emit_candidate_events(on_event, registry, generation.candidates[0])
+        if generation.candidates:
+            _emit_candidate_events(on_event, registry, generation.candidates[0])
 
         repair_outcome: RecursiveRepairOutcome | None = None
         if project.repair is not None and generation.promoted is None:
@@ -345,6 +634,14 @@ def run_project(
                     stop_reason=repair_outcome.stop_reason.value,
                     stop_detail=repair_outcome.stop_detail,
                 ),
+            )
+
+        if not generation.candidates:
+            return ProjectRunOutcome(
+                project=project,
+                hardware=hardware,
+                generation=generation,
+                repair=repair_outcome,
             )
 
         candidate = generation.candidates[0]

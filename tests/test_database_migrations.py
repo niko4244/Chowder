@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -12,9 +13,15 @@ from chowder.executor_investigator import analyze_execution_failure
 from chowder.execution_failure import ExecutionFailure, ExecutionStage
 from chowder.executors import ExecutionContext, TrainingArtifact
 from chowder.investigation import RemediationRegistry
+from chowder.improvement.constitution import Constitution
 from chowder.memory import HardwareProfile
-from chowder.models import Experiment, Hypothesis
-from chowder.registry import RegistryInvariantError, RunRegistry
+from chowder.models import Experiment, Goal, Hypothesis, MetricTarget
+from chowder.registry import (
+    GoalObjectiveMigrationApproval,
+    GoalObjectiveMigrationProvenance,
+    RegistryInvariantError,
+    RunRegistry,
+)
 from chowder.resources import ResourceUsage
 
 
@@ -91,10 +98,129 @@ def test_supported_version_without_history_table_is_repaired_and_migrated(tmp_pa
             )
         )
         assert history == [
-            (1, "baseline-version-marker"),
-            (2, "execution-incidents"),
-            (3, "recursive-recovery-claims"),
-        ]
+                (1, "baseline-version-marker"),
+                (2, "execution-incidents"),
+                (3, "recursive-recovery-claims"),
+                (4, "goal-lifecycle"),
+                (5, "goal-protocol-contract-migrations"),
+                (6, "timestamp-bound-migration-hashes"),
+            ]
+
+
+
+def test_version_5_database_upgrades_existing_version_1_migration_row(tmp_path):
+    path = tmp_path / "legacy-migration-v5.sqlite"
+    goal = Goal((MetricTarget("quality", minimum=0.8),), gpu_hour_budget=1.0)
+    constitution = Constitution()
+    source_identity = constitution.new_objective_identity(
+        objective_version="legacy",
+        goal=goal,
+        benchmark_digest="b" * 64,
+        evaluation_protocol_digest="c" * 64,
+    )
+    target_identity = constitution.new_objective_identity(
+        objective_version="migrated",
+        goal=goal,
+        benchmark_digest="b" * 64,
+        evaluation_protocol_digest="c" * 64,
+    )
+    contract_digest = "d" * 64
+    approval = GoalObjectiveMigrationApproval(
+        approval_id="approval-v1",
+        approver="operator@example.com",
+        approved_at="2026-09-20T12:00:00+00:00",
+        reason="legacy migration",
+    )
+    provenance = GoalObjectiveMigrationProvenance(
+        operation="legacy_protocol_contract_migration",
+        source_objective_version="legacy",
+        target_objective_version="migrated",
+        source_identity_digest=RunRegistry._identity_digest(
+            RunRegistry._identity_payload(source_identity)
+        ),
+        target_identity_digest=RunRegistry._identity_digest(
+            RunRegistry._identity_payload(target_identity)
+        ),
+        protocol_contract_digest=contract_digest,
+        registry_path=str(path),
+    )
+    recorded_at = "2026-09-20T12:00:00+00:00"
+    migration_id = RunRegistry._migration_id(
+        source_objective_version="legacy",
+        target_identity_payload=RunRegistry._identity_payload(target_identity),
+        protocol_contract_digest=contract_digest,
+        approval=approval,
+        provenance=provenance,
+        recorded_at=None,
+        migration_hash_version=1,
+    )
+    connection = sqlite3.connect(path)
+    connection.execute(f"PRAGMA application_id={CHOWDER_APPLICATION_ID}")
+    connection.execute("PRAGMA user_version=5")
+    connection.executescript(
+        """
+        CREATE TABLE goal_objectives (
+            objective_version TEXT PRIMARY KEY,
+            identity_json TEXT NOT NULL,
+            goal_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE goal_objective_migrations (
+            migration_id TEXT PRIMARY KEY,
+            source_objective_version TEXT NOT NULL,
+            target_objective_version TEXT NOT NULL UNIQUE,
+            source_identity_json TEXT NOT NULL,
+            target_identity_json TEXT NOT NULL,
+            protocol_contract_digest TEXT NOT NULL,
+            approval_json TEXT NOT NULL,
+            provenance_json TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        );
+        """
+    )
+    def identity_row(identity):
+        return json.dumps(
+            RunRegistry._identity_payload(identity), sort_keys=True, separators=(",", ":")
+        )
+    connection.executemany(
+        "INSERT INTO goal_objectives VALUES (?, ?, ?, ?)",
+        (
+            ("legacy", identity_row(source_identity), json.dumps({}), recorded_at),
+            (
+                "migrated",
+                identity_row(target_identity),
+                json.dumps({"protocol_contract_digest": contract_digest}),
+                recorded_at,
+            ),
+        ),
+    )
+    connection.execute(
+        "INSERT INTO goal_objective_migrations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            migration_id,
+            "legacy",
+            "migrated",
+            identity_row(source_identity),
+            identity_row(target_identity),
+            contract_digest,
+            json.dumps(approval.to_dict(), sort_keys=True, separators=(",", ":")),
+            json.dumps(provenance.to_dict(), sort_keys=True, separators=(",", ":")),
+            recorded_at,
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    with RunRegistry(path) as registry:
+        assert schema_version(registry._conn) == 6
+        migrations = registry.list_goal_objective_migrations()
+        assert len(migrations) == 1
+        assert migrations[0].migration_hash_version == 1
+        assert migrations[0].migration_id == migration_id
+        assert migrations[0].recorded_at == recorded_at
+        assert registry._conn.execute(
+            "SELECT migration_hash_version FROM goal_objective_migrations"
+        ).fetchone()[0] == 1
 
 
 def test_unrelated_versioned_database_is_not_adopted(tmp_path):

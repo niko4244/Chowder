@@ -25,7 +25,7 @@ from chowder.run_events import (
     RunEvent,
     TrainingProgressEvent,
 )
-from chowder.tui import ChowderTUI
+from chowder.tui import ChowderTUI, _outcome_status
 
 
 def _snapshot(n_gpus: int) -> HardwareSnapshot:
@@ -388,9 +388,42 @@ async def test_history_button_press_does_not_raise(tmp_path):
 # --- cancel: races, repeated clicks, and status wording ----------------------
 
 
+def test_outcome_status_handles_parent_completion_without_candidates():
+    outcome = SimpleNamespace(
+        succeeded=True,
+        generation=SimpleNamespace(candidates=(), goal_terminal_state="STOP_GOALS_MET"),
+        repair=None,
+        promoted_experiment_id=None,
+    )
+    assert _outcome_status(outcome) == "Complete — goals met"
+
+
+def test_outcome_status_marks_promoted_but_unmet_as_incomplete():
+    candidate = SimpleNamespace(error=None)
+    outcome = SimpleNamespace(
+        succeeded=False,
+        generation=SimpleNamespace(candidates=(candidate,), goal_terminal_state=None),
+        repair=None,
+        promoted_experiment_id="e1",
+    )
+    assert _outcome_status(outcome) == "Incomplete — promoted e1; goal not met"
+
+
+def test_outcome_status_marks_terminal_uncertainty_as_stopped():
+    outcome = SimpleNamespace(
+        succeeded=False,
+        generation=SimpleNamespace(candidates=(), goal_terminal_state="STOP_UNCERTAIN"),
+        repair=None,
+        promoted_experiment_id=None,
+    )
+    assert _outcome_status(outcome) == "Stopped — STOP_UNCERTAIN"
+
+
 def _fake_outcome(*, candidate_error=None, repair_stop_reason=None, promoted_experiment_id=None):
     candidate = SimpleNamespace(error=candidate_error, artifact=None)
-    generation = SimpleNamespace(candidates=(candidate,), promoted=None)
+    generation = SimpleNamespace(
+        candidates=(candidate,), promoted=None, goal_terminal_state=None
+    )
     repair = (
         SimpleNamespace(stop_reason=repair_stop_reason) if repair_stop_reason is not None else None
     )
@@ -398,6 +431,7 @@ def _fake_outcome(*, candidate_error=None, repair_stop_reason=None, promoted_exp
         generation=generation,
         repair=repair,
         promoted_experiment_id=promoted_experiment_id,
+        succeeded=False,
     )
 
 

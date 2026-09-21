@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import unicodedata
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -19,8 +20,26 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
+def _unicode_fold(text: str) -> str:
+    """NFKD-decompose, drop combining marks, map curly quotes and dashes.
+
+    Scorer semantics: correct accented answers must not be rejected against
+    plain-ASCII expected labels. Shared with base_text_worker in lockstep.
+    """
+    punct_map = str.maketrans({
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+    })
+    decomposed = unicodedata.normalize("NFKD", text.translate(punct_map))
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
 def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().casefold()
+    return re.sub(r"\s+", " ", _unicode_fold(text)).strip().casefold()
 
 
 def _score(prediction: str, expected: str, scoring: str) -> float:
@@ -28,6 +47,14 @@ def _score(prediction: str, expected: str, scoring: str) -> float:
         return float(prediction.strip() == expected.strip())
     if scoring == "normalized_exact_match":
         return float(_normalize(prediction) == _normalize(expected))
+    if scoring == "refusal_classification":
+        # Shared classifier with the base-text worker; this backend does no
+        # thinking-aware extraction, so the whole prediction is the surface.
+        from .base_text_worker import _classify_behavior
+
+        return float(
+            _classify_behavior(prediction, prediction) == expected.strip().casefold()
+        )
     raise ValueError(f"unsupported scoring: {scoring}")
 
 

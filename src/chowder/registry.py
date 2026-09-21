@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .combined_mechanism_experiment import CombinedMechanismExperiment
 from .database import connect_database
 from .executors import EvaluationOutcome, TrainingArtifact
+from .goal_assessment import GoalAssessment
+from .improvement.constitution import ObjectiveIdentity
 from .failures import FailureRecord, FailureSourceRole, RepairPlan
 from .models import Experiment, ExperimentResult, ExperimentStatus, Hypothesis
 from .provenance import EvidenceManifest
@@ -113,6 +116,180 @@ _EXPERIMENT_INSERT = """INSERT INTO experiments
 
 class RegistryInvariantError(ValueError):
     """Raised when durable scientific state would be overwritten or malformed."""
+
+
+def _validate_recorded_at(value: object) -> str:
+    """Require the canonical timezone-aware ``datetime.isoformat()`` form."""
+    if not isinstance(value, str) or not value.strip():
+        raise RegistryInvariantError("migration recorded_at must be a non-empty string")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise RegistryInvariantError("migration recorded_at is not a canonical timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None or parsed.isoformat() != value:
+        raise RegistryInvariantError("migration recorded_at is not a canonical timestamp")
+    return value
+
+
+@dataclass(frozen=True)
+class GoalObjectiveMigrationApproval:
+    """Validated human approval attached to one objective migration."""
+
+    approval_id: str
+    approver: str
+    approved_at: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("approval_id", self.approval_id),
+            ("approver", self.approver),
+            ("approved_at", self.approved_at),
+            ("reason", self.reason),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise RegistryInvariantError(f"migration approval {name} must be non-empty")
+
+    @classmethod
+    def from_dict(cls, value: object) -> "GoalObjectiveMigrationApproval":
+        if not isinstance(value, dict) or set(value) != {
+            "approval_id", "approver", "approved_at", "reason"
+        }:
+            raise RegistryInvariantError("migration approval fields are incomplete or unrelated")
+        try:
+            return cls(**value)
+        except TypeError as exc:
+            raise RegistryInvariantError("migration approval fields are malformed") from exc
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "approval_id": self.approval_id,
+            "approver": self.approver,
+            "approved_at": self.approved_at,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class GoalObjectiveMigrationProvenance:
+    """Validated provenance binding one protocol-contract migration to its identities."""
+
+    operation: str
+    source_objective_version: str
+    target_objective_version: str
+    source_identity_digest: str
+    target_identity_digest: str
+    protocol_contract_digest: str
+    registry_path: str
+
+    @staticmethod
+    def _require_digest(name: str, value: object) -> str:
+        if not isinstance(value, str) or len(value) != 64:
+            raise RegistryInvariantError(f"migration provenance {name} must be a SHA-256 digest")
+        try:
+            int(value, 16)
+        except ValueError as exc:
+            raise RegistryInvariantError(
+                f"migration provenance {name} must be a SHA-256 digest"
+            ) from exc
+        return value
+
+    def __post_init__(self) -> None:
+        if self.operation != "legacy_protocol_contract_migration":
+            raise RegistryInvariantError("migration provenance operation is invalid")
+        for name, value in (
+            ("source_objective_version", self.source_objective_version),
+            ("target_objective_version", self.target_objective_version),
+            ("registry_path", self.registry_path),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise RegistryInvariantError(f"migration provenance {name} must be non-empty")
+        if self.source_objective_version == self.target_objective_version:
+            raise RegistryInvariantError("migration provenance source and target must differ")
+        self._require_digest("source_identity_digest", self.source_identity_digest)
+        self._require_digest("target_identity_digest", self.target_identity_digest)
+        self._require_digest("protocol_contract_digest", self.protocol_contract_digest)
+
+    @classmethod
+    def from_dict(cls, value: object) -> "GoalObjectiveMigrationProvenance":
+        if not isinstance(value, dict):
+            raise RegistryInvariantError("migration provenance must be an object")
+        required = {
+            "operation",
+            "source_objective_version",
+            "target_objective_version",
+            "source_identity_digest",
+            "target_identity_digest",
+            "protocol_contract_digest",
+            "registry_path",
+        }
+        if set(value) != required:
+            raise RegistryInvariantError("migration provenance fields are incomplete or unrelated")
+        try:
+            return cls(**value)
+        except TypeError as exc:
+            raise RegistryInvariantError("migration provenance fields are malformed") from exc
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "operation": self.operation,
+            "source_objective_version": self.source_objective_version,
+            "target_objective_version": self.target_objective_version,
+            "source_identity_digest": self.source_identity_digest,
+            "target_identity_digest": self.target_identity_digest,
+            "protocol_contract_digest": self.protocol_contract_digest,
+            "registry_path": self.registry_path,
+        }
+
+
+@dataclass(frozen=True)
+class GoalObjectiveMigration:
+    """Validated, typed readback of one append-only objective migration."""
+
+    migration_id: str
+    source_objective_version: str
+    target_objective_version: str
+    source_identity: ObjectiveIdentity
+    target_identity: ObjectiveIdentity
+    protocol_contract_digest: str
+    approval: GoalObjectiveMigrationApproval
+    provenance: GoalObjectiveMigrationProvenance
+    recorded_at: str
+    migration_hash_version: int
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("migration_id", self.migration_id),
+            ("source_objective_version", self.source_objective_version),
+            ("target_objective_version", self.target_objective_version),
+            ("protocol_contract_digest", self.protocol_contract_digest),
+            ("recorded_at", self.recorded_at),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise RegistryInvariantError(f"migration evidence {name} must be a non-empty string")
+        _validate_recorded_at(self.recorded_at)
+        if not isinstance(self.migration_hash_version, int) or isinstance(
+            self.migration_hash_version, bool
+        ) or self.migration_hash_version not in (1, 2):
+            raise RegistryInvariantError("migration hash version is unsupported")
+        if not isinstance(self.source_identity, ObjectiveIdentity) or not isinstance(
+            self.target_identity, ObjectiveIdentity
+        ):
+            raise RegistryInvariantError("migration evidence identities are malformed")
+        if not isinstance(self.approval, GoalObjectiveMigrationApproval) or not isinstance(
+            self.provenance, GoalObjectiveMigrationProvenance
+        ):
+            raise RegistryInvariantError("migration evidence approval or provenance is malformed")
+        if self.source_objective_version != self.source_identity.objective_version:
+            raise RegistryInvariantError("migration source identity is inconsistent")
+        if self.target_objective_version != self.target_identity.objective_version:
+            raise RegistryInvariantError("migration target identity is inconsistent")
+        if self.provenance.source_objective_version != self.source_objective_version:
+            raise RegistryInvariantError("migration provenance source is inconsistent")
+        if self.provenance.target_objective_version != self.target_objective_version:
+            raise RegistryInvariantError("migration provenance target is inconsistent")
+        if self.provenance.protocol_contract_digest != self.protocol_contract_digest:
+            raise RegistryInvariantError("migration provenance contract is inconsistent")
 
 
 class RunRegistry:
@@ -528,6 +705,413 @@ class RunRegistry:
                 columns=columns, values=values,
             )
         return digest
+
+    @staticmethod
+    def _identity_payload(identity: ObjectiveIdentity) -> dict[str, str]:
+        return {
+            "objective_version": identity.objective_version,
+            "goal_digest": identity.goal_digest,
+            "benchmark_digest": identity.benchmark_digest,
+            "evaluation_protocol_digest": identity.evaluation_protocol_digest,
+            "constitution_digest": identity.constitution_digest,
+        }
+
+    @classmethod
+    def _identity_digest(cls, identity_payload: object) -> str:
+        if not isinstance(identity_payload, dict):
+            raise RegistryInvariantError("persisted migration identity is invalid")
+        return hashlib.sha256(cls._json(identity_payload).encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _migration_id(
+        cls,
+        *,
+        source_objective_version: str,
+        target_identity_payload: dict[str, str],
+        protocol_contract_digest: str,
+        approval: GoalObjectiveMigrationApproval,
+        provenance: GoalObjectiveMigrationProvenance,
+        recorded_at: str | None,
+        migration_hash_version: int,
+    ) -> str:
+        if migration_hash_version not in (1, 2):
+            raise RegistryInvariantError("migration hash version is unsupported")
+        payload = {
+            "source": source_objective_version,
+            "target": target_identity_payload,
+            "contract": protocol_contract_digest,
+            "approval": approval.to_dict(),
+            "provenance": provenance.to_dict(),
+        }
+        if migration_hash_version == 2:
+            _validate_recorded_at(recorded_at)
+            payload["hash_version"] = 2
+            payload["recorded_at"] = recorded_at
+        return hashlib.sha256(cls._json(payload).encode("utf-8")).hexdigest()
+
+    def record_goal_objective(
+        self, identity: ObjectiveIdentity, goal_payload: dict[str, object]
+    ) -> None:
+        """Persist one frozen objective identity; divergent replays fail closed."""
+        identity_json = self._json(self._identity_payload(identity))
+        goal_json = self._json(goal_payload)
+        columns = ("objective_version", "identity_json", "goal_json", "created_at")
+        values = (
+            identity.objective_version,
+            identity_json,
+            goal_json,
+            datetime.now(timezone.utc).isoformat(),
+        )
+        with self._conn:
+            existing = self._conn.execute(
+                "SELECT identity_json, goal_json FROM goal_objectives WHERE objective_version = ?",
+                (identity.objective_version,),
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing) != (identity_json, goal_json):
+                    raise RegistryInvariantError(
+                        f"immutable goal objective {identity.objective_version!r} changed"
+                    )
+                return
+            self._conn.execute(
+                "INSERT INTO goal_objectives "
+                "(objective_version, identity_json, goal_json, created_at) VALUES (?, ?, ?, ?)",
+                values,
+            )
+
+    def get_goal_objective(self, objective_version: str) -> dict[str, object] | None:
+        row = self._conn.execute(
+            "SELECT identity_json, goal_json FROM goal_objectives WHERE objective_version = ?",
+            (objective_version,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"identity": json.loads(row[0]), "goal": json.loads(row[1])}
+
+    def record_goal_objective_migration(
+        self,
+        *,
+        source_objective_version: str,
+        target_identity: ObjectiveIdentity,
+        target_goal_payload: dict[str, object],
+        protocol_contract_digest: str,
+        approval: GoalObjectiveMigrationApproval | Mapping[str, str],
+        provenance: GoalObjectiveMigrationProvenance | Mapping[str, object],
+    ) -> str:
+        """Atomically append a legacy-objective migration and its new objective."""
+        source = self.get_goal_objective(source_objective_version)
+        if source is None:
+            raise RegistryInvariantError(
+                f"cannot migrate unknown goal objective: {source_objective_version}"
+            )
+        if "protocol_contract_digest" in source["goal"]:
+            raise RegistryInvariantError(
+                "goal objective already has a protocol contract; migration is not applicable"
+            )
+        if target_identity.objective_version == source_objective_version:
+            raise RegistryInvariantError("protocol migration requires a new objective version")
+        if not protocol_contract_digest or len(protocol_contract_digest) != 64:
+            raise RegistryInvariantError("protocol contract digest must be a SHA-256 digest")
+        try:
+            int(protocol_contract_digest, 16)
+        except ValueError as exc:
+            raise RegistryInvariantError("protocol contract digest must be a SHA-256 digest") from exc
+        if (
+            not isinstance(target_goal_payload, dict)
+            or target_goal_payload.get("protocol_contract_digest") != protocol_contract_digest
+        ):
+            raise RegistryInvariantError(
+                "target objective protocol-contract evidence is missing or inconsistent"
+            )
+        if isinstance(approval, GoalObjectiveMigrationApproval):
+            validated_approval = approval
+        else:
+            validated_approval = GoalObjectiveMigrationApproval.from_dict(approval)
+        if isinstance(provenance, GoalObjectiveMigrationProvenance):
+            validated_provenance = provenance
+        else:
+            validated_provenance = GoalObjectiveMigrationProvenance.from_dict(provenance)
+        source_identity = source["identity"]
+        target_identity_payload = self._identity_payload(target_identity)
+        if validated_provenance.source_objective_version != source_objective_version:
+            raise RegistryInvariantError("migration provenance source objective is unrelated")
+        if validated_provenance.target_objective_version != target_identity.objective_version:
+            raise RegistryInvariantError("migration provenance target objective is inconsistent")
+        if validated_provenance.protocol_contract_digest != protocol_contract_digest:
+            raise RegistryInvariantError("migration provenance contract digest is inconsistent")
+        if validated_provenance.registry_path != self.path:
+            raise RegistryInvariantError("migration provenance registry is unrelated")
+        if validated_provenance.source_identity_digest != self._identity_digest(source_identity):
+            raise RegistryInvariantError("migration provenance source identity is inconsistent")
+        if validated_provenance.target_identity_digest != self._identity_digest(target_identity_payload):
+            raise RegistryInvariantError("migration provenance target identity is inconsistent")
+        provenance_payload = validated_provenance.to_dict()
+        recorded_at = datetime.now(timezone.utc).isoformat()
+        migration_hash_version = 2
+        migration_id = self._migration_id(
+            source_objective_version=source_objective_version,
+            target_identity_payload=target_identity_payload,
+            protocol_contract_digest=protocol_contract_digest,
+            approval=validated_approval,
+            provenance=validated_provenance,
+            recorded_at=recorded_at,
+            migration_hash_version=migration_hash_version,
+        )
+        identity_json = self._json(self._identity_payload(target_identity))
+        goal_json = self._json(target_goal_payload)
+        with self._conn:
+            existing = self._conn.execute(
+                "SELECT 1 FROM goal_objectives WHERE objective_version = ?",
+                (target_identity.objective_version,),
+            ).fetchone()
+            if existing is not None:
+                raise RegistryInvariantError(
+                    f"target objective version already exists: {target_identity.objective_version}"
+                )
+            self._conn.execute(
+                "INSERT INTO goal_objectives "
+                "(objective_version, identity_json, goal_json, created_at) VALUES (?, ?, ?, ?)",
+                (
+                    target_identity.objective_version,
+                    identity_json,
+                    goal_json,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._conn.execute(
+                "INSERT INTO goal_objective_migrations "
+                "(migration_id, source_objective_version, target_objective_version, "
+                "source_identity_json, target_identity_json, protocol_contract_digest, "
+                "approval_json, provenance_json, recorded_at, migration_hash_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    migration_id,
+                    source_objective_version,
+                    target_identity.objective_version,
+                    self._json(source["identity"]),
+                    identity_json,
+                    protocol_contract_digest,
+                    self._json(validated_approval.to_dict()),
+                    self._json(provenance_payload),
+                    recorded_at,
+                    migration_hash_version,
+                ),
+            )
+        return migration_id
+
+    def list_goal_objective_migrations(self) -> tuple[GoalObjectiveMigration, ...]:
+        rows = self._conn.execute(
+            "SELECT migration_id, source_objective_version, target_objective_version, "
+            "source_identity_json, target_identity_json, protocol_contract_digest, "
+            "approval_json, provenance_json, recorded_at, migration_hash_version "
+            "FROM goal_objective_migrations ORDER BY rowid"
+        )
+        migrations: list[GoalObjectiveMigration] = []
+        for row in rows:
+            try:
+                (
+                    migration_id,
+                    source_version,
+                    target_version,
+                    source_identity_json,
+                    target_identity_json,
+                    contract_digest,
+                    approval_json,
+                    provenance_json,
+                    recorded_at,
+                    migration_hash_version,
+                ) = row
+                if not all(
+                    isinstance(value, str) and value.strip()
+                    for value in (
+                        migration_id,
+                        source_version,
+                        target_version,
+                        contract_digest,
+                        recorded_at,
+                        source_identity_json,
+                        target_identity_json,
+                        approval_json,
+                        provenance_json,
+                    )
+                ) or not isinstance(migration_hash_version, int) or isinstance(
+                    migration_hash_version, bool
+                ):
+                    raise RegistryInvariantError("persisted migration scalar field is malformed")
+                source_identity = ObjectiveIdentity(**json.loads(source_identity_json))
+                target_identity = ObjectiveIdentity(**json.loads(target_identity_json))
+                approval = GoalObjectiveMigrationApproval.from_dict(json.loads(approval_json))
+                provenance = GoalObjectiveMigrationProvenance.from_dict(json.loads(provenance_json))
+                source = self.get_goal_objective(source_version)
+                target = self.get_goal_objective(target_version)
+                if source is None or target is None:
+                    raise RegistryInvariantError("migration references an unknown objective")
+                if source["identity"] != self._identity_payload(source_identity):
+                    raise RegistryInvariantError("migration source identity does not match objective")
+                if target["identity"] != self._identity_payload(target_identity):
+                    raise RegistryInvariantError("migration target identity does not match objective")
+                if contract_digest != provenance.protocol_contract_digest:
+                    raise RegistryInvariantError("migration protocol contract is inconsistent")
+                target_goal = target["goal"]
+                if not isinstance(target_goal, dict) or target_goal.get("protocol_contract_digest") != contract_digest:
+                    raise RegistryInvariantError("migration target contract evidence is inconsistent")
+                expected_migration_id = self._migration_id(
+                    source_objective_version=source_version,
+                    target_identity_payload=self._identity_payload(target_identity),
+                    protocol_contract_digest=contract_digest,
+                    approval=approval,
+                    provenance=provenance,
+                    recorded_at=recorded_at,
+                    migration_hash_version=migration_hash_version,
+                )
+                if migration_id != expected_migration_id:
+                    raise RegistryInvariantError("migration content hash is inconsistent")
+                migration = GoalObjectiveMigration(
+                    migration_id=migration_id,
+                    source_objective_version=source_version,
+                    target_objective_version=target_version,
+                    source_identity=source_identity,
+                    target_identity=target_identity,
+                    protocol_contract_digest=contract_digest,
+                    approval=approval,
+                    provenance=provenance,
+                    recorded_at=recorded_at,
+                    migration_hash_version=migration_hash_version,
+                )
+                if provenance.registry_path != self.path:
+                    raise RegistryInvariantError("migration provenance registry is unrelated")
+                if provenance.source_identity_digest != self._identity_digest(source["identity"]):
+                    raise RegistryInvariantError("migration source provenance is inconsistent")
+                if provenance.target_identity_digest != self._identity_digest(target["identity"]):
+                    raise RegistryInvariantError("migration target provenance is inconsistent")
+                migrations.append(migration)
+            except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                if isinstance(exc, RegistryInvariantError):
+                    raise
+                raise RegistryInvariantError("persisted migration evidence is malformed") from exc
+        return tuple(migrations)
+
+    def record_goal_assessment(
+        self, objective_version: str, assessment: GoalAssessment
+    ) -> str:
+        """Append an immutable assessment and return its content key."""
+        if assessment.goal_version != objective_version:
+            raise RegistryInvariantError("assessment objective version does not match lifecycle")
+        objective_row = self._conn.execute(
+            "SELECT identity_json FROM goal_objectives WHERE objective_version = ?",
+            (objective_version,),
+        ).fetchone()
+        if objective_row is None:
+            raise RegistryInvariantError(
+                f"cannot persist assessment for unknown goal objective: {objective_version}"
+            )
+        try:
+            stored_identity = ObjectiveIdentity(**json.loads(objective_row[0]))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RegistryInvariantError("persisted goal objective identity is invalid") from exc
+        identity_fields = (
+            ("goal", stored_identity.goal_digest, assessment.goal_digest),
+            (
+                "evaluation protocol",
+                stored_identity.evaluation_protocol_digest,
+                assessment.evaluation_protocol_digest,
+            ),
+            ("benchmark", stored_identity.benchmark_digest, assessment.benchmark_digest),
+            (
+                "constitution",
+                stored_identity.constitution_digest,
+                assessment.constitution_digest,
+            ),
+        )
+        for label, expected, actual in identity_fields:
+            if actual != expected:
+                raise RegistryInvariantError(
+                    f"assessment {label} digest does not match frozen objective"
+                )
+        payload = assessment.to_dict()
+        assessment_json = self._json(payload)
+        assessment_id = hashlib.sha256(assessment_json.encode("utf-8")).hexdigest()
+        columns = (
+            "assessment_id",
+            "objective_version",
+            "artifact_identity",
+            "status",
+            "assessment_json",
+            "recorded_at",
+        )
+        values = (
+            assessment_id,
+            objective_version,
+            assessment.artifact_identity,
+            assessment.status.value,
+            assessment_json,
+            datetime.now(timezone.utc).isoformat(),
+        )
+        with self._conn:
+            self._insert_immutable(
+                table="goal_assessments",
+                key_column="assessment_id",
+                key=assessment_id,
+                columns=columns,
+                values=values,
+            )
+        return assessment_id
+
+    def list_goal_assessments(self, objective_version: str) -> tuple[GoalAssessment, ...]:
+        rows = self._conn.execute(
+            "SELECT assessment_json FROM goal_assessments "
+            "WHERE objective_version = ? ORDER BY rowid",
+            (objective_version,),
+        )
+        return tuple(GoalAssessment.from_dict(json.loads(row[0])) for row in rows)
+
+    def latest_goal_assessment(self, objective_version: str) -> GoalAssessment | None:
+        row = self._conn.execute(
+            "SELECT assessment_json FROM goal_assessments "
+            "WHERE objective_version = ? ORDER BY rowid DESC LIMIT 1",
+            (objective_version,),
+        ).fetchone()
+        return None if row is None else GoalAssessment.from_dict(json.loads(row[0]))
+
+    def record_goal_terminal(
+        self, objective_version: str, terminal_state: object, artifact_identity: str
+    ) -> None:
+        state = getattr(terminal_state, "value", terminal_state)
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO goal_terminal_events "
+                "(objective_version, terminal_state, artifact_identity, recorded_at) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    objective_version,
+                    str(state),
+                    artifact_identity,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def list_goal_terminals(self, objective_version: str) -> tuple[dict[str, object], ...]:
+        rows = self._conn.execute(
+            "SELECT terminal_state, artifact_identity, recorded_at "
+            "FROM goal_terminal_events WHERE objective_version = ? ORDER BY event_id",
+            (objective_version,),
+        )
+        return tuple(
+            {
+                "terminal_state": row[0],
+                "artifact_identity": row[1],
+                "recorded_at": row[2],
+            }
+            for row in rows
+        )
+
+    def latest_goal_terminal(self, objective_version: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT terminal_state FROM goal_terminal_events "
+            "WHERE objective_version = ? ORDER BY event_id DESC LIMIT 1",
+            (objective_version,),
+        ).fetchone()
+        return None if row is None else str(row[0])
 
     def record_execution_incident(self, analysis) -> None:
         """Persist structured executor crash evidence from Executor Investigator."""
