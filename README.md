@@ -35,7 +35,7 @@ Real local executor (v0.2):
 - **Independent holdout evaluator** that reloads the base model and adapter separately from training and checks adapter/protocol evidence itself, rather than trusting the trainer's own claim of what it produced.
 - **Evaluator resource contract matching the trainer's**: evaluators support `profile()` (cost estimation) and `cancel()` alongside `evaluate()`, and an evaluator crash gets the same structured-failure capture, Executor Investigator routing, and partial GPU-hour accounting a training crash already did — not silent generic-exception handling.
 - **Immutable, schema-versioned SQLite persistence** for every training artifact, evaluation outcome, and result — an append-only evidence trail, not a mutable status field.
-- **JSON project configuration** with fail-closed validation, plus a guided TUI (`chowder tui`, also the default with no arguments) for building and running training projects without hand-writing config.
+- **JSON project configuration** with fail-closed validation, plus a guided TUI (`chowder tui`, also the default with no arguments) for building and running training projects without hand-writing config. The same interface now also carries an **Autonomous Growth** workspace: inspect the current lineage, plan the next target from measured evidence, see every readiness check, start a bounded loop, stop after the current campaign, resume from durable state, and read what each generation actually did.
 
 Autonomous repair loop:
 
@@ -43,6 +43,20 @@ Autonomous repair loop:
 - **Bounded, autonomous recursive repair**: a rejected candidate can be diagnosed, repaired, and re-evaluated automatically within a GPU-hour budget, with crash-safe resume and full provenance back to the training data and parent adapter it repaired.
 - **Wired into the default single-command user path**: `chowder train`/`run_project()` optionally continues straight from a gate-rejected initial candidate through failure harvesting → repair proposal → bounded repair → re-evaluation, config-driven (a `repair` section names a local corpus, training-config-only repair variants, and a recursive-repair policy) — no separate Python orchestration required.
 - **Evidence manifest hashing** for reproducibility/provenance across the whole chain.
+
+Autonomous multi-generation growth:
+
+- **One bounded loop that advances generations.** `GrowthLoop` selects the next target from measured, benchmark-attributed capability evidence, composes and freezes the next campaign from an immutable policy, runs it through the same production engine a hand-written campaign uses, and stops on a finite condition: a campaign budget, a global envelope, a plateau, a target that needs human review, uncertain evidence, or an operator stop. It will not advance the parent pointer for a promotion it cannot bind to an exact adapter.
+- **The interface and the CLI are the same system.** Both are thin clients of `AutonomousGrowthService`; planning, readiness, composition, state restoration, budgeting and promotion are owned by the production control plane, so what the interface previews is what `chowder growth loop run` executes. Planning calls the loop's own gates, and a capability profile measured on a different generation refuses (`PROFILE_GENERATION_MISMATCH`) instead of quietly choosing the next target from another model's evidence.
+- **Durable, resumable state.** Failures, interventions, targets and capability history are append-only under one growth-state root and read back before the next generation is planned, so a stop and resume continues the same session rather than re-spending it.
+
+Three different operating modes, and it matters which one you are in:
+
+| Mode | What it does | Entry point |
+|---|---|---|
+| **Single project** | Trains and evaluates one project you configured | `chowder train`, or the guided TUI |
+| **Autonomous repair** | Repairs one rejected candidate within a GPU-hour budget | `repair` section of a project config |
+| **Autonomous multi-generation growth** | Chooses the next improvement target from measured evidence and advances Gen N → Gen N+1 → … under a finite envelope | Autonomous Growth in `chowder tui`, or `chowder growth loop ...` for headless use |
 
 Still ahead: FSDP for multi-GPU (DDP now supported). HF/model infrastructure resilience (download retries, offline mode, dependency/disk-space/architecture preflight, and cache-hit/miss reporting) is now fully supported. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full, currently-accurate list.
 

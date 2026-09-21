@@ -587,3 +587,44 @@ def test_real_plan_never_auto_selects_an_unvalidated_multi_mechanism_combination
     assert enabled_count <= 1, (
         f"expected at most 1 mechanism enabled with no validated combined-mechanism cache, got {enabled_count}"
     )
+
+
+def test_offloaded_dispatch_gives_the_weights_their_buffers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A base-only offloaded measurement must not OOM on its own buffers.
+
+    accelerate warns for this model class that the offloaded layers' buffers
+    "do not fit any GPU's remaining memory"; without ``offload_buffers`` a
+    16 GB host OOMs on the first forward even with several GB nominally free
+    (observed as a 64 MiB allocation failure while measuring the dense base).
+    The buffers ride with their weights so the trusted-ancestor arm can be
+    measured at all.
+    """
+    # ``accelerate`` is an optional dependency of the offload path (the import
+    # inside ``dispatch_offloaded`` is lazy for exactly this reason), so a host
+    # without it skips rather than failing.
+    accelerate = pytest.importorskip("accelerate")
+
+    from chowder.evaluators.placement import dispatch_offloaded
+
+    captured: dict[str, object] = {}
+
+    def _record(model, **kwargs):
+        captured.update(kwargs)
+        return model
+
+    monkeypatch.setattr(accelerate, "dispatch_model", _record)
+
+    class _Inner:
+        layers = [object(), object(), object()]
+
+    class _Model:
+        model = _Inner()
+
+    dispatch_offloaded(_Model(), "cuda")
+    assert captured["offload_buffers"] is True
+    assert captured["device_map"] == {
+        "": "cuda",
+        "model.layers.0": "cpu",
+        "model.layers.1": "cpu",
+        "model.layers.2": "cpu",
+    }

@@ -1,0 +1,48 @@
+{
+  "dense_model": "F:\\llm-models\\Qwen3.8-9B-abliterated-25-bf16",
+  "active_channels": 3440,
+  "eval_maxlen": 384,
+  "rank_split_size": {
+    "contiguous": 32,
+    "corpus_wide": 32
+  },
+  "rankings": {
+    "contiguous_digest": "df207741fdccbcbc6dc5d2c38ddac77c832ce3590031174e4a7aea3230609b7f",
+    "corpus_wide_digest": "304fffa858ea1512f7d456a4ccf9b086217f3337ab56a648e110733fea9650f2",
+    "top_set_overlap_mean": 0.7351108284883722,
+    "top_set_overlap_min": 0.6209302325581395,
+    "top_set_overlap_max": 0.9293604651162791,
+    "concentration_contiguous": {
+      "top10pct_mass_mean": 0.2262957901846374,
+      "top10pct_mass_min": 0.16323479747346603,
+      "top10pct_mass_max": 0.47686327596388134
+    },
+    "concentration_corpus_wide": {
+      "top10pct_mass_mean": 0.20866870922016326,
+      "top10pct_mass_min": 0.14920773112285612,
+      "top10pct_mass_max": 0.4472458630139887
+    }
+  },
+  "results": {
+    "eval_a": {
+      "dense": 5.270738163850845,
+      "contiguous": 8.911109542641753,
+      "corpus_wide": 9.796796722558273
+    },
+    "eval_b": {
+      "dense": 4.304398356962633,
+      "contiguous": 15.691828574203372,
+      "corpus_wide": 12.960474593212007
+    }
+  },
+  "cost_spread_a_to_b": {
+    "contiguous": 2.1562581694279563,
+    "corpus_wide": 1.619928303318866
+  },
+  "consequence": {
+    "pilot_trained_eval_b": 14.9314,
+    "contiguous_reference": 15.6918,
+    "corpus_wide_reference": 12.960474593212007,
+    "still_beats_static": false
+  }
+}

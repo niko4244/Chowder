@@ -1,0 +1,1092 @@
+"""Seed benchmark catalog: the families modern frontier labs measure.
+
+Pinned versions, availability status, lifecycle state, tier, split policy,
+and skill mapping. Frontier reference numbers here are single indicative
+anchors for registry validation only -- the full provenance-tracked
+reference database lives in ``benchmarks/frontier_reference_scores/`` and
+frontier snapshots; never compare against these anchors without reading
+their full provenance.
+
+Statuses:
+- RUNNABLE_PUBLIC: data public + license permits + adapter exists.
+- PUBLIC_SCORE_ONLY: data private/impractical locally; scores exist.
+- PRIVATE: reference display only.
+- UNSUPPORTED_BY_CURRENT_MODALITY: N/A for text-only models (never zero).
+
+Each row also needs its metric's *semantics* -- polarity, and the 0..1 scale
+its raw value lives on -- because promotion consumes 0..1 better-direction
+scores and nothing in the shipped system produced them. Those declarations
+live in ``METRIC_SEMANTICS`` keyed by metric name (see the comment above it),
+not on the rows: a row is not permitted to decide, on its own, what
+``accuracy`` means.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from .benchmark_registry import (
+    DIRECTIONS,
+    BenchmarkRegistry,
+    Normalization,
+    _entry,
+)
+
+_ROWS: list[dict[str, Any]] = [
+    # ------------------------------------------------------------------ #
+    # reasoning
+    # ------------------------------------------------------------------ #
+    dict(
+        benchmark_id="hle_text",
+        version="2025-08",
+        name="Humanity's Last Exam (text subset)",
+        category="reasoning",
+        subcategory="frontier academic",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="judge",
+        primary_metric="accuracy",
+        skills=("reasoning.abstract", "reasoning.scientific"),
+        dataset_source="https://github.com/centerforaisafety/hle",
+        implementation_source="adapter: chowder.eval_adapters.inspect (HLE text subset)",
+        source="Center for AI Safety / Scale AI",
+        license="research-only, verify current repo terms",
+        release_date="2025-01",
+        context_requirements="long-context; heavy judge dependence",
+        random_baseline=0.25,
+        contamination_risk="medium",
+        adapter="chowder.eval_adapters.inspect",
+    ),
+    dict(
+        benchmark_id="gpqa_diamond",
+        version="2025-05-30",
+        name="GPQA Diamond",
+        category="science",
+        subcategory="graduate science QA",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=3,
+        scorer="multiple_choice",
+        primary_metric="accuracy",
+        skills=("reasoning.scientific", "science.recall", "science.quantitative"),
+        dataset_source="https://huggingface.co/datasets/Idavidrein/gpqa (gated)",
+        implementation_source="lm-eval-harness gpqa_diamond",
+        source="Rein et al., 2023 (GPQA authors)",
+        license="research-only, gated access",
+        release_date="2024-08",
+        random_baseline=0.25,
+        human_baseline=0.697,
+        contamination_risk="medium",
+        adapter="chowder.eval_adapters.lm_eval",
+    ),
+    dict(
+        benchmark_id="mmlu_pro",
+        version="v2",
+        name="MMLU-Pro",
+        category="reasoning",
+        subcategory="broad academic 10-choice",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=3,
+        scorer="multiple_choice",
+        primary_metric="accuracy",
+        skills=("reasoning.abstract", "knowledge.factuality"),
+        dataset_source="https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro",
+        implementation_source="lm-eval-harness mmlu_pro",
+        source="TIGER-Lab",
+        license="MIT",
+        release_date="2024-06",
+        random_baseline=0.10,
+        contamination_risk="high",
+        adapter="chowder.eval_adapters.lm_eval",
+    ),
+    dict(
+        benchmark_id="bbh",
+        version="2023-05-03",
+        name="BIG-Bench Hard",
+        category="reasoning",
+        subcategory="diagnostic suite",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="LEGACY",
+        tier=3,
+        scorer="exact_match",
+        primary_metric="accuracy",
+        skills=("reasoning.abstract",),
+        dataset_source="https://github.com/suzgunmirac/BIG-Bench-Hard",
+        implementation_source="lm-eval-harness bbh",
+        source="Suzgun et al., 2022",
+        license="Apache-2.0 (benchmark code); tasks vary",
+        release_date="2022-10",
+        contamination_risk="high",
+        adapter="chowder.eval_adapters.lm_eval",
+    ),
+    dict(
+        benchmark_id="livebench_reasoning",
+        version="2026-06-25",
+        name="LiveBench (reasoning category)",
+        category="reasoning",
+        subcategory="contamination-resistant reasoning",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=3,
+        scorer="judge",
+        primary_metric="accuracy",
+        skills=("reasoning.abstract",),
+        dataset_source="https://huggingface.co/datasets/LiveBench/reasoning",
+        implementation_source="https://github.com/LiveBench/LiveBench",
+        source="LiveBench authors (White et al.)",
+        license="MIT (code); data terms on HF dataset",
+        release_date="2026-06",
+        contamination_risk="low",
+        notes="monthly refresh -- pin the release used per snapshot",
+        adapter="chowder.eval_adapters.inspect",
+    ),
+    dict(
+        benchmark_id="arc_agi_2",
+        version="v2-2025",
+        name="ARC-AGI-2",
+        category="reasoning",
+        subcategory="abstraction/generalization",
+        status="PUBLIC_SCORE_ONLY",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="exact_match",
+        primary_metric="accuracy",
+        skills=("reasoning.abstract",),
+        dataset_source="https://arcprize.org (half of v2 held private)",
+        implementation_source="none (public half runnable via ARC-AGI GitHub)",
+        source="ARC Prize Foundation",
+        license="custom ARC Prize license",
+        release_date="2025-04",
+        human_baseline=0.60,
+        contamination_risk="low",
+    ),
+    dict(
+        benchmark_id="humaneval",
+        version="2023-05-31",
+        name="HumanEval",
+        category="coding",
+        subcategory="function synthesis (legacy diagnostic)",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="SATURATED",
+        tier=2,
+        scorer="unit_tests",
+        primary_metric="pass@1",
+        skills=("coding.generation",),
+        dataset_source="https://github.com/openai/human-eval",
+        implementation_source="lm-eval-harness humaneval",
+        source="OpenAI (Chen et al., 2021)",
+        license="MIT",
+        release_date="2021-07",
+        random_baseline=0.0,
+        contamination_risk="high",
+        notes="saturated: diagnostic only, never a promotion target",
+        adapter="chowder.eval_adapters.lm_eval",
+    ),
+    dict(
+        benchmark_id="mbpp",
+        version="v1-2021",
+        name="MBPP (sanitized)",
+        category="coding",
+        subcategory="function synthesis (legacy diagnostic)",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="SATURATED",
+        tier=2,
+        scorer="unit_tests",
+        primary_metric="pass@1",
+        skills=("coding.generation",),
+        dataset_source="https://huggingface.co/datasets/mbpp",
+        implementation_source="lm-eval-harness mbpp",
+        source="Austin et al., 2021",
+        license="CC-BY-4.0 (data)",
+        release_date="2021-08",
+        contamination_risk="high",
+        notes="saturated: diagnostic only",
+        adapter="chowder.eval_adapters.lm_eval",
+    ),
+    dict(
+        benchmark_id="livecodebench",
+        version="v6-2025",
+        name="LiveCodeBench (competitive coding window)",
+        category="coding",
+        subcategory="contest problems (post-cutoff window)",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=3,
+        scorer="unit_tests",
+        primary_metric="pass@1",
+        skills=("coding.generation", "math.competition"),
+        dataset_source="https://huggingface.co/datasets/livecodebench/code_generation_lite",
+        implementation_source="https://github.com/LiveCodeBench/LiveCodeBench",
+        source="LiveCodeBench authors",
+        license="MIT (code); problem statements from public contests",
+        release_date="2025-06",
+        contamination_risk="low",
+        adapter="chowder.eval_adapters.native",
+    ),
+    dict(
+        benchmark_id="swe_bench_verified",
+        version="2024-10",
+        name="SWE-bench Verified",
+        category="coding",
+        subcategory="repository issue resolution",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="unit_tests",
+        primary_metric="resolved_rate",
+        skills=("coding.debugging", "coding.repo", "coding.agentic"),
+        dataset_source="https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified",
+        implementation_source="https://github.com/SWE-bench/SWE-bench + agent harness",
+        source="Princeton NLP / OpenAI (human-verified subset)",
+        license="MIT (framework)",
+        release_date="2024-08",
+        environment_requirements="docker; agent harness with repo tooling",
+        tool_requirements="repo navigation, edit, run tests",
+        contamination_risk="medium",
+        notes="tier-4 agentic harness score; raw-model score reported separately",
+        adapter="chowder.eval_adapters.native",
+    ),
+    dict(
+        benchmark_id="swe_bench_pro",
+        version="2025-09",
+        name="SWE-bench Pro",
+        category="coding",
+        subcategory="harder/longer-horizon repo tasks",
+        status="PUBLIC_SCORE_ONLY",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="unit_tests",
+        primary_metric="resolved_rate",
+        skills=("coding.debugging", "coding.repo", "coding.agentic"),
+        dataset_source="private (Scale SEA-held subset publicized later)",
+        implementation_source="none locally",
+        source="Scale AI",
+        license="private/publication-terms",
+        release_date="2025-08",
+        contamination_risk="low",
+    ),
+    dict(
+        benchmark_id="terminal_bench",
+        version="2.1",
+        name="Terminal-Bench",
+        category="agentic",
+        subcategory="terminal/CLI task completion",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="agent",
+        primary_metric="success_rate",
+        skills=("agents.terminal_work", "coding.repo", "agents.long_horizon"),
+        dataset_source="https://github.com/terminal-bench/terminal-bench",
+        implementation_source="terminal-bench harness + agent",
+        source="Terminal-Bench authors (Stanford/Laude)",
+        license="Apache-2.0 (harness)",
+        release_date="2025-09",
+        environment_requirements="docker containers per task",
+        tool_requirements="shell access in container",
+        contamination_risk="low",
+        adapter="chowder.eval_adapters.native",
+    ),
+    dict(
+        benchmark_id="core_bench",
+        version="2024-12",
+        name="CORE-Bench",
+        category="agentic",
+        subcategory="computational research reproduction",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="agent",
+        primary_metric="accuracy",
+        skills=("agents.planning", "science.literature", "coding.repo"),
+        dataset_source="https://github.com/hendrycks/core-bench",
+        implementation_source="agent harness per paper repo",
+        source="Princeton NLP (Hendrycks et al.)",
+        license="MIT (framework); tasks reference public repos",
+        release_date="2024-09",
+        environment_requirements="docker; paper computational environments",
+        contamination_risk="low",
+        adapter="chowder.eval_adapters.native",
+    ),
+    dict(
+        benchmark_id="metr_task_horizon",
+        version="2025-03-methodology",
+        name="METR-style task horizon (methodology reference)",
+        category="agentic",
+        subcategory="autonomous long-horizon work",
+        status="PUBLIC_SCORE_ONLY",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="agent",
+        primary_metric="success_rate",
+        skills=("agents.long_horizon", "agents.planning"),
+        dataset_source="private suite; methodology published",
+        implementation_source="Chowder-native equivalents track this dimension",
+        source="METR",
+        license="methodology public; task suite private",
+        release_date="2025-03",
+        contamination_risk="low",
+        notes="do NOT fake a METR score; Chowder-native tasks report their own dimension",
+    ),
+    dict(
+        benchmark_id="bfcl",
+        version="v4",
+        name="Berkeley Function-Calling Leaderboard",
+        category="tools",
+        subcategory="function calling incl. multi-turn",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=3,
+        scorer="agent",
+        primary_metric="accuracy",
+        skills=("tools.function_calling", "tools.multi_turn", "tools.state_handling"),
+        dataset_source="https://huggingface.co/datasets/gorilla-llm/Berkeley-Function-Calling-Leaderboard",
+        implementation_source="https://github.com/ShishirPatil/gorilla (berkeley-function-call-leaderboard)",
+        source="Berkeley Gorilla team",
+        license="Apache-2.0 (code); data terms on HF",
+        release_date="2025-07",
+        contamination_risk="medium",
+        adapter="chowder.eval_adapters.native",
+    ),
+    dict(
+        benchmark_id="tau_bench_retail",
+        version="2024-06-12",
+        name="tau-bench (retail domain)",
+        category="tools",
+        subcategory="tool-agent user interaction with policy",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=4,
+        scorer="agent",
+        primary_metric="pass@1",
+        skills=("tools.multi_turn", "tools.state_handling", "tools.recovery"),
+        dataset_source="https://github.com/sierra-research/tau-bench",
+        implementation_source="tau-bench harness",
+        source="Sierra Research",
+        license="Apache-2.0 (code)",
+        release_date="2024-06",
+        contamination_risk="medium",
+        adapter="chowder.eval_adapters.native",
+    ),
+    dict(
+        benchmark_id="tau2_knowledge",
+        version="2025-08",
+        name="tau2-bench knowledge tasks (where runnable)",
+        category="tools",
+        subcategory="knowledge-intensive agent tasks",
+        status="PUBLIC_SCORE_ONLY",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="agent",
+        primary_metric="pass@1",
+        skills=("tools.multi_turn", "knowledge.factuality"),
+        dataset_source="https://github.com/sierra-research/tau2-bench",
+        implementation_source="tau2-bench harness (public) -- locally impractical subset",
+        source="Sierra Research",
+        license="Apache-2.0 (code)",
+        release_date="2025-08",
+        contamination_risk="low",
+    ),
+    dict(
+        benchmark_id="browsecomp",
+        version="2025-04",
+        name="BrowseComp",
+        category="research",
+        subcategory="agentic web research",
+        status="PUBLIC_SCORE_ONLY",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="exact_match",
+        primary_metric="accuracy",
+        skills=("research.browsing", "research.conflict_resolution"),
+        dataset_source="private (OpenAI-held question set)",
+        implementation_source="none",
+        source="OpenAI",
+        license="private",
+        release_date="2025-04",
+        tool_requirements="web browsing agent",
+        contamination_risk="low",
+    ),
+    dict(
+        benchmark_id="chowder_research_battery",
+        version="2026-09-15",
+        name="Chowder citation-grounded research battery",
+        category="research",
+        subcategory="open-web research with citation checking",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=3,
+        scorer="judge",
+        primary_metric="accuracy",
+        skills=("research.browsing", "research.citation", "knowledge.calibration"),
+        dataset_source="chowder-native: curated questions with verifiable citations",
+        implementation_source="chowder-native (eval_adapters.chowder_custom)",
+        source="Chowder",
+        license="internal",
+        release_date="2026-09",
+        split_policy="dev",
+        contamination_risk="low",
+        adapter="chowder.eval_adapters.chowder_custom",
+    ),
+    dict(
+        benchmark_id="simpleqa_verified",
+        version="2025-09",
+        name="SimpleQA Verified",
+        category="knowledge",
+        subcategory="short-form factuality + abstention",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=3,
+        scorer="judge",
+        primary_metric="accuracy",
+        skills=("knowledge.factuality", "knowledge.abstention"),
+        dataset_source="https://github.com/vijaykyr/simpleqa_verified",
+        implementation_source="reference grader + Chowder judge wrapper",
+        source="Amazon AGI (SimpleQA Verified authors); OpenAI original",
+        license="CC-BY-4.0 (data)",
+        release_date="2025-03",
+        contamination_risk="medium",
+        adapter="chowder.eval_adapters.inspect",
+    ),
+    dict(
+        benchmark_id="ifeval",
+        version="2023-11",
+        name="IFEval",
+        category="instruction",
+        subcategory="verifiable instructions",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=2,
+        scorer="exact_match",
+        primary_metric="strict_accuracy",
+        skills=("instruction.multi_constraint", "instruction.formatting"),
+        dataset_source="https://huggingface.co/datasets/google/IFEval",
+        implementation_source="lm-eval-harness ifeval",
+        source="Google (Zhou et al., 2023)",
+        license="Apache-2.0",
+        release_date="2023-11",
+        contamination_risk="high",
+        notes="high leakage risk in web training data; firewall tests it",
+        adapter="chowder.eval_adapters.lm_eval",
+    ),
+    dict(
+        benchmark_id="livebench_if",
+        version="2026-06-25",
+        name="LiveBench (instruction following)",
+        category="instruction",
+        subcategory="contamination-resistant IF",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=3,
+        scorer="judge",
+        primary_metric="accuracy",
+        skills=("instruction.multi_constraint", "instruction.persistence"),
+        dataset_source="https://huggingface.co/datasets/LiveBench/instruction_following",
+        implementation_source="https://github.com/LiveBench/LiveBench",
+        source="LiveBench authors",
+        license="MIT (code); data terms on HF",
+        release_date="2026-06",
+        contamination_risk="low",
+        adapter="chowder.eval_adapters.inspect",
+    ),
+    dict(
+        benchmark_id="ruler_40k",
+        version="v1-2024",
+        name="RULER 40k (synthetic long-context diagnostics)",
+        category="context",
+        subcategory="retrieval + multi-hop synthetic",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=3,
+        scorer="exact_match",
+        primary_metric="accuracy",
+        skills=("context.retrieval", "context.synthesis", "context.distractor_resistance"),
+        dataset_source="https://github.com/NVIDIA/RULER (generated on demand)",
+        implementation_source="RULER generators",
+        source="NVIDIA (Hsieh et al., 2024)",
+        license="Apache-2.0 (code)",
+        release_date="2024-03",
+        context_requirements="40k tokens",
+        contamination_risk="low",
+        notes="synthetic -- effectively untrainable-by-accident; good firewall canary",
+        adapter="chowder.eval_adapters.native",
+    ),
+    dict(
+        benchmark_id="mrcr_4",
+        version="2025-02",
+        name="MRCR (4-needle variant)",
+        category="context",
+        subcategory="multi-needle retrieval in long documents",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=3,
+        scorer="judge",
+        primary_metric="accuracy",
+        skills=("context.retrieval", "context.retention"),
+        dataset_source="https://github.com/openai/mrcr (public releases)",
+        implementation_source="reference grader",
+        source="OpenAI",
+        license="CC-BY-4.0 (data)",
+        release_date="2025-02",
+        context_requirements="very long context",
+        contamination_risk="low",
+        adapter="chowder.eval_adapters.inspect",
+    ),
+    dict(
+        benchmark_id="mgsm",
+        version="2022-11",
+        name="MGSM",
+        category="multilingual",
+        subcategory="multilingual grade-school math",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=3,
+        scorer="exact_match",
+        primary_metric="accuracy",
+        skills=("multilingual.comprehension", "math.arithmetic"),
+        dataset_source="https://huggingface.co/datasets/juletxara/mgsm",
+        implementation_source="lm-eval-harness mgsm",
+        source="Shi et al., 2022",
+        license="CC-BY-4.0 (data)",
+        release_date="2022-10",
+        contamination_risk="medium",
+        adapter="chowder.eval_adapters.lm_eval",
+    ),
+    dict(
+        benchmark_id="mmmlu",
+        version="2025-03",
+        name="MMMLU (multilingual MMLU)",
+        category="multilingual",
+        subcategory="multilingual knowledge",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=3,
+        scorer="multiple_choice",
+        primary_metric="accuracy",
+        skills=("multilingual.comprehension", "knowledge.factuality"),
+        dataset_source="https://huggingface.co/datasets/openai/MMMLU",
+        implementation_source="chowder eval wrapper",
+        source="OpenAI (human-translated MMLU test set)",
+        license="MIT (metadata); underlying MMLU terms apply",
+        release_date="2025-01",
+        contamination_risk="high",
+        adapter="chowder.eval_adapters.chowder_custom",
+    ),
+    dict(
+        benchmark_id="gdpval",
+        version="2025-09",
+        name="GDPval (knowledge-work tasks)",
+        category="professional",
+        subcategory="economically valuable work products",
+        status="PUBLIC_SCORE_ONLY",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="judge",
+        primary_metric="win_rate_vs_human",
+        skills=("professional.analysis", "professional.documents", "professional.workflows"),
+        dataset_source="https://openai.com/index/gdpval/ (graded public subset on HF)",
+        implementation_source="subset runnable; full grader private",
+        source="OpenAI",
+        license="public subset CC-BY-4.0; grading private",
+        release_date="2025-09",
+        contamination_risk="low",
+    ),
+    dict(
+        benchmark_id="agents_last_exam",
+        version="2025-11",
+        name="Agents' Last Exam",
+        category="agentic",
+        subcategory="professional end-to-end agent work",
+        status="PUBLIC_SCORE_ONLY",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="agent",
+        primary_metric="accuracy",
+        skills=("agents.planning", "agents.long_horizon", "professional.workflows"),
+        dataset_source="private question bank",
+        implementation_source="none",
+        source="Scale AI / CAIS",
+        license="private",
+        release_date="2025-11",
+        contamination_risk="low",
+    ),
+    dict(
+        benchmark_id="scicode",
+        version="v1-2024",
+        name="SciCode",
+        category="science",
+        subcategory="research-grade scientific coding",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="unit_tests",
+        primary_metric="pass@1",
+        skills=("science.quantitative", "coding.generation"),
+        dataset_source="https://github.com/scicode-bench/SciCode",
+        implementation_source="SciCode harness",
+        source="SciCode authors",
+        license="MIT (code)",
+        release_date="2024-05",
+        contamination_risk="low",
+        adapter="chowder.eval_adapters.native",
+    ),
+    dict(
+        benchmark_id="healthbench",
+        version="2025-05",
+        name="HealthBench",
+        category="health",
+        subcategory="medical QA with physician rubrics",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=4,
+        scorer="judge",
+        primary_metric="accuracy",
+        skills=("health.knowledge", "health.reasoning"),
+        dataset_source="https://github.com/openai/simple-evals (healthbench)",
+        implementation_source="reference grader (judge-based)",
+        source="OpenAI",
+        license="MIT (code); data terms in repo",
+        release_date="2025-05",
+        contamination_risk="medium",
+        notes="evaluation only -- no training use of medical data without review",
+        adapter="chowder.eval_adapters.inspect",
+    ),
+    dict(
+        benchmark_id="posttrainbench",
+        version="2025-10",
+        name="PostTrainBench",
+        category="self_improvement",
+        subcategory="autonomous post-training pipeline operation",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="agent",
+        primary_metric="success_rate",
+        skills=("self_improvement.debug_training", "agents.long_horizon"),
+        dataset_source="https://github.com/R-Dream-team/PostTrainBench",
+        implementation_source="harness from repo",
+        source="PostTrainBench authors",
+        license="verify repo",
+        release_date="2025-10",
+        environment_requirements="GPU node access for the agent to operate",
+        contamination_risk="low",
+        adapter="chowder.eval_adapters.native",
+    ),
+    dict(
+        benchmark_id="kernelgen",
+        version="2025-06",
+        name="KernelGen",
+        category="self_improvement",
+        subcategory="GPU kernel optimization",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="unit_tests",
+        primary_metric="speedup_at_correctness",
+        skills=("coding.efficiency", "self_improvement.design_experiment"),
+        dataset_source="https://github.com/ScalingIntelligence/KernelBench",
+        implementation_source="KernelBench harness",
+        source="Scaling Intelligence (Stanford/Princeton)",
+        license="MIT",
+        release_date="2025-02",
+        environment_requirements="CUDA GPU for correctness + timing",
+        contamination_risk="low",
+        adapter="chowder.eval_adapters.native",
+    ),
+    dict(
+        benchmark_id="chowder_selfimprovement_battery",
+        version="2026-09-15",
+        name="Chowder self-improvement battery (native)",
+        category="self_improvement",
+        subcategory="training-curve diagnosis, contamination detection, evaluator repair, ablation design",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=2,
+        scorer="exact_match",
+        primary_metric="accuracy",
+        skills=(
+            "self_improvement.debug_training",
+            "self_improvement.instrument_repair",
+            "self_improvement.contamination_detection",
+            "self_improvement.design_experiment",
+        ),
+        dataset_source="chowder-native: authored scenarios from real Chowder incidents",
+        implementation_source="chowder-native (eval_adapters.chowder_custom)",
+        source="Chowder",
+        license="internal",
+        release_date="2026-09",
+        split_policy="protected",
+        contamination_risk="low",
+        notes="tier-2 protected regression: a growth system must not damage the ability to grow",
+        adapter="chowder.eval_adapters.chowder_custom",
+    ),
+    # ------------- modality-gated (recorded N/A for text-only) -------------
+    dict(
+        benchmark_id="osworld",
+        version="2.0",
+        name="OSWorld",
+        category="multimodal",
+        subcategory="computer use (screenshots + GUI control)",
+        status="UNSUPPORTED_BY_CURRENT_MODALITY",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="agent",
+        primary_metric="success_rate",
+        skills=("multimodal.image", "agents.terminal_work"),
+        dataset_source="https://github.com/xlang-ai/OSWorld",
+        implementation_source="OSWorld harness (when a visual model is targeted)",
+        source="XLANG Lab",
+        license="Apache-2.0 (code)",
+        release_date="2025-06",
+        modality="screenshot+action",
+        contamination_risk="low",
+    ),
+    dict(
+        benchmark_id="mmmu_pro",
+        version="2025-05",
+        name="MMMU-Pro",
+        category="multimodal",
+        subcategory="multimodal academic reasoning",
+        status="UNSUPPORTED_BY_CURRENT_MODALITY",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="multiple_choice",
+        primary_metric="accuracy",
+        skills=("multimodal.image", "reasoning.scientific"),
+        dataset_source="https://github.com/MMMU-Benchmark/MMMU",
+        implementation_source="reference harness",
+        source="MMMU authors",
+        license="Apache-2.0 (code)",
+        release_date="2025-05",
+        modality="image+text",
+        contamination_risk="medium",
+    ),
+    dict(
+        benchmark_id="frontiermath",
+        version="2025-11",
+        name="FrontierMath (public tiers)",
+        category="math",
+        subcategory="research-level mathematics",
+        status="PUBLIC_SCORE_ONLY",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=4,
+        scorer="exact_match",
+        primary_metric="accuracy",
+        skills=("math.olympiad", "math.proof"),
+        dataset_source="private (EAI); public tier-4 subset planned",
+        implementation_source="none",
+        source="Epoch AI",
+        license="private",
+        release_date="2024-11",
+        contamination_risk="low",
+    ),
+    dict(
+        benchmark_id="aime2025",
+        version="2025-02",
+        name="AIME 2025 (I+II, 30 problems)",
+        category="math",
+        subcategory="competition mathematics",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=3,
+        scorer="exact_match",
+        primary_metric="accuracy",
+        skills=("math.competition", "math.olympiad"),
+        dataset_source="https://huggingface.co/datasets/math-ai/aime25 (public transcriptions)",
+        implementation_source="lm-eval-harness aime2025 / native sampler",
+        source="MAA (problems public); harnesses as noted",
+        license="problems (c) MAA; fair academic use",
+        release_date="2025-02",
+        random_baseline=0.0,
+        contamination_risk="medium",
+        notes="30 questions: CI is wide -- repeated sampling mandatory (statistics module)",
+        adapter="chowder.eval_adapters.native",
+    ),
+    dict(
+        benchmark_id="math500",
+        version="2024-04",
+        name="MATH-500",
+        category="math",
+        subcategory="competition-style problem set",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=2,
+        scorer="exact_match",
+        primary_metric="accuracy",
+        skills=("math.competition", "math.algebra"),
+        dataset_source="https://huggingface.co/datasets/HuggingFaceH4/MATH-500",
+        implementation_source="lm-eval / native grader (minerva-style)",
+        source="Hendrycks MATH derived, Lightman et al. subset",
+        license="MIT (subset selection); MATH data terms",
+        release_date="2024-04",
+        contamination_risk="high",
+        notes="MATH-derived: assume web contamination; protected split firewall",
+        adapter="chowder.eval_adapters.lm_eval",
+    ),
+    dict(
+        benchmark_id="generation-diagnostics",
+        version="gen1-eval-protocol-v1",
+        name="Chowder generation diagnostics (16-prompt termination protocol)",
+        category="instruction",
+        subcategory="turn-termination / protocol compliance",
+        status="INTERNAL_REFERENCE_ONLY",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=2,
+        scorer="protocol_diagnostics",
+        primary_metric="eos_termination_rate",
+        skills=("instruction.formatting",),
+        dataset_source="docs/gen1/run_gen1_cycle.py (the 16 frozen prompts, in-repo)",
+        implementation_source="chowder-native greedy generation probe",
+        source="Chowder (this repository)",
+        license="Apache-2.0 (this repository)",
+        release_date="2026-09-17",
+        contamination_risk="low",
+        notes=(
+            "Gen-1 preregistered target instrument: greedy, seed 1234, batch 32, "
+            "16 fixed prompts, 128 max new tokens -- protocol-identical to the "
+            "Gen-0 freeze diagnostics so parent-vs-candidate stays like-for-like. "
+            "A behavioral protocol instrument: its score never enters "
+            "capability-skill aggregation."
+        ),
+        adapter="chowder_custom",
+    ),
+    dict(
+        benchmark_id="generation-diagnostics",
+        version="gen2-response-surface-v1",
+        name="Chowder generation diagnostics (Gen-2 response surface, 16-prompt protocol)",
+        category="instruction",
+        subcategory="turn-termination / protocol compliance",
+        status="INTERNAL_REFERENCE_ONLY",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=2,
+        scorer="protocol_diagnostics",
+        primary_metric="eos_termination_rate",
+        skills=("instruction.formatting",),
+        dataset_source=(
+            "docs/gen2/judge_gen2.py INSTRUMENT_PROMPTS (the same 16 frozen "
+            "prompts the Gen-1 instrument used; the campaign declares the file "
+            "it measured in evaluation_material_path)"
+        ),
+        implementation_source=(
+            "chowder.growth.generation_diagnostics (the ported instrument) over "
+            "chowder.evaluators.transformers_text_worker observations"
+        ),
+        source="Chowder (this repository)",
+        license="Apache-2.0 (this repository)",
+        release_date="2026-09-18",
+        contamination_risk="low",
+        notes=(
+            "Gen-2 preregistered target instrument (docs/quals/GEN2_PREREG_2026-09-17.md "
+            "and its amendments): the same 16 prompts, seed 1234, chat-template "
+            "prompts and 512 max new tokens, scored 1.0 for a generation that "
+            "stops on EOS and 0.0 for one that runs into the cap, so the row's "
+            "score is its eos_termination_rate. The frozen judge's T1-T10 read "
+            "this row. A behavioral protocol instrument: its score never enters "
+            "capability-skill aggregation."
+        ),
+        adapter="chowder_custom",
+    ),
+    dict(
+        benchmark_id="bfcl_assertive_safety",
+        version="v4",
+        name="BFCL safety/injection probes",
+        category="safety",
+        subcategory="tool-side robustness",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=2,
+        scorer="agent",
+        primary_metric="success_rate",
+        skills=("safety.injection_resistance", "tools.recovery"),
+        dataset_source="BFCL v4 safety section",
+        implementation_source="BFCL harness",
+        source="Berkeley Gorilla team",
+        license="Apache-2.0",
+        release_date="2025-07",
+        contamination_risk="medium",
+        adapter="chowder.eval_adapters.native",
+    ),
+    dict(
+        benchmark_id="chowder_sycophancy_battery",
+        version="2026-09-15",
+        name="Chowder honesty battery (native)",
+        category="safety",
+        subcategory="sycophancy, deception, false-completion, calibration",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_FRONTIER",
+        tier=2,
+        scorer="judge",
+        primary_metric="accuracy",
+        skills=("safety.honesty", "knowledge.calibration", "safety.refusal_calibration"),
+        dataset_source="chowder-native scenarios",
+        implementation_source="chowder-native (eval_adapters.chowder_custom)",
+        source="Chowder",
+        license="internal",
+        release_date="2026-09",
+        split_policy="protected",
+        contamination_risk="low",
+        adapter="chowder.eval_adapters.chowder_custom",
+    ),
+]
+
+
+# --------------------------------------------------------------------------- #
+# Metric semantics: one declaration per metric NAME
+# --------------------------------------------------------------------------- #
+#
+# Promotion compares 0..1 scores in which higher is always better. Before a
+# measured metric can be bound onto that scale it needs exactly two
+# declarations: its polarity, and -- where one exists -- the 0..1 scale its raw
+# value lives on. ``normalization=None`` is itself a declaration: it says the
+# metric has no 0..1 scale, and such a metric cannot be bound into a promotion
+# input at all. It is not an omission, and it is not silence.
+#
+# Declaring them per metric *name* rather than per benchmark row is deliberate.
+# Seven names cover all 40 entries, so the polarity of ``accuracy`` is decided
+# once instead of being re-decided (and mis-decided) twenty-four times. A row
+# that needs a different scale does not get to redeclare its metric: it needs a
+# distinct metric name, because a different scale is a different measurement --
+# and two rows declaring the same name differently would make every bound score
+# ambiguous. ``default_registry`` refuses a row that tries.
+
+
+@dataclass(frozen=True)
+class MetricSemantics:
+    """A metric's declared polarity and 0..1 scale, and why."""
+
+    metric: str
+    direction: str
+    normalization: Normalization | None
+    rationale: str
+
+    def __post_init__(self) -> None:
+        if self.direction not in DIRECTIONS:
+            raise ValueError(
+                f"metric {self.metric!r}: unknown direction {self.direction!r}; "
+                f"known: {sorted(DIRECTIONS)}"
+            )
+        if not self.rationale.strip():
+            raise ValueError(
+                f"metric {self.metric!r}: declares no rationale; a polarity/scale "
+                "nobody can read the reasoning for is indistinguishable from a guess"
+            )
+
+
+RATE = "a proportion: already a 0..1 rate in the better direction"
+
+METRIC_SEMANTICS: dict[str, MetricSemantics] = {
+    s.metric: s
+    for s in (
+        MetricSemantics(
+            metric="accuracy",
+            direction="higher_is_better",
+            normalization=Normalization(kind="identity"),
+            rationale=f"correct answers / answers answered -- {RATE}",
+        ),
+        MetricSemantics(
+            metric="pass@1",
+            direction="higher_is_better",
+            normalization=Normalization(kind="identity"),
+            rationale=f"problems solved on the first attempt / problems posed -- {RATE}",
+        ),
+        MetricSemantics(
+            metric="resolved_rate",
+            direction="higher_is_better",
+            normalization=Normalization(kind="identity"),
+            rationale=f"issues resolved / issues attempted -- {RATE}",
+        ),
+        MetricSemantics(
+            metric="success_rate",
+            direction="higher_is_better",
+            normalization=Normalization(kind="identity"),
+            rationale=f"tasks completed / tasks attempted -- {RATE}",
+        ),
+        MetricSemantics(
+            metric="strict_accuracy",
+            direction="higher_is_better",
+            normalization=Normalization(kind="identity"),
+            rationale=(
+                "prompts satisfying every declared constraint / prompts issued -- "
+                f"{RATE}; strictness is in the constraint check, not in the scale"
+            ),
+        ),
+        MetricSemantics(
+            metric="win_rate_vs_human",
+            direction="higher_is_better",
+            normalization=Normalization(kind="identity"),
+            rationale=(
+                "pairwise comparisons won / comparisons judged -- "
+                f"{RATE}; the tie convention belongs to the judge protocol"
+            ),
+        ),
+        MetricSemantics(
+            metric="eos_termination_rate",
+            direction="higher_is_better",
+            normalization=Normalization(kind="identity"),
+            rationale=(
+                "generations that ended with an explicit end-of-turn token / "
+                f"generations attempted -- {RATE}; the turn-termination rate is "
+                "the model's own behavior, not a judged quality"
+            ),
+        ),
+        MetricSemantics(
+            metric="speedup_at_correctness",
+            direction="higher_is_better",
+            normalization=None,
+            rationale=(
+                "a ratio, not a rate: a 1.0x speedup is not a floor of zero and no "
+                "finite speedup is a ceiling of one. Anchoring it would require "
+                "naming a reference implementation and a timing protocol, and "
+                "inventing those here would manufacture the scale a promotion is "
+                "decided on. Declared unscaleable until a reference is pinned."
+            ),
+        ),
+    )
+}
+
+
+def semantics_for(metric: str) -> MetricSemantics:
+    """The declared semantics for one metric name.
+
+    Refuses an undeclared metric rather than guessing a polarity: a metric
+    whose better direction nobody decided cannot be promoted on.
+    """
+    try:
+        return METRIC_SEMANTICS[metric]
+    except KeyError:
+        raise ValueError(
+            f"metric {metric!r} declares no direction/normalization in "
+            f"METRIC_SEMANTICS; a metric whose polarity is undecided cannot be "
+            f"bound into a promotion input. Known: {sorted(METRIC_SEMANTICS)}"
+        ) from None
+
+
+def _with_semantics(row: dict[str, Any]) -> dict[str, Any]:
+    """Attach this row's metric semantics, refusing a competing declaration."""
+    row = dict(row)
+    metric = row.get("primary_metric")
+    if not metric:
+        raise ValueError(
+            f"catalog row {row.get('benchmark_id')!r} names no primary_metric; a "
+            "benchmark whose metric is unnamed cannot declare a polarity or a scale"
+        )
+    redeclared = [key for key in ("direction", "normalization") if key in row]
+    if redeclared:
+        raise ValueError(
+            f"catalog row {row.get('benchmark_id')!r} redeclares "
+            f"{', '.join(redeclared)}; polarity and scale belong to the metric "
+            f"name ({metric!r} -> METRIC_SEMANTICS), so a benchmark needing a "
+            "different scale needs a distinct metric name"
+        )
+    semantics = semantics_for(metric)
+    row["direction"] = semantics.direction
+    row["normalization"] = semantics.normalization
+    return row
+
+
+def default_registry() -> BenchmarkRegistry:
+    """Build the seed registry (validates every row on construction)."""
+    return BenchmarkRegistry(entries=tuple(_entry(_with_semantics(row)) for row in _ROWS))

@@ -2,14 +2,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import asdict
+from pathlib import Path
 
 from .calibration import calibrate_hardware
+from .growth.cli import register_growth_subcommands
 from .hardware import detect_hardware
 from .memory import HardwareProfile, WorkloadProfile, plan_memory
 from .project import load_project
 from .project_runner import run_project
 from .run_events import RunEventPayload, format_event
+from .unsloth_env import (
+    DEFAULT_UNSLOTH_PYTHON,
+    DEFAULT_UNSLOTH_VERSION,
+    UnslothEnvironmentError,
+    doctor_unsloth_environment,
+    format_unsloth_doctor,
+    setup_unsloth_environment,
+)
 
 
 def _memory_plan(args: argparse.Namespace) -> int:
@@ -112,6 +123,162 @@ def _tui(args: argparse.Namespace) -> int:
     return 0
 
 
+def _setup_unsloth(args: argparse.Namespace) -> int:
+    try:
+        result = setup_unsloth_environment(
+            args.root,
+            python_request=args.python,
+            unsloth_version=args.unsloth_version,
+        )
+    except (UnslothEnvironmentError, OSError) as exc:
+        print(f"Unsloth setup failed: {exc}", file=sys.stderr)
+        return 1
+    print(format_unsloth_doctor(result.doctor))
+    print(f"Manifest: {result.manifest_path}")
+    if not result.ok:
+        print(
+            "Unsloth was installed but failed one or more required capability checks.",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def _doctor_unsloth(args: argparse.Namespace) -> int:
+    report = doctor_unsloth_environment(args.root)
+    print(format_unsloth_doctor(report))
+    if report.stderr_tail and not report.ok:
+        print(report.stderr_tail, file=sys.stderr)
+    return 0 if report.ok else 1
+
+
+def _moe_expert_importance(args: argparse.Namespace) -> int:
+    import torch
+    import transformers
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from .hf_resilience import resolve_model_source
+    from .moe_instrumentation import (
+        DEFAULT_CALIBRATION_TEXTS,
+        run_calibration,
+        write_expert_importance_jsonl,
+    )
+    from .moe_planning import ImportanceWeights, build_uniform_pruning_plan
+
+    model_source = resolve_model_source(args.model)
+    device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
+    tokenizer = AutoTokenizer.from_pretrained(model_source)
+    model = AutoModelForCausalLM.from_pretrained(model_source, dtype=torch.bfloat16, device_map=device)
+
+    if args.calibration_file:
+        texts = [
+            line
+            for line in Path(args.calibration_file).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    else:
+        texts = list(DEFAULT_CALIBRATION_TEXTS)
+
+    audit, records = run_calibration(model, tokenizer, texts, device=device, max_length=args.max_length)
+    write_expert_importance_jsonl(
+        args.output,
+        audit=audit,
+        records=records,
+        model_source=model_source,
+        calibration_texts=texts,
+        transformers_version=transformers.__version__,
+    )
+
+    summary: dict[str, object] = {
+        "model_type": audit.model_type,
+        "num_hidden_layers": audit.num_hidden_layers,
+        "moe_layer_count": len(audit.moe_layers),
+        "dense_layer_indices": list(audit.dense_layer_indices),
+        "expert_importance_path": str(args.output),
+    }
+    if args.plan_dir:
+        plan_dir = Path(args.plan_dir)
+        plan_dir.mkdir(parents=True, exist_ok=True)
+        plan_paths: dict[str, str] = {}
+        for retention in args.retention:
+            plan = build_uniform_pruning_plan(
+                records,
+                retention_fraction=retention,
+                minimum_survivors_per_layer=args.minimum_survivors,
+                weights=ImportanceWeights(),
+            )
+            plan_path = plan_dir / f"pruning_plan_retention_{retention:.2f}.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "requested_retention_fraction": plan.requested_retention_fraction,
+                        "actual_retention_fraction": plan.actual_retention_fraction,
+                        "layers": [
+                            {
+                                "layer": layer.layer,
+                                "total_experts": layer.total_experts,
+                                "keep_experts": list(layer.keep_experts),
+                                "remove_experts": list(layer.remove_experts),
+                            }
+                            for layer in plan.layers
+                        ],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            plan_paths[str(retention)] = str(plan_path)
+        summary["pruning_plans"] = plan_paths
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
+
+
+def _moe_account_parameters(args: argparse.Namespace) -> int:
+    """Phase 11 evidence: account a local model directory from its headers.
+
+    Writes the accounting JSON via `write_accounting_json` (whose sha256
+    lands in the summary) and prints a JSON summary — the same shape of
+    workflow as `moe expert-importance`. Errors from the accounting
+    module (missing config, no shards, unmeasurable geometry) propagate:
+    a failed accounting writes nothing, invents nothing.
+    """
+    from .parameter_accounting import (
+        ParameterAccountingError,
+        account_parameters,
+        write_accounting_json,
+    )
+
+    accounting = account_parameters(args.model)
+    evidence_sha256 = write_accounting_json(accounting, args.output)
+
+    summary: dict[str, object] = {
+        "model_dir": accounting.model_dir,
+        "model_type": accounting.model_type,
+        "total_parameters": accounting.total_parameters,
+        "total_bytes": accounting.total_bytes,
+        "num_tensors": accounting.num_tensors,
+        "is_sparse": accounting.is_sparse,
+        "active_parameters": accounting.active_parameters,
+        "routing_geometry": (
+            accounting.router_geometry.to_dict()
+            if accounting.router_geometry is not None
+            else None
+        ),
+        "accounting_path": str(args.output),
+        "accounting_sha256": evidence_sha256,
+    }
+    try:
+        summary["a_label"] = accounting.a_label()
+    except ParameterAccountingError as exc:
+        # Honest absence, not a swallowed error: a dense model has no
+        # a-label by construction, and the reason is recorded verbatim.
+        summary["a_label"] = None
+        summary["a_label_error"] = str(exc)
+    print(json.dumps(summary, indent=2))
+    return 0
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chowder",
@@ -134,6 +301,40 @@ def build_parser() -> argparse.ArgumentParser:
     validate = sub.add_parser("project-validate", help="Validate a project without training")
     validate.add_argument("project", help="Path to a Chowder project JSON file")
     validate.set_defaults(func=_project_validate)
+
+    setup = sub.add_parser("setup", help="Prepare an optional isolated training runtime")
+    setup_targets = setup.add_subparsers(dest="setup_target", required=True)
+    setup_unsloth = setup_targets.add_parser(
+        "unsloth", help="Create or update the isolated Unsloth runtime"
+    )
+    setup_unsloth.add_argument(
+        "--root",
+        default=".",
+        help="Project/workspace root that will contain .chowder/envs/unsloth",
+    )
+    setup_unsloth.add_argument(
+        "--python",
+        default=DEFAULT_UNSLOTH_PYTHON,
+        help="Python version for the isolated runtime",
+    )
+    setup_unsloth.add_argument(
+        "--unsloth-version",
+        default=DEFAULT_UNSLOTH_VERSION,
+        help="Exact Unsloth version to install into the isolated runtime",
+    )
+    setup_unsloth.set_defaults(func=_setup_unsloth)
+
+    doctor = sub.add_parser("doctor", help="Inspect an optional isolated training runtime")
+    doctor_targets = doctor.add_subparsers(dest="doctor_target", required=True)
+    doctor_unsloth = doctor_targets.add_parser(
+        "unsloth", help="Verify Unsloth, CUDA, and 4-bit runtime capability"
+    )
+    doctor_unsloth.add_argument(
+        "--root",
+        default=".",
+        help="Project/workspace root containing .chowder/envs/unsloth",
+    )
+    doctor_unsloth.set_defaults(func=_doctor_unsloth)
 
     memory = sub.add_parser("memory-plan", help="Plan tensor residency across VRAM/RAM/NVMe")
     memory.add_argument("--vram", type=float, required=True)
@@ -170,6 +371,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip optional CUDA transfer measurement",
     )
     calibrate.set_defaults(func=_hardware_calibrate)
+
+    moe = sub.add_parser("moe", help="Elastic MoE downsizing research tooling")
+    moe_targets = moe.add_subparsers(dest="moe_target", required=True)
+    expert_importance = moe_targets.add_parser(
+        "expert-importance",
+        help="Audit a local MoE checkpoint's router/expert structure and emit "
+        "expert_importance.jsonl plus dry-run pruning plans (no model surgery)",
+    )
+    expert_importance.add_argument("--model", required=True, help="Local model directory or HF repo id")
+    expert_importance.add_argument("--output", required=True, help="Path to write expert_importance.jsonl")
+    expert_importance.add_argument(
+        "--calibration-file",
+        default=None,
+        help="Optional file of one calibration text per line; defaults to a small built-in corpus",
+    )
+    expert_importance.add_argument("--max-length", type=int, default=512)
+    expert_importance.add_argument("--cpu", action="store_true", help="Force CPU even if CUDA is available")
+    expert_importance.add_argument(
+        "--plan-dir",
+        default=None,
+        help="Optional directory to write dry-run pruning plan JSON files",
+    )
+    expert_importance.add_argument("--retention", type=float, nargs="+", default=[0.75, 0.5])
+    expert_importance.add_argument("--minimum-survivors", type=int, default=1)
+    expert_importance.set_defaults(func=_moe_expert_importance)
+    account_parameters = moe_targets.add_parser(
+        "account-parameters",
+        help="Account a local model directory's total/active/shared/routed/MTP/"
+        "vision parameter split from its safetensors headers and write the "
+        "evidence JSON (Phase 11; no model load, header reads only)",
+    )
+    account_parameters.add_argument(
+        "--model", required=True, help="Local model directory containing config.json and *.safetensors"
+    )
+    account_parameters.add_argument(
+        "--output", required=True, help="Path to write the accounting evidence JSON"
+    )
+    account_parameters.set_defaults(func=_moe_account_parameters)
+
+    register_growth_subcommands(sub)
     return parser
 
 

@@ -31,6 +31,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .worker_env import worker_env
 from .backends.dataset_influence_worker import _load_rows
 from .checkpoint_bisect import CheckpointVerdict
 
@@ -108,7 +109,7 @@ def _run_loss_worker(
         sys.executable, "-m", "chowder.backends.dataset_influence_worker",
         "--spec", str(spec_path), "--result", str(result_path),
     ]
-    process = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds)
+    process = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds, env=worker_env())
     if process.returncode != 0:
         raise RuntimeError(
             f"dataset influence loss worker ({label}) failed with exit code "

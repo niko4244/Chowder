@@ -2,6 +2,29 @@
 
 Chowder keeps scientific decision-making separate from framework execution. A training backend produces a `TrainingArtifact`; only a separate evaluator may produce an `ExperimentResult` that can enter a promotion gate.
 
+## Engine selection
+
+New PEFT projects select the training implementation explicitly:
+
+```yaml
+backend:
+  type: peft
+  engine: transformers
+```
+
+There is intentionally no `engine: auto` mode. Chowder should not learn or guess an engine preference until both implementations have real apples-to-apples evidence.
+
+The historical spelling remains fully supported for backward compatibility:
+
+```yaml
+backend:
+  type: transformers-peft
+```
+
+It resolves to the Transformers engine without requiring an `engine` key. `backend.type: peft` requires an explicit engine so a project cannot silently change training implementations.
+
+`engine: unsloth` runs through an isolated executor (`chowder/backends/unsloth_peft.py` + `unsloth_worker.py`), never imported into Chowder's normal process -- see [`docs/UNSLOTH.md`](UNSLOTH.md) for the isolated-environment setup (`chowder setup unsloth` / `chowder doctor unsloth`) it requires first. This initial slice is deliberately minimal: one NVIDIA GPU, PEFT LoRA/QLoRA, text-format datasets only, standard PEFT adapter output. Chat-format datasets, checkpoint/resume, replay, and continuing from a parent adapter are not yet supported under this engine. Chowder's `activation_offload`/`optimizer_tiering`/`frozen_layer_streaming` are refused outright (unverified against Unsloth's own patched model/attention implementation) rather than silently no-op'd. Implemented and CI-verified (mocked subprocess, no real Unsloth/CUDA in ordinary CI); real-CUDA acceptance against actual Unsloth training is a separate, not-yet-completed phase.
+
 ## Transformers + PEFT
 
 Install the optional training stack:
@@ -24,7 +47,8 @@ The first backend supports causal-language-model SFT with LoRA or CUDA QLoRA. He
 {
   "seed": 17,
   "backend": {
-    "type": "transformers-peft",
+    "type": "peft",
+    "engine": "transformers",
     "base_model": "Qwen/Qwen3-8B",
     "revision": "optional-hub-revision",
     "dataset": "data/train.jsonl",
@@ -54,7 +78,7 @@ The first backend supports causal-language-model SFT with LoRA or CUDA QLoRA. He
 }
 ```
 
-The experiment graph may store only child patches. `ExperimentGraph.resolve_config()` resolves root-to-child patches before the backend sees the configuration.
+The experiment graph may store only child patches. `ExperimentGraph.resolve_config()` resolves root-to-child patches before the backend sees the configuration. The project runner normalizes canonical `peft + transformers` selection at the executor boundary so the existing strict Transformers executor contract remains unchanged internally.
 
 ### Evidence captured for every successful run
 

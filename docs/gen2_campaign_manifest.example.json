@@ -1,0 +1,47 @@
+{
+  "cycle_id": "gen2-campaign",
+  "parent_version": "gen1",
+  "base_model_path": "F:/llm-models/Qwen3.8-9B-abliterated-25-bf16",
+  "base_model_digest": "59e767aab1dabceef098ceb367d872ef735114412383ae8e622a95c64297555f",
+  "parent_adapter_path": "C:/Users/nikma/Chowder-Protected/runs/2026-09-17-gen1-protocol-compliance/attempts/attempt-10/work/.chowder/runs/gen1-protocol-compliance-a10-46861b2929bd/adapter",
+  "parent_adapter_digest": "ca8769c5e7e06575c95501391e328811b55f2208d9cbb10b86e95eb40d8786cd",
+  "state_root": "C:/Users/nikma/Chowder-Protected/runs/gen2",
+  "target_benchmarks": ["generation-diagnostics@gen1-eval-protocol-v1"],
+  "protected_benchmarks": ["math500@2024-04", "mgsm@2022-11"],
+  "broad_benchmarks": ["math500@2024-04"],
+  "calibration_benchmarks": [],
+  "reliability_benchmarks": [],
+  "budget": {
+    "device_gpu_hours_ceiling_per_recipe": 0.30,
+    "wall_gpu_hours_ceiling_per_recipe": 0.75,
+    "device_gpu_hours_ceiling_campaign": 0.60,
+    "wall_gpu_hours_ceiling_campaign": 1.50,
+    "device_time_measured": false
+  },
+  "recipes": ["recipe-a", "recipe-b"],
+  "candidate_selection_policy": "first_successful",
+  "stopping_rules": [
+    "stop on admission refusal",
+    "stop on campaign overrun"
+  ],
+  "promotion_policy_version": "promotion-policy-v2-provenance-settlement",
+  "protection": {
+    "trusted_ancestor_version": "gen0",
+    "slice_regression_max": 0.0625,
+    "n_samples": 16,
+    "seed": 1234,
+    "shuffle": false,
+    "decoding": {"temperature": 0.0, "do_sample": false, "max_new_tokens": 512},
+    "prompt_policy": "chat_template"
+  },
+  "baseline_eval_report_path": "docs/gen2/inputs/gen0-baseline-evaluation.json",
+  "contamination_manifest_path": "docs/gen2/inputs/contamination.json",
+  "project_template_path": "docs/gen2/inputs/project-template.json",
+  "training_material_path": "docs/gen2/inputs/training-material.json",
+  "data_registry_path": "docs/gen2/inputs/data-registry.json",
+  "hardware_budget_path": "docs/gen2/inputs/hardware-budget.json",
+  "parent_profile_path": "docs/gen2/inputs/parent-profile.json",
+  "parent_eval_report_path": "docs/gen2/inputs/parent-eval-report.json",
+  "evaluation_material_path": "docs/gen2/inputs/evaluation-material.json",
+  "notes": "Example declaration for `chowder growth campaign run`. Identity is two objects: `base_model_path`/`base_model_digest` name the dense base, and `parent_adapter_path`/`parent_adapter_digest` name the parent generation's adapter over it (omit both when the parent *is* the base). Each digest is verified against its own tree before compute; a base digest is never accepted as an adapter digest. Every path above is relative to the repository root and must exist before a run; the runner refuses a declared-but-missing input by name. `recipes` must be exactly the ids `chowder growth campaign plan <this file>` prints -- the planner owns recipe identity, and a run refuses an id the planner did not propose. The two ids here are placeholders and deliberately do not match, so `plan` reports \"recipes_declared\": false. `device_time_measured: false` is the honest setting for the current trainer, which charges wall time: the device ceilings then bound the *projected plan* (per recipe and for the campaign as a whole) and the run records that they were not settled against measured device time. `protection` declares the branch-protection policy certification applies *before* any lineage record: the trusted ancestor (`gen0`), the regression tolerance, and the mini-slice protocol a protected row must match. `baseline_eval_report_path` is the arm those slices are compared against. The candidate arm is deliberately absent from this list: it is a run *output*, produced by evaluating the adapter the run trained and selected (the run requires an evaluation seam and refuses without one), and a report prepared outside the run is no longer an accepted input. `evaluation_material_path` is the other half of that sentence: the report is an output, but the *data* it is measured on is an input, so the campaign declares one dataset per declared benchmark and the production evaluator measures exactly those items. Its shape is `{\"suites\": [{\"benchmark_qualified_id\": \"math500@2024-04\", \"name\": \"math500\", \"dataset\": \"<jsonl path>\", \"scoring\": \"normalized_exact_match\", \"metric\": \"accuracy\"}]}`: one suite per declared benchmark id, each naming a JSONL file whose items carry the scoring fields. The evaluator writes the first `protection.n_samples` items of each dataset, in dataset order, into the run root as the slice it measures, so a dataset shorter than the declared protocol refuses before any model load. A campaign that declares no protection policy, or whose candidate evaluation does not name the artifact the run selected, refuses or reaches INCONCLUSIVE and records no promoted generation."
+}

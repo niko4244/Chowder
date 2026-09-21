@@ -41,29 +41,34 @@ class _FrozenLinearRestream(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, input, weight_gpu, bias_gpu, weight_cpu, bias_cpu, device):
+    def forward(ctx, input, weight_gpu, bias_gpu, weight_cpu, bias_cpu, device, backward_runtime, idx):
         ctx.save_for_backward(input)
         ctx.weight_cpu = weight_cpu
         ctx.bias_cpu = bias_cpu
         ctx.device = device
         ctx.has_bias = bias_cpu is not None
+        ctx.backward_runtime = backward_runtime
+        ctx.idx = idx
         return F.linear(input, weight_gpu, bias_gpu)
 
     @staticmethod
     def backward(ctx, grad_output):
         (input,) = ctx.saved_tensors
-        # Backward-direction prefetch (streaming layer i-1's weight ahead
-        # while layer i's backward computes) is a documented near-term
-        # follow-up, not yet implemented -- this re-stream is synchronous.
-        # Correctness does not depend on it; only backward-pass overlap
-        # does.
-        weight_gpu = ctx.weight_cpu.to(ctx.device, non_blocking=True)
+        if ctx.backward_runtime is not None:
+            # One-layer-ahead prefetch in backward's own (decreasing-index)
+            # visitation order -- see FrozenLayerPrefetchRuntime.take_backward.
+            weight_gpu, _ = ctx.backward_runtime.take_backward(ctx.idx)
+        else:
+            # Synchronous fallback (backward_prefetch=False): re-stream this
+            # layer's weight fresh with no lookahead, identical to this
+            # module's original behavior.
+            weight_gpu = ctx.weight_cpu.to(ctx.device, non_blocking=True)
         grad_input = grad_output @ weight_gpu
         grad_bias = None
         if ctx.has_bias:
             grad_bias = grad_output.reshape(-1, grad_output.shape[-1]).sum(dim=0)
         del input  # unused; input is needed only for shape/dtype context autograd already has
-        return grad_input, None, None, None, grad_bias, None
+        return grad_input, None, None, None, grad_bias, None, None, None
 
 
 class FrozenLayerPrefetchRuntime:
@@ -96,7 +101,7 @@ class FrozenLayerPrefetchRuntime:
         self.bytes_transferred = 0
 
     def _launch_prefetch(self, idx: int) -> None:
-        if idx >= len(self.weights_cpu) or idx in self.pending:
+        if idx < 0 or idx >= len(self.weights_cpu) or idx in self.pending:
             return
         with torch.cuda.stream(self.stream):
             weight_gpu = self.weights_cpu[idx].to(self.device, non_blocking=True)
@@ -129,6 +134,31 @@ class FrozenLayerPrefetchRuntime:
         self._launch_prefetch(idx + 1)
         return weight_gpu, bias_gpu
 
+    def start_backward(self) -> None:
+        """Call once before loss.backward() -- kicks off the *last* layer's
+        prefetch, since backward visits layers in decreasing index order and
+        nothing computes ahead of the last one to overlap with."""
+        self._launch_prefetch(len(self.weights_cpu) - 1)
+
+    def take_backward(self, idx: int) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Mirror of take(), but walks layers in decreasing index order --
+        the order backward actually visits them in a sequential stack: layer
+        i+1's backward node necessarily runs before layer i's, since layer
+        i's forward output feeds layer i+1's forward input, regardless of
+        what unrelated backward nodes (attention, LoRA, norms, ...) execute
+        in between. Reuses the same pending/stream/bytes_transferred state
+        as forward's take() -- forward has already fully completed by the
+        time backward starts, so there is no concurrent use to race."""
+        if idx not in self.pending:
+            self._launch_prefetch(idx)
+        weight_gpu, bias_gpu, event = self.pending.pop(idx)
+        torch.cuda.current_stream(self.device).wait_event(event)
+        weight_gpu.record_stream(torch.cuda.current_stream(self.device))
+        if bias_gpu is not None:
+            bias_gpu.record_stream(torch.cuda.current_stream(self.device))
+        self._launch_prefetch(idx - 1)
+        return weight_gpu, bias_gpu
+
 
 class StreamedFrozenLayers:
     """Patches a real PEFT-wrapped model's frozen `base_layer` Linear
@@ -148,7 +178,15 @@ class StreamedFrozenLayers:
     Linear the same way regardless of model family.
     """
 
-    def __init__(self, model: nn.Module, device: torch.device) -> None:
+    def __init__(self, model: nn.Module, device: torch.device, *, backward_prefetch: bool = True) -> None:
+        """``backward_prefetch=True`` (default) streams each frozen layer's
+        weight one layer ahead during backward, overlapping the H2D
+        transfer with the previous layer's backward compute -- see
+        FrozenLayerPrefetchRuntime.take_backward. ``backward_prefetch=False``
+        retains this module's original synchronous re-stream (no lookahead)
+        as an explicit fallback; both produce bit-identical
+        loss/gradients (see tests/test_memory_fabric.py)."""
+        self.backward_prefetch = backward_prefetch
         if device.type != "cuda":
             # pin_memory() and the dedicated CUDA prefetch stream both
             # require a real accelerator -- there is nothing to stream a
@@ -209,9 +247,23 @@ class StreamedFrozenLayers:
             weight_gpu, bias_gpu = self.runtime.take(idx)
             weight_cpu = self.runtime.weights_cpu[idx]
             bias_cpu = self.runtime.biases_cpu[idx]
-            return _FrozenLinearRestream.apply(x, weight_gpu, bias_gpu, weight_cpu, bias_cpu, self.device)
+            backward_runtime = self.runtime if self.backward_prefetch else None
+            return _FrozenLinearRestream.apply(
+                x, weight_gpu, bias_gpu, weight_cpu, bias_cpu, self.device, backward_runtime, idx
+            )
 
         return _forward
+
+    def start_backward(self) -> None:
+        """Call once per step, immediately before loss.backward() -- kicks
+        off the last frozen layer's backward prefetch. A no-op when
+        backward_prefetch=False (the synchronous fallback), and safe (if
+        merely less effective) to skip even when enabled: take_backward
+        self-launches its own prefetch on demand if start_backward was
+        never called, it just loses the lookahead for the first layer
+        backward visits."""
+        if self.backward_prefetch:
+            self.runtime.start_backward()
 
     def start_step(self) -> None:
         """Call once per forward pass, before the model's own forward --
@@ -234,11 +286,18 @@ class StreamedFrozenLayers:
         self._originals = {}
 
 
-def stream_frozen_layers(model: nn.Module, device: torch.device) -> StreamedFrozenLayers:
+def stream_frozen_layers(
+    model: nn.Module, device: torch.device, *, backward_prefetch: bool = True
+) -> StreamedFrozenLayers:
     """Patch every frozen PEFT `base_layer` Linear in `model` to stream
     its weight from pinned CPU RAM with one-layer-ahead async prefetch,
     instead of staying GPU-resident. Returns a StreamedFrozenLayers
-    handle -- call .start_step() before each forward pass, and .restore()
-    to undo the patch and return the model to normal resident training.
+    handle -- call .start_step() before each forward pass, .start_backward()
+    immediately before loss.backward(), and .restore() to undo the patch
+    and return the model to normal resident training.
+
+    backward_prefetch=False disables backward's own one-layer-ahead
+    lookahead (see StreamedFrozenLayers.__init__), falling back to this
+    module's original synchronous re-stream during backward.
     """
-    return StreamedFrozenLayers(model, device)
+    return StreamedFrozenLayers(model, device, backward_prefetch=backward_prefetch)

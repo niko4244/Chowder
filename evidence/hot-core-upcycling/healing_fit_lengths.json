@@ -1,0 +1,98 @@
+{
+  "model": "F:\\llm-models\\Qwen3.8-9B-HotCore-E16-k2-h2176",
+  "card_total_gib": 15.928,
+  "recipe": {
+    "prepare_model_for_kbit_training": false,
+    "trainable": "mlp.gate.weight + mlp.shared_expert_gate.weight",
+    "gradient_checkpointing": true,
+    "optimizer": "AdamW",
+    "quantization_skip_modules": [
+      "shared_expert_gate"
+    ]
+  },
+  "trainable_params": 2228224,
+  "frozen_params": 6974091776,
+  "layers_with_router_gate": 32,
+  "layers_with_shared_expert_gate": 32,
+  "gradient_reachability_pass": true,
+  "gradient_reachability_error": null,
+  "stages": {
+    "after load": {
+      "allocated_gib": 11.239,
+      "peak_reserved_gib": 11.363
+    },
+    "after freeze + ckpt": {
+      "allocated_gib": 11.239,
+      "peak_reserved_gib": 11.363
+    }
+  },
+  "steps": [
+    {
+      "seq_len": 384,
+      "ok": true,
+      "seconds": 5.03,
+      "peak_reserved_gib": 15.514,
+      "headroom_gib": 0.415,
+      "router_grad_norm": 0.9507331855875825,
+      "shared_gate_grad_norm": 4.779658058997992,
+      "verdict": "fits"
+    },
+    {
+      "seq_len": 512,
+      "ok": true,
+      "seconds": 5.67,
+      "peak_reserved_gib": 15.531,
+      "headroom_gib": 0.397,
+      "router_grad_norm": 0.9261917413525943,
+      "shared_gate_grad_norm": 2.9296010345203074,
+      "verdict": "fits"
+    },
+    {
+      "seq_len": 768,
+      "ok": true,
+      "seconds": 7.08,
+      "peak_reserved_gib": 15.547,
+      "headroom_gib": 0.381,
+      "router_grad_norm": 0.6433539696450377,
+      "shared_gate_grad_norm": 2.139751020419728,
+      "verdict": "fits"
+    },
+    {
+      "seq_len": 1024,
+      "ok": true,
+      "seconds": 9.05,
+      "peak_reserved_gib": 16.508,
+      "headroom_gib": -0.58,
+      "router_grad_norm": 0.6130317257586864,
+      "shared_gate_grad_norm": 2.545286931761426,
+      "verdict": "oversubscribed"
+    },
+    {
+      "seq_len": 1536,
+      "ok": true,
+      "seconds": 145.61,
+      "peak_reserved_gib": 19.385,
+      "headroom_gib": -3.456,
+      "router_grad_norm": 0.5344657145464411,
+      "shared_gate_grad_norm": 2.5174039872783207,
+      "verdict": "thrashing"
+    },
+    {
+      "seq_len": 2048,
+      "ok": true,
+      "seconds": 137.11,
+      "peak_reserved_gib": 23.207,
+      "headroom_gib": -7.279,
+      "router_grad_norm": 0.412493990402055,
+      "shared_gate_grad_norm": 2.365858226111964,
+      "verdict": "thrashing"
+    }
+  ],
+  "verdict": {
+    "max_fitting_seq_len": 768,
+    "seconds_per_step_at_ceiling": 7.08,
+    "peak_reserved_gib_at_ceiling": 15.547,
+    "headroom_gib_at_ceiling": 0.381,
+    "note": "torch.cuda.OutOfMemoryError never fires here: Windows WDDM oversubscribes VRAM into system RAM, so judge on headroom and step-time blowup, not on an OOM exception."
+  }
+}

@@ -75,6 +75,7 @@ def run_experiment(spec: TransformersPeftRunSpec, *, batch_size: int = 2) -> dic
         started = time.perf_counter()
         streamed.start_step()
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
+        streamed.start_backward()
         outputs.loss.backward()
         torch.cuda.synchronize(device)
         elapsed = time.perf_counter() - started

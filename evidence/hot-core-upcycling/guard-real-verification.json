@@ -1,0 +1,19 @@
+{
+  "transformers": {
+    "verdict": "ACCEPTED",
+    "report": {
+      "adapter_dir": "F:\\llm-models\\_a4b\\level2-transformers-v4\\.chowder\\runs\\level2-transformers-8093aa1d784f\\adapter",
+      "saved_tensors": 400,
+      "live_lora_parameters": 400,
+      "matched_keys": 400,
+      "lora_B_parameters": 200,
+      "lora_B_nonzero": 200,
+      "example_saved_key": "base_model.model.model.layers.0.linear_attn.in_proj_qkv.lora_A.weight",
+      "example_live_parameter": "base_model.model.model.layers.0.linear_attn.in_proj_qkv.lora_A.default.weight"
+    }
+  },
+  "unsloth": {
+    "verdict": "REFUSED",
+    "error": "adapter at F:\\llm-models\\_a4b\\level2-unsloth\\.chowder\\runs\\level2-unsloth-256027c96e72\\adapter shares NO parameter names with the loaded model: 400 saved tensors, 256 adapter parameters on the model, 0 matched. PeftModel.from_pretrained does not fail on this -- it warns about missing keys and leaves every LoRA B at zero, so the model is unchanged and any score would describe the BASE model.\n  example saved key:      base_model.model.model.language_model.layers.0.linear_attn.in_proj_qkv.lora_A.weight\n  example live parameter: base_model.model.model.layers.0.mlp.down_proj.lora_A.default.weight\nA prefix difference here usually means the adapter was trained against a different model class than the one just loaded (e.g. a *ForConditionalGeneration wrapper, whose decoder layers sit under `language_model.`, versus a text-only CausalLM)."
+  }
+}

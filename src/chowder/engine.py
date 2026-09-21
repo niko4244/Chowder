@@ -12,11 +12,37 @@ from .tournament import RankedCandidate, rank_candidates
 @dataclass
 class EvolutionEngine:
     goal: Goal
-    baseline: ExperimentResult
+    baseline: ExperimentResult | None
     graph: ExperimentGraph = field(default_factory=ExperimentGraph)
     spent_gpu_hours: float = 0.0
     reserved_gpu_hours: float = 0.0
+    baseline_deferred: bool = False
     _reservations: dict[str, float] = field(default_factory=dict)
+
+    def set_baseline(self, result: ExperimentResult) -> None:
+        """Complete a deferred baseline with its real measurement.
+
+        The amortized project path defers the automatic baseline to the
+        candidate's own resident-pair evaluation; when that measurement
+        arrives, this installs it. Deliberately single-shot: a baseline is
+        a measurement, and re-measuring it into the engine would let a
+        second result silently overwrite the one the gate compared
+        against. Reconciliation replaces the provisional spend the engine
+        was constructed with, rather than stacking on it.
+        """
+        if not self.baseline_deferred:
+            raise RuntimeError(
+                "set_baseline requires a deferred baseline: this engine's baseline "
+                "is already measured, and a second measurement is not a baseline"
+            )
+        if not isinstance(result, ExperimentResult):
+            raise TypeError("set_baseline accepts an ExperimentResult")
+        provisional = self.spent_gpu_hours
+        self.baseline = result
+        self.baseline_deferred = False
+        self.spent_gpu_hours = max(0.0, self.spent_gpu_hours - provisional) + float(
+            result.gpu_hours
+        )
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -26,6 +52,23 @@ class EvolutionEngine:
             number = float(value)
             if not math.isfinite(number) or number < 0:
                 raise ValueError(f"{label} must be finite and non-negative")
+        if not isinstance(self.baseline_deferred, bool):
+            raise ValueError("baseline_deferred must be a bool")
+        if self.baseline_deferred:
+            # A deferred baseline is a measurement the engine does not have:
+            # there is no honest placeholder to hold instead of None, and an
+            # engine claiming both modes is a contradiction.
+            if self.baseline is not None:
+                raise ValueError(
+                    "baseline_deferred=True requires no baseline: a deferred "
+                    "measurement has nothing to hold yet"
+                )
+        elif self.baseline is None:
+            raise ValueError(
+                "baseline is required unless baseline_deferred=True: an engine "
+                "without a measured baseline and without a declared deferral "
+                "cannot rank anything"
+            )
         if self.spent_gpu_hours + self.reserved_gpu_hours > self.goal.gpu_hour_budget + 1e-12:
             raise ValueError("engine spent + reserved GPU-hours exceed goal budget")
 
@@ -163,6 +206,11 @@ class EvolutionEngine:
         results = tuple(results)
         if any(not isinstance(result, ExperimentResult) for result in results):
             raise TypeError("adjudicate accepts evaluated ExperimentResult objects only")
+        if self.baseline_deferred:
+            raise RuntimeError(
+                "cannot adjudicate against a deferred baseline: the measurement has "
+                "not landed; complete it with set_baseline before ranking candidates"
+            )
         result_ids = [result.experiment_id for result in results]
         if len(result_ids) != len(set(result_ids)):
             raise ValueError("adjudicate received duplicate experiment results")
@@ -187,6 +235,15 @@ class EvolutionEngine:
         return ranked
 
     def promote(self, ranked: Iterable[RankedCandidate]) -> ExperimentResult | None:
+        ranked = tuple(ranked)
+        if self.baseline_deferred and ranked:
+            # An empty ranking promotes nothing and is the normal shape of a
+            # failed generation; a NON-empty ranking while the baseline is
+            # still deferred would mean the gate ranked against fiction.
+            raise RuntimeError(
+                "cannot promote against a deferred baseline: complete the baseline "
+                "measurement with set_baseline first"
+            )
         for candidate in ranked:
             if candidate.decision.accepted:
                 self.baseline = candidate.result

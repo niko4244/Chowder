@@ -1171,6 +1171,106 @@ class RunRegistry:
                 "analysis": json.loads(row[8]),
             }
 
+    def record_teacher_signal(
+        self,
+        *,
+        entry_key: str,
+        artifact_digest: str,
+        request_digest: str,
+        payload_file_sha256: str,
+        signal_kind: str,
+        teacher_id: str,
+        model_revision: str,
+        tokenizer_identity_sha256: str | None,
+        signal_id: str,
+        stored_at: str,
+        metadata_json: str,
+    ) -> None:
+        """Append one teacher-signal ledger row (Teacher Fabric Slice B).
+
+        Immutably keyed by the store content address: an identical replay
+        is idempotent, a divergent one is a RegistryInvariantError -- the
+        same discipline as every other evidence table.
+        """
+        columns = (
+            "entry_key",
+            "artifact_digest",
+            "request_digest",
+            "payload_file_sha256",
+            "signal_kind",
+            "teacher_id",
+            "model_revision",
+            "tokenizer_identity_sha256",
+            "signal_id",
+            "stored_at",
+            "metadata_json",
+        )
+        values = (
+            entry_key,
+            artifact_digest,
+            request_digest,
+            payload_file_sha256,
+            signal_kind,
+            teacher_id,
+            model_revision,
+            tokenizer_identity_sha256,
+            signal_id,
+            stored_at,
+            metadata_json,
+        )
+        with self._conn:
+            self._insert_immutable(
+                table="teacher_signals", key_column="entry_key", key=entry_key,
+                columns=columns, values=values,
+            )
+
+    def list_teacher_signals(self) -> Iterable[dict[str, object]]:
+        rows = self._conn.execute(
+            """SELECT entry_key, artifact_digest, request_digest, payload_file_sha256,
+                      signal_kind, teacher_id, model_revision, tokenizer_identity_sha256,
+                      signal_id, stored_at, metadata_json
+               FROM teacher_signals ORDER BY rowid"""
+        )
+        for row in rows:
+            yield {
+                "entry_key": row[0],
+                "artifact_digest": row[1],
+                "request_digest": row[2],
+                "payload_file_sha256": row[3],
+                "signal_kind": row[4],
+                "teacher_id": row[5],
+                "model_revision": row[6],
+                "tokenizer_identity_sha256": row[7],
+                "signal_id": row[8],
+                "stored_at": row[9],
+                "metadata": json.loads(row[10]),
+            }
+
+    def teacher_signal_row(self, entry_key: str) -> dict[str, object] | None:
+        """The ledger row for *entry_key*, or None when never recorded."""
+        row = self._conn.execute(
+            """SELECT entry_key, artifact_digest, request_digest, payload_file_sha256,
+                      signal_kind, teacher_id, model_revision, tokenizer_identity_sha256,
+                      signal_id, stored_at, metadata_json
+               FROM teacher_signals WHERE entry_key = ?""",
+            (entry_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "entry_key": row[0],
+            "artifact_digest": row[1],
+            "request_digest": row[2],
+            "payload_file_sha256": row[3],
+            "signal_kind": row[4],
+            "teacher_id": row[5],
+            "model_revision": row[6],
+            "tokenizer_identity_sha256": row[7],
+            "signal_id": row[8],
+            "stored_at": row[9],
+            "metadata": json.loads(row[10]),
+        }
+
     def lineage(self, experiment_id: str) -> tuple[str, ...]:
         lineage: list[str] = []
         current = experiment_id
@@ -1203,6 +1303,43 @@ class RunRegistry:
                 artifact_ref=artifact_ref,
                 evidence=json.loads(evidence),
             )
+
+    def audit_stranded_results(self) -> list[dict[str, object]]:
+        """Flag results stranded on a non-terminal experiment row.
+
+        A result row whose experiment still reports ``planned`` or ``running``
+        is a durable-evidence disagreement: the row carries a measured score
+        while its status claims the experiment has not run (or has not
+        finished). This is the audit for the class of defect the automatic-
+        baseline settlement fixed for one writer — it keeps the class from
+        recurring silently through any other writer.
+
+        An orphan result (no experiment row at all) cannot exist here:
+        ``results.experiment_id`` carries a foreign key into ``experiments``,
+        so the schema refuses it at insert time — the audit only has to watch
+        statuses.
+        """
+        terminal = {"passed", "failed", "rejected"}
+        status_by_id = {
+            row[0]: row[1]
+            for row in self._conn.execute("SELECT experiment_id, status FROM experiments")
+        }
+        findings: list[dict[str, object]] = []
+        for experiment_id, _metrics, gpu_hours, artifact_ref, _evidence in self._conn.execute(
+            "SELECT experiment_id, metrics_json, gpu_hours, artifact_ref, evidence_json "
+            "FROM results ORDER BY rowid"
+        ):
+            status = status_by_id.get(experiment_id)
+            if status not in terminal:
+                findings.append(
+                    {
+                        "experiment_id": experiment_id,
+                        "status": status,
+                        "gpu_hours": gpu_hours,
+                        "artifact_ref": artifact_ref,
+                    }
+                )
+        return findings
 
     def record_event(self, event: RunEventPayload) -> None:
         """Append one structured run event to the durable history.

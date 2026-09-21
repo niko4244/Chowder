@@ -40,6 +40,15 @@ def _write_checkpoint(
     trainer_dir = tmp_path / ".chowder" / "runs" / run_id / "adapter" / "trainer"
     checkpoint_dir = trainer_dir / f"checkpoint-{step}"
     checkpoint_dir.mkdir(parents=True)
+    # P7: resumable state, not just a directory. A checkpoint without
+    # optimizer/scheduler state is reported invalid by discovery, because
+    # Trainer would otherwise restore the weights and start the optimizer over.
+    (checkpoint_dir / "optimizer.pt").write_bytes(b"optimizer-state")
+    (checkpoint_dir / "scheduler.pt").write_bytes(b"scheduler-state")
+    (checkpoint_dir / "rng_state.pth").write_bytes(b"rng-state")
+    (checkpoint_dir / "trainer_state.json").write_text(
+        json.dumps({"global_step": step}), encoding="utf-8"
+    )
     spec = TransformersPeftRunSpec.from_resolved_config(
         manifest_config,
         work_dir=work_dir,
@@ -63,6 +72,54 @@ def _write_checkpoint(
         json.dumps(bound_inputs), encoding="utf-8"
     )
     return checkpoint_dir
+
+
+def test_a_checkpoint_without_optimizer_state_is_never_offered_for_resume(tmp_path):
+    """The auto-resume hazard: a killed process leaves weights on disk.
+
+    The manifest matches, so the identity check alone would call this
+    compatible and hand it to a resume; the state inventory catches it.
+    """
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    checkpoint_dir = _write_checkpoint(
+        tmp_path, run_id="e1-abc", step=50, manifest_config=config, work_dir=tmp_path
+    )
+    (checkpoint_dir / "optimizer.pt").unlink()  # the save never got that far
+
+    result = discover_checkpoints(
+        work_dir=tmp_path, resolved_config=config, context=_context(tmp_path, config)
+    )
+
+    assert len(result) == 1
+    discovered = result[0]
+    assert discovered.valid is False
+    assert "training_state" in discovered.mismatches
+    assert discovered.mismatches["training_state"]["missing"] == ["optimizer"]
+    assert "training_state" in discovered.reason
+    # The inventory is carried, not inferred: partial, with the step still known.
+    assert discovered.state is not None
+    assert discovered.state["state"] == "partial"
+    assert discovered.state["global_step"] == 50
+
+
+def test_a_complete_checkpoint_reports_its_measured_state(tmp_path):
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"hello"}\n')
+    config = _config(str(data))
+    _write_checkpoint(
+        tmp_path, run_id="e1-abc", step=50, manifest_config=config, work_dir=tmp_path
+    )
+
+    result = discover_checkpoints(
+        work_dir=tmp_path, resolved_config=config, context=_context(tmp_path, config)
+    )
+
+    assert result[0].valid is True
+    assert result[0].state is not None
+    assert result[0].state["state"] == "complete"
+    assert result[0].state["global_step"] == 50
 
 
 def test_no_runs_directory_returns_empty(tmp_path):

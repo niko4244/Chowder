@@ -228,6 +228,241 @@ def test_patched_model_survives_a_blanket_to_device_call():
 
 
 @_REAL_ML_SMOKE
+def test_backward_prefetch_true_and_false_produce_bit_identical_gradients():
+    """backward_prefetch is purely a scheduling change (when the H2D copy
+    for a given layer's weight is *launched*, not what value it produces)
+    -- loss and LoRA gradients must be identical whether or not backward's
+    one-layer-ahead lookahead is enabled."""
+    import torch
+    from transformers import AutoTokenizer
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device available for a real streaming comparison")
+
+    from chowder.memory_fabric import stream_frozen_layers
+
+    tok = AutoTokenizer.from_pretrained(_TINY_MODEL)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    inputs = _build_inputs(tok, "cuda")
+
+    def _run(backward_prefetch: bool) -> tuple[float, dict]:
+        torch.manual_seed(0)
+        model = _build_lora_model()
+        model.train()
+        model.to("cuda")
+        streamed = stream_frozen_layers(model, torch.device("cuda"), backward_prefetch=backward_prefetch)
+        streamed.start_step()
+        out = model(**inputs, labels=inputs["input_ids"])
+        streamed.start_backward()
+        out.loss.backward()
+        torch.cuda.synchronize()
+        grads = {
+            n: p.grad.detach().clone().cpu()
+            for n, p in model.named_parameters()
+            if p.requires_grad and p.grad is not None
+        }
+        return out.loss.item(), grads
+
+    loss_with_prefetch, grads_with_prefetch = _run(True)
+    loss_without_prefetch, grads_without_prefetch = _run(False)
+
+    assert loss_with_prefetch == pytest.approx(loss_without_prefetch, abs=1e-6)
+    assert set(grads_with_prefetch) == set(grads_without_prefetch)
+    assert grads_with_prefetch, "no trainable gradients were compared -- test setup is broken"
+    for name in grads_with_prefetch:
+        assert torch.allclose(grads_with_prefetch[name], grads_without_prefetch[name], atol=1e-5), name
+
+
+@_REAL_ML_SMOKE
+def test_backward_prefetch_is_correct_across_repeated_iterations():
+    """Same race-condition concern as forward's one-layer-ahead prefetch
+    (a prefetched tensor's memory reused before the compute stream finished
+    reading it), checked specifically for backward's own lookahead across
+    several real steps."""
+    import torch
+    from transformers import AutoTokenizer
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device available for a real streaming comparison")
+
+    from chowder.memory_fabric import stream_frozen_layers
+
+    tok = AutoTokenizer.from_pretrained(_TINY_MODEL)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+
+    model = _build_lora_model()
+    model.train()
+    model.to("cuda")
+    streamed = stream_frozen_layers(model, torch.device("cuda"), backward_prefetch=True)
+    inputs = _build_inputs(tok, "cuda")
+
+    losses = []
+    for _ in range(5):
+        model.zero_grad(set_to_none=True)
+        streamed.start_step()
+        out = model(**inputs, labels=inputs["input_ids"])
+        streamed.start_backward()
+        out.loss.backward()
+        torch.cuda.synchronize()
+        losses.append(out.loss.item())
+
+    assert len(set(losses)) == 1, f"loss drifted across repeated iterations: {losses}"
+
+
+def _build_synthetic_frozen_stack(num_layers: int, dim: int, device: str):
+    """A PEFT-shaped (`.base_layer` + small trainable adapter) synthetic
+    stack sized so H2D transfer time (64MB/layer at dim=4096, fp32) and
+    backward compute time (a [rows, dim] x [dim, dim] matmul) are the same
+    order of magnitude -- the regime where overlapping one layer's transfer
+    with the previous layer's compute actually has something to hide behind.
+    Deliberately built from plain torch (no transformers/peft dependency):
+    StreamedFrozenLayers detects targets generically via
+    `hasattr(module, "base_layer")`, so this exercises the exact same real
+    patch path a real PEFT model does, just at a size the tiny production
+    smoke-test model is too small to show a meaningful timing difference at
+    (see frozen_layer_streaming.py's own documented caveat about this)."""
+    import torch
+    from torch import nn
+
+    class _Block(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.base_layer = nn.Linear(dim, dim, bias=True)
+            for p in self.base_layer.parameters():
+                p.requires_grad = False
+            self.lora_a = nn.Linear(dim, 8, bias=False)
+            self.lora_b = nn.Linear(8, dim, bias=False)
+            nn.init.zeros_(self.lora_b.weight)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.base_layer(x) + self.lora_b(self.lora_a(x))
+
+    class _Stack(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.blocks = nn.ModuleList([_Block() for _ in range(num_layers)])
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            for block in self.blocks:
+                x = torch.relu(block(x))
+            return x
+
+    torch.manual_seed(0)
+    return _Stack().to(device)
+
+
+@_REAL_ML_SMOKE
+def test_backward_prefetch_gives_a_real_measured_throughput_gain_with_no_vram_regression():
+    """The actual throughput claim this feature exists for: backward wall
+    time with prefetch enabled must be measurably lower than with it
+    disabled, on a synthetic stack sized so per-layer H2D transfer and
+    per-layer backward compute are comparable (frozen_layer_streaming_
+    worker.py's real-model calibration documents that the tiny smoke-test
+    model is too small for this -- compute there is too cheap to hide any
+    transfer behind), while peak VRAM must not regress relative to the
+    already-proven forward-only-prefetch baseline, and loss/gradients must
+    stay identical to a fully resident run."""
+    import statistics
+    import time
+
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device available for a real streaming comparison")
+
+    from chowder.memory_fabric import stream_frozen_layers
+
+    num_layers = 12
+    dim = 4096
+    rows = 4096
+    device = "cuda"
+
+    def _inputs():
+        torch.manual_seed(1)
+        return torch.randn(rows, dim, device=device)
+
+    def _resident_step(model, x):
+        torch.cuda.synchronize()
+        out = model(x)
+        loss = out.pow(2).mean()
+        loss.backward()
+        torch.cuda.synchronize()
+        model.zero_grad(set_to_none=True)
+        return loss.item()
+
+    # Correctness: streamed (either mode) must match a fully resident run.
+    resident_model = _build_synthetic_frozen_stack(num_layers, dim, device)
+    resident_loss = _resident_step(resident_model, _inputs())
+    resident_grads = {
+        n: p.grad.detach().clone().cpu()
+        for n, p in resident_model.named_parameters()
+        if p.requires_grad and p.grad is not None
+    }
+
+    def _timed_backward_seconds(backward_prefetch: bool, *, iterations: int) -> tuple[list[float], float, float]:
+        model = _build_synthetic_frozen_stack(num_layers, dim, device)
+        streamed = stream_frozen_layers(model, torch.device(device), backward_prefetch=backward_prefetch)
+        x = _inputs()
+
+        def _step() -> tuple[float, float]:
+            model.zero_grad(set_to_none=True)
+            streamed.start_step()
+            out = model(x)
+            loss = out.pow(2).mean()
+            torch.cuda.synchronize()
+            started = time.perf_counter()
+            streamed.start_backward()
+            loss.backward()
+            torch.cuda.synchronize()
+            return time.perf_counter() - started, loss.item()
+
+        for _ in range(2):  # warmup: CUDA kernel selection / allocator cache
+            _step()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(device)
+        times = []
+        last_loss = None
+        for _ in range(iterations):
+            elapsed, last_loss = _step()
+            times.append(elapsed)
+        peak_gb = torch.cuda.max_memory_allocated(device) / (1024**3)
+        grads = {
+            n: p.grad.detach().clone().cpu()
+            for n, p in model.named_parameters()
+            if p.requires_grad and p.grad is not None
+        }
+        streamed.restore()
+        return times, peak_gb, last_loss, grads
+
+    times_with_prefetch, peak_with_prefetch, loss_with_prefetch, grads_with_prefetch = _timed_backward_seconds(
+        True, iterations=5
+    )
+    times_without_prefetch, peak_without_prefetch, loss_without_prefetch, grads_without_prefetch = (
+        _timed_backward_seconds(False, iterations=5)
+    )
+
+    assert resident_loss == pytest.approx(loss_with_prefetch, abs=1e-3)
+    assert resident_loss == pytest.approx(loss_without_prefetch, abs=1e-3)
+    for name in resident_grads:
+        assert torch.allclose(resident_grads[name], grads_with_prefetch[name], atol=1e-3), name
+        assert torch.allclose(resident_grads[name], grads_without_prefetch[name], atol=1e-3), name
+
+    median_with = statistics.median(times_with_prefetch)
+    median_without = statistics.median(times_without_prefetch)
+    assert median_with < median_without, (
+        f"backward prefetch did not improve backward wall time: "
+        f"with={median_with:.4f}s without={median_without:.4f}s"
+    )
+    # No VRAM regression relative to the non-prefetch streamed baseline --
+    # both stream at most ~2 layers' weights at a time regardless of the
+    # lookahead direction, so a real regression here would mean the new
+    # code path is accidentally keeping extra layers resident.
+    assert peak_with_prefetch <= peak_without_prefetch * 1.05
+
+
+@_REAL_ML_SMOKE
 def test_stream_frozen_layers_rejects_non_cuda_device_clearly():
     """Regression test for a real bug found on CI's CPU-only job: pinned
     memory and the dedicated CUDA prefetch stream both require a real

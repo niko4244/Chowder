@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..adapter_guard import assert_adapter_is_live
 from ..hf_resilience import cache_status, with_hub_retries
 
 
@@ -131,6 +132,10 @@ def compute_per_example_losses(spec: PerExampleLossSpec) -> dict[str, Any]:
     model = base if spec.adapter_dir is None else PeftModel.from_pretrained(
         base, spec.adapter_dir, is_trainable=False
     )
+    if spec.adapter_dir is not None:
+        # An inert adapter here would attribute the BASE model's losses
+        # to the adapter, inverting the influence measurement.
+        assert_adapter_is_live(model, spec.adapter_dir)
     model.eval()
     device = next(model.parameters()).device
 

@@ -1,5 +1,7 @@
 from dataclasses import replace
 
+import pytest
+
 from chowder.cancellation import CancellationToken
 from chowder.cycle import ExperimentCycleRunner
 from chowder.engine import EvolutionEngine
@@ -397,3 +399,154 @@ def test_a_trainer_without_bind_progress_support_is_unaffected(tmp_path):
     outcome = runner.run_generation([exp])
     assert outcome.promoted is not None
     assert outcome.candidates[0].error is None
+
+
+class PairedEvaluator(Evaluator):
+    """The paired router evaluator: the candidate outcome carries the
+    untouched base's own score as ``base_holdout_loss`` evidence."""
+
+    def evaluate(self, *, experiment, artifact, context):
+        return EvaluationOutcome(
+            "eval-1",
+            experiment.experiment_id,
+            artifact.artifact_ref,
+            {"quality": 0.85},
+            0.1,
+            {"arm": "paired", "base_holdout_loss": 0.7},
+        )
+
+
+def _deferred_engine():
+    return EvolutionEngine(
+        Goal((MetricTarget("quality", minimum=0.8),), gpu_hour_budget=10),
+        None,
+        spent_gpu_hours=0.01,
+        baseline_deferred=True,
+    )
+
+
+def test_a_deferred_baseline_provider_runs_between_evaluation_and_the_gate(tmp_path):
+    """The amortized project path defers the baseline measurement to the
+    candidate's own resident-pair evaluation; the runner must complete the
+    engine's baseline BEFORE the gate adjudicates, or the gate would rank
+    against a placeholder."""
+    engine = _deferred_engine()
+    exp = _experiment()
+    assert engine.propose([exp]) == (exp,)
+    seen = {}
+
+    def provider(candidate_outcome):
+        # The hook fires while the baseline is still deferred: the gate has
+        # not adjudicated yet. (If it had, adjudicate itself would raise.)
+        assert engine.baseline_deferred is True
+        seen["base_loss"] = candidate_outcome.evaluation.evidence["base_holdout_loss"]
+        return ExperimentResult("baseline", {"quality": 0.7}, 0.01)
+
+    runner = ExperimentCycleRunner(
+        engine, Trainer(), PairedEvaluator(), _context(tmp_path), deferred_baseline=provider
+    )
+    outcome = runner.run_generation([exp])
+
+    assert seen == {"base_loss": 0.7}
+    assert engine.baseline_deferred is False
+    # Budget accounting: the provisional 0.01 was replaced by the measured
+    # 0.01, and the candidate's real 0.5 was charged on top.
+    assert engine.spent_gpu_hours == pytest.approx(0.51)
+    # The gate adjudicated at all only because set_baseline ran first (a
+    # deferred engine refuses adjudication), and it accepted because it
+    # compared 0.85 against the completed 0.7 baseline. Post-promotion,
+    # engine.baseline is legitimately the candidate's result.
+    assert outcome.ranking[0].decision.accepted is True
+    assert outcome.promoted is not None
+
+
+def test_a_failing_deferred_baseline_provider_fails_the_generation_honestly(tmp_path):
+    """A provider that cannot complete the measurement must fail the whole
+    generation -- the candidate's numbers exist but no honest comparison
+    does -- and its reservation must be settled, not stranded."""
+    engine = _deferred_engine()
+    exp = _experiment()
+    assert engine.propose([exp]) == (exp,)
+
+    def provider(candidate_outcome):
+        raise RuntimeError("the resident pair measured no base score")
+
+    runner = ExperimentCycleRunner(
+        engine, Trainer(), Evaluator(), _context(tmp_path), deferred_baseline=provider
+    )
+    outcome = runner.run_generation([exp])
+
+    assert outcome.promoted is None
+    assert outcome.candidates[0].error == (
+        "deferred baseline: RuntimeError: the resident pair measured no base score"
+    )
+    assert engine.graph.nodes["e1"].status is ExperimentStatus.FAILED
+    assert not engine.has_reservation("e1"), (
+        "the failed candidate's reservation must be settled, not stranded"
+    )
+    assert engine.spent_gpu_hours > 0
+
+
+def test_the_deferred_baseline_provider_is_unused_when_the_baseline_is_present(tmp_path):
+    """The hook is for the amortized path only; every existing caller keeps
+    its constructor-time baseline and the provider never fires."""
+    engine = _engine()
+    exp = _experiment()
+    assert engine.propose([exp]) == (exp,)
+    calls = []
+
+    runner = ExperimentCycleRunner(
+        engine,
+        Trainer(),
+        Evaluator(),
+        _context(tmp_path),
+        deferred_baseline=lambda outcome: calls.append(outcome) or ExperimentResult("x", {"quality": 1.0}, 0.0),
+    )
+    outcome = runner.run_generation([exp])
+
+    assert calls == []
+    # The constructor-time baseline, not the provider's experiment, is what
+    # the gate consumed (promote then legitimately replaced it).
+    assert engine.baseline.experiment_id != "x"
+    assert outcome.promoted is not None
+
+
+def test_the_runner_completes_a_provider_that_persists_the_baseline_durably(tmp_path):
+    """The provider is the single writer of the baseline row (the stranded-row
+    discipline: whoever created the row settles it); the runner's job is only
+    to hand it the measured evidence before the gate and complete the engine."""
+    engine = _deferred_engine()
+    exp = _experiment()
+    assert engine.propose([exp]) == (exp,)
+    with RunRegistry(tmp_path / "runs.db") as registry:
+        registry.record_experiment(
+            Experiment("baseline", None, Hypothesis("o", "c", "i"), {}, 0.01)
+        )
+        registry.record_experiment(exp)
+
+        def provider(candidate_outcome):
+            result = ExperimentResult(
+                "baseline",
+                {"quality": candidate_outcome.evaluation.evidence["base_holdout_loss"]},
+                0.01,
+            )
+            registry.record_result(result)
+            registry.update_experiment_status("baseline", ExperimentStatus.PASSED.value)
+            return result
+
+        runner = ExperimentCycleRunner(
+            engine,
+            Trainer(),
+            PairedEvaluator(),
+            _context(tmp_path),
+            base_config={},
+            registry=registry,
+            deferred_baseline=provider,
+        )
+        outcome = runner.run_generation([exp])
+        experiments = {e.experiment_id: e for e in registry.list_experiments()}
+        results = {r.experiment_id: r for r in registry.list_results()}
+
+    assert outcome.promoted is not None
+    assert experiments["baseline"].status is ExperimentStatus.PASSED
+    assert results["baseline"].metrics == {"quality": 0.7}

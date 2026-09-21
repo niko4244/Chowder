@@ -84,6 +84,11 @@ class ChowderTUI(App[None]):
         super().__init__()
         self.project_path = Path(project_path).expanduser().resolve()
         self._hardware: HardwareSnapshot | None = None
+        #: Why the hardware scan found nothing, when it failed. Kept separate
+        #: from `_hardware is None`, so "not measured" is never read as "zero
+        #: accelerators" -- the distinction this codebase applies everywhere a
+        #: measurement can be missing.
+        self._hardware_scan_failure: str | None = None
         self._cancellation: CancellationToken | None = None
         self._training_worker = None
         self._memory_estimate_worker = None
@@ -193,6 +198,7 @@ class ChowderTUI(App[None]):
                 yield Button("Start Training", id="start", variant="success")
                 yield Button("Cancel", id="cancel", variant="error", disabled=True)
                 yield Button("View History", id="history")
+                yield Button("Autonomous Growth", id="growth")
                 yield Button("Quit", id="quit")
             yield Static("Ready", id="status")
             yield Static("Not running", id="run_status")
@@ -217,13 +223,46 @@ class ChowderTUI(App[None]):
             raise ProjectValidationError(f"{widget_id} is required")
         return int(value)
 
+    def _measured_hardware(self) -> HardwareSnapshot | None:
+        """The hardware snapshot, measuring once if the background pass has not landed.
+
+        `_scan_hardware` is an `on_mount` background worker, so a save (or a
+        checkpoint discovery) that runs first used to read `None` and resolve
+        'auto' to **zero** -- recording CPU-only training for a machine with
+        GPUs, with nothing in the saved project to say a scan was still in
+        flight. 'Not yet measured' and 'measured zero' are different facts, so
+        the first caller that needs the value takes the measurement itself and
+        every later caller reuses it.
+
+        `None` means the scan genuinely failed; the reason is recorded in
+        `_hardware_scan_failure` and is reported as its own state rather than
+        being folded into zero accelerators.
+        """
+        if self._hardware is not None:
+            return self._hardware
+        if self._hardware_scan_failure is not None:
+            return None
+        try:
+            self._hardware = detect_hardware(Path.cwd())
+        except Exception as exc:
+            self._hardware_scan_failure = f"{type(exc).__name__}: {exc}"
+            return None
+        return self._hardware
+
     def _resolve_active_accelerator_count(self) -> int:
         """"auto" uses every detected GPU (accelerate launch + DDP now
         drives real multi-GPU training from this count); anything else is
         an explicit integer the user chose instead."""
         raw = self._value("active_accelerator_count")
         if raw.lower() == "auto":
-            return len(self._hardware.accelerators) if self._hardware else 0
+            snapshot = self._measured_hardware()
+            if snapshot is None:
+                raise ProjectValidationError(
+                    "active accelerator count is 'auto' but the hardware scan "
+                    f"failed ({self._hardware_scan_failure}); set an explicit count "
+                    "rather than recording a number nobody measured"
+                )
+            return len(snapshot.accelerators)
         try:
             count = int(raw)
         except ValueError as exc:
@@ -441,9 +480,15 @@ class ChowderTUI(App[None]):
 
     def _current_execution_context(self) -> ExecutionContext:
         work_dir_raw = self._value("work_dir") or str(Path.cwd())
+        # The same measurement rule as the recorded accelerator count: a
+        # context built before the background scan landed would otherwise use a
+        # zeroed profile and resolve different hardware-aware defaults than the
+        # project actually has. A genuinely failed scan still falls back here,
+        # because this profile feeds a comparison, not a recorded number.
+        snapshot = self._measured_hardware()
         profile = (
-            hardware_profile_from_snapshot(self._hardware)
-            if self._hardware is not None
+            hardware_profile_from_snapshot(snapshot)
+            if snapshot is not None
             else HardwareProfile(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         )
         return ExecutionContext(hardware=profile, work_dir=work_dir_raw, seed=1)
@@ -620,6 +665,21 @@ class ChowderTUI(App[None]):
                 self._set_status("Cancelling…")
                 self._append_log("[yellow]Cancelling…[/]")
             return
+        if event.button.id == "growth":
+            # The workspace is another client of the same production service the
+            # `chowder growth loop` commands use -- it does not shell out to
+            # them, and it owns none of their decisions.
+            from .tui_growth import AutonomousGrowthScreen
+
+            self.push_screen(
+                AutonomousGrowthScreen(
+                    defaults={
+                        "parent_declaration_path": str(self.project_path),
+                        "state_root": str(self.project_path.parent / "growth-state"),
+                    }
+                )
+            )
+            return
         if event.button.id == "history":
             try:
                 summary = self._history_summary()
@@ -721,9 +781,13 @@ class ChowderTUI(App[None]):
         try:
             snapshot = detect_hardware(Path.cwd())
         except Exception as exc:
-            self._update_hardware_panel(f"Hardware scan failed: {type(exc).__name__}: {exc}")
+            # Recorded, not just displayed: a later 'auto' resolution has to be
+            # able to tell a failed scan from a real zero.
+            self._hardware_scan_failure = f"{type(exc).__name__}: {exc}"
+            self._update_hardware_panel(f"Hardware scan failed: {self._hardware_scan_failure}")
             return
         self._hardware = snapshot
+        self._hardware_scan_failure = None
         if snapshot.accelerators:
             gpu_lines = " | ".join(
                 f"GPU {index}: {gpu.name} {gpu.memory_gb:.1f} GB"
