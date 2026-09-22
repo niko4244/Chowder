@@ -132,6 +132,27 @@ GPU processes holding VRAM) required freeing the GPU and relaunching with
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` — both recovered without
 code changes, and the second OOM-free run completed all 300 steps.
 
+## Generation 6a: the eval-budget probe — truncation closed with measurements
+
+The gen-6a diagnostic ran the gen-2 promoted adapter on the same holdout
+through the real evaluator worker, at the 320-token protocol (control) and
+768 tokens (probe). The control scored **0.73 — identical to the gen-2
+lifecycle baseline**, validating the standalone probe machinery.
+
+- **Probe (768 tokens): 0.73.** Doubling the generation budget changed the
+  score by exactly zero.
+- **Per-prompt trajectories:** with 2.4× the budget, **1 of 100 predictions
+  changed at all**; zero score flips in either direction. Mean emitted
+  length moved 112 → 116 tokens; the same single row hit the cap at both
+  budgets and still answered wrong with the extra room.
+
+Three independent measurements now agree: wrong-answer classification
+(1/30 and 0/32 wrong answers truncated), the score-level probe
+(0.73 = 0.73), and the trajectory comparison (1/100 generations differ).
+Greedy GSM8K chains end at ~112 tokens; the model stops and answers, and
+when it answers wrong, more budget does not help. **The truncation
+hypothesis is closed.** Decision-tree branch taken: data-quantity lever.
+
 ## Generation 6 plan (eval-budget probe, post-truncation-analysis)
 
 **Truncation analysis** (classify all wrong holdout predictions by failure
