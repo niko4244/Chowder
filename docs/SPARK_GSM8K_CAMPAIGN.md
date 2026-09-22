@@ -153,6 +153,37 @@ Greedy GSM8K chains end at ~112 tokens; the model stops and answers, and
 when it answers wrong, more budget does not help. **The truncation
 hypothesis is closed.** Decision-tree branch taken: data-quantity lever.
 
+## Generation 6: data quantity at the fixed protocol — 0.70, refused twice over
+
+With the budget probe closed, the decision tree pointed at the one untested
+lever. Gen 6 ran the maximum available data at the gentle recipe: all 1473
+fresh rows in the 6000–7599 range (the shuffled train split yields no more),
+chunked with the 400 gen1/gen2 replay rows repeated 4×, lr 3e-5, r=16,
+750 steps (~one pass), continuing from the gen-2 adapter, fixed 320-token
+protocol. Training completed cleanly (train_loss 0.79).
+
+Candidate: **0.70 — below the 0.73 baseline.** The data-quantity lever is
+dead at this recipe: 8× the fresh rows moved the checkpoint *away* from its
+best point, same as every other continuation attempt.
+
+Gen 6 also produced the campaign's first live firing of the scorer-identity
+gate: the self-consistency scoring mode was committed between the gen-2
+baseline measurement and this run, which changed `scoring.py`'s content
+hash, which changed the candidate's evaluation-protocol digest — and the
+lifecycle refused the comparison (`evaluation protocol changed within the
+objective`) instead of silently scoring a new protocol against an old
+one's evidence. The refusal is correct fail-closed behavior; the campaign
+reads gen 6's verdict from the worker's raw evaluation artifact
+(`eval-result.json`, 0.70 on the full 100-row holdout), with the registry
+recording the refused comparison.
+
+Campaign conclusion across six generations: 0.39 → 0.68 → **0.73 (peak)**
+→ 0.70 → 0.66 → 0.68 → 0.70. Every lever tried beyond gen 2 — identical
+recipe, 2× capacity+data, gentle-lr replay, 8× data — regressed. The 0.73
+gen-2 checkpoint is this 4B model's ceiling under LoRA at GSM8K; further
+progress needs a stronger base model, full fine-tuning, or a different
+task decomposition.
+
 ## Generation 6 plan (eval-budget probe, post-truncation-analysis)
 
 **Truncation analysis** (classify all wrong holdout predictions by failure
