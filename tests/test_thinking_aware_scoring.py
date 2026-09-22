@@ -159,3 +159,54 @@ def test_suite_budget_default_raised_for_thinking_models() -> None:
     assert suite.max_new_tokens == 256
     assert pe.ParentSuiteSpec.from_dict({"name": "s", "dimension": "coding",
                                          "dataset": "d.jsonl"}).max_new_tokens == 256
+
+
+# ---- self-consistency: majority vote over K sampled chains ---------------------
+
+
+def _sc_row(chains: list[str], expected: str) -> tuple[str, str]:
+    """A self-consistency row as the worker records it: K chains joined by
+    SAMPLE_SEPARATOR, scored through the public `score` entry point."""
+    from chowder.evaluators.scoring import SAMPLE_SEPARATOR
+
+    return SAMPLE_SEPARATOR.join(chains), expected
+
+
+def test_self_consistency_majority_of_three_wins() -> None:
+    row, expected = _sc_row(["...42</think>#### 42", "...x</think>#### 42", "...y</think>#### 43"], "42")
+    assert _score(row, expected, "self_consistency_final_number_match") == 1.0
+
+
+def test_self_consistency_split_vote_is_a_miss() -> None:
+    row, expected = _sc_row(["a</think>#### 42", "b</think>#### 43", "c</think>#### 44"], "42")
+    # 1/3 for the right number: no strict majority, scored against the vote.
+    assert _score(row, expected, "self_consistency_final_number_match") == 0.0
+
+
+def test_self_consistency_wrong_majority_is_a_miss() -> None:
+    row, expected = _sc_row(["a</think>#### 43", "b</think>#### 43", "c</think>#### 42"], "42")
+    assert _score(row, expected, "self_consistency_final_number_match") == 0.0
+
+
+def test_self_consistency_unfinished_chains_voted_by_finished_ones() -> None:
+    row, expected = _sc_row(["</think>#### 42", "halfway through reasoning and", "x</think>#### 42"], "42")
+    # 2 of 3 chains finished with 42: the vote stands despite one overrun.
+    assert _score(row, expected, "self_consistency_final_number_match") == 1.0
+
+
+def test_self_consistency_majority_requires_more_than_half() -> None:
+    row, expected = _sc_row(["a</think>#### 42", "b</think>#### 42", "c</think>#### 43", "d</think>#### 43"], "42")
+    # 2 of 4 is a tie, not a majority: miss.
+    assert _score(row, expected, "self_consistency_final_number_match") == 0.0
+
+
+def test_self_consistency_single_chain_falls_back_to_single_shot_rule() -> None:
+    row, expected = _sc_row(["reasoning</think>#### 42"], "42")
+    assert _score(row, expected, "self_consistency_final_number_match") == 1.0
+    row_bad, expected_bad = _sc_row(["reasoning</think>#### 43"], "42")
+    assert _score(row_bad, expected_bad, "self_consistency_final_number_match") == 0.0
+
+
+def test_self_consistency_comma_and_decimal_normalization_applies() -> None:
+    row, expected = _sc_row(["a</think>#### 1,234</think>", "b</think>#### 1234"], "1234.0")
+    assert _score(row, expected, "self_consistency_final_number_match") == 1.0

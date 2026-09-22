@@ -46,8 +46,10 @@ from typing import Any, Mapping
 
 __all__ = [
     "OBSERVED_SCORINGS",
+    "SAMPLE_SEPARATOR",
     "final_answer",
     "final_number",
+    "majority_vote_final_number",
     "normalize",
     "observed_score",
     "reasoning_answer",
@@ -155,6 +157,40 @@ def reasoning_final_number(prediction: str) -> str | None:
     return final_number(reasoning_answer(prediction))
 
 
+#: Joins the K sampled chains of one self-consistency row in its prediction
+#: text. It must not collide with real model output: a literal "\n<sample>\n"
+#: is not a string a GSM8K-style answer emits, and the worker's
+#: ``skip_special_tokens`` decode never produces it.
+SAMPLE_SEPARATOR = "\n<sample>\n"
+
+
+def majority_vote_final_number(prediction: str, expected: str) -> float:
+    """Score one self-consistency row: majority vote over K sampled chains.
+
+    The row's ``prediction`` is K chains joined by :data:`SAMPLE_SEPARATOR`;
+    each chain's final number is extracted with the same reasoning-span rule
+    as :func:`reasoning_final_number` (per chain, so a chain that overruns
+    its own budget scores as its own miss rather than poisoning the others).
+    The row is correct when a strict majority of chains -- ``> K / 2`` --
+    extracted the expected number. A tie (only possible when fewer than half
+    the chains produced the answer) is a miss, and a row with no majority is
+    scored against the single-shot rule, not the vote.
+    """
+    chains = prediction.split(SAMPLE_SEPARATOR)
+    votes: dict[str, int] = {}
+    for chain in chains:
+        got = final_number(reasoning_answer(chain))
+        if got is not None:
+            votes[got] = votes.get(got, 0) + 1
+    want = final_number(expected)
+    if want is None or not votes:
+        return 0.0
+    top, count = max(votes.items(), key=lambda kv: (kv[1], kv[0] == want))
+    if count * 2 <= len(chains):
+        return 0.0
+    return float(top == want)
+
+
 def score(prediction: str, expected: str, scoring: str) -> float:
     """Score one prediction. Thinking-aware extraction applies to every mode."""
     if scoring == "reasoning_answer_match":
@@ -168,6 +204,8 @@ def score(prediction: str, expected: str, scoring: str) -> float:
         if got is None or want is None:
             return 0.0
         return float(got == want)
+    if scoring == "self_consistency_final_number_match":
+        return majority_vote_final_number(prediction, expected)
     answer = final_answer(prediction)
     if scoring == "exact_match":
         return float(answer.strip() == expected.strip())

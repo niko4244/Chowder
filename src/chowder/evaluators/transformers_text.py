@@ -21,7 +21,7 @@ from ..protocol import protocol_fingerprint
 from .placement import validate_placement
 from ..provenance import sha256_directory, sha256_file
 from ..local_model_compat import verify_local_custom_code
-from .scoring import OBSERVED_SCORINGS
+from .scoring import OBSERVED_SCORINGS, SAMPLE_SEPARATOR
 
 # final_number_match compares the LAST number on each side, for arithmetic word
 # problems where the model shows its work; see the workers for the extraction
@@ -37,6 +37,7 @@ _ALLOWED_SCORING = {
     "final_number_match",
     "reasoning_answer_match",
     "reasoning_final_number_match",
+    "self_consistency_final_number_match",
     *OBSERVED_SCORINGS,
 }
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
@@ -67,6 +68,16 @@ class EvalSuiteSpec:
     #: amortises one re-stream over ``batch_size`` rows -- measured on the
     #: frozen Gen-0 base at 2.60 s/token for 1 row against 2.77 s/token for 16.
     batch_size: int = 1
+    #: Chains sampled per row for self-consistency scoring (1 = single greedy
+    #: pass, the historical default and the value every protocol digest before
+    #: this field implied). Above 1, the worker decodes ``n_samples`` chains per
+    #: row with temperature sampling seeded by ``spec.seed``, joins them with
+    #: ``SAMPLE_SEPARATOR``, and the scoring modes that support it vote. K and
+    #: temperature are protocol identity: a k=5 comparison is not a k=1 one.
+    n_samples: int = 1
+    #: Sampling temperature for those chains. Only meaningful with
+    #: ``n_samples > 1``; the worker refuses a sampled suite without it.
+    temperature: float = 0.7
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -85,6 +96,13 @@ class EvalSuiteSpec:
             raise ValueError(
                 f"evaluation suite {self.name!r} batch_size must be at least 1"
             )
+        if self.n_samples < 1:
+            raise ValueError(f"evaluation suite {self.name!r} n_samples must be at least 1")
+        if self.n_samples > 1 and self.temperature <= 0:
+            raise ValueError(
+                f"evaluation suite {self.name!r} sets n_samples > 1 without a "
+                "positive temperature; self-consistency needs sampling"
+            )
         if self.canonical_rendering and not self.use_chat_template:
             # Refuse the contradictory request at construction: canonical
             # rendering is a *way* of applying a chat template, so this would
@@ -93,6 +111,46 @@ class EvalSuiteSpec:
                 f"evaluation suite {self.name!r} sets canonical_rendering without "
                 "use_chat_template; enable use_chat_template or drop canonical_rendering"
             )
+
+
+def suite_protocol_entry(suite: EvalSuiteSpec, dataset_sha256: str) -> dict[str, Any]:
+    """The one suite block inside the evaluation-protocol fingerprint.
+
+    One owner for the fingerprint's shape: the worker's spec is dataclass-identical
+    to what this function digests, so a field added to the spec must land here or
+    it silently escapes identity. Sampling fields are digest-additive like
+    canonical_rendering: suites without them (``n_samples == 1``, the value every
+    protocol before this field implied) hash exactly as all earlier protocols did,
+    so persisted identities stay valid.
+    """
+    entry: dict[str, Any] = {
+        "name": suite.name,
+        "dataset_sha256": dataset_sha256,
+        "prompt_field": suite.prompt_field,
+        "expected_field": suite.expected_field,
+        "scoring": suite.scoring,
+        "max_new_tokens": suite.max_new_tokens,
+        "use_chat_template": suite.use_chat_template,
+    }
+    if suite.n_samples > 1:
+        entry["n_samples"] = suite.n_samples
+        entry["temperature"] = suite.temperature
+    if suite.canonical_rendering:
+        entry["canonical_rendering"] = True
+    return entry
+
+
+def suite_execution_evidence(suite: EvalSuiteSpec, observations: list[dict[str, Any]]) -> dict[str, Any]:
+    """The per-suite execution evidence block: what it took to produce the rows."""
+    return {
+        "rows": len(observations),
+        "batch_size": suite.batch_size,
+        **(
+            {"n_samples": suite.n_samples, "temperature": suite.temperature}
+            if suite.n_samples > 1
+            else {}
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -200,6 +258,8 @@ class TransformersTextEvalSpec:
                     # exists on the shared EvalSuiteSpec; it is now parsed here.
                     canonical_rendering=bool(raw.get("canonical_rendering", False)),
                     batch_size=int(raw.get("batch_size", 1)),
+                    n_samples=int(raw.get("n_samples", evaluation.get("n_samples", 1))),
+                    temperature=float(raw.get("temperature", evaluation.get("temperature", 0.7))),
                 )
             )
 
@@ -474,20 +534,7 @@ class TransformersTextEvaluator:
             "versions": dict(versions),
             "suites": [
                 {
-                    "name": suite.name,
-                    "dataset_sha256": dataset_hashes[suite.name],
-                    "prompt_field": suite.prompt_field,
-                    "expected_field": suite.expected_field,
-                    "scoring": suite.scoring,
-                    "max_new_tokens": suite.max_new_tokens,
-                    "use_chat_template": suite.use_chat_template,
-                    # Digest-additive canonical rendering marker; see the
-                    # matching comment in evaluators/base_text.py.
-                    **(
-                        {"canonical_rendering": True}
-                        if suite.canonical_rendering
-                        else {}
-                    ),
+                    **suite_protocol_entry(suite, dataset_hashes[suite.name]),
                     # P4: the rendering the worker actually performed, with the
                     # template digest -- the same shape the baseline evaluator
                     # writes, so `gate.py`'s baseline==candidate check covers it.

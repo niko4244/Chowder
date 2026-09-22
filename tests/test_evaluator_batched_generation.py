@@ -279,3 +279,43 @@ def test_two_throughputs_are_two_evaluation_specs(tmp_path: Path) -> None:
         ).digest()
 
     assert digest(1) != digest(4)
+
+
+# ---- self-consistency suite fields: identity + validation ----------------------
+
+
+def _scoring_suite(**overrides):
+    defaults = dict(
+        name="s",
+        dataset="d.jsonl",
+        scoring="final_number_match",
+        max_new_tokens=64,
+    )
+    return EvalSuiteSpec(**{**defaults, **overrides})
+
+
+def test_sampling_fields_are_digest_additive_to_the_protocol_entry():
+    from chowder.evaluators.transformers_text import suite_protocol_entry
+    from chowder.protocol import protocol_fingerprint
+
+    greedy = suite_protocol_entry(_scoring_suite(), "sha")
+    assert "n_samples" not in greedy and "temperature" not in greedy
+    sampled = suite_protocol_entry(_scoring_suite(n_samples=5, temperature=0.8), "sha")
+    assert sampled["n_samples"] == 5 and sampled["temperature"] == 0.8
+    assert protocol_fingerprint(greedy) != protocol_fingerprint(sampled)
+
+
+def test_k1_suite_hashes_identically_regardless_of_temperature():
+    """k=1 is greedy regardless of temperature, so identity must not move."""
+    from chowder.evaluators.transformers_text import suite_protocol_entry
+
+    assert suite_protocol_entry(_scoring_suite(temperature=0.9), "sha") == suite_protocol_entry(_scoring_suite(), "sha")
+
+
+def test_n_samples_and_temperature_validation():
+    with pytest.raises(ValueError):
+        _scoring_suite(n_samples=0)
+    with pytest.raises(ValueError):
+        _scoring_suite(n_samples=4, temperature=0.0)
+    with pytest.raises(ValueError):
+        _scoring_suite(n_samples=4, temperature=-1.0)
