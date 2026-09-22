@@ -238,3 +238,35 @@ training/eval pipeline — two early candidate evals died exactly that way).
 Registries (`runs.db`) under `gen{1..4}/` (gen 5's under its relocated run
 root) hold the append-only evidence; outcome summaries are written to
 `gen{N}_outcome.json` next to each script.
+
+## Post-campaign measurements: noise floor fixed, self-consistency at the bar
+
+**500-prompt holdout baseline (gen-2 adapter, 320-token protocol, batch 1):**
+**0.734 ± 0.039** (95% CI). The holdout extension (rows 5000-5499, a verified
+superset of the 100-prompt holdout) makes the 0.02 promotion-gain step
+resolvable: future deltas above ±0.04 are real signal, not noise.
+
+**k=5 self-consistency diagnostic (100-prompt holdout, temp 0.7, shipped
+`self_consistency_final_number_match`): 0.75 — exactly at the bar.** Paired
+per-prompt against the greedy control: the vote fixed 8 rows and broke 6
+(McNemar p≈0.59 — not individually significant at n=100); 19 rows are wrong
+under both protocols. The mechanism is visible in the evidence: **16 of
+those 19 wrong rows had the correct number produced by at least one sampled
+chain but outvoted**. With more samples (k=10-20), those rows are the
+recoverable mass — the realistic ceiling of pure sampling on this adapter is
+~0.80-0.83, and the decisive test is k≥10 on the 500-prompt holdout.
+
+Operational findings from these runs (full notes:
+`.chowder-spark-calib/gsm8k/holdout500-notes.md`):
+
+1. **Batch-8 generation is not safe on Spark.** An earlier batch-8 attempt
+   appeared to diverge wildly from the batch-1 control, but the run was
+   double-written by two concurrent worker instances (a killed wrapper's
+   orphaned child survived and shared the output path), so that divergence
+   verdict is unsound and was discarded with the data. What stands: any
+   batched-vs-single equivalence must be *proven per model* before a batched
+   arm is trusted — a batch-equivalence check belongs in worker startup or
+   model compatibility verification. All campaign measurements are batch-1.
+2. **Output paths must be single-writer by construction.** Two worker
+   instances writing one predictions file corrupts it silently. A lock file
+   or pid-guard at the output path turns this corruption into a refusal.
