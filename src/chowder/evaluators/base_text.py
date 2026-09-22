@@ -19,6 +19,7 @@ from .scorer_identity import scorer_identity
 from ..executors import EvaluationOutcome, ExecutionContext
 from ..protocol import protocol_fingerprint
 from ..provenance import sha256_file
+from ..local_model_compat import verify_local_custom_code
 from .transformers_text import EvalSuiteSpec
 
 
@@ -39,6 +40,7 @@ class BaseTextEvalSpec:
     seed: int = 1
     timeout_seconds: float | None = None
     trust_remote_code: bool = False
+    local_custom_code_digests: dict[str, str] | None = None
     offline: bool = False
 
     def __post_init__(self) -> None:
@@ -57,6 +59,8 @@ class BaseTextEvalSpec:
             raise ValueError("baseline timeout_seconds must be positive")
         if self.trust_remote_code:
             raise ValueError("trust_remote_code is disabled for baseline evaluation")
+        if self.local_custom_code_digests is not None:
+            verify_local_custom_code(self.base_model, self.local_custom_code_digests)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -145,6 +149,11 @@ class BaseTextEvalSpec:
                 else None
             ),
             trust_remote_code=bool(evaluation.get("trust_remote_code", False)),
+            local_custom_code_digests=(
+                dict(evaluation["local_custom_code_digests"])
+                if evaluation.get("local_custom_code_digests") is not None
+                else None
+            ),
             offline=bool(evaluation.get("offline", backend.get("offline", False))),
         )
 
@@ -315,6 +324,7 @@ class BaseModelTextEvaluator:
             "placement": spec.placement,
             "device": runtime.get("device"),
             "seed": spec.seed,
+            "local_custom_code_digests": spec.local_custom_code_digests,
             "versions": dict(versions),
             "suites": [
                 {

@@ -2,14 +2,37 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
-import unicodedata
+import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
+from ..adapter_guard import assert_adapter_is_live
 from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
+from ..local_model_compat import patch_transformers5_custom_model
+from ..lifecycle import (
+    PhaseTimer,
+    cuda_synchronize,
+    evaluation_lifecycle_ledger,
+    sampling_device,
+)
+from .generation import observed_span, resolve_eos_token_ids
+from .rendering import render_prompt
+from .scoring import (
+    final_answer,
+    final_number,
+    normalize,
+    observed_score,
+    reasoning_answer,
+    score,
+)
+from .vram import MemorySampler, peak_vram as _peak_vram
+from .placement import (
+    dispatch_offloaded,
+    needs_redispatch_after_adapter,
+    placement_note,
+)
 from .transformers_text import EvalSuiteSpec, TransformersTextEvalSpec
 
 
@@ -20,42 +43,16 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
-def _unicode_fold(text: str) -> str:
-    """NFKD-decompose, drop combining marks, map curly quotes and dashes.
-
-    Scorer semantics: correct accented answers must not be rejected against
-    plain-ASCII expected labels. Shared with base_text_worker in lockstep.
-    """
-    punct_map = str.maketrans({
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u2013": "-",
-        "\u2014": "-",
-    })
-    decomposed = unicodedata.normalize("NFKD", text.translate(punct_map))
-    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-
-
-def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", _unicode_fold(text)).strip().casefold()
-
-
-def _score(prediction: str, expected: str, scoring: str) -> float:
-    if scoring == "exact_match":
-        return float(prediction.strip() == expected.strip())
-    if scoring == "normalized_exact_match":
-        return float(_normalize(prediction) == _normalize(expected))
-    if scoring == "refusal_classification":
-        # Shared classifier with the base-text worker; this backend does no
-        # thinking-aware extraction, so the whole prediction is the surface.
-        from .base_text_worker import _classify_behavior
-
-        return float(
-            _classify_behavior(prediction, prediction) == expected.strip().casefold()
-        )
-    raise ValueError(f"unsupported scoring: {scoring}")
+#: Scoring lives in `.scoring` so both workers cannot drift apart again. This worker
+#: used to score the RAW generation while base_text_worker discarded an unclosed
+#: <think> block first, which meant Chowder's automatic baseline and its candidate
+#: were not scored by the same rule. See that module.
+#: Re-exported under the historical private names for existing callers.
+_normalize = normalize
+_final_answer = final_answer
+_reasoning_answer = reasoning_answer
+_final_number = final_number
+_score = score
 
 
 def _resolve_dtype(torch: Any, precision: str):
@@ -79,6 +76,14 @@ def _resolve_device(torch: Any, requested: str) -> str:
     if requested.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError(f"{requested} requested but CUDA is unavailable")
     return requested
+
+
+def _batches(rows: list[dict[str, Any]], size: int) -> Iterator[list[dict[str, Any]]]:
+    """Split a suite's rows into the declared generation batches."""
+    if size < 1:
+        raise RuntimeError(f"evaluation batch_size must be at least 1, got {size}")
+    for start in range(0, len(rows), size):
+        yield rows[start : start + size]
 
 
 def _load_rows(suite: EvalSuiteSpec) -> list[dict[str, Any]]:
@@ -110,18 +115,25 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
 
     if spec.trust_remote_code:
         raise RuntimeError("trust_remote_code is disabled")
+    if spec.local_custom_code_digests is not None:
+        patch_transformers5_custom_model(spec.base_model, spec.local_custom_code_digests)
     device_name = _resolve_device(torch, spec.device)
     if spec.quantization == "4bit" and not device_name.startswith("cuda"):
         raise RuntimeError("4-bit evaluation requires a CUDA device")
 
     dtype = _resolve_dtype(torch, spec.precision)
+    # P6: generation dominated the completed rerun's cost (1.16 + 1.86 GPU-hours
+    # against 0.44 for the 500 steps), and neither evaluation arm reported its
+    # own timing, so that cost was invisible in the artifacts.
+    load_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
+    load_timer.__enter__()
     set_seed(spec.seed)
     model_cache_status = cache_status(spec.base_model, spec.revision)
     tokenizer = with_hub_retries(
         lambda: AutoTokenizer.from_pretrained(
             spec.base_model,
             revision=spec.revision,
-            trust_remote_code=False,
+            trust_remote_code=spec.local_custom_code_digests is not None,
             local_files_only=spec.offline,
         ),
         label=f"tokenizer download for {spec.base_model}",
@@ -132,7 +144,7 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         tokenizer.pad_token = tokenizer.eos_token
 
     model_kwargs: dict[str, Any] = {
-        "trust_remote_code": False,
+        "trust_remote_code": spec.local_custom_code_digests is not None,
         "dtype": dtype,
         "local_files_only": spec.offline,
     }
@@ -154,19 +166,37 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
     )
     resolved_commit = getattr(base.config, "_commit_hash", None)
     if spec.quantization == "none":
-        base = base.to(device_name)
+        if spec.placement == "offload":
+            base = dispatch_offloaded(base, device_name)
+        else:
+            base = base.to(device_name)
+    adapter_liveness: dict[str, Any] | None = None
     if spec.adapter_dir is None:
         model = base
     else:
         model = PeftModel.from_pretrained(base, spec.adapter_dir, is_trainable=False)
+        # Refuse to score an adapter that cannot change the model. PEFT only
+        # warns when no saved key matches, leaving every LoRA B at zero.
+        adapter_liveness = assert_adapter_is_live(model, spec.adapter_dir)
+        base = placement_after_adapter(base, spec=spec, device_name=device_name)
     model.eval()
+    if spec.placement == "offload":
+        # Reported per run: "offload" means nothing unless the dense weights
+        # demonstrably live on the CPU while generation runs.
+        print(f"placement: offload active ({placement_note(model)})", flush=True)
     device = next(model.parameters()).device
+    resolved_eos_token_id = resolve_eos_token_ids(tokenizer, model)
+    load_timer.__exit__()
 
     output_dir = Path(spec.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics: dict[str, float] = {}
     suite_evidence: dict[str, Any] = {}
 
+    generation_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
+    memory_sampler = MemorySampler(device_name=sampling_device(torch))
+    memory_sampler.start()
+    generation_timer.__enter__()
     with torch.inference_mode():
         for suite in spec.suites:
             rows = _load_rows(suite)
@@ -182,56 +212,116 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
             correct = 0.0
             predictions_path = output_dir / f"predictions-{suite.name}.jsonl"
             with predictions_path.open("w", encoding="utf-8", newline="\n") as output:
-                for row in rows:
-                    prompt = str(row[suite.prompt_field])
-                    expected = str(row[suite.expected_field])
-                    if suite.use_chat_template:
-                        if not getattr(tokenizer, "chat_template", None):
-                            raise RuntimeError(
-                                f"suite {suite.name!r} requested chat template but tokenizer has none"
-                            )
-                        rendered = tokenizer.apply_chat_template(
-                            [{"role": "user", "content": prompt}],
-                            tokenize=False,
-                            add_generation_prompt=True,
+                for chunk in _batches(rows, suite.batch_size):
+                    rendered_batch: list[tuple[str, str]] = []
+                    for row in chunk:
+                        prompt = str(row[suite.prompt_field])
+                        expected = str(row[suite.expected_field])
+                        # One renderer for both text workers (see
+                        # evaluators/rendering.py). This arm previously ignored
+                        # `canonical_rendering` entirely: a suite asking for the
+                        # pinned template silently rendered through the
+                        # checkpoint's own instead, so baseline and candidate
+                        # scored different prompt bytes under one protocol entry.
+                        rendered, render_evidence = render_prompt(
+                            tokenizer=tokenizer,
+                            prompt=prompt,
+                            suite_name=suite.name,
+                            use_chat_template=suite.use_chat_template,
+                            canonical_rendering=suite.canonical_rendering,
                         )
-                    else:
-                        rendered = prompt
-                    encoded = tokenizer(rendered, return_tensors="pt")
+                        rendered_batch.append((prompt, expected, rendered))
+                    # padding=True pads with the tokenizer's pad token on the
+                    # declared side; the mask it returns is what keeps the pads
+                    # out of attention, so a padded row sees the same context it
+                    # would have seen alone.
+                    encoded = tokenizer(
+                        [item[2] for item in rendered_batch],
+                        return_tensors="pt",
+                        padding=len(rendered_batch) > 1,
+                    )
                     encoded = {key: value.to(device) for key, value in encoded.items()}
                     generated = model.generate(
                         **encoded,
                         max_new_tokens=suite.max_new_tokens,
                         do_sample=False,
                         pad_token_id=tokenizer.pad_token_id,
-                        eos_token_id=tokenizer.eos_token_id,
+                        eos_token_id=resolved_eos_token_id,
                     )
-                    prompt_tokens = encoded["input_ids"].shape[1]
-                    prediction = tokenizer.decode(
-                        generated[0, prompt_tokens:], skip_special_tokens=True
-                    )
-                    row_score = _score(prediction, expected, suite.scoring)
-                    correct += row_score
-                    output.write(
-                        json.dumps(
-                            {
-                                "prompt": prompt,
-                                "expected": expected,
-                                "prediction": prediction,
-                                "score": row_score,
-                            },
-                            ensure_ascii=False,
+                    width = int(encoded["input_ids"].shape[1])
+                    for index, (prompt, expected, _) in enumerate(rendered_batch):
+                        # What the generation did, recorded rather than
+                        # re-derived: the completion text cannot say whether it
+                        # stopped on EOS or ran into the cap, and the generation
+                        # diagnostics (the campaign's target instrument) are
+                        # defined over exactly that.
+                        own_tokens, produced, stopped = observed_span(
+                            continuation=generated[index, width:].tolist(),
+                            max_new_tokens=suite.max_new_tokens,
+                            # Only a multi-row call can have padded this row
+                            # after it finished.
+                            pad_token_id=(
+                                tokenizer.pad_token_id
+                                if len(rendered_batch) > 1
+                                else None
+                            ),
                         )
-                        + "\n"
-                    )
+                        prediction = tokenizer.decode(
+                            own_tokens, skip_special_tokens=True
+                        )
+                        observation = {
+                            "generated_tokens": max(0, produced),
+                            "eos_terminated": bool(
+                                stopped and resolved_eos_token_id is not None
+                            ),
+                        }
+                        observed = observed_score(observation, suite.scoring)
+                        row_score = (
+                            observed
+                            if observed is not None
+                            else _score(prediction, expected, suite.scoring)
+                        )
+                        correct += row_score
+                        output.write(
+                            json.dumps(
+                                {
+                                    "prompt": prompt,
+                                    "expected": expected,
+                                    "prediction": prediction,
+                                    "score": row_score,
+                                    **observation,
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n"
+                        )
+                        output.flush()
             metrics[suite.name] = correct / len(rows)
             suite_evidence[suite.name] = {
                 "rows": len(rows),
+                # Execution evidence, not protocol identity: what it took to
+                # produce these rows, so a batched arm and a single-row arm are
+                # distinguishable in the artifact even though the declared
+                # decoding is the same.
+                "batch_size": suite.batch_size,
                 "scoring": suite.scoring,
                 "predictions_file": str(predictions_path),
                 "holdout_fingerprints_file": str(fingerprint_path),
                 "holdout_fingerprints_sha256": fingerprint_digest,
+                "resolved_eos_token_id": resolved_eos_token_id,
+                **render_evidence,
             }
+
+    # The candidate arm's own generation, timed and sampled separately from the
+    # baseline's -- one arm cannot measure the other, and the ledger says so.
+    generation_timer.__exit__()
+    memory_sampling = memory_sampler.stop()
+    lifecycle_data = evaluation_lifecycle_ledger(
+        accelerator_count=1 if device_name.startswith("cuda") else 0,
+        arm="candidate",
+        generation_seconds=generation_timer.seconds,
+        model_load_seconds=load_timer.seconds,
+    ).to_dict()
 
     return {
         "metrics": metrics,
@@ -239,13 +329,29 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         "runtime": {
             "device": device_name,
             "gpu_count": 1 if device_name.startswith("cuda") else 0,
+            "placement": spec.placement,
+            "lifecycle": lifecycle_data,
+            "memory_sampling": memory_sampling,
+            # The training workers have always reported this; the evaluators did
+            # not, and a pre-registered "peak VRAM under budget" condition was
+            # therefore undecidable for the evaluation leg. Judging it from
+            # nvidia-smi instead measures the whole MACHINE -- every browser and
+            # service on it -- and that is what produced a spurious
+            # oversubscription FAIL (docs/PRUNED_9B_RERUN_RESULT.md). A run must be
+            # able to answer "how much VRAM did *I* use" from its own artifacts.
+            **_peak_vram(device_name),
         },
         "model_provenance": {
             "requested_base_model": spec.base_model,
             "requested_revision": spec.revision,
             "model_cache_status": model_cache_status,
             "resolved_model_commit": resolved_commit,
-            "adapter_loaded": spec.adapter_dir is not None,
+            # "an adapter directory was requested" is NOT "an adapter is in
+            # effect": PeftModel.from_pretrained succeeds on a total key mismatch.
+            # This now reports the measured check, not the request.
+            "adapter_requested": spec.adapter_dir is not None,
+            "adapter_loaded": adapter_liveness is not None,
+            "adapter_liveness": adapter_liveness,
         },
         "versions": {
             "torch": _package_version("torch"),
@@ -256,11 +362,53 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
     }
 
 
+def placement_after_adapter(base: Any, *, spec: Any, device_name: str) -> Any:
+    """Re-assert the declared placement once an adapter has been attached.
+
+    The adapter wrapper re-places the model it wraps, which silently turns a
+    bounded arm measurement into an unbounded one (see
+    :func:`chowder.evaluators.placement.needs_redispatch_after_adapter` for the
+    measurement). The decision lives in that function and this one only applies
+    it, so there is exactly one owner of "does the placement need re-applying".
+    """
+    if not needs_redispatch_after_adapter(
+        quantization=spec.quantization,
+        placement=spec.placement,
+        adapter=True,
+    ):
+        return base
+    # Re-asserted on the bare base the wrapper holds, which is the module graph
+    # the adapter's LoRA layers were injected into: the wrapper generates through
+    # it, so the placement applies to the model that will actually run.
+    return dispatch_offloaded(base, device_name)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--spec", required=True)
     parser.add_argument("--result", required=True)
+    parser.add_argument(
+        "--chowder-identity",
+        default=None,
+        help="JSON file with the chowder source identity the controller declared; "
+        "verified against the code this process actually imported BEFORE the "
+        "spec is read, so a wrong-checkout worker refuses instead of scoring",
+    )
     args = parser.parse_args()
+
+    # P4c: nothing may be loaded, run, or written before the pin checks out.
+    from ..worker_env import verify_source_identity
+
+    if args.chowder_identity is not None:
+        verify_source_identity(
+            json.loads(Path(args.chowder_identity).read_text(encoding="utf-8"))
+        )
+    else:
+        print(
+            "WARNING: no --chowder-identity supplied; the worker's source "
+            "identity is unverified for this run",
+            file=sys.stderr,
+        )
 
     raw = json.loads(Path(args.spec).read_text(encoding="utf-8"))
     raw["suites"] = tuple(EvalSuiteSpec(**suite) for suite in raw["suites"])

@@ -50,6 +50,8 @@ __all__ = [
     "final_number",
     "normalize",
     "observed_score",
+    "reasoning_answer",
+    "reasoning_final_number",
     "score",
 ]
 
@@ -112,8 +114,60 @@ def final_number(text: str) -> str | None:
     return raw or None
 
 
+def reasoning_answer(prediction: str) -> str:
+    """Extract the answer span for templates that open ``<think>`` themselves.
+
+    Spark-X2.5-style chat templates end the generation prompt with ``<think>``
+    already emitted, so the model's generation begins by CLOSING thinking:
+    ``</think>answer`` (sometimes followed by a trailing ``</think>`` as its
+    end-of-turn marker). For that shape the answer span is between the FIRST
+    ``</think>`` and the NEXT one (or end of generation) -- taking everything
+    after the LAST marker, as :func:`final_answer` does, reads the empty tail
+    after the trailing marker and scores a correct answer as a miss.
+
+    The strict budget rule is unchanged: a prediction with no ``</think>`` at
+    all but an unclosed ``<think>`` means the generation was exhausted
+    mid-reasoning, so there is no answer span and this extraction is empty.
+    A prediction with neither marker is answered whole (non-thinking output).
+    """
+    if "</think>" in prediction:
+        after = prediction.split("</think>", 1)[1]
+        if "</think>" in after:
+            return after.split("</think>", 1)[0]
+        return after
+    if "<think>" in prediction:
+        return ""
+    return prediction
+
+
+def reasoning_final_number(prediction: str) -> str | None:
+    """Final number within the reasoning answer span.
+
+    Same answer-span extraction as :func:`reasoning_answer`, then the
+    :func:`final_number` comparison rule. Exists because ``final_number_match``
+    builds on :func:`final_answer`, which takes everything after the LAST
+    ``</think>`` -- and on templates that emit a trailing ``</think>``
+    end-of-turn marker after the answer (Spark-X2.5), that tail is empty, so a
+    correct answer scores as a miss. Here the number is read from the span
+    between the first and next ``</think>``, which is where the answer lives
+    for that template shape.
+    """
+    return final_number(reasoning_answer(prediction))
+
+
 def score(prediction: str, expected: str, scoring: str) -> float:
     """Score one prediction. Thinking-aware extraction applies to every mode."""
+    if scoring == "reasoning_answer_match":
+        return float(normalize(reasoning_answer(prediction)) == normalize(expected))
+    if scoring == "reasoning_final_number_match":
+        # Same reasoning-span rule as reasoning_answer_match, with the
+        # final-number comparison for arithmetic tasks: a model that shows
+        # its work cannot exact-match a bare number.
+        got = reasoning_final_number(prediction)
+        want = final_number(expected)
+        if got is None or want is None:
+            return 0.0
+        return float(got == want)
     answer = final_answer(prediction)
     if scoring == "exact_match":
         return float(answer.strip() == expected.strip())

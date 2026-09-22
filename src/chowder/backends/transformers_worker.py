@@ -2,19 +2,48 @@ from __future__ import annotations
 
 import argparse
 import functools
-import hashlib
 import json
 import math
 import os
+import sys
 import threading
 import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
+from ..evaluators.vram import MemorySampler
+from ..lifecycle import (
+    PHASE_CLOSEOUT,
+    PhaseTimer,
+    cuda_synchronize,
+    quantization_reality_report,
+    sampling_device,
+    tensor_inventory,
+    training_lifecycle_ledger,
+)
+from ..progress_write import write_progress_best_effort
+from ..resume_state import assert_resumable, inventory_checkpoint, resume_witness
+from ..target_coverage import adapted_modules_by_leaf
+from ..trainability import (
+    adapted_module_paths,
+    component_path_report,
+    resolve_expected_module_paths,
+)
+from ..adapter_guard import assert_adapter_is_live
 from ..hf_resilience import cache_status, with_hub_retries
-from ..provenance import sha256_directory
+from ..local_model_compat import patch_transformers5_custom_model
+from safetensors import SafetensorError
 from .activation_offload_hooks import offload_pack, offload_unpack
+from .training_data import (
+    _build_chat_example,
+    _chat_digest,
+    _replay_sample_count,
+    _text_digest,
+    _validate_chat_messages,
+    _verify_bound_adapter,
+    _verify_bound_input,
+)
 from .transformers_peft import TransformersPeftRunSpec
 
 
@@ -23,6 +52,54 @@ def _package_version(name: str) -> str:
         return version(name)
     except PackageNotFoundError:
         return "unknown"
+
+
+#: Bound on the recorded per-step log, so a long run cannot turn its own
+#: evidence into an unbounded payload. Truncation is recorded, never silent.
+_STEP_LOG_LIMIT = 5000
+
+
+def _step_log(trainer: Any) -> dict[str, Any]:
+    """Per-step loss and LR as Trainer actually logged them, in order.
+
+    This is the comparison surface for a resumed run: the same losses at the
+    same steps mean the continuation saw the same data order, and the same LR
+    sequence means the scheduler really continued rather than restarting. Only
+    finite numbers are recorded -- a non-finite value is dropped rather than
+    written into JSON as ``NaN``, and a missing entry stays missing.
+    """
+
+    def _number(value: Any) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        return number if math.isfinite(number) else None
+
+    history = getattr(getattr(trainer, "state", None), "log_history", None) or []
+    entries: list[dict[str, Any]] = []
+    for row in history:
+        if not isinstance(row, Mapping):
+            continue
+        step = row.get("step")
+        entry = {
+            "step": (
+                int(step)
+                if isinstance(step, int) and not isinstance(step, bool)
+                else None
+            ),
+            "loss": _number(row.get("loss")),
+            "learning_rate": _number(row.get("learning_rate")),
+        }
+        if entry["loss"] is None and entry["learning_rate"] is None:
+            # Trainer's end-of-run summary row carries a step and nothing else;
+            # it is not a step measurement and would read as a null step.
+            continue
+        entries.append(entry)
+    return {
+        "entries": entries[:_STEP_LOG_LIMIT],
+        "total_entries": len(entries),
+        "truncated": len(entries) > _STEP_LOG_LIMIT,
+    }
 
 
 def _resolve_dtype(torch: Any, precision: str):
@@ -39,17 +116,16 @@ def _resolve_dtype(torch: Any, precision: str):
     return torch.float32
 
 
-# Only architectures whose attention (q/k/v/o_proj) AND MLP (gate/up/
-# down_proj) naming has actually been verified against a real loaded model
-# (directly, for llama; by well-documented, stable architectural convention
-# shared with llama, for the rest) are listed here. PEFT silently trains
+# Only architectures whose attention AND MLP leaf-module naming has actually
+# been verified against a real loaded model (directly, for llama and qwen3_5;
+# by well-documented, stable architectural convention shared with llama, for
+# the rest) are listed here. PEFT silently trains
 # only whatever subset of a target_modules list actually matches real module
 # names on the model -- it does NOT error if some names don't match, only if
 # NONE do -- so guessing wrong here would be a silent partial-coverage bug,
 # not a loud one. When in doubt, leave an architecture out: "auto" (PEFT's
 # own actively-maintained per-architecture mapping) or an explicit
 # backend.lora.target_modules list are always available.
-_ATTENTION_AND_MLP_MODEL_TYPES = {"llama", "mistral", "qwen2", "gemma", "gemma2"}
 _ATTENTION_AND_MLP_TARGET_MODULES = (
     "q_proj",
     "k_proj",
@@ -59,6 +135,47 @@ _ATTENTION_AND_MLP_TARGET_MODULES = (
     "up_proj",
     "down_proj",
 )
+# qwen3_5 is a hybrid stack, so the llama-family seven above would quietly
+# cover only a quarter of its attention: of 32 decoder layers just 8 are full
+# attention (q/k/v/o_proj), while the other 24 are Mamba-style `linear_attn`
+# (in_proj_qkv / in_proj_z / out_proj); all 32 share the gate/up/down_proj FFN.
+# Per-leaf counts verified against the real pruned 9B checkpoint -- q/k/v/o_proj
+# 8 each, in_proj_qkv / in_proj_z / out_proj 24 each, gate/up/down_proj 32 each,
+# 200 modules in total (docs/PRUNED_9B_RERUN_RESULT.md). in_proj_b / in_proj_a
+# (24 each) are excluded deliberately: they project to num_v_heads, so they are
+# per-head scalar gates rather than matrices a rank-r adapter can decompose.
+# PEFT ships no auto-detection entry for this model_type, so "auto" raises here
+# -- without this entry every recipe has to spell all ten names out by hand.
+_QWEN3_5_TARGET_MODULES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "in_proj_qkv",
+    "in_proj_z",
+    "out_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+_ATTENTION_AND_MLP_MODULES_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
+    "llama": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "mistral": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "qwen2": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "gemma": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "gemma2": _ATTENTION_AND_MLP_TARGET_MODULES,
+    "qwen3_5": _QWEN3_5_TARGET_MODULES,
+    # The text-only decoder the real loader instantiates: AutoModelForCausalLM
+    # replaces the composite `qwen3_5` config with its nested text_config, so
+    # model.config.model_type is `qwen3_5_text` after loading (verified against
+    # the actual pruned-9B checkpoint; worker-result.json in
+    # F:/llm-models/_a4b/level2-transformers-v7). Without this alias the preset
+    # resolved fine for the composite type and rejected the decoder every real
+    # run actually gets. MoE variants (`qwen3_5_moe`, `qwen3_5_moe_text`) stay
+    # deliberately absent: the expert leaves are NOT this dense list, and this
+    # dense preset must not silently half-cover an MoE stack.
+    "qwen3_5_text": _QWEN3_5_TARGET_MODULES,
+}
 
 
 def _resolve_target_modules(
@@ -73,162 +190,16 @@ def _resolve_target_modules(
         return list(explicit)
     if preset == "attention_and_mlp":
         model_type = getattr(model.config, "model_type", None)
-        if model_type not in _ATTENTION_AND_MLP_MODEL_TYPES:
+        curated = _ATTENTION_AND_MLP_MODULES_BY_MODEL_TYPE.get(model_type)
+        if curated is None:
             raise RuntimeError(
                 f"lora.target_preset='attention_and_mlp' has no curated module list for "
-                f"model_type {model_type!r}; supported: {sorted(_ATTENTION_AND_MLP_MODEL_TYPES)}. "
+                f"model_type {model_type!r}; supported: "
+                f"{sorted(_ATTENTION_AND_MLP_MODULES_BY_MODEL_TYPE)}. "
                 "Specify backend.lora.target_modules explicitly instead."
             )
-        return list(_ATTENTION_AND_MLP_TARGET_MODULES)
+        return list(curated)
     return None
-
-
-def _sha256_file(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _verify_bound_input(path: str, expected_sha: str | None, *, label: str) -> str:
-    resolved = Path(path).resolve()
-    if not resolved.is_file():
-        raise FileNotFoundError(f"{label} dataset not found: {resolved}")
-    actual = _sha256_file(resolved)
-    if expected_sha is not None and actual != expected_sha:
-        raise RuntimeError(f"{label} dataset digest changed before worker load")
-    return actual
-
-
-def _verify_bound_adapter(path: str, expected_sha: str, *, label: str) -> str:
-    resolved = Path(path).resolve()
-    if not resolved.is_dir():
-        raise FileNotFoundError(f"{label} adapter not found: {resolved}")
-    actual = sha256_directory(resolved)
-    if actual != expected_sha:
-        raise RuntimeError(f"{label} adapter digest changed before worker load")
-    return actual
-
-
-def _replay_sample_count(primary_rows: int, replay_rows: int, ratio: float) -> int:
-    if primary_rows < 0 or replay_rows < 0:
-        raise ValueError("dataset row counts cannot be negative")
-    if replay_rows == 0 or primary_rows == 0:
-        return 0
-    if not math.isfinite(float(ratio)) or ratio <= 0:
-        raise ValueError("replay ratio must be finite and positive")
-    return min(replay_rows, max(1, math.ceil(primary_rows * float(ratio))))
-
-
-def _text_digest(dataset: Any, text_field: str) -> str:
-    digest = hashlib.sha256()
-    for index in range(len(dataset)):
-        text = str(dataset[index][text_field]).encode("utf-8")
-        digest.update(len(text).to_bytes(8, "big"))
-        digest.update(text)
-    return digest.hexdigest()
-
-
-_CHAT_ROLES = {"system", "user", "assistant"}
-
-
-def _validate_chat_messages(raw: Any, *, row_index: int) -> list[dict[str, str]]:
-    if not isinstance(raw, list) or not raw:
-        raise RuntimeError(
-            f"chat dataset row {row_index} has an empty or invalid messages list"
-        )
-    normalized: list[dict[str, str]] = []
-    has_assistant = False
-    for turn in raw:
-        if not isinstance(turn, dict) or "role" not in turn or "content" not in turn:
-            raise RuntimeError(
-                f"chat dataset row {row_index} has a message missing role/content"
-            )
-        role = str(turn["role"])
-        if role not in _CHAT_ROLES:
-            raise RuntimeError(
-                f"chat dataset row {row_index} has unsupported message role {role!r}; "
-                f"supported roles are {sorted(_CHAT_ROLES)}"
-            )
-        if role == "assistant":
-            has_assistant = True
-        normalized.append({"role": role, "content": str(turn["content"])})
-    if not has_assistant:
-        raise RuntimeError(
-            f"chat dataset row {row_index} has no assistant turn -- nothing to train on"
-        )
-    return normalized
-
-
-def _render_chat_ids(
-    tokenizer: Any, messages: list[dict[str, str]], *, add_generation_prompt: bool
-) -> list[int]:
-    encoded = tokenizer.apply_chat_template(
-        messages, tokenize=True, add_generation_prompt=add_generation_prompt
-    )
-    return list(encoded["input_ids"] if hasattr(encoded, "keys") else encoded)
-
-
-def _build_chat_example(
-    tokenizer: Any, messages: list[dict[str, str]], *, max_length: int, row_index: int
-) -> dict[str, list[int]]:
-    """Tokenize one conversation with completion-only (assistant-turn) labels.
-
-    Does not rely on the chat template defining a ``{% generation %}`` block
-    -- most real templates (including the official Llama 3.1 template) don't.
-    Instead, for each assistant turn, renders the conversation twice: once up
-    to (not including) that turn with ``add_generation_prompt=True`` (the
-    exact point the assistant's own tokens begin), and once through the end
-    of that turn. The token-length difference is exactly the assistant's own
-    generated span, verified to be a real prefix of the full sequence before
-    being trusted -- a template that isn't prefix-consistent raises rather
-    than silently mislabeling.
-    """
-    full_ids = _render_chat_ids(tokenizer, messages, add_generation_prompt=False)
-    labels = [-100] * len(full_ids)
-    for index, turn in enumerate(messages):
-        if turn["role"] != "assistant":
-            continue
-        prefix_ids = _render_chat_ids(tokenizer, messages[:index], add_generation_prompt=True)
-        through_ids = _render_chat_ids(
-            tokenizer, messages[: index + 1], add_generation_prompt=False
-        )
-        if (
-            len(prefix_ids) > len(full_ids)
-            or len(through_ids) > len(full_ids)
-            or full_ids[: len(prefix_ids)] != prefix_ids
-            or full_ids[: len(through_ids)] != through_ids
-        ):
-            raise RuntimeError(
-                f"chat dataset row {row_index}: chat template is not prefix-consistent "
-                "across turns; cannot compute a reliable completion-only loss mask"
-            )
-        labels[len(prefix_ids) : len(through_ids)] = full_ids[len(prefix_ids) : len(through_ids)]
-
-    full_ids = full_ids[:max_length]
-    labels = labels[:max_length]
-    if not any(label != -100 for label in labels):
-        raise RuntimeError(
-            f"chat dataset row {row_index}: no assistant tokens remain after truncating "
-            f"to max_length={max_length} -- increase max_length or shorten this conversation"
-        )
-    return {
-        "input_ids": full_ids,
-        "attention_mask": [1] * len(full_ids),
-        "labels": labels,
-    }
-
-
-def _chat_digest(dataset: Any, messages_field: str) -> str:
-    digest = hashlib.sha256()
-    for index in range(len(dataset)):
-        payload = json.dumps(
-            dataset[index][messages_field], sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        digest.update(len(payload).to_bytes(8, "big"))
-        digest.update(payload)
-    return digest.hexdigest()
 
 
 def _cuda_resource_snapshot(torch: Any, model: Any, trainer: Any) -> dict[str, Any]:
@@ -270,6 +241,26 @@ def _cuda_resource_snapshot(torch: Any, model: Any, trainer: Any) -> dict[str, A
     }
 
 
+def _save_adapter_with_retry(model: Any, output_dir: str | Path) -> None:
+    """save_pretrained() once, with one bounded retry on Windows file-lock
+    failures (os error 32). safetensors surfaces those as SafetensorError,
+    not OSError, so both exception types are retried; the message is matched
+    so genuine I/O failures still raise on first attempt."""
+    try:
+        model.save_pretrained(output_dir, safe_serialization=True)
+        return
+    except (OSError, SafetensorError) as save_error:
+        if "os error 32" not in str(save_error).lower():
+            raise
+    time.sleep(2.0)
+    for stale in Path(output_dir).glob("*.safetensors"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    model.save_pretrained(output_dir, safe_serialization=True)
+
+
 def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     """Returns None on non-main ranks under multi-GPU DDP -- only the main
     process (trainer.is_world_process_zero()) produces a result; see the
@@ -290,6 +281,16 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             spec.parent_adapter_sha256,
             label="parent",
         )
+
+    # P7: check the checkpoint *before* loading anything. A checkpoint whose
+    # optimizer/scheduler state is missing (a process killed mid-save, or a save
+    # that only reached the manifest) makes Trainer restore the weights and
+    # silently start optimization over; refusing here costs no model load and no
+    # GPU time, and the inventory is reused for the post-training witness.
+    resume_inventory = None
+    if spec.resume_from_checkpoint is not None:
+        resume_inventory = inventory_checkpoint(spec.resume_from_checkpoint)
+        assert_resumable(resume_inventory, require_rng=True)
 
     try:
         import torch
@@ -331,6 +332,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         def __init__(self, progress_path: Path, started: float) -> None:
             self._progress_path = progress_path
             self._started = started
+            self._progress_write_failures = 0
 
         def on_log(self, args, state, control, logs=None, **kwargs):
             # Trainer also calls on_log once more at the very end of
@@ -351,10 +353,12 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
                 "learning_rate": logs.get("learning_rate"),
                 "wall_seconds": time.perf_counter() - self._started,
             }
-            tmp_path = self._progress_path.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(payload), encoding="utf-8")
-            tmp_path.replace(self._progress_path)  # atomic on POSIX/NTFS, so a
-            # concurrent poller in the main process never reads a half-written file.
+            # Best-effort: the rename is atomic WHEN IT SUCCEEDS, so a concurrent
+            # poller never sees a half-written file -- but it can still fail with a
+            # sharing violation on Windows, and an exception raised here propagates
+            # out of Trainer.train() and destroys the run. One did, at step 323/500.
+            if not write_progress_best_effort(payload, self._progress_path):
+                self._progress_write_failures += 1
 
     class _FrozenLayerStreamingCallback(TrainerCallback):
         """Kicks off each step's frozen-layer prefetch right before that
@@ -370,10 +374,32 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
 
         def __init__(self) -> None:
             self.streamed: Any = None
+            self.trainer_ref: Any = None
 
         def on_step_begin(self, args, state, control, **kwargs):
             if self.streamed is not None:
                 self.streamed.start_step()
+
+        def on_train_begin(self, args, state, control, **kwargs):
+            # Wrap accelerator.backward so start_backward() (kicking off the
+            # last frozen layer's backward prefetch) fires immediately
+            # before the real backward call, every step. self.trainer_ref
+            # is set externally right after Trainer() construction (same
+            # pattern _TrainingPhaseTimerCallback uses, for the same
+            # reason); by the time on_train_begin fires inside
+            # trainer.train(), both trainer_ref and streamed are already
+            # set. A no-op when frozen-layer streaming isn't enabled.
+            if self.streamed is None or self.trainer_ref is None:
+                return
+            trainer = self.trainer_ref
+            original_backward = trainer.accelerator.backward
+
+            @functools.wraps(original_backward)
+            def backward_with_prefetch(*call_args, **call_kwargs):
+                self.streamed.start_backward()
+                return original_backward(*call_args, **call_kwargs)
+
+            trainer.accelerator.backward = backward_with_prefetch
 
     class _TrainingPhaseTimerCallback(TrainerCallback):
         """Real forward/backward/optimizer-step timing, by wrapping
@@ -404,6 +430,12 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             self.forward_seconds = 0.0
             self.backward_seconds = 0.0
             self.optimizer_seconds = 0.0
+            # The FIRST step is its own quantity: a real run reached its memory
+            # peak inside the first step, and a steady-state average hides that.
+            # None means "not observed", never 0.0.
+            self.first_forward_seconds: float | None = None
+            self.first_backward_seconds: float | None = None
+            self.first_optimizer_seconds: float | None = None
             self._utilization_samples: list[float] = []
             self._stop_sampling = threading.Event()
             self._sampler_thread: threading.Thread | None = None
@@ -441,7 +473,10 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
                 started = time.perf_counter()
                 result = original_compute_loss(*call_args, **call_kwargs)
                 self._sync()
-                self.forward_seconds += time.perf_counter() - started
+                elapsed = time.perf_counter() - started
+                self.forward_seconds += elapsed
+                if self.first_forward_seconds is None:
+                    self.first_forward_seconds = elapsed
                 return result
 
             trainer.compute_loss = timed_compute_loss
@@ -454,7 +489,10 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
                 started = time.perf_counter()
                 result = original_backward(*call_args, **call_kwargs)
                 self._sync()
-                self.backward_seconds += time.perf_counter() - started
+                elapsed = time.perf_counter() - started
+                self.backward_seconds += elapsed
+                if self.first_backward_seconds is None:
+                    self.first_backward_seconds = elapsed
                 return result
 
             trainer.accelerator.backward = timed_backward
@@ -467,7 +505,10 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
                 started = time.perf_counter()
                 result = original_step(*call_args, **call_kwargs)
                 self._sync()
-                self.optimizer_seconds += time.perf_counter() - started
+                elapsed = time.perf_counter() - started
+                self.optimizer_seconds += elapsed
+                if self.first_optimizer_seconds is None:
+                    self.first_optimizer_seconds = elapsed
                 return result
 
             trainer.optimizer.step = timed_step
@@ -488,10 +529,18 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
 
     if spec.trust_remote_code:
         raise RuntimeError("trust_remote_code is disabled")
+    if spec.local_custom_code_digests is not None:
+        patch_transformers5_custom_model(spec.base_model, spec.local_custom_code_digests)
 
     dtype = _resolve_dtype(torch, spec.precision)
     if spec.quantization == "4bit" and not torch.cuda.is_available():
         raise RuntimeError("initial 4-bit QLoRA backend requires an available CUDA device")
+
+    # P6: the model load is a real, measurable phase. Until now the completed
+    # rerun's artifacts could not say how much of its 3.463 GPU-hours was load,
+    # how much was the 500 steps, and how much was generation.
+    load_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
+    load_timer.__enter__()
 
     set_seed(spec.seed)
     model_cache_status = cache_status(spec.base_model, spec.revision)
@@ -499,7 +548,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         lambda: AutoTokenizer.from_pretrained(
             spec.base_model,
             revision=spec.revision,
-            trust_remote_code=False,
+            trust_remote_code=spec.local_custom_code_digests is not None,
             local_files_only=spec.offline,
         ),
         label=f"tokenizer download for {spec.base_model}",
@@ -512,7 +561,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model_kwargs: dict[str, Any] = {
-        "trust_remote_code": False,
+        "trust_remote_code": spec.local_custom_code_digests is not None,
         "dtype": dtype,
         "local_files_only": spec.offline,
     }
@@ -543,6 +592,9 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             spec.parent_adapter,
             is_trainable=True,
         )
+        # A parent adapter that silently fails to load would make a
+        # 'continued' run a fresh one, with provenance claiming otherwise.
+        assert_adapter_is_live(model, spec.parent_adapter)
     else:
         target_modules = _resolve_target_modules(
             base_model, explicit=spec.target_modules, preset=spec.target_preset
@@ -558,10 +610,31 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         )
         model = get_peft_model(base_model, lora_config)
 
-    resolved_target_modules = sorted(model.peft_config[model.active_adapter].target_modules)
+    # A regex target spec stays a STRING in peft_config, and sorting a string shreds
+    # it into characters. See unsloth_worker for the run this corrupted.
+    _resolved = model.peft_config[model.active_adapter].target_modules
+    resolved_target_modules = (
+        _resolved if isinstance(_resolved, str) else sorted(_resolved)
+    )
+    # What was actually ADAPTED, not what was configured: PEFT matches by suffix
+    # and silently adapts only the subset that matches. The controller turns this
+    # into a coverage verdict against the requested list.
+    adapted_by_leaf = adapted_modules_by_leaf(model)
+    # P5: the leaf counts above are a summary and cannot see WHICH path is
+    # missing -- seven of eight `q_proj` modules still counts as "q_proj
+    # present". Record the exact intended-vs-adapted module path set as well, so
+    # a run carries the comparison rather than only the totals. Only meaningful
+    # for an explicit list: a preset's regex declares no per-path intent.
+    component_paths: dict[str, Any] | None = None
+    if spec.target_modules:
+        intended, unknown_targets = resolve_expected_module_paths(model, spec.target_modules)
+        component_paths = component_path_report(
+            intended, adapted_module_paths(model), unknown_suffixes=unknown_targets
+        ).to_dict()
 
     if spec.gradient_checkpointing:
         model.config.use_cache = False
+    load_timer.__exit__()
 
     is_chat = spec.dataset_format == "chat"
     field = spec.messages_field if is_chat else spec.text_field
@@ -694,6 +767,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     )
     if timer_callback is not None:
         timer_callback.trainer_ref = trainer
+    frozen_layer_streaming_callback.trainer_ref = trainer
 
     frozen_layer_streaming_bytes_transferred: int | None = None
     streamed_layers = None
@@ -709,6 +783,13 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
 
         streamed_layers = stream_frozen_layers(model, trainer.args.device)
         frozen_layer_streaming_callback.streamed = streamed_layers
+
+    # P6: sampled headroom while the steps run, from this process's own view.
+    # The report states its own cadence and that a sample is a point reading;
+    # judging headroom from a machine-wide nvidia-smi figure is what produced a
+    # spurious oversubscription FAIL on a busy desktop.
+    memory_sampler = MemorySampler(device_name=sampling_device(torch))
+    memory_sampler.start()
 
     activation_offload_bytes_transferred: int | None = None
     if spec.activation_offload:
@@ -744,6 +825,9 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     else:
         train_output = trainer.train(resume_from_checkpoint=spec.resume_from_checkpoint)
     runtime = time.perf_counter() - started
+    memory_sampling = memory_sampler.stop()
+    closeout_timer = PhaseTimer()
+    closeout_timer.__enter__()
 
     if streamed_layers is not None:
         frozen_layer_streaming_bytes_transferred = streamed_layers.runtime.bytes_transferred
@@ -764,8 +848,32 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     # .train() returns, so the non-main ranks have nothing left to do.
     if not trainer.is_world_process_zero():
         return None
-    model.save_pretrained(output_dir, safe_serialization=True)
+    publication_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
+    publication_timer.__enter__()
+    # Windows: shell/AV/indexer handles on a fresh output dir can hold the
+    # target path open while safetensors serializes, failing the whole run
+    # after training already succeeded. One bounded cleanup+retry on the
+    # exact save site; anything that fails twice is a real error.
+    _save_adapter_with_retry(model, output_dir)
     tokenizer.save_pretrained(output_dir)
+    publication_timer.__exit__()
+
+    # P7: a resume that cannot be witnessed is refused. The adapter existing
+    # proves training ran; only the advance past the checkpoint's own recorded
+    # step proves it *resumed* rather than quietly starting over.
+    resume_report: dict[str, Any] | None = None
+    if resume_inventory is not None:
+        resume_report = resume_witness(
+            resume_inventory,
+            final_global_step=int(trainer.state.global_step),
+            declared_max_steps=spec.max_steps if spec.max_steps > 0 else None,
+        )
+        if not resume_report["matched"]:
+            raise RuntimeError(
+                "the run did not resume from the checkpoint it was given: "
+                f"{resume_report['reason']} (witness={resume_report})"
+            )
+    step_log = _step_log(trainer)
     # KNOWN LIMITATION: under multi-GPU DDP, torch.cuda.max_memory_allocated
     # is scoped to the CALLING process's own CUDA context per device -- this
     # process (rank 0) only ever allocated on its own device, so peak VRAM
@@ -777,6 +885,41 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     # reporting its own device, rank 0 merging them) is a real follow-up,
     # not done here.
     resource_snapshot = _cuda_resource_snapshot(torch, model, trainer)
+
+    # P6: what the run could measure, and what it could not. `lifecycle` keeps
+    # the two apart on purpose; `tensor_inventory`/`quantization_reality` report
+    # the storage that is actually present, not the loader setting requested.
+    lifecycle = training_lifecycle_ledger(
+        accelerator_count=int(resource_snapshot["active_accelerator_count"]),
+        model_load=load_timer,
+        checkpoint_publication=publication_timer,
+        steady_state_steps_seconds=runtime,
+        detailed_timing_enabled=timer_callback is not None,
+        first_forward_seconds=(
+            timer_callback.first_forward_seconds if timer_callback is not None else None
+        ),
+        first_backward_seconds=(
+            timer_callback.first_backward_seconds if timer_callback is not None else None
+        ),
+        first_update_seconds=(
+            timer_callback.first_optimizer_seconds if timer_callback is not None else None
+        ),
+        resumed_from_checkpoint=spec.resume_from_checkpoint is not None,
+    )
+    lifecycle_data = lifecycle.to_dict()
+    tensor_storage = tensor_inventory(model)
+    quantization_reality = quantization_reality_report(
+        model, requested=spec.quantization
+    )
+    # The first step's own cost, only when the first forward was actually
+    # observed -- None otherwise, never a partial sum presented as a total.
+    first_step_seconds: float | None = None
+    if timer_callback is not None and timer_callback.first_forward_seconds is not None:
+        first_step_seconds = (
+            timer_callback.first_forward_seconds
+            + (timer_callback.first_backward_seconds or 0.0)
+            + (timer_callback.first_optimizer_seconds or 0.0)
+        )
 
     # Real, device-agnostic tensor introspection -- identical approach to
     # Phase 7A's optimizer_state_bytes and 7C's own experiment worker.
@@ -813,6 +956,10 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         ):
             raise RuntimeError("parent adapter changed during worker execution")
 
+    closeout_timer.__exit__()
+    lifecycle.record_timer(PHASE_CLOSEOUT, closeout_timer)
+    lifecycle_data = lifecycle.to_dict()
+
     peak_values = list(resource_snapshot["peak_vram_gb_by_accelerator"].values())
     peak_vram_gb = max(peak_values, default=0.0)
     return {
@@ -833,6 +980,16 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "primary_rows": primary_rows,
             "replay_selected_rows": replay_selected_rows,
             "training_rows": len(dataset),
+            # P6: the whole-lifecycle phase ledger, the storage that is really
+            # present, and this process's own sampled headroom. An unmeasured
+            # phase is null and named in `unmeasured` -- never a zero.
+            "lifecycle": lifecycle_data,
+            "tensor_inventory": tensor_storage,
+            "quantization_reality": quantization_reality,
+            "memory_sampling": memory_sampling,
+            "first_step_seconds": first_step_seconds,
+            "resume": resume_report,
+            "step_log": step_log,
         },
         "resource_usage": resource_snapshot,
         "data_provenance": {
@@ -855,6 +1012,8 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "resolved_model_commit": getattr(model.config, "_commit_hash", None),
             "model_type": getattr(model.config, "model_type", None),
             "resolved_target_modules": resolved_target_modules,
+            "adapted_modules_by_leaf": adapted_by_leaf,
+            "component_paths": component_paths,
             "continued_from_parent_adapter": parent_adapter_sha is not None,
             "parent_adapter_sha256": parent_adapter_sha,
         },
@@ -885,13 +1044,60 @@ def _crash_rank_for_ddp_acceptance_test() -> None:
         )
 
 
+def _constrain_vram_for_memory_fabric_acceptance_test() -> None:
+    """Test-support only, inert unless a specific env var is explicitly set
+    (normal runs never set it): caps this process's real CUDA allocator
+    budget via torch.cuda.set_per_process_memory_fraction, so
+    tests/test_memory_fabric_acceptance.py can prove a genuine resident
+    CUDA-OOM -> Memory-Fabric-success pair on hardware whose driver-level
+    VRAM-to-system-RAM paging fallback otherwise silently absorbs an
+    overflow instead of raising (see docs/MEMORY_FABRIC_ACCEPTANCE.md).
+    Confirmed for real (see that doc) that this produces a genuine
+    torch.cuda.OutOfMemoryError raised by PyTorch's own allocator before
+    it ever asks the driver for more memory -- the driver's paging
+    fallback never gets a chance to engage, so the OOM this test needs is
+    real, not simulated by lying about the card's reported size. Same
+    principle as _crash_rank_for_ddp_acceptance_test above: the effect is
+    real, only its reproducibility is engineered.
+    """
+    fraction_raw = os.environ.get("_CHOWDER_MEMORY_FABRIC_ACCEPTANCE_VRAM_FRACTION")
+    if fraction_raw is None:
+        return
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.set_per_process_memory_fraction(float(fraction_raw), device=0)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--spec", required=True)
     parser.add_argument("--result", required=True)
+    parser.add_argument(
+        "--chowder-identity",
+        default=None,
+        help="JSON file with the chowder source identity the controller declared; "
+        "verified against the code this process actually imported BEFORE the "
+        "spec is read, so a wrong-checkout worker refuses instead of training",
+    )
     args = parser.parse_args()
 
+    # P4c: nothing may be loaded, run, or written before the pin checks out.
+    from ..worker_env import verify_source_identity
+
+    if args.chowder_identity is not None:
+        verify_source_identity(
+            json.loads(Path(args.chowder_identity).read_text(encoding="utf-8"))
+        )
+    else:
+        print(
+            "WARNING: no --chowder-identity supplied; the worker's source "
+            "identity is unverified for this run",
+            file=sys.stderr,
+        )
+
     _crash_rank_for_ddp_acceptance_test()
+    _constrain_vram_for_memory_fabric_acceptance_test()
 
     spec_data = json.loads(Path(args.spec).read_text(encoding="utf-8"))
     spec = TransformersPeftRunSpec(**spec_data)

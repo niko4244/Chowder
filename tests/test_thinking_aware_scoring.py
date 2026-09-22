@@ -11,7 +11,11 @@ pinned here as a regression test.
 from __future__ import annotations
 
 import chowder.parent_eval as pe
-from chowder.evaluators.base_text_worker import _final_answer, _score
+from chowder.evaluators.base_text_worker import (
+    _final_answer,
+    _reasoning_answer,
+    _score,
+)
 
 
 # ---- extraction ---------------------------------------------------------------
@@ -50,6 +54,72 @@ def test_unclosed_thinking_scores_zero() -> None:
 def test_plain_prediction_unchanged() -> None:
     assert _score("Mercury", "mercury", "normalized_exact_match") == 1.0
     assert _score("Venus", "mercury", "normalized_exact_match") == 0.0
+
+
+# ---- reasoning_answer_match: templates that open <think> themselves ----------
+
+
+def test_reasoning_answer_reads_span_after_first_close_marker() -> None:
+    # Spark-X2.5 shape: the generation prompt ends with <think>, so the
+    # generation starts by closing it. The trailing </think> is the model's
+    # end-of-turn marker, not part of the answer.
+    assert _reasoning_answer("</think>zblorb-61</think>") == "zblorb-61"
+
+
+def test_reasoning_answer_without_trailing_marker() -> None:
+    assert _reasoning_answer("</think>zblorb-60") == "zblorb-60"
+
+
+def test_reasoning_answer_unclosed_thinking_is_empty() -> None:
+    assert _reasoning_answer("<think>still reasoning") == ""
+
+
+def test_reasoning_answer_plain_prediction_unchanged() -> None:
+    assert _reasoning_answer("zblorb-60") == "zblorb-60"
+
+
+def test_reasoning_answer_match_scores_real_spark_generations() -> None:
+    assert _score("</think>zblorb-61</think>", "zblorb-61", "reasoning_answer_match") == 1.0
+    assert _score("</think>zblorb-62</think>", "zblorb-61", "reasoning_answer_match") == 0.0
+    # The old rule reads the empty tail after the LAST marker and would score
+    # this correct answer as a miss -- that behavior gap is why this mode exists.
+    assert _score("</think>zblorb-61</think>", "zblorb-61", "normalized_exact_match") == 0.0
+
+
+# ---- reasoning_final_number_match: reasoning span + final-number rule -------
+
+
+def test_reasoning_final_number_reads_number_from_reasoning_span() -> None:
+    # Spark-style trailing </think> marker: final_number_match reads the empty
+    # tail after the LAST marker and would score a correct answer as a miss.
+    assert _score("</think>$0.20 per sock... #### 3</think>", "3", "final_number_match") == 0.0
+    assert (
+        _score("</think>$0.20 per sock... #### 3</think>", "3", "reasoning_final_number_match")
+        == 1.0
+    )
+
+
+def test_reasoning_final_number_matches_plain_output() -> None:
+    # No think markers: the span is the whole prediction, number compared.
+    assert _score("The answer is #### 72", "72", "reasoning_final_number_match") == 1.0
+
+
+def test_reasoning_final_number_comma_and_decimal_normalization() -> None:
+    assert _score("</think>70,000 total</think>", "70000", "reasoning_final_number_match") == 1.0
+    assert _score("</think>72.0</think>", "72", "reasoning_final_number_match") == 1.0
+
+
+def test_reasoning_final_number_rejects_unclosed_thinking() -> None:
+    # Budget exhausted mid-reasoning: no answer span, no number, score 0.
+    assert _score("<think>let me work this out... 42", "42", "reasoning_final_number_match") == 0.0
+
+
+def test_reasoning_final_number_mismatch_scores_zero() -> None:
+    assert _score("</think>#### 25</think>", "24", "reasoning_final_number_match") == 0.0
+
+
+def test_reasoning_answer_match_rejects_unclosed_thinking() -> None:
+    assert _score("<think>mid-reasoning", "zblorb-61", "reasoning_answer_match") == 0.0
 
 
 def test_real_retry6_knowledge_item_regression() -> None:
