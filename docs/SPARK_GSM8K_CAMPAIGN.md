@@ -132,6 +132,49 @@ GPU processes holding VRAM) required freeing the GPU and relaunching with
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` — both recovered without
 code changes, and the second OOM-free run completed all 300 steps.
 
+## Generation 6 plan (eval-budget probe, post-truncation-analysis)
+
+**Truncation analysis** (classify all wrong holdout predictions by failure
+shape; script: `analyze_truncation.py` next to the fixtures):
+
+| Generation | wrong | TRUNCATED (no `#### N`) | WRONG_NUMBER | SCORING_MISS | ceiling if all truncations fixed |
+|---|---|---|---|---|---|
+| gen3 (0.70) | 30 | **1** | 29 | 0 | 0.71 |
+| gen5 (0.68) | 32 | **0** | 32 | 0 | 0.68 |
+
+Wrong chains are *complete* (~103–113 emitted words, far under the
+320-token cap) and compute a wrong number — the model ends its reasoning
+and answers; it does not run out of budget. Zero scoring misses: the
+extractor and scorer are not losing credit. **The truncation hypothesis is
+refuted as the primary blocker**: a longer generation budget alone buys at
+most +0.01–0.03.
+
+**gen-6a — direct probe (cheap, no training, ~25 min).** Evaluate the
+gen-2 promoted adapter on the same holdout with `max_new_tokens` raised
+320 → 768 through the evaluator path. This closes the question with a
+measured number instead of the inferred bound. Design notes: raising the
+budget changes the protocol contract (max_new_tokens is part of evaluation
+identity), so this is a *diagnostic outside the lifecycle* — not a
+campaign generation — and any score it produces cannot be compared to the
+0.73 baseline without a matching-baseline run. Halve the holdout to 50
+prompts if eval time matters; 768 tokens roughly doubles generation time.
+
+**Decision tree:**
+
+- Probe ≥ 0.76 → the budget was masking real answers after all; run gen-6b
+  as a training generation under the 768-token protocol (new objective
+  version, fresh measured baseline = gen-2 adapter under the same 768-token
+  protocol, replay recipe from gen 5).
+- Probe in 0.73–0.76 → marginal; do not train. The remaining errors are
+  arithmetic, not truncation. Pivot to the untested data lever: one
+  generation over ~2,000 rows (fresh + full replay) at lr 3e-5 — gen 4's
+  400-row run is confounded by forgetting and does not settle whether
+  data quantity at gentle LR helps.
+- Probe < 0.73 → longer budget hurts (rambling past the answer); close the
+  hypothesis entirely and treat 0.73 as the recipe ceiling. Next levers:
+  self-consistency voting (k=5 samples, majority final number — new eval
+  protocol, no training), a stronger base model, or full fine-tuning.
+
 ## Reproduction
 
 Scripts live in `.chowder-spark-calib/gsm8k/`: `prep_gen{3,4,5}.py` build the
