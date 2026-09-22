@@ -24,6 +24,7 @@ regression was refused.
   | gen2_train | 1000–1199 | generation 2 training |
   | gen3_train | 2000–2199 | generation 3 training |
   | gen4_train | 3000–3399 | generation 4 training |
+  | gen5_train | 4000–4399 (+ replay of gen1/gen2 rows) | generation 5 training |
   | holdout | 5000–5099 | **all** evaluation, never trained on |
 - **Scoring**: `reasoning_final_number_match` — reads the final number from
   the reasoning span (between the first and next `</think>`). Plain
@@ -45,6 +46,7 @@ regression was refused.
 | 2 | 200 fresh rows, continued from gen1 adapter | 100 | 0.68 (gen1 measured) | **0.73** | UNMET (bar 0.75) | null | yes (gain +0.05 > 0.02 gate) | false |
 | 3 | 200 fresh rows, continued from gen2 adapter | 150 | 0.73 (gen2 measured) | **0.70** | UNMET (bar 0.75) | `STOP_PLATEAU` | no — candidate below baseline | false |
 | 4 | **400** fresh rows, r=32/alpha=64, continued from gen2 adapter | 300 | 0.73 (gen2 measured) | **0.66** | UNMET (bar 0.75) | `STOP_PLATEAU` | no — candidate below baseline | false |
+| 5 | **800** rows: 400 fresh + 400 replayed gen1/gen2, interleaved; r=16; **lr 3e-5**; continued from gen2 adapter | 300 | 0.73 (gen2 measured) | **0.68** | UNMET (bar 0.75) | `STOP_PLATEAU` | no — candidate below baseline | false |
 
 Key honesty checkpoints demonstrated:
 
@@ -103,11 +105,41 @@ campaign's peak (gen 2, 0.73) is the capability this recipe reaches, and
 breaking 0.75 needs a different lever — lower learning rate with more steps,
 replay of gen-1/2 data alongside fresh rows, or a larger/stronger base model.
 
+## Generation 5 (anti-forgetting replay)
+
+The two levers the gen-3/4 diagnosis pointed to, combined: **dataset replay**
+(400 fresh rows deterministically interleaved with the exact gen1/gen2
+training rows, so every optimization window mixes novel and parent-era
+material) and a **10× lower learning rate** (3e-5), back to the gen-2 rank
+(r=16/alpha=32), 300 steps, continuing from the gen-2 promoted adapter.
+Training completed cleanly (train_loss 0.833, schedule fully decayed).
+
+Result: **0.68 — below its 0.73 parent**; the promotion gate refused it and
+the lifecycle returned `STOP_PLATEAU`. Replay plus a gentle learning rate
+did not beat the gen-2 checkpoint either. The full picture across gens
+3–5: three different recipes (identical, 2× capacity/data, gentle-lr
+replay) all land at or below 0.68–0.73, while the gen-2 checkpoint itself
+holds at 0.73. This is consistent with a capability ceiling of the 4B base
+under this LoRA recipe rather than a training-dynamics problem: continued
+optimization perturbs the adapter away from its best point more than it
+gains. Breaking 0.75 most plausibly needs a stronger base model, a
+substantially longer generation budget at eval time, or full fine-tuning.
+
+Infrastructure notes from gen 5: the run root was relocated to another
+drive after the system disk filled (the disk-space preflight correctly
+refused the first launch with 0.28 GB free), and a mid-run CUDA OOM (other
+GPU processes holding VRAM) required freeing the GPU and relaunching with
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` — both recovered without
+code changes, and the second OOM-free run completed all 300 steps.
+
 ## Reproduction
 
-Scripts live in `.chowder-spark-calib/gsm8k/`: `prep_gen{3,4}.py` build the
-fixtures; `run_gen{1..4}.py` run each generation through `run_project()`;
-`launch-gen{2..4}.ps1` launch them detached (tool timeouts must not kill the
+Scripts live in `.chowder-spark-calib/gsm8k/`: `prep_gen{3,4,5}.py` build the
+fixtures (gen5's demonstrates the dataset-replay pattern: fresh slice plus
+re-rendered parent-generation rows, deterministically interleaved);
+`run_gen{1..5}.py` run each generation through `run_project()`;
+`launch-gen{2..5}.ps1` launch them detached (tool timeouts must not kill the
 training/eval pipeline — two early candidate evals died exactly that way).
-Registries (`runs.db`) under `gen{1..4}/` hold the append-only evidence;
-outcome summaries are written to `gen{N}_outcome.json` next to each script.
+Registries (`runs.db`) under `gen{1..4}/` (gen 5's under its relocated run
+root) hold the append-only evidence; outcome summaries are written to
+`gen{N}_outcome.json` next to each script.
