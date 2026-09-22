@@ -31,26 +31,18 @@ from .run_events import (
 
 
 def _outcome_status(outcome: ProjectRunOutcome) -> str:
-    """Render status from the canonical project outcome, never candidate success."""
     if outcome.succeeded:
         return "Complete — goals met"
-
     terminal_state = outcome.generation.goal_terminal_state
     if terminal_state is not None:
         return f"Stopped — {terminal_state}"
-
     candidate = outcome.generation.candidates[-1] if outcome.generation.candidates else None
     if candidate is not None and candidate.error is not None:
         if candidate.error.startswith("cancelled"):
             return "Cancelled"
         return f"Failed: {candidate.error}"
-
-    if (
-        outcome.repair is not None
-        and outcome.repair.stop_reason is RecursiveRepairStopReason.CANCELLED
-    ):
+    if outcome.repair is not None and outcome.repair.stop_reason is RecursiveRepairStopReason.CANCELLED:
         return "Cancelled"
-
     if outcome.promoted_experiment_id is not None:
         return f"Incomplete — promoted {outcome.promoted_experiment_id}; goal not met"
     return "Incomplete — goal not met"

@@ -17,3 +17,9 @@ An operator may explicitly call the narrow protocol-contract migration operation
 - a non-empty approval ID, approver, timestamp, and reason.
 
 The operation recomputes the current contract from the project configuration, verifies that the goal and benchmark are unchanged, creates a new frozen objective, and appends a migration record containing source/target identities, contract digest, approval, and provenance. The legacy objective remains immutable. Only the returned project with the new objective version may resume; changing its configuration afterward is refused. No approval, reused objective version, goal change, benchmark change, or missing provenance is accepted.
+
+## Legacy unbounded mode (`goal_lifecycle.mode: "legacy_unbounded"`)
+
+The canonical path freezes an evaluation-protocol digest and refuses to record evidence under a changed protocol. A project may opt out ONLY with an explicit config key (`config.goal_lifecycle.mode = "legacy_unbounded"`) AND a goal whose every metric has no `minimum`/`maximum` bound; either alone is inert. When the measured protocol differs from the frozen one under this mode, the lifecycle records the assessment against the frozen identity for continuity instead of refusing.
+
+This mode exists for callers whose objectives intentionally have no bounded goals (generation-limit-only budgets). It must never be combined with bounded goal metrics: a project that declares a pass/fail bar cannot silently keep measuring after its evaluation contract changed. Note the semantics trade-off: an unbounded metric assesses as MET whenever a finite measurement exists, so under this mode a legacy objective can complete with `STOP_GOALS_MET` exactly as it did before protocol freezing — the double gate (explicit opt-in plus all metrics unbounded) is the only guard against accidental use.

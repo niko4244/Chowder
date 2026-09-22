@@ -253,11 +253,15 @@ def _check_model_architecture(
     if not base_model:
         return
     revision = backend.get("revision")
+    local_custom_code_digests = backend.get("local_custom_code_digests")
+    if local_custom_code_digests is not None and not isinstance(local_custom_code_digests, Mapping):
+        raise ValueError("backend.local_custom_code_digests must be a mapping")
     check_causal_lm_architecture(
         base_model=base_model,
         revision=str(revision) if revision is not None else None,
         offline=bool(backend.get("offline", False)),
         label="transformers-peft training/evaluation",
+        local_custom_code_digests=local_custom_code_digests,
     )
 
 
@@ -317,6 +321,17 @@ class ExperimentCycleRunner:
     executor_investigation_budget: float = 0.25
     cancellation: CancellationToken | None = None
     progress_callback: Callable[[TrainingProgressEvent], None] | None = None
+    # The amortized project path defers the automatic baseline to the
+    # candidate's own resident-pair evaluation. The provider receives the
+    # finished candidate outcome (whose evaluation evidence carries the
+    # in-process base score) and returns the baseline ExperimentResult; the
+    # runner hands it to the engine before adjudication so the gate never
+    # ranks against a placeholder. It is called exactly once, even when no
+    # candidate scored (with None, so the closure can settle its own row
+    # honestly) -- and it fires ONLY while the engine's baseline is actually
+    # deferred: every existing caller (a constructor-time baseline) never
+    # triggers it.
+    deferred_baseline: Callable[[CandidateCycleOutcome | None], ExperimentResult] | None = None
     goal_lifecycle: GoalLifecycle | None = None
 
     def __post_init__(self) -> None:
@@ -342,6 +357,30 @@ class ExperimentCycleRunner:
         bind = getattr(executor, "bind_progress_callback", None)
         if callable(bind):
             bind(callback)
+
+    def _persist_executor_analysis(
+        self,
+        analysis: ExecutorFailureAnalysis | None,
+    ) -> str | None:
+        """Persist an executor-failure analysis as an `execution_incidents`
+        row -- the production caller the censored-outcome view documents.
+
+        Written once per real crash (analyses are only constructed on that
+        path); `_insert_immutable` makes an identical replay idempotent and
+        a divergent replay a `RegistryInvariantError`. Persistence runs
+        *after* the failure is settled (reservation charged, status
+        recorded): a ledger failure must not undo or mask the crash's own
+        control flow, so it is reported as a diagnostic instead of raised.
+        Returns the diagnostic text on failure, `None` on success or when
+        there is nothing to persist.
+        """
+        if analysis is None or self.registry is None:
+            return None
+        try:
+            self.registry.record_execution_incident(analysis)
+        except Exception as exc:
+            return f"incident persistence {type(exc).__name__}: {exc}"
+        return None
 
     def _run_candidate(self, experiment: Experiment) -> CandidateCycleOutcome:
         if experiment.experiment_id not in self.engine.graph.nodes:
@@ -439,6 +478,11 @@ class ExperimentCycleRunner:
                         f"executor investigator {type(investigator_exc).__name__}: "
                         f"{investigator_exc}"
                     )
+            # Keep the investigator's own outcome distinct from any
+            # persistence diagnostic added below: the returned analysis is
+            # evidence of what was diagnosed, not of how the ledger write
+            # went.
+            first_analysis = analysis
 
             self.engine.fail(
                 experiment.experiment_id,
@@ -446,11 +490,21 @@ class ExperimentCycleRunner:
             )
             experiment.status = ExperimentStatus.FAILED
             self._record_status(experiment)
+            # Persist the incident evidence now that the failure is
+            # settled; a persistence failure becomes a diagnostic, never a
+            # mask over the crash itself or over an investigator error.
+            persistence_error = self._persist_executor_analysis(analysis)
+            if persistence_error is not None and diagnostic_error is None:
+                diagnostic_error = persistence_error
+            elif persistence_error is not None:
+                diagnostic_error = (
+                    f"{diagnostic_error}; {persistence_error}"
+                )
             error = f"{failure.cause_type}: {failure.cause_message}"
             return CandidateCycleOutcome(
                 experiment_id=experiment.experiment_id,
                 execution_failure=failure,
-                executor_analysis=analysis,
+                executor_analysis=first_analysis,
                 diagnostic_error=diagnostic_error,
                 error=f"cancelled: {error}" if was_cancelled else error,
             )
@@ -508,17 +562,27 @@ class ExperimentCycleRunner:
                         f"executor investigator {type(investigator_exc).__name__}: "
                         f"{investigator_exc}"
                     )
+            first_analysis = analysis
 
             known_compute = artifact.gpu_hours + (failure.gpu_hours_spent or 0.0)
             self.engine.fail(experiment.experiment_id, actual_gpu_hours=known_compute)
             experiment.status = ExperimentStatus.FAILED
             self._record_status(experiment)
+            # Same discipline as the training-stage handler: persistence
+            # after settlement, failures reported as diagnostics.
+            persistence_error = self._persist_executor_analysis(analysis)
+            if persistence_error is not None and diagnostic_error is None:
+                diagnostic_error = persistence_error
+            elif persistence_error is not None:
+                diagnostic_error = (
+                    f"{diagnostic_error}; {persistence_error}"
+                )
             error = f"{failure.cause_type}: {failure.cause_message}"
             return CandidateCycleOutcome(
                 experiment_id=experiment.experiment_id,
                 artifact=artifact,
                 execution_failure=failure,
-                executor_analysis=analysis,
+                executor_analysis=first_analysis,
                 diagnostic_error=diagnostic_error,
                 error=f"cancelled: {error}" if was_cancelled else error,
             )
@@ -569,6 +633,8 @@ class ExperimentCycleRunner:
                 },
             }
             protocol_sha = evaluation.evidence.get("protocol_sha256")
+            if not (isinstance(protocol_sha, str) and len(protocol_sha) == 64):
+                protocol_sha = evaluation.evidence.get("eval_spec_digest")
             if isinstance(protocol_sha, str) and len(protocol_sha) == 64:
                 evidence["evaluation_protocol_sha256"] = protocol_sha
 
@@ -628,31 +694,34 @@ class ExperimentCycleRunner:
             if self.goal_lifecycle.terminal_state is not None:
                 persisted = self.goal_lifecycle.terminal_result()
                 return GenerationOutcome(
-                    candidates=(),
-                    ranking=(),
-                    promoted=None,
+                    candidates=(), ranking=(), promoted=None,
                     goal_assessment=persisted.assessment,
                     goal_terminal_state=persisted.terminal_state.value,
                 )
-            parent = self.goal_lifecycle.assess_parent_result(self.engine.baseline)
-            goal_assessment = parent.assessment
-            if parent.terminal_state is not None:
+            if self.goal_lifecycle.last_assessment is None and not self.engine.baseline_deferred:
+                if self.engine.baseline is None:
+                    raise RuntimeError("goal lifecycle requires a measured baseline")
+                parent = self.goal_lifecycle.assess_parent_result(self.engine.baseline)
+                goal_assessment = parent.assessment
+            else:
+                parent = None
+                goal_assessment = self.goal_lifecycle.last_assessment
+            if parent is not None and parent.terminal_state is not None:
                 reserved_ids = tuple(
-                    experiment.experiment_id
-                    for experiment in experiments
+                    experiment.experiment_id for experiment in experiments
                     if self.engine.has_reservation(experiment.experiment_id)
                 )
                 if reserved_ids:
                     self.engine.withdraw_proposals(reserved_ids)
                 return GenerationOutcome(
-                    candidates=(),
-                    ranking=(),
-                    promoted=None,
+                    candidates=(), ranking=(), promoted=None,
                     goal_assessment=goal_assessment,
                     goal_terminal_state=parent.terminal_state.value,
                 )
 
         candidates = tuple(self._run_candidate(experiment) for experiment in experiments)
+        if self.engine.baseline_deferred and self.deferred_baseline is not None:
+            candidates = self._complete_deferred_baseline(candidates)
         results = tuple(candidate.result for candidate in candidates if candidate.result is not None)
         ranking = self.engine.adjudicate(results) if results else ()
         promoted = self.engine.promote(ranking) if promote else None
@@ -667,8 +736,7 @@ class ExperimentCycleRunner:
             goal_assessment = lifecycle_result.assessment
             goal_terminal_state = (
                 lifecycle_result.terminal_state.value
-                if lifecycle_result.terminal_state is not None
-                else None
+                if lifecycle_result.terminal_state is not None else None
             )
 
         if self.registry is not None:
@@ -678,9 +746,75 @@ class ExperimentCycleRunner:
                     self.registry.update_experiment_status(candidate.experiment_id, node.status.value)
 
         return GenerationOutcome(
-            candidates=candidates,
-            ranking=ranking,
-            promoted=promoted,
+            candidates=candidates, ranking=ranking, promoted=promoted,
             goal_assessment=goal_assessment,
             goal_terminal_state=goal_terminal_state,
         )
+
+    def _complete_deferred_baseline(
+        self, candidates: tuple[CandidateCycleOutcome, ...]
+    ) -> tuple[CandidateCycleOutcome, ...]:
+        """Complete the deferred baseline from the first scored candidate.
+
+        The provider sees the candidate outcome BEFORE adjudication -- its
+        whole reason to exist is that the resident-pair evaluation measured
+        the untouched base inside the candidate's own process. A provider
+        failure is a generation failure for every scored candidate: the
+        numbers exist, but no honest comparison does, so each candidate is
+        settled failed (charging its real cost) rather than stranded.
+        """
+        try:
+            scored = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate.result is not None and candidate.error is None
+                ),
+                None,
+            )
+            baseline_result = self.deferred_baseline(scored)
+            if scored is None:
+                # The provider was offered the empty outcome so it could
+                # settle its own row; returning a measurement anyway would
+                # mean completing a baseline from evidence that does not
+                # exist.
+                raise RuntimeError(
+                    "the deferred baseline provider returned a measurement with no "
+                    "scored candidate to complete from"
+                )
+            self.engine.set_baseline(baseline_result)
+            return candidates
+        except Exception as exc:
+            message = f"deferred baseline: {type(exc).__name__}: {exc}"
+            settled: list[CandidateCycleOutcome] = []
+            for candidate in candidates:
+                if candidate.result is None and candidate.error is not None:
+                    settled.append(candidate)
+                    continue
+                gpu_hours = (
+                    candidate.result.gpu_hours if candidate.result is not None else 0.0
+                )
+                self.engine.fail(
+                    candidate.experiment_id, actual_gpu_hours=gpu_hours
+                )
+                node = self.engine.graph.nodes.get(candidate.experiment_id)
+                if node is not None:
+                    node.status = ExperimentStatus.FAILED
+                self._record_status_from(node, candidate.experiment_id)
+                settled.append(
+                    CandidateCycleOutcome(
+                        experiment_id=candidate.experiment_id,
+                        artifact=candidate.artifact,
+                        evaluation=candidate.evaluation,
+                        result=None,
+                        harvested_failures=candidate.harvested_failures,
+                        repair_plans=candidate.repair_plans,
+                        diagnostic_error=candidate.diagnostic_error,
+                        error=message,
+                    )
+                )
+            return tuple(settled)
+
+    def _record_status_from(self, node, experiment_id: str) -> None:
+        if self.registry is not None and node is not None:
+            self.registry.update_experiment_status(experiment_id, node.status.value)

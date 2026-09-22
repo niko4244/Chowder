@@ -107,6 +107,19 @@ CREATE TABLE IF NOT EXISTS combined_mechanism_experiments (
     per_mechanism_predicted_savings_gb_json TEXT NOT NULL,
     telemetry_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS teacher_signals (
+    entry_key TEXT PRIMARY KEY,
+    artifact_digest TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    payload_file_sha256 TEXT NOT NULL,
+    signal_kind TEXT NOT NULL,
+    teacher_id TEXT NOT NULL,
+    model_revision TEXT NOT NULL,
+    tokenizer_identity_sha256 TEXT,
+    signal_id TEXT NOT NULL,
+    stored_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL
+);
 """
 
 _EXPERIMENT_INSERT = """INSERT INTO experiments

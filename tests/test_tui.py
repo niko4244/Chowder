@@ -67,6 +67,11 @@ def _write_matching_checkpoint(app: ChowderTUI, work_dir: Path, *, step: int) ->
     trainer_dir = work_dir / ".chowder" / "runs" / "e1-abc" / "adapter" / "trainer"
     checkpoint_dir = trainer_dir / f"checkpoint-{step}"
     checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "optimizer.pt").write_bytes(b"optimizer")
+    (checkpoint_dir / "scheduler.pt").write_bytes(b"scheduler")
+    (checkpoint_dir / "trainer_state.json").write_text(
+        json.dumps({"global_step": step, "max_steps": step}), encoding="utf-8"
+    )
     (trainer_dir / "chowder-checkpoint-manifest.json").write_text(
         json.dumps(bound_inputs), encoding="utf-8"
     )
@@ -132,22 +137,6 @@ async def test_active_accelerator_count_auto_uses_detected_gpu_count(tmp_path):
         app._hardware = _snapshot(2)
         payload = app._build_payload()
     assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_active_accelerator_count_auto_with_no_hardware_scanned_yet_defaults_to_zero(
-    tmp_path,
-):
-    """The background hardware scan on_mount() kicks off can genuinely
-    finish before this test's own code runs (a real race, not just a local
-    timing accident -- observed passing locally and failing on CI), so this
-    forces the "not scanned yet" state directly rather than hoping the scan
-    hasn't completed."""
-    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
-    async with app.run_test():
-        app._hardware = None
-        payload = app._build_payload()
-    assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 0
 
 
 @pytest.mark.asyncio

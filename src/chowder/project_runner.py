@@ -6,6 +6,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .backend_selection import (
+    ROUTER_HEALING_ENGINE,
+    create_evaluation_executor,
+    create_training_executor,
+    normalize_training_config_for_executor,
+    resolve_training_engine,
+)
 from .backends.transformers_peft import TransformersPeftExecutor
 from .cancellation import CancellationToken
 from .cycle import ExperimentCycleRunner, GenerationOutcome
@@ -19,7 +26,7 @@ from .improvement.constitution import Constitution, goal_digest
 from .hardware import HardwareSnapshot, detect_hardware
 from .local_corpus_provider import LocalCorpusRepairProvider
 from .memory import HardwareProfile
-from .models import Experiment, ExperimentResult, Hypothesis
+from .models import Experiment, ExperimentResult, ExperimentStatus, Hypothesis
 from .protocol import protocol_fingerprint, result_protocol_fingerprint
 from .project import ProjectSpec, load_project
 from .provenance import sha256_file
@@ -54,6 +61,7 @@ class ProjectRunOutcome:
     hardware: HardwareSnapshot
     generation: GenerationOutcome
     repair: RecursiveRepairOutcome | None = None
+    registry_audit: tuple[dict[str, object], ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -100,6 +108,21 @@ def _emit_stage(
     experiment_id: str | None = None,
 ) -> None:
     _emit(callback, registry, RunEvent(stage=stage, message=message, experiment_id=experiment_id))
+
+
+def _closeout_registry_audit(
+    registry: RunRegistry,
+    on_event: EventCallback | None,
+) -> tuple[dict[str, object], ...]:
+    findings = tuple(registry.audit_stranded_results())
+    if findings:
+        _emit_stage(
+            on_event,
+            registry,
+            "registry-audit",
+            f"Registry audit found {len(findings)} stranded result(s)",
+        )
+    return findings
 
 
 def hardware_profile_from_snapshot(snapshot: HardwareSnapshot) -> HardwareProfile:
@@ -190,7 +213,25 @@ def _run_automatic_baseline(
             estimated_gpu_hours=estimated_gpu_hours,
         )
     )
-    outcome = BaseModelTextEvaluator().evaluate(config=project.config, context=context)
+    if resolve_training_engine(project.config) == ROUTER_HEALING_ENGINE:
+        from .backends.router_healing import RouterHealingEvaluator
+
+        evaluator = RouterHealingEvaluator()
+        if evaluator.defers_automatic_baseline(
+            experiment=project.experiment, context=context
+        ):
+            return None, None  # type: ignore[return-value]
+        try:
+            outcome = evaluator.evaluate_base(config=project.config, context=context)
+        except Exception:
+            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
+            raise
+    else:
+        try:
+            outcome = BaseModelTextEvaluator().evaluate(config=project.config, context=context)
+        except Exception:
+            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
+            raise
     evidence: dict[str, Any] = {
         "evaluation_run_id": outcome.run_id,
         "evaluation": dict(outcome.evidence),
@@ -200,6 +241,8 @@ def _run_automatic_baseline(
         },
     }
     protocol_sha = outcome.evidence.get("protocol_sha256")
+    if not (isinstance(protocol_sha, str) and len(protocol_sha) == 64):
+        protocol_sha = outcome.evidence.get("eval_spec_digest")
     if isinstance(protocol_sha, str) and len(protocol_sha) == 64:
         evidence["evaluation_protocol_sha256"] = protocol_sha
     result = ExperimentResult(
@@ -211,6 +254,7 @@ def _run_automatic_baseline(
     )
     registry.record_evaluation_outcome(outcome)
     registry.record_result(result)
+    registry.update_experiment_status("baseline", ExperimentStatus.PASSED.value)
     metrics_summary = ", ".join(f"{name}={value:.4f}" for name, value in sorted(result.metrics.items()))
     _emit_stage(
         on_event, registry, "baseline", f"Automatic baseline established: {metrics_summary}"
@@ -253,10 +297,12 @@ def _protocol_contract_digest(project: ProjectSpec) -> str:
         raise ValueError("project protocol contract requires backend and evaluation mappings")
 
     backend_contract = dict(backend)
-    dataset = Path(str(backend_contract.get("dataset", "")))
-    if not dataset.is_absolute():
-        dataset = project.work_dir / dataset
-    backend_contract["dataset_sha256"] = sha256_file(dataset)
+    dataset_value = backend_contract.get("dataset")
+    if dataset_value:
+        dataset = Path(str(dataset_value))
+        if not dataset.is_absolute():
+            dataset = project.work_dir / dataset
+        backend_contract["dataset_sha256"] = sha256_file(dataset)
     backend_contract.pop("dataset", None)
 
     evaluation_contract = dict(evaluation)
@@ -286,6 +332,33 @@ def _protocol_contract_digest(project: ProjectSpec) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _legacy_unbounded_lifecycle(project: ProjectSpec) -> bool:
+    lifecycle = project.config.get("goal_lifecycle")
+    return (
+        isinstance(lifecycle, Mapping)
+        and lifecycle.get("mode") == "legacy_unbounded"
+        and all(
+            metric.minimum is None and metric.maximum is None
+            for metric in project.goal.metrics
+        )
+    )
+
+
+def _measured_protocol_digest(result: ExperimentResult | None) -> str | None:
+    if result is None:
+        return None
+    digest = result_protocol_fingerprint(result.evidence)
+    if digest is not None:
+        return digest
+    evaluation = result.evidence.get("evaluation")
+    if isinstance(evaluation, Mapping):
+        digest = evaluation.get("eval_spec_digest")
+        if isinstance(digest, str) and len(digest) == 64:
+            return digest
+    digest = result.evidence.get("eval_spec_digest")
+    return digest if isinstance(digest, str) and len(digest) == 64 else None
+
+
 def _open_project_lifecycle(
     project: ProjectSpec,
     registry: RunRegistry,
@@ -305,11 +378,8 @@ def _open_project_lifecycle(
             None,
         )
         contract_digest = _protocol_contract_digest(project)
-        current_measured_digest = (
-            result_protocol_fingerprint(baseline.evidence)
-            if baseline is not None
-            else None
-        )
+        legacy_unbounded = _legacy_unbounded_lifecycle(project)
+        current_measured_digest = _measured_protocol_digest(baseline)
         if (
             current_measured_digest is not None
             and current_measured_digest != str(identity["evaluation_protocol_digest"])
@@ -324,16 +394,19 @@ def _open_project_lifecycle(
             benchmark_digest=_project_benchmark_digest(project),
             evaluation_protocol_digest=str(identity["evaluation_protocol_digest"]),
             constitution=Constitution(),
-            objective_metadata={"protocol_contract_digest": contract_digest},
+            objective_metadata={
+                "protocol_contract_digest": contract_digest,
+                "legacy_unbounded": legacy_unbounded,
+            },
+            legacy_unbounded=legacy_unbounded,
             resume=True,
         )
 
-    protocol_digest = (
-        result_protocol_fingerprint(baseline.evidence)
-        if baseline is not None
-        else protocol_fingerprint({"evaluation": project.config.get("evaluation", {})})
+    protocol_digest = _measured_protocol_digest(baseline) or protocol_fingerprint(
+        {"evaluation": project.config.get("evaluation", {})}
     )
     contract_digest = _protocol_contract_digest(project)
+    legacy_unbounded = _legacy_unbounded_lifecycle(project)
     return GoalLifecycle.open(
         registry,
         objective_version=project.objective_version,
@@ -341,7 +414,11 @@ def _open_project_lifecycle(
         benchmark_digest=_project_benchmark_digest(project),
         evaluation_protocol_digest=protocol_digest,
         constitution=Constitution(),
-        objective_metadata={"protocol_contract_digest": contract_digest},
+        objective_metadata={
+            "protocol_contract_digest": contract_digest,
+            "legacy_unbounded": legacy_unbounded,
+        },
+        legacy_unbounded=legacy_unbounded,
     )
 
 
@@ -482,6 +559,7 @@ def run_project(
                     goal_assessment=persisted.assessment,
                     goal_terminal_state=persisted.terminal_state.value,
                 ),
+                registry_audit=_closeout_registry_audit(registry, on_event),
             )
         hardware = detect_hardware(project.work_dir)
         profile = hardware_profile_from_snapshot(hardware)
@@ -503,6 +581,7 @@ def run_project(
             hardware=profile,
             work_dir=str(project.work_dir),
             seed=project.seed,
+            resolved_config=project.config,
         )
 
         if project.baseline_mode == "auto":
@@ -533,7 +612,7 @@ def run_project(
         if lifecycle is None:
             lifecycle = _open_project_lifecycle(project, registry, baseline=baseline)
 
-        if lifecycle.last_assessment is None:
+        if lifecycle.last_assessment is None and baseline is not None:
             parent_result = lifecycle.assess_parent_result(baseline)
             if parent_result.terminal_state is not None:
                 return ProjectRunOutcome(
@@ -546,19 +625,63 @@ def run_project(
                         goal_assessment=parent_result.assessment,
                         goal_terminal_state=parent_result.terminal_state.value,
                     ),
+                    registry_audit=_closeout_registry_audit(registry, on_event),
                 )
 
+        training_config = normalize_training_config_for_executor(training_config)
+        baseline_deferred = baseline is None
         engine = EvolutionEngine(
             goal=project.goal,
             baseline=baseline,
-            spent_gpu_hours=baseline.gpu_hours,
+            spent_gpu_hours=0.0 if baseline_deferred else baseline.gpu_hours,
+            baseline_deferred=baseline_deferred,
         )
-        trainer = TransformersPeftExecutor()
-        evaluator = TransformersTextEvaluator()
+        if resolve_training_engine(training_config) == ROUTER_HEALING_ENGINE:
+            trainer = create_training_executor(training_config)
+            evaluator = create_evaluation_executor(training_config)
+        else:
+            # Preserve the existing constructor seam for the mature PEFT path;
+            # the router backend is the only path that needs factory dispatch.
+            trainer = TransformersPeftExecutor()
+            evaluator = TransformersTextEvaluator()
+        deferred_baseline = None
+        if baseline_deferred:
+            def complete_deferred_baseline(candidate):
+                if candidate is None or candidate.evaluation is None:
+                    raise RuntimeError("paired evaluation produced no candidate evidence")
+                evaluation_evidence = dict(candidate.evaluation.evidence)
+                base_loss = evaluation_evidence.get("base_holdout_loss")
+                if not isinstance(base_loss, (int, float)):
+                    raise RuntimeError("paired evaluation omitted base_holdout_loss")
+                compute = {
+                    "baseline_source": "paired-candidate-evaluation",
+                    "model_loads": 1,
+                    "shared_wall_gpu_hours": candidate.result.gpu_hours if candidate.result else 0.0,
+                    "charged_to": candidate.experiment_id,
+                    "total_gpu_hours": 0.0,
+                }
+                evidence = {
+                    "baseline_source": "paired-candidate-evaluation",
+                    "evaluation": evaluation_evidence,
+                    "compute": compute,
+                }
+                result = ExperimentResult(
+                    experiment_id="baseline",
+                    metrics={"holdout_loss": float(base_loss)},
+                    gpu_hours=0.0,
+                    artifact_ref=None,
+                    evidence=evidence,
+                )
+                registry.record_result(result)
+                registry.update_experiment_status("baseline", ExperimentStatus.PASSED.value)
+                return result
+            deferred_baseline = complete_deferred_baseline
+
         runner = ExperimentCycleRunner(
             engine=engine,
             trainer=trainer,
             evaluator=evaluator,
+            deferred_baseline=deferred_baseline,
             context=context,
             base_config=training_config,
             registry=registry,
@@ -642,6 +765,7 @@ def run_project(
                 hardware=hardware,
                 generation=generation,
                 repair=repair_outcome,
+                registry_audit=_closeout_registry_audit(registry, on_event),
             )
 
         candidate = generation.candidates[0]
@@ -685,12 +809,13 @@ def run_project(
                     experiment_id=candidate.experiment_id,
                 )
 
-    return ProjectRunOutcome(
-        project=project,
-        hardware=hardware,
-        generation=generation,
-        repair=repair_outcome,
-    )
+        return ProjectRunOutcome(
+            project=project,
+            hardware=hardware,
+            generation=generation,
+            repair=repair_outcome,
+            registry_audit=_closeout_registry_audit(registry, on_event),
+        )
 
 
 def _emit_candidate_events(

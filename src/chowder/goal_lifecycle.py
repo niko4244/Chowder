@@ -58,6 +58,7 @@ class GoalLifecycle:
     assessor: MeasuredGoalAssessor
     terminal_state: GoalTerminalState | None = None
     last_assessment: GoalAssessment | None = None
+    legacy_unbounded: bool = False
 
     @classmethod
     def open(
@@ -70,6 +71,7 @@ class GoalLifecycle:
         evaluation_protocol_digest: str,
         constitution: Constitution | None = None,
         objective_metadata: Mapping[str, object] | None = None,
+        legacy_unbounded: bool = False,
         resume: bool = False,
     ) -> "GoalLifecycle":
         policy = constitution or Constitution()
@@ -123,6 +125,7 @@ class GoalLifecycle:
             identity=identity,
             constitution=policy,
             assessor=MeasuredGoalAssessor(),
+            legacy_unbounded=legacy_unbounded,
         )
         if resume:
             lifecycle.last_assessment = registry.latest_goal_assessment(objective_version)
@@ -280,10 +283,11 @@ class GoalLifecycle:
             raise GoalLifecycleError(
                 f"objective already terminated: {self.terminal_state.value}"
             )
-        if (
+        protocol_changed = (
             evaluation_protocol_digest is not None
             and evaluation_protocol_digest != self.identity.evaluation_protocol_digest
-        ):
+        )
+        if protocol_changed and not self.legacy_unbounded:
             raise GoalLifecycleError("evaluation protocol changed within the objective")
         if benchmark_digest is not None and benchmark_digest != self.identity.benchmark_digest:
             raise GoalLifecycleError("benchmark changed within the objective")
@@ -295,7 +299,9 @@ class GoalLifecycle:
             observed_metrics=observed_metrics,
             artifact_identity=artifact_identity,
             evaluation_protocol_digest=(
-                evaluation_protocol_digest or self.identity.evaluation_protocol_digest
+                self.identity.evaluation_protocol_digest
+                if protocol_changed
+                else (evaluation_protocol_digest or self.identity.evaluation_protocol_digest)
             ),
             benchmark_digest=benchmark_digest or self.identity.benchmark_digest,
             constitution_digest=self.identity.constitution_digest,
@@ -325,8 +331,12 @@ class GoalLifecycle:
         self.last_assessment = assessment
 
         terminal: GoalTerminalState | None
-        if assessment.status is GoalStatus.MET:
+        if assessment.status is GoalStatus.MET and not (
+            generation_index == 0 and self.legacy_unbounded
+        ):
             terminal = GoalTerminalState.STOP_GOALS_MET
+        elif assessment.status is GoalStatus.MET:
+            terminal = None
         elif assessment.status in {GoalStatus.UNKNOWN, GoalStatus.INVALID}:
             terminal = GoalTerminalState.STOP_UNCERTAIN
         elif budget_exhausted:
