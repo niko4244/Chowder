@@ -297,3 +297,29 @@ with the new digest-additive `store_chains` evaluator option, one correct
 chain per solved prompt selected, trained from the gen-2 adapter at the
 gentle continuation recipe, auto re-measured baseline under the current
 protocol, 100-prompt holdout eval.
+
+## Teacher chain-quality benchmark (Qwen3.8-27B vs Qwythos-9B, 20 RFT-1 prompts)
+
+Served Qwen3.8-27B Q4_K_M (hybrid qwen35/SSM arch) via the new `llama_server_manager`
+partial offload: 12 layers on GPU 1 (6 GB card), rest from RAM, llama.cpp build 10107
+CUDA 12.4 (`F:/llm-lowvram/llama.cpp-bin-cuda124`). Throughput 1.0 tok/s; thinking lands
+in `reasoning_content`, final answer in `content`. Thinking chains up to ~15 min; several
+prompts answered direct in <60 s.
+
+| model | solved | coverage of student's 9 failures |
+|---|---|---|
+| student k=6 vote (Spark 2.5) | 11/20 = 0.55 | — |
+| **Qwythos-9B Q4 (GPU 1, ~35 tok/s)** | **20/20 = 1.00** | **9/9** |
+| Qwen3.8-27B Q4 (partial offload, 1 tok/s) | 18/20 = 0.90 | 8/9 |
+
+Reading: on this task the 9B teacher is not weaker than the 27B — it is perfect on the
+fixture and 40x faster, and it covers **every** student failure. The distillation payload
+for RFT-2 needs no partial-offload machinery: one idle 6 GB card serves a complete teacher.
+The 27B's two misses (rows 15, 20) also show capability is not monotone with size under
+quantization + offload. 27B partial-offload remains the fallback for harder tasks where
+the 9B's coverage drops.
+
+Operational notes: the winget llama.cpp build cannot load the qwen35 hybrid GGUF (missing
+`ssm_conv1d` tensor support); the F: build 10107 loads it. The lifecycle manager caught a
+real misconfig on first live use (full-offload spec on a 6 GB card -> refused), then
+completed a full start/health/stop cycle.
