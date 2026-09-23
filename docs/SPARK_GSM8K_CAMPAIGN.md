@@ -359,3 +359,32 @@ completed a full start/health/stop cycle.
   small chain set and washes out the adapter's skill; the 10 teacher rows (4% of
   data) were too few to transfer and enough to perturb. Any RFT-3 must mix replay
   (the only recipe that ever held) and cap epochs near 1.
+
+## Platform additions (2026-09-23, post-RFT-2)
+
+- **Promotion gate fix (parent-adapter baselines).** The RFT-2 blind spot is
+  closed in code: `BaseTextEvalSpec` now resolves `backend.parent_adapter`
+  and the base-text worker attaches that adapter (with the same liveness
+  guard the candidate path uses) before scoring. A continuation's
+  auto-baseline is the re-measured parent, so a regression like RFT-2's
+  (-0.19 vs gen-2) can no longer "promote" against the weaker dense-base
+  reference. The adapter stays out of the protocol fingerprint (it is the
+  treatment, not the protocol), preserving baseline-vs-candidate
+  comparability; malformed parent_adapter configs (missing sha256, empty
+  path) are refused. Tests: `tests/test_base_text_evaluator.py` (18).
+- **Envelope curriculum (batch 004).** `chowder_batch/build_envelope_curriculum.py`
+  scales batch 003's 3-row injection to 28 SFT records + 2 preference pairs
+  across four families (read x8, write x8, observation-gated fix loops x8,
+  structured log_event x4 + pref pairs). Every assistant span is re-derived
+  from Spark's tokenizer and verified byte-identical; general gates enforce
+  one-action-per-turn, observation-before-next-action, no fabricated
+  tool_response, and grounded final reports across all records.
+- **Runtime loop test.** `chowder_batch/runtime_loop.py` drives the student
+  around a real multi-turn tool loop against a mock workspace with a
+  genuinely buggy module: run_tests executes the model's fix, so a green
+  summary can only be observed through correct actions. Verdicts fail
+  fabricated tool_responses, premature success claims, batched calls, and
+  bare-JSON envelopes. Verified headless with scripted agents (correct loop
+  passes; fabricator and premature-success both fail); `--endpoint` mode
+  drives a llama-server; `--adapter` mode loads a fine-tuned PEFT checkpoint.
+  Live run queued behind the RFT-1 arm.

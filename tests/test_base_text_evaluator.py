@@ -262,3 +262,70 @@ def test_offload_placement_is_carried_by_the_protocol_fingerprint(tmp_path, monk
     # And a resident protocol must hash differently: placement is protocol.
     resident = _evaluate(_config(str(data)), tmp_path, monkeypatch)
     assert resident.evidence["protocol_sha256"] != outcome.evidence["protocol_sha256"]
+
+
+# --- parent-adapter continuations baseline against the re-measured parent ---
+
+
+def test_no_parent_adapter_defaults_to_none(tmp_path):
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"x","expected":"y"}\n')
+    spec = BaseTextEvalSpec.from_config(
+        _config(str(data)), work_dir=tmp_path, output_dir=tmp_path / "out", seed=1
+    )
+    assert spec.adapter_dir is None
+
+
+def test_parent_adapter_path_is_resolved_for_the_baseline(tmp_path):
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"x","expected":"y"}\n')
+    config = _config(str(data))
+    config["backend"]["parent_adapter"] = {
+        "path": str(tmp_path / "parent-adapter"),
+        "sha256": "a" * 64,
+    }
+    spec = BaseTextEvalSpec.from_config(
+        config, work_dir=tmp_path, output_dir=tmp_path / "out", seed=1
+    )
+    assert spec.adapter_dir == str((tmp_path / "parent-adapter").resolve())
+
+
+def test_parent_adapter_without_a_sha_is_refused(tmp_path):
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"x","expected":"y"}\n')
+    config = _config(str(data))
+    config["backend"]["parent_adapter"] = {"path": str(tmp_path / "parent-adapter")}
+    with pytest.raises(ValueError, match="sha256"):
+        BaseTextEvalSpec.from_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "out", seed=1
+        )
+
+
+def test_empty_parent_adapter_path_is_refused(tmp_path):
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"x","expected":"y"}\n')
+    config = _config(str(data))
+    config["backend"]["parent_adapter"] = {"path": "  ", "sha256": "a" * 64}
+    with pytest.raises(ValueError, match="non-empty"):
+        BaseTextEvalSpec.from_config(
+            config, work_dir=tmp_path, output_dir=tmp_path / "out", seed=1
+        )
+
+
+def test_adapter_dir_is_not_protocol_but_is_spec_bound(tmp_path, monkeypatch):
+    # The adapter is the treatment being measured, not the protocol: the
+    # baseline and candidate protocols must stay comparable (gate.py's
+    # require_protocol_match compares them), so adapter_dir is excluded from
+    # the protocol dict. It is still bound by the spec digest in evidence.
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"x","expected":"y"}\n')
+    config = _config(str(data))
+    config["backend"]["parent_adapter"] = {
+        "path": str(tmp_path / "parent-adapter"),
+        "sha256": "a" * 64,
+    }
+    with_parent = _evaluate(config, tmp_path, monkeypatch)
+    without = _evaluate(_config(str(data)), tmp_path, monkeypatch)
+    assert with_parent.evidence["protocol_sha256"] == without.evidence["protocol_sha256"]
+    spec_digest = with_parent.evidence["evaluation_spec_sha256"]
+    assert spec_digest != without.evidence["evaluation_spec_sha256"]

@@ -28,7 +28,9 @@ from .scoring import (
     score,
 )
 from .vram import MemorySampler, peak_vram as _peak_vram
+from ..adapter_guard import assert_adapter_is_live
 from .placement import dispatch_offloaded, placement_note
+from .transformers_text_worker import placement_after_adapter
 from .transformers_text import EvalSuiteSpec
 
 
@@ -159,7 +161,27 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
             model = dispatch_offloaded(model, device_name)
         else:
             model = model.to(device_name)
+    # Parent-adapter baseline: this run measures the adapter a continuation
+    # project trains FROM, so attach it exactly the way the candidate worker
+    # does -- including the liveness guard, so an adapter that cannot change
+    # outputs fails the baseline loudly instead of scoring as the dense base.
+    adapter_liveness: dict[str, Any] | None = None
+    if spec.adapter_dir is not None:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, spec.adapter_dir, is_trainable=False)
+        adapter_liveness = assert_adapter_is_live(model, spec.adapter_dir)
+        if spec.placement == "offload":
+            model = placement_after_adapter(model, spec=spec, device_name=device_name)
+        else:
+            model = model.to(device_name)
     model.eval()
+    if adapter_liveness is not None:
+        print(
+            f"parent-adapter baseline: attached {spec.adapter_dir} "
+            f"(liveness: {adapter_liveness.get('verified_nonzero_lora_b', 'unknown')})",
+            flush=True,
+        )
     if spec.placement == "offload":
         # Reported per run: "offload" means nothing unless the dense weights
         # demonstrably live on the CPU while generation runs.
