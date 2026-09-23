@@ -31,6 +31,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "src"))
 MODEL_DIR = r"F:\Huihui-Spark-X2.5-4B-abliterated"
 
 TOOLS = [
@@ -151,8 +152,14 @@ def strip_ws(text: str) -> str:
 
 # ----------------------------------------------------------------- model serving ---
 def load_transformers(adapter: str | None):
+    import hashlib
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    from chowder.local_model_compat import patch_transformers5_custom_model
+
+    DIGESTS = {n: hashlib.sha256(open(os.path.join(MODEL_DIR, n), "rb").read()).hexdigest()
+               for n in ["configuration_spark.py", "modeling_spark.py"]}
+    patch_transformers5_custom_model(MODEL_DIR, DIGESTS)
 
     tok = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True,
                                         local_files_only=True)

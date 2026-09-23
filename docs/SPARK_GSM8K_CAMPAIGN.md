@@ -444,3 +444,24 @@ runtime loop, not just the static fixtures.
   crashed on the raw 4.57-to-5.x tied-weights incompatibility).
 - `run_batch003_finetune.py` goal minimum raised 0.60 -> 0.74 (retention
   bar above the parent) to bypass the generation-0 parent-MET short-circuit.
+
+### Live runtime-loop verdict (mock workspace, real adapters)
+
+`chowder_batch/runtime_loop.py --adapter` run against both adapters on the
+buggy `version.py` workspace (12-turn budget, greedy):
+
+- **gen-2 adapter (0.73)**: emits the correct `<tool_call>` envelope every
+  turn, calls run_tests first, then loops 11x on `run_tests` with a
+  hallucinated `args` key — it never attempts a `write_file` fix and burns
+  the budget without a final report. Envelope discipline is real; the
+  multi-turn diagnose-fix-verify loop is NOT (it was never trained).
+- **batch-003 adapter**: envelope degraded to mis-formatted calls
+  (read_file with `test_1.2`-style paths, repeated ERROR observations) —
+  consistent with the static before/after regression.
+
+The loop test works as designed: it produces an honest FAIL for both
+adapters today and gives batch-004 training a concrete end-to-end target —
+turn-by-turn envelope discipline PLUS stopping only on an observed green
+summary. Also fixed in this pass: the runtime loop now applies the Spark
+digest-gated compat patch (it crashed on the raw custom-code path before),
+and the mock-workspace machinery test still passes offline.
