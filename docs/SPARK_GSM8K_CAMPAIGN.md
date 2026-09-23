@@ -323,3 +323,39 @@ Operational notes: the winget llama.cpp build cannot load the qwen35 hybrid GGUF
 `ssm_conv1d` tensor support); the F: build 10107 loads it. The lifecycle manager caught a
 real misconfig on first live use (full-offload spec on a 6 GB card -> refused), then
 completed a full start/health/stop cycle.
+
+## RFT campaign operations (Sep 23)
+
+- **Auto-baseline is a charged experiment.** RFT-1's baseline ran under GPU contention
+  and charged 2.35 GPU-hours against a 3.0 budget; with the experiment's 1.0 h estimate
+  the lifecycle correctly refused the initial experiment ("does not fit the configured
+  GPU-hour budget"). Lesson: budget = baseline-hours + experiment-hours + headroom, and
+  never run two lifecycle projects on one GPU — contention both corrupts timing and
+  inflates the baseline charge. RFT-1 relaunched with budget 5.0, chained behind RFT-2.
+- **Auto-baseline measured the untouched base model at 0.39** under the current
+  protocol — the honest "what did training add" reference for the RFT arms (gen2
+  adapters score 0.73-0.75; the base model alone is far lower).
+- Selection evidence (student sampler, 250 prompts): 93.2% solved, mean 4.25 correct
+  chains per solved prompt. Hybrid arm adds 10 teacher-transfer rows (student-failed,
+  teacher-solved) from Qwythos-9B.
+- The collated verdict lands in `F:\chowder-campaign\rft_collation.json` when both
+  arms finish (watchers + collator run detached; single-shot markers prevent
+  double-launch).
+
+### RFT-2 hybrid verdict (Sep 23, 11:09)
+
+- Candidate (on-policy student chains + 10 teacher-transfer rows, 300 steps from the
+  gen-2 adapter): **0.54** on the 100-prompt holdout. Goal 0.75 UNMET; terminal
+  STOP_BUDGET (budget exhausted after the candidate eval). The lifecycle marked it
+  promoted **relative to its auto-baseline** — but see the gate finding below.
+- **The auto-baseline measured the untouched base model (0.39), not the parent
+  adapter (0.730 on the same 100 prompts).** Paired per-prompt vs the parent:
+  fixed 9, broke 28 → a net **-0.19 regression**. The promotion gate as configured
+  compares the candidate to the base-model baseline, so a parent-adapter
+  continuation can regress the parent and still "promote". Platform fix needed:
+  when a config carries `parent_adapter`, the baseline reference must be that
+  adapter re-measured under the current protocol, not the bare base model.
+- Recipe diagnosis: 243 rows x ~4.9 epochs at lr 3e-5 with no replay overfits the
+  small chain set and washes out the adapter's skill; the 10 teacher rows (4% of
+  data) were too few to transfer and enough to perturb. Any RFT-3 must mix replay
+  (the only recipe that ever held) and cap epochs near 1.
