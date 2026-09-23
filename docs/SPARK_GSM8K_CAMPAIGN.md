@@ -273,3 +273,27 @@ Operational findings from these runs (full notes:
 2. **Output paths must be single-writer by construction.** Two worker
    instances writing one predictions file corrupts it silently. A lock file
    or pid-guard at the output path turns this corruption into a refusal.
+
+## k=10 verdict: more voting hurts — plurality convergence (2026-09-22)
+
+k=10, temp 0.7, same 100-prompt holdout, same adapter, batch-1
+(`F:/chowder-campaign/sc-k10-100`): **0.69**, vs k=5's 0.75 and greedy's
+0.73. Paired per-prompt against k=5: **3 fixed, 9 broke**, 66 same-right,
+22 same-wrong (McNemar p≈0.15, n.s. — but the direction is consistent with
+the mechanism, and 0.69 is also k=10's point estimate).
+
+The mechanism is vote convergence: as k grows, the majority converges to
+the model's *modal* answer. Where the modal chain is wrong and the correct
+answer is merely present-but-not-modal, more samples make the row more
+reliably wrong. k=5's 0.75 was favorable variance around a true
+plurality-score of ~0.69-0.73; the k=5-extrapolated "~0.80-0.83 ceiling"
+is falsified. The sampling lever on this adapter tops out around
+**0.73-0.75 at k=5** — it does not clear the 0.75 bar reliably.
+
+Campaign implication: the RFT flywheel (self-generated correct chains) is
+now the live path to 0.75+. Iteration 1 is running: k=6 sampling on 250
+training prompts (rows 4400-4649, disjoint from all training and holdouts)
+with the new digest-additive `store_chains` evaluator option, one correct
+chain per solved prompt selected, trained from the gen-2 adapter at the
+gentle continuation recipe, auto re-measured baseline under the current
+protocol, 100-prompt holdout eval.
