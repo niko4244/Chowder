@@ -160,7 +160,15 @@ def _stub(**factories):
     )
 
 
-def _suite(tmp_path: Path, rows: int, batch_size: int, max_new_tokens: int) -> tuple:
+def _suite(
+    tmp_path: Path,
+    rows: int,
+    batch_size: int,
+    max_new_tokens: int,
+    n_samples: int = 1,
+    temperature: float = 0.7,
+    store_chains: bool = False,
+) -> tuple:
     dataset = tmp_path / f"dataset-{rows}-{batch_size}.jsonl"
     dataset.write_text(
         "".join(
@@ -178,10 +186,22 @@ def _suite(tmp_path: Path, rows: int, batch_size: int, max_new_tokens: int) -> t
         max_new_tokens=max_new_tokens,
         use_chat_template=False,
         batch_size=batch_size,
+        n_samples=n_samples,
+        temperature=temperature,
+        store_chains=store_chains,
     )
 
 
-def _run(tmp_path: Path, monkeypatch, *, rows: int, batch_size: int, max_new_tokens: int = 6):
+def _run(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    rows: int,
+    batch_size: int,
+    max_new_tokens: int = 6,
+    n_samples: int = 1,
+    store_chains: bool = False,
+):
     # The worker imports these inside evaluate(), so the patched owner is the
     # transformers module the import resolves against.
     pytest.importorskip("torch")
@@ -209,7 +229,16 @@ def _run(tmp_path: Path, monkeypatch, *, rows: int, batch_size: int, max_new_tok
         base_model="fake-model",
         adapter_dir=None,
         output_dir=str(output),
-        suites=(_suite(tmp_path, rows, batch_size, max_new_tokens),),
+        suites=(
+            _suite(
+                tmp_path,
+                rows,
+                batch_size,
+                max_new_tokens,
+                n_samples=n_samples,
+                store_chains=store_chains,
+            ),
+        ),
         precision="bf16",
         quantization="none",
         device="cpu",
@@ -319,3 +348,34 @@ def test_n_samples_and_temperature_validation():
         _scoring_suite(n_samples=4, temperature=0.0)
     with pytest.raises(ValueError):
         _scoring_suite(n_samples=4, temperature=-1.0)
+
+
+def test_store_chains_records_sampled_chain_texts(tmp_path, monkeypatch):
+    """store_chains persists each sampled chain's text for selection (RFT)."""
+    from chowder.evaluators.transformers_text import SAMPLE_SEPARATOR
+
+    _, out = _run(tmp_path, monkeypatch, rows=2, batch_size=1, n_samples=3, store_chains=True)
+    rows = _rows(out / "predictions-slice.jsonl")
+    assert len(rows) == 2
+    for row in rows:
+        assert len(row["chains"]) == 3
+        assert all(isinstance(c, str) and c for c in row["chains"])
+        assert row["prediction"] == SAMPLE_SEPARATOR.join(row["chains"])
+
+
+def test_store_chains_defaults_to_absent(tmp_path, monkeypatch):
+    """Without the flag, sampled rows carry no chain texts (artifact shape unchanged)."""
+    _, out = _run(tmp_path, monkeypatch, rows=2, batch_size=1, n_samples=3)
+    rows = _rows(out / "predictions-slice.jsonl")
+    assert rows and all("chains" not in row for row in rows)
+
+
+def test_store_chains_is_not_protocol_identity():
+    """Recording changes what is stored, not what is scored: no digest movement."""
+    from chowder.evaluators.transformers_text import suite_protocol_entry
+    from chowder.protocol import protocol_fingerprint
+
+    plain = suite_protocol_entry(_scoring_suite(), "sha")
+    storing = suite_protocol_entry(_scoring_suite(store_chains=True), "sha")
+    assert "store_chains" not in storing
+    assert protocol_fingerprint(plain) == protocol_fingerprint(storing)

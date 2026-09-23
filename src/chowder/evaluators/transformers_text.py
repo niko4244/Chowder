@@ -78,6 +78,12 @@ class EvalSuiteSpec:
     #: Sampling temperature for those chains. Only meaningful with
     #: ``n_samples > 1``; the worker refuses a sampled suite without it.
     temperature: float = 0.7
+    #: Persist each sampled chain's decoded text in the predictions artifact
+    #: (``chains`` per row). Selection evidence for RFT-style workflows; not
+    #: part of protocol identity because it changes what is *recorded*, not
+    #: what is *generated or scored*. Suites that keep the default hash
+    #: exactly as all earlier protocols did.
+    store_chains: bool = False
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -260,6 +266,7 @@ class TransformersTextEvalSpec:
                     batch_size=int(raw.get("batch_size", 1)),
                     n_samples=int(raw.get("n_samples", evaluation.get("n_samples", 1))),
                     temperature=float(raw.get("temperature", evaluation.get("temperature", 0.7))),
+                    store_chains=bool(raw.get("store_chains", evaluation.get("store_chains", False))),
                 )
             )
 

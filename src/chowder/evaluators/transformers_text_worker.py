@@ -323,15 +323,18 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                             else _score(prediction, expected, suite.scoring)
                         )
                         correct += row_score
+                        record = {
+                            "prompt": prompt,
+                            "expected": expected,
+                            "prediction": prediction,
+                            "score": row_score,
+                            **observation,
+                        }
+                        if suite.store_chains and sampled:
+                            record["chains"] = chain_texts[index]
                         output.write(
                             json.dumps(
-                                {
-                                    "prompt": prompt,
-                                    "expected": expected,
-                                    "prediction": prediction,
-                                    "score": row_score,
-                                    **observation,
-                                },
+                                record,
                                 ensure_ascii=False,
                             )
                             + "\n"
