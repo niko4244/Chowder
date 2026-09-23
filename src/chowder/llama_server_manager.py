@@ -64,6 +64,9 @@ class ServerSpec:
     expected_vram_mib: int | None = None
     extra_args: list[str] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        self.model_path = Path(self.model_path)
+
     def command(self, server_bin: Path) -> list[str]:
         args = [
             str(server_bin),
