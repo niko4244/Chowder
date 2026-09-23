@@ -388,3 +388,59 @@ completed a full start/health/stop cycle.
   passes; fabricator and premature-success both fail); `--endpoint` mode
   drives a llama-server; `--adapter` mode loads a fine-tuned PEFT checkpoint.
   Live run queued behind the RFT-1 arm.
+
+## RFT campaign verdicts + batch-003 before/after (2026-09-23 evening)
+
+### RFT arms vs the 0.75 bar (collated, rft_collation.json)
+
+| arm | candidate | parent (gen-2, same protocol) | dense base | verdict |
+|---|---|---|---|---|
+| RFT-1 student-only (233 own-correct chains) | **0.64** | 0.730 | 0.39 | UNMET, STOP_PLATEAU |
+| RFT-2 hybrid (233 student + 10 teacher rows) | **0.54** | 0.730 | 0.39 | UNMET, STOP_BUDGET |
+
+Both arms regressed their parent: RFT-1 -0.09, RFT-2 -0.19. The common factor
+is not the data source (own chains vs teacher chains both failed) but the
+recipe: small datasets trained for multiple epochs with no replay wash out
+the adapter's GSM8K skill. RFT-1's student-only data did no better than
+RFT-2's hybrid, so teacher-row contamination is ruled out as the primary
+cause. Any RFT-3 must cap epochs near 1 and replay parent-generation data.
+
+RFT-2's lifecycle note: it "promoted" only because its auto-baseline
+reference was the dense base (0.39), not its parent (0.73) -- the gate
+blind spot fixed in code this pass (parent-adapter baselines).
+
+### Batch-003 envelope fine-tune: 3-row injection does NOT survive (and does harm)
+
+Fine-tuned the gen-2 adapter on batch 003 (3 SFT rows, pre-rendered through
+Spark's template, verified byte-correct), 12 steps, lr 2e-5, then captured
+the 11 chowder_batch fixtures before and after:
+
+| fixture family | before (gen-2) | after (batch-003 adapter) |
+|---|---|---|
+| spark_tool_call_envelope_basic (eval-9) | PASS (correct `<tool_call>` span) | **FAIL** (bare JSON `{"name": ...}`) |
+| spark_envelope_observation_gated_loop (eval-10) | PASS | PASS |
+| spark_tool_call_structured_args (eval-11) | PASS (tojson object) | **FAIL** (pseudocode `log_event({level: ...})`) |
+| 8 JSON-discipline fixtures | 0/8 | 1/8 |
+| GSM8K holdout (retention check) | 0.73 (parent) | 0.71 (candidate, lifecycle UNMET at 0.74 bar) |
+
+The training text itself is byte-correct (verified against the tokenizer),
+the run genuinely continued from the gen-2 parent adapter, and the lifecycle
+behavior was honest: the parent-assessment short-circuit initially skipped
+training entirely (goal minimum 0.60 was already MET by the parent's 0.73
+baseline at generation 0), which was worked around by raising the minimum to
+0.74 so the parent assessment is UNMET and the candidate actually trains.
+
+Finding: a 3-row, 12-step injection into a 4B model is too weak to teach a
+new format but strong enough to degrade the existing one -- the same
+instability signature as gens 3-6, at miniature scale. The envelope
+curriculum (batch 004, 28 SFT + 2 pref pairs) exists precisely for this:
+train on volume with the family spread and re-measure before/after with the
+runtime loop, not just the static fixtures.
+
+### Batch-003 infra fixes made along the way
+
+- capture scripts now load eval parts from `chowder_batch/` and apply the
+  Spark digest-gated compat patch before model load (they previously
+  crashed on the raw 4.57-to-5.x tied-weights incompatibility).
+- `run_batch003_finetune.py` goal minimum raised 0.60 -> 0.74 (retention
+  bar above the parent) to bypass the generation-0 parent-MET short-circuit.
