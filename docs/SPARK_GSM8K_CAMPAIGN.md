@@ -259,14 +259,17 @@ recoverable mass — the realistic ceiling of pure sampling on this adapter is
 Operational findings from these runs (full notes:
 `.chowder-spark-calib/gsm8k/holdout500-notes.md`):
 
-1. **Batch-8 generation is not safe on Spark.** An earlier batch-8 attempt
-   appeared to diverge wildly from the batch-1 control, but the run was
-   double-written by two concurrent worker instances (a killed wrapper's
-   orphaned child survived and shared the output path), so that divergence
-   verdict is unsound and was discarded with the data. What stands: any
-   batched-vs-single equivalence must be *proven per model* before a batched
-   arm is trusted — a batch-equivalence check belongs in worker startup or
-   model compatibility verification. All campaign measurements are batch-1.
+1. **Batch-8 generation is not safe on Spark — confirmed with a clean probe.**
+   The earlier divergence verdict (two concurrent writers corrupting one
+   output file) was re-run under single-writer conditions
+   (`run_batch8_sc_k10.py` stage A): 50 holdout500 rows, greedy, batch 8 vs
+   the batch-1 baseline on identical prompts. Result: probe 0.38 vs 0.72,
+   only 6/50 prediction texts byte-identical, 23/50 correctness agreement —
+   far below the 48/50 gate. The original divergence was real: Spark's
+   custom modeling does not handle right-padded batched generation even
+   with per-row pad correction. All Spark evals stay batch-1, and a
+   batch-equivalence gate (probe-then-allow) belongs in model compatibility
+   verification.
 2. **Output paths must be single-writer by construction.** Two worker
    instances writing one predictions file corrupts it silently. A lock file
    or pid-guard at the output path turns this corruption into a refusal.
