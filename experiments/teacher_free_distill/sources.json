@@ -1,0 +1,28 @@
+{
+  "sources": {
+    "open_thoughts3": {
+      "kind": "chat",
+      "repo": "open-thoughts/OpenThoughts3-1.2M",
+      "revision": "61bcf9d",
+      "license": "Apache-2.0 (dataset card; inspect upstream sources)",
+      "review_reference": "https://huggingface.co/datasets/open-thoughts/OpenThoughts3-1.2M",
+      "approved": false
+    },
+    "mixture_of_thoughts": {
+      "kind": "chat",
+      "repo": "open-r1/Mixture-of-Thoughts",
+      "revision": "5214c67",
+      "license": null,
+      "review_reference": "https://huggingface.co/datasets/open-r1/Mixture-of-Thoughts",
+      "approved": false
+    },
+    "swe_smith_local_replay": {
+      "kind": "repair",
+      "repo": "SWE-bench/SWE-smith",
+      "revision": "LOCAL_REPLAY_REVISION_REQUIRED",
+      "license": null,
+      "review_reference": "https://github.com/SWE-bench/SWE-smith",
+      "approved": false
+    }
+  }
+}
