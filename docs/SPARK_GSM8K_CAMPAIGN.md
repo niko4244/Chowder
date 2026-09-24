@@ -479,13 +479,13 @@ parent 0.730 and candidate **0.700**, ending `STOP_PLATEAU` / `UNMET` at the
 | spark_tool_call_envelope_basic (eval-9) | PASS | PASS |
 | spark_envelope_observation_gated_loop (eval-10) | PASS | PASS |
 | spark_tool_call_structured_args (eval-11) | PASS | FAIL |
-| 8 JSON-discipline fixtures | 3/8 | 1/8 |
+| 8 JSON-discipline fixtures | 0/8 | 1/8 |
 | **all 11 fixtures** | **3/11** | **3/11** |
 
-Batch-004 therefore retained the two core envelope fixtures but still failed
-structured arguments and lost most of the non-envelope JSON-discipline
-behavior. The score is not a promotion signal: it is a small, mixed-format
-regression relative to gen-2 on the full fixture set and -0.03 on GSM8K.
+Batch-004 therefore retained the two core envelope fixtures, gained one
+non-envelope JSON-discipline fixture, but still failed structured arguments.
+The score is not a promotion signal: it is a small, mixed-format regression
+relative to gen-2 on the full fixture set and -0.03 on GSM8K.
 
 The live runtime loop was then run with the batch-004 adapter for 12 turns:
 
