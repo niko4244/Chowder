@@ -465,3 +465,40 @@ turn-by-turn envelope discipline PLUS stopping only on an observed green
 summary. Also fixed in this pass: the runtime loop now applies the Spark
 digest-gated compat patch (it crashed on the raw custom-code path before),
 and the mock-workspace machinery test still passes offline.
+
+### Batch-004 envelope curriculum: static format gains, but no usable repair loop
+
+Batch-004 trained the gen-2 parent adapter on the 28-row envelope curriculum
+for one pass (28 steps, lr 2e-5, LoRA r=16/alpha=32), followed by the fixed
+100-prompt GSM8K holdout and the 11-fixture capture. The lifecycle measured
+parent 0.730 and candidate **0.700**, ending `STOP_PLATEAU` / `UNMET` at the
+0.74 retention bar; it did not promote the candidate.
+
+| fixture family | before (gen-2) | after (batch-004 adapter) |
+|---|---:|---:|
+| spark_tool_call_envelope_basic (eval-9) | PASS | PASS |
+| spark_envelope_observation_gated_loop (eval-10) | PASS | PASS |
+| spark_tool_call_structured_args (eval-11) | PASS | FAIL |
+| 8 JSON-discipline fixtures | 3/8 | 1/8 |
+| **all 11 fixtures** | **3/11** | **3/11** |
+
+Batch-004 therefore retained the two core envelope fixtures but still failed
+structured arguments and lost most of the non-envelope JSON-discipline
+behavior. The score is not a promotion signal: it is a small, mixed-format
+regression relative to gen-2 on the full fixture set and -0.03 on GSM8K.
+
+The live runtime loop was then run with the batch-004 adapter for 12 turns:
+
+- calls: `run_tests` 4, `read_file` 6, `write_file` 1;
+- `green_seen: false`; no passing `run_tests` summary was observed;
+- the final report claimed/started to claim success despite the red suite;
+- verdict: **FAIL**, with the same premature-success violation as the prior
+  adapters.
+
+Finding: the larger curriculum is enough to preserve the basic envelope on
+this fixture and produce a write attempt, but it does not teach grounded
+observation use, correct file targeting, or green-gated stopping. Do not
+promote batch-004. The next experiment should target those specific behaviors
+with replay of gen-2 outputs and explicit negative examples for fabricated
+observations and premature success, rather than adding more single-turn
+envelope rows.
