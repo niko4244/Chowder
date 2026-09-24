@@ -76,7 +76,32 @@ def test_batch_003_records_render_through_spark_template_when_available():
             assert "</think>" in span
 
 
+def test_batch_005_replay_repair_records_are_green_gated_when_available():
+    import pytest
 
+    records_path = Path(BATCH) / "chowder_agent_batch_005_replay_repair.jsonl"
+    text_path = Path(BATCH) / "replay_repair_train_text.jsonl"
+    model_dir = r"F:\Huihui-Spark-X2.5-4B-abliterated"
+    if not records_path.exists() or not text_path.exists() or not Path(model_dir).is_dir():
+        pytest.skip("batch-005 artifacts or Spark model dir not present")
+
+    records = [json.loads(line) for line in records_path.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 12
+    for record in records:
+        messages = record["messages"]
+        assert [m["role"] for m in messages] == [
+            "user", "assistant", "tool", "assistant", "tool",
+            "assistant", "tool", "assistant", "tool", "assistant",
+        ]
+        assert messages[-2]["role"] == "tool" and "passed" in messages[-2]["content"]
+        assert messages[-1]["role"] == "assistant"
+        assert "tool_response" not in messages[-1]["content"]
+        assert sum(m["content"].count("<tool_call>") for m in messages if m["role"] == "assistant") == 4
+
+    text_rows = [json.loads(line) for line in text_path.read_text(encoding="utf-8").splitlines()]
+    assert len(text_rows) == 60
+    assert sum(row["id"].startswith("gen2-replay-") for row in text_rows) == 48
+    assert sum(row["id"].startswith("repair-") for row in text_rows) == 12
 
 
 def test_eval_harness_selfcheck_and_scoring_baselines():

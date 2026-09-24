@@ -502,3 +502,35 @@ promote batch-004. The next experiment should target those specific behaviors
 with replay of gen-2 outputs and explicit negative examples for fabricated
 observations and premature success, rather than adding more single-turn
 envelope rows.
+
+### Batch-005 replay-heavy repair curriculum: replay did not rescue the adapter
+
+Batch-005 continued gen-2 on 60 rows: 48 deterministic GSM8K replay examples
+and 12 template-rendered repair loops. Each repair loop observes a red test
+summary, reads the responsible file, writes a fix, observes a green summary,
+and only then emits its final report. Training was capped to one pass (60
+steps) at lr 1e-5, with the parent-adapter baseline and the same 100-prompt
+GSM8K retention protocol.
+
+| metric | gen-2 parent | batch-005 candidate |
+|---|---:|---:|
+| GSM8K holdout | 0.730 | **0.680** |
+| all 11 static fixtures | 3/11 | **2/11** |
+| envelope fixtures (eval-9/10/11) | 3/3 | 2/3 |
+| JSON-discipline fixtures | 0/8 | 0/8 |
+
+The lifecycle ended `STOP_PLATEAU` / `UNMET` at the 0.74 bar and did not
+promote the candidate. The live 12-turn runtime loop also failed: it made one
+`run_tests` call followed by eleven increasingly malformed `read_file`
+paths, never wrote a fix, never observed green, and exhausted the budget
+without a final report.
+
+Finding: replay plus green-gated positive transcripts did not preserve GSM8K
+or repair behavior. The likely issue is not the presence of replay rows, but
+the single-pass LoRA update on a small, highly templated repair set: the
+candidate became more deterministic about the wrong read path and still
+could not connect the observed failure to the correct workspace file. Do not
+promote batch-005. A subsequent attempt should preserve the parent through
+an even smaller adapter update or train only a repair-specific module while
+keeping the gen-2 adapter frozen, and should include negative examples that
+penalize repeated nonexistent reads.
