@@ -104,6 +104,24 @@ def test_batch_005_replay_repair_records_are_green_gated_when_available():
     assert sum(row["id"].startswith("repair-") for row in text_rows) == 12
 
 
+def test_batch_006_teacher_data_has_corrected_preference_context():
+    import pytest
+
+    records_path = Path(BATCH) / "chowder_agent_batch_006_teacher_repair.jsonl"
+    text_path = Path(BATCH) / "batch006_repair_replay_train_text.jsonl"
+    if not records_path.exists() or not text_path.exists():
+        pytest.skip("batch-006 artifacts not present")
+    records = [json.loads(line) for line in records_path.read_text(encoding="utf-8").splitlines()]
+    positives = [r for r in records if r.get("type") != "preference_pair"]
+    preferences = [r for r in records if r.get("type") == "preference_pair"]
+    assert len(positives) == 32 and len(preferences) == 8
+    assert sum(1 for r in positives if len(r["messages"]) == 16) == 4
+    assert any("tool_calls" in m for p in preferences for m in p["rejected"]["messages"])
+    assert any(len(p["input"]["messages"]) == 3 and p["input"]["messages"][-1]["role"] == "tool" for p in preferences)
+    text_rows = [json.loads(line) for line in text_path.read_text(encoding="utf-8").splitlines()]
+    assert len(text_rows) == 60
+
+
 def test_eval_harness_selfcheck_and_scoring_baselines():
     # fixture count is derived, so adding fixtures never stales this test
     import re as _re

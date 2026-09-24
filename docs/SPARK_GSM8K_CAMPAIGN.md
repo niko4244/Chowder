@@ -534,3 +534,34 @@ promote batch-005. A subsequent attempt should preserve the parent through
 an even smaller adapter update or train only a repair-specific module while
 keeping the gen-2 adapter frozen, and should include negative examples that
 penalize repeated nonexistent reads.
+
+### Batch-006 corrected teacher data: retention improved, repair behavior did not
+
+Batch-006 applied the two requested teacher-data corrections: rejected
+batched calls are represented explicitly, and the repeated-test preference
+pair includes the preceding red observation. The dataset contains 32 positive
+repair trajectories, including four still-red recovery loops, plus eight
+preference pairs. It was rendered through Spark's chat template and mixed
+with 48 gen-2 replay rows for one 60-step pass at lr 5e-6.
+
+| metric | gen-2 parent | batch-006 candidate |
+|---|---:|---:|
+| GSM8K holdout | 0.730 | **0.720** |
+| all 11 static fixtures | 3/11 | **2/11** |
+| envelope fixtures (eval-9/10/11) | 3/3 | 2/3 |
+| JSON-discipline fixtures | 0/8 | 0/8 |
+
+The lifecycle ended `STOP_PLATEAU` / `UNMET` at the 0.74 bar and did not
+promote the candidate. GSM8K retention improved from batch-005's 0.68 to
+0.72, but remained below the parent. The live 12-turn loop still failed:
+one `run_tests` call was followed by eleven nonexistent `read_file` paths,
+with no `write_file`, no green observation, and no final report.
+
+Finding: the corrected teacher data and lower learning rate reduced the
+GSM8K regression but did not change the model's runtime failure mode. The
+static envelope fixtures remain insufficient as a promotion signal for the
+multi-turn repair policy. Do not promote batch-006. The next experiment
+should change the training mechanism rather than add more near-duplicate
+positive repair rows: freeze gen-2, train a repair-only module or use a
+preference-aware objective, and include runtime traces where nonexistent
+reads receive an explicit negative reward.
