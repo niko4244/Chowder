@@ -1,0 +1,34 @@
+{
+  "condition": "C_preference_optimization",
+  "description": "OPTIONAL and conditional: run only if genuine matched preference pairs exist. Pairs are valid only when chosen and rejected actions come from the SAME decision context and BOTH are backed by independent execution evidence (observed tool result / test outcome). Never manufactured from arbitrary negative rewards on unverified responses.",
+  "status": "gated_off_until_genuine_pairs_exist",
+  "pair_requirements": {
+    "same_decision_context": "identical prefix (observation history) for chosen and rejected",
+    "chosen_evidence": "individually verified_good action with a recorded real observation",
+    "rejected_evidence": "individually verified_bad action with a recorded real observation (nonexistent read, repeated unproductive call, wrong-file edit, premature success claim)",
+    "construction": "pairs are emitted by replay evidence analysis, never synthesized by label flipping",
+    "minimum_pairs_for_run": 200
+  },
+  "backend": "chowder.backends.transformers_peft.TransformersPeftExecutor",
+  "student": "qwen3-1.7b",
+  "training": {
+    "objective": "dpo_with_frozen_reference",
+    "beta": 0.1,
+    "reference_policy": "frozen condition-A student (adapter merged into a frozen copy)",
+    "learning_rate": 5e-5,
+    "epochs": 1,
+    "micro_batch": 2,
+    "gradient_accumulation": 16,
+    "max_length": 4096,
+    "seed": 2026
+  },
+  "authorization": {
+    "gpu_required": true,
+    "operator_approval_required": true,
+    "device_exclusivity_required": true
+  },
+  "outputs": {
+    "adapter": "checkpoints/cond_c/adapter"
+  },
+  "promotion_rule": "never auto-promoted; requires win-rate evidence against condition-A on held-out repair contexts"
+}
