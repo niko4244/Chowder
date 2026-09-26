@@ -1,0 +1,59 @@
+{
+  "student": {
+    "role": "primary",
+    "repo": "Qwen/Qwen3-1.7B",
+    "revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+    "license": "apache-2.0",
+    "dtype": "bfloat16",
+    "bytes_per_param": 2,
+    "params_est": 1720000000,
+    "hidden_size": 2048,
+    "layers": 28,
+    "chat_template": "native Qwen3 (verified prefix-consistent masking required)",
+    "gguf_only": false,
+    "license_note": "API-verified apache-2.0; revision pinned to live sha."
+  },
+  "hardware": {
+    "platform": "Windows 10",
+    "cpu_count": 20,
+    "ram_gb": 63.90541458129883,
+    "storage_total_gb": 952.8398399353027,
+    "storage_free_gb": 32.95187759399414,
+    "accelerators": [
+      {
+        "vendor": "nvidia",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "memory_gb": 15.9287109375,
+        "bus_id": "00000000:01:00.0",
+        "index": 0,
+        "uuid": null,
+        "compute_capability": null
+      },
+      {
+        "vendor": "nvidia",
+        "name": "NVIDIA GeForce RTX 2060",
+        "memory_gb": 6.0,
+        "bus_id": "00000000:02:00.0",
+        "index": 1,
+        "uuid": null,
+        "compute_capability": null
+      }
+    ]
+  },
+  "workload_gb": {
+    "frozen_weights_gb": 3.44,
+    "trainable_gb": 0.344,
+    "activation_gb": 11.274,
+    "optimizer_gb": 0.172,
+    "workspace_gb": 1.0
+  },
+  "primary_pool_gb": 15.9287109375,
+  "fits_primary_pool": true,
+  "plan_bottleneck": "compute_or_kernel",
+  "plan_vram_total_gb": 14.929,
+  "notes": [
+    "memory figures are static estimates; throughput and duration require a measured pilot",
+    "control student requires explicit license acceptance before any download",
+    "GGUF inference checkpoints are not trainable; recipes load native safetensors"
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "condition": "B_repair_specialized",
+  "description": "Continue from the condition-A candidate on verified observation-action repair demonstrations (sandbox-replayed SWE-smith traces), mixed with a controlled fraction of general data to probe catastrophic forgetting.",
+  "backend": "chowder.backends.transformers_peft.TransformersPeftExecutor",
+  "starts_from": "condition A adapter (parent adapter continuation)",
+  "student": "qwen3-1.7b",
+  "data": {
+    "train": "prepared_repair/train.jsonl",
+    "dev": "prepared_repair/dev.jsonl",
+    "general_mix_fraction": 0.2,
+    "general_mix_source": "prepared_pilot/train.jsonl (held-out from condition A selection)",
+    "contract": "messages chat rows; repair rows are observation-history -> action with individually verified_good targets only"
+  },
+  "training": {
+    "objective": "causal_lm_completion_only",
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+    "learning_rate": 0.0001,
+    "scheduler": "cosine",
+    "warmup_ratio": 0.03,
+    "epochs": 2,
+    "micro_batch": 4,
+    "gradient_accumulation": 8,
+    "max_length": 4096,
+    "seed": 2026,
+    "dtype": "bfloat16",
+    "gradient_checkpointing": true,
+    "forgetting_probe": "evaluate general-capability dev set before and after this stage"
+  },
+  "verification_gate": "every repair row must carry verification.method == sandbox_replay with matching trace_sha256 and an observed green test event (prepare.py repair path rejects the rest)",
+  "authorization": {
+    "gpu_required": true,
+    "operator_approval_required": true,
+    "device_exclusivity_required": "no other Chowder campaign may hold the target device"
+  },
+  "outputs": {
+    "adapter": "checkpoints/cond_b/adapter",
+    "trainer_state": "checkpoints/cond_b/trainer_state.json",
+    "loss_history_required": true
+  },
+  "promotion_rule": "never auto-promoted; repair behavior metrics plus general-capability regression check against the condition-A student"
+}

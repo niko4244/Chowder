@@ -1,0 +1,42 @@
+{
+  "condition": "A_supervised_distillation",
+  "description": "LoRA SFT on verified positive teacher-generated examples (OpenThoughts3 pilot). Completion-only loss masking via chowder.backends.training_data; native Qwen3 chat template; no teacher model is ever loaded.",
+  "backend": "chowder.backends.transformers_peft.TransformersPeftExecutor",
+  "student": "qwen3-1.7b",
+  "student_revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+  "data": {
+    "train": "prepared_pilot/train.jsonl",
+    "dev": "prepared_pilot/dev.jsonl",
+    "manifest": "prepared_pilot/manifest.json",
+    "contract": "messages chat rows (chowder training_data validation)"
+  },
+  "training": {
+    "objective": "causal_lm_completion_only",
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+    "learning_rate": 0.0002,
+    "scheduler": "cosine",
+    "warmup_ratio": 0.03,
+    "epochs": 2,
+    "micro_batch": 4,
+    "gradient_accumulation": 8,
+    "max_length": 2048,
+    "seed": 2026,
+    "dtype": "bfloat16",
+    "gradient_checkpointing": true
+  },
+  "authorization": {
+    "gpu_required": true,
+    "operator_approval_required": true,
+    "device_exclusivity_required": "no other Chowder campaign may hold the target device",
+    "cpu_preflight_evidence": "experiments/teacher_free_distill/preflight output (8/8 checks)"
+  },
+  "outputs": {
+    "adapter": "checkpoints/cond_a/adapter",
+    "trainer_state": "checkpoints/cond_a/trainer_state.json",
+    "loss_history_required": true
+  },
+  "promotion_rule": "never auto-promoted; comparison against untouched baseline under the same protocol, dev scores never used for final-holdout selection"
+}
