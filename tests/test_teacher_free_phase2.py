@@ -542,3 +542,30 @@ def test_pass_to_pass_outcomes_are_measured_and_recorded(tmp_path):
                               pass_to_pass_source="instance_PASS_TO_PASS")
     assert verified["pass_to_pass"] == {"total": 3, "passing": 3, "failing": 0,
                                         "source": "instance_PASS_TO_PASS"}
+
+
+# --------------------------------------------------------------------------
+# Final-eval set builder
+# --------------------------------------------------------------------------
+
+final_eval = load("final_eval_set")
+
+
+def test_gold_extraction_rejects_non_numbers():
+    """Regression: a lone comma matched the number regex and became ''."""
+    assert final_eval.extract_gold("so the total is 1,024 units.") == "1024"
+    assert final_eval.extract_gold("hence, 42") == "42"
+    assert final_eval.extract_gold("value: ,") is None
+    assert final_eval.extract_gold("```print(x)```") is None
+    assert final_eval.extract_gold("#### 3.50") == "3.50"
+    assert final_eval.extract_gold("no digits here at all") is None
+
+
+def test_dev_prompt_texts_cover_dev_and_train(tmp_path):
+    def msg_row(q):
+        return json.dumps({"messages": [{"role": "user", "content": q},
+                                        {"role": "assistant", "content": "a"}]})
+    (tmp_path / "dev.jsonl").write_text(msg_row(" Dev Question ") + "\n", encoding="utf-8")
+    (tmp_path / "train.jsonl").write_text(msg_row("train question") + "\n", encoding="utf-8")
+    texts = final_eval.dev_prompt_texts(tmp_path)
+    assert "dev question" in texts and "train question" in texts

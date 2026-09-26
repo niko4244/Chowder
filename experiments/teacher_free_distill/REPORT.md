@@ -29,7 +29,7 @@ Defects found in the previous pipeline, each fixed and regression-tested in `tes
 
 New `experiments/teacher_free_distill/eval_protocol.py`:
 
-- **Frozen shared protocol** (`FROZEN_PROTOCOL`: greedy decoding, seed 2026, `max_new_tokens` 512, `final_number_match` scoring, bf16; `FROZEN_MODEL`: Qwen3-1.7B @ `70d244cc…`, chat template, thinking disabled) attached digest-identically to both arms.
+- **Frozen shared protocol** (`FROZEN_PROTOCOL`: greedy decoding, seed 2026, `max_new_tokens` 1024, `final_number_match` scoring, bf16; `FROZEN_MODEL`: Qwen3-1.7B @ `70d244cc…`, tokenizer chat template, thinking at the production renderer's actual behavior — template default, i.e. enabled, with the think-aware scorer treating an unclosed `<think>` as a miss) attached digest-identically to both arms.
 - **Dev/final separation by construction:** the final split's plan embeds a separation check that hard-fails on overlapping problem ids *or* overlapping normalized prompt text with any development material.
 - **Adapter provenance fail-closed:** the Condition A arm is accepted only after `adapter/adapter_model.safetensors` re-verifies against the pinned digest in `condition_a_artifacts.json`; the plan records that training loss (1.7276) is history, never a quality claim.
 - **Raw outputs and resources:** `run_plan` writes per-arm/split specs executed by the production `chowder.evaluators.transformers_text_worker`, which already emits per-problem predictions, generation diagnostics (EOS-termination, produced tokens), lifecycle timings and its own peak-VRAM sampling. Status stays `awaiting_operator_authorization` until the operator executes the specs.

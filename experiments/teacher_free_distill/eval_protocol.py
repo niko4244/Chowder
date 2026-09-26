@@ -37,11 +37,15 @@ from pathlib import Path
 #: Frozen protocol shared by every arm of a comparison. Greedy decoding keeps
 #: the two arms deterministic on the same hardware; the seed is recorded
 #: anyway because the protocol must be reproducible in writing, not in prose.
+#: max_new_tokens 1024: the rendering path leaves thinking at the model's
+#: default (enabled for Qwen3), and a budget too tight to finish a think
+#: block would score both arms as misses (scoring.py treats an unclosed
+#: <think> as a miss by design), destroying the comparison's resolution.
 FROZEN_PROTOCOL = {
     "decoding": "greedy",
     "temperature": 0.0,
     "seed": 2026,
-    "max_new_tokens": 512,
+    "max_new_tokens": 1024,
     "scoring": "final_number_match",
     "precision": "bf16",
     "quantization": "none",
@@ -49,13 +53,18 @@ FROZEN_PROTOCOL = {
 
 #: Frozen model identity. The revision is the pinned Qwen3-1.7B commit that
 #: Condition A trained from; the chat template is the tokenizer's own, shipped
-#: in the adapter directory and identical for the base.
+#: in the adapter directory and identical for the base. Thinking mode is
+#: whatever the production renderer produces: it applies the tokenizer
+#: template with add_generation_prompt=True and no enable_thinking kwarg, so
+#: Qwen3 runs at its template default (thinking enabled); the think-aware
+#: scorer already defines the honest reading of an exhausted budget.
 FROZEN_MODEL = {
     "base_model": "Qwen/Qwen3-1.7B",
     "base_revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
     "use_chat_template": True,
-    "thinking_mode": "disabled",
-    "enable_thinking": False,
+    "thinking_mode": "model_default (Qwen3 template default: enabled; "
+                     "unclosed <think> scores as a miss)",
+    "enable_thinking": None,
 }
 
 DECISION = "requires_operator_review"
@@ -80,14 +89,29 @@ def digest(obj: object) -> str:
                    separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def _row_prompt(row: dict) -> str:
+    """A row's prompt under either contract: eval rows (prompt field) or
+    Chowder chat rows (first user message)."""
+    value = row.get("prompt")
+    if isinstance(value, str) and value.strip():
+        return value
+    for message in row.get("messages") or []:
+        if isinstance(message, dict) and message.get("role") == "user" \
+                and isinstance(message.get("content"), str):
+            return message["content"]
+    return ""
+
+
 def eval_prompt_ids(path: Path) -> set[str]:
     """The problem ids an eval file asks about."""
     ids: set[str] = set()
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.strip():
             row = json.loads(line)
-            value = row.get("problem_id") or row.get("id") or row.get("prompt")
+            value = row.get("problem_id") or row.get("id")
             if value is None:
+                value = _row_prompt(row)
+            if not value:
                 raise ValueError(f"{path}: eval row without problem_id/id/prompt")
             ids.add(str(value))
     return ids
@@ -110,8 +134,7 @@ def check_dev_final_separation(dev_prompts: Path, final_prompts: Path) -> dict:
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 row = json.loads(line)
-                text = row.get("prompt") or ""
-                out.add(" ".join(str(text).casefold().split()))
+                out.add(" ".join(_row_prompt(row).casefold().split()))
         return out
 
     dev_texts = normalized_prompts(dev_prompts)
@@ -315,6 +338,26 @@ def run_plan(plan_path: Path, results_root: Path, *, python: str = "python") -> 
         raise ValueError(f"{plan_path}: expected format {FORMAT!r}")
     results: dict[str, dict] = {}
     for split, split_spec in sorted(plan["splits"].items()):
+        # A split is only executable when its prompts file is in the eval
+        # contract (prompt + expected per row). A chat-contract file (e.g. a
+        # training dev split without gold answers) is recorded as not
+        # executable instead of producing a spec the worker would reject.
+        rows = [json.loads(x) for x in
+                Path(split_spec["prompts"]).read_text(encoding="utf-8").splitlines()
+                if x.strip()]
+        eval_contract = bool(rows) and all(
+            isinstance(r.get("prompt"), str) and r.get("expected") is not None
+            for r in rows)
+        if not eval_contract:
+            results[f"{split}"] = {
+                "status": "not_executable_needs_eval_contract",
+                "prompts": split_spec["prompts"],
+                "note": ("rows are chat-contract records without gold answers; "
+                         "a gold-bearing eval-contract dev set is a separate "
+                         "artifact and is not required for the final "
+                         "paired comparison"),
+            }
+            continue
         for arm in plan["arms"]:
             out_dir = results_root / f"{arm['arm']}__{split}"
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -351,7 +394,10 @@ def run_plan(plan_path: Path, results_root: Path, *, python: str = "python") -> 
     summary = {
         "format": FORMAT,
         "plan": str(plan_path),
-        "runs": {k: str(v["spec"]) for k, v in results.items()},
+        "runs": {k: str(v["spec"]) for k, v in results.items()
+                 if "spec" in v},
+        "splits": {k: {"status": v["status"]} for k, v in results.items()
+                   if "spec" not in v},
         "status": "awaiting_operator_authorization",
         "note": ("launching real inference is the operator-authorized GPU step; "
                  "execute each eval_spec.json with the production worker "
