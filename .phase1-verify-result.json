@@ -1,0 +1,12 @@
+{
+  "chunker_default_deterministic": true,
+  "chunker_default_digest": "8770bc7f6aaa5c8c458a338d21648e651b9e44b1589277e1bff501e548440ba1",
+  "chunker_v2_digest": "7faa08f5793897ed2e7f8d3d81752e7588819994caab01c41d07e494c84077dc",
+  "chunker_v2_recorded_digest": "7faa08f5793897ed2e7f8d3d81752e7588819994caab01c41d07e494c84077dc",
+  "chunker_v2_matches_recorded": true,
+  "prepare_train_matches_pilot_v4": true,
+  "prepare_dev_matches_pilot_v4": true,
+  "prepare_manifest_integrity_ok": true,
+  "prepare_train_rows": 3807,
+  "prepare_dev_rows": 471
+}

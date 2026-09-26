@@ -1,0 +1,138 @@
+{
+  "artifacts_root": "C:\\Users\\nikma\\chowder_teacher_free\\checkpoints\\cond_a",
+  "evaluation": {
+    "format": "chowder-teacher-free-eval-protocol/v1",
+    "protocol": "frozen paired protocol (eval_protocol.py): greedy, seed 2026, max_new_tokens 512, final_number_match, bf16, chat template, thinking disabled",
+    "dev_split": "pilot_v4 dev.jsonl (recipe selection only; never cited as a result)",
+    "final_split": "independent final-eval prompts; must be disjoint from all development material (checked at plan time)",
+    "status": "not_run",
+    "quality_claim": "none: no evaluation has run; training loss (1.7276) is training history and never a quality claim",
+    "evaluated": false
+  },
+  "files": [
+    {
+      "bytes": 25720120,
+      "path": "adapter/adapter_model.safetensors",
+      "sha256": "93fa91e0b90c6abe57c3e3e7d56f374a840a6a2475f1506f68afe2ccd25f3c8c"
+    },
+    {
+      "bytes": 1145,
+      "path": "adapter/adapter_config.json",
+      "sha256": "8f4b98da3dd581b07c9fbc830f306352ee9ec3236d3853586ffb8bf78387c50d"
+    },
+    {
+      "bytes": 11422650,
+      "path": "adapter/tokenizer.json",
+      "sha256": "be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506"
+    },
+    {
+      "bytes": 724,
+      "path": "adapter/tokenizer_config.json",
+      "sha256": "154e5ff1e7c152d964edf30da854ea62465c767719ac8e97e58babf2d4fa9079"
+    },
+    {
+      "bytes": 4256,
+      "path": "adapter/chat_template.jinja",
+      "sha256": "51fa65c79bb57f058dc7ef8734884bd325fe9d45bb03a61bfef59785d3bc2da9"
+    },
+    {
+      "bytes": 15559,
+      "path": "run_record.json",
+      "sha256": "e75471bb8f3ba54874a018c4119f9d904d371a1624f776102b8bf26b2d71fc14"
+    },
+    {
+      "bytes": 12688,
+      "path": "worker-result.json",
+      "sha256": "3aa6be300b0e504f02e6304f03eb6bb7a50bb481fe557a5e37414c5b02defb5b"
+    },
+    {
+      "bytes": 2953,
+      "path": "loss_history.json",
+      "sha256": "ba96e44ea76b4769caaa99495f7dc6392f3b02a9b2cfcbc65cde2b0178f84a2b"
+    },
+    {
+      "bytes": 1366,
+      "path": ".chowder/runs/cond-a-supervised-distillation-pilot-f78d6fd60c3d/run-spec.json",
+      "sha256": "b39181c62e7f8c181926423c9c08c29ee9990b135448276019c682962e99745c"
+    }
+  ],
+  "format": "chowder-teacher-free-condition-a/v1",
+  "loss_history": {
+    "entries": 28,
+    "first": {
+      "learning_rate": 0.0002,
+      "loss": 2.3453609466552736,
+      "step": 10
+    },
+    "last": {
+      "learning_rate": 1.630896073864352e-07,
+      "loss": 1.6870847702026368,
+      "step": 280
+    },
+    "truncated": false
+  },
+  "run": {
+    "base_model": "Qwen/Qwen3-1.7B",
+    "base_revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+    "dataset_sha256": "f916364e8eaa3f0e43b693550e591667177fec20f0926e78c6138e5395076ce4",
+    "mean_train_loss": 1.727639614696234,
+    "measured": {
+      "measured_gpu_hours": 4.7363021495,
+      "measured_seconds": 17050.6877382,
+      "peak_vram_gb": 7.034084796905518,
+      "train_runtime_seconds": 17046.1911861
+    },
+    "measured_gpu_hours": 4.7363021495,
+    "peak_vram_gb": 7.034084796905518,
+    "resolved": {
+      "batch_size": 1,
+      "epochs": 2.0,
+      "gradient_accumulation_steps": 32,
+      "gradient_checkpointing": true,
+      "learning_rate": 0.0002,
+      "lora_alpha": 32,
+      "lora_dropout": 0.05,
+      "lora_r": 16,
+      "lr_scheduler_type": "cosine",
+      "max_length": 2048,
+      "precision": "bf16",
+      "seed": 2026,
+      "target_modules": [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj"
+      ],
+      "warmup_ratio": 0.03
+    },
+    "steps_completed": 284,
+    "steps_total": 284,
+    "training_rows": 4529,
+    "versions": {
+      "accelerate": "1.6.0",
+      "bitsandbytes": "0.50.2",
+      "datasets": "4.3.0",
+      "peft": "0.20.0",
+      "torch": "2.11.0+cu128",
+      "transformers": "5.16.1"
+    },
+    "wall_seconds": 17152.7
+  },
+  "a2_baseline": {
+    "format": "chowder-teacher-free-pilot-v1",
+    "purpose": "controlled retrain (Condition A2) from the untouched base on the corrected dataset, budget comparable to A",
+    "recipe": "recipes/a2_sft_supervised.json",
+    "dataset": {
+      "train_sha256": "9e5dbbefe05379b53406a33359d6452f3c098198b7462f5b47f84c473dd2abe4",
+      "dev_sha256": "98fbe4f2f646a592192b6239b059958ee982239de2d67e9d9a74d285faad16c6",
+      "rows": {
+        "train": 3807,
+        "dev": 471
+      },
+      "unique_problems": 467,
+      "expected_optimizer_steps": 240
+    },
+    "status": "recipe_ready_awaiting_operator_approval",
+    "training_started": false
+  }
+}

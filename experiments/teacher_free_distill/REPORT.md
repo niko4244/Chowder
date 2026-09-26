@@ -1,9 +1,58 @@
 # Teacher-free distillation pilot — status report
 
-Branch: `experiment/teacher-free-distillation-pilot` (base audit SHA `3d5c0101e40406e01defa7591e025f28178a7be9`)
-Date: 2026-09-26 (revised; first version 2026-09-25). All numbers below come from runs executed on this branch; nothing is extrapolated. Upstream flags (`resolved`) are carried as claims and never counted as evidence.
+Branch: `experiment/teacher-free-distillation-pilot` (base audit SHA `3d5c0101e40406e01defa7591e025f28178a7be9`); this revision on working branch `experiment/teacher-free-revised-plan` @ `eb0ad69`.
+Date: 2026-09-26 (revised plan, phases 0–4; first version 2026-09-25). All numbers below come from runs executed on this branch; nothing is extrapolated. Upstream flags (`resolved`) are carried as claims and never counted as evidence.
 
-## This session — four follow-up tasks
+## Revised plan — phase-by-phase evidence (this revision)
+
+### Phase 0 — reliability (all four items done)
+
+1. **CI failures fixed.** `tests/test_teacher_free_phase2.py` monkeypatched `datasets.load_dataset` while `datasets` is an optional extra, so CI (which does not install it) failed with `ModuleNotFoundError`; the suite now installs a stand-in `datasets` module via `sys.modules` and a new test asserts `fetch_smith`/`stream_hf` import cleanly with the module blocked and never bind `load_dataset` at import time. `tui_teacher_free.py` line 131 launched the preflight subprocess without `env=`, failing `test_worker_env`'s every-launch check on 4 CI jobs; `run_preflight()` now passes `env=worker_env({"PYTHONUNBUFFERED": "1"})` with a bounded timeout.
+2. **TUI stages derive from verified artifacts, not file existence.** New `src/chowder/teacher_free_evidence.py` computes each of the 8 workflow stages from on-disk evidence (manifest format + pinned `output_sha256` digests re-hashed from bytes, recipes present *and* structurally valid, replay summary buckets, comparison decisions restricted to `requires_operator_review`, Condition A verified via the digest record). A replay file that merely exists no longer reports "done": vocabulary includes missing/pending/not_audited/recorded_unpinned/narrative_only/unchecked/pending_record.
+3. **Condition A preserved.** `experiments/teacher_free_distill/verify_condition_a.py` (`record`/`verify`) pins 9 artifact files including `run-spec.json`; `condition_a_artifacts.json` re-verifies against the real `checkpoints/cond_a` on this host (`ok: true, state: verified`, 284/284 steps). The TUI and the new eval protocol both refuse to *use* Condition A unless the pinned digests re-verify.
+4. **Full matrix re-run locally:** `2702 passed, 77 skipped` (Linux/Windows-compatible paths; no new platform-specific behavior introduced). CI validation pending push.
+
+### Phase 1 — data integrity (all seven items done, with measured consequences)
+
+Defects found in the previous pipeline, each fixed and regression-tested in `tests/test_teacher_free_integrity.py` (16 deterministic tests):
+
+- **Windows CRLF digest corruption (newly found and fixed):** `Path.write_text` text-mode writes turned `\n` into `\r\n` on Windows, so the pinned `output_sha256` never matched the bytes on disk. All JSONL/JSON outputs are now written byte-mode LF, and `test_outputs_are_lf_bytes_pinned_in_the_manifest` locks it. The affected run was re-executed cleanly.
+- **MinHash band collisions were dropped without verification:** the old chunker dropped *every* band collision. Measured consequence: on the default rebuild, **1314 of 5201 chunks (~25 % of scanned rows) were candidates, and all 1314 cleared** containment verification — nothing was a real duplicate. Candidates are now verified (word-5-shingle containment ≥ 0.6) before quarantine; a forced-collision test proves unrelated rows survive while genuinely equivalent ones are still quarantined.
+- **Continuation prompts were not self-contained:** they now quote the real preceding segment (default 800 chars, flag-gated, default off for compatibility).
+- **Excerpt-based parent recovery never matched:** `recovered_parent` required the probe to be *exactly* the recorded excerpt length, so real chunk-0 prompts never linked to their siblings. Fixed to bidirectional prefix matching; grouping tests prove one problem never straddles partitions at a dev_percent chosen so the legacy per-chunk hashing *would* have split it.
+- **Label audit** with the production Qwen3-1.7B tokenizer @ `70d244cc…` at `max_length=2048`: rejects incomplete supervised targets and truncated final answers; `--keep-truncated-targets` flips `ok` to False instead of failing silently.
+- **Immutable manifest, leakage report, truncation report, unique-problem count** with digest pinning; a re-run that would change pinned bytes is refused unless `--allow-rewrite`.
+
+**Verified pilot_v4 numbers (all from the fixed, byte-deterministic pipeline):** train **3807** / dev **471** rows, **467 unique problems**, basis 100 % `declared_problem_id`, **0** split crossings, **0** holdout collisions, **778** truncated final answers rejected, **0** incomplete targets, token audit `ok` (p50 total 1689 / p95 1991 / max 2048). Near-dup: 1210 candidates, 1210 cleared, 0 quarantined. `output_sha256` for train/dev matches the on-disk bytes; a full re-run reproduced both digests **byte-identically** (determinism check `.phase1-verify-result.json`), and the chunker re-run matched the recorded v2 chunk file digest exactly.
+
+### Phase 2 — baseline evaluation protocol (implemented; real inference awaits operator authorization)
+
+New `experiments/teacher_free_distill/eval_protocol.py`:
+
+- **Frozen shared protocol** (`FROZEN_PROTOCOL`: greedy decoding, seed 2026, `max_new_tokens` 512, `final_number_match` scoring, bf16; `FROZEN_MODEL`: Qwen3-1.7B @ `70d244cc…`, chat template, thinking disabled) attached digest-identically to both arms.
+- **Dev/final separation by construction:** the final split's plan embeds a separation check that hard-fails on overlapping problem ids *or* overlapping normalized prompt text with any development material.
+- **Adapter provenance fail-closed:** the Condition A arm is accepted only after `adapter/adapter_model.safetensors` re-verifies against the pinned digest in `condition_a_artifacts.json`; the plan records that training loss (1.7276) is history, never a quality claim.
+- **Raw outputs and resources:** `run_plan` writes per-arm/split specs executed by the production `chowder.evaluators.transformers_text_worker`, which already emits per-problem predictions, generation diagnostics (EOS-termination, produced tokens), lifecycle timings and its own peak-VRAM sampling. Status stays `awaiting_operator_authorization` until the operator executes the specs.
+- **Paired analysis:** `compare_arms` pairs raw per-problem scores across arms and computes per-problem deltas with a percentile bootstrap CI (resampling problems); the decision is always `requires_operator_review` — no automated promotion exists.
+- Six new protocol tests cover freezing, overlap refusal, adapter-digest refusal, spec generation, delta/CI math and per-problem pairing.
+
+### Phase 3 — controlled experiment A2 (recipe ready; training awaits operator approval)
+
+`recipes/a2_sft_supervised.json`: identical student/revision, objective, LoRA config (r16/α32/dropout 0.05, q/k/v/o), lr 2e-4 cosine, warmup 0.03, epochs 2, effective batch 32 (micro-batch 1 × grad-accum 32, the operator override measured on Condition A run 4 — recorded, not hidden), max_length 2048, seed 2026 — on **pilot_v4** (expected steps 240 = 2·⌈3807/32⌉). Built **from the untouched base only**, never a continuation of A, so a delta vs A isolates the data corrections. `condition_a_artifacts.json` now carries an `a2_baseline` block (`training_started: false`) and an `evaluation` block (`evaluated: false`) so evidence-derived tooling can see no evaluation and no A2 training has happened. Skill-targeted selection/hyperparameter variants remain separate follow-ups, not part of A2.
+
+### Phase 4 — verified repair data (gate tightened; no verified repair exists yet)
+
+- `replay_smith.py` now measures the **pass-to-pass surface** on the official-image path: instance `PASS_TO_PASS` ids are collected in-container (never executed early), matched against the verbose post-patch output, and the measured `{total, passing, failing, source}` travels on every record. A red→green patch that breaks a previously passing test is **`not_green`**, and an instance with no recorded P2P surface is marked `none_recorded` instead of vacuously clean.
+- `prepare.repair_examples` refuses to promote any repair whose `pass_to_pass` is missing, unrecorded, or shows a failure — so upstream `resolved` claims remain irrelevant and regression-risk is actually measured before anything reaches training data.
+- Status unchanged and fail-closed: **0 verified repairs**; the earlier batch's verdicts (3/3 red reproduced, 0 green, 15/23 rows not module-congruent) stand.
+
+### Safety and execution compliance
+
+No new GPU training launched (A2 `awaiting_operator_approval`); no inference server touched; no benchmark material generated (no final-eval prompts created — only the protocol and the separation check that will guard them); no synthetic success evidence; every change recorded above with its test. The commit/PR step remains with the operator on request.
+
+---
+
+## Earlier session — four follow-up tasks
 
 | Task | Outcome | Strongest evidence |
 |---|---|---|
