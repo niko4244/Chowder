@@ -57,6 +57,11 @@ def export(catalog: Path, source_id: str, dest: Path, *, limit: int = 100,
         attempt += 1
         try:
             stream = open_stream()
+            # Each attempt restarts the stream, so the scan budget and the
+            # reservoir candidate count restart with it (a persisted counter
+            # would make every retry break immediately, silently shrinking
+            # the sample).
+            scanned = dropped = 0
             for row in stream:
                 if scanned >= scan_limit:
                     break
@@ -66,7 +71,9 @@ def export(catalog: Path, source_id: str, dest: Path, *, limit: int = 100,
                     continue
                 if len(reservoir) < limit:
                     reservoir.append(row)
-                elif rng.randrange(len(reservoir) + scanned - dropped) < limit:
+                # Vitter R over the candidates seen so far (accepted rows
+                # included exactly once): (scanned - dropped) IS that count.
+                elif rng.randrange(scanned - dropped) < limit:
                     reservoir[rng.randrange(limit)] = row
             break
         except RETRYABLE:

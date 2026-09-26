@@ -127,6 +127,13 @@ class TeacherFreeDistillScreen(Static):
             self._refresh()
         elif event.button.id == "tfd_preflight":
             out = exp_dir / "preflight_result.json"
-            result = subprocess.run([sys.executable, str(exp_dir / "preflight.py"),
-                                     "--out", str(out)], capture_output=True, text=True)
+            try:
+                subprocess.run([sys.executable, str(exp_dir / "preflight.py"),
+                                "--out", str(out)], capture_output=True, text=True,
+                               timeout=600)
+            except subprocess.TimeoutExpired:
+                # Bounded, not decorative: a hung preflight must not freeze the
+                # screen forever; the stale result file stays as-is and the
+                # refresh below shows whatever evidence exists on disk.
+                pass
             self._refresh()

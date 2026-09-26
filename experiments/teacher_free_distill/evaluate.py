@@ -56,14 +56,17 @@ def check_repair_split_leakage(train_rows: list[dict], eval_rows: list[dict]) ->
 
 def check_prompt_overlap(train_rows: list[dict], eval_rows: list[dict]) -> dict:
     """Exact normalized-prompt overlap between any train material and final eval."""
-    train_prompts = {normalized_prompt(m["content"]) for row in train_rows
-                     for m in row.get("messages", []) if m.get("role") == "user"}
+    def user_contents(rows: list[dict]):
+        for row in rows:
+            for m in row.get("messages", []) or []:
+                if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+                    yield m["content"]
+
+    train_prompts = {normalized_prompt(c) for c in user_contents(train_rows)}
     collisions = []
-    for row in eval_rows:
-        for m in row.get("messages", []):
-            if m.get("role") == "user" and normalized_prompt(m["content"]) in train_prompts:
-                collisions.append(normalized_prompt(m["content"])[:80])
-                break
+    for content in user_contents(eval_rows):
+        if normalized_prompt(content) in train_prompts:
+            collisions.append(normalized_prompt(content)[:80])
     return {"collisions": len(collisions), "ok": not collisions}
 
 
@@ -115,12 +118,11 @@ def repair_behaviors(trajectory: list[dict]) -> dict:
         and e.get("returncode") == 0 and not e.get("tests_observed")
         for e in trajectory
     )
-    unproductive_repeats = max((Counter(
+    action_keys = (
         str((e.get("action") or {}).get("command") or (e.get("action") or {}).get("path") or "")
-        for e in reads + edits).most_common(1) or [(None, 0)])[0:1])[0:1]
-    repeat_count = (Counter(
-        str((e.get("action") or {}).get("command") or (e.get("action") or {}).get("path") or "")
-        for e in reads + edits).most_common(1) or [("none", 0)])[0][1]
+        for e in reads + edits
+    )
+    repeat_count = max(Counter(action_keys).values(), default=0)
     return {
         "tool_calls": len(trajectory),
         "nonexistent_reads": nonexistent_reads,
@@ -187,16 +189,12 @@ def main() -> None:
         print(json.dumps({"repair_split": check_repair_split_leakage(train, ev),
                           "prompt_overlap": check_prompt_overlap(train, ev)}, indent=2))
     elif args.cmd == "repair-metrics":
-        print(json.dumps(repair_aggregate([load_jsonl_row(x) for x in
-                                           json.loads(args.trajectories.read_text())]), indent=2))
+        # One trajectory per JSONL row (each a list of recorded events),
+        # matching what the replay/generation steps write.
+        print(json.dumps(repair_aggregate(load_jsonl(args.trajectories)), indent=2))
     elif args.cmd == "compare":
         print(json.dumps(compare(json.loads(args.baseline.read_text()),
                                  json.loads(args.candidate.read_text())), indent=2))
-
-
-def load_jsonl_row(path_text: str):
-    return json.loads(path_text)
-
 
 if __name__ == "__main__":
     main()

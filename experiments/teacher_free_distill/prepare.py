@@ -198,7 +198,10 @@ def heldout_keys(path: Path | None) -> set[str]:
 
 def prepare(catalog_path: Path, inputs: dict[str, Path], out: Path, *,
             heldout: Path | None = None, dev_percent: int = 10,
-            max_chars: int = 24000, max_rows: int = 1000) -> dict:
+            max_chars: int = 24000, max_rows: int = 1000,
+            near_dup_field: str = "prompt") -> dict:
+    if near_dup_field not in ("prompt", "target"):
+        raise ValueError("near_dup_field must be 'prompt' or 'target'")
     if not 1 <= dev_percent <= 40 or max_rows < 1 or max_chars < 1:
         raise ValueError("invalid sampling settings")
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
@@ -252,7 +255,14 @@ def prepare(catalog_path: Path, inputs: dict[str, Path], out: Path, *,
                 if sum(len(x["content"]) for x in messages) > max_chars:
                     stats[f"{source_id}:overlong"] += 1
                     continue
-                near_key = near_duplicate_key(first_user)
+                # Near-dup screen on the configured field. 'prompt' suits
+                # whole-row chat data; 'target' suits chunk-derived rows whose
+                # prompts legitimately share a continuation template while the
+                # supervised segments differ.
+                screen_text = (first_user if near_dup_field == "prompt"
+                               else next((x["content"] for x in reversed(messages)
+                                          if x["role"] == "assistant"), ""))
+                near_key = near_duplicate_key(screen_text)
                 prior = None
                 if near_key:
                     for band, value in enumerate(near_key):
@@ -331,6 +341,7 @@ def prepare(catalog_path: Path, inputs: dict[str, Path], out: Path, *,
         "counts": dict(sorted(stats.items())), "train_rows": len(outputs["train"]),
         "dev_rows": len(outputs["dev"]), "max_chars": max_chars,
         "max_rows_per_source": max_rows, "dev_percent": dev_percent,
+        "near_dup_field": near_dup_field,
         "provenance": provenance,
         "quality_report": quality_report,
         "note": "Sample-level QA is not proof of source correctness. Repair success requires independent sandbox replay."
@@ -347,6 +358,7 @@ def main() -> None:
     parser.add_argument("--holdout", type=Path, help="External benchmark prompts; never copied to outputs")
     parser.add_argument("--max-rows", type=int, default=1000)
     parser.add_argument("--max-chars", type=int, default=24000)
+    parser.add_argument("--near-dup-field", choices=("prompt", "target"), default="prompt")
     args = parser.parse_args()
     inputs: dict[str, Path] = {}
     for item in args.input:
@@ -355,7 +367,8 @@ def main() -> None:
             parser.error("--input must be unique SOURCE=PATH")
         inputs[source_id] = Path(location)
     print(json.dumps(prepare(args.catalog, inputs, args.out, heldout=args.holdout,
-                             max_rows=args.max_rows, max_chars=args.max_chars), indent=2))
+                             max_rows=args.max_rows, max_chars=args.max_chars,
+                             near_dup_field=args.near_dup_field), indent=2))
 
 
 if __name__ == "__main__":
