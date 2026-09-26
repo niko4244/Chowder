@@ -8,7 +8,7 @@ Date: 2026-09-26 (revised; first version 2026-09-25). All numbers below come fro
 | Task | Outcome | Strongest evidence |
 |---|---|---|
 | OT3 short-trace strategy so the SFT set reaches 5 000+ accepted rows | **DONE** | `pilot_v3`: **5 015 accepted** (4 529 train / 486 dev), manifest-pinned |
-| Condition A GPU pilot, Qwen3-1.7B | **RUNNING** (authorized) | run 4 on GPU 0, step 260/284, loss 1.673; ~50 s/step through step 250, degrading under co-resident load |
+| Condition A GPU pilot, Qwen3-1.7B | **DONE** (authorized) | run 4 complete: 284/284 steps, wall 17 153 s, adapter published (25.7 MB LoRA weights) |
 | Wire SWE-smith per-repo env specs into the replay sandbox | **PROTOCOL SOLVED — 8 harness defects found and fixed; red reproduced 3/3, no verified repair yet** | official-image path + in-container apply evidence per row |
 | End-to-end review of PR #201 (correctness, security, tests) | **DONE** | 4 PR defects fixed, 8 harness defects found and fixed, **33/33 pass** |
 
@@ -46,12 +46,15 @@ Date: 2026-09-26 (revised; first version 2026-09-25). All numbers below come fro
 
 ## TRAINED
 
-**Condition A is in flight; no completed student exists yet.**
+**Condition A completed: one LoRA adapter trained on 4 529 pinned examples.**
 
 - Authorization: operator granted GPU use for this pilot. Exclusivity check before launch: `device_index 0`, RTX 5060 Ti, **12.05 GB free / 15.93 GB**, **0 Chowder processes** on the device; the user's resident inference servers were detected, left untouched, and recorded as a contention risk.
 - Runs 1–3 aborted: with micro-batch 4 the desktop WDDM driver spilled to shared system memory next to those inference servers — **333 s/step**, with 6.67 GB of shared GPU memory measured via `Get-Counter "\GPU Process Memory(*)\Shared Usage"`. Run 4 uses `--micro-batch 1 --grad-accum 32` (effective batch 32, unchanged, recorded as an operator override) and shows **no spillover**.
 - Run 4 live values: 284 optimizer steps, wall 13 376 s at step 260 (≈50 s/step through step 250). Loss **2.3454 @ 10 → 1.8798 @ 20 → 1.6637 @ 200 → 1.6734 @ 260**, cosine decay (lr 4.05e-6 at step 260). Frozen config: Qwen/Qwen3-1.7B @ `70d244cc86ccca08cf5af4e1e306ecf908b1ad5e`, dataset `pilot_v3/train.jsonl` (sha256 above), chat format, 2 epochs, max_length 2048, LoRA r16/α32/dropout 0.05 on q,k,v,o, bf16, gradient checkpointing, seed 2026, lr 2e-4.
-- Artifacts published so far: `run-spec.json` (frozen, dataset hash matches), `stderr.log`, run identity, and live `adapter/progress.json`. The adapter, `run_record.json` and `loss_history.json` are written **on completion**; until then the adapter directory holds partial training state and is not a usable checkpoint.
+- **Finished run (2026-09-26 03:15)**: 284/284 steps, wall **17 153 s (4 h 46 m)**, mean `train_loss` **1.7276**, last logged loss **1.6871 @ step 280**, LoRA cosine decay to 1.6e-7. Telemetry from the worker's own record: `global_step 284`, `training_rows 4529`, `peak_vram_gb 7.03` (the frozen plan predicted a ~7 GB worst band), `measured_gpu_hours 4.74`, optimizer state 51.4 MB.
+- Published artifacts (`C:\Users\nikma\chowder_teacher_free\checkpoints\cond_a\`): `adapter/` with a real **`adapter_model.safetensors` (25.7 MB)**, `adapter_config.json`, tokenizer + chat template; plus `run_record.json`, `worker-result.json`, and `loss_history.json` (28 step points).
+- Step-time behaviour is a measured result of its own: ~48–53 s/step to step 250, then **160–240 s/step** exactly while three replay batches shared the host, recovering to 92–129 s/step once they were stopped. The pilot's GPU throughput on this machine is load-sensitive; the spilling diagnosis from runs 1–3 and this degradation are the same phenomenon at different magnitudes.
+- A post-run defect was found and fixed rather than papered over: the launcher looked for `step_log` as a bare list, but the worker publishes `{"entries": [...]}`, so the run published an **empty** `loss_history.json` while recipe A declares `outputs.loss_history_required: true`. `train_pilot.py` now accepts the worker's real shape, falls back to the points the launcher itself observed, and **refuses to publish an empty loss history** when the recipe requires one; the artifact was then recovered from the worker's own `step_log` (28 entries, 2.3454 → 1.6871). Regression tests cover the wrapped shape, the bare shape, and the malformed/absent cases.
 
 ## EVALUATED
 
@@ -75,20 +78,22 @@ Date: 2026-09-26 (revised; first version 2026-09-25). All numbers below come fro
 
 - **Verified repair corpus**: the environment-spec problem is solved (official images + bug-branch overlay + F2P restore) and the harness is sound, but the corpus is limited by upstream data quality. Of the three rows that reached their tests, all reproduced red and none went green: one trajectory repaired half its FAIL_TO_PASS set, and two carried patches that do not apply to the recorded base state (one of them edits a different feature than its tests exercise). 15 of 23 strict rows are not module-congruent, so a large share of the batch can never verify by construction. No verified repair exists yet; the gate is refusing to certify, which is the intended fail-closed behaviour.
 - **Mixture-of-Thoughts ingestion**: no dataset license exists to review.
-- **gen-2 comparison**: needs a trained student plus an operator-authorized baseline run under the same protocol.
+- **gen-2 / baseline comparison**: Condition A now provides the trained student; what remains is an operator-authorized baseline evaluation run under the same protocol (same holdout, same prompts, same scorer).
 
 ## NOT YET ATTEMPTED
 
 - Conditions B/C training runs and checkpoint lineages beyond preflight scale.
-- GSM8K / held-out perplexity / instruction-following measurement for any model (untouched student included).
+- GSM8K / held-out perplexity / instruction-following measurement — the trained Condition A adapter now exists, so the student side of this is no longer blocked, only unrun.
 - Preference-pair construction at scale (Condition C stays gated).
 - Catastrophic-forgetting measurement (needs a condition-B student first).
-- Student evaluation against the frozen gen-2 reference (needs Condition A to finish).
+- Student evaluation against the frozen gen-2 reference: no longer gated by training, only by the baseline run.
 - The remaining 20 strict rows need a quieter host: their first-use image pulls are 3–4 GB each, and image pulling competes with both the desktop and the GPU run.
 - A single-writer replay queue: three concurrent batches saturated one podman daemon, which produced cleanup timeouts and one lost row phase (now non-fatal, but not free).
 
 ## Answer to the principal question, honestly
 
-Still not answerable by measurement — no student has been trained to completion, and no repair trajectory has yet been independently verified. What changed this session: (1) the SFT set exists at usable scale (5 015 pinned examples, up from 6) via conclusion-boundary chunking rather than filtering; (2) a real, authorized GPU run is training on that exact pinned dataset (step 260 of 284 when this report was written), with its spilling problem diagnosed and worked around rather than papered over; (3) the replay sandbox now uses SWE-smith's own environment spec and produces per-row machine-checkable evidence — and in doing so it exposed eight defects of our own that had made every earlier "0 verified" result vacuous (red had never even been reproduced: the one row that previously looked like a red result was reporting 0 executed tests); (4) the PR itself was reviewed and four real defects were fixed, with 33 tests now passing.
+Half answerable now, with the other half honestly still open. The student half is no longer blocked: a Condition A adapter trained on 4 529 pinned, license-gated examples exists (284/284 steps, 4 h 46 m, mean loss 1.7276, 25.7 MB of LoRA weights) — but **it has not been evaluated**, so what it learned is unmeasured and no claim about capability or forgetting is made here. The repair half is blocked by the data, not by us: of the three strict rows that reached their tests, red was reproduced in 3/3 and green in 0/3 — one trajectory repaired half its FAIL_TO_PASS set, two carried patches that do not fit the recorded base state, and 15 of 23 strictly-matched rows are not module-congruent to begin with.
 
-The remaining binding constraint is no longer tooling. It is the data: 15 of 23 strictly-matched trajectories carry patches that do not touch the module their own FAIL_TO_PASS tests exercise, and the two rows whose patches *do* apply split cleanly — one repaired half its test set, one repaired none of it. Separately, host throughput is a real limit on this machine: cold per-instance images are 3–4 GB, the podman daemon serializes under load, and co-resident load slows GPU steps from ~50 s to ~150 s. A verified repair corpus and a finished Condition A adapter remain the next hard gates, and both are now measurement tasks with known, quantified obstacles rather than open design questions.
+What else changed this session: the SFT set exists at usable scale (5 015 pinned examples, up from 6) via conclusion-boundary chunking rather than filtering; the replay sandbox now uses SWE-smith's own environment spec and emits per-row, machine-checkable evidence; the PR itself was reviewed and four real defects were fixed. Running the hardened harness exposed eleven defects of our own — five of which had made every earlier "0 verified" result vacuous (red had never actually been reproduced: the one row that looked like a red result was reporting 0 executed tests), and one of which published an empty loss history for a completed 284-step run.
+
+The remaining constraints are now quantified rather than unknown: upstream data quality (65 % of strictly-matched trajectories carry patches that do not touch the module their own tests exercise), host throughput (cold per-instance images are 3–4 GB and the podman daemon serializes under load), and the fact that the trained student has never been measured. The next hard gates are an evaluation run — GSM8K, held-out perplexity, and the gen-2 comparison under one protocol — and a verified repair corpus, both of which are now execution tasks with known obstacles instead of open design questions.

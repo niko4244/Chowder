@@ -89,6 +89,31 @@ def test_missing_train_file_fails_closed(tmp_path):
         train_pilot.build_resolved_config(recipe(), empty)
 
 
+def test_step_entries_accepts_the_workers_wrapped_shape():
+    """The worker publishes step_log as {'entries': [...]}.
+
+    Regression: the launcher only accepted a bare list, so a finished 284-step
+    run published an empty loss_history.json while the recipe declares
+    loss_history_required -- a silent artifact that looked successful.
+    """
+    entries = [{"step": 10, "loss": 2.3453}, {"step": 20, "loss": 1.8798}]
+    assert train_pilot.step_entries({"step_log": {"entries": entries}}) == entries
+    # Tolerated legacy/bare shape.
+    assert train_pilot.step_entries({"step_log": entries}) == entries
+    # Absent, empty or malformed logs must report "nothing usable".
+    assert train_pilot.step_entries({}) == []
+    assert train_pilot.step_entries({"step_log": {"entries": []}}) == []
+    assert train_pilot.step_entries({"step_log": None}) == []
+    assert train_pilot.step_entries({"step_log": {"entries": "junk"}}) == []
+
+
+def test_recipe_outputs_require_a_loss_history():
+    """The guard in the launcher must read the recipe's own contract."""
+    recipe_json = json.loads((EXP / "recipes" / "a_sft_supervised.json")
+                             .read_text(encoding="utf-8"))
+    assert recipe_json["outputs"]["loss_history_required"] is True
+
+
 def test_exclusivity_blocks_when_chowder_holds_the_device(monkeypatch):
     monkeypatch.setattr(train_pilot, "gpu_compute_apps",
                         lambda: "1234, chowder-worker, 900 MiB")

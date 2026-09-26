@@ -173,6 +173,24 @@ def build_resolved_config(
     }
 
 
+def step_entries(telemetry: dict) -> list[dict]:
+    """Extract per-step loss entries from the worker's telemetry.
+
+    The worker publishes ``step_log`` as ``{"entries": [...]}`` (one dict per
+    logged step); an older/bare list shape is accepted too. Returning ``[]``
+    means the worker produced no usable log.
+    """
+    for key in ("step_log", "step_log_truncated"):
+        value = telemetry.get(key)
+        if isinstance(value, dict):
+            entries = value.get("entries")
+            if isinstance(entries, list) and entries:
+                return list(entries)
+        elif isinstance(value, list) and value:
+            return list(value)
+    return []
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--recipe", type=Path, default=DEFAULT_RECIPE)
@@ -278,12 +296,21 @@ def main() -> int:
     )
 
     executor = TransformersPeftExecutor()
+    #: Points seen by THIS process. They are the fallback loss history when the
+    #: worker's own step log is unavailable, so a missing worker log can never
+    #: be published as "no loss history" (recipes require one).
+    observed_steps: list[dict] = []
 
     def on_progress(event) -> None:
         loss = f" loss={event.loss:.4f}" if event.loss is not None else ""
         print(f"[step {event.step}"
               + (f"/{event.max_steps}" if event.max_steps else "")
               + f"]{loss}", flush=True)
+        entry = {"step": event.step, "loss": event.loss}
+        learning_rate = getattr(event, "learning_rate", None)
+        if learning_rate is not None:
+            entry["learning_rate"] = learning_rate
+        observed_steps.append(entry)
 
     executor.bind_progress_callback(on_progress)
 
@@ -339,14 +366,26 @@ def main() -> int:
     if adapter_src.is_dir():
         shutil.copytree(adapter_src, adapter_dst)
     result_path = run_dir / "worker-result.json"
-    loss_history: list = []
+    loss_history: list[dict] = []
+    loss_source = "none"
     if result_path.is_file():
         worker_result = json.loads(result_path.read_text(encoding="utf-8"))
         shutil.copy2(result_path, args.output / "worker-result.json")
-        telemetry = worker_result.get("telemetry", {})
-        step_log = telemetry.get("step_log") or telemetry.get("step_log_truncated")
-        if isinstance(step_log, list):
-            loss_history = step_log
+        loss_history = step_entries(worker_result.get("telemetry", {}) or {})
+        loss_source = "worker step_log"
+    if not loss_history:
+        loss_history = observed_steps
+        loss_source = "launcher progress callback"
+    if not loss_history:
+        # Recipes require a loss history; an empty file would look like a
+        # successful artifact while carrying no evidence at all.
+        if (recipe.get("outputs", {}) or {}).get("loss_history_required"):
+            raise SystemExit(
+                "loss_history_required is set but no worker step log or progress "
+                "observations exist; refusing to publish an empty loss history"
+            )
+        print("[warn] no loss history available from the worker or the progress "
+              "callback", file=sys.stderr)
     (args.output / "loss_history.json").write_text(
         json.dumps(loss_history, indent=2), encoding="utf-8"
     )
@@ -355,7 +394,7 @@ def main() -> int:
     print(f"[done] adapter -> {adapter_dst}")
     print(f"[done] record   -> {record_path}")
     print(f"[done] loss log -> {args.output / 'loss_history.json'} "
-          f"({len(loss_history)} entries)")
+          f"({len(loss_history)} entries from {loss_source})")
     return 0
 
 
