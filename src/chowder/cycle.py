@@ -333,6 +333,9 @@ class ExperimentCycleRunner:
     # triggers it.
     deferred_baseline: Callable[[CandidateCycleOutcome | None], ExperimentResult] | None = None
     goal_lifecycle: GoalLifecycle | None = None
+    #: Keep a non-promoted generation's objective open (no STOP_PLATEAU) for a
+    #: caller that continues with autonomous repair and settles it afterwards.
+    defer_plateau: bool = False
 
     def __post_init__(self) -> None:
         budget = float(self.executor_investigation_budget)
@@ -732,6 +735,7 @@ class ExperimentCycleRunner:
                 promoted=promoted is not None,
                 generation_index=1,
                 budget_exhausted=self.engine.remaining_budget <= 1e-12,
+                defer_plateau=self.defer_plateau,
             )
             goal_assessment = lifecycle_result.assessment
             goal_terminal_state = (

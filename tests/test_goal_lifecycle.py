@@ -263,3 +263,58 @@ def test_lifecycle_identity_is_stable_across_result_assessments(tmp_path):
         assert assessed.assessment.goal_digest == lifecycle.identity.goal_digest
     finally:
         registry.close()
+
+
+def _unpromoted(lifecycle, *, defer_plateau):
+    return lifecycle.assess_candidate(
+        observed_metrics={"quality": 0.6},
+        artifact_identity="candidate-1",
+        evidence=EVIDENCE,
+        promoted=False,
+        generation_index=1,
+        evaluation_protocol_digest=PROTOCOL,
+        benchmark_digest=BENCHMARK,
+        defer_plateau=defer_plateau,
+    )
+
+
+def test_unpromoted_candidate_plateaus_unless_deferred(tmp_path):
+    registry, lifecycle = _open(tmp_path)
+    try:
+        assert _unpromoted(lifecycle, defer_plateau=False).terminal_state is (
+            GoalTerminalState.STOP_PLATEAU
+        )
+    finally:
+        registry.close()
+
+
+def test_deferred_plateau_stays_open_for_repair_then_settles(tmp_path):
+    registry, lifecycle = _open(tmp_path)
+    try:
+        first = _unpromoted(lifecycle, defer_plateau=True)
+        assert first.terminal_state is None
+        assert lifecycle.terminal_state is None
+        # The repair continuation can still record evidence.
+        second = _unpromoted(lifecycle, defer_plateau=True)
+        assert second.terminal_state is None
+
+        settled = lifecycle.close_deferred_plateau()
+        assert settled.terminal_state is GoalTerminalState.STOP_PLATEAU
+        assert settled.succeeded is False
+        # Idempotent: an already-terminal objective is never overwritten.
+        assert lifecycle.close_deferred_plateau().terminal_state is (
+            GoalTerminalState.STOP_PLATEAU
+        )
+        with pytest.raises(GoalLifecycleError, match="already terminated"):
+            _unpromoted(lifecycle, defer_plateau=True)
+    finally:
+        registry.close()
+
+
+def test_close_deferred_plateau_requires_an_assessment(tmp_path):
+    registry, lifecycle = _open(tmp_path)
+    try:
+        with pytest.raises(GoalLifecycleError, match="no assessment"):
+            lifecycle.close_deferred_plateau()
+    finally:
+        registry.close()

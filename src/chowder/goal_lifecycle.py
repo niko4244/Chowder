@@ -167,6 +167,25 @@ class GoalLifecycle:
                     f"persisted assessment {label} identity does not match frozen objective"
                 )
 
+    def close_deferred_plateau(self) -> GoalLifecycleResult:
+        """Settle an objective left open by ``defer_plateau`` as STOP_PLATEAU.
+
+        Idempotent on an already-terminal objective (returns its terminal
+        result) so a continuation that reached its own terminal state is never
+        overwritten.
+        """
+        if self.terminal_state is not None:
+            return self.terminal_result()
+        if self.last_assessment is None:
+            raise GoalLifecycleError("objective has no assessment to settle")
+        self.terminal_state = GoalTerminalState.STOP_PLATEAU
+        self.registry.record_goal_terminal(
+            self.identity.objective_version,
+            self.terminal_state,
+            self.last_assessment.artifact_identity,
+        )
+        return self.terminal_result()
+
     def terminal_result(self) -> GoalLifecycleResult:
         """Return the persisted terminal result for a resumed objective."""
         if self.terminal_state is None or self.last_assessment is None:
@@ -219,6 +238,7 @@ class GoalLifecycle:
         generation_index: int,
         generation_limit: int | None = None,
         budget_exhausted: bool = False,
+        defer_plateau: bool = False,
     ) -> GoalLifecycleResult:
         """Assess a persisted experiment result without launching evaluation."""
         return self.assess_candidate(
@@ -231,6 +251,7 @@ class GoalLifecycle:
             budget_exhausted=budget_exhausted,
             evaluation_protocol_digest=result_protocol_fingerprint(result.evidence),
             benchmark_digest=self.identity.benchmark_digest,
+            defer_plateau=defer_plateau,
         )
 
     def assess_candidate(
@@ -246,8 +267,14 @@ class GoalLifecycle:
         evaluation_protocol_digest: str | None = None,
         benchmark_digest: str | None = None,
         measured_at: str | None = None,
+        defer_plateau: bool = False,
     ) -> GoalLifecycleResult:
-        """Assess a candidate and turn bounded exhaustion into non-success."""
+        """Assess a candidate and turn bounded exhaustion into non-success.
+
+        ``defer_plateau`` leaves a non-promoted candidate's objective open so a
+        caller-owned continuation (autonomous repair) can still run; that
+        caller must then settle it with :meth:`close_deferred_plateau`.
+        """
         if generation_index < 1:
             raise GoalLifecycleError("candidate generation_index must be at least 1")
         if generation_limit is not None and generation_limit < 1:
@@ -263,6 +290,7 @@ class GoalLifecycle:
             generation_index=generation_index,
             generation_limit=generation_limit,
             budget_exhausted=budget_exhausted,
+            defer_plateau=defer_plateau,
         )
 
     def _assess(
@@ -278,6 +306,7 @@ class GoalLifecycle:
         generation_index: int,
         generation_limit: int | None,
         budget_exhausted: bool,
+        defer_plateau: bool = False,
     ) -> GoalLifecycleResult:
         if self.terminal_state is not None:
             raise GoalLifecycleError(
@@ -346,7 +375,7 @@ class GoalLifecycle:
         elif generation_limit is not None and generation_index >= generation_limit:
             terminal = GoalTerminalState.STOP_GENERATION_LIMIT
         elif not promoted:
-            terminal = GoalTerminalState.STOP_PLATEAU
+            terminal = None if defer_plateau else GoalTerminalState.STOP_PLATEAU
         else:
             terminal = None
 

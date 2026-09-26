@@ -4346,7 +4346,7 @@ class _LockingModel:
 
 
 def test_adapter_save_retries_safetensor_file_lock(tmp_path, monkeypatch):
-    from safetensors import SafetensorError
+    SafetensorError = pytest.importorskip("safetensors").SafetensorError
 
     monkeypatch.setattr(time, "sleep", lambda _s: None)
     model = _LockingModel(
@@ -4361,7 +4361,7 @@ def test_adapter_save_retries_safetensor_file_lock(tmp_path, monkeypatch):
 
 
 def test_adapter_save_retry_is_bounded_and_reraises_other_errors(tmp_path, monkeypatch):
-    from safetensors import SafetensorError
+    SafetensorError = pytest.importorskip("safetensors").SafetensorError
 
     monkeypatch.setattr(time, "sleep", lambda _s: None)
     # A non-lock I/O failure must propagate on the first attempt.

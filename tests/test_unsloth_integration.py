@@ -234,7 +234,6 @@ def test_real_unsloth_trained_adapter_flows_through_the_real_evaluator_gate_and_
                 "metrics": [
                     {
                         "name": "quality",
-                        "minimum": 0.0,
                         "direction": "maximize",
                         "regression_tolerance": 1.0,
                     }
@@ -248,6 +247,10 @@ def test_real_unsloth_trained_adapter_flows_through_the_real_evaluator_gate_and_
                 "experiment_id": "baseline",
                 "metrics": {"quality": 0.0},
                 "gpu_hours": 0.0,
+                # The goal lifecycle refuses a fixed baseline with no declared
+                # protocol identity. This smoke never compares protocols
+                # (legacy_unbounded), so a fixed placeholder digest suffices.
+                "evaluation_protocol_sha256": "0" * 64,
             },
             "experiment": {
                 "experiment_id": "real-unsloth-sft",
@@ -263,6 +266,10 @@ def test_real_unsloth_trained_adapter_flows_through_the_real_evaluator_gate_and_
             },
             "config": {
                 "seed": 123,
+                # Plumbing smoke, not a goal test: an unbounded metric under the
+                # documented legacy mode keeps the parent's MET assessment from
+                # stopping the objective before any candidate trains.
+                "goal_lifecycle": {"mode": "legacy_unbounded"},
                 "backend": {
                     "schema_version": 1,
                     "type": "peft",

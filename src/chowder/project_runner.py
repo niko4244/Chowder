@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping
 
 from .backend_selection import (
     ROUTER_HEALING_ENGINE,
+    TRANSFORMERS_ENGINE,
     create_evaluation_executor,
     create_training_executor,
     normalize_training_config_for_executor,
@@ -636,14 +637,17 @@ def run_project(
             spent_gpu_hours=0.0 if baseline_deferred else baseline.gpu_hours,
             baseline_deferred=baseline_deferred,
         )
-        if resolve_training_engine(training_config) == ROUTER_HEALING_ENGINE:
-            trainer = create_training_executor(training_config)
-            evaluator = create_evaluation_executor(training_config)
-        else:
-            # Preserve the existing constructor seam for the mature PEFT path;
-            # the router backend is the only path that needs factory dispatch.
+        if resolve_training_engine(training_config) == TRANSFORMERS_ENGINE:
+            # Preserve the existing constructor seam for the mature
+            # Transformers PEFT path.
             trainer = TransformersPeftExecutor()
             evaluator = TransformersTextEvaluator()
+        else:
+            # Every other engine (unsloth, router-healing) must go through
+            # factory dispatch -- the Transformers executor rejects their
+            # backend keys (e.g. backend.engine) at preflight.
+            trainer = create_training_executor(training_config)
+            evaluator = create_evaluation_executor(training_config)
         deferred_baseline = None
         if baseline_deferred:
             def complete_deferred_baseline(candidate):
@@ -698,6 +702,9 @@ def run_project(
             # already are.
             progress_callback=on_event,
             goal_lifecycle=lifecycle,
+            # Autonomous repair is the continuation of a rejected candidate,
+            # so its plateau is settled only after repair finishes.
+            defer_plateau=project.repair is not None,
         )
         accepted = engine.propose((project.experiment,))
         if not accepted:
@@ -717,7 +724,11 @@ def run_project(
             _emit_candidate_events(on_event, registry, generation.candidates[0])
 
         repair_outcome: RecursiveRepairOutcome | None = None
-        if project.repair is not None and generation.promoted is None:
+        if (
+            project.repair is not None
+            and generation.promoted is None
+            and lifecycle.terminal_state is None
+        ):
             repair_spec = project.repair
             _emit(
                 on_event,
@@ -757,6 +768,14 @@ def run_project(
                     stop_reason=repair_outcome.stop_reason.value,
                     stop_detail=repair_outcome.stop_detail,
                 ),
+            )
+
+        if project.repair is not None and lifecycle.terminal_state is None and generation.promoted is None:
+            settled = lifecycle.close_deferred_plateau()
+            generation = replace(
+                generation,
+                goal_assessment=settled.assessment,
+                goal_terminal_state=settled.terminal_state.value,
             )
 
         if not generation.candidates:

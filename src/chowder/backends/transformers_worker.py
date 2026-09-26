@@ -33,7 +33,6 @@ from ..trainability import (
 from ..adapter_guard import assert_adapter_is_live
 from ..hf_resilience import cache_status, with_hub_retries
 from ..local_model_compat import patch_transformers5_custom_model
-from safetensors import SafetensorError
 from .activation_offload_hooks import offload_pack, offload_unpack
 from .training_data import (
     _build_chat_example,
@@ -246,6 +245,10 @@ def _save_adapter_with_retry(model: Any, output_dir: str | Path) -> None:
     failures (os error 32). safetensors surfaces those as SafetensorError,
     not OSError, so both exception types are retried; the message is matched
     so genuine I/O failures still raise on first attempt."""
+    # Lazy: this module is imported by the base (no-[train]) test envs, where
+    # safetensors is absent. Only the save path itself needs the type.
+    from safetensors import SafetensorError
+
     try:
         model.save_pretrained(output_dir, safe_serialization=True)
         return
