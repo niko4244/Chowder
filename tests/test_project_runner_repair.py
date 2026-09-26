@@ -90,7 +90,11 @@ def test_real_run_project_autonomously_repairs_a_rejected_candidate(tmp_path: Pa
                 "metrics": [
                     {
                         "name": "quality",
-                        "minimum": 0.0,
+                        # Unattainable on a [0, 1] metric: the goal lifecycle
+                        # must see an UNMET parent (so candidates train) and
+                        # UNMET candidates (so repair, not STOP_GOALS_MET,
+                        # follows the rejection).
+                        "minimum": 1.5,
                         "direction": "maximize",
                         "regression_tolerance": 1.0,
                     }
@@ -105,11 +109,9 @@ def test_real_run_project_autonomously_repairs_a_rejected_candidate(tmp_path: Pa
                 "minimum_promotion_gain": 2.0,
                 "require_protocol_match": False,
             },
-            "baseline": {
-                "experiment_id": "baseline",
-                "metrics": {"quality": 0.0},
-                "gpu_hours": 0.0,
-            },
+            # Automatic baseline: the lifecycle freezes the real evaluator's
+            # protocol identity, which a declared fixed baseline cannot know.
+            "baseline": {"mode": "auto"},
             "experiment": {
                 "experiment_id": "real-sft",
                 "estimated_gpu_hours": 0.25,
@@ -198,7 +200,10 @@ def test_real_run_project_autonomously_repairs_a_rejected_candidate(tmp_path: Pa
     # metric can ever gain) -- but both trained and evaluated for real
     # without crashing.
     assert outcome.promoted_experiment_id is None
-    assert outcome.succeeded is True
+    # Product success is lifecycle goal completion: an unmet goal after repair
+    # exhausts is settled as a plateau (deferred until repair finished).
+    assert outcome.succeeded is False
+    assert outcome.generation.goal_terminal_state == "STOP_PLATEAU"
 
     repair_events = [event for event in events if isinstance(event, RepairEvent)]
     assert len(repair_events) == 2, "expected a repair-start and repair-stop event"
@@ -236,6 +241,8 @@ def test_real_run_project_autonomously_repairs_a_rejected_candidate(tmp_path: Pa
 
     # outcome.generation is reassigned to the repair loop's final generation,
     # so a caller reading only .generation (as the CLI does) sees the latest
-    # real attempt, not the stale initial one.
-    assert outcome.generation is repair_outcome.repair_generation
+    # real attempt, not the stale initial one. (It is re-stamped with the
+    # settled plateau, so compare the attempt itself rather than identity.)
+    assert outcome.generation.candidates == repair_outcome.repair_generation.candidates
+    assert outcome.generation.promoted == repair_outcome.repair_generation.promoted
     assert outcome.generation.candidates[0].experiment_id == repair_candidate.experiment_id

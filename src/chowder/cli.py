@@ -9,6 +9,7 @@ from pathlib import Path
 from .calibration import calibrate_hardware
 from .growth.cli import register_growth_subcommands
 from .hardware import detect_hardware
+from .llama_server_manager import LlamaServerError, LlamaServerManager, ServerSpec
 from .memory import HardwareProfile, WorkloadProfile, plan_memory
 from .project import load_project
 from .project_runner import run_project
@@ -59,6 +60,42 @@ def _hardware_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _llama_start(args: argparse.Namespace) -> int:
+    manager = LlamaServerManager()
+    spec = ServerSpec(
+        name=args.name,
+        model_path=Path(args.model),
+        port=args.port,
+        n_gpu_layers=args.n_gpu_layers,
+        ctx_size=args.ctx_size,
+        threads=args.threads,
+        gpu_index=args.gpu if args.gpu >= 0 else None,
+        expected_vram_mib=args.expected_vram_mib,
+    )
+    try:
+        handle = manager.start(spec, timeout_s=args.timeout)
+    except LlamaServerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(handle.to_dict(), indent=2))
+    return 0
+
+
+def _llama_stop(args: argparse.Namespace) -> int:
+    try:
+        result = LlamaServerManager().stop(args.name)
+    except LlamaServerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _llama_status(args: argparse.Namespace) -> int:
+    print(json.dumps(LlamaServerManager().status(), indent=2))
+    return 0
+
+
 def _project_validate(args: argparse.Namespace) -> int:
     project = load_project(args.project, validate_files=True)
     print(
@@ -82,20 +119,38 @@ def _train(args: argparse.Namespace) -> int:
     def event_sink(event: RunEventPayload) -> None:
         print(format_event(event), flush=True)
 
-    outcome = run_project(args.project, on_event=event_sink)
-    candidate = outcome.generation.candidates[0]
+    try:
+        outcome = run_project(args.project, on_event=event_sink)
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "succeeded": False,
+                    "terminal_state": None,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 1
+
+    candidate = outcome.generation.candidates[-1] if outcome.generation.candidates else None
+    assessment = outcome.generation.goal_assessment
     summary = {
         "project": outcome.project.name,
-        "experiment_id": candidate.experiment_id,
-        "succeeded": candidate.succeeded,
+        "experiment_id": candidate.experiment_id if candidate else None,
+        "succeeded": outcome.succeeded,
+        "terminal_state": outcome.generation.goal_terminal_state,
+        "goal_status": assessment.status.value if assessment else None,
         "promoted_experiment_id": outcome.promoted_experiment_id,
-        "artifact_ref": candidate.artifact.artifact_ref if candidate.artifact else None,
-        "metrics": dict(candidate.result.metrics) if candidate.result else None,
-        "gpu_hours": candidate.result.gpu_hours if candidate.result else None,
-        "error": candidate.error,
+        "artifact_ref": candidate.artifact.artifact_ref if candidate and candidate.artifact else None,
+        "metrics": dict(candidate.result.metrics) if candidate and candidate.result else None,
+        "gpu_hours": candidate.result.gpu_hours if candidate and candidate.result else None,
+        "error": candidate.error if candidate else None,
     }
     print(json.dumps(summary, indent=2, sort_keys=True))
-    return 0 if candidate.succeeded else 1
+    return 0 if outcome.succeeded else 1
 
 
 def _tui(args: argparse.Namespace) -> int:
@@ -353,6 +408,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip optional CUDA transfer measurement",
     )
     calibrate.set_defaults(func=_hardware_calibrate)
+
+    llama = sub.add_parser("llama", help="Manage llama-server instances that Chowder started")
+    llama_targets = llama.add_subparsers(dest="llama_target", required=True)
+
+    llama_start = llama_targets.add_parser("start", help="Start a managed llama-server")
+    llama_start.add_argument("--name", required=True, help="Managed instance name")
+    llama_start.add_argument("--model", required=True, help="Path to the GGUF model")
+    llama_start.add_argument("--port", type=int, required=True)
+    llama_start.add_argument("--gpu", type=int, default=-1, help="CUDA device index (default: all)")
+    llama_start.add_argument("--n-gpu-layers", type=int, default=99)
+    llama_start.add_argument("--ctx-size", type=int, default=4096)
+    llama_start.add_argument("--threads", type=int, default=8)
+    llama_start.add_argument("--expected-vram-mib", type=int, default=None)
+    llama_start.add_argument("--timeout", type=float, default=300.0)
+    llama_start.set_defaults(func=_llama_start)
+
+    llama_stop = llama_targets.add_parser("stop", help="Stop a managed llama-server by name")
+    llama_stop.add_argument("name")
+    llama_stop.set_defaults(func=_llama_stop)
+
+    llama_status = llama_targets.add_parser("status", help="List managed llama-server instances")
+    llama_status.set_defaults(func=_llama_status)
 
     moe = sub.add_parser("moe", help="Elastic MoE downsizing research tooling")
     moe_targets = moe.add_subparsers(dest="moe_target", required=True)

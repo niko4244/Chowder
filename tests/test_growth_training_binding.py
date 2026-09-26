@@ -485,6 +485,7 @@ def _template(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
                 },
             },
             "evaluation": {"type": ROUTER_HEALING_ENGINE, "eval_batches": 2},
+            "goal_lifecycle": {"mode": "legacy_unbounded"},
         },
     }
     payload.update(overrides)

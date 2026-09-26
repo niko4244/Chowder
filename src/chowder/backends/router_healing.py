@@ -53,6 +53,7 @@ from ..lifecycle import (
 )
 from ..models import Experiment
 from ..provenance import sha256_file
+from ..protocol import protocol_fingerprint
 from ..resources import ResourceUsage
 from ..worker_env import chowder_source_identity, worker_env
 from .device_preflight import project_run_ceiling
@@ -1668,6 +1669,16 @@ class RouterHealingEvaluator:
             peak_vram_gb_by_accelerator=dict(raw_usage.get("peak_vram_gb_by_accelerator", {})),
         )
 
+        # Bind the comparison protocol, not the arm-specific payload/output paths.
+        # Those paths differ between baseline and candidate even when the measured
+        # evaluation contract is identical.
+        protocol_payload = spec.to_dict()
+        protocol_payload.pop("payload_dir", None)
+        protocol_payload.pop("output_dir", None)
+        protocol_payload.pop("expected_parameter_paths", None)
+        protocol_payload.pop("paired_arms", None)
+        protocol_sha = protocol_fingerprint(protocol_payload)
+
         # The base arm has no artifact to point at, and it must not pretend to:
         # its source reference names the base content it actually measured.
         source_ref = (
@@ -1693,6 +1704,7 @@ class RouterHealingEvaluator:
                 "payload_applied": payload_arm,
                 "eval_spec": spec.to_dict(),
                 "eval_spec_digest": spec.digest(),
+                "protocol_sha256": protocol_sha,
                 "source_identity": dict(identity),
                 "source_artifact_ref": artifact_ref,
                 "base_identity": result.get("base_identity"),

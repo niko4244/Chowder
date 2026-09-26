@@ -1,0 +1,4 @@
+__pycache__/
+*_scored.jsonl
+eval_results.jsonl
+stub_capture.jsonl

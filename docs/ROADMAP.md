@@ -1,174 +1,11 @@
 # Roadmap
 
-> **Model program retargeted (2026-09-06):** Chowder's primary model
-> research target is now the **Qwen3.8 Native Sparse Program** — a
-> directly native-Qwen3.8-derived sparse/MoE model (~3–4B *active*
-> parameters/token), developed from `orcarouter/Qwen3.8-27B-Uncensored`
-> with `Qwen/Qwen3.8-27B` as untouched control and
-> OBLITERATUS/DavidAU variants as comparison parents. Definition, pinned
-> revisions, architecture audit, and honest blockers:
-> [`docs/QWEN38_SPARSE_PROGRAM.md`](QWEN38_SPARSE_PROGRAM.md). The prior
-> 8B commissioning campaign and the Qwen3.6 MoE-downsizing program
-> remain below as historical evidence. No distillation in the primary
-> lineage — ever.
-
-> **Active-parameter target revised (2026-09-14):** the former hard
-> successor gate of ≤10B total / ≤3.5B active parameters is **removed by
-> decision** — the program aim is now the *lowest per-model active
-> parameter count actually achieved*, honestly measured under the frozen
-> accounting convention. The measured non-FFN floor of the
-> Qwen3.8-9B-derived backbone (**4,121,965,056** parameters, from
-> safetensors headers; see the 2026-09-12 audit) is the recorded floor the
-> program has hit: expert routing/pruning of FFNs alone cannot reduce the
-> always-on remainder, so the floor stands as the achievement baseline
-> rather than a failed gate. Any later architecture work (narrower always-on
-> backbone, routing beyond FFN) is judged by how far below the recorded
-> floor it measurably reaches, not by the retired ceiling. The strict
-> historical targets remain preserved in the 2026-09-12 planning documents
-> as history; they are not rewritten.
-
 Reorganized around what's actually proven vs. still speculative, rather than
 version milestones — a checkbox next to a bullet doesn't distinguish "real
 code with real tests" from "a stub that returns a plausible-looking dict."
 Each item below names the module/PR that backs the claim.
 
 ## PROVEN / MERGED
-
-**Autonomous model growth (platform-proven, model-research ongoing)**
-Generation 0 frozen: the dense Qwen3.8-9B abliterated parent, evaluation-
-only, with exact identity/protocol manifests and measured baseline
-(`docs/gen0/GEN0_EVAL_RESULT_2026-09-17.md`; math500 0.0, mgsm-en 0.0,
-EOS termination 0.000, cap-hit 1.000, no literal loops; freeze digest
-`5c8b18ab…`; immutable snapshot `gen0-frontier`). GrowthCycle binds to the
-real production trainer via `SubprocessTrainingFn` with qualified
-contamination/budget/identity refusals, and promotion binds measured runs
-onto declared metric semantics with the reliability set as a hard gate
-(#167). First Model N → N+1 cycle preregistered
-(`docs/quals/GEN1_PREREG_2026-09-17.md`): target = chat-protocol
-compliance; frontier reference seeding is honest-empty with provenance
-gates (`docs/FRONTIER_REFERENCE_SEED_2026-09-17.md`). Successive-halving
-search remains a library capability with no production caller — not
-required by, and not wired into, the growth cycle.
-
-Integrity pass (2026-09-17): measurement provenance is now first-class
-(candidate gates require candidate-measured rows; carried/parent evidence
-cannot satisfy a regression gate), actual-cost settlement enforces the
-frozen ceilings post-run against the units they were declared in (a
-successful train that overruns wall or the project budget refuses; a device
-ceiling is settled only when the run separated device time, and an
-unmeasured device figure fails closed — see
-`docs/growth/DEVICE_CEILING_FAIL_CLOSED_ADDENDUM_2026-09-18.md`), the cycle
-compute accounting artifact covers every recipe
-count, candidate selection reads only training-side evidence, and
-verdicts are correctable only via append-only adjudication revisions.
-Gen-1's effective verdict is INCONCLUSIVE (target repair validated)
-per `docs/growth/GEN1_READJUDICATION_ADDENDUM_2026-09-17.md`; campaign
-manifests (`chowder growth campaign validate|plan|run|settle`) declare
-admission/settlement units explicitly and drive a cycle end to end through
-the production engine rather than a `docs/` script. Gen-2's certification
-boundary is hardened before any gen2 compute
-(`docs/quals/GEN2_PREREG_AMENDMENT1_2026-09-18.md`): the frozen judge
-settles resources with the production `settle_campaign()`, requires both
-protected mini-slices to be present, candidate-measured and protocol-exact,
-takes the parent arm from its own artifact, enforces exact contamination
-coverage, recomputes the candidate artifact digest, applies the frozen
-paired/strict target rule, and requires no regression against the trusted
-ancestor gen0 as well as the immediate parent.
-
-**Gen-2 pre-compute blockers (explicitly not done; nothing here is guessed).**
-Certification now runs before the lineage record, the candidate arm is a run
-output rather than a declared input, every arm is digest- and generation-bound
-(`docs/quals/GEN2_PREREG_AMENDMENT5_2026-09-18.md`), and the instrument that
-*produces* the candidate arm is real
-(`docs/quals/GEN2_PREREG_AMENDMENT6_2026-09-18.md`):
-`chowder.growth.evaluation_binding.SubprocessEvaluationFn` measures the adapter
-the run selected through the production transformers-text worker and its own
-command line, writes the first `protection.n_samples` items of each declared
-dataset into the run root as the slice it measures, and returns digest-bound
-`MEASURED_THIS_GENERATION` rows whose score is the mean of the per-item scores
-in `predictions-<suite>.jsonl`. `build_evaluator` builds it from the manifest's
-newly declared `evaluation_material_path`; a campaign that declares none refuses
-before compute rather than after training. `GEN2_PREREG_AMENDMENT7_2026-09-18.md`
-makes that refusal reachable early and the spend always accountable: the run
-builds and admits the evaluator, parses the declared arms and checks the
-evaluator's coverage of every declared benchmark in a `readiness` phase before
-any training starts, an evaluation that reports no measured cost is refused
-rather than charged zero, a refusal after training still writes the accounting,
-the attempts, the selection and its reason, and the selected artifact's digest is
-re-derived from disk both before it is measured and before the verdict is bound.
-`GEN2_PREREG_AMENDMENT9_2026-09-18.md` makes that gate inspectable without
-spending anything: `chowder growth campaign readiness <manifest>` reports every
-pre-compute prerequisite with zero compute and a non-zero exit unless all pass,
-using the same helpers `run_campaign` applies. Its first real use found the base
-identity could not verify: `base_model_digest` was the Gen-0 freeze's semantic
-`model_content_digest` (`59e767aa…`, ten model files), but production verified
-with `directory_digest`, which also folds in a volatile HF
-`.cache/huggingface/**` (`8eb92aa6…`).
-`GEN2_PREREG_AMENDMENT10_2026-09-18.md` reconciles the basis: a base is verified
-by `local_model_manifest.model_content_digest`, over its payload files only, so a
-cache touch cannot move its identity and a substituted config still refuses.
-`campaign_runner._verify_base_identity` owns that check for both the run and the
-readiness report. Readiness now reports `base_identity: ok` and refuses on the
-undeclared inputs alone (`READINESS_DECLARED_INPUT`).
-
-The certification boundary is now exercised as a matrix rather than a handful of
-cases: `tests/test_growth_gen2_dry_run_matrix.py` drives a manifest through the
-real CLI and then hands the same run root to the frozen judge across clean
-promotion, an inherited trusted-ancestor regression, an artifact that moves under
-its own measurement, an evaluation overrun, an unwired evaluator, an unreported
-evaluation cost, a contamination mismatch and identity mismatches on the base and
-ancestor arms — asserting in every state that the campaign cannot record
-`PROMOTED` where the judge would refuse.
-
-The instrument is no longer a blocker:
-`GEN2_PREREG_AMENDMENT8_2026-09-18.md` ports the generation-diagnostics
-instrument into `src/` (`chowder.growth.generation_diagnostics` computes the
-frozen rules from the observed generations, `chowder.evaluators.generation`
-records the two facts only the worker can observe, and the evaluation binding
-merges them into the row's metadata flat, where T1–T10 read them). The scoring is
-the Gen-1 rule, so the row's own score *is* its `eos_termination_rate`, and the
-version the judge pins is now a registered benchmark rather than an id no
-registry knew. `GEN2_PREREG_AMENDMENT11_2026-09-18.md` closes the readiness side of that build
-with production code rather than a script. `chowder growth campaign prepare
-<manifest> --out-dir DIR --parent-evidence ROOT` emits the declaration's
-required inputs from evidence the repository already holds: a **real device
-probe** for the hardware budget, the **pinned local dataset caches** (and the
-in-repo, production-owned 16-prompt generation-diagnostics instrument, pinned
-byte-identical to the frozen judge's copy by a test) for the evaluation
-material, the **parent generation's own durable run root** for the parent arm and
-profile, and the **production planner's own curriculum item ids** for the corpus,
-registry and project template. The parent *arm* is strict — a row is
-`MEASURED_PARENT` only for the exact declared benchmark, and a slice the parent
-carried is `UNMEASURED` rather than relabelled — while the *profile* keeps
-whatever the parent durably measured. `--write-declaration` also fills `recipes`
-with the ids production proposes, which were not knowable before the hardware and
-profile existed.
-
-`chowder growth campaign measure-ancestor <manifest>` is the second half: it
-drives the **same production worker** the candidate evaluator uses with **no
-adapter loaded**, so the untouched dense Gen-0 base is what is measured. Its rows
-are `MEASURED_PARENT` under the declared trusted-ancestor label with per-item
-scores and digest-bound artifacts, and it is referenced at zero incremental
-campaign cost. (This required one narrow evaluator change: the spec now accepts
-`adapter_dir=None` as a *declared base-only measurement* — the worker already had
-the branch, and an empty string stays refused.)
-
-Against the committed declaration, `prepare` now produces every declared input,
-so readiness no longer reports `READINESS_DECLARED_INPUT`; its remaining codes
-were `READINESS_ANCESTOR_ARM` (now addressable by `measure-ancestor`) and
-`READINESS_RECIPE_SET` (addressable by the recipe fill). One pre-compute blocker
-is *reported* rather than papered over: the parent arm has no measurement under
-the Gen-2 target instrument (`gen2-response-surface-v1`), so the promotion rule's
-target comparison still lacks a parent row and Gen-2 can only reach
-`INCONCLUSIVE` on target until the parent is measured under that instrument or
-the campaign declares the parent's own instrument.
-
-The port is proven end to end without a GPU:
-`tests/test_growth_certification_coupling.py` drives a manifest through the real
-CLI with the production evaluator (only the child process is a recording worker)
-over the frozen diagnostic prompts, then hands that run root to the frozen judge
-and requires `VERDICT: PROMOTED` with T1–T10 each named PASS — so the instrument
-no longer has to be prepared outside the runner.
 
 **Research kernel**
 experiment DAG · hypothesis schema · compute budget enforcement · hard
@@ -195,22 +32,6 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
 - independent holdout/evidence evaluator (`evaluators/`) — reloads
   base+adapter independently and verifies adapter SHA/protocol evidence
   rather than trusting the training process's own claim
-- **real generation-correctness bug fixed (PR #95)**: both evaluator
-  workers (`base_text_worker.py`, `transformers_text_worker.py`)
-  unconditionally overrode `model.generate()`'s `eos_token_id` with the
-  tokenizer's scalar id, discarding the model's own (often list-valued)
-  `generation_config.eos_token_id` — many instruction-tuned checkpoints
-  (Qwen2/Qwen3, Llama-3) list the chat template's real turn-end token
-  there alongside the base eos. On a checkpoint whose tokenizer config
-  has drifted from its generation config (observed on a real abliterated
-  Qwen3 checkpoint), this made the model ramble until `max_new_tokens`
-  under `use_chat_template: true`, failing `exact_match`/
-  `normalized_exact_match` even when the correct answer was present —
-  the real cause of a training campaign scoring `0.0` on both baseline
-  and candidate. `evaluators/generation.py::resolve_eos_token_ids()` now
-  prefers the model's own resolved generation config; confirmed on a real
-  model that this is a pure improvement (official Qwen2.5/Qwen3 keep
-  these in sync already) that fixes the drifted-config failure mode.
 - failure clustering — `failures.py::cluster_failures()` buckets eval
   failures by (evaluator, suite, protocol_sha256, source_role, failure_kind)
 - hypothesis templates from eval deltas — `failures.py::plan_repairs()`
@@ -219,7 +40,7 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
   builds a deduplicated, content-hashed rehearsal corpus at a configurable
   ratio, wired into repair candidate generation
 
-**Regression Surgeon — core repair loop complete; hardening limits below**
+**Regression Surgeon (partial — see hardening below for what's missing)**
 - repair dataset generation — `contamination.py` builds a new SFT dataset
   from independent sources and hard-refuses any prompt/answer overlap with
   holdout (`example_fingerprints()`)
@@ -312,7 +133,7 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
   was arranged), confirmed with the user rather than silently stubbed
   or faked.
 
-**Scientific search controller — Priority 4 (library slice complete)**
+**Scientific search controller — Priority 4 (complete)**
 - successive halving — `successive_halving.py` (PR #77). `cycle.py::
   run_generation()` was one flat train-all → evaluate-all → rank pass with
   no budget-elimination or staged rounds; `run_successive_halving()` runs
@@ -328,20 +149,7 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
   candidates trained cheaply, 2 real survivors correctly separated from 2
   real cutoff-eliminations, round 2 genuinely resumed the real winner's
   checkpoint and trained additional real steps on top of it (proven by
-  `global_step`, not a restart from scratch). **A real registry-persistence
-  gap was later found by integration testing and fixed (PR #90)**: the
-  round-1+ child experiments `run_successive_halving()` invents itself were
-  proposed to the engine but never recorded in the `RunRegistry`, so
-  `ExperimentCycleRunner._record_status()` hard-refused the unknown id and
-  any search with a registry attached died at the start of round 1, leaving
-  that round's reservations outstanding forever (measured: `spent=1.0`,
-  `reserved=1.05`, `outstanding=2` against a 10.0 budget). Neither module's
-  own tests caught it — `test_successive_halving.py` never attached a
-  registry and `test_cycle.py` never ran a multi-round search. Every exact
-  effective round (including the controller's round-0 budget patch) is now
-  validated or atomically recorded before proposal can create a reservation;
-  same-ID divergent or terminal evidence is refused, while an exact PLANNED
-  persistence retry is idempotent (`test_search_controller_integration.py`).
+  `global_step`, not a restart from scratch).
 - bandit candidate ordering — `candidate_selection.py` (PR #78).
   `prioritize_candidates()` reorders a pool of not-yet-run candidates by
   UCB1 score over "arms" (the frozenset of dotted `config_patch` key-paths
@@ -355,87 +163,7 @@ on real 2×T4 Kaggle hardware, not simulated (`docs/DDP_ACCEPTANCE.md`, PR #63)
   reconstruct historical `(Experiment, ExperimentResult)` pairs.
 - regression-tested together: `test_cycle.py`/`test_successive_halving.py`
   exercise the promote=False deferral, gate-rejection vs cutoff-elimination
-  provenance, and exact GPU-hour accounting across chained rounds;
-  `test_search_controller_integration.py` (PR #90) proves the registry,
-  scheduler, selector, repair path, hard gate, checkpoints, provenance, and
-  ledger hold together across their real seams.
-
-These are proven package capabilities, not yet Chowder's default operational
-controller: no production caller under `src/chowder/` invokes
-`run_successive_halving()` or `prioritize_candidates()` today. Wiring them
-into `project_runner.py` remains open and must not be inferred from the
-library implementation or its integration tests.
-
-**Meta-controller evidence foundation — Priority 6 (dataset slice complete, both halves)**
-- `intervention_outcomes.py` (PR #89) builds a normalized, queryable
-  `InterventionOutcome` view by joining the immutable experiment, result,
-  and training-artifact records the registry already stores. It reuses
-  `candidate_selection.dotted_paths()` for intervention-arm identity, reads
-  historical gate acceptance from persisted status, and refuses ambiguous
-  artifact provenance instead of guessing a producing run.
-- The honesty boundary is explicit: missing evidence stays `None`. The
-  scored-result view once lacked the censored half of the dataset entirely;
-  `censored_outcomes.py` (this pass) now represents experiments that ended
-  without a scored result -- REJECTED-before-work and FAILED -- as
-  `CensoredOutcome` rows with the same arm identity, joining the structured
-  `execution_incidents` classification and its capture-time measured
-  GPU-hours when an incident was recorded and honestly `None` when none
-  was. It invents no score for an unobserved outcome and stores no
-  sub-cause the registry never kept. The context gaps this section once
-  carried are now closed (see the dataset/hardware context slice below),
-  and per-arm censoring rate is a first-class signal; what would still
-  create survivor bias in an unrestricted learned selector -- and how the
-  two views must be combined -- is documented in the module rather than
-  left implicit.
-- `censored_outcomes.py` (this pass) is the censored half of that dataset:
-  `build_censored_outcomes()` emits a `CensoredOutcome` row for every
-  result-less REJECTED/FAILED experiment (never for PLANNED/RUNNING, and
-  never for a scored result -- gate-rejection is an *observed* outcome and
-  stays in `intervention_outcomes`), reuses the same
-  `candidate_selection.dotted_paths()` arm identity so a censored row and a
-  scored row name the same intervention arm, joins
-  `registry.list_execution_incidents()` for `signature_kind`/
-  `fingerprint_sha256`/executor and the incident's real capture-time
-  `gpu_hours_spent`, and reports `censoring_rate_by_arm()` as the
-  REJECTED-vs-FAILED shape within each arm's censored rows. Documented
-  policy position: per-arm censoring rate is a first-class signal, spent
-  compute on crashed runs is real cost, and any reward model over
-  `InterventionOutcome` alone is survivor-biased by construction -- how to
-  combine the two views is explicitly left to the policy layer. The
-  once-documented gap is closed: `ExperimentCycleRunner` now persists every
-  non-cancelled crash's Executor-Investigator analysis into
-  `execution_incidents` (after the failure is settled; a persistence
-  failure becomes a diagnostic, never a mask over the crash), so FAILED
-  rows from current runs carry a real classification. Absence still
-  occurs -- pre-existing registries, registry-less runs, cancellations
-  (no analysis is built for a deliberate stop), persistence failures --
-  and is visible as `None`, never imputed.
-- Dataset and hardware context (this pass): `InterventionOutcome` now
-  carries the dataset identity and scale, and the hardware context beyond
-  the single `active_accelerator_count` number, that the Priority-6
-  context-gap item required -- read only from evidence the registry
-  already stores, under the same honesty rule. Dataset identity:
-  `dataset_sha256`/`replay_dataset_sha256` (both real executors verify the
-  dataset on disk and record the digest they trained on, so digest match
-  is what "same data" means across runs) and `filter_outcomes(
-  dataset_sha256=...)` as the same-dataset selector, with the same
-  "not on record" exclusion rule as every other criterion. Dataset scale
-  and shape (transformers-peft `data_provenance` only): `dataset_format`,
-  `primary_rows`, `replay_selected_rows`, `total_token_count`,
-  `assistant_token_count`. Hardware context: `visible_accelerator_count`
-  and the measured `peak_vram_gb_by_accelerator` map (both executors
-  record them; one malformed entry blocks the whole map rather than
-  serving a partial one), `requested_active_accelerator_count`
-  (transformers-peft only), and `base_model_revision` -- so a run on one
-  of two visible GPUs is now distinguishable from a single-GPU box, the
-  multi-GPU telemetry context the roadmap flagged. Known, honestly-stated
-  gaps: no dataset path or file name exists anywhere in the registry (a
-  content digest is the only dataset identity the evidence keeps), the
-  unsloth backend records no `data_provenance` block so its rows carry
-  scale/shape as `None`, and evidence recorded before the real executors
-  started writing these keys stays `None` -- never backfilled.
-- This remains a durable evidence view, not an expected-improvement model,
-  candidate selector, learned policy, or claim of cross-model transfer.
+  provenance, and exact GPU-hour accounting across chained rounds.
 
 **Regression Surgeon extensions — Priority 5 (4 of 4 slices complete)**
 - checkpoint bisect — `checkpoint_bisect.py` (PR #79). The existing
@@ -527,23 +255,7 @@ treated as fully proven:
   explicitly rejected at config time, not silently allowed, because the
   interaction hasn't been verified on real multi-GPU hardware. The `"auto"`
   acceptance threshold (`_MAX_ACCEPTABLE_PENALTY_RATIO = 1.2`) is a
-  documented starting point, not a measured-optimal constant. **A real
-  stride-corruption crash (found during the Memory Fabric OOM-acceptance
-  investigation below) is now fixed, PR #92**: `saved_tensors_hooks`'
-  pack/unpack intercepts *every* tensor autograd saves for backward, not
-  just a model's own activations — including transformers' expanded/
-  broadcast 4D attention bias (stride 0 on the head dim). The old hooks did
-  a naive `.to("cpu")`/`.to(device)` round trip, which silently
-  materializes a differently-strided dense tensor that PyTorch's memory-
-  efficient SDPA backward kernel rejects
-  (`attn_bias.stride(2) = 66, and should be a multiple of 4`) — reproduced
-  byte-for-byte on real hardware at the exact reported scale
-  (`batch_size=96`), never caught by this project's existing tests because
-  they all use batch sizes of 2-8. New shared
-  `activation_offload_hooks.py` preserves the exact original strides of a
-  non-contiguous saved tensor via `as_strided()` instead of guarding
-  against the scale/config combination — see
-  `docs/ACTIVATION_OFFLOAD_STRIDE_FIX.md`.
+  documented starting point, not a measured-optimal constant.
 - **Optimizer-state tiering (production)** — same shape as above: real,
   merged, single-GPU only, DDP explicitly rejected pending verification. No
   PCIe-bytes-transferred instrumentation exists (bitsandbytes' CUDA-unified-
@@ -552,12 +264,9 @@ treated as fully proven:
 - **Frozen-layer streaming (production)** — same shape again: real,
   merged, single-GPU only, DDP explicitly rejected (the custom autograd.
   Function's dedicated CUDA prefetch stream has only been verified on
-  single-GPU hardware). Backward-direction prefetch is now implemented and
-  real-hardware measured (a real 1.82x backward-wall-time speedup on a
-  synthetic stack, bit-identical loss/gradients, synchronous fallback
-  retained via `backward_prefetch=False`) — see the NEXT section below for
-  the full real numbers and what remains unverified (a production-model,
-  not synthetic-stack, throughput measurement).
+  single-GPU hardware). Backward-direction prefetch is not yet
+  implemented (backward re-streams synchronously; correctness does not
+  depend on it, only backward-pass overlap does).
 - **Production timing telemetry** — real, merged, but its own real ~17%
   measured overhead means it is opt-in and mostly unused by default;
   does not separately measure all-reduce time under DDP (folded into
@@ -571,11 +280,10 @@ treated as fully proven:
   `test_dataset_regression_repair.py::test_training_regression_repair_that_
   fails_to_improve_is_not_promoted` (PR #88) now drives a *failing* repair
   through this exact path end to end for the training-regression repair
-  flow specifically, and `test_search_controller_integration.py::test_a_
-  repair_that_fails_its_own_gate_never_replaces_the_baseline` (PR #90) does
-  the same for the older eval-gate repair flow (`autonomous_repair.py`).
-  There is still no monitored post-promotion rollback (Chowder never
-  "deploys" before evaluating, so there is nothing to roll back from yet).
+  flow specifically — no equivalent test exists yet for the older eval-gate
+  repair flow (`autonomous_repair.py`), and there is still no monitored
+  post-promotion rollback (Chowder never "deploys" before evaluating, so
+  there is nothing to roll back from yet).
 - `checkpoint_discovery.py` is real and tested, but solves *resume
   compatibility validation* for the TUI, not bisection — don't confuse it
   with checkpoint bisect (`checkpoint_bisect.py`, PR #79, now PROVEN under
@@ -617,179 +325,75 @@ treated as fully proven:
   instead. **Still not fully production-proven**: no real resident-OOM →
   Memory-Fabric-success acceptance run exists yet (see Next below) — do
   not treat Memory Fabric as validated end-to-end until that exists.
-- **Unsloth PEFT backend — minimal isolated executor, real-CUDA-
-  commissioned once, not yet production-proven** — an explicit PEFT
-  engine-selection seam (`backend_selection.py`, PR #93: `backend.type:
-  peft` + `backend.engine: transformers|unsloth`, no `auto` mode) plus a
-  real isolated Unsloth runtime: `chowder setup unsloth`/`chowder doctor
-  unsloth` (`unsloth_env.py`, PR #94) create/verify a separate `uv`-managed
-  Python 3.13 environment under `.chowder/envs/unsloth`, invoked only
-  through a subprocess — Unsloth, its patched Torch, TRL, bitsandbytes,
-  and Triton are never imported into Chowder's own controller process, by
-  design (different, incompatible dependency envelope from Chowder's
-  tested `[train]` stack). `training_data.py` (PR #96) extracted the
-  backend-neutral dataset-digest/replay/chat-tokenization contract out of
-  `transformers_worker.py` so a second training backend has a real
-  contract to share instead of a temptation to duplicate it. `unsloth_
-  peft.py`/`unsloth_worker.py` (PR #97) implement the actual isolated
-  executor against the existing `TrainingExecutor` contract (profile/run/
-  cancel, cancellation binding, progress polling) — text-format datasets
-  only in this slice (the isolated worker cannot import
-  `chowder.backends.training_data`, so chat support needs a deliberate
-  cross-environment data-handoff design, not a guess), and refuses
-  `activation_offload`/`optimizer_tiering`/`frozen_layer_streaming`
-  outright rather than risk an unverified interaction with Unsloth's own
-  patched attention/model implementation. **Real-CUDA-commissioned on
-  this project's own target hardware** (RTX 5060 Ti, Blackwell, Windows):
-  a real `chowder setup unsloth` produced a fully green `chowder doctor
-  unsloth` (real Unsloth/Torch/CUDA/bitsandbytes NF4 forward pass), and
-  the first real end-to-end training run caught one more real bug before
-  it could ship broken — unlike plain PEFT's `LoraConfig(target_modules=
-  None)`, Unsloth's own `FastLanguageModel.get_peft_model` does not
-  auto-detect target modules at all and crashes on `None` — fixed by
-  defaulting to Unsloth's own documented Llama-family target list (PR
-  #98). After the fix, a real training run completed real steps and
-  produced a genuine, standard, independently-loadable PEFT adapter.
-  Checkpoint/resume and cancellation are also real-CUDA-commissioned
-  (PR #100): `UnslothPeftRunSpec` gained `save_strategy`/`save_steps`/
-  `save_total_limit`/`resume_from_checkpoint`, with a checkpoint manifest
-  that additionally binds to the isolated environment's own manifest
-  digest (so a rebuilt/different-version environment is refused, not
-  silently trusted) and whose filename alone is the entire mechanism that
-  rejects a Transformers checkpoint resumed under `engine='unsloth'` or
-  vice versa. A real, mid-flight training run was cancelled after 8 real
-  seconds and confirmed fully gone from the OS process table (nvidia-smi
-  `--query-compute-apps` was found unreliable on this Windows/WDDM
-  machine for that specific check); a real second run then resumed
-  correctly from a real, earlier real checkpoint's saved step. Independent
-  -evaluator integration is proven end to end (PR #101): a real project
-  with `engine='unsloth'` runs through the unmodified `run_project()` ->
-  `TransformersTextEvaluator` -> hard gate -> registry pipeline, catching
-  two more real, previously-latent bugs in `project.py` along the way —
-  a stale hardcoded rejection of `engine='unsloth'` left over from before
-  the executor existed, and project validation unconditionally using the
-  Transformers-only config schema/spec for every engine regardless of
-  which one was actually selected. **Real-target-model commissioned**
-  (`docs/UNSLOTH_REAL_CUDA_ACCEPTANCE.md`): the actual model from the
-  real prior training campaign (resolved from this repo's own
-  `chowder-project.json`, not guessed from shorthand) --
-  `Goekdeniz-Guelmez/Josiefied-Qwen3-8B-abliterated-v1`, a real ~8B-param
-  Qwen3 model -- trained for real via 4-bit QLoRA on this hardware: a
-  25-step pilot (91s, 6.5 GB peak VRAM), then a real resume from that
-  pilot's own checkpoint to 150 total steps (loss 1.34 -> 0.34, genuine
-  continued learning), producing a real, standard, independently-loadable
-  PEFT adapter throughout. Uses a text-format pilot dataset rather than
-  the original campaign's chat-format one (chat support is still
-  deferred, see below), so this does not reproduce that campaign's exact
-  task -- it proves the real target model and real checkpoint/resume work
-  correctly through the Unsloth engine at real scale, which it does.
-  **Still not fully production-proven**: chat-format datasets and
-  continuing from a parent adapter remain explicitly deferred (the
-  isolated worker cannot import `chowder.backends.training_data`); real
-  process-tree-safe cancellation hardening (e.g. a Windows job object) has
-  not been added since the current single-process worker has not been
-  shown to need it; and a real, honest anomaly surfaced during the
-  150-step resume (the real on-disk checkpoint cadence didn't match the
-  requested `save_steps`, conservatively saving *more* often than asked,
-  likely an inherent `transformers.Trainer` resume characteristic rather
-  than anything Unsloth-specific) has not yet had a dedicated root-cause
-  investigation.
 
 ## NEXT
 
-**Status as of this section's last real-work pass**: every concrete item
-below that was actionable without new hardware has been closed for real
-(Qwen-shape MoE router/expert instrumentation and frozen-layer backward
-prefetch, both this pass; Unsloth integration, activation-offload stride
-fix, and Memory Fabric's core OOM-to-success claim, earlier passes). The
-one item still open in this section — matched multi-GPU telemetry — is
-blocked on hardware this machine does not have (an asymmetric 2-GPU box
-does not substitute; see that item for why substituting would misrepresent
-real DDP behavior) and is not something further engineering effort on this
-machine can close. The `## RESEARCH` section below (Priority 6 meta-
-controller, further Elastic MoE phases) is explicitly open-ended and, per
-its own header, gated on these proven foundations being stable rather than
-a precondition for that stability — it is not a shippability blocker.
-
-**Final Memory Fabric acceptance test (Priority 1 follow-up) — CLOSED as a
-qualification artifact (PR #169): the acceptance verdict is now mechanical**
-The commitment deadline for a committed always-green CI test remains closed
-(see below) — a machine-specific WDDM flake cannot make an always-green
-honesty claim. The deliverable is therefore the qualification artifact
-[`docs/quals/memory_fabric_acceptance_qualification.py`](quals/memory_fabric_acceptance_qualification.py)
-(unit-tested verdict logic, CI-green; operator-run hardware mode that writes
-a durable verdict record).
-The milestone before Memory Fabric can be called production-proven: a real
-workload that genuinely CUDA-OOMs under normal resident training, then
-genuinely succeeds under the same model/recipe with Memory Fabric's real
-mechanism applied — not faked by lowering the reported VRAM budget. Full
-real-hardware attempt log, findings, and next steps:
+**Final Memory Fabric acceptance test (Priority 1 follow-up) — attempted for
+real, not yet demonstrated cleanly**
+The remaining milestone before Memory Fabric can be called production-
+proven: a real workload that genuinely CUDA-OOMs under normal resident
+training, then genuinely succeeds under the same model/recipe with Memory
+Fabric's real placement plan applied — not faked by lowering the reported
+VRAM budget. Full real-hardware attempt log, findings, and next steps:
 [`docs/MEMORY_FABRIC_ACCEPTANCE.md`](MEMORY_FABRIC_ACCEPTANCE.md). Short
-version: **this has now genuinely passed, repeatedly** — using
-`torch.cuda.set_per_process_memory_fraction` (a real, in-process allocator
-constraint, not a reported-hardware lie) to bypass this development
-machine's driver-level VRAM-to-system-RAM paging fallback without touching
-any system setting, real Qwen2.5-1.5B/fp32/LoRA r=8 training at batch=8 was
-shown to genuinely, cleanly `torch.cuda.OutOfMemoryError` resident (measured
-peak 18.7 GB, already exceeding the 15.93 GiB card) while
-`activation_offload: "always"` genuinely succeeded under the identical
-constraint (measured peak 9.3 GB) — the exact same model, recipe, and GPU.
-What keeps this from being a committed, always-green regression test yet: a
-newly surfaced, real Windows/WDDM driver flakiness
-(`CUDA error: resource already mapped`) intermittently interrupts
-`activation_offload`'s real CPU↔GPU transfers under memory pressure on this
-specific machine — the same error class already flagged (but not explained)
-during the stride-alignment investigation, now confirmed to recur here too,
-independent of the specific VRAM ceiling. A mechanism's isolated single
--forward+backward savings not reliably predicting a full training run's real
-peak VRAM was also confirmed a third time and remains an open, separate
-limitation.
+version: a real production calibration-timeout bug was found and fixed
+along the way; a real, reproducible `activation_offload` crash was found
+and flagged separately (not fixed here); this development machine's
+driver-level VRAM-to-system-RAM paging fallback and shared-desktop-GPU
+contention make a clean pass hard to reach on this specific hardware; and
+a mechanism's isolated single-forward+backward savings not reliably
+predicting a full training run's real peak VRAM was confirmed a third
+time. Revisiting this needs either a dedicated/isolated GPU or the
+`activation_offload` bug fixed first.
 
-**Backward prefetch for frozen-layer streaming (Priority 1 follow-up) — done, real-hardware measured**
-`memory_fabric.py`'s backward now prefetches layer i-1's weight one layer
-ahead while layer i's backward is still computing, via
-`FrozenLayerPrefetchRuntime.start_backward`/`take_backward` (the same
-dedicated-CUDA-stream + `record_stream` design forward's existing prefetch
-uses, walked in decreasing index order since backward visits a sequential
-frozen-layer stack in that order regardless of what unrelated backward nodes
-run in between). `StreamedFrozenLayers`/`stream_frozen_layers` take a
-`backward_prefetch: bool = True` parameter; `False` retains this module's
-original synchronous re-stream verbatim as an explicit fallback. Wired into
-the real Trainer path in `transformers_worker.py` (`accelerator.backward` is
-wrapped to call `start_backward()` immediately before the real backward
-call) and into `frozen_layer_streaming_worker.py`'s calibration harness.
+**Backward prefetch for frozen-layer streaming (Priority 1 follow-up)**
+`memory_fabric.py`'s backward re-streams each frozen layer's weight
+synchronously today (correctness does not depend on overlap, only
+throughput does). Prefetching layer N-1's weight while layer N's backward
+is still running is the next real improvement to prove and measure —
+whether the overlap actually improves throughput on real hardware, not
+assumed. **Not implemented; measurement started, not finished.**
 
-Real measurements (`tests/test_memory_fabric.py`, `CHOWDER_REAL_ML_SMOKE=1`,
-RTX 5060 Ti), on a 12-layer synthetic PEFT-shaped stack sized so per-layer
-H2D transfer (64MB/layer at dim=4096, fp32) and per-layer backward compute
-are comparable (the production tiny smoke-test model is too small for
-either cost to be visible against the other, per
-`frozen_layer_streaming.py`'s own documented caveat):
+Real measurement so far (RTX 5060 Ti, Qwen2.5-0.5B, seq 512, fp32,
+forward and backward timed *separately* — the existing
+`frozen_layer_streaming_worker.py` only times the combined step, which
+cannot separate forward-prefetch overlap from backward re-stream cost):
 
-- **Throughput**: median backward wall time 124.7ms with prefetch vs.
-  226.4ms without — a real 1.82x speedup, not assumed.
-- **Correctness**: bit-identical loss and gradients between
-  `backward_prefetch=True`/`False` and a fully resident run, including
-  across 5 repeated iterations (checked for the same stream-reuse race
-  forward's prefetch already guards against).
-- **VRAM**: `backward_prefetch=True` uses one extra layer's weight
-  resident at a time versus `False` (a 64MB lookahead buffer at this size,
-  ~3% of this synthetic stack's ~1.9GB peak) — an expected, bounded cost of
-  the lookahead itself, not a regression relative to fully resident
-  training's 0.75GB frozen-weight-only footprint (streamed keeps at most 2
-  of 12 layers' weights resident either way). At this synthetic stack's
-  size, activation memory (~0.75GB, one relu output per layer, unrelated to
-  streaming) dominates the *total* peak enough that the original
-  forward-only design's 13.5%-total-peak-reduction claim (measured on a
-  different, activation-light synthetic stack) does not directly transfer
-  to a throughput-oriented, activation-heavy shape like this one; the
-  frozen-weight-only footprint reduction (~128MB streamed vs. 768MB
-  resident) is real and unchanged either way.
+| tokens/step | forward penalty | backward penalty |
+|---|---|---|
+| 512  | +0.0268s | +0.0588s |
+| 2048 | **-0.0018s** | **+0.0300s** |
 
-Not yet done: a real Trainer-level (not synthetic-stack) throughput
-measurement, since the production tiny smoke-test model remains too small
-to show a meaningful signal (see above) and no larger production model has
-been benchmarked this way yet.
+The 2048-token row is the informative one and is a clean positive
+control: the *prefetched* forward path costs nothing, while the
+*synchronous* backward path still costs ~0.030s (~4% of step time) on
+the same workload. So the one-layer-ahead prefetch mechanism demonstrably
+can hide a transfer once there is compute to hide it behind, and the
+backward gap is exactly what it does not yet cover. Analytically the
+compute/transfer ratio scales with tokens-per-step and is independent of
+model size, crossing over near ~2300 tokens on this card — which is why
+the 512-token row shows both phases paying.
+
+Two cautions recorded so the next attempt does not repeat them:
+- The same sweep's 8192- and 16384-token rows were **discarded as
+  contaminated**, not reported: raw times went non-monotonic (8192-token
+  forward 20.97s vs 16384-token forward 10.61s), the signature of this
+  machine's VRAM→system-RAM paging fallback (see
+  `MEMORY_FABRIC_ACCEPTANCE.md`). At fp32 the logits alone are
+  `tokens × 151936 × 4` bytes, ~5GB at 8192 tokens. Any retry must report
+  per-row peak VRAM so a paging-contaminated row is visible rather than
+  believed.
+- Backward prefetch holds two frozen weights resident where one sufficed,
+  in a module whose entire purpose is *reducing* peak VRAM. That trade
+  must be measured, not assumed away — though note the forward path
+  already holds two, so the step's peak may already be set there.
+
+Bar for promotion is unchanged and deliberately high: bit-identical loss
+and LoRA gradients versus the current synchronous path (the existing
+`test_memory_fabric.py` equivalence tests are the standard), a measured
+throughput improvement rather than a theoretical one, no peak-VRAM
+regression, and a synchronous fallback retained if the async path is not
+measurably better.
 
 **Multi-GPU telemetry (Priority 2, deferred slice)**
 Real GPU↔GPU bandwidth/topology measurement, PCIe/NVLink capability
@@ -802,181 +406,35 @@ the same way Phase 5's DDP acceptance was.
 
 ## RESEARCH
 
-Remaining policy and architecture research is gated on the proven foundations
-above being stable:
+Explicitly gated on the above being stable — no design work has started on
+any of these:
 
-- **Meta-controller policy learning** (Priority 6) — the evidence-view slice
-  is complete above, both halves: scored outcomes (`intervention_outcomes.py`)
-  and censored outcomes (`censored_outcomes.py`, this pass, which closes the
-  roadmap's own "define how censored failures/cancellations enter the
-  dataset" gate by representing them explicitly and documenting the policy
-  position rather than imputing scores). Still not started: the
-  expected-improvement model, GPU-hour-aware experiment policy, and
-  cross-model transfer of successful training strategies. The required
-  hardware/dataset context gaps are closed (dataset identity/scale and
-  accelerator context now live in the evidence view); remaining before
-  training a selector: validate against held-out experiments versus the
-  existing UCB1 baseline with zero hard-gate violations (production runs
-  now persist executor-failure incidents, so the censored view's crash
-  classifications are actual for current runs). A durable historical dataset is not
-  itself a learned policy.
+- **Meta-controller** (Priority 6) — the persisted intervention/result
+  **dataset slice is done** (`intervention_outcomes.py`, PR #89): a
+  normalized `InterventionOutcome` row per historical experiment that
+  actually ran, joining experiments/results/training_runs the registry
+  already stores, plus `filter_outcomes()`/`group_by_arm()`. It shares
+  one definition of an "arm" with `candidate_selection.py` (the now-public
+  `dotted_paths`) so the two cannot drift apart about which experiments
+  were the same intervention. Every field is read from real stored
+  evidence or is `None`; nothing is imputed, and the module docstring
+  names each frequently-`None` field and why. Two deliberate refusals
+  worth keeping: gate *acceptance* is read from the persisted status
+  rather than replayed through the gate (replaying answers "would this be
+  accepted now", not "was this accepted", and the two diverge once the
+  baseline moves), and an experiment with several training artifacts and
+  no recorded producing run-id joins **nothing** rather than picking one.
+  No throughput *rate* is stored — `train_runtime_seconds` and
+  `global_step` are the measured numbers; the division is the caller's.
+  **Still open:** the expected-improvement model, the GPU-hour-aware
+  experiment policy, and cross-model transfer of successful strategies.
+  Only claim learned-policy improvement once validated against held-out
+  experiments — a durable historical dataset is not itself a learned
+  policy. Note `HardwareProfile` is never persisted, so
+  `min_device_vram_gb`/`active_accelerator_count` are the only hardware
+  facts actually recoverable from stored evidence today; a richer
+  hardware-conditioned policy would need that gap closed first.
 - **Elastic MoE research** (Priority 7) — per-expert load/gradient
   statistics, expert specialization diagnostics, safe expert clone/split
   experiments, router retraining/distillation, architecture-change
   promotion gates kept behind strict regression and compute-budget gates.
-  docs/MOE_DOWNSIZING.md's "First implementation slice" (Phase A/B: audit,
-  calibration capture, `expert_importance.jsonl`, dry-run pruning plan) is
-  now real code (`src/chowder/moe_instrumentation.py`,
-  `chowder moe expert-importance`), verified against the actual installed
-  transformers==5.16.1 Qwen3Moe/Qwen3_5Moe/Olmoe source (a fused
-  batched-expert design, not per-expert submodules — see that doc's Phase A
-  section) and real-hardware-validated end to end against the local
-  OLMoE-1B-7B checkpoint (16 layers × 64 experts, real router hooks, real
-  per-expert gated-activation/output-norm math, real dry-run 75%/50%
-  pruning plans). What remains genuinely open: no local Qwen3.6-35B-A3B
-  checkpoint exists on this machine (exhaustively searched), so the actual
-  named target is not yet commissioned — only the mechanism is proven, on a
-  real architecturally-equivalent stand-in. Phases C–F (budget search,
-  distillation, mixed precision, promotion gates) have not started.
-- **Qwen3.8 Native Sparse Program** (Priority 0 — the model program;
-  see [`docs/QWEN38_SPARSE_PROGRAM.md`](QWEN38_SPARSE_PROGRAM.md) for the
-  pinned parent manifest, the architecture audit, and the milestone-1
-  checklist that gates "underway" claims). All four parent revisions are
-  pinned; parent B's auto-gate was accepted with the account's token and
-  its full architecture audit is recorded (dense `qwen3_5`, 64L/5120h,
-  MTP 15 tensors, vision 333 tensors, `Qwen2Tokenizer`, 18 shards /
-  51.7 GiB / zero GGUF). The protected nine-dimension evaluation harness
-  is implemented in `src/chowder/parent_eval.py` with real tests:
-  complete-coverage spec validation, capability/behavior separation by
-  construction, a protocol fingerprint excluding candidate identity, a
-  fail-closed tokenizer-identity gate, hash-only protected indexes, and
-  FK-anchored persistence into `evaluation_runs`. The protected suite
-  content is authored (`src/chowder/parent_suite_content.py`, 54 items
-  / 6 per dimension, contamination-guard round trip verified) and
-  **frozen** on disk (manifest sha `7946d8c9…`; a content change is
-  suite v2, never a silent mutation of v1). Parent B is fully verified
-  at its pinned revision (all 18 shards match Hub LFS digests, zero
-  divergence, full-mode manifest `fab432f1…`; accounting: 27,781,427,952
-  params / 1199 tensors, identical census to parent A). The
-  public-benchmark campaign scoreboard
-  (`src/chowder/campaign_scoreboard.py`) records the historical targets
-  (MMLU>0.90, GSM8K>0.90, HumanEval>0.60, MATH>0.40) with signed
-  digests plus the Fable standing reference (parity claim gated on full
-  measurement). Still open before the Phase-4 tournament: the A/B
-  evaluation runs themselves, then parent C/D acquisition. The Phase-6 conversion plan is
-  generated and merged
-  ([`docs/PHASE6_CONVERSION_PLAN.md`](PHASE6_CONVERSION_PLAN.md), PR
-  #120): partition-conversion of the dense FFN's intermediate dimension
-  into experts. The converter and exactness harness are implemented
-  (`src/chowder/dense_to_moe.py`, `src/chowder/conversion_exactness.py`;
-  validation-ladder stages 1–2 done — tiny-fixture forward measured
-  within the documented association gate, f32 max_abs 1.341e-07 / bf16
-  1.953e-03, bitwise dense recovery, exactly uniform routers — and the
-  real fusion code path exercised on parent A's actual layer-0 bytes).
-  Two plan claims were corrected as implementation errata (top-k = E is
-  required for init exactness; only down_proj carries the ×E scaling).
-  The full parent-A conversion has not run (~52 GiB output; a disk
-  decision).
-  Phase 11 accounting is implemented
-  (`src/chowder/parameter_accounting.py`, exposed as
-  `chowder moe account-parameters`): real safetensors-header
-  census (stdlib-only, index cross-checked, fail-closed on unknown
-  dtypes and missing top-k), with `a_label()` refusing to exist without
-  measured routing geometry. Measured on the cached parent A: 27.78B
-  total parameters, dense floor 9.78B active/token — correcting the
-  plan's ~10.55B estimate.
-- **Teacher Fabric / Remote Intelligence Distillation** (Priority 8) —
-  architecture documented in
-  [`docs/TEACHER_FABRIC.md`](TEACHER_FABRIC.md) (provider-neutral design,
-  data contracts, integration map, threat model, benchmark protocol, open
-  research questions). **Slice A is implemented**:
-  `src/chowder/teacher_fabric.py` holds the signal taxonomy, capability
-  declaration/negotiation over a registry, request/signal/artifact schemas
-  with fail-closed validation and canonical digests, the
-  `TeacherProvider` protocol (mirroring `TrainingExecutor`'s
-  profile/query/cancel shape), and a deterministic offline
-  `FakeTeacherProvider` test double — with the tokenizer-compatibility
-  gate failing closed on every token-aligned signal kind (rejection or an
-  explicit caller-invoked downgrade, never approximation) and zero
-  network code. **Slice B is implemented**:
-  `src/chowder/teacher_signal_store.py` is the content-addressed,
-  budgeted signal store — atomic writes with interrupted-write recovery,
-  verified-or-absent reads (payloads re-hashed on every read; corruption
-  is refused, never served), exact dedup over
-  `(request_digest, payload_file_sha256)`, a required no-default
-  `local_cache_max_bytes` with a measured footprint, explicit caller
-  eviction only, and registry migration 4 adding the append-only
-  `teacher_signals` ledger (evidence survives cache eviction; identical
-  re-acquisition replays idempotently). Slices C–J (black-box repair
-  integration, cost accounting/query controller, selected-token scorer,
-  real remote commissioning, remote jobs, microjobs, multi-teacher,
-  selection research) **have not started**; no real provider is
-  commissioned and no student-improvement claim exists — none has been
-  measured. The hard
-  regression gate remains the sole promotion authority and is untouched.
-
-**Autonomous growth control plane (started).** The single-generation engine is
-proven; the layer that lets one generation teach the next began landing in
-`docs/AUTONOMOUS_GROWTH_LOOP.md`. `chowder.growth.target_selection` supplies the
-durable learning memory (`GrowthState`: failures, interventions, targets and
-capability history, append-only and read back before the next generation is
-planned; `FailureBank.from_records` is its public load half),
-benchmark-attributed profiling (`build_skill_profile` computes a skill's
-estimate only from the benchmarks the registry declares for it, weighted by
-sample support and provenance, so a skill nobody measured stays *unknown* rather
-than zero), an intervention classifier that decides whether a weakness is even
-trainable on the current path before any campaign exists, and
-`NextTargetSelector`, whose `propose()` takes no candidate runs at all — a test
-pins its signature so an undeclared campaign's scores cannot become a selection
-signal, and protected skills are excluded from candidacy entirely. (PR #192.)
-
-**Autonomous growth control plane (loop landed).** The chain from a selected
-target to a frozen campaign is now automatic. `NextCampaignBuilder` composes the
-next declaration from the target and an immutable `LoopPolicy` and freezes it
-write-once with its preregistration, carrying the trusted ancestor, the declared
-execution throughput and the budget ceilings from the policy rather than from
-the template it starts from -- a template that disagrees with the policy is
-refused, not merged. `GrowthLoop` owns the finite stopping condition, charges
-itself the *measured* cost each campaign reports (a campaign reporting none ends
-the session with a durable decision rather than being charged zero), re-checks
-the envelope before each generation, and refuses to advance the parent pointer
-for a promotion it cannot bind to an adapter. `run(resume=True)` adopts the
-durable record instead of re-spending. The fake-compute simulator runs the real
-loop against six pinned terminal states, and `chowder growth loop
-status|plan|run|resume` exposes it with no injectable training seam, so a run
-that cannot proceed refuses having spent nothing. (PR #193.) Still missing now:
-bounded production candidate search. The task-specific training-data providers
-and their quality gate have since been delivered: `data_providers` dispatches
-each curriculum item to the provider that serves its declared skill and
-verification, records provider/source/generation/skill/verification/contamination
-per admitted example, refuses an item no provider serves, refuses a protected
-evaluation text as training material, and measures the corpus (counts, duplicate
-rate, verifier pass rate, skill and source composition) so a thin, duplicated,
-unverified or contaminated corpus refuses before any compute.
-
-**Autonomous growth is production-wired, with one service behind the interface
-and the CLI.** Four cross-generation defects that let *simulated* autonomy
-succeed while the production path refused were found by exercising the loop
-against the real prepared declaration, and fixed at their owners: a capability
-profile measured on another generation could plan the next target (now
-`PROFILE_GENERATION_MISMATCH` on `run`, `plan` and `resume`); the CLI `plan`
-re-derived the selector call and skipped the run's own gates (now one
-`_proposal_or_decision` behind both, so the dry run previews exactly what a run
-would refuse); `campaign_prepare` emitted a flat `CapabilityProfile` where the
-loop consumes an attributed `SkillProfile` (preparation now produces the profile
-the loop consumes, and `CapabilityProfile` is a named derived view); and the
-builder froze placeholder recipe ids the production `RecipePlanner` would never
-propose (composition is now phased -- draft, plan, freeze -- so the exact recipe
-ids are known before anything is frozen). An explicit `ParentEvidenceRef` makes
-the lineage pointer a verified object rather than a directory-shape inference (a
-promotion advances it; a rejection leaves it alone), the selector's protected
-skill set is derived from the policy's `protected_benchmarks` through the
-registry, and the Chowder interface now has a first-class **Autonomous Growth**
-workspace over `AutonomousGrowthService` -- inspect, plan, prepare + readiness,
-start, stop after the current campaign, resume and growth history, with Start
-enabled by the service's readiness verdict alone. The Gen-1 parent arm has since
-been measured under the Gen-2 instrument (target 0.5625, math500/mgsm 0.0), so
-the target comparison is decidable. Still missing, and deliberately not claimed:
-bounded production candidate search (successive halving has no production caller
-on the growth path and `run_project` has no `search` section). No real Gen-2
-candidate training has been run.

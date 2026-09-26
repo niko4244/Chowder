@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from typing import Mapping
+
 from .hf_resilience import with_hub_retries
+from .local_model_compat import patch_transformers5_custom_model, verify_local_custom_code
 
 
 class IncompatibleModelArchitectureError(RuntimeError):
@@ -16,7 +19,12 @@ class IncompatibleModelArchitectureError(RuntimeError):
 
 
 def check_causal_lm_architecture(
-    *, base_model: str, revision: str | None, offline: bool, label: str
+    *,
+    base_model: str,
+    revision: str | None,
+    offline: bool,
+    label: str,
+    local_custom_code_digests: Mapping[str, str] | None = None,
 ) -> None:
     """Resolve base_model's config (config.json only -- no weight download)
     and verify its architecture is registered under AutoModelForCausalLM.
@@ -31,11 +39,15 @@ def check_causal_lm_architecture(
     """
     from transformers import AutoConfig, AutoModelForCausalLM
 
+    if local_custom_code_digests is not None:
+        verify_local_custom_code(base_model, local_custom_code_digests)
+        patch_transformers5_custom_model(base_model, local_custom_code_digests)
+
     config = with_hub_retries(
         lambda: AutoConfig.from_pretrained(
             base_model,
             revision=revision,
-            trust_remote_code=False,
+            trust_remote_code=local_custom_code_digests is not None,
             local_files_only=offline,
         ),
         label=f"config resolution for {base_model}",
@@ -45,6 +57,11 @@ def check_causal_lm_architecture(
         compatible = type(config) in mapping
     except AttributeError:
         return
+    if not compatible and local_custom_code_digests is not None:
+        auto_map = getattr(config, "auto_map", {})
+        compatible = isinstance(auto_map, Mapping) and isinstance(
+            auto_map.get("AutoModelForCausalLM"), str
+        )
     if not compatible:
         model_type = getattr(config, "model_type", type(config).__name__)
         raise IncompatibleModelArchitectureError(

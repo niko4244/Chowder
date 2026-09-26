@@ -32,6 +32,7 @@ from ..trainability import (
 )
 from ..adapter_guard import assert_adapter_is_live
 from ..hf_resilience import cache_status, with_hub_retries
+from ..local_model_compat import patch_transformers5_custom_model
 from .activation_offload_hooks import offload_pack, offload_unpack
 from .training_data import (
     _build_chat_example,
@@ -237,6 +238,30 @@ def _cuda_resource_snapshot(torch: Any, model: Any, trainer: Any) -> dict[str, A
         "active_accelerators": [f"cuda:{index}" for index in active_devices],
         "peak_vram_gb_by_accelerator": peak_map,
     }
+
+
+def _save_adapter_with_retry(model: Any, output_dir: str | Path) -> None:
+    """save_pretrained() once, with one bounded retry on Windows file-lock
+    failures (os error 32). safetensors surfaces those as SafetensorError,
+    not OSError, so both exception types are retried; the message is matched
+    so genuine I/O failures still raise on first attempt."""
+    # Lazy: this module is imported by the base (no-[train]) test envs, where
+    # safetensors is absent. Only the save path itself needs the type.
+    from safetensors import SafetensorError
+
+    try:
+        model.save_pretrained(output_dir, safe_serialization=True)
+        return
+    except (OSError, SafetensorError) as save_error:
+        if "os error 32" not in str(save_error).lower():
+            raise
+    time.sleep(2.0)
+    for stale in Path(output_dir).glob("*.safetensors"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    model.save_pretrained(output_dir, safe_serialization=True)
 
 
 def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
@@ -507,6 +532,8 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
 
     if spec.trust_remote_code:
         raise RuntimeError("trust_remote_code is disabled")
+    if spec.local_custom_code_digests is not None:
+        patch_transformers5_custom_model(spec.base_model, spec.local_custom_code_digests)
 
     dtype = _resolve_dtype(torch, spec.precision)
     if spec.quantization == "4bit" and not torch.cuda.is_available():
@@ -524,7 +551,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         lambda: AutoTokenizer.from_pretrained(
             spec.base_model,
             revision=spec.revision,
-            trust_remote_code=False,
+            trust_remote_code=spec.local_custom_code_digests is not None,
             local_files_only=spec.offline,
         ),
         label=f"tokenizer download for {spec.base_model}",
@@ -537,7 +564,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model_kwargs: dict[str, Any] = {
-        "trust_remote_code": False,
+        "trust_remote_code": spec.local_custom_code_digests is not None,
         "dtype": dtype,
         "local_files_only": spec.offline,
     }
@@ -826,7 +853,11 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         return None
     publication_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
     publication_timer.__enter__()
-    model.save_pretrained(output_dir, safe_serialization=True)
+    # Windows: shell/AV/indexer handles on a fresh output dir can hold the
+    # target path open while safetensors serializes, failing the whole run
+    # after training already succeeded. One bounded cleanup+retry on the
+    # exact save site; anything that fails twice is a real error.
+    _save_adapter_with_retry(model, output_dir)
     tokenizer.save_pretrained(output_dir)
     publication_timer.__exit__()
 

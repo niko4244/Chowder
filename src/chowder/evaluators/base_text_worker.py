@@ -9,6 +9,7 @@ from typing import Any
 
 from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
+from ..local_model_compat import patch_transformers5_custom_model
 from ..lifecycle import (
     PhaseTimer,
     cuda_synchronize,
@@ -18,9 +19,18 @@ from ..lifecycle import (
 from .base_text import BaseTextEvalSpec
 from .generation import observed_generation, resolve_eos_token_ids
 from .rendering import render_prompt
-from .scoring import final_answer, final_number, normalize, observed_score, score
+from .scoring import (
+    final_answer,
+    final_number,
+    normalize,
+    observed_score,
+    reasoning_answer,
+    score,
+)
 from .vram import MemorySampler, peak_vram as _peak_vram
+from ..adapter_guard import assert_adapter_is_live
 from .placement import dispatch_offloaded, placement_note
+from .transformers_text_worker import placement_after_adapter
 from .transformers_text import EvalSuiteSpec
 
 
@@ -37,6 +47,7 @@ def _package_version(name: str) -> str:
 _normalize = normalize
 _final_answer = final_answer
 _final_number = final_number
+_reasoning_answer = reasoning_answer
 _score = score
 
 
@@ -94,6 +105,8 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
     except ImportError as exc:
         raise RuntimeError("baseline dependencies are missing; install chowder-ai[train]") from exc
 
+    if spec.local_custom_code_digests is not None:
+        patch_transformers5_custom_model(spec.base_model, spec.local_custom_code_digests)
     device_name = _device(torch, spec.device)
     if spec.quantization == "4bit" and not device_name.startswith("cuda"):
         raise RuntimeError("4-bit baseline evaluation requires CUDA")
@@ -109,7 +122,7 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
         lambda: AutoTokenizer.from_pretrained(
             spec.base_model,
             revision=spec.revision,
-            trust_remote_code=False,
+            trust_remote_code=spec.local_custom_code_digests is not None,
             local_files_only=spec.offline,
         ),
         label=f"tokenizer download for {spec.base_model}",
@@ -120,7 +133,7 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
         tokenizer.pad_token = tokenizer.eos_token
 
     model_kwargs: dict[str, Any] = {
-        "trust_remote_code": False,
+        "trust_remote_code": spec.local_custom_code_digests is not None,
         "dtype": dtype,
         "local_files_only": spec.offline,
     }
@@ -148,7 +161,27 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
             model = dispatch_offloaded(model, device_name)
         else:
             model = model.to(device_name)
+    # Parent-adapter baseline: this run measures the adapter a continuation
+    # project trains FROM, so attach it exactly the way the candidate worker
+    # does -- including the liveness guard, so an adapter that cannot change
+    # outputs fails the baseline loudly instead of scoring as the dense base.
+    adapter_liveness: dict[str, Any] | None = None
+    if spec.adapter_dir is not None:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, spec.adapter_dir, is_trainable=False)
+        adapter_liveness = assert_adapter_is_live(model, spec.adapter_dir)
+        if spec.placement == "offload":
+            model = placement_after_adapter(model, spec=spec, device_name=device_name)
+        else:
+            model = model.to(device_name)
     model.eval()
+    if adapter_liveness is not None:
+        print(
+            f"parent-adapter baseline: attached {spec.adapter_dir} "
+            f"(liveness: {adapter_liveness.get('verified_nonzero_lora_b', 'unknown')})",
+            flush=True,
+        )
     if spec.placement == "offload":
         # Reported per run: "offload" means nothing unless the dense weights
         # demonstrably live on the CPU while generation runs.

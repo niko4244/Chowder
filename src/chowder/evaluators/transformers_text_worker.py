@@ -10,6 +10,7 @@ from typing import Any, Iterator
 from ..adapter_guard import assert_adapter_is_live
 from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
+from ..local_model_compat import patch_transformers5_custom_model
 from ..lifecycle import (
     PhaseTimer,
     cuda_synchronize,
@@ -18,14 +19,26 @@ from ..lifecycle import (
 )
 from .generation import observed_span, resolve_eos_token_ids
 from .rendering import render_prompt
-from .scoring import final_answer, final_number, normalize, observed_score, score
+from .scoring import (
+    SAMPLE_SEPARATOR,
+    final_answer,
+    final_number,
+    normalize,
+    observed_score,
+    reasoning_answer,
+    score,
+)
 from .vram import MemorySampler, peak_vram as _peak_vram
 from .placement import (
     dispatch_offloaded,
     needs_redispatch_after_adapter,
     placement_note,
 )
-from .transformers_text import EvalSuiteSpec, TransformersTextEvalSpec
+from .transformers_text import (
+    EvalSuiteSpec,
+    TransformersTextEvalSpec,
+    suite_execution_evidence,
+)
 
 
 def _package_version(name: str) -> str:
@@ -42,6 +55,7 @@ def _package_version(name: str) -> str:
 #: Re-exported under the historical private names for existing callers.
 _normalize = normalize
 _final_answer = final_answer
+_reasoning_answer = reasoning_answer
 _final_number = final_number
 _score = score
 
@@ -106,6 +120,8 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
 
     if spec.trust_remote_code:
         raise RuntimeError("trust_remote_code is disabled")
+    if spec.local_custom_code_digests is not None:
+        patch_transformers5_custom_model(spec.base_model, spec.local_custom_code_digests)
     device_name = _resolve_device(torch, spec.device)
     if spec.quantization == "4bit" and not device_name.startswith("cuda"):
         raise RuntimeError("4-bit evaluation requires a CUDA device")
@@ -122,7 +138,7 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         lambda: AutoTokenizer.from_pretrained(
             spec.base_model,
             revision=spec.revision,
-            trust_remote_code=False,
+            trust_remote_code=spec.local_custom_code_digests is not None,
             local_files_only=spec.offline,
         ),
         label=f"tokenizer download for {spec.base_model}",
@@ -133,7 +149,7 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         tokenizer.pad_token = tokenizer.eos_token
 
     model_kwargs: dict[str, Any] = {
-        "trust_remote_code": False,
+        "trust_remote_code": spec.local_custom_code_digests is not None,
         "dtype": dtype,
         "local_files_only": spec.offline,
     }
@@ -230,40 +246,76 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                         padding=len(rendered_batch) > 1,
                     )
                     encoded = {key: value.to(device) for key, value in encoded.items()}
-                    generated = model.generate(
-                        **encoded,
-                        max_new_tokens=suite.max_new_tokens,
-                        do_sample=False,
-                        pad_token_id=tokenizer.pad_token_id,
-                        eos_token_id=resolved_eos_token_id,
-                    )
                     width = int(encoded["input_ids"].shape[1])
+                    # Self-consistency (n_samples > 1): K temperature-sampled
+                    # chains per row, seeded by spec.seed so a rerun of the same
+                    # protocol reproduces the same rows. Greedy decoding is the
+                    # n_samples == 1 path and stays exactly as it was.
+                    sampled = suite.n_samples > 1
+                    generation_kwargs: dict[str, Any] = {
+                        "max_new_tokens": suite.max_new_tokens,
+                        "pad_token_id": tokenizer.pad_token_id,
+                        "eos_token_id": resolved_eos_token_id,
+                    }
+                    if sampled:
+                        generation_kwargs.update(do_sample=True, temperature=suite.temperature)
+                    else:
+                        generation_kwargs["do_sample"] = False
+                    chain_texts: list[list[str]] = [[] for _ in rendered_batch]
+                    chain_observations: list[list[dict[str, Any]]] = [
+                        [] for _ in rendered_batch
+                    ]
+                    for _pass in range(suite.n_samples):
+                        generated = model.generate(**encoded, **generation_kwargs)
+                        for index, _ in enumerate(rendered_batch):
+                            # What the generation did, recorded rather than
+                            # re-derived: the completion text cannot say whether
+                            # it stopped on EOS or ran into the cap, and the
+                            # generation diagnostics (the campaign's target
+                            # instrument) are defined over exactly that.
+                            own_tokens, produced, stopped = observed_span(
+                                continuation=generated[index, width:].tolist(),
+                                max_new_tokens=suite.max_new_tokens,
+                                # Only a multi-row call can have padded this row
+                                # after it finished.
+                                pad_token_id=(
+                                    tokenizer.pad_token_id
+                                    if len(rendered_batch) > 1
+                                    else None
+                                ),
+                            )
+                            chain_texts[index].append(
+                                tokenizer.decode(own_tokens, skip_special_tokens=True)
+                            )
+                            chain_observations[index].append(
+                                {
+                                    "generated_tokens": max(0, produced),
+                                    "eos_terminated": bool(
+                                        stopped and resolved_eos_token_id is not None
+                                    ),
+                                }
+                            )
                     for index, (prompt, expected, _) in enumerate(rendered_batch):
-                        # What the generation did, recorded rather than
-                        # re-derived: the completion text cannot say whether it
-                        # stopped on EOS or ran into the cap, and the generation
-                        # diagnostics (the campaign's target instrument) are
-                        # defined over exactly that.
-                        own_tokens, produced, stopped = observed_span(
-                            continuation=generated[index, width:].tolist(),
-                            max_new_tokens=suite.max_new_tokens,
-                            # Only a multi-row call can have padded this row
-                            # after it finished.
-                            pad_token_id=(
-                                tokenizer.pad_token_id
-                                if len(rendered_batch) > 1
-                                else None
-                            ),
+                        prediction = SAMPLE_SEPARATOR.join(chain_texts[index])
+                        observation = (
+                            # Per-chain diagnostics for a sampled row; the
+                            # aggregate numbers describe the WORST chain, which
+                            # is the one that determines whether the vote had a
+                            # full panel to draw from.
+                            {
+                                "generated_tokens": max(
+                                    int(c["generated_tokens"])
+                                    for c in chain_observations[index]
+                                ),
+                                "eos_terminated": all(
+                                    c["eos_terminated"]
+                                    for c in chain_observations[index]
+                                ),
+                                "chain_observations": chain_observations[index],
+                            }
+                            if sampled
+                            else chain_observations[index][0]
                         )
-                        prediction = tokenizer.decode(
-                            own_tokens, skip_special_tokens=True
-                        )
-                        observation = {
-                            "generated_tokens": max(0, produced),
-                            "eos_terminated": bool(
-                                stopped and resolved_eos_token_id is not None
-                            ),
-                        }
                         observed = observed_score(observation, suite.scoring)
                         row_score = (
                             observed
@@ -271,15 +323,18 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                             else _score(prediction, expected, suite.scoring)
                         )
                         correct += row_score
+                        record = {
+                            "prompt": prompt,
+                            "expected": expected,
+                            "prediction": prediction,
+                            "score": row_score,
+                            **observation,
+                        }
+                        if suite.store_chains and sampled:
+                            record["chains"] = chain_texts[index]
                         output.write(
                             json.dumps(
-                                {
-                                    "prompt": prompt,
-                                    "expected": expected,
-                                    "prediction": prediction,
-                                    "score": row_score,
-                                    **observation,
-                                },
+                                record,
                                 ensure_ascii=False,
                             )
                             + "\n"
@@ -287,12 +342,11 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                         output.flush()
             metrics[suite.name] = correct / len(rows)
             suite_evidence[suite.name] = {
-                "rows": len(rows),
+                **suite_execution_evidence(suite, rows),
                 # Execution evidence, not protocol identity: what it took to
                 # produce these rows, so a batched arm and a single-row arm are
                 # distinguishable in the artifact even though the declared
                 # decoding is the same.
-                "batch_size": suite.batch_size,
                 "scoring": suite.scoring,
                 "predictions_file": str(predictions_path),
                 "holdout_fingerprints_file": str(fingerprint_path),
