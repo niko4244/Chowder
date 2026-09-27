@@ -72,6 +72,19 @@ The original paired numbers (`paired_comparison_final.json`: +11.40 points, 13/0
 
 **Required before any re-run can support a claim:** (a) a row scores only if `eos_terminated` is true and the answer lies outside a single closed, non-empty think block — an empty `<think></think>` followed by a reopened `<think>` is a miss; (b) an eval set with real answer keys — the pinned external GSM8K set (`gsm8k_eval/`, `openai/gsm8k` test @ `740312ad…`) is the next measurement; (c) a token budget at which the base can finish, reported alongside the EOS rate for each arm. Decision remains `requires_operator_review`; training loss played no part in any of this.
 
+### External GSM8K paired evaluation (fixed scorer, 2026-09-27) — Condition A regresses
+
+Pinned external set (`openai/gsm8k` test @ `740312ad…`, 120 problems, seed 2026), same frozen protocol at `max_new_tokens` 2048, EOS-gated scorer from `d41db63`. Raw artifacts: `C:\Users\nikma\chowder_teacher_free\eval_gsm8k2048\results\`. The base arm completed 120/120; the Condition A arm was stopped by the operator at 106/120 because the outcome could no longer change (even 14/14 on the remainder leaves it far below base). Paired over the 106 common rows:
+
+| arm | correct | EOS-terminated | accuracy when finished | output shape |
+|---|---|---|---|---|
+| base | **60/106** (66/120 full) | 67 | 0.90 | 77 real closed think, 29 unclosed |
+| Condition A | **23/106** | 33 | 0.70 | 106/106 `<think>\n\n</think>` then plain mid-trace text ("Wait, the problem says…") |
+
+Paired delta **−34.9 points**, 95 % bootstrap CI **[−45.3, −23.6]** (10 000 resamples of paired rows, seed 2026); Condition A 5 wins / **42 losses** / 59 ties.
+
+**Mechanism — the training targets are mid-trace chunks.** In `pilot_v4/train.jsonl` (the A2 set), 3537/3807 rows are continuation chunks, 3760/3807 targets end mid-reasoning, only 85 contain `</think>`, and 0 contain a boxed final answer. The adapter learned exactly that: skip thinking, ruminate, and stop without committing (finished-but-wrong outputs end "Let me check the problem again."). **A2 was therefore not launched**: its data has the same shape and would reproduce this regression. Chunked SFT needs loss restricted to complete traces (or chunk targets that include the trace's conclusion) before another training run is worth GPU time.
+
 ---
 
 ## Earlier session — four follow-up tasks
