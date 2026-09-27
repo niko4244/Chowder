@@ -245,6 +245,21 @@ def parse_instance_id(instance_id: str) -> tuple[str, str]:
     return f"{m.group('owner')}/{m.group('name')}", m.group("commit")
 
 
+def traj_id_of(record: dict) -> str:
+    """A stable per-row id: traj_id, else the instance id, else a content hash.
+
+    Rows without traj_id used to all share the literal fallback "unknown",
+    so concurrent rows clobbered one another's replay_log.json.
+    """
+    raw = record.get("traj_id")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    instance = str(record.get("instance_id") or "").strip()
+    if instance:
+        return instance
+    return "row-" + digest(record)[:12]
+
+
 def derive_test_targets(patch: str) -> tuple[list[str], str]:
     """Map the patch's touched files to candidate test targets.
 
@@ -282,7 +297,7 @@ def replay_one(record: dict, work_root: Path, *, instance: dict | None = None) -
     """Replay one trajectory; any unexpected exception becomes a failed record
     that still carries the evidence written before the failure, never a crashed
     batch (one broken repo must not lose the rest)."""
-    traj_id = str(record.get("traj_id") or "unknown")
+    traj_id = traj_id_of(record)
     task_dir = work_root / traj_id.replace("/", "_")
     try:
         if instance and instance.get("image_name"):
@@ -323,7 +338,7 @@ def _replay_one_official(record: dict, work_root: Path, *, instance: dict) -> di
     then the trajectory's patch is applied and the same tests must pass
     (green), both with network disabled.
     """
-    traj_id = str(record.get("traj_id") or "unknown")
+    traj_id = traj_id_of(record)
     instance_id = str(record.get("instance_id") or "")
     repo = str(instance.get("repo") or "")
     base_commit = str(instance.get("base_commit") or parsed_or_blank(instance_id))
@@ -556,7 +571,7 @@ def _replay_one_inner(record: dict, work_root: Path, *, instance: dict | None = 
     trajectory's patch, run the tests again (green). Success labels require
     BOTH observations from independently executed commands.
     """
-    traj_id = str(record.get("traj_id") or "unknown")
+    traj_id = traj_id_of(record)
     instance_id = str(record.get("instance_id") or "")
     parsed_repo, parsed_commit = parse_instance_id(instance_id)
     repo = str((instance or {}).get("repo") or parsed_repo)

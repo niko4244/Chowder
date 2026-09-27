@@ -580,3 +580,14 @@ def test_gsm8k_gold_extraction_is_marker_derived():
     assert gsm.gold_from_answer("#### -3.5") == "-3.5"
     assert gsm.gold_from_answer("#### ,") is None
     assert gsm.gold_from_answer("no marker at all") is None
+
+
+def test_rows_without_traj_id_get_distinct_replay_ids():
+    """Regression: every traj_id-less row shared the fallback "unknown", so
+    their per-row replay logs clobbered one another."""
+    a = replay.traj_id_of({"instance_id": "repo__pkg.abcdef.pr_1"})
+    b = replay.traj_id_of({"instance_id": "repo__pkg.abcdef.pr_2"})
+    c = replay.traj_id_of({"patch": "diff"})
+    d = replay.traj_id_of({"patch": "diff"})
+    assert a.startswith("repo__pkg.abcdef.pr_1") and a != b
+    assert c.startswith("row-") and c == d  # content-hash fallback is stable
