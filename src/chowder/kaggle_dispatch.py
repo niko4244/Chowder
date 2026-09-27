@@ -124,7 +124,10 @@ class KaggleJobRecord:
 
 
 def _default_runner(args: Sequence[str]) -> "subprocess.CompletedProcess[str]":
-    return subprocess.run(list(args), capture_output=True, text=True, timeout=600)
+    # UTF-8 mode on both sides: on Windows the CLI otherwise prints kernel file
+    # names through cp1252 and `kernels output` exits 1 (seen on the first real run).
+    return subprocess.run(list(args), capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          timeout=600, env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
 
 
 def _kaggle(runner: Runner, *args: str) -> str:

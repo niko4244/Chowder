@@ -47,13 +47,13 @@ def _resolve_dtype(torch: Any, precision: str):
     if precision == "fp32":
         return torch.float32
     if precision == "bf16":
-        if torch.cuda.is_available() and not torch.cuda.is_bf16_supported():
+        if torch.cuda.is_available() and not torch.cuda.is_bf16_supported(including_emulation=False):
             raise RuntimeError("bf16 requested but the active CUDA device does not support bf16")
         return torch.bfloat16
     if precision == "fp16":
         return torch.float16
     if torch.cuda.is_available():
-        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        return torch.bfloat16 if torch.cuda.is_bf16_supported(including_emulation=False) else torch.float16
     return torch.float32
 
 

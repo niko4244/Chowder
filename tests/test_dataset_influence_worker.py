@@ -25,9 +25,14 @@ class _FakeTorch:
         def is_available():
             return _FakeTorch.cuda._available
 
+        #: Real torch reports emulated bf16 as supported by default (a T4, cc 7.5,
+        #: says True); only including_emulation=False tells the truth.
+        _bf16_emulated = False
+
         @staticmethod
-        def is_bf16_supported():
-            return _FakeTorch.cuda._bf16_supported
+        def is_bf16_supported(including_emulation=True):
+            native = _FakeTorch.cuda._bf16_supported
+            return native or (including_emulation and _FakeTorch.cuda._bf16_emulated)
 
 
 def test_resolve_dtype_fp32_is_explicit():
@@ -110,3 +115,16 @@ def test_load_rows_rejects_empty_dataset(tmp_path):
     path.write_text("", encoding="utf-8")
     with pytest.raises(RuntimeError, match="empty"):
         _load_rows(str(path), "text")
+
+
+def test_resolve_dtype_rejects_emulated_bf16_like_a_t4():
+    # Kaggle T4 (2026-09-27): torch.cuda.is_bf16_supported() -> True via emulation.
+    _FakeTorch.cuda._available = True
+    _FakeTorch.cuda._bf16_supported = False
+    _FakeTorch.cuda._bf16_emulated = True
+    try:
+        with pytest.raises(RuntimeError, match="bf16"):
+            _resolve_dtype(_FakeTorch, "bf16")
+        assert _resolve_dtype(_FakeTorch, "auto") is _FakeTorch.float16
+    finally:
+        _FakeTorch.cuda._bf16_emulated = False
