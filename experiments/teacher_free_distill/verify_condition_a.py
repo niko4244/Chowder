@@ -18,9 +18,13 @@ the run can be re-checked later, on this host or another.
     with the record is a failure. Artifacts absent from this host report
     ``unverifiable`` -- preserved, but never ``ok``.
 
-The record deliberately does NOT claim evaluation: the adapter has never been
-scored. Training loss is not model quality, and the record says so in
-``evaluation``.
+The ``evaluation`` block in the record carries the measured evaluation
+outcome once one has run. The verify gate is evidence-checked, not a frozen
+assumption: ``evaluated: true`` is only accepted when the block pins the
+comparison artifact (``evaluation.results.artifact``) next to the record and
+that file exists, carries decision ``requires_operator_review``, and includes
+its recorded leakage section. Training loss is not model quality, and the
+record says so in ``evaluation``.
 """
 from __future__ import annotations
 
@@ -195,8 +199,31 @@ def verify_record(record: dict, *, root: Path | None = None,
         failures.append(f"run incomplete: {run.get('steps_completed')}/{run.get('steps_total')} steps")
     if not (record.get("loss_history") or {}).get("entries"):
         failures.append("loss history is empty")
-    if (record.get("evaluation") or {}).get("evaluated") is True:
-        failures.append("record claims an evaluation that has not run")
+    evaluated = (record.get("evaluation") or {})
+    if evaluated.get("evaluated") is True:
+        # An evaluation claim must point at measurable evidence: a comparison
+        # artifact beside this record, carrying the operator-review decision
+        # and its recorded leakage checks. Anything else stays a refusal.
+        artifact = evaluated.get("results", {}).get("artifact") \
+            if isinstance(evaluated.get("results"), dict) else None
+        comparison_path = (Path(__file__).resolve().parent / str(artifact)) \
+            if artifact else None
+        comparison = load_json(comparison_path) if artifact and comparison_path.is_file() else None
+        if not isinstance(comparison, dict):
+            failures.append("evaluation claims a run but pins no readable "
+                            "comparison artifact next to the record")
+        else:
+            if comparison.get("decision") != "requires_operator_review":
+                failures.append(
+                    f"comparison decision is {comparison.get('decision')!r}, "
+                    "not requires_operator_review")
+            leakage = comparison.get("leakage")
+            if not isinstance(leakage, dict) or not leakage or not all(
+                    isinstance(v, dict) and v.get("ok") is True
+                    for v in leakage.values()):
+                failures.append("comparison carries no recorded leakage section")
+            if evaluated.get("results", {}).get("paired_mean_delta") is None:
+                failures.append("evaluation block carries no measured delta")
     dataset_sha = run.get("dataset_sha256")
     if not isinstance(dataset_sha, str) or len(dataset_sha) != 64:
         failures.append("run does not pin the dataset digest")

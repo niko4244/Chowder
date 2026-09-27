@@ -74,5 +74,19 @@
     }
   ],
   "pairing": "row index across arms; per-row prompt equality asserted; duplicate prompts excluded and recorded",
-  "status": "complete"
+  "status": "complete",
+  "leakage": {
+    "dev_final_separation": {
+      "ok": true,
+      "checked_at": "plan time (eval_plan.json separation_check) and at set build (final_eval_set.py)",
+      "id_overlap": [],
+      "prompt_text_overlap": [],
+      "detail": "120 final prompts disjoint from all 4278 pilot_v4 train/dev prompts; 21 sampled rows refused for overlap"
+    },
+    "duplicate_prompt_exclusion": {
+      "ok": true,
+      "excluded_rows": 6,
+      "detail": "duplicate prompts excluded from pairing and recorded in excluded_rows"
+    }
+  }
 }

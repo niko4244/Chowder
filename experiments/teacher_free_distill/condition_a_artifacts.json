@@ -1,13 +1,25 @@
 {
   "artifacts_root": "C:\\Users\\nikma\\chowder_teacher_free\\checkpoints\\cond_a",
   "evaluation": {
-    "format": "chowder-teacher-free-eval-protocol/v1",
-    "protocol": "frozen paired protocol (eval_protocol.py): greedy, seed 2026, max_new_tokens 512, final_number_match, bf16, chat template, thinking disabled",
-    "dev_split": "pilot_v4 dev.jsonl (recipe selection only; never cited as a result)",
-    "final_split": "independent final-eval prompts; must be disjoint from all development material (checked at plan time)",
-    "status": "not_run",
-    "quality_claim": "none: no evaluation has run; training loss (1.7276) is training history and never a quality claim",
-    "evaluated": false
+    "evaluated": true,
+    "status": "completed_2026-09-27",
+    "protocol": "frozen paired protocol (eval_protocol.py): greedy, seed 2026, max_new_tokens 1024, final_number_match, bf16, tokenizer chat template, thinking at renderer default",
+    "final_split": "final_eval/final_eval_prompts.jsonl (120 problems, sha256 d2f2530c7340e2ad37d97c6cb222a7340e1e1792c714455b9bd3d46d7c3ce417; disjoint from all development material, verified at plan time)",
+    "adapter_integrity": "adapter_model.safetensors digest re-verified at plan time; worker liveness check: 224/224 LoRA keys matched, 112/112 B matrices nonzero",
+    "results": {
+      "base_accuracy": 0.0,
+      "condition_a_accuracy": 0.11666666666666667,
+      "paired_mean_delta": 0.114035,
+      "paired_ci95": [
+        0.061404,
+        0.175439
+      ],
+      "problems_paired": 114,
+      "excluded_rows": 6,
+      "artifact": "comparison_paired_final.json"
+    },
+    "quality_claim": "condition_a beat the untouched base on the final split (13 wins, 0 losses); dominated by budget completion; decision requires_operator_review",
+    "dev_split": "chat-contract dev.jsonl has no gold answers; recorded not_executable_needs_eval_contract and never cited"
   },
   "files": [
     {

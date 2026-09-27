@@ -144,13 +144,26 @@ def test_verify_detects_a_claim_that_no_longer_derives(tmp_path):
     assert any("mean_train_loss disagrees" in failure for failure in result["failures"])
 
 
-def test_verify_refuses_a_record_that_claims_evaluation(tmp_path):
+def test_verify_refuses_a_claim_without_evidence(tmp_path):
+    """`evaluated: true` is only accepted when the record pins a readable
+    comparison artifact with the operator-review decision and a recorded
+    leakage section; anything less stays a refusal."""
     root = fake_artifacts(tmp_path)
     record = write_record(root, tmp_path / "record.json")
     record["evaluation"]["evaluated"] = True
     result = verify_tool.verify_record(record)
     assert not result["ok"]
-    assert any("claims an evaluation" in failure for failure in result["failures"])
+    assert any("claims a run but pins no readable" in failure
+               for failure in result["failures"])
+
+    comparison = tmp_path / "comparison_paired_final.json"
+    comparison.write_text(json.dumps({"decision": "requires_operator_review",
+                                      "leakage": {"dev_final_separation": {"ok": True}}}),
+                          encoding="utf-8")
+    record["evaluation"]["results"] = {
+        "artifact": comparison.name, "paired_mean_delta": 0.114}
+    result = verify_tool.verify_record(record)
+    assert result["ok"], result["failures"]
 
 
 def test_verify_cross_checks_the_pinned_dataset_digest(tmp_path):
@@ -171,7 +184,11 @@ def test_committed_record_is_structurally_valid_without_the_artifacts():
     assert run["base_model"] == "Qwen/Qwen3-1.7B"
     assert run["resolved"]["max_length"] == 2048
     assert record["loss_history"]["entries"] > 0
-    assert record["evaluation"]["evaluated"] is False
+    assert record["evaluation"]["evaluated"] is True
+    # The evaluation claim must stay evidence-backed on every host: the
+    # comparison artifact lives beside the record in the same directory.
+    assert record["evaluation"]["results"]["artifact"] == "comparison_paired_final.json"
+    assert (EXP / record["evaluation"]["results"]["artifact"]).is_file()
     assert {entry["path"] for entry in record["files"]} >= set(verify_tool.PINNED_FILES)
 
 

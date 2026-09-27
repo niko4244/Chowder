@@ -505,8 +505,9 @@ def test_empty_recorded_file_list_is_never_ok(tmp_path):
 def test_real_repo_artifacts_derive_coherent_state():
     """The committed pilot directory must read coherently, honestly.
 
-    Nothing here asserts a green training/evaluation stage: no manifest and no
-    checked comparison is committed, and pretending otherwise is the defect.
+    The evaluation stage reads green only because a committed comparison file
+    actually carries the operator-review decision and a recorded leakage
+    section; results are done only through that same evidence.
     """
     found = states(EXP)
     assert found["source_review"]["state"] == "reviewed"
@@ -514,4 +515,13 @@ def test_real_repo_artifacts_derive_coherent_state():
     assert found["student_selection"]["state"] == "selected"
     assert found["training"]["state"] in ("recipes_ready", "completed_verified",
                                           "recorded_offline")
-    assert found["evaluation"]["state"] not in ev.GREEN_STATES
+    # The committed comparison must be a real leak-checked artifact, not a
+    # narrative claim: if it disappears, evaluation must drop out of green.
+    comparison = EXP / "comparison_paired_final.json"
+    assert comparison.is_file()
+    payload = json.loads(comparison.read_text(encoding="utf-8"))
+    assert payload["decision"] == "requires_operator_review"
+    assert all(check.get("ok") is True
+               for check in payload["leakage"].values())
+    assert found["evaluation"]["state"] == "compared"
+    assert found["results"]["state"] == "done"
