@@ -46,9 +46,24 @@ New `experiments/teacher_free_distill/eval_protocol.py`:
 - `prepare.repair_examples` refuses to promote any repair whose `pass_to_pass` is missing, unrecorded, or shows a failure — so upstream `resolved` claims remain irrelevant and regression-risk is actually measured before anything reaches training data.
 - Status unchanged and fail-closed: **0 verified repairs**; the earlier batch's verdicts (3/3 red reproduced, 0 green, 15/23 rows not module-congruent) stand.
 
-### Safety and execution compliance
+### Safety and execution compliance (updated after the evaluation run)
 
-No new GPU training launched (A2 `awaiting_operator_approval`); no inference server touched; no benchmark material generated (no final-eval prompts created — only the protocol and the separation check that will guard them); no synthetic success evidence; every change recorded above with its test. The commit/PR step remains with the operator on request.
+No new GPU training launched (A2 `awaiting_operator_approval`); no inference server touched; the operator-authorized final-eval set exists (`final_eval/final_eval_prompts.jsonl`, 120 problems, sha256-pinned, drawn from source rows the training pipeline never scanned, with 21 sampled rows refused for development/train prompt overlap); no synthetic success evidence; every change recorded above with its test.
+
+### Measured paired evaluation (operator-authorized, completed 2026-09-27)
+
+Both final-split arms ran under the frozen protocol on GPU 0 (RTX 5060 Ti; resident inference servers untouched; identity-verified workers; offline HF cache). Raw per-problem artifacts: `eval_run/results/{base,condition_a}__final/` (predictions, fingerprints, result.json with adapter liveness and lifecycle telemetry).
+
+| arm | rows | finished within budget | hits | accuracy | peak VRAM | measured GPU-h |
+|---|---|---|---|---|---|---|
+| base (Qwen3-1.7B @ `70d244cc…`) | 120 | **0** (0 closed `</think>`) | 0 | **0.0 %** | 3.77 GB | 2.34 |
+| Condition A (digest-verified adapter; 224/224 LoRA keys live, all B nonzero) | 120 | **120** | 14 | **11.67 %** | 3.80 GB | 3.68 |
+
+**Paired comparison** (`paired_comparison_final.json`; 10 000-resample percentile bootstrap, seed 2026): mean delta **+11.40 points** (Condition A − base), **13 wins / 0 losses / 101 ties**, 95 % CI **[+6.14, +17.54]**, on **114** of 120 problems — 6 rows excluded and recorded (`excluded_rows`) because 3 prompts appear twice in the eval set with **conflicting teacher golds** (e.g. `998899` vs `1`), so those rows cannot decide which arm was right. Decision: `requires_operator_review`.
+
+Mechanism, from the raw outputs: the untouched base never closed a thinking block inside the 1024-token budget on any problem — the think-aware scorer honestly scores an unclosed `<think>` as a miss — while Condition A closed its reasoning within budget on **120/120** problems. The SFT measurably taught budget completion; 14 of those completions landed the teacher's number.
+
+Limitations, stated plainly: absolute hit rate is low (11.7 %) and the delta is dominated by budget completion rather than reasoning accuracy; golds come from the corpus's own teacher traces (QwQ-32B), not an external benchmark; greedy decoding at one budget, n=114; the chat-contract dev split was not executable (no gold answers) and is recorded `not_executable_needs_eval_contract`. No claim beyond this comparison is made, and training loss played no part in it.
 
 ---
 

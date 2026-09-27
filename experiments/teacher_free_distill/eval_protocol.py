@@ -32,6 +32,7 @@ import argparse
 import hashlib
 import json
 import random
+from collections import Counter
 from pathlib import Path
 
 #: Frozen protocol shared by every arm of a comparison. Greedy decoding keeps
@@ -410,7 +411,15 @@ def run_plan(plan_path: Path, results_root: Path, *, python: str = "python") -> 
 
 
 def compare_arms(results_root: Path, *, split: str = "final") -> dict:
-    """Paired comparison of two arms on one split from raw prediction files."""
+    """Paired comparison of two arms on one split from raw prediction files.
+
+    Rows are paired by position: both arms ran the identical dataset in the
+    identical order under the frozen protocol, and every row's prompt is
+    asserted equal across arms before pairing. A prompt appearing more than
+    once in the eval set is excluded from the paired analysis and the
+    exclusion is recorded: upstream duplicates carry conflicting gold
+    answers, so such a row cannot decide which arm was right.
+    """
     prediction_files = {}
     for arm_dir in sorted(results_root.glob(f"*__{split}")):
         preds = arm_dir / f"predictions-holdout_{split}.jsonl"
@@ -420,26 +429,48 @@ def compare_arms(results_root: Path, *, split: str = "final") -> dict:
         raise ValueError(
             f"expected exactly two arms with raw predictions under {results_root} "
             f"for split {split!r}, found {sorted(prediction_files)}")
-    rows: dict[str, dict[str, float]] = {}
-    for arm, path in prediction_files.items():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            pid = row.get("problem_id") or row.get("prompt")
-            rows.setdefault(str(pid), {})[arm] = float(row.get("score") or 0.0)
-    paired = []
     names = sorted(prediction_files)
-    for pid, scores in sorted(rows.items()):
-        if names[0] in scores and names[1] in scores:
-            paired.append({"problem_id": pid, "score_a": scores[names[0]],
-                           "score_b": scores[names[1]]})
+
+    def load_rows(path: Path) -> list[dict]:
+        return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()
+                if x.strip()]
+
+    rows_a = load_rows(prediction_files[names[0]])
+    rows_b = load_rows(prediction_files[names[1]])
+    if len(rows_a) != len(rows_b):
+        raise ValueError(
+            f"arms disagree on row count: {names[0]}={len(rows_a)}, "
+            f"{names[1]}={len(rows_b)}; the frozen protocol requires "
+            "identical problem sets")
+    for index, (a, b) in enumerate(zip(rows_a, rows_b)):
+        if str(a.get("prompt")) != str(b.get("prompt")):
+            raise ValueError(
+                f"row {index}: prompts differ across arms "
+                f"({str(a.get('prompt'))[:60]!r} vs {str(b.get('prompt'))[:60]!r}); "
+                "refusing to pair mismatched problems")
+    prompt_counts: Counter = Counter(str(r.get("prompt")) for r in rows_a)
+    ambiguous = {p for p, c in prompt_counts.items() if c > 1}
+    paired = []
+    excluded = []
+    for index, (a, b) in enumerate(zip(rows_a, rows_b)):
+        prompt = str(a.get("prompt"))
+        if prompt in ambiguous:
+            excluded.append({"row_index": index, "prompt_head": prompt[:80],
+                             "reason": "duplicate_prompt_in_eval_set",
+                             "gold_a": a.get("expected"), "gold_b": b.get("expected"),
+                             "score_a": a.get("score"), "score_b": b.get("score")})
+            continue
+        paired.append({"row_index": index, "problem_id": prompt[:120],
+                       "score_a": float(a.get("score") or 0.0),
+                       "score_b": float(b.get("score") or 0.0)})
     analysis = paired_deltas(paired)
     analysis["arms"] = {"a": names[0], "b": names[1]}
-    analysis["problems_total"] = len(rows)
+    analysis["problems_total"] = len(rows_a)
     analysis["problems_paired"] = len(paired)
-    analysis["status"] = "complete" if len(paired) == len(rows) \
-        else "incomplete_pairing"
+    analysis["excluded_rows"] = excluded
+    analysis["pairing"] = ("row index across arms; per-row prompt equality "
+                           "asserted; duplicate prompts excluded and recorded")
+    analysis["status"] = "complete" if paired else "no_paired_rows"
     analysis_path = results_root / f"paired_comparison_{split}.json"
     analysis_path.write_text(json.dumps(analysis, indent=2) + "\n", encoding="utf-8")
     return analysis
