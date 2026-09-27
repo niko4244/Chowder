@@ -1,0 +1,92 @@
+{
+  "format": "chowder-teacher-free-paired-comparison/v1",
+  "problems": 114,
+  "mean_delta_b_minus_a": 0.114035,
+  "b_wins": 13,
+  "a_wins": 0,
+  "ties": 101,
+  "ci95_low": 0.061404,
+  "ci95_high": 0.175439,
+  "bootstrap_samples": 10000,
+  "seed": 2026,
+  "decision": "requires_operator_review",
+  "note": "interval from resampling paired problems; the decision is always operator review, never an automated promotion",
+  "arms": {
+    "a": "base",
+    "b": "condition_a"
+  },
+  "problems_total": 120,
+  "problems_paired": 114,
+  "excluded_rows": [
+    {
+      "row_index": 6,
+      "prompt_head": "Let n be a positive integer then n = a + b + c for some a, b, and c that are pal",
+      "reason": "duplicate_prompt_in_eval_set",
+      "gold_a": "998899",
+      "gold_b": "998899",
+      "score_a": 0.0,
+      "score_b": 0.0
+    },
+    {
+      "row_index": 13,
+      "prompt_head": "I was asked by OEIS contributor Andrew Howroyd to post a Code Golf Challenge to ",
+      "reason": "duplicate_prompt_in_eval_set",
+      "gold_a": "1",
+      "gold_b": "1",
+      "score_a": 0.0,
+      "score_b": 0.0
+    },
+    {
+      "row_index": 26,
+      "prompt_head": "Let n be a positive integer then n = a + b + c for some a, b, and c that are pal",
+      "reason": "duplicate_prompt_in_eval_set",
+      "gold_a": "1",
+      "gold_b": "1",
+      "score_a": 0.0,
+      "score_b": 0.0
+    },
+    {
+      "row_index": 28,
+      "prompt_head": "Suppose you have two polynomials <image> and <image>. Then polynomial <image> ca",
+      "reason": "duplicate_prompt_in_eval_set",
+      "gold_a": "1",
+      "gold_b": "1",
+      "score_a": 0.0,
+      "score_b": 1.0
+    },
+    {
+      "row_index": 31,
+      "prompt_head": "Suppose you have two polynomials <image> and <image>. Then polynomial <image> ca",
+      "reason": "duplicate_prompt_in_eval_set",
+      "gold_a": "123",
+      "gold_b": "123",
+      "score_a": 0.0,
+      "score_b": 0.0
+    },
+    {
+      "row_index": 61,
+      "prompt_head": "I was asked by OEIS contributor Andrew Howroyd to post a Code Golf Challenge to ",
+      "reason": "duplicate_prompt_in_eval_set",
+      "gold_a": "0",
+      "gold_b": "0",
+      "score_a": 0.0,
+      "score_b": 0.0
+    }
+  ],
+  "pairing": "row index across arms; per-row prompt equality asserted; duplicate prompts excluded and recorded",
+  "status": "complete",
+  "leakage": {
+    "dev_final_separation": {
+      "ok": true,
+      "checked_at": "plan time (eval_plan.json separation_check) and at set build (final_eval_set.py)",
+      "id_overlap": [],
+      "prompt_text_overlap": [],
+      "detail": "120 final prompts disjoint from all 4278 pilot_v4 train/dev prompts; 21 sampled rows refused for overlap"
+    },
+    "duplicate_prompt_exclusion": {
+      "ok": true,
+      "excluded_rows": 6,
+      "detail": "duplicate prompts excluded from pairing and recorded in excluded_rows"
+    }
+  }
+}

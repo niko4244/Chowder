@@ -5,10 +5,19 @@ preflight results, recipe authorization blocks, replay summaries, evaluation
 comparisons. Buttons invoke the pipeline's CLI entry points; there is no
 decorative progress state — every displayed value traces to a file that the
 pipeline actually wrote, and the refresh button re-reads the filesystem.
+
+Stage completion is *checked*, not inferred from a file's existence: the
+checking lives in :mod:`chowder.teacher_free_evidence` so it is testable
+without a TUI and so a half-written recipe or an empty replay summary cannot
+present itself as finished work.
+
+Set ``TFD_PILOT_DIR`` to point the screen at a pilot root outside this
+checkout (the pilot's real datasets and checkpoints live outside the repo);
+the screen always displays which directory it is reading.
 """
 from __future__ import annotations
 
-import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -18,70 +27,44 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Footer, Header, Static
 
 from .hardware import detect_hardware
+from .worker_env import worker_env
+from .teacher_free_evidence import (  # noqa: F401
+    GREEN_STATES, RED_STATES, WORKFLOW_STAGES, stage_state,
+)
 
-WORKFLOW_STAGES = [
-    "source_review", "data_collection", "validation", "student_selection",
-    "training_preflight", "training", "evaluation", "results",
-]
+PREFLIGHT_TIMEOUT_SECONDS = 600
 
 
-def stage_state(exp_dir: Path) -> list[dict]:
-    """Derive per-stage status from real artifacts; unknown stays unknown."""
-    states = []
+def pilot_dir(default: Path | None = None) -> Path:
+    """The directory the screen reads: ``TFD_PILOT_DIR`` or the repo's copy."""
+    override = os.environ.get("TFD_PILOT_DIR", "").strip()
+    if override:
+        return Path(override)
+    if default is not None:
+        return default
+    return Path(__file__).resolve().parents[2] / "experiments" / "teacher_free_distill"
 
-    def has(name: str) -> bool:
-        return (exp_dir / name).exists()
 
-    catalog = {}
+def run_preflight(exp_dir: Path, *, timeout: int = PREFLIGHT_TIMEOUT_SECONDS) -> None:
+    """Run the CPU preflight through the worker contract.
+
+    ``env=worker_env()`` pins the child's ``import chowder`` to the checkout
+    this process imported: without it a fresh interpreter resolves the
+    editable install, so a worktree screen would validate another Chowder's
+    masking code and record the result as this one's evidence.
+    """
+    out = Path(exp_dir) / "preflight_result.json"
     try:
-        catalog = json.loads((exp_dir / "sources.json").read_text(encoding="utf8"))["sources"]
-    except (OSError, json.JSONDecodeError, KeyError):
+        subprocess.run(
+            [sys.executable, str(Path(exp_dir) / "preflight.py"), "--out", str(out)],
+            capture_output=True, text=True, timeout=timeout,
+            env=worker_env({"PYTHONUNBUFFERED": "1"}),
+        )
+    except subprocess.TimeoutExpired:
+        # Bounded, not decorative: a hung preflight must not freeze the screen
+        # forever; the stale result file stays as-is and the refresh below
+        # shows whatever evidence exists on disk.
         pass
-    approved = sorted(k for k, v in catalog.items() if v.get("approved") is True)
-    blocked = sorted(k for k, v in catalog.items() if v.get("approved") is not True)
-
-    states.append({"stage": "source_review", "state": "done" if catalog else "missing",
-                   "detail": f"{len(approved)} approved, {len(blocked)} blocked: {', '.join(blocked) or 'none'}"})
-
-    manifests = sorted(exp_dir.glob("**/manifest.json"))
-    states.append({"stage": "data_collection", "state": "done" if manifests else "pending",
-                   "detail": ", ".join(str(m.relative_to(exp_dir)) for m in manifests) or "no manifest.json yet"})
-
-    counts = {}
-    if manifests:
-        try:
-            counts = json.loads(manifests[0].read_text(encoding="utf8")).get("counts", {})
-        except (OSError, json.JSONDecodeError):
-            pass
-    states.append({"stage": "validation", "state": "done" if counts else "pending",
-                   "detail": ", ".join(f"{k}={v}" for k, v in sorted(counts.items())[:6]) or "run prepare.py"})
-
-    student_ok = has("student_selection.json")
-    states.append({"stage": "student_selection", "state": "done" if student_ok else "pending",
-                   "detail": "student_selection.json" if student_ok else "run student.py --student qwen3-1.7b"})
-
-    preflight = {}
-    try:
-        preflight = json.loads((exp_dir / "preflight_result.json").read_text(encoding="utf8"))
-    except (OSError, json.JSONDecodeError):
-        pass
-    ok = preflight.get("ok") is True
-    states.append({"stage": "training_preflight",
-                   "state": "passed" if ok else ("failed" if preflight else "pending"),
-                   "detail": f"{preflight.get('passed')}/{preflight.get('total')} checks" if preflight else "run preflight.py"})
-
-    recipes = sorted((exp_dir / "recipes").glob("*.json")) if has("recipes") else []
-    gpu_gate = "operator authorization + device exclusivity required"
-    states.append({"stage": "training", "state": "recipes_ready" if recipes else "pending",
-                   "detail": f"{len(recipes)} recipes; {gpu_gate}" if recipes else "recipes missing"})
-
-    comparisons = sorted(exp_dir.glob("**/comparison_*.json")) + sorted(exp_dir.glob("**/replay_summary.json"))
-    states.append({"stage": "evaluation", "state": "done" if comparisons else "pending",
-                   "detail": ", ".join(p.name for p in comparisons) or "no comparison/replay evidence yet"})
-
-    states.append({"stage": "results", "state": "pending",
-                   "detail": "final REPORT.md status: see REPORT.md" if has("REPORT.md") else "not yet produced"})
-    return states
 
 
 class TeacherFreeDistillScreen(Static):
@@ -101,14 +84,15 @@ class TeacherFreeDistillScreen(Static):
         self._refresh()
 
     def _exp_dir(self) -> Path:
-        return Path(__file__).resolve().parents[2] / "experiments" / "teacher_free_distill"
+        return pilot_dir()
 
     def _refresh(self) -> None:
         exp_dir = self._exp_dir()
-        lines = ["[b]Teacher-free distillation pilot — isolated workflow[/b]", ""]
+        lines = ["[b]Teacher-free distillation pilot — isolated workflow[/b]",
+                 f"evidence directory: {exp_dir}", ""]
         for entry in stage_state(exp_dir):
-            color = {"done": "green", "passed": "green", "recipes_ready": "green",
-                     "failed": "red"}.get(entry["state"], "yellow")
+            color = "green" if entry["state"] in GREEN_STATES else (
+                "red" if entry["state"] in RED_STATES else "yellow")
             lines.append(f"[{color}]●[/{color}] {entry['stage']:<18} "
                          f"[{color}]{entry['state']}[/{color}] — {entry['detail']}")
         self.query_one("#tfd_stages").update("\n".join(lines))
@@ -126,14 +110,5 @@ class TeacherFreeDistillScreen(Static):
         if event.button.id == "tfd_refresh":
             self._refresh()
         elif event.button.id == "tfd_preflight":
-            out = exp_dir / "preflight_result.json"
-            try:
-                subprocess.run([sys.executable, str(exp_dir / "preflight.py"),
-                                "--out", str(out)], capture_output=True, text=True,
-                               timeout=600)
-            except subprocess.TimeoutExpired:
-                # Bounded, not decorative: a hung preflight must not freeze the
-                # screen forever; the stale result file stays as-is and the
-                # refresh below shows whatever evidence exists on disk.
-                pass
+            run_preflight(exp_dir)
             self._refresh()

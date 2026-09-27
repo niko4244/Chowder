@@ -38,6 +38,18 @@ def test_uses_last_close_marker() -> None:
 # ---- scoring through the extraction -------------------------------------------
 
 
+def test_reopened_thinking_after_empty_block_means_no_answer() -> None:
+    # Real Condition A shape: empty block, reopened, truncated mid-sentence.
+    raw = "<think>\n\n</think>\n\n<think> Okay, the degree drops by 1 (since the"
+    assert _final_answer(raw) == ""
+    assert _score(raw, "1", "final_number_match") == 0.0
+
+
+def test_unfinished_generation_scores_zero() -> None:
+    assert _score("The answer is 64", "64", "final_number_match", finished=False) == 0.0
+    assert _score("The answer is 64", "64", "final_number_match", finished=True) == 1.0
+
+
 def test_normalized_match_ignores_thinking_preamble() -> None:
     raw = 'We need answer user: "tungsten?" Need final only.\n</think>\n\nW'
     assert _score(raw, "w", "normalized_exact_match") == 1.0

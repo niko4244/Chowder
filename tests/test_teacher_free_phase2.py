@@ -2,6 +2,8 @@
 import importlib.util
 import json
 import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -31,6 +33,21 @@ def catalog(tmp_path, approved=True, kind="chat"):
 
 def write_jsonl(path, rows):
     path.write_text("".join(json.dumps(x) + "\n" for x in rows), encoding="utf8")
+
+
+def stub_datasets(monkeypatch, rows):
+    """Install a stand-in ``datasets`` module so the *optional* dependency is
+    never required to test the fetch path.
+
+    CI installs chowder without the optional extras, so the real module is
+    absent there; a fake module exercises ``fetch_smith`` through the same
+    call shape without weakening what the test asserts (the dataset's own
+    ``resolved`` flag stays a labeled claim, never evidence).
+    """
+    module = types.ModuleType("datasets")
+    module.load_dataset = lambda *a, **k: iter(rows)
+    monkeypatch.setitem(sys.modules, "datasets", module)
+    return module
 
 
 def test_near_duplicate_quarantined_and_reported(tmp_path):
@@ -85,7 +102,7 @@ def test_fetch_preserves_claim_not_evidence(tmp_path, monkeypatch):
             {"traj_id": "t2", "instance_id": "repo/pkg.abc123.fix__abcd5678",
              "resolved": "false", "model": "m", "messages": [], "patch": "diff"}]
 
-    monkeypatch.setattr("datasets.load_dataset", lambda *a, **k: iter(rows))
+    stub_datasets(monkeypatch, rows)
     dest = tmp_path / "traj.jsonl"
     fetch.export(src, "test", dest, limit=2, scan_limit=10, resolved_only=False)
     saved = [json.loads(x) for x in dest.read_text().splitlines()]
@@ -96,6 +113,42 @@ def test_fetch_preserves_claim_not_evidence(tmp_path, monkeypatch):
     export_meta = json.loads((tmp_path / "traj.jsonl.export.json").read_text())
     assert export_meta["verification"].startswith("NONE")
     assert saved[0]["messages"] == []  # raw passthrough; nothing invented
+
+
+def test_fetch_and_stream_modules_import_without_the_optional_datasets():
+    """``datasets`` is an optional extra: importing these modules must never
+    require it, or a CPU test matrix without extras fails at import time.
+
+    Regression: the CI failure this replaces -- the fetch test itself did
+    ``monkeypatch.setattr("datasets.load_dataset", ...)``, which raises
+    ModuleNotFoundError wherever the optional dependency is not installed.
+    """
+    blocker = (
+        "import sys\n"
+        "class _Block:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name == 'datasets' or name.startswith('datasets.'):\n"
+        "            raise ImportError('datasets is not installed in this environment')\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, _Block())\n"
+        "import importlib.util, pathlib\n"
+        "for mod in sys.argv[1:]:\n"
+        "    spec = importlib.util.spec_from_file_location(pathlib.Path(mod).stem, mod)\n"
+        "    module = importlib.util.module_from_spec(spec)\n"
+        "    spec.loader.exec_module(module)\n"
+        "print('imported')\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", blocker, str(EXP / "fetch_smith.py"),
+         str(EXP / "stream_hf.py")],
+        capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.strip() == "imported"
+    # The import must also stay lazy on a machine where datasets IS installed:
+    # a module-level ``from datasets import load_dataset`` would bind the symbol
+    # here even though it sits inside a try/except.
+    assert "load_dataset" not in vars(fetch)
+    assert "load_dataset" not in vars(load("stream_hf"))
 
 
 def test_replay_refuses_without_podman(monkeypatch, tmp_path):
@@ -136,6 +189,8 @@ def test_verified_replay_record_yields_repair_examples(tmp_path):
     ]
     record = {"task_id": "t1", "repository": "repo/pkg", "task": "fix x",
               "events": events,
+              "pass_to_pass": {"total": 2, "passing": 2, "failing": 0,
+                               "source": "instance_PASS_TO_PASS"},
               "verification": {"method": "sandbox_replay", "returncode": 0,
                                "tests_executed": 3,
                                "trace_sha256": prepare.digest(events)}}
@@ -341,3 +396,198 @@ def test_finish_gates_verification_and_records_apply_rc(tmp_path):
     assert verified["status"] == "verified" and verified["apply_rc"] == 0
     assert verified["verification"]["tests_executed"] == 2
     assert len(verified["verification"]["trace_sha256"]) == 64
+
+
+# --------------------------------------------------------------------------
+# Phase 2: frozen paired evaluation protocol
+# --------------------------------------------------------------------------
+
+eval_protocol = load("eval_protocol")
+
+
+def write_eval_rows(path, rows):
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return path
+
+
+def eval_pair(tmp_path, *, dev_prompt="dev problem one"):
+    dev = write_eval_rows(tmp_path / "dev.jsonl", [
+        {"problem_id": "dev-1", "prompt": dev_prompt, "expected": "42"}])
+    final = write_eval_rows(tmp_path / "final.jsonl", [
+        {"problem_id": "fin-1", "prompt": "final problem one", "expected": "7"}])
+    return dev, final
+
+
+def test_paired_plan_freezes_one_protocol_for_both_arms(tmp_path):
+    dev, final = eval_pair(tmp_path)
+    plan = eval_protocol.paired_plan(tmp_path / "plan", dev, final)
+    digests = {plan["protocol_digest"]}
+    assert plan["arms"] == [
+        {"arm": "base", "adapter_dir": None,
+         "model": eval_protocol.FROZEN_MODEL["base_model"],
+         "revision": eval_protocol.FROZEN_MODEL["base_revision"]},
+    ]
+    assert plan["splits"]["final"]["separation_check"]["ok"] is True
+    assert plan["protocol"]["decoding"] == "greedy"
+    assert digests == {plan["protocol_digest"]}
+
+
+def test_paired_plan_refuses_dev_final_overlap(tmp_path):
+    dev, final = eval_pair(tmp_path)
+    # Same problem id in both files: the final split would not be independent.
+    leaked = write_eval_rows(tmp_path / "leaked.jsonl", [
+        {"problem_id": "dev-1", "prompt": "a different question entirely",
+         "expected": "1"}])
+    with pytest.raises(ValueError, match="overlap"):
+        eval_protocol.paired_plan(tmp_path / "plan", dev, leaked)
+    # Same prompt text under a different id is the same leak.
+    leaked_text = write_eval_rows(tmp_path / "leaked_text.jsonl", [
+        {"problem_id": "fin-9", "prompt": "DEV   problem ONE", "expected": "1"}])
+    with pytest.raises(ValueError, match="overlap"):
+        eval_protocol.paired_plan(tmp_path / "plan2", dev, leaked_text)
+
+
+def test_adapter_arm_requires_the_pinned_condition_a_digest(tmp_path):
+    dev, final = eval_pair(tmp_path)
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_model.safetensors").write_bytes(b"weights")
+    with pytest.raises((FileNotFoundError, ValueError)):
+        eval_protocol.paired_plan(tmp_path / "p1", dev, final,
+                                  adapter_dir=adapter)
+    real = eval_protocol.verified_adapter_record(EXP)
+    pinned = {f["path"]: f for f in real["files"]
+              }["adapter/adapter_model.safetensors"]["sha256"]
+    (adapter / "adapter_model.safetensors").write_bytes(b"not the adapter")
+    with pytest.raises(ValueError, match="pinned Condition A digest"):
+        eval_protocol.paired_plan(tmp_path / "p2", dev, final,
+                                  adapter_dir=adapter)
+    # The real artifacts root must still verify (guards against a stale pin).
+    record = eval_protocol.verified_adapter_record(EXP)
+    on_disk = {f["path"]: f for f in record["files"]
+               }["adapter/adapter_model.safetensors"]["sha256"]
+    assert on_disk == pinned
+    assert record["run"]["base_revision"] == \
+        eval_protocol.FROZEN_MODEL["base_revision"]
+
+
+def test_run_plan_writes_specs_but_never_claims_execution(tmp_path):
+    dev, final = eval_pair(tmp_path)
+    plan_path = tmp_path / "plan"
+    eval_protocol.paired_plan(plan_path, dev, final)
+    summary = eval_protocol.run_plan(plan_path / "eval_plan.json",
+                                     tmp_path / "results")
+    assert summary["status"] == "awaiting_operator_authorization"
+    spec = json.loads((tmp_path / "results" / "base__final" /
+                       "eval_spec.json").read_text())
+    assert spec["adapter_dir"] is None
+    assert spec["suites"][0]["scoring"] == "final_number_match"
+    assert spec["offline"] is True
+    assert spec["seed"] == 2026
+
+
+def test_paired_deltas_and_the_always_review_decision():
+    rows = [{"problem_id": f"p{i}", "score_a": 0.0, "score_b": 1.0}
+            for i in range(6)] + [
+            {"problem_id": "p6", "score_a": 1.0, "score_b": 0.0}]
+    analysis = eval_protocol.paired_deltas(rows, bootstraps=400, seed=7)
+    assert analysis["problems"] == 7
+    assert analysis["b_wins"] == 6 and analysis["a_wins"] == 1
+    assert analysis["mean_delta_b_minus_a"] == round(5 / 7, 6)
+    assert analysis["ci95_low"] <= analysis["mean_delta_b_minus_a"] <= analysis["ci95_high"]
+    assert analysis["decision"] == "requires_operator_review"
+    with pytest.raises(ValueError):
+        eval_protocol.paired_deltas([{"problem_id": "x", "score_a": 1, "score_b": 1},
+                                     {"problem_id": "x", "score_a": 0, "score_b": 1}])
+
+
+def test_compare_arms_pairs_raw_predictions_per_problem(tmp_path):
+    for arm, score_for in (("base", {"a": 0.0, "b": 0.0, "c": 1.0}),
+                           ("condition_a", {"a": 1.0, "b": 0.0, "c": 1.0})):
+        arm_dir = tmp_path / f"{arm}__final"
+        arm_dir.mkdir()
+        with (arm_dir / "predictions-holdout_final.jsonl").open("w",
+                                                                encoding="utf-8") as out:
+            for pid, value in score_for.items():
+                out.write(json.dumps({"problem_id": pid, "prompt": f"problem {pid}",
+                                      "score": value}) + "\n")
+    analysis = eval_protocol.compare_arms(tmp_path, split="final")
+    assert analysis["arms"] == {"a": "base", "b": "condition_a"}
+    assert analysis["problems_paired"] == 3 and analysis["status"] == "complete"
+    assert analysis["b_wins"] == 1 and analysis["ties"] == 2
+    assert analysis["decision"] == "requires_operator_review"
+    assert (tmp_path / "paired_comparison_final.json").is_file()
+
+
+def test_pass_to_pass_outcomes_are_measured_and_recorded(tmp_path):
+    """Phase 4: the post-patch output decides the pass-to-pass verdict.
+
+    Observed failures block; unexecuted ids are unknown rather than passing;
+    the measured surface travels on the replay record either way.
+    """
+    passing, failing = replay._p2p_outcomes(
+        "PASSED tests/test_a.py::test_one\n"
+        "FAILED tests/test_a.py::test_two - boom\n",
+        ["tests/test_a.py::test_one", "tests/test_a.py::test_two"])
+    assert (passing, failing) == (1, 1)
+    assert replay._p2p_outcomes("nothing ran", ["tests/test_a.py::test_one"]) == (0, 0)
+    assert replay._p2p_outcomes("no surface", []) == (0, 0)
+
+    events = [{"kind": "test", "returncode": 0, "tests_executed": 2}]
+    verified = replay._finish(tmp_path / "v", "t1", events, [], "verified",
+                              returncode=0, apply_rc=0, tests_executed=2,
+                              failure_reproduced=True,
+                              pass_to_pass_total=3, pass_to_pass_passing=3,
+                              pass_to_pass_failing=0,
+                              pass_to_pass_source="instance_PASS_TO_PASS")
+    assert verified["pass_to_pass"] == {"total": 3, "passing": 3, "failing": 0,
+                                        "source": "instance_PASS_TO_PASS"}
+
+
+# --------------------------------------------------------------------------
+# Final-eval set builder
+# --------------------------------------------------------------------------
+
+final_eval = load("final_eval_set")
+
+
+def test_gold_extraction_rejects_non_numbers():
+    """Regression: a lone comma matched the number regex and became ''."""
+    assert final_eval.extract_gold("so the total is 1,024 units.") == "1024"
+    assert final_eval.extract_gold("hence, 42") == "42"
+    assert final_eval.extract_gold("value: ,") is None
+    assert final_eval.extract_gold("```print(x)```") is None
+    assert final_eval.extract_gold("#### 3.50") == "3.50"
+    assert final_eval.extract_gold("no digits here at all") is None
+
+
+def test_dev_prompt_texts_cover_dev_and_train(tmp_path):
+    def msg_row(q):
+        return json.dumps({"messages": [{"role": "user", "content": q},
+                                        {"role": "assistant", "content": "a"}]})
+    (tmp_path / "dev.jsonl").write_text(msg_row(" Dev Question ") + "\n", encoding="utf-8")
+    (tmp_path / "train.jsonl").write_text(msg_row("train question") + "\n", encoding="utf-8")
+    texts = final_eval.dev_prompt_texts(tmp_path)
+    assert "dev question" in texts and "train question" in texts
+
+
+def test_gsm8k_gold_extraction_is_marker_derived():
+    """External golds come from the dataset's #### marker, normalized;
+    a lone comma is not a number."""
+    gsm = load("gsm8k_eval_set")
+    assert gsm.gold_from_answer("some reasoning\n#### 1,024") == "1024"
+    assert gsm.gold_from_answer("#### 72") == "72"
+    assert gsm.gold_from_answer("#### -3.5") == "-3.5"
+    assert gsm.gold_from_answer("#### ,") is None
+    assert gsm.gold_from_answer("no marker at all") is None
+
+
+def test_rows_without_traj_id_get_distinct_replay_ids():
+    """Regression: every traj_id-less row shared the fallback "unknown", so
+    their per-row replay logs clobbered one another."""
+    a = replay.traj_id_of({"instance_id": "repo__pkg.abcdef.pr_1"})
+    b = replay.traj_id_of({"instance_id": "repo__pkg.abcdef.pr_2"})
+    c = replay.traj_id_of({"patch": "diff"})
+    d = replay.traj_id_of({"patch": "diff"})
+    assert a.startswith("repo__pkg.abcdef.pr_1") and a != b
+    assert c.startswith("row-") and c == d  # content-hash fallback is stable

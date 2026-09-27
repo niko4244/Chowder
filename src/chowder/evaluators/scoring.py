@@ -82,9 +82,15 @@ def final_answer(prediction: str) -> str:
     without any marker the whole prediction is the answer (non-thinking models, or
     thinking disabled). An *unclosed* ``<think>`` means the budget was exhausted
     mid-reasoning, so there is no answer yet and the extraction is empty.
+
+    A ``<think>`` reopened after the last close marker is unclosed too: the
+    teacher-free Condition A eval (2026-09-26) emitted ``<think>\\n\\n</think>``
+    then ``<think> Okay, ...`` and was truncated mid-reasoning, and scoring the
+    text after the empty block credited the last number of a cut-off sentence.
     """
     if "</think>" in prediction:
-        return prediction.rsplit("</think>", 1)[1]
+        answer = prediction.rsplit("</think>", 1)[1]
+        return "" if "<think>" in answer else answer
     if "<think>" in prediction:
         return ""
     return prediction
@@ -112,8 +118,17 @@ def final_number(text: str) -> str | None:
     return raw or None
 
 
-def score(prediction: str, expected: str, scoring: str) -> float:
-    """Score one prediction. Thinking-aware extraction applies to every mode."""
+def score(
+    prediction: str, expected: str, scoring: str, *, finished: bool = True
+) -> float:
+    """Score one prediction. Thinking-aware extraction applies to every mode.
+
+    ``finished=False`` (the generation hit its token budget instead of EOS) is
+    a miss: text cut off mid-sentence has no final answer, and its last number
+    matching a small gold is luck, not measurement.
+    """
+    if not finished:
+        return 0.0
     answer = final_answer(prediction)
     if scoring == "exact_match":
         return float(answer.strip() == expected.strip())

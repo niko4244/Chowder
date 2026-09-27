@@ -82,6 +82,61 @@ def digest(obj: object) -> str:
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def _p2p_ids(pass_to_pass) -> list[str]:
+    """Normalize a PASS_TO_PASS list (JSON string, or list) to str ids."""
+    if isinstance(pass_to_pass, str):
+        try:
+            value = json.loads(pass_to_pass)
+        except ValueError:
+            value = [pass_to_pass]
+    else:
+        value = pass_to_pass
+    return [str(x) for x in value if str(x).strip()]
+
+
+def _p2p_outcomes(output: str, p2p_ids: list[str]) -> tuple[int, int]:
+    """Count pass-to-pass tests seen passing vs failing in pytest output.
+
+    Ids are ``path.py::nodeid``; short ids match any nodeid whose text
+    contains them, full ``path.py::Class::method`` ids match exactly. Only
+    ids actually observed in the post-patch output are counted at all — an
+    unexecuted P2P test is unknown, not passing.
+    """
+    passed: set[str] = set()
+    failed: set[str] = set()
+    for line in (output or "").splitlines():
+        text = line.strip()
+        if text.startswith("PASSED "):
+            passed.add(text[7:].strip())
+        elif text.startswith("FAILED "):
+            failed.add(text[7:].split(" - ", 1)[0].strip())
+    if not p2p_ids:
+        return 0, 0
+    passing = failing = 0
+    for pid in p2p_ids:
+        if pid in failed or any(pid in f for f in failed):
+            failing += 1
+        elif pid in passed or any(pid in p for p in passed):
+            passing += 1
+    return passing, failing
+
+
+def _p2p_phase_cmd(image: str, p2p_paths: list[str]) -> list[str]:
+    """One podman run that lists the collected P2P nodeids on a given image.
+
+    Collection does not execute tests, so listing on the pristine (or red)
+    /testbed tree yields the canonical nodeid set; the ids are then matched
+    against the verbose post-patch output. Short summary lines (-rf) are
+    unnecessary noise here: ``--collect-only -q`` prints one nodeid per line.
+    """
+    quoted = " ".join(shlex.quote(str(p)) for p in p2p_paths[:60])
+    tail = ("cd /testbed && /opt/conda/envs/testbed/bin/python -m pytest "
+            f"--collect-only -q {quoted}")
+    return ["run", "--rm", "--pull", "never",
+            "--memory", MEMORY_LIMIT, "--cpus", CPUS, "--pids-limit", str(PIDS_LIMIT),
+            "--network", "none", image, "bash", "-lc", tail]
+
+
 def parse_test_summary(output: str) -> int:
     """Count executed tests from pytest/unittest-style output; 0 if unknown.
 
@@ -190,6 +245,21 @@ def parse_instance_id(instance_id: str) -> tuple[str, str]:
     return f"{m.group('owner')}/{m.group('name')}", m.group("commit")
 
 
+def traj_id_of(record: dict) -> str:
+    """A stable per-row id: traj_id, else the instance id, else a content hash.
+
+    Rows without traj_id used to all share the literal fallback "unknown",
+    so concurrent rows clobbered one another's replay_log.json.
+    """
+    raw = record.get("traj_id")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    instance = str(record.get("instance_id") or "").strip()
+    if instance:
+        return instance
+    return "row-" + digest(record)[:12]
+
+
 def derive_test_targets(patch: str) -> tuple[list[str], str]:
     """Map the patch's touched files to candidate test targets.
 
@@ -227,7 +297,7 @@ def replay_one(record: dict, work_root: Path, *, instance: dict | None = None) -
     """Replay one trajectory; any unexpected exception becomes a failed record
     that still carries the evidence written before the failure, never a crashed
     batch (one broken repo must not lose the rest)."""
-    traj_id = str(record.get("traj_id") or "unknown")
+    traj_id = traj_id_of(record)
     task_dir = work_root / traj_id.replace("/", "_")
     try:
         if instance and instance.get("image_name"):
@@ -268,7 +338,7 @@ def _replay_one_official(record: dict, work_root: Path, *, instance: dict) -> di
     then the trajectory's patch is applied and the same tests must pass
     (green), both with network disabled.
     """
-    traj_id = str(record.get("traj_id") or "unknown")
+    traj_id = traj_id_of(record)
     instance_id = str(record.get("instance_id") or "")
     repo = str(instance.get("repo") or "")
     base_commit = str(instance.get("base_commit") or parsed_or_blank(instance_id))
@@ -325,7 +395,34 @@ def _replay_one_official(record: dict, work_root: Path, *, instance: dict) -> di
                  else (resolve_full_sha(upstream_repo, upstream_commit) or upstream_commit))
 
     image = _ensure_official_image(str(instance["image_name"]))
-    tests = ("python -m pytest -q -p no:cacheprovider "
+    # ---- pass-to-pass surface (Phase 4) -----------------------------------
+    # A FAIL_TO_PASS red->green alone would certify a patch that silently
+    # breaks other tests. The instance's PASS_TO_PASS list is collected (not
+    # executed) so the post-patch output can be checked for regressions; an
+    # instance with no recorded P2P surface keeps the gate vacuous at replay
+    # level and records that fact, and prepare.py refuses to promote such a
+    # row into training data because the regression risk is unverified.
+    p2p = instance.get("PASS_TO_PASS") or instance.get("pass_to_pass") or []
+    p2p_ids = _p2p_ids(p2p)
+    p2p_paths = sorted({str(t).split("::")[0] for t in p2p_ids
+                        if "::" in t and t.split("::")[0].endswith(".py")})
+    resolved_p2p: list[str] = list(p2p_ids)
+    p2p_source = "instance_PASS_TO_PASS"
+    if p2p_paths:
+        rc_p2p, out_p2p = run_podman(_p2p_phase_cmd(image, p2p_paths),
+                                     timeout=STEP_TIMEOUT)
+        observe("tool", {"tool": "run_command",
+                         "command": f"collect {len(p2p_paths)} PASS_TO_PASS test files"},
+                rc_p2p, out_p2p)
+        collected = [ln.strip() for ln in (out_p2p or "").splitlines() if "::" in ln]
+        if rc_p2p == 0 and collected:
+            resolved_p2p = sorted(set(collected))
+    else:
+        p2p_source = "none_recorded"
+    # -rA prints one "PASSED <nodeid>" / "FAILED <nodeid> - reason" line per
+    # test in the short summary, which is what the pass-to-pass check matches
+    # against; plain -q would print dots and leave the P2P outcome unmeasurable.
+    tests = ("python -m pytest -q -rA -p no:cacheprovider "
              + " ".join(shlex.quote(str(t)) for t in f2p[:80]))
     test_source = ("instance_FAIL_TO_PASS" if len(f2p) <= 80
                    else "instance_FAIL_TO_PASS_first80")
@@ -426,12 +523,20 @@ def _replay_one_official(record: dict, work_root: Path, *, instance: dict) -> di
     # Short-circuit order matters: rc_c is the combined apply+test container's
     # return code, meaningful only once the apply itself succeeded.
     verified = failure_reproduced and patch_applied and rc_c == 0 and executed2 > 0
+    p2p_passing, p2p_failing = _p2p_outcomes(out_c, resolved_p2p)
+    if verified and p2p_failing:
+        # A repair that breaks previously passing tests is not a repair.
+        verified = False
     status = "verified" if verified else "not_green"
     return _finish(task_dir, traj_id, events, log, status,
                    returncode=rc_c if patch_applied else 1, apply_rc=apply_rc,
                    tests_executed=executed2, failure_reproduced=failure_reproduced,
                    instance_id=instance_id, repo=repo, base_commit=base_commit,
-                   test_cmd=tests, test_source=test_source)
+                   test_cmd=tests, test_source=test_source,
+                   pass_to_pass_total=len(resolved_p2p),
+                   pass_to_pass_passing=p2p_passing,
+                   pass_to_pass_failing=p2p_failing,
+                   pass_to_pass_source=p2p_source)
 
 
 _FULL_SHA_CACHE: dict[tuple[str, str], str | None] = {}
@@ -466,7 +571,7 @@ def _replay_one_inner(record: dict, work_root: Path, *, instance: dict | None = 
     trajectory's patch, run the tests again (green). Success labels require
     BOTH observations from independently executed commands.
     """
-    traj_id = str(record.get("traj_id") or "unknown")
+    traj_id = traj_id_of(record)
     instance_id = str(record.get("instance_id") or "")
     parsed_repo, parsed_commit = parse_instance_id(instance_id)
     repo = str((instance or {}).get("repo") or parsed_repo)
@@ -643,7 +748,11 @@ def _finish(task_dir: Path, traj_id: str, events: list[dict], log: list[dict],
             status: str, *, returncode: int = 1, tests_executed: int = 0,
             failure_reproduced: bool = False, instance_id: str = "",
             repo: str = "", base_commit: str = "", test_cmd: str = "",
-            test_source: str = "", apply_rc: int | None = None) -> dict:
+            test_source: str = "", apply_rc: int | None = None,
+            pass_to_pass_total: int | None = None,
+            pass_to_pass_passing: int | None = None,
+            pass_to_pass_failing: int | None = None,
+            pass_to_pass_source: str | None = None) -> dict:
     _persist_log(task_dir, log)
     record = {"task_id": traj_id, "repository": repo, "task": f"repair {instance_id}",
               "events": events,
@@ -654,6 +763,16 @@ def _finish(task_dir: Path, traj_id: str, events: list[dict], log: list[dict],
     # from "patch applied but tests still red" (genuine non-repair).
     if apply_rc is not None:
         record["apply_rc"] = apply_rc
+    # The measured pass-to-pass outcome travels with the record: prepare.py
+    # refuses to promote a repair whose pass_to_pass.failing > 0 or whose
+    # pass-to-pass surface was never recorded.
+    if pass_to_pass_total is not None:
+        record["pass_to_pass"] = {
+            "total": pass_to_pass_total,
+            "passing": pass_to_pass_passing,
+            "failing": pass_to_pass_failing,
+            "source": pass_to_pass_source,
+        }
     if status == "verified":
         record["verification"] = {"method": "sandbox_replay", "returncode": returncode,
                                   "tests_executed": tests_executed,

@@ -211,7 +211,9 @@ def main() -> int:
         ap.error("--yes is required: records operator authorization for GPU use")
 
     recipe = json.loads(args.recipe.read_text(encoding="utf-8"))
-    if recipe.get("condition") != "A_supervised_distillation":
+    if recipe.get("condition") not in ("A_supervised_distillation",
+                                       "A2_supervised_distillation_corrected",
+                                       "A3_supervised_distillation_complete_traces"):
         ap.error(f"unexpected recipe condition: {recipe.get('condition')}")
 
     exclusivity = check_device_exclusivity(args.device)
@@ -221,8 +223,30 @@ def main() -> int:
         recipe, args.data_dir,
         micro_batch=args.micro_batch, grad_accum=args.grad_accum,
     )
-    overrides = {}
-    if args.micro_batch is not None or args.grad_accum is not None:
+    # The recipe may pin the dataset it was written for: refuse to train on
+    # bytes the recipe never saw (an A2 claim about "the corrected dataset"
+    # would otherwise be unenforceable).
+    data_section = recipe.get("data") or {}
+    expected_train = data_section.get("expected_train_sha256")
+    if expected_train:
+        actual_train = config["backend"]["dataset_sha256"]
+        if actual_train != expected_train:
+            ap.error(
+                f"dataset digest mismatch: recipe pins {expected_train[:12]}... "
+                f"but {args.data_dir / 'train.jsonl'} hashes to {actual_train[:12]}...; "
+                "training on unreviewed bytes is refused")
+        print(f"[data] recipe digest check OK ({actual_train[:12]}...)")
+    expected_dev = data_section.get("expected_dev_sha256")
+    if expected_dev:
+        dev_path = args.data_dir / "dev.jsonl"
+        if dev_path.is_file():
+            actual_dev = sha256_file(dev_path)
+            if actual_dev != expected_dev:
+                ap.error(
+                    f"dev digest mismatch: recipe pins {expected_dev[:12]}... "
+                    f"but {dev_path} hashes to {actual_dev[:12]}...")
+            else:
+                print(f"[data] dev digest check OK ({actual_dev[:12]}...)")
         overrides = {
             "micro_batch": config["backend"]["training"]["batch_size"],
             "gradient_accumulation": config["backend"]["training"]["gradient_accumulation_steps"],

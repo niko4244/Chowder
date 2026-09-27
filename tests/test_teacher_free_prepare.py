@@ -65,6 +65,11 @@ def test_external_holdout_blocks_example(tmp_path):
     assert "HOLDOUT" not in (tmp_path / "out" / "train.jsonl").read_text()
 
 
+def p2p_ok():
+    """A measured, clean pass-to-pass outcome as replay_smith records it."""
+    return {"total": 2, "passing": 2, "failing": 0, "source": "instance_PASS_TO_PASS"}
+
+
 def test_repair_requires_matching_local_evidence(tmp_path):
     events = [
         {"kind": "tool", "action": {"tool": "read_file", "path": "x.py"},
@@ -73,7 +78,7 @@ def test_repair_requires_matching_local_evidence(tmp_path):
          "returncode": 0, "tests_executed": 1, "verdict": "verified_good"}
     ]
     record = {"task": "Fix bug", "repository": "synthetic/repo", "task_id": "r1",
-              "events": events, "verification": {
+              "events": events, "pass_to_pass": p2p_ok(), "verification": {
                   "method": "sandbox_replay", "returncode": 0, "tests_executed": 1,
                   "trace_sha256": mod.digest(events)
               }}
@@ -87,10 +92,38 @@ def test_repair_claimed_success_without_observed_test_rejected():
     events = [{"kind": "tool", "action": {"tool": "write_file"},
                "observation": "done", "verdict": "verified_good"}]
     row = {"task": "Fix", "repository": "synthetic", "task_id": "a", "events": events,
+           "pass_to_pass": p2p_ok(),
            "verification": {"method": "sandbox_replay", "returncode": 0,
                             "tests_executed": 1, "trace_sha256": mod.digest(events)}}
     with pytest.raises(ValueError, match="observed green"):
         mod.repair_examples(row)
+
+
+def test_repair_that_breaks_previously_passing_tests_is_refused():
+    """Phase 4: a green FAIL_TO_PASS run is not a repair when the same run
+    shows a previously passing test now failing."""
+    events = [
+        {"kind": "tool", "action": {"tool": "edit_file", "path": "x.py"},
+         "observation": "edited", "verdict": "verified_good"},
+        {"kind": "test", "action": {"tool": "run_tests"}, "observation": "2 passed",
+         "returncode": 0, "tests_executed": 2, "verdict": "verified_good"}
+    ]
+    base = {"task": "Fix", "repository": "synthetic", "task_id": "b",
+            "events": events,
+            "verification": {"method": "sandbox_replay", "returncode": 0,
+                             "tests_executed": 2, "trace_sha256": mod.digest(events)}}
+    broken = base | {"pass_to_pass": {"total": 3, "passing": 2, "failing": 1,
+                                      "source": "instance_PASS_TO_PASS"}}
+    with pytest.raises(ValueError, match="pass-to-pass"):
+        mod.repair_examples(broken)
+    unrecorded = base | {"pass_to_pass": {"total": 0, "passing": 0, "failing": 0,
+                                          "source": "none_recorded"}}
+    with pytest.raises(ValueError, match="pass-to-pass"):
+        mod.repair_examples(unrecorded)
+    missing = dict(base)
+    with pytest.raises(ValueError, match="pass-to-pass"):
+        mod.repair_examples(missing)
+    assert len(mod.repair_examples(base | {"pass_to_pass": p2p_ok()})) == 2
 
 
 def test_repair_holdout_task_id(tmp_path):

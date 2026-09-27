@@ -1,0 +1,59 @@
+{
+  "condition": "A2_supervised_distillation_corrected",
+  "description": "Controlled retrain of Condition A on the corrected Phase-1 pipeline: identical student, objective and budget, but the dataset is the corrected pilot_v4 (ids preserved, problem-grouped splits, verified near-duplicates, byte-pinned digests). Built FROM the untouched base only - never a continuation of Condition A - so any delta vs A measures the data corrections, not training order.",
+  "backend": "chowder.backends.transformers_peft.TransformersPeftExecutor",
+  "student": "qwen3-1.7b",
+  "student_revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+  "data": {
+    "train": "prepared_pilot_v4/train.jsonl",
+    "dev": "prepared_pilot_v4/dev.jsonl",
+    "manifest": "prepared_pilot_v4/manifest.json",
+    "expected_train_sha256": "9e5dbbefe05379b53406a33359d6452f3c098198b7462f5b47f84c473dd2abe4",
+    "expected_dev_sha256": "98fbe4f2f646a592192b6239b059958ee982239de2d67e9d9a74d285faad16c6",
+    "integrity_note": "pilot_v4: 3807 train / 471 dev, 467 unique problems, 0 split crossings, 0 holdout collisions, 778 truncated final answers rejected, token audit ok at max_length 2048 (production Qwen3-1.7B tokenizer @ 70d244cc)",
+    "contract": "messages chat rows (chowder training_data validation)"
+  },
+  "training": {
+    "objective": "causal_lm_completion_only",
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+    "learning_rate": 0.0002,
+    "scheduler": "cosine",
+    "warmup_ratio": 0.03,
+    "epochs": 2,
+    "micro_batch": 1,
+    "gradient_accumulation": 32,
+    "max_length": 2048,
+    "seed": 2026,
+    "dtype": "bfloat16",
+    "gradient_checkpointing": true
+  },
+  "comparability": {
+    "unchanged_from_condition_a": ["student", "student_revision", "objective", "lora_r", "lora_alpha", "lora_dropout", "target_modules", "learning_rate", "scheduler", "warmup_ratio", "epochs", "effective_batch_size_32", "max_length", "seed", "dtype", "gradient_checkpointing"],
+    "deliberately_changed": {
+      "dataset": "pilot_v3 (pre-integrity-fix) -> pilot_v4 (ids, grouping, verified near-dups, label audit)",
+      "micro_batch_grad_accum": "4/8 -> 1/32 (operator override measured on Condition A run 4; effective batch 32 preserved; recorded, not hidden)"
+    },
+    "evaluation": "A2 is evaluated against the untouched base and Condition A with the frozen paired protocol (eval_protocol.py); training-loss comparison alone is never a quality claim"
+  },
+  "authorization": {
+    "gpu_required": true,
+    "operator_approval_required": true,
+    "status": "awaiting_operator_approval",
+    "device_exclusivity_required": "no other Chowder campaign may hold the target device",
+    "cpu_preflight_evidence": "experiments/teacher_free_distill/preflight output (8/8 checks)"
+  },
+  "outputs": {
+    "adapter": "checkpoints/cond_a2/adapter",
+    "trainer_state": "checkpoints/cond_a2/trainer_state.json",
+    "loss_history_required": true,
+    "note": "expected steps differ from A (3807 vs 4529 rows at the same effective batch): 2*ceil(3807/32)=240 optimizer steps"
+  },
+  "provenance_rules": {
+    "from_untouched_base": "training must start from Qwen/Qwen3-1.7B @ 70d244cc, never from the Condition A adapter",
+    "no_synthetic_success": "no metric may be derived from anything but measured artifacts",
+    "no_auto_promotion": "any claim that A2 beats A or base requires the frozen paired evaluation on the final split; the recorded decision is always requires_operator_review"
+  }
+}

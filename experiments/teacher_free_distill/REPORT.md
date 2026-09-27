@@ -1,9 +1,93 @@
 # Teacher-free distillation pilot — status report
 
-Branch: `experiment/teacher-free-distillation-pilot` (base audit SHA `3d5c0101e40406e01defa7591e025f28178a7be9`)
-Date: 2026-09-26 (revised; first version 2026-09-25). All numbers below come from runs executed on this branch; nothing is extrapolated. Upstream flags (`resolved`) are carried as claims and never counted as evidence.
+Branch: `experiment/teacher-free-distillation-pilot` (base audit SHA `3d5c0101e40406e01defa7591e025f28178a7be9`); this revision on working branch `experiment/teacher-free-revised-plan` @ `eb0ad69`.
+Date: 2026-09-26 (revised plan, phases 0–4; first version 2026-09-25). All numbers below come from runs executed on this branch; nothing is extrapolated. Upstream flags (`resolved`) are carried as claims and never counted as evidence.
 
-## This session — four follow-up tasks
+## Revised plan — phase-by-phase evidence (this revision)
+
+### Phase 0 — reliability (all four items done)
+
+1. **CI failures fixed.** `tests/test_teacher_free_phase2.py` monkeypatched `datasets.load_dataset` while `datasets` is an optional extra, so CI (which does not install it) failed with `ModuleNotFoundError`; the suite now installs a stand-in `datasets` module via `sys.modules` and a new test asserts `fetch_smith`/`stream_hf` import cleanly with the module blocked and never bind `load_dataset` at import time. `tui_teacher_free.py` line 131 launched the preflight subprocess without `env=`, failing `test_worker_env`'s every-launch check on 4 CI jobs; `run_preflight()` now passes `env=worker_env({"PYTHONUNBUFFERED": "1"})` with a bounded timeout.
+2. **TUI stages derive from verified artifacts, not file existence.** New `src/chowder/teacher_free_evidence.py` computes each of the 8 workflow stages from on-disk evidence (manifest format + pinned `output_sha256` digests re-hashed from bytes, recipes present *and* structurally valid, replay summary buckets, comparison decisions restricted to `requires_operator_review`, Condition A verified via the digest record). A replay file that merely exists no longer reports "done": vocabulary includes missing/pending/not_audited/recorded_unpinned/narrative_only/unchecked/pending_record.
+3. **Condition A preserved.** `experiments/teacher_free_distill/verify_condition_a.py` (`record`/`verify`) pins 9 artifact files including `run-spec.json`; `condition_a_artifacts.json` re-verifies against the real `checkpoints/cond_a` on this host (`ok: true, state: verified`, 284/284 steps). The TUI and the new eval protocol both refuse to *use* Condition A unless the pinned digests re-verify.
+4. **Full matrix re-run locally:** `2702 passed, 77 skipped` (Linux/Windows-compatible paths; no new platform-specific behavior introduced). CI validation pending push.
+
+### Phase 1 — data integrity (all seven items done, with measured consequences)
+
+Defects found in the previous pipeline, each fixed and regression-tested in `tests/test_teacher_free_integrity.py` (16 deterministic tests):
+
+- **Windows CRLF digest corruption (newly found and fixed):** `Path.write_text` text-mode writes turned `\n` into `\r\n` on Windows, so the pinned `output_sha256` never matched the bytes on disk. All JSONL/JSON outputs are now written byte-mode LF, and `test_outputs_are_lf_bytes_pinned_in_the_manifest` locks it. The affected run was re-executed cleanly.
+- **MinHash band collisions were dropped without verification:** the old chunker dropped *every* band collision. Measured consequence: on the default rebuild, **1314 of 5201 chunks (~25 % of scanned rows) were candidates, and all 1314 cleared** containment verification — nothing was a real duplicate. Candidates are now verified (word-5-shingle containment ≥ 0.6) before quarantine; a forced-collision test proves unrelated rows survive while genuinely equivalent ones are still quarantined.
+- **Continuation prompts were not self-contained:** they now quote the real preceding segment (default 800 chars, flag-gated, default off for compatibility).
+- **Excerpt-based parent recovery never matched:** `recovered_parent` required the probe to be *exactly* the recorded excerpt length, so real chunk-0 prompts never linked to their siblings. Fixed to bidirectional prefix matching; grouping tests prove one problem never straddles partitions at a dev_percent chosen so the legacy per-chunk hashing *would* have split it.
+- **Label audit** with the production Qwen3-1.7B tokenizer @ `70d244cc…` at `max_length=2048`: rejects incomplete supervised targets and truncated final answers; `--keep-truncated-targets` flips `ok` to False instead of failing silently.
+- **Immutable manifest, leakage report, truncation report, unique-problem count** with digest pinning; a re-run that would change pinned bytes is refused unless `--allow-rewrite`.
+
+**Verified pilot_v4 numbers (all from the fixed, byte-deterministic pipeline):** train **3807** / dev **471** rows, **467 unique problems**, basis 100 % `declared_problem_id`, **0** split crossings, **0** holdout collisions, **778** truncated final answers rejected, **0** incomplete targets, token audit `ok` (p50 total 1689 / p95 1991 / max 2048). Near-dup: 1210 candidates, 1210 cleared, 0 quarantined. `output_sha256` for train/dev matches the on-disk bytes; a full re-run reproduced both digests **byte-identically** (determinism check `.phase1-verify-result.json`), and the chunker re-run matched the recorded v2 chunk file digest exactly.
+
+### Phase 2 — baseline evaluation protocol (implemented; real inference awaits operator authorization)
+
+New `experiments/teacher_free_distill/eval_protocol.py`:
+
+- **Frozen shared protocol** (`FROZEN_PROTOCOL`: greedy decoding, seed 2026, `max_new_tokens` 1024, `final_number_match` scoring, bf16; `FROZEN_MODEL`: Qwen3-1.7B @ `70d244cc…`, tokenizer chat template, thinking at the production renderer's actual behavior — template default, i.e. enabled, with the think-aware scorer treating an unclosed `<think>` as a miss) attached digest-identically to both arms.
+- **Dev/final separation by construction:** the final split's plan embeds a separation check that hard-fails on overlapping problem ids *or* overlapping normalized prompt text with any development material.
+- **Adapter provenance fail-closed:** the Condition A arm is accepted only after `adapter/adapter_model.safetensors` re-verifies against the pinned digest in `condition_a_artifacts.json`; the plan records that training loss (1.7276) is history, never a quality claim.
+- **Raw outputs and resources:** `run_plan` writes per-arm/split specs executed by the production `chowder.evaluators.transformers_text_worker`, which already emits per-problem predictions, generation diagnostics (EOS-termination, produced tokens), lifecycle timings and its own peak-VRAM sampling. Status stays `awaiting_operator_authorization` until the operator executes the specs.
+- **Paired analysis:** `compare_arms` pairs raw per-problem scores across arms and computes per-problem deltas with a percentile bootstrap CI (resampling problems); the decision is always `requires_operator_review` — no automated promotion exists.
+- Six new protocol tests cover freezing, overlap refusal, adapter-digest refusal, spec generation, delta/CI math and per-problem pairing.
+
+### Phase 3 — controlled experiment A2 (recipe ready; training awaits operator approval)
+
+`recipes/a2_sft_supervised.json`: identical student/revision, objective, LoRA config (r16/α32/dropout 0.05, q/k/v/o), lr 2e-4 cosine, warmup 0.03, epochs 2, effective batch 32 (micro-batch 1 × grad-accum 32, the operator override measured on Condition A run 4 — recorded, not hidden), max_length 2048, seed 2026 — on **pilot_v4** (expected steps 240 = 2·⌈3807/32⌉). Built **from the untouched base only**, never a continuation of A, so a delta vs A isolates the data corrections. `condition_a_artifacts.json` now carries an `a2_baseline` block (`training_started: false`) and an `evaluation` block (`evaluated: false`) so evidence-derived tooling can see no evaluation and no A2 training has happened. Skill-targeted selection/hyperparameter variants remain separate follow-ups, not part of A2.
+
+### Phase 4 — verified repair data (gate tightened; no verified repair exists yet)
+
+- `replay_smith.py` now measures the **pass-to-pass surface** on the official-image path: instance `PASS_TO_PASS` ids are collected in-container (never executed early), matched against the verbose post-patch output, and the measured `{total, passing, failing, source}` travels on every record. A red→green patch that breaks a previously passing test is **`not_green`**, and an instance with no recorded P2P surface is marked `none_recorded` instead of vacuously clean.
+- `prepare.repair_examples` refuses to promote any repair whose `pass_to_pass` is missing, unrecorded, or shows a failure — so upstream `resolved` claims remain irrelevant and regression-risk is actually measured before anything reaches training data.
+- Status unchanged and fail-closed: **0 verified repairs**; the earlier batch's verdicts (3/3 red reproduced, 0 green, 15/23 rows not module-congruent) stand.
+
+### Safety and execution compliance (updated after the evaluation run)
+
+No new GPU training launched (A2 `awaiting_operator_approval`); no inference server touched; the operator-authorized final-eval set exists (`final_eval/final_eval_prompts.jsonl`, 120 problems, sha256-pinned, drawn from source rows the training pipeline never scanned, with 21 sampled rows refused for development/train prompt overlap); no synthetic success evidence; every change recorded above with its test.
+
+### Measured paired evaluation (operator-authorized, completed 2026-09-27)
+
+Both final-split arms ran under the frozen protocol on GPU 0 (RTX 5060 Ti; resident inference servers untouched; identity-verified workers; offline HF cache). Raw per-problem artifacts: `eval_run/results/{base,condition_a}__final/` (predictions, fingerprints, result.json with adapter liveness and lifecycle telemetry).
+
+> **CORRECTION (2026-09-26): this comparison is INVALID and supports no quality claim.** The +11.40-point delta below is a scorer artifact, not a model improvement. An earlier version of this section said Condition A "finished within budget on 120/120" and that "the SFT measurably taught budget completion" — both statements are false and are retracted. The original numbers are kept only as a record of what the broken scorer produced.
+
+| arm | rows | EOS-terminated (actually finished) | generated tokens | scorer hits | peak VRAM | measured GPU-h |
+|---|---|---|---|---|---|---|
+| base (Qwen3-1.7B @ `70d244cc…`) | 120 | **0** | 1024 on every row | 0 | 3.77 GB | 2.34 |
+| Condition A (digest-verified adapter; 224/224 LoRA keys live, all B nonzero) | 120 | **0** | 1024 on every row | 14 (invalid, see below) | 3.80 GB | 3.68 |
+
+What the raw outputs (`eval_run/results/*/predictions-holdout_final.jsonl`) actually show:
+
+1. **Neither arm finished any problem.** `eos_terminated` is false on 240/240 rows; every row stopped at exactly `max_new_tokens` = 1024.
+2. **Condition A's "closed `</think>`" is an empty block.** Every Condition A output begins `<think>\n\n</think>\n\n<think> Okay, …` — the `</think>` sits at character 9, then the model reopens `<think>` and reasons until truncation. The think-aware scorer saw a closed block and scored the truncated text; the base's single unclosed block was scored a miss. The two arms were not scored under the same effective rule.
+3. **The 14 hits are the last number of mid-sentence truncated text.** `final_number_match` takes the final number in the scored text, and the golds are dominated by small integers (`1` is the gold on 31/120 problems, `2` on 20). Hit golds: `1`×9, `2`×3, `0`×1, `-1`×1. Example hit: text truncated at "…reduces the degree of the first polynomial by 1 (since the remainder's degree is less than the" scored correct against gold `1`.
+4. **The eval set is not a numeric-answer benchmark.** The final split is competitive-programming / code-golf prompts from OT3; "golds" are numbers extracted from the teacher's own traces (QwQ-32B), and 3 prompts appear twice with conflicting golds.
+
+The original paired numbers (`paired_comparison_final.json`: +11.40 points, 13/0/101, CI [+6.14, +17.54], n=114) are retained for the record and must not be cited.
+
+**Required before any re-run can support a claim:** (a) a row scores only if `eos_terminated` is true and the answer lies outside a single closed, non-empty think block — an empty `<think></think>` followed by a reopened `<think>` is a miss; (b) an eval set with real answer keys — the pinned external GSM8K set (`gsm8k_eval/`, `openai/gsm8k` test @ `740312ad…`) is the next measurement; (c) a token budget at which the base can finish, reported alongside the EOS rate for each arm. Decision remains `requires_operator_review`; training loss played no part in any of this.
+
+### External GSM8K paired evaluation (fixed scorer, 2026-09-27) — Condition A regresses
+
+Pinned external set (`openai/gsm8k` test @ `740312ad…`, 120 problems, seed 2026), same frozen protocol at `max_new_tokens` 2048, EOS-gated scorer from `d41db63`. Raw artifacts: `C:\Users\nikma\chowder_teacher_free\eval_gsm8k2048\results\`. The base arm completed 120/120; the Condition A arm was stopped by the operator at 106/120 because the outcome could no longer change (even 14/14 on the remainder leaves it far below base). Paired over the 106 common rows:
+
+| arm | correct | EOS-terminated | accuracy when finished | output shape |
+|---|---|---|---|---|
+| base | **60/106** (66/120 full) | 67 | 0.90 | 77 real closed think, 29 unclosed |
+| Condition A | **23/106** | 33 | 0.70 | 106/106 `<think>\n\n</think>` then plain mid-trace text ("Wait, the problem says…") |
+
+Paired delta **−34.9 points**, 95 % bootstrap CI **[−45.3, −23.6]** (10 000 resamples of paired rows, seed 2026); Condition A 5 wins / **42 losses** / 59 ties.
+
+**Mechanism — the training targets are mid-trace chunks.** In `pilot_v4/train.jsonl` (the A2 set), 3537/3807 rows are continuation chunks, 3760/3807 targets end mid-reasoning, only 85 contain `</think>`, and 0 contain a boxed final answer. The adapter learned exactly that: skip thinking, ruminate, and stop without committing (finished-but-wrong outputs end "Let me check the problem again."). **A2 was therefore not launched**: its data has the same shape and would reproduce this regression. Chunked SFT needs loss restricted to complete traces (or chunk targets that include the trace's conclusion) before another training run is worth GPU time.
+
+---
+
+## Earlier session — four follow-up tasks
 
 | Task | Outcome | Strongest evidence |
 |---|---|---|
@@ -97,3 +181,7 @@ Half answerable now, with the other half honestly still open. The student half i
 What else changed this session: the SFT set exists at usable scale (5 015 pinned examples, up from 6) via conclusion-boundary chunking rather than filtering; the replay sandbox now uses SWE-smith's own environment spec and emits per-row, machine-checkable evidence; the PR itself was reviewed and four real defects were fixed. Running the hardened harness exposed eleven defects of our own — five of which had made every earlier "0 verified" result vacuous (red had never actually been reproduced: the one row that looked like a red result was reporting 0 executed tests), and one of which published an empty loss history for a completed 284-step run.
 
 The remaining constraints are now quantified rather than unknown: upstream data quality (65 % of strictly-matched trajectories carry patches that do not touch the module their own tests exercise), host throughput (cold per-instance images are 3–4 GB and the podman daemon serializes under load), and the fact that the trained student has never been measured. The next hard gates are an evaluation run — GSM8K, held-out perplexity, and the gen-2 comparison under one protocol — and a verified repair corpus, both of which are now execution tasks with known obstacles instead of open design questions.
+
+### Next pilot built: A3 on complete released R1 traces (awaiting operator approval)
+
+`build_openr1_pilot.py` builds from `open-r1/OpenR1-Math-220k` @ `e4e141ec` (Apache-2.0; one 213.6 MB shard, sha256 `ccc3a95e…`, 9,374 problems): per problem, the shortest DeepSeek-R1 generation that is `is_reasoning_complete`, `math_verify`-correct, has one closed non-empty `<think>` and a boxed answer after it, and renders — through the trainer's own `_build_chat_example` — at ≤ 4096 tokens. Problems sharing a 13-word n-gram or normalized text with GSM8K test (1,319) or MATH-500 are dropped (16). Result: 2,994 usable problems → **2,000 train / 200 dev**, problem-disjoint, train tokens p50 2,583 / p90 3,725 / max 4,092, `output_sha256` train `0058df1b…` dev `ac7629d3…`. An independent re-render audit of the written files found 0 would-truncate rows, 0 incomplete targets, 0 train/dev overlap and 0 overlap with the 120 GSM8K eval prompts. Recipe `recipes/a3_sft_openr1_complete.json` keeps A/A2 hyperparameters except `max_length` 4096; status `awaiting_operator_approval`. Promotion gate: paired GSM8K CI above zero vs base and no EOS-rate drop.
