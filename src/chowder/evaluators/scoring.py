@@ -118,6 +118,28 @@ def final_number(text: str) -> str | None:
     return raw or None
 
 
+def boxed_answer(text: str) -> str | None:
+    """Content of the LAST ``\\boxed{...}`` (brace-matched), or None.
+
+    A model that commits to ``\\boxed{7}`` and then restates context ("... in 4
+    weeks") has answered 7; the last-number rule scored it 4. Seen on every
+    R1-distilled answer in the A3 GSM8K eval (2026-09-27), and it favoured base
+    Qwen3, which usually ends on the box.
+    """
+    start = (text or "").rfind("\\boxed{")
+    if start < 0:
+        return None
+    depth, i = 0, start + len("\\boxed")
+    for j in range(i, len(text)):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[i + 1 : j]
+    return None  # unbalanced: no committed answer
+
+
 def score(
     prediction: str, expected: str, scoring: str, *, finished: bool = True
 ) -> float:
@@ -138,7 +160,8 @@ def score(
         # Compare the last number on each side, not the whole string: a model that
         # shows its work cannot exact-match a bare answer, and scoring it wrong
         # would manufacture failures rather than measure them.
-        got = final_number(answer)
+        boxed = boxed_answer(answer)
+        got = final_number(boxed if boxed is not None else answer)
         want = final_number(expected)
         if got is None or want is None:
             return 0.0

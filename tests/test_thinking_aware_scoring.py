@@ -101,3 +101,16 @@ def test_suite_budget_default_raised_for_thinking_models() -> None:
     assert suite.max_new_tokens == 256
     assert pe.ParentSuiteSpec.from_dict({"name": "s", "dimension": "coding",
                                          "dataset": "d.jsonl"}).max_new_tokens == 256
+
+
+def test_boxed_answer_wins_over_trailing_restatement() -> None:
+    # Real A3 GSM8K rows: the committed answer is boxed, then context is restated.
+    assert _score(r"**Answer:** Claire eats \boxed{7} dozens of eggs in 4 weeks.", "7", "final_number_match") == 1.0
+    assert _score(r"It is \boxed{8} cm shorter from 1:00 PM to 5:00 PM.", "8", "final_number_match") == 1.0
+    assert _score(r"so \boxed{\frac{3}{4}} then", "4", "final_number_match") == 1.0  # last number inside the box
+    assert _score(r"\boxed{12} was wrong, the answer is \boxed{15}.", "15", "final_number_match") == 1.0
+
+
+def test_no_box_keeps_the_last_number_rule() -> None:
+    assert _score("The total is 64 dollars", "64", "final_number_match") == 1.0
+    assert _score(r"\boxed{7 unbalanced, 9", "9", "final_number_match") == 1.0
