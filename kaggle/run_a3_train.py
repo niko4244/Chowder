@@ -76,9 +76,12 @@ def install() -> dict:
 
 
 def _mounted(pattern: str, mount: str) -> list[Path]:
-    # Mount layout differs across Kaggle images (/kaggle/input/<slug> vs nested
-    # owner paths), so search by name and keep hits under the requested mount.
-    return sorted(p for p in Path("/kaggle/input").rglob(pattern) if mount in p.parts)
+    # Mount layout differs across Kaggle images: /kaggle/input/<slug> or nested
+    # (datasets|notebooks)/<owner>/<slug> (seen 2026-09-27). Find the mount dir
+    # within three levels, then search only inside it -- never the whole input tree.
+    base = Path("/kaggle/input")
+    roots = [p for depth in ("", "*/", "*/*/", "*/*/*/") for p in base.glob(f"{depth}{mount}") if p.is_dir()]
+    return sorted(hit for root in roots for hit in root.rglob(pattern))
 
 
 def data() -> dict:

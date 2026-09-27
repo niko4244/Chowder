@@ -798,7 +798,7 @@ class TransformersPeftExecutor:
 
     @classmethod
     def _verify_resume_checkpoint(
-        cls, spec: TransformersPeftRunSpec, bound_inputs: Mapping[str, Any]
+        cls, spec: TransformersPeftRunSpec, bound_inputs: Mapping[str, Any], *, world_size: int = 1
     ) -> CheckpointInventory:
         """Reject a resume if any bound training input has changed.
 
@@ -851,7 +851,7 @@ class TransformersPeftExecutor:
         inventory = inventory_checkpoint(checkpoint_dir)
         # require_rng: without the RNG stream position, a resumed run silently
         # restarts the data order, which makes an "exact resume" claim unprovable.
-        assert_resumable(inventory, require_rng=True)
+        assert_resumable(inventory, require_rng=True, world_size=world_size)
         return inventory
 
     @staticmethod
@@ -1754,7 +1754,9 @@ class TransformersPeftExecutor:
         bound_inputs = self._bound_inputs(spec)
         resume_inventory: CheckpointInventory | None = None
         if spec.resume_from_checkpoint is not None:
-            resume_inventory = self._verify_resume_checkpoint(spec, bound_inputs)
+            resume_inventory = self._verify_resume_checkpoint(
+                spec, bound_inputs, world_size=max(1, active_accelerator_count)
+            )
         if spec.save_strategy != "no":
             self._write_checkpoint_manifest(Path(spec.output_dir) / "trainer", bound_inputs)
 

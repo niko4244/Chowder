@@ -111,6 +111,17 @@ def test_boxed_answer_wins_over_trailing_restatement() -> None:
     assert _score(r"\boxed{12} was wrong, the answer is \boxed{15}.", "15", "final_number_match") == 1.0
 
 
+def test_decimal_money_answers_normalise() -> None:
+    assert _score(r"\boxed{18.00}", "18", "final_number_match") == 1.0
+    assert _score(r"\boxed{\$18.50}", "18.5", "final_number_match") == 1.0
+    assert _score(r"\boxed{100}", "10", "final_number_match") == 0.0  # integers keep their zeros
+    assert _score(r"\boxed{0.0}", "0", "final_number_match") == 1.0
+
+
+def test_unbalanced_last_box_falls_back_to_the_previous_box() -> None:
+    assert _score(r"so \boxed{42} and 7 more ... \boxed{42", "42", "final_number_match") == 1.0
+
+
 def test_no_box_keeps_the_last_number_rule() -> None:
     assert _score("The total is 64 dollars", "64", "final_number_match") == 1.0
     assert _score(r"\boxed{7 unbalanced, 9", "9", "final_number_match") == 1.0

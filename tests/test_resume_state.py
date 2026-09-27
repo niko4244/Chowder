@@ -335,7 +335,25 @@ def test_ddp_per_rank_rng_state_counts_as_rng(tmp_path):
     inventory = inventory_checkpoint(ckpt)
     assert "rng_state" in inventory.present
     assert any("per-rank" in note for note in inventory.notes)
-    assert_resumable(inventory, require_rng=True)
+    assert_resumable(inventory, require_rng=True, world_size=2)
+
+
+def test_ddp_rng_state_requires_the_same_world_size(tmp_path):
+    ckpt = _write_state(tmp_path / "checkpoint-3")
+    for rank in (0, 1):
+        (ckpt / f"rng_state_{rank}.pth").write_bytes(b"state")
+    inventory = inventory_checkpoint(ckpt)
+    assert inventory.rng_ranks == 2
+    assert_resumable(inventory, require_rng=True, world_size=2)
+    with pytest.raises(IncompleteCheckpointError, match="2 process"):
+        assert_resumable(inventory, require_rng=True, world_size=1)  # 2xT4 checkpoint on one GPU
+
+
+def test_single_rng_state_refuses_a_ddp_resume(tmp_path):
+    ckpt = _write_state(tmp_path / "checkpoint-3", pieces=[*REQUIRED_STATE_PIECES, "rng_state"])
+    assert_resumable(inventory_checkpoint(ckpt), require_rng=True)
+    with pytest.raises(IncompleteCheckpointError, match="1 process"):
+        assert_resumable(inventory_checkpoint(ckpt), require_rng=True, world_size=2)
 
 
 def test_ddp_rng_state_with_a_gap_is_still_missing(tmp_path):

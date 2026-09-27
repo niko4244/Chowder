@@ -111,10 +111,10 @@ def final_number(text: str) -> str | None:
     if not matches:
         return None
     raw = matches[-1].replace(",", "")
-    if raw.endswith(".0"):
-        raw = raw[:-2]
-    if raw.endswith("."):
-        raw = raw[:-1]
+    if "." in raw:
+        # "18.00" == "18" and "18.50" == "18.5": money answers are often boxed
+        # with cents, and only a single trailing ".0" used to be stripped.
+        raw = raw.rstrip("0").rstrip(".")
     return raw or None
 
 
@@ -126,18 +126,21 @@ def boxed_answer(text: str) -> str | None:
     R1-distilled answer in the A3 GSM8K eval (2026-09-27), and it favoured base
     Qwen3, which usually ends on the box.
     """
-    start = (text or "").rfind("\\boxed{")
-    if start < 0:
-        return None
-    depth, i = 0, start + len("\\boxed")
-    for j in range(i, len(text)):
-        if text[j] == "{":
-            depth += 1
-        elif text[j] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[i + 1 : j]
-    return None  # unbalanced: no committed answer
+    text = text or ""
+    start = text.rfind("\\boxed{")
+    while start >= 0:
+        depth, i = 0, start + len("\\boxed")
+        for j in range(i, len(text)):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[i + 1 : j]
+        # Unbalanced (e.g. cut off): fall back to the previous box, not to the
+        # last-number rule over the whole answer.
+        start = text.rfind("\\boxed{", 0, start)
+    return None
 
 
 def score(

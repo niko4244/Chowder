@@ -83,6 +83,27 @@ def test_train_pull_is_scoped_and_never_fetches_checkpoints():
     assert wanted.search("cond_a3_kaggle/worker-result.json")
     assert not wanted.search("cond_a3_kaggle/adapter/trainer/checkpoint-4/optimizer.pt")
     assert not wanted.search("cond_a3_kaggle/adapter/trainer/checkpoint-4/adapter_model.safetensors")
+    assert wanted.search("cond_a3_kaggle/adapter/tokenizer.json")  # the final adapter's own copy
+    assert not wanted.search("cond_a3_kaggle/adapter/trainer/checkpoint-4/tokenizer.json")
+    assert wanted.search("cond_a3_kaggle/adapter/trainer/checkpoint-4/trainer_state.json")
+
+
+@pytest.mark.parametrize("devices,ok", [(None, False), ("0,1", True)])
+def test_train_pilot_refuses_a_batch_the_recipe_did_not_declare(tmp_path, monkeypatch, capsys, devices, ok):
+    tp = _load(REPO / "experiments" / "teacher_free_distill" / "train_pilot.py", "train_pilot_batch")
+    monkeypatch.setattr(tp, "check_device_exclusivity",
+                        lambda d: {"device_index": d, "device_name": "T4", "total_vram_gb": 14.6, "free_vram_gb": 14.4})
+    (tmp_path / "train.jsonl").write_text("{}\n", encoding="utf-8")
+    recipe = REPO / "experiments" / "teacher_free_distill" / "recipes" / "a3_sft_openr1_complete_kaggle_fp16.json"
+    argv = ["train_pilot", "--recipe", str(recipe), "--data-dir", str(tmp_path), "--yes", "--dry-run"]
+    monkeypatch.setattr("sys.argv", argv + (["--devices", devices] if devices else []))
+    with pytest.raises(SystemExit):
+        tp.main()  # the placeholder data always stops it at the pinned-digest check at the latest
+    err = capsys.readouterr().err
+    if ok:  # 1 x 16 x 2 = 32 passes the batch check and reaches the digest check
+        assert "effective batch" not in err and "dataset digest mismatch" in err
+    else:  # 1 x 16 x 1 = 16 on a recipe declaring 32
+        assert "effective batch 16 != recipe's declared effective_batch 32" in err
 
 
 def test_train_fails_when_the_pulled_adapter_does_not_verify(tmp_path):

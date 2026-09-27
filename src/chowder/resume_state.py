@@ -80,6 +80,9 @@ class CheckpointInventory:
     #: presented as an exact resume.
     max_steps: int | None = None
     notes: tuple[str, ...] = ()
+    #: 0 = a single rng_state.pth; N = DDP per-rank rng_state_0..N-1.pth, valid
+    #: only for a resume with exactly N processes.
+    rng_ranks: int = 0
 
     @property
     def is_complete(self) -> bool:
@@ -96,6 +99,7 @@ class CheckpointInventory:
             "global_step": self.global_step,
             "max_steps": self.max_steps,
             "random_state_files": list(self.random_state_files),
+            "rng_ranks": self.rng_ranks,
             "notes": list(self.notes),
         }
 
@@ -165,10 +169,13 @@ def inventory_checkpoint(directory: str | Path) -> CheckpointInventory:
                 notes.append(f"{name} is unreadable: {exc}")
                 continue
 
+    rng_ranks = 0
     if "rng_state" not in files:
         # Under DDP the Trainer writes one rng_state_<rank>.pth per process (and
         # reads them back the same way) instead of rng_state.pth. Accept only a
-        # contiguous, nonempty set from rank 0 -- a gap is an unknown stream.
+        # contiguous, nonempty set from rank 0 -- a gap is an unknown stream --
+        # and record the count: assert_resumable checks it against the resume's
+        # world size, since a different process count restores no RNG at all.
         ranks = {}
         for p in path.glob("rng_state_*.pth"):
             suffix = p.stem.rsplit("_", 1)[-1]
@@ -176,6 +183,7 @@ def inventory_checkpoint(directory: str | Path) -> CheckpointInventory:
                 ranks[int(suffix)] = int(p.stat().st_size)
         if ranks and sorted(ranks) == list(range(len(ranks))):
             files["rng_state"] = sum(ranks.values())
+            rng_ranks = len(ranks)
             notes.append(f"rng_state is per-rank: rng_state_0..{len(ranks) - 1}.pth ({len(ranks)} DDP processes)")
 
     global_step: int | None = None
@@ -218,11 +226,12 @@ def inventory_checkpoint(directory: str | Path) -> CheckpointInventory:
         random_state_files=random_state_files,
         max_steps=max_steps,
         notes=tuple(notes),
+        rng_ranks=rng_ranks,
     )
 
 
 def assert_resumable(
-    inventory: CheckpointInventory, *, require_rng: bool = False
+    inventory: CheckpointInventory, *, require_rng: bool = False, world_size: int = 1
 ) -> None:
     """Refuse a checkpoint that would silently start optimization over.
 
@@ -252,6 +261,15 @@ def assert_resumable(
             f"cannot resume from {inventory.directory}: rng_state.pth is missing, so "
             "the RNG stream position is unknown and the data order would silently "
             "restart. Required for an exact-resume comparison."
+        )
+    # Per-rank RNG (rng_state_<rank>.pth) restores only when the resume runs the
+    # same number of processes; a single rng_state.pth needs a single process.
+    saved_ranks = inventory.rng_ranks or 1
+    if require_rng and "rng_state" in inventory.present and saved_ranks != world_size:
+        raise IncompleteCheckpointError(
+            f"cannot resume from {inventory.directory}: its RNG state was saved by "
+            f"{saved_ranks} process(es) but this resume runs {world_size}; the Trainer "
+            "would restore no RNG stream and the data order would silently restart."
         )
 
 

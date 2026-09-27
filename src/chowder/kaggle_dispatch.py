@@ -204,7 +204,9 @@ def wait(record: KaggleJobRecord, *, runner: Runner = _default_runner, poll_seco
 #: What a training job pulls: the final adapter directory plus every record and
 #: log. Never the optimizer checkpoints -- a resuming kernel reads those on
 #: Kaggle directly, and pulling them made every full-output pull time out.
-TRAIN_PULL_PATTERN = r"(^|/)cond_a3_kaggle/adapter/[^/]+$|\.(json|log)$"
+#: tokenizer.json (~11 MB) is copied into every checkpoint; only the final
+#: adapter's copy (matched by the first branch) is pulled.
+TRAIN_PULL_PATTERN = r"(^|/)cond_a3_kaggle/adapter/[^/]+$|(?<!tokenizer)\.json$|\.log$"
 
 
 def pull_output(record: KaggleJobRecord, output_dir: Path, *, runner: Runner = _default_runner,

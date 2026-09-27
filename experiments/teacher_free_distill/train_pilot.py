@@ -245,8 +245,15 @@ def main() -> int:
         tr["max_steps"] = args.max_steps
     if args.resume_from_checkpoint is not None:
         config["backend"]["resume_from_checkpoint"] = str(args.resume_from_checkpoint.resolve())
+    effective = tr["batch_size"] * tr["gradient_accumulation_steps"] * len(devices)
     print(f"[batch] effective = {tr['batch_size']} x {tr['gradient_accumulation_steps']} x "
-          f"{len(devices)} device(s) = {tr['batch_size'] * tr['gradient_accumulation_steps'] * len(devices)}")
+          f"{len(devices)} device(s) = {effective}")
+    # DDP multiplies the batch by the device count, so the fp16 Kaggle recipe on
+    # one GPU (or the local recipe on two) would silently train a different run.
+    declared = recipe["training"].get("effective_batch")
+    if declared is not None and effective != int(declared):
+        ap.error(f"effective batch {effective} != recipe's declared effective_batch {declared}; "
+                 "adjust --devices / --micro-batch / --grad-accum")
     # The recipe may pin the dataset it was written for: refuse to train on
     # bytes the recipe never saw (an A2 claim about "the corrected dataset"
     # would otherwise be unenforceable).
@@ -396,7 +403,7 @@ def main() -> int:
         "authorization": {
             "operator_authorized": True,
             "authorized_on": "2026-09-25",
-            "device_exclusivity_check": exclusivity,
+            "device_exclusivity_check": exclusivity if len(per_device) == 1 else per_device,
         },
         "run_dir": str(run_dir),
         "artifact_ref": artifact.artifact_ref,

@@ -290,7 +290,9 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     resume_inventory = None
     if spec.resume_from_checkpoint is not None:
         resume_inventory = inventory_checkpoint(spec.resume_from_checkpoint)
-        assert_resumable(resume_inventory, require_rng=True)
+        # accelerate launch sets WORLD_SIZE on every rank; a plain launch is one process.
+        assert_resumable(resume_inventory, require_rng=True,
+                         world_size=int(os.environ.get("WORLD_SIZE", "1")))
 
     try:
         import torch
@@ -849,7 +851,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     publication_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
     publication_timer.__enter__()
     _save_with_lock_retry(lambda: model.save_pretrained(output_dir, safe_serialization=True))
-    tokenizer.save_pretrained(output_dir)
+    _save_with_lock_retry(lambda: tokenizer.save_pretrained(output_dir))
     publication_timer.__exit__()
 
     # P7: a resume that cannot be witnessed is refused. The adapter existing

@@ -27,7 +27,7 @@ def test_the_comma_bug_case_from_the_findings_scores_correct():
 @pytest.mark.parametrize("text,want", [
     ("the answer is 18", "18"),
     ("profit of $70,000", "70000"),
-    ("so 1,234.50 dollars", "1234.50"),
+    ("so 1,234.50 dollars", "1234.5"),  # trailing decimal zeros normalise, like gold "1234.5"
     ("result: -42", "-42"),
     ("it costs 8.0", "8"),            # trailing .0 normalised
     ("ends with 12.", "12"),          # trailing dot dropped
