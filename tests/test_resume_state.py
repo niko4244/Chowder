@@ -324,3 +324,24 @@ def test_inventory_is_frozen_evidence_not_a_live_handle(tmp_path):
     assert isinstance(inventory, CheckpointInventory)
     with pytest.raises(Exception):
         inventory.state = "complete"  # type: ignore[misc]
+
+
+def test_ddp_per_rank_rng_state_counts_as_rng(tmp_path):
+    # Kaggle 2xT4 proof-1 (2026-09-27) wrote rng_state_0.pth / rng_state_1.pth,
+    # never rng_state.pth, and the exact-resume guard refused it.
+    ckpt = _write_state(tmp_path / "checkpoint-3")
+    for rank in (0, 1):
+        (ckpt / f"rng_state_{rank}.pth").write_bytes(b"state")
+    inventory = inventory_checkpoint(ckpt)
+    assert "rng_state" in inventory.present
+    assert any("per-rank" in note for note in inventory.notes)
+    assert_resumable(inventory, require_rng=True)
+
+
+def test_ddp_rng_state_with_a_gap_is_still_missing(tmp_path):
+    ckpt = _write_state(tmp_path / "checkpoint-3")
+    for rank in (0, 2):
+        (ckpt / f"rng_state_{rank}.pth").write_bytes(b"state")
+    (ckpt / "rng_state_1.pth").write_bytes(b"")  # empty file is not a stream
+    with pytest.raises(IncompleteCheckpointError, match="rng_state"):
+        assert_resumable(inventory_checkpoint(ckpt), require_rng=True)

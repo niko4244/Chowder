@@ -165,6 +165,19 @@ def inventory_checkpoint(directory: str | Path) -> CheckpointInventory:
                 notes.append(f"{name} is unreadable: {exc}")
                 continue
 
+    if "rng_state" not in files:
+        # Under DDP the Trainer writes one rng_state_<rank>.pth per process (and
+        # reads them back the same way) instead of rng_state.pth. Accept only a
+        # contiguous, nonempty set from rank 0 -- a gap is an unknown stream.
+        ranks = {}
+        for p in path.glob("rng_state_*.pth"):
+            suffix = p.stem.rsplit("_", 1)[-1]
+            if suffix.isdigit() and p.is_file() and p.stat().st_size > 0:
+                ranks[int(suffix)] = int(p.stat().st_size)
+        if ranks and sorted(ranks) == list(range(len(ranks))):
+            files["rng_state"] = sum(ranks.values())
+            notes.append(f"rng_state is per-rank: rng_state_0..{len(ranks) - 1}.pth ({len(ranks)} DDP processes)")
+
     global_step: int | None = None
     max_steps: int | None = None
     if "trainer_state" in files:
