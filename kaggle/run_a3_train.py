@@ -111,21 +111,23 @@ def train(repo: str, data_dir: str, resume_from: str | None) -> dict:
     if JOB.get("max_steps"):
         cmd += ["--max-steps", str(JOB["max_steps"])]
     env = {"PYTHONPATH": f"{repo}/src", "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+    import hashlib
     import os
-    import shutil
 
     with open(WORK / "train.log", "w", encoding="utf-8") as log:
         rc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env={**os.environ, **env}).returncode
-    # Checkpoints land under a hidden .chowder/ run dir; copy them somewhere a
-    # later kernel is sure to see when this run is attached as its input.
-    kept = []
-    for ck in (WORK / "cond_a3_kaggle").rglob("checkpoint-*"):
-        if ck.is_dir():
-            shutil.copytree(ck, WORK / "checkpoints" / ck.name, dirs_exist_ok=True)
-            kept.append(ck.name)
+    # Kaggle exports hidden dirs, so checkpoints stay where the trainer wrote
+    # them (proof-2 resumed from adapter/trainer/checkpoint-3); a later kernel
+    # attached to this output finds them there.
+    out = WORK / "cond_a3_kaggle"
+    ckpts = sorted({p.name for p in out.rglob("checkpoint-*") if p.is_dir()})
     if rc != 0:
-        raise RuntimeError(f"train_pilot exited {rc}; see train.log (checkpoints kept: {kept})")
-    return {"rc": rc, "command": cmd, "checkpoints": sorted(kept)}
+        raise RuntimeError(f"train_pilot exited {rc}; see train.log (checkpoints: {ckpts})")
+    # The worker records no adapter digest; pin one here so the dispatcher can
+    # prove the pulled copy is the published one.
+    adapter = out / "adapter"
+    digests = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(adapter.iterdir()) if p.is_file()}
+    return {"rc": rc, "command": cmd, "checkpoints": ckpts, "adapter_sha256": digests}
 
 
 if __name__ == "__main__":

@@ -6,7 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from chowder.kaggle_dispatch import TRAIN_SCRIPT, KaggleDispatchError, main, render_job_script
+import hashlib
+import subprocess
+
+from chowder.kaggle_dispatch import (
+    TRAIN_PULL_PATTERN,
+    TRAIN_SCRIPT,
+    KaggleDispatchError,
+    main,
+    render_job_script,
+    verify_adapter,
+)
 from test_kaggle_dispatch import FakeKaggle
 
 REPO = Path(__file__).resolve().parents[1]
@@ -34,8 +44,55 @@ def test_render_refuses_a_template_without_one_placeholder(tmp_path):
         render_job_script(bad, {}, tmp_path / "out")
 
 
+def _write_train_output(dest: Path, weights: bytes = b"lora", record: bytes = b"lora") -> None:
+    adapter = dest / "cond_a3_kaggle" / "adapter"
+    adapter.mkdir(parents=True, exist_ok=True)
+    (adapter / "adapter_model.safetensors").write_bytes(weights)
+    digests = {"adapter_model.safetensors": hashlib.sha256(record).hexdigest()}
+    (dest / "a3_job.json").write_text(json.dumps({"stages": {"train": {"ok": True, "result": {"adapter_sha256": digests}}}}),
+                                      encoding="utf-8")
+
+
+class FakeTrainKaggle(FakeKaggle):
+    def __init__(self, weights: bytes = b"lora"):
+        super().__init__(["complete"])
+        self.weights = weights
+
+    def __call__(self, args):
+        args = list(args)
+        if args[2] == "output":
+            self.calls.append(args)
+            _write_train_output(Path(args[args.index("-p") + 1]), weights=self.weights)
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return super().__call__(args)
+
+
+def test_verify_adapter_accepts_the_recorded_bytes_and_rejects_others(tmp_path):
+    _write_train_output(tmp_path)
+    assert verify_adapter(tmp_path) == {"verified_files": 1}
+    _write_train_output(tmp_path / "bad", weights=b"truncated")
+    with pytest.raises(KaggleDispatchError, match="does not match"):
+        verify_adapter(tmp_path / "bad")
+
+
+def test_train_pull_is_scoped_and_never_fetches_checkpoints():
+    import re
+
+    wanted = re.compile(TRAIN_PULL_PATTERN)
+    assert wanted.search("cond_a3_kaggle/adapter/adapter_model.safetensors")
+    assert wanted.search("cond_a3_kaggle/worker-result.json")
+    assert not wanted.search("cond_a3_kaggle/adapter/trainer/checkpoint-4/optimizer.pt")
+    assert not wanted.search("cond_a3_kaggle/adapter/trainer/checkpoint-4/adapter_model.safetensors")
+
+
+def test_train_fails_when_the_pulled_adapter_does_not_verify(tmp_path):
+    rc = main(["train", "--owner", "nik", "--commit", SHA, "--dataset", "nik/chowder-openr1-pilot",
+               "--work-dir", str(tmp_path), "--poll-seconds", "0"], runner=FakeTrainKaggle(weights=b"cut short"))
+    assert rc == 1
+
+
 def test_train_push_attaches_dataset_and_resume_sources(tmp_path):
-    fake = FakeKaggle(["complete"], output_files=("a3_job.json",))
+    fake = FakeTrainKaggle()
     rc = main(["train", "--owner", "nik", "--commit", SHA, "--dataset", "nik/chowder-openr1-pilot",
                "--resume-kernel", "nik/chowder-a3-train-1", "--max-steps", "3", "--work-dir", str(tmp_path), "--poll-seconds", "0"],
               runner=fake)
@@ -46,6 +103,10 @@ def test_train_push_attaches_dataset_and_resume_sources(tmp_path):
     staged = _load(next(tmp_path.rglob("kernel/run_a3_train.py")), "staged_a3")
     assert staged.JOB["resume_mount"] == "chowder-a3-train-1" and staged.JOB["commit"] == SHA
     assert staged.JOB["max_steps"] == 3
+    pull = next(c for c in fake.calls if c[2] == "output")
+    assert pull[pull.index("--file-pattern") + 1] == TRAIN_PULL_PATTERN
+    record = json.loads(next(tmp_path.rglob("job_record.json")).read_text(encoding="utf-8"))
+    assert record["verification"] == {"verified_files": 1}
 
 
 def test_train_refuses_a_short_commit(tmp_path):

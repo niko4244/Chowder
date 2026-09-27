@@ -23,6 +23,7 @@ Boundaries
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -112,6 +113,7 @@ class KaggleJobRecord:
     output_files: list[str] = field(default_factory=list)
     push_stdout: str = ""
     error: str | None = None
+    verification: dict | None = None
 
     @property
     def wall_seconds(self) -> float | None:
@@ -199,9 +201,17 @@ def wait(record: KaggleJobRecord, *, runner: Runner = _default_runner, poll_seco
         sleep(poll_seconds)
 
 
-def pull_output(record: KaggleJobRecord, output_dir: Path, *, runner: Runner = _default_runner) -> KaggleJobRecord:
+#: What a training job pulls: the final adapter directory plus every record and
+#: log. Never the optimizer checkpoints -- a resuming kernel reads those on
+#: Kaggle directly, and pulling them made every full-output pull time out.
+TRAIN_PULL_PATTERN = r"(^|/)cond_a3_kaggle/adapter/[^/]+$|\.(json|log)$"
+
+
+def pull_output(record: KaggleJobRecord, output_dir: Path, *, runner: Runner = _default_runner,
+                file_pattern: str | None = None) -> KaggleJobRecord:
     output_dir.mkdir(parents=True, exist_ok=True)
-    _kaggle(runner, "kernels", "output", record.kernel_ref, "-p", str(output_dir), "-o", "-q")
+    pattern = ("--file-pattern", file_pattern) if file_pattern else ()
+    _kaggle(runner, "kernels", "output", record.kernel_ref, "-p", str(output_dir), "-o", "-q", *pattern)
     record.output_dir = str(output_dir)
     record.output_files = sorted(
         str(p.relative_to(output_dir)) for p in output_dir.rglob("*") if p.is_file()
@@ -209,9 +219,28 @@ def pull_output(record: KaggleJobRecord, output_dir: Path, *, runner: Runner = _
     return record
 
 
+def verify_adapter(output_dir: Path) -> dict:
+    """Re-hash the pulled adapter against the digests the kernel recorded."""
+    job = json.loads((output_dir / "a3_job.json").read_text(encoding="utf-8"))
+    expected = (job.get("stages", {}).get("train", {}).get("result") or {}).get("adapter_sha256")
+    if not expected:
+        raise KaggleDispatchError("a3_job.json records no adapter_sha256; cannot verify the pulled adapter")
+    adapter = output_dir / "cond_a3_kaggle" / "adapter"
+    bad = {}
+    for name, digest in expected.items():
+        path = adapter / name
+        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+        if actual != digest:
+            bad[name] = {"expected": digest, "actual": actual}
+    if bad:
+        raise KaggleDispatchError(f"pulled adapter does not match the kernel's digests: {bad}")
+    return {"verified_files": len(expected)}
+
+
 def run_job(spec: KaggleJobSpec, work_dir: Path, *, runner: Runner = _default_runner,
             poll_seconds: float = 60.0, clock: Callable[[], float] = time.time,
-            sleep: Callable[[float], None] = time.sleep) -> KaggleJobRecord:
+            sleep: Callable[[float], None] = time.sleep, pull_pattern: str | None = None,
+            verify: Callable[[Path], dict] | None = None) -> KaggleJobRecord:
     """push -> wait -> pull, writing `job_record.json` beside the output.
 
     Output (including the kernel log) is pulled on failure too, so the
@@ -220,9 +249,11 @@ def run_job(spec: KaggleJobSpec, work_dir: Path, *, runner: Runner = _default_ru
     record = push(spec, work_dir / "kernel", runner=runner, clock=clock)
     wait(record, runner=runner, poll_seconds=poll_seconds, clock=clock, sleep=sleep)
     try:
-        pull_output(record, work_dir / "output", runner=runner)
-    except KaggleDispatchError as exc:
-        record.error = (record.error + "; " if record.error else "") + f"output pull failed: {exc}"
+        pull_output(record, work_dir / "output", runner=runner, file_pattern=pull_pattern)
+        if verify is not None and record.status == TERMINAL_OK:
+            record.verification = verify(work_dir / "output")
+    except (KaggleDispatchError, OSError, ValueError) as exc:
+        record.error = (record.error + "; " if record.error else "") + f"output pull/verify failed: {exc}"
     (work_dir / "job_record.json").write_text(json.dumps(record.to_dict(), indent=2), encoding="utf-8")
     if record.status != TERMINAL_OK or record.error:
         raise KaggleDispatchError(
@@ -324,7 +355,10 @@ def main(argv: Sequence[str] | None = None, *, runner: Runner = _default_runner)
                 model_sources=tuple(args.model_source),
             )
         print(f"pushing {spec.kernel_ref} ({spec.accelerator}, cap {args.timeout_minutes} min) -> {work_dir}")
-        record = run_job(spec, work_dir, runner=runner, poll_seconds=args.poll_seconds)
+        train = args.command == "train"
+        record = run_job(spec, work_dir, runner=runner, poll_seconds=args.poll_seconds,
+                         pull_pattern=TRAIN_PULL_PATTERN if train else None,
+                         verify=verify_adapter if train else None)
     except (KaggleDispatchError, FileNotFoundError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
