@@ -35,6 +35,8 @@ from typing import Callable, Sequence
 
 #: Staged kernel script for the 2xT4 worker smoke test (repo checkout / editable install).
 SMOKE_SCRIPT = Path(__file__).resolve().parents[2] / "kaggle" / "smoke_qwen3_30b_a3b.py"
+#: Staged kernel script for A3 teacher-free training; its JOB block is rendered per push.
+TRAIN_SCRIPT = Path(__file__).resolve().parents[2] / "kaggle" / "run_a3_train.py"
 
 #: `machine_shape` / `--accelerator` value for the "GPU T4 x2" notebook
 #: option (the only GPU shape since P100 retirement on 2026-09-15).
@@ -228,6 +230,24 @@ def run_job(spec: KaggleJobSpec, work_dir: Path, *, runner: Runner = _default_ru
     return record
 
 
+_JOB_PLACEHOLDER = "__CHOWDER_JOB__"
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def render_job_script(template: Path, job: dict, out_dir: Path) -> Path:
+    """Bake `job` into a kernel script: only the code file runs on Kaggle."""
+    text = template.read_text(encoding="utf-8")
+    if text.count(_JOB_PLACEHOLDER) != 1:
+        raise KaggleDispatchError(f"{template} must contain {_JOB_PLACEHOLDER} exactly once")
+    payload = json.dumps(job, sort_keys=True)
+    if "'''" in payload:
+        raise KaggleDispatchError("job payload cannot contain ''' (it is embedded in a raw string)")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / template.name
+    out.write_text(text.replace(_JOB_PLACEHOLDER, payload), encoding="utf-8")
+    return out
+
+
 def quota(*, runner: Runner = _default_runner) -> str:
     """Raw `kaggle quota` text (weekly GPU hours used / remaining)."""
     return _kaggle(runner, "quota").strip()
@@ -246,6 +266,18 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--poll-seconds", type=float, default=60.0)
     smoke.add_argument("--model-source", action="append", default=[], help="Kaggle Models mount, repeatable")
     smoke.add_argument("--work-dir", default="runs/kaggle")
+    train = sub.add_parser("train", help="Push the A3 teacher-free training kernel (2xT4 fp16 DDP), wait, pull output")
+    train.add_argument("--owner", default=None, help="Kaggle username (default: $KAGGLE_USERNAME)")
+    train.add_argument("--slug", default="chowder-a3-train")
+    train.add_argument("--commit", required=True, help="full 40-hex Chowder commit the kernel checks out")
+    train.add_argument("--repo-url", default="https://github.com/niko4244/Chowder.git")
+    train.add_argument("--dataset", required=True, help="private Kaggle dataset owner/slug holding train.jsonl + dev.jsonl")
+    train.add_argument("--recipe", default="experiments/teacher_free_distill/recipes/a3_sft_openr1_complete_kaggle_fp16.json")
+    train.add_argument("--resume-kernel", default=None, help="owner/slug of a previous run whose checkpoints to resume")
+    train.add_argument("--save-steps", type=int, default=10)
+    train.add_argument("--timeout-minutes", type=int, default=690, help="Hard cap charged to quota (<= 720)")
+    train.add_argument("--poll-seconds", type=float, default=120.0)
+    train.add_argument("--work-dir", default="runs/kaggle")
     return parser
 
 
@@ -261,16 +293,31 @@ def main(argv: Sequence[str] | None = None, *, runner: Runner = _default_runner)
         if not owner:
             print("--owner (or KAGGLE_USERNAME) is required", file=sys.stderr)
             return 2
-        script = Path(args.script)
-        if not script.is_file():
-            print(f"smoke script not found: {script}", file=sys.stderr)
-            return 2
-        spec = KaggleJobSpec(
-            owner=owner, slug=args.slug, title=args.slug.replace("-", " ").title(),
-            script=script, timeout_seconds=args.timeout_minutes * 60,
-            model_sources=tuple(args.model_source),
-        )
         work_dir = Path(args.work_dir) / time.strftime("%Y%m%d-%H%M%S")
+        if args.command == "train":
+            if not _COMMIT_RE.match(args.commit):
+                print("--commit must be a full 40-hex SHA (the kernel verifies it after checkout)", file=sys.stderr)
+                return 2
+            job = {"repo_url": args.repo_url, "commit": args.commit, "recipe": args.recipe,
+                   "data_mount": args.dataset.split("/")[-1], "save_steps": args.save_steps,
+                   "resume_mount": args.resume_kernel.split("/")[-1] if args.resume_kernel else None}
+            spec = KaggleJobSpec(
+                owner=owner, slug=args.slug, title=args.slug.replace("-", " ").title(),
+                script=render_job_script(TRAIN_SCRIPT, job, work_dir / "rendered"),
+                timeout_seconds=args.timeout_minutes * 60,
+                dataset_sources=(args.dataset,),
+                kernel_sources=(args.resume_kernel,) if args.resume_kernel else (),
+            )
+        else:
+            script = Path(args.script)
+            if not script.is_file():
+                print(f"smoke script not found: {script}", file=sys.stderr)
+                return 2
+            spec = KaggleJobSpec(
+                owner=owner, slug=args.slug, title=args.slug.replace("-", " ").title(),
+                script=script, timeout_seconds=args.timeout_minutes * 60,
+                model_sources=tuple(args.model_source),
+            )
         print(f"pushing {spec.kernel_ref} ({spec.accelerator}, cap {args.timeout_minutes} min) -> {work_dir}")
         record = run_job(spec, work_dir, runner=runner, poll_seconds=args.poll_seconds)
     except (KaggleDispatchError, FileNotFoundError) as exc:

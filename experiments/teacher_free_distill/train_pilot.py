@@ -150,7 +150,9 @@ def build_resolved_config(
             "messages_field": "messages",
             "max_length": int(t["max_length"]),
             "quantization": "none",
-            "precision": "bf16" if t["dtype"] == "bfloat16" else t["dtype"],
+            # The worker accepts short names only; "float16" used to pass through
+            # verbatim and fail its precision check.
+            "precision": {"bfloat16": "bf16", "float16": "fp16", "float32": "fp32"}.get(t["dtype"], t["dtype"]),
             "lora": {
                 "r": int(t["lora_r"]),
                 "alpha": int(t["lora_alpha"]),
@@ -205,7 +207,15 @@ def main() -> int:
                     help="override recipe gradient_accumulation")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the resolved plan without launching the worker")
+    ap.add_argument("--devices", default=None,
+                    help="comma-separated CUDA indices; more than one trains DDP via accelerate launch "
+                         "(effective batch = micro_batch x grad_accum x devices)")
+    ap.add_argument("--save-steps", type=int, default=0,
+                    help="checkpoint every N optimizer steps (for resuming across session limits)")
+    ap.add_argument("--resume-from-checkpoint", type=Path, default=None,
+                    help="HF Trainer checkpoint-N directory to resume from")
     args = ap.parse_args()
+    devices = [int(d) for d in args.devices.split(",")] if args.devices else [args.device]
 
     if not args.yes:
         ap.error("--yes is required: records operator authorization for GPU use")
@@ -216,13 +226,23 @@ def main() -> int:
                                        "A3_supervised_distillation_complete_traces"):
         ap.error(f"unexpected recipe condition: {recipe.get('condition')}")
 
-    exclusivity = check_device_exclusivity(args.device)
-    print(f"[exclusivity] OK: {json.dumps({k: v for k, v in exclusivity.items() if k != 'compute_apps_snapshot'}, indent=2)}")
+    per_device = [check_device_exclusivity(d) for d in devices]
+    exclusivity = per_device[0]
+    for ex in per_device:
+        print(f"[exclusivity] OK: {json.dumps({k: v for k, v in ex.items() if k != 'compute_apps_snapshot'}, indent=2)}")
 
     config = build_resolved_config(
         recipe, args.data_dir,
         micro_batch=args.micro_batch, grad_accum=args.grad_accum,
     )
+    tr = config["backend"]["training"]
+    config["backend"]["runtime"]["active_accelerator_count"] = len(devices)
+    if args.save_steps:
+        tr["save_strategy"], tr["save_steps"] = "steps", args.save_steps
+    if args.resume_from_checkpoint is not None:
+        config["backend"]["resume_from_checkpoint"] = str(args.resume_from_checkpoint.resolve())
+    print(f"[batch] effective = {tr['batch_size']} x {tr['gradient_accumulation_steps']} x "
+          f"{len(devices)} device(s) = {tr['batch_size'] * tr['gradient_accumulation_steps'] * len(devices)}")
     # The recipe may pin the dataset it was written for: refuse to train on
     # bytes the recipe never saw (an A2 claim about "the corrected dataset"
     # would otherwise be unenforceable).
@@ -256,7 +276,7 @@ def main() -> int:
     print(f"[data] train sha256 = {config['backend']['dataset_sha256']}")
 
     # Pin this run to one device; the worker subprocess inherits the env.
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(d) for d in devices)
     # Reduce fragmentation risk next to the operator's resident inference
     # servers; the static memory plan (14.9 GiB) assumed a quieter device.
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -289,7 +309,7 @@ def main() -> int:
         pcie_gbps=12.0,
         ram_gbps=40.0,
         nvme_gbps=3.0,
-        accelerator_vram_gb=(exclusivity["total_vram_gb"],),
+        accelerator_vram_gb=tuple(ex["total_vram_gb"] for ex in per_device),
     )
     context = ExecutionContext(
         hardware=hardware,

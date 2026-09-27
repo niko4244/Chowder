@@ -1,0 +1,85 @@
+{
+  "condition": "A3_supervised_distillation_complete_traces",
+  "description": "Kaggle 2xT4 variant of A3: same data, objective and hyperparameters, but fp16 (T4 / compute capability 7.5 has no bf16; the worker refuses bf16 there) and DDP over both T4s with gradient_accumulation 16 so the effective batch stays 1 x 16 x 2 = 32. Run with --devices 0,1. fp16 changes training numerics, so an A3-kaggle adapter is compared to base on its own, never pooled with the local bf16 A3 run.",
+  "backend": "chowder.backends.transformers_peft.TransformersPeftExecutor",
+  "student": "qwen3-1.7b",
+  "student_revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+  "data": {
+    "train": "openr1_pilot/train.jsonl",
+    "dev": "openr1_pilot/dev.jsonl",
+    "manifest": "openr1_pilot/manifest.json",
+    "expected_train_sha256": "0058df1bf53efbfedde7510f045a094c4a0506c73b11e4bd0a07253de9bd28f9",
+    "expected_dev_sha256": "ac7629d3da3e45338bdfd8d3738e7fdf289fbade1c9ce2d263c6fbfa0b2decda",
+    "integrity_note": "2000 train / 200 dev problems from shard 00000 (sha256 ccc3a95e...) @ e4e141ec; built by build_openr1_pilot.py; independent audit: 0 would-truncate, 0 incomplete targets, 0 train/dev overlap, 0 overlap with GSM8K test / MATH-500; train tokens p50 2583, p90 3725, max 4092",
+    "contract": "messages chat rows (chowder training_data validation)"
+  },
+  "training": {
+    "objective": "causal_lm_completion_only",
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj"
+    ],
+    "learning_rate": 0.0002,
+    "scheduler": "cosine",
+    "warmup_ratio": 0.03,
+    "epochs": 2,
+    "micro_batch": 1,
+    "gradient_accumulation": 16,
+    "max_length": 4096,
+    "seed": 2026,
+    "dtype": "float16",
+    "gradient_checkpointing": true
+  },
+  "comparability": {
+    "unchanged_from_a2": [
+      "student",
+      "student_revision",
+      "objective",
+      "lora_r",
+      "lora_alpha",
+      "lora_dropout",
+      "target_modules",
+      "learning_rate",
+      "scheduler",
+      "warmup_ratio",
+      "epochs",
+      "effective_batch_size_32",
+      "seed",
+      "gradient_checkpointing"
+    ],
+    "deliberately_changed": {
+      "dataset": "chunked OT3 continuations -> complete, answer-verified OpenR1-Math R1 traces",
+      "max_length": "2048 -> 4096 (complete traces; zero rows truncated)",
+      "precision": "bf16 -> fp16 (T4 has no bf16)",
+      "parallelism": "1 GPU x grad_accum 32 -> 2 GPU DDP x grad_accum 16 (effective 32)"
+    },
+    "evaluation": "paired against the untouched base on the pinned GSM8K set (eval_gsm8k2048, EOS-gated scorer) plus MATH-500; promotion requires the paired CI above zero AND no drop in EOS rate; decision always requires_operator_review"
+  },
+  "authorization": {
+    "gpu_required": true,
+    "operator_approval_required": true,
+    "status": "awaiting_operator_approval",
+    "device_exclusivity_required": "no other Chowder campaign may hold the target device"
+  },
+  "outputs": {
+    "adapter": "/kaggle/working/cond_a3_kaggle/adapter",
+    "note": "2*ceil(2000/32)=126 optimizer steps"
+  },
+  "provenance_rules": {
+    "from_untouched_base": "training must start from Qwen/Qwen3-1.7B @ 70d244cc, never from the Condition A adapter",
+    "no_synthetic_success": "no metric may be derived from anything but measured artifacts",
+    "no_auto_promotion": "the recorded decision is always requires_operator_review"
+  },
+  "runtime_target": {
+    "platform": "kaggle",
+    "accelerator": "NvidiaTeslaT4 x2",
+    "devices": "0,1",
+    "session_cap_hours": 12,
+    "resume": "--save-steps + --resume-from-checkpoint across sessions"
+  }
+}
