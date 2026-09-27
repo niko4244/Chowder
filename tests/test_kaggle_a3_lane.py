@@ -123,3 +123,24 @@ def test_kaggle_recipe_keeps_effective_batch_and_maps_fp16(tmp_path):
     assert backend["precision"] == "fp16"
     tr = backend["training"]
     assert tr["batch_size"] * tr["gradient_accumulation_steps"] * 2 == 32
+
+
+def test_adapter_save_retries_only_a_windows_lock():
+    from chowder.backends.transformers_worker import _save_with_lock_retry
+
+    calls, waits = [], []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("Error while serializing: I/O error: ... (os error 32)")
+
+    _save_with_lock_retry(flaky, sleep=waits.append)
+    assert len(calls) == 3 and waits == [2.0, 4.0]
+
+    def broken():
+        raise RuntimeError("disk full")
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        _save_with_lock_retry(broken, sleep=waits.append)
+    assert len(waits) == 2  # no retry for a different error

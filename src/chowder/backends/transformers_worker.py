@@ -239,6 +239,28 @@ def _cuda_resource_snapshot(torch: Any, model: Any, trainer: Any) -> dict[str, A
     }
 
 
+def _save_with_lock_retry(save, *, attempts: int = 6, first_wait: float = 2.0, sleep=time.sleep) -> None:
+    """Run ``save``, retrying while Windows reports the target locked.
+
+    2026-09-27: a 5.8 h A3 run finished training and then lost its adapter
+    because the safetensors temp->final rename hit "os error 32" (file in use
+    by another process -- typically an AV/indexer scan of the fresh file).
+    Only that lock is retried; every other failure raises at once.
+    """
+    for attempt in range(attempts):
+        try:
+            save()
+            return
+        except Exception as exc:  # noqa: BLE001 -- SafetensorError is not an OSError subclass
+            locked = getattr(exc, "winerror", None) == 32 or "os error 32" in str(exc)
+            if not locked or attempt == attempts - 1:
+                raise
+            wait = first_wait * 2**attempt
+            print(f"[save] target locked (os error 32); retry {attempt + 1}/{attempts - 1} in {wait:.0f}s",
+                  file=sys.stderr, flush=True)
+            sleep(wait)
+
+
 def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     """Returns None on non-main ranks under multi-GPU DDP -- only the main
     process (trainer.is_world_process_zero()) produces a result; see the
@@ -826,7 +848,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         return None
     publication_timer = PhaseTimer(synchronize=cuda_synchronize(torch))
     publication_timer.__enter__()
-    model.save_pretrained(output_dir, safe_serialization=True)
+    _save_with_lock_retry(lambda: model.save_pretrained(output_dir, safe_serialization=True))
     tokenizer.save_pretrained(output_dir)
     publication_timer.__exit__()
 
