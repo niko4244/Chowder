@@ -268,7 +268,12 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                         row_score = (
                             observed
                             if observed is not None
-                            else _score(prediction, expected, suite.scoring)
+                            else _score(
+                                prediction,
+                                expected,
+                                suite.scoring,
+                                finished=observation["eos_terminated"],
+                            )
                         )
                         correct += row_score
                         output.write(

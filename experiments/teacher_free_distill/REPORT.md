@@ -54,16 +54,23 @@ No new GPU training launched (A2 `awaiting_operator_approval`); no inference ser
 
 Both final-split arms ran under the frozen protocol on GPU 0 (RTX 5060 Ti; resident inference servers untouched; identity-verified workers; offline HF cache). Raw per-problem artifacts: `eval_run/results/{base,condition_a}__final/` (predictions, fingerprints, result.json with adapter liveness and lifecycle telemetry).
 
-| arm | rows | finished within budget | hits | accuracy | peak VRAM | measured GPU-h |
+> **CORRECTION (2026-09-26): this comparison is INVALID and supports no quality claim.** The +11.40-point delta below is a scorer artifact, not a model improvement. An earlier version of this section said Condition A "finished within budget on 120/120" and that "the SFT measurably taught budget completion" — both statements are false and are retracted. The original numbers are kept only as a record of what the broken scorer produced.
+
+| arm | rows | EOS-terminated (actually finished) | generated tokens | scorer hits | peak VRAM | measured GPU-h |
 |---|---|---|---|---|---|---|
-| base (Qwen3-1.7B @ `70d244cc…`) | 120 | **0** (0 closed `</think>`) | 0 | **0.0 %** | 3.77 GB | 2.34 |
-| Condition A (digest-verified adapter; 224/224 LoRA keys live, all B nonzero) | 120 | **120** | 14 | **11.67 %** | 3.80 GB | 3.68 |
+| base (Qwen3-1.7B @ `70d244cc…`) | 120 | **0** | 1024 on every row | 0 | 3.77 GB | 2.34 |
+| Condition A (digest-verified adapter; 224/224 LoRA keys live, all B nonzero) | 120 | **0** | 1024 on every row | 14 (invalid, see below) | 3.80 GB | 3.68 |
 
-**Paired comparison** (`paired_comparison_final.json`; 10 000-resample percentile bootstrap, seed 2026): mean delta **+11.40 points** (Condition A − base), **13 wins / 0 losses / 101 ties**, 95 % CI **[+6.14, +17.54]**, on **114** of 120 problems — 6 rows excluded and recorded (`excluded_rows`) because 3 prompts appear twice in the eval set with **conflicting teacher golds** (e.g. `998899` vs `1`), so those rows cannot decide which arm was right. Decision: `requires_operator_review`.
+What the raw outputs (`eval_run/results/*/predictions-holdout_final.jsonl`) actually show:
 
-Mechanism, from the raw outputs: the untouched base never closed a thinking block inside the 1024-token budget on any problem — the think-aware scorer honestly scores an unclosed `<think>` as a miss — while Condition A closed its reasoning within budget on **120/120** problems. The SFT measurably taught budget completion; 14 of those completions landed the teacher's number.
+1. **Neither arm finished any problem.** `eos_terminated` is false on 240/240 rows; every row stopped at exactly `max_new_tokens` = 1024.
+2. **Condition A's "closed `</think>`" is an empty block.** Every Condition A output begins `<think>\n\n</think>\n\n<think> Okay, …` — the `</think>` sits at character 9, then the model reopens `<think>` and reasons until truncation. The think-aware scorer saw a closed block and scored the truncated text; the base's single unclosed block was scored a miss. The two arms were not scored under the same effective rule.
+3. **The 14 hits are the last number of mid-sentence truncated text.** `final_number_match` takes the final number in the scored text, and the golds are dominated by small integers (`1` is the gold on 31/120 problems, `2` on 20). Hit golds: `1`×9, `2`×3, `0`×1, `-1`×1. Example hit: text truncated at "…reduces the degree of the first polynomial by 1 (since the remainder's degree is less than the" scored correct against gold `1`.
+4. **The eval set is not a numeric-answer benchmark.** The final split is competitive-programming / code-golf prompts from OT3; "golds" are numbers extracted from the teacher's own traces (QwQ-32B), and 3 prompts appear twice with conflicting golds.
 
-Limitations, stated plainly: absolute hit rate is low (11.7 %) and the delta is dominated by budget completion rather than reasoning accuracy; golds come from the corpus's own teacher traces (QwQ-32B), not an external benchmark; greedy decoding at one budget, n=114; the chat-contract dev split was not executable (no gold answers) and is recorded `not_executable_needs_eval_contract`. No claim beyond this comparison is made, and training loss played no part in it.
+The original paired numbers (`paired_comparison_final.json`: +11.40 points, 13/0/101, CI [+6.14, +17.54], n=114) are retained for the record and must not be cited.
+
+**Required before any re-run can support a claim:** (a) a row scores only if `eos_terminated` is true and the answer lies outside a single closed, non-empty think block — an empty `<think></think>` followed by a reopened `<think>` is a miss; (b) an eval set with real answer keys — the pinned external GSM8K set (`gsm8k_eval/`, `openai/gsm8k` test @ `740312ad…`) is the next measurement; (c) a token budget at which the base can finish, reported alongside the EOS rate for each arm. Decision remains `requires_operator_review`; training loss played no part in any of this.
 
 ---
 
