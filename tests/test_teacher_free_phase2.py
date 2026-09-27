@@ -569,3 +569,14 @@ def test_dev_prompt_texts_cover_dev_and_train(tmp_path):
     (tmp_path / "train.jsonl").write_text(msg_row("train question") + "\n", encoding="utf-8")
     texts = final_eval.dev_prompt_texts(tmp_path)
     assert "dev question" in texts and "train question" in texts
+
+
+def test_gsm8k_gold_extraction_is_marker_derived():
+    """External golds come from the dataset's #### marker, normalized;
+    a lone comma is not a number."""
+    gsm = load("gsm8k_eval_set")
+    assert gsm.gold_from_answer("some reasoning\n#### 1,024") == "1024"
+    assert gsm.gold_from_answer("#### 72") == "72"
+    assert gsm.gold_from_answer("#### -3.5") == "-3.5"
+    assert gsm.gold_from_answer("#### ,") is None
+    assert gsm.gold_from_answer("no marker at all") is None
