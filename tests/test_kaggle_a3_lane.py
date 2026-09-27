@@ -37,7 +37,7 @@ def test_render_refuses_a_template_without_one_placeholder(tmp_path):
 def test_train_push_attaches_dataset_and_resume_sources(tmp_path):
     fake = FakeKaggle(["complete"], output_files=("a3_job.json",))
     rc = main(["train", "--owner", "nik", "--commit", SHA, "--dataset", "nik/chowder-openr1-pilot",
-               "--resume-kernel", "nik/chowder-a3-train-1", "--work-dir", str(tmp_path), "--poll-seconds", "0"],
+               "--resume-kernel", "nik/chowder-a3-train-1", "--max-steps", "3", "--work-dir", str(tmp_path), "--poll-seconds", "0"],
               runner=fake)
     assert rc == 0
     meta = json.loads(next(tmp_path.rglob("kernel-metadata.json")).read_text(encoding="utf-8"))
@@ -45,6 +45,7 @@ def test_train_push_attaches_dataset_and_resume_sources(tmp_path):
     assert meta["kernel_sources"] == ["nik/chowder-a3-train-1"]
     staged = _load(next(tmp_path.rglob("kernel/run_a3_train.py")), "staged_a3")
     assert staged.JOB["resume_mount"] == "chowder-a3-train-1" and staged.JOB["commit"] == SHA
+    assert staged.JOB["max_steps"] == 3
 
 
 def test_train_refuses_a_short_commit(tmp_path):

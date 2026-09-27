@@ -214,6 +214,8 @@ def main() -> int:
                     help="checkpoint every N optimizer steps (for resuming across session limits)")
     ap.add_argument("--resume-from-checkpoint", type=Path, default=None,
                     help="HF Trainer checkpoint-N directory to resume from")
+    ap.add_argument("--max-steps", type=int, default=-1,
+                    help="stop after N optimizer steps (plumbing proofs only; the result is not an A3 run)")
     args = ap.parse_args()
     devices = [int(d) for d in args.devices.split(",")] if args.devices else [args.device]
 
@@ -239,6 +241,8 @@ def main() -> int:
     config["backend"]["runtime"]["active_accelerator_count"] = len(devices)
     if args.save_steps:
         tr["save_strategy"], tr["save_steps"] = "steps", args.save_steps
+    if args.max_steps > 0:
+        tr["max_steps"] = args.max_steps
     if args.resume_from_checkpoint is not None:
         config["backend"]["resume_from_checkpoint"] = str(args.resume_from_checkpoint.resolve())
     print(f"[batch] effective = {tr['batch_size']} x {tr['gradient_accumulation_steps']} x "

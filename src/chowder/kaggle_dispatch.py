@@ -278,6 +278,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--recipe", default="experiments/teacher_free_distill/recipes/a3_sft_openr1_complete_kaggle_fp16.json")
     train.add_argument("--resume-kernel", default=None, help="owner/slug of a previous run whose checkpoints to resume")
     train.add_argument("--save-steps", type=int, default=10)
+    train.add_argument("--max-steps", type=int, default=None, help="cap optimizer steps (plumbing proofs only)")
     train.add_argument("--timeout-minutes", type=int, default=690, help="Hard cap charged to quota (<= 720)")
     train.add_argument("--poll-seconds", type=float, default=120.0)
     train.add_argument("--work-dir", default="runs/kaggle")
@@ -303,6 +304,7 @@ def main(argv: Sequence[str] | None = None, *, runner: Runner = _default_runner)
                 return 2
             job = {"repo_url": args.repo_url, "commit": args.commit, "recipe": args.recipe,
                    "data_mount": args.dataset.split("/")[-1], "save_steps": args.save_steps,
+                   "max_steps": args.max_steps,
                    "resume_mount": args.resume_kernel.split("/")[-1] if args.resume_kernel else None}
             spec = KaggleJobSpec(
                 owner=owner, slug=args.slug, title=args.slug.replace("-", " ").title(),
