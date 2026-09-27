@@ -56,8 +56,14 @@ def hardware() -> dict:
 
 
 def install() -> dict:
-    repo = WORK / "Chowder"
+    # Outside /kaggle/working: everything there is exported as kernel output,
+    # and a repo clone made proof-1's output pull time out.
+    repo = Path("/tmp/Chowder")
     subprocess.run(["git", "clone", "-q", JOB["repo_url"], str(repo)], check=True)
+    # The image's torchao 0.10 makes transformers/peft>=5.12 raise at import
+    # (they require >=0.16 if present). A3 uses no torchao; removing it is
+    # safer than installing a torchao built for a different torch.
+    subprocess.run([sys.executable, "-m", "pip", "uninstall", "-q", "-y", "torchao"], check=False)
     subprocess.run(["git", "-C", str(repo), "checkout", "-q", JOB["commit"]], check=True)
     # Chowder's [train] pins minus torch/torchao: keep the image's CUDA torch,
     # but the worker needs transformers>=5.12 (the image ships 5.0).
