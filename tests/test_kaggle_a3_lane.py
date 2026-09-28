@@ -145,6 +145,29 @@ def test_train_can_resume_from_a_dataset_mount(tmp_path):
     assert _load(next(tmp_path.rglob("kernel/run_a3_train.py")), "staged_ds").JOB["resume_mount"] == "chowder-a4-ckpt210"
 
 
+def test_eval_push_attaches_adapter_kernels_and_renders_jobs(tmp_path):
+    from chowder.kaggle_dispatch import EVAL_PULL_PATTERN, parse_eval_job
+
+    assert parse_eval_job("a4@nik/chowder-a4-resume:1:75:150") == {
+        "arm": "a4", "adapter_kernel": "nik/chowder-a4-resume", "adapter_mount": "chowder-a4-resume",
+        "gpu": 1, "rows": [75, 150]}
+    for bad in ("a4:2:0:10", "a4:0:10:10", "A4:0:0:10", "a4@nokernel:0:0:10"):
+        with pytest.raises(KaggleDispatchError):
+            parse_eval_job(bad)
+    fake = FakeKaggle(["complete"], output_files=("eval_job.json",))
+    rc = main(["eval", "--owner", "nik", "--slug", "chowder-math150-base-a3", "--commit", SHA,
+               "--prompts-dataset", "nik/chowder-math150", "--job", "base:0:0:150",
+               "--job", "a3@nik/chowder-a3-full:1:0:150", "--work-dir", str(tmp_path), "--poll-seconds", "0"],
+              runner=fake)
+    assert rc == 0
+    meta = json.loads(next(tmp_path.rglob("kernel-metadata.json")).read_text(encoding="utf-8"))
+    assert meta["dataset_sources"] == ["nik/chowder-math150"] and meta["kernel_sources"] == ["nik/chowder-a3-full"]
+    staged = _load(next(tmp_path.rglob("kernel/run_eval.py")), "staged_eval")
+    assert [j["arm"] for j in staged.JOB["jobs"]] == ["base", "a3"] and staged.JOB["precision"] == "fp16"
+    pull = next(c for c in fake.calls if c[2] == "output")
+    assert pull[pull.index("--file-pattern") + 1] == EVAL_PULL_PATTERN
+
+
 def test_train_refuses_a_short_commit(tmp_path):
     assert main(["train", "--owner", "nik", "--commit", "abc123", "--dataset", "nik/x-data",
                  "--work-dir", str(tmp_path)], runner=FakeKaggle([])) == 2

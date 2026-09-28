@@ -38,6 +38,8 @@ from typing import Callable, Sequence
 SMOKE_SCRIPT = Path(__file__).resolve().parents[2] / "kaggle" / "smoke_qwen3_30b_a3b.py"
 #: Staged kernel script for A3 teacher-free training; its JOB block is rendered per push.
 TRAIN_SCRIPT = Path(__file__).resolve().parents[2] / "kaggle" / "run_a3_train.py"
+#: Staged kernel script for parallel evaluation arms (one worker per GPU).
+EVAL_SCRIPT = Path(__file__).resolve().parents[2] / "kaggle" / "run_eval.py"
 
 #: `machine_shape` / `--accelerator` value for the "GPU T4 x2" notebook
 #: option (the only GPU shape since P100 retirement on 2026-09-15).
@@ -207,6 +209,18 @@ def wait(record: KaggleJobRecord, *, runner: Runner = _default_runner, poll_seco
 #: tokenizer.json (~11 MB) is copied into every checkpoint; only the final
 #: adapter's copy (matched by the first branch) is pulled.
 TRAIN_PULL_PATTERN = r"(^|/)cond_a3_kaggle/adapter/[^/]+$|(?<!tokenizer)\.json$|\.log$"
+#: What an eval job pulls: predictions, per-job results/specs and the job record.
+EVAL_PULL_PATTERN = r"\.(jsonl|log)$|(^|/)(eval_job|result|eval_spec)\.json$"
+_EVAL_JOB_RE = re.compile(r"^(?P<arm>[a-z0-9_]+)(@(?P<kernel>[\w-]+/[\w-]+))?:(?P<gpu>[01]):(?P<start>\d+):(?P<end>\d+)$")
+
+
+def parse_eval_job(text: str) -> dict:
+    """ARM[@owner/kernel]:GPU:START:END -> one eval job (GPU 0/1 of a 2xT4 kernel)."""
+    m = _EVAL_JOB_RE.match(text)
+    if not m or int(m["start"]) >= int(m["end"]):
+        raise KaggleDispatchError(f"bad --job {text!r}; expected ARM[@owner/kernel]:GPU:START:END")
+    return {"arm": m["arm"], "adapter_kernel": m["kernel"], "adapter_mount": m["kernel"].split("/")[-1] if m["kernel"] else None,
+            "gpu": int(m["gpu"]), "rows": [int(m["start"]), int(m["end"])]}
 
 
 def pull_output(record: KaggleJobRecord, output_dir: Path, *, runner: Runner = _default_runner,
@@ -319,6 +333,24 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--timeout-minutes", type=int, default=690, help="Hard cap charged to quota (<= 720)")
     train.add_argument("--poll-seconds", type=float, default=120.0)
     train.add_argument("--work-dir", default="runs/kaggle")
+    ev = sub.add_parser("eval", help="Push parallel eval arms (one worker per T4), wait, pull predictions")
+    ev.add_argument("--owner", default=None, help="Kaggle username (default: $KAGGLE_USERNAME)")
+    ev.add_argument("--slug", required=True)
+    ev.add_argument("--commit", required=True, help="full 40-hex Chowder commit the kernel checks out")
+    ev.add_argument("--repo-url", default="https://github.com/niko4244/Chowder.git")
+    ev.add_argument("--prompts-dataset", required=True, help="private dataset owner/slug holding the prompts file")
+    ev.add_argument("--prompts-file", default="math_eval_prompts.jsonl")
+    ev.add_argument("--job", action="append", required=True, help="ARM[@owner/kernel]:GPU:START:END, repeatable")
+    ev.add_argument("--suite-name", default="math150")
+    ev.add_argument("--scoring", default="math_verify_match")
+    ev.add_argument("--max-new-tokens", type=int, default=4096)
+    ev.add_argument("--batch-size", type=int, default=8)
+    ev.add_argument("--precision", default="fp16", help="T4 has no native bf16")
+    ev.add_argument("--base-model", default="Qwen/Qwen3-1.7B")
+    ev.add_argument("--revision", default="70d244cc86ccca08cf5af4e1e306ecf908b1ad5e")
+    ev.add_argument("--timeout-minutes", type=int, default=690)
+    ev.add_argument("--poll-seconds", type=float, default=300.0)
+    ev.add_argument("--work-dir", default="runs/kaggle")
     return parser
 
 
@@ -352,6 +384,21 @@ def main(argv: Sequence[str] | None = None, *, runner: Runner = _default_runner)
                 dataset_sources=(args.dataset,) + ((args.resume_dataset,) if args.resume_dataset else ()),
                 kernel_sources=(args.resume_kernel,) if args.resume_kernel else (),
             )
+        elif args.command == "eval":
+            if not _COMMIT_RE.match(args.commit):
+                print("--commit must be a full 40-hex SHA (the kernel verifies it after checkout)", file=sys.stderr)
+                return 2
+            jobs = [parse_eval_job(j) for j in args.job]
+            job = {"repo_url": args.repo_url, "commit": args.commit, "prompts_mount": args.prompts_dataset.split("/")[-1],
+                   "prompts_file": args.prompts_file, "suite_name": args.suite_name, "scoring": args.scoring,
+                   "max_new_tokens": args.max_new_tokens, "batch_size": args.batch_size, "precision": args.precision,
+                   "base_model": args.base_model, "revision": args.revision, "seed": 2026, "jobs": jobs}
+            spec = KaggleJobSpec(
+                owner=owner, slug=args.slug, title=args.slug.replace("-", " ").title(),
+                script=render_job_script(EVAL_SCRIPT, job, work_dir / "rendered"),
+                timeout_seconds=args.timeout_minutes * 60, dataset_sources=(args.prompts_dataset,),
+                kernel_sources=tuple(sorted({j["adapter_kernel"] for j in jobs if j["adapter_kernel"]})),
+            )
         else:
             script = Path(args.script)
             if not script.is_file():
@@ -365,7 +412,7 @@ def main(argv: Sequence[str] | None = None, *, runner: Runner = _default_runner)
         print(f"pushing {spec.kernel_ref} ({spec.accelerator}, cap {args.timeout_minutes} min) -> {work_dir}")
         train = args.command == "train"
         record = run_job(spec, work_dir, runner=runner, poll_seconds=args.poll_seconds,
-                         pull_pattern=TRAIN_PULL_PATTERN if train else None,
+                         pull_pattern=TRAIN_PULL_PATTERN if train else EVAL_PULL_PATTERN if args.command == "eval" else None,
                          verify=verify_adapter if train else None)
     except (KaggleDispatchError, FileNotFoundError) as exc:
         print(str(exc), file=sys.stderr)
