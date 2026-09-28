@@ -124,6 +124,7 @@ def test_train_push_attaches_dataset_and_resume_sources(tmp_path):
     staged = _load(next(tmp_path.rglob("kernel/run_a3_train.py")), "staged_a3")
     assert staged.JOB["resume_mount"] == "chowder-a3-train-1" and staged.JOB["commit"] == SHA
     assert staged.JOB["max_steps"] == 3
+    assert staged.JOB["timeout_hours"] == 11.0  # default 690-min cap minus 30 min of margin
     pull = next(c for c in fake.calls if c[2] == "output")
     assert pull[pull.index("--file-pattern") + 1] == TRAIN_PULL_PATTERN
     record = json.loads(next(tmp_path.rglob("job_record.json")).read_text(encoding="utf-8"))

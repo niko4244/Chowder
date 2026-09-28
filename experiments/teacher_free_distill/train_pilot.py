@@ -214,6 +214,8 @@ def main() -> int:
                     help="checkpoint every N optimizer steps (for resuming across session limits)")
     ap.add_argument("--resume-from-checkpoint", type=Path, default=None,
                     help="HF Trainer checkpoint-N directory to resume from")
+    ap.add_argument("--timeout-hours", type=float, default=LAUNCH_TIMEOUT_SECONDS / 3600,
+                    help="hard cap on the training worker (A4 on 2xT4 hit the 6 h default at step 210/376)")
     ap.add_argument("--max-steps", type=int, default=-1,
                     help="stop after N optimizer steps (plumbing proofs only; the result is not an A3 run)")
     args = ap.parse_args()
@@ -240,6 +242,7 @@ def main() -> int:
     )
     tr = config["backend"]["training"]
     config["backend"]["runtime"]["active_accelerator_count"] = len(devices)
+    config["backend"]["runtime"]["timeout_seconds"] = int(args.timeout_hours * 3600)
     if args.save_steps:
         tr["save_strategy"], tr["save_steps"] = "steps", args.save_steps
     if args.max_steps > 0:

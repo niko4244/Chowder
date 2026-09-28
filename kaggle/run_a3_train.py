@@ -113,6 +113,8 @@ def train(repo: str, data_dir: str, resume_from: str | None) -> dict:
         cmd += ["--resume-from-checkpoint", resume_from]
     if JOB.get("max_steps"):
         cmd += ["--max-steps", str(JOB["max_steps"])]
+    if JOB.get("timeout_hours"):
+        cmd += ["--timeout-hours", str(JOB["timeout_hours"])]
     env = {"PYTHONPATH": f"{repo}/src", "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
     import hashlib
     import os

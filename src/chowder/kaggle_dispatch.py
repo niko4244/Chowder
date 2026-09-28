@@ -338,6 +338,8 @@ def main(argv: Sequence[str] | None = None, *, runner: Runner = _default_runner)
             job = {"repo_url": args.repo_url, "commit": args.commit, "recipe": args.recipe,
                    "data_mount": args.dataset.split("/")[-1], "save_steps": args.save_steps,
                    "max_steps": args.max_steps,
+                   # Leave 30 min of the kernel cap for install, setup and output export.
+                   "timeout_hours": round(max(0.5, args.timeout_minutes / 60 - 0.5), 2),
                    "resume_mount": args.resume_kernel.split("/")[-1] if args.resume_kernel else None}
             spec = KaggleJobSpec(
                 owner=owner, slug=args.slug, title=args.slug.replace("-", " ").title(),
