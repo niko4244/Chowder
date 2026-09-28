@@ -57,7 +57,11 @@ def _write_lf(path: Path, rows: list[dict]) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--shard", type=Path, required=True, help="OpenR1-Math-220k default-config parquet shard")
+    ap.add_argument("--shard", type=Path, nargs="+", required=True,
+                    help="OpenR1-Math-220k default-config parquet shard(s)")
+    ap.add_argument("--keep-from", type=Path, default=None,
+                    help="prior build dir: its train rows stay in train and its dev IS the dev split; new problems "
+                         "(never overlapping it) top train up to --train (A4 = A3's rows + more of the same data)")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--max-length", type=int, default=4096)
     ap.add_argument("--train", type=int, default=2000)
@@ -77,12 +81,27 @@ def main() -> int:
     eval_norm = {" ".join(_words(q)) for q in evals}
     eval_grams = set().union(*(ngrams(q) for q in evals))
 
-    shard_bytes = args.shard.read_bytes()
-    rows = pq.read_table(args.shard).to_pylist()
+    def render_len(msgs: list[dict]) -> int:
+        return len(_build_chat_example(tok, msgs, max_length=10**7, row_index=0)["input_ids"])
+
+    prior_train: list[dict] = []
+    prior_dev: list[dict] = []
+    if args.keep_from is not None:
+        for name, bucket in (("train", prior_train), ("dev", prior_dev)):
+            for line in (args.keep_from / f"{name}.jsonl").read_text(encoding="utf-8").splitlines():
+                msgs = json.loads(line)["messages"]
+                bucket.append({"uuid": None, "tokens": render_len(msgs), "messages": msgs})
+    prior_prompts = {r["messages"][0]["content"] for r in prior_train + prior_dev}
+
+    shards = [{"name": s.name, "sha256": hashlib.sha256(s.read_bytes()).hexdigest()} for s in args.shard]
+    rows = [r for s in args.shard for r in pq.read_table(s).to_pylist()]
     reasons: dict[str, int] = {}
     kept = []
     for r in rows:
         prompt = r["messages"][0]["content"]
+        if prompt in prior_prompts:
+            reasons["already_in_prior_build"] = reasons.get("already_in_prior_build", 0) + 1
+            continue
         if contaminated(r["problem"], eval_norm, eval_grams) or contaminated(prompt, eval_norm, eval_grams):
             reasons["eval_overlap"] = reasons.get("eval_overlap", 0) + 1
             continue
@@ -93,8 +112,7 @@ def main() -> int:
                 reasons[why] = reasons.get(why, 0) + 1
                 continue
             msgs = [{"role": "user", "content": prompt}, {"role": "assistant", "content": gen}]
-            ex = _build_chat_example(tok, msgs, max_length=10**7, row_index=0)
-            n = len(ex["input_ids"])
+            n = render_len(msgs)
             if n > args.max_length:
                 reasons["over_max_length"] = reasons.get("over_max_length", 0) + 1
                 continue
@@ -106,11 +124,17 @@ def main() -> int:
         kept.append({"uuid": r["uuid"], "tokens": best[0], "problem_type": r["problem_type"], "messages": best[1]})
 
     random.Random(args.seed).shuffle(kept)
-    need = args.train + args.dev
-    if len(kept) < need:
-        raise SystemExit(f"only {len(kept)} usable problems; need {need}")
-    dev, train = kept[: args.dev], kept[args.dev : need]
-    assert not {r["uuid"] for r in dev} & {r["uuid"] for r in train}
+    if args.keep_from is None:
+        need = args.train + args.dev
+        if len(kept) < need:
+            raise SystemExit(f"only {len(kept)} usable problems; need {need}")
+        dev, train = kept[: args.dev], kept[args.dev : need]
+    else:
+        need = args.train - len(prior_train)
+        if need < 0 or len(kept) < need:
+            raise SystemExit(f"need {need} new problems beyond the prior {len(prior_train)}; only {len(kept)} usable")
+        dev, train = prior_dev, prior_train + kept[:need]
+    assert not {r["messages"][0]["content"] for r in dev} & {r["messages"][0]["content"] for r in train}
 
     args.out.mkdir(parents=True, exist_ok=True)
     digests = {
@@ -120,16 +144,18 @@ def main() -> int:
     toks = sorted(r["tokens"] for r in train)
     manifest = {
         "format": "chowder-openr1-complete-trace-pilot/v1",
-        "source": {"repo": REPO, "revision": REVISION, "shard": args.shard.name,
-                   "shard_sha256": hashlib.sha256(shard_bytes).hexdigest(), "license": "apache-2.0",
+        "source": {"repo": REPO, "revision": REVISION, "shards": shards, "license": "apache-2.0",
                    "teacher": "DeepSeek-R1 (released traces; no teacher run locally)"},
+        "inherits": None if args.keep_from is None else {
+            "from": str(args.keep_from), "train_rows": len(prior_train), "dev_rows": len(prior_dev),
+            "rule": "prior train stays in train, prior dev is the dev split; new problems never overlap either"},
         "selection": {"per_problem": "shortest generation that is_reasoning_complete, math_verify-correct, "
                                      "single closed non-empty <think>, boxed answer after it, rendered <= max_length",
                       "max_length": args.max_length, "renderer": "chowder.backends.training_data._build_chat_example",
                       "tokenizer": "Qwen/Qwen3-1.7B@70d244cc", "seed": args.seed},
         "decontamination": {"against": ["openai/gsm8k main test (1319)", "HuggingFaceH4/MATH-500 test (500)"],
                             "rule": f"normalized exact match or any shared {NGRAM}-word n-gram"},
-        "counts": {"shard_problems": len(rows), "usable_problems": len(kept), "train": len(train), "dev": len(dev),
+        "counts": {"shard_problems": len(rows), "usable_new_problems": len(kept), "train": len(train), "dev": len(dev),
                    "rejections": dict(sorted(reasons.items()))},
         "train_tokens": {"min": toks[0], "p50": toks[len(toks) // 2], "p90": toks[int(len(toks) * 0.9)], "max": toks[-1],
                          "truncated_rows": 0},
