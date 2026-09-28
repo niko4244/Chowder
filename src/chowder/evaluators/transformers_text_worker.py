@@ -127,6 +127,12 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         ),
         label=f"tokenizer download for {spec.base_model}",
     )
+    # Batched generation must pad on the LEFT: with the default right padding a
+    # shorter prompt's continuation is generated after its pad tokens, from a
+    # corrupted context (transformers warns; MATH-150 at batch 8, 2026-09-28).
+    # Left padding also makes `width` below the true start of every row's
+    # continuation. batch_size=1 is unaffected.
+    tokenizer.padding_side = "left"
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token_id is None:
             raise RuntimeError("tokenizer has neither pad_token nor eos_token")
@@ -220,10 +226,10 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                             canonical_rendering=suite.canonical_rendering,
                         )
                         rendered_batch.append((prompt, expected, rendered))
-                    # padding=True pads with the tokenizer's pad token on the
-                    # declared side; the mask it returns is what keeps the pads
-                    # out of attention, so a padded row sees the same context it
-                    # would have seen alone.
+                    # padding=True pads on the left (set at load): every row's
+                    # prompt ends at the same column, and the mask keeps the
+                    # pads out of attention, so a padded row generates from the
+                    # same context it would have seen alone.
                     encoded = tokenizer(
                         [item[2] for item in rendered_batch],
                         return_tensors="pt",
