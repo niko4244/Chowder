@@ -169,4 +169,27 @@ def score(
         if got is None or want is None:
             return 0.0
         return float(got == want)
+    if scoring == "math_verify_match":
+        return _math_verify_match(answer, expected)
     raise ValueError(f"unsupported scoring: {scoring}")
+
+
+def _math_verify_match(answer: str, expected: str) -> float:
+    """Symbolic equivalence via math-verify (the checker behind OpenR1's own labels).
+
+    MATH answers are LaTeX (``\\frac{14}{3}``, ``3\\sqrt{13}``, ``\\text{Evelyn}``),
+    which final-number matching cannot score. The committed boxed answer is
+    checked when present, else the whole answer. math-verify's timeouts use
+    SIGALRM, which Windows lacks, so they are disabled there.
+    """
+    import signal
+
+    from math_verify import parse, verify
+
+    timeout = 5 if hasattr(signal, "SIGALRM") else None
+    boxed = boxed_answer(answer)
+    pred = parse("$\\boxed{" + boxed + "}$" if boxed is not None else answer, parsing_timeout=timeout)
+    gold = parse("$" + expected + "$", parsing_timeout=timeout)
+    if not pred or not gold:
+        return 0.0
+    return float(verify(gold, pred, timeout_seconds=timeout))

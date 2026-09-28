@@ -10,6 +10,8 @@ pinned here as a regression test.
 
 from __future__ import annotations
 
+import pytest
+
 import chowder.parent_eval as pe
 from chowder.evaluators.base_text_worker import _final_answer, _score
 
@@ -120,6 +122,21 @@ def test_decimal_money_answers_normalise() -> None:
 
 def test_unbalanced_last_box_falls_back_to_the_previous_box() -> None:
     assert _score(r"so \boxed{42} and 7 more ... \boxed{42", "42", "final_number_match") == 1.0
+
+
+def test_math_verify_match_scores_latex_answers() -> None:
+    pytest.importorskip("math_verify")
+    ok = [
+        (r"\frac{14}{3}", r"so it is \boxed{\dfrac{14}{3}} then 7"),
+        (r"3\sqrt{13}", r"\boxed{3\sqrt{13}}"),
+        (r"\left( 3, \frac{\pi}{2} \right)", r"\boxed{(3, \frac{\pi}{2})}"),
+        (r"\text{Evelyn}", r"\boxed{\text{Evelyn}}"),
+    ]
+    for gold, pred in ok:
+        assert _score(pred, gold, "math_verify_match") == 1.0, gold
+    assert _score(r"\boxed{8}", "9", "math_verify_match") == 0.0
+    assert _score(r"\boxed{9}", "9", "math_verify_match", finished=False) == 0.0  # EOS gate still applies
+    assert _score("<think>\n\n</think>\n\n<think> reopened, \\boxed{9}", "9", "math_verify_match") == 0.0
 
 
 def test_no_box_keeps_the_last_number_rule() -> None:

@@ -34,6 +34,7 @@ _ALLOWED_SCORING = {
     "exact_match",
     "normalized_exact_match",
     "final_number_match",
+    "math_verify_match",
     *OBSERVED_SCORINGS,
 }
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
