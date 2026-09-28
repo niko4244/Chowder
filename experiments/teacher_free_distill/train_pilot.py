@@ -225,7 +225,8 @@ def main() -> int:
     recipe = json.loads(args.recipe.read_text(encoding="utf-8"))
     if recipe.get("condition") not in ("A_supervised_distillation",
                                        "A2_supervised_distillation_corrected",
-                                       "A3_supervised_distillation_complete_traces"):
+                                       "A3_supervised_distillation_complete_traces",
+                                       "A4_supervised_distillation_scaled_complete_traces"):
         ap.error(f"unexpected recipe condition: {recipe.get('condition')}")
 
     per_device = [check_device_exclusivity(d) for d in devices]

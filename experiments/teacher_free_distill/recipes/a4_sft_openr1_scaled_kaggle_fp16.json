@@ -1,0 +1,67 @@
+{
+  "condition": "A4_supervised_distillation_scaled_complete_traces",
+  "description": "A4 (see A4_PLAN.md): A3's Kaggle fp16 2xT4 recipe with ONE change, data scale. 6,000 complete DeepSeek-R1 traces from OpenR1-Math shards 0-3 that include all 2,000 of A3's train rows; dev is A3's dev byte-for-byte.",
+  "backend": "chowder.backends.transformers_peft.TransformersPeftExecutor",
+  "student": "qwen3-1.7b",
+  "student_revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+  "data": {
+    "train": "openr1_a4/train.jsonl",
+    "dev": "openr1_a4/dev.jsonl",
+    "manifest": "openr1_a4/manifest.json",
+    "expected_train_sha256": "c129eae1d8b632739db2ec768143ea86ce7dc1033de35689df75825b9fe0da74",
+    "expected_dev_sha256": "ac7629d3da3e45338bdfd8d3738e7fdf289fbade1c9ce2d263c6fbfa0b2decda",
+    "integrity_note": "6000/200; A3 train rows 2000/2000 inherited; dev == A3 dev; independent re-render audit: 0 defects, 0 overlaps with GSM8K-120/MATH-150",
+    "contract": "messages chat rows (chowder training_data validation)"
+  },
+  "training": {
+    "objective": "causal_lm_completion_only",
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj"
+    ],
+    "learning_rate": 0.0002,
+    "scheduler": "cosine",
+    "warmup_ratio": 0.03,
+    "epochs": 2,
+    "micro_batch": 1,
+    "gradient_accumulation": 16,
+    "max_length": 4096,
+    "seed": 2026,
+    "dtype": "float16",
+    "gradient_checkpointing": true,
+    "effective_batch": 32
+  },
+  "comparability": {
+    "unchanged_from_a3_kaggle": "every training field; only the dataset changes",
+    "deliberately_changed": {
+      "dataset": "2,000 -> 6,000 complete traces (superset of A3's)"
+    }
+  },
+  "authorization": {
+    "gpu_required": true,
+    "operator_approval_required": true,
+    "status": "awaiting_operator_approval",
+    "device_exclusivity_required": "no other Chowder campaign may hold the target device"
+  },
+  "outputs": {
+    "adapter": "/kaggle/working/cond_a3_kaggle/adapter",
+    "note": "2*ceil(6000/32)=376 optimizer steps (~10.5 h on 2xT4 est. from A3's 126 steps in 3.5 h)"
+  },
+  "provenance_rules": {
+    "from_untouched_base": "training must start from Qwen/Qwen3-1.7B @ 70d244cc, never from the Condition A adapter",
+    "no_synthetic_success": "no metric may be derived from anything but measured artifacts",
+    "no_auto_promotion": "the recorded decision is always requires_operator_review"
+  },
+  "runtime_target": {
+    "platform": "kaggle",
+    "accelerator": "NvidiaTeslaT4 x2",
+    "devices": "0,1",
+    "session_cap_hours": 12,
+    "resume": "--save-steps + --resume-from-checkpoint across sessions"
+  }
+}
