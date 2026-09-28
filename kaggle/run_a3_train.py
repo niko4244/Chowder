@@ -100,7 +100,9 @@ def resume() -> dict:
     ckpts = sorted((p for p in _mounted("checkpoint-*", JOB["resume_mount"]) if p.is_dir()),
                    key=lambda p: int(p.name.split("-")[-1]) if p.name.split("-")[-1].isdigit() else -1)
     if not ckpts:
-        raise FileNotFoundError(f"resume requested but no checkpoint-* under {JOB['resume_mount']}")
+        # Record what WAS mounted: an errored kernel's output never mounts (A4, 2026-09-28).
+        seen = sorted(str(p) for p in Path("/kaggle/input").glob("*/*/*"))[:50]
+        raise FileNotFoundError(f"resume requested but no checkpoint-* under {JOB['resume_mount']}; /kaggle/input has {seen}")
     return {"resume_from": str(ckpts[-1])}
 
 

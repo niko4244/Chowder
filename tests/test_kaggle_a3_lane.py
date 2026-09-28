@@ -131,6 +131,20 @@ def test_train_push_attaches_dataset_and_resume_sources(tmp_path):
     assert record["verification"] == {"verified_files": 1}
 
 
+def test_train_can_resume_from_a_dataset_mount(tmp_path):
+    # An ERRORED kernel's output cannot be mounted (A4, 2026-09-28): its checkpoint
+    # is re-uploaded as a dataset and attached as a second dataset source.
+    fake = FakeTrainKaggle()
+    rc = main(["train", "--owner", "nik", "--commit", SHA, "--dataset", "nik/chowder-openr1-a4",
+               "--resume-dataset", "nik/chowder-a4-ckpt210", "--work-dir", str(tmp_path), "--poll-seconds", "0"],
+              runner=fake)
+    assert rc == 0
+    meta = json.loads(next(tmp_path.rglob("kernel-metadata.json")).read_text(encoding="utf-8"))
+    assert meta["dataset_sources"] == ["nik/chowder-openr1-a4", "nik/chowder-a4-ckpt210"]
+    assert meta["kernel_sources"] == []
+    assert _load(next(tmp_path.rglob("kernel/run_a3_train.py")), "staged_ds").JOB["resume_mount"] == "chowder-a4-ckpt210"
+
+
 def test_train_refuses_a_short_commit(tmp_path):
     assert main(["train", "--owner", "nik", "--commit", "abc123", "--dataset", "nik/x-data",
                  "--work-dir", str(tmp_path)], runner=FakeKaggle([])) == 2

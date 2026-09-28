@@ -309,7 +309,11 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--repo-url", default="https://github.com/niko4244/Chowder.git")
     train.add_argument("--dataset", required=True, help="private Kaggle dataset owner/slug holding train.jsonl + dev.jsonl")
     train.add_argument("--recipe", default="experiments/teacher_free_distill/recipes/a3_sft_openr1_complete_kaggle_fp16.json")
-    train.add_argument("--resume-kernel", default=None, help="owner/slug of a previous run whose checkpoints to resume")
+    resume = train.add_mutually_exclusive_group()
+    resume.add_argument("--resume-kernel", default=None, help="owner/slug of a previous run whose checkpoints to resume")
+    resume.add_argument("--resume-dataset", default=None,
+                        help="owner/slug of a dataset holding checkpoints (an ERRORED kernel's output cannot be "
+                             "mounted as a source, so its checkpoint is re-uploaded as a dataset)")
     train.add_argument("--save-steps", type=int, default=10)
     train.add_argument("--max-steps", type=int, default=None, help="cap optimizer steps (plumbing proofs only)")
     train.add_argument("--timeout-minutes", type=int, default=690, help="Hard cap charged to quota (<= 720)")
@@ -340,12 +344,12 @@ def main(argv: Sequence[str] | None = None, *, runner: Runner = _default_runner)
                    "max_steps": args.max_steps,
                    # Leave 30 min of the kernel cap for install, setup and output export.
                    "timeout_hours": round(max(0.5, args.timeout_minutes / 60 - 0.5), 2),
-                   "resume_mount": args.resume_kernel.split("/")[-1] if args.resume_kernel else None}
+                   "resume_mount": (args.resume_kernel or args.resume_dataset or "").split("/")[-1] or None}
             spec = KaggleJobSpec(
                 owner=owner, slug=args.slug, title=args.slug.replace("-", " ").title(),
                 script=render_job_script(TRAIN_SCRIPT, job, work_dir / "rendered"),
                 timeout_seconds=args.timeout_minutes * 60,
-                dataset_sources=(args.dataset,),
+                dataset_sources=(args.dataset,) + ((args.resume_dataset,) if args.resume_dataset else ()),
                 kernel_sources=(args.resume_kernel,) if args.resume_kernel else (),
             )
         else:
