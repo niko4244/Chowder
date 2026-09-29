@@ -88,7 +88,8 @@ TEST_TIMEOUT = 1200
 # two batches pointed at one work root must not execute the same row twice.
 
 #: Statuses that are real evidence and must never be silently re-run.
-FINAL_STATUSES = ("verified", "not_green", "patch_did_not_fit", "mispaired")
+FINAL_STATUSES = ("verified", "not_green", "patch_did_not_fit", "mispaired",
+                  "recovery_evidence_insufficient")
 #: Failures that are the *host's* fault (a saturated daemon, a bounded pull
 #: that lost a race) are retried; a patch that cannot apply is not.
 HOST_LOAD_MARKERS = (
@@ -308,7 +309,7 @@ def run_podman(args: list[str], *, timeout: int) -> tuple[int, str]:
     """
     proc = subprocess.Popen(["podman", *args], stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                            text=True)
+                            text=True, encoding="utf-8", errors="replace")
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -407,6 +408,44 @@ def derive_test_targets(patch: str) -> tuple[list[str], str]:
         if stem not in stems:
             stems.append(stem)
     return stems, ("patch_derived_stems" if stems else "default")
+
+
+def stem_name_clauses(stems: list[str]) -> str:
+    """Find clauses resolving a source stem to its conventional test files.
+
+    Covers the pytest conventions actually seen in the corpus: ``test_x.py``
+    (most repos) and ``x_test.py``, plus mypy's ``testx.py`` — whose absence
+    sent mypy recovery rows to the full suite, where an unrelated collection
+    error aborted both phases with zero tests executed.
+    """
+    clauses: list[str] = []
+    for s in stems[:5]:
+        clauses.append(f"-name 'test_{s}.py'")
+        clauses.append(f"-name '{s}_test.py'")
+        clauses.append(f"-name 'test{s}.py'")
+    return " -o ".join(clauses)
+
+
+def classify_replay_status(*, patch_applied: bool, failure_reproduced: bool,
+                           post_rc: int, post_tests_executed: int) -> str:
+    """Terminal status from the replay phases (shared by both env paths).
+
+    Order carries the evidence semantics: an apply failure is a pairing/base
+    defect, never a failed repair; a verified run needs a red first and a
+    green after; and a run whose post-patch phase executed ZERO tests is
+    evidence-of-nothing — ``recovery_evidence_insufficient`` — because an
+    unrelated collection error aborting the suite must never be read as
+    "the repair failed" (a real not_green has executed tests that passed
+    without the bug's red). Zero tests pre-patch with tests post-patch stays
+    ``not_green``: that is the meaningful F2P-passes-pre-patch case.
+    """
+    if not patch_applied:
+        return "patch_did_not_fit"
+    if post_tests_executed <= 0:
+        return "recovery_evidence_insufficient"
+    if failure_reproduced and post_rc == 0:
+        return "verified"
+    return "not_green"
 
 
 def replay_one(record: dict, work_root: Path, *, instance: dict | None = None,  # noqa: C901
@@ -675,14 +714,9 @@ def _replay_one_official(record: dict, work_root: Path, *, instance: dict) -> di
     # Short-circuit order matters: rc_c is the combined apply+test container's
     # return code, meaningful only once the apply itself succeeded.
     verified = failure_reproduced and patch_applied and rc_c == 0 and executed2 > 0
-    if verified:
-        status = "verified"
-    elif not patch_applied:
-        # The patch never fit this base state: that is a pairing/base defect
-        # (upstream data), not a failed repair, and must not be counted as one.
-        status = "patch_did_not_fit"
-    else:
-        status = "not_green"
+    status = classify_replay_status(
+        patch_applied=patch_applied, failure_reproduced=failure_reproduced,
+        post_rc=rc_c, post_tests_executed=executed2)
     return _finish(task_dir, traj_id, events, log, status,
                    returncode=rc_c if patch_applied else 1, apply_rc=apply_rc,
                    tests_executed=executed2, failure_reproduced=failure_reproduced,
@@ -849,11 +883,7 @@ def _replay_one_inner(record: dict, work_root: Path, *, instance: dict | None = 
         tests = (PYTEST + " -q -p no:cacheprovider "
                  + " ".join(shlex.quote(t) for t in targets))
     elif test_source == "patch_derived_stems":
-        clauses: list[str] = []
-        for s in targets[:5]:
-            clauses.append(f"-name 'test_{s}.py'")
-            clauses.append(f"-name '{s}_test.py'")
-        name_args = " -o ".join(clauses)
+        name_args = stem_name_clauses(targets)
         rc_r, out_r = run_podman(_container_cmd(True, work_mount) + [
             f"cd /work/repo && find . -type f \\( {name_args} \\) | head -20"],
             timeout=STEP_TIMEOUT)
@@ -896,12 +926,9 @@ def _replay_one_inner(record: dict, work_root: Path, *, instance: dict | None = 
     observe("test", {"tool": "run_tests", "command": tests, "phase": "post_patch"},
             rc_c, out_c, tests=executed2)
     verified = failure_reproduced and patch_applied and rc_c == 0 and executed2 > 0
-    if verified:
-        status = "verified"
-    elif not patch_applied:
-        status = "patch_did_not_fit"
-    else:
-        status = "not_green"
+    status = classify_replay_status(
+        patch_applied=patch_applied, failure_reproduced=failure_reproduced,
+        post_rc=rc_c, post_tests_executed=executed2)
     return _finish(task_dir, traj_id, events, log, status,
                    returncode=rc_c if patch_applied else 1, apply_rc=apply_rc,
                    tests_executed=executed2, failure_reproduced=failure_reproduced,

@@ -200,3 +200,49 @@ def test_summary_counts_each_outcome_and_merges_duplicates(tmp_path):
     summary = mod.summarize_results(merged)
     assert summary == {"rows": 3, "verified": 2, "not_green": 1}
     assert mod.write_summary(out)["rows"] == 3
+
+
+def test_classify_replay_status_orders_evidence_correctly():
+    """The status decision is shared by both env paths and its order is the
+    evidence semantics: apply defects are never failed repairs, verified
+    needs red-then-green, and a zero-test post phase is evidence-of-nothing,
+    not a failed repair (an unrelated collection error aborting the suite
+    must not read as not_green)."""
+    mod = load()
+    classify = mod.classify_replay_status
+    assert classify(patch_applied=True, failure_reproduced=True,
+                    post_rc=0, post_tests_executed=12) == "verified"
+    assert classify(patch_applied=False, failure_reproduced=True,
+                    post_rc=1, post_tests_executed=12) == "patch_did_not_fit"
+    # A genuine not_green: tests ran, stayed red (or the F2P passed pre-patch).
+    assert classify(patch_applied=True, failure_reproduced=False,
+                    post_rc=0, post_tests_executed=730) == "not_green"
+    assert classify(patch_applied=True, failure_reproduced=True,
+                    post_rc=2, post_tests_executed=5) == "not_green"
+    # Zero tests executed post-patch: evidence-of-nothing, whatever the rc.
+    assert classify(patch_applied=True, failure_reproduced=False,
+                    post_rc=2, post_tests_executed=0) == "recovery_evidence_insufficient"
+    assert classify(patch_applied=True, failure_reproduced=True,
+                    post_rc=0, post_tests_executed=0) == "recovery_evidence_insufficient"
+    # Apply failure wins over the zero-test case (pairing defect first).
+    assert classify(patch_applied=False, failure_reproduced=False,
+                    post_rc=2, post_tests_executed=0) == "patch_did_not_fit"
+
+
+def test_recovery_evidence_insufficient_is_terminal_and_summarized(tmp_path):
+    mod = load()
+    assert "recovery_evidence_insufficient" in mod.FINAL_STATUSES
+    out = tmp_path / "replayed.jsonl"
+    rows = [{"task_id": "x", "status": "recovery_evidence_insufficient"}]
+    out.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    assert mod.summarize_results(mod.merge_results(out))[
+        "recovery_evidence_insufficient"] == 1
+
+
+def test_stem_name_clauses_cover_pypi_and_mypy_conventions():
+    mod = load()
+    clauses = mod.stem_name_clauses(["fscache", "routines"])
+    assert "-name 'test_fscache.py'" in clauses
+    assert "-name 'fscache_test.py'" in clauses
+    # mypy's testx.py convention, previously missing -> full-suite fallback.
+    assert "-name 'testfscache.py'" in clauses
