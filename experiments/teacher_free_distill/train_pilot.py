@@ -82,13 +82,19 @@ def gpu_compute_apps() -> str:
     return out.stdout.strip()
 
 
-def check_device_exclusivity(device_index: int) -> dict:
+def check_device_exclusivity(device_index: int, *, min_free_gb: float | None = None) -> dict:
     """No Chowder process may hold the target device.
 
     Unrelated inference servers (llama.cpp, Ollama, desktop apps) are allowed
     and recorded as contention risk -- they are the operator's own workload
     and this pilot was authorized to share the device with them.
+
+    ``min_free_gb`` defaults to the training floor; callers with a different
+    measured requirement (evaluation loads a freeze-weight 1.7B model and needs
+    far less than training) must pass their own floor EXPLICITLY rather than
+    bypassing this check.
     """
+    floor_gb = MIN_FREE_VRAM_GB if min_free_gb is None else float(min_free_gb)
     apps = gpu_compute_apps()
     rows = [r.strip() for r in apps.splitlines() if r.strip()]
     chowder_rows = [r for r in rows if EXCLUSIVITY_PAT.search(r)]
@@ -104,15 +110,16 @@ def check_device_exclusivity(device_index: int) -> dict:
             used_mib = float(cells[2].split()[0])
             total_mib = float(cells[3].split()[0])
             free_gb = (total_mib - used_mib) / 1024.0
-            if free_gb < MIN_FREE_VRAM_GB:
+            if free_gb < floor_gb:
                 raise RuntimeError(
                     f"GPU {device_index} has only {free_gb:.1f} GiB free "
-                    f"(floor {MIN_FREE_VRAM_GB} GiB for the Condition A plan)"
+                    f"(floor {floor_gb:.1f} GiB for this workload)"
                 )
             return {
                 "device_index": device_index,
                 "device_name": cells[1],
                 "free_vram_gb": round(free_gb, 2),
+                "free_vram_floor_gb": round(floor_gb, 2),
                 "total_vram_gb": round(total_mib / 1024.0, 2),
                 "chowder_processes_on_device": 0,
                 "compute_apps_snapshot": rows,
@@ -124,12 +131,80 @@ def check_device_exclusivity(device_index: int) -> dict:
     raise RuntimeError(f"could not read memory info for GPU {device_index}")
 
 
+def sha256_directory(path: Path) -> str:
+    """Hash a directory tree by relative path and content.
+
+    Mirrors chowder.provenance.sha256_directory exactly (the training worker
+    verifies ``parent_adapter`` with that function before load); kept inline
+    so config building never imports chowder from the wrong checkout. A unit
+    test asserts byte-for-byte equivalence with the real implementation.
+    """
+    root = Path(path).resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"adapter directory not found: {root}")
+    h = hashlib.sha256()
+    for entry in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
+        if entry.is_symlink():
+            raise ValueError(f"artifact directory contains unsupported symlink: {entry}")
+        if not entry.is_file():
+            continue
+        rel = entry.relative_to(root).as_posix().encode("utf-8")
+        h.update(len(rel).to_bytes(8, "big"))
+        h.update(rel)
+        h.update(b"\0")
+        with entry.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def condition_b_bindings(recipe: dict, *, parent_adapter: Path | None,
+                         general_mix: Path | None) -> dict:
+    """Resolve Condition B's continuation and general-mix bindings.
+
+    Returns config fragments consumed by ``build_resolved_config``:
+    ``parent_adapter`` (the Condition A adapter dir the run continues from,
+    SHA-pinned over the directory tree) and ``replay`` (the general-capability
+    dataset plus the raw ratio that realizes the recipe's final-mix fraction:
+    the executor samples ceil(primary * ratio) rows, so a fraction f of the
+    final mix corresponds to ratio f / (1 - f)).
+    """
+    if recipe.get("condition") != "B_repair_specialized":
+        raise ValueError("condition_b_bindings applies to the B recipe only")
+    adapter_dir = (Path(parent_adapter) if parent_adapter else
+                   Path(r"C:\Users\nikma\chowder_teacher_free\checkpoints\cond_a\adapter"))
+    if not adapter_dir.is_dir():
+        raise SystemExit(
+            f"parent adapter not found: {adapter_dir} "
+            "(Condition B continues from the Condition A adapter)")
+    mix_path = (Path(general_mix) if general_mix else
+                Path(r"C:\Users\nikma\chowder_teacher_free\pilot_v3\train.jsonl"))
+    if not mix_path.is_file():
+        raise SystemExit(f"general-mix dataset not found: {mix_path}")
+    fraction = float(recipe.get("data", {}).get("general_mix_fraction", 0.0) or 0.0)
+    if not 0 <= fraction < 1:
+        raise SystemExit(f"general_mix_fraction out of range: {fraction}")
+    bindings: dict = {
+        "parent_adapter": {"path": str(adapter_dir),
+                           "sha256": sha256_directory(adapter_dir)},
+    }
+    raw_ratio = fraction / (1.0 - fraction) if fraction else 0.0
+    if raw_ratio > 0:
+        bindings["replay"] = {"dataset": str(mix_path),
+                              "sha256": sha256_file(mix_path),
+                              "ratio": round(raw_ratio, 6)}
+    return bindings
+
+
 def build_resolved_config(
     recipe: dict,
     data_dir: Path,
     *,
     micro_batch: int | None = None,
     grad_accum: int | None = None,
+    replay: dict | None = None,
+    parent_adapter: dict | None = None,
 ) -> dict:
     train_path = data_dir / "train.jsonl"
     if not train_path.is_file():
@@ -138,7 +213,7 @@ def build_resolved_config(
     eff_mb = int(micro_batch if micro_batch is not None else t["micro_batch"])
     eff_ga = int(grad_accum if grad_accum is not None else t["gradient_accumulation"])
     repo = _STUDENT_REPOS.get(recipe["student"], recipe["student"])
-    return {
+    config = {
         "seed": int(t["seed"]),
         "backend": {
             "type": "transformers-peft",
@@ -171,6 +246,19 @@ def build_resolved_config(
             "runtime": {"timeout_seconds": LAUNCH_TIMEOUT_SECONDS},
         },
     }
+    if replay is not None:
+        # Continual-learning mix: the executor samples ceil(primary * ratio)
+        # rows from the replay dataset (seeded by the run seed) and trains on
+        # the concatenation, so general data is replayed alongside repair data
+        # in one pass. Digest-pinned like the primary dataset. Lives inside
+        # the backend section: that is where the executor reads it.
+        config["backend"]["replay"] = dict(replay)
+    if parent_adapter is not None:
+        # Adapter-to-adapter continuation: LoRA weights are initialized from
+        # the parent adapter; the worker verifies the directory digest before
+        # loading and records it in the run telemetry.
+        config["backend"]["parent_adapter"] = dict(parent_adapter)
+    return config
 
 
 def step_entries(telemetry: dict) -> list[dict]:
@@ -203,6 +291,12 @@ def main() -> int:
                     help="override recipe micro_batch (keeps effective batch via grad_accum)")
     ap.add_argument("--grad-accum", type=int, default=None,
                     help="override recipe gradient_accumulation")
+    ap.add_argument("--parent-adapter", type=Path, default=None,
+                    help="Condition B: adapter dir to continue from "
+                         "(default: the Condition A adapter)")
+    ap.add_argument("--general-mix", type=Path, default=None,
+                    help="Condition B: general-capability JSONL for the "
+                         "forgetting-probe mix (default: pilot_v3 train split)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the resolved plan without launching the worker")
     args = ap.parse_args()
@@ -211,15 +305,35 @@ def main() -> int:
         ap.error("--yes is required: records operator authorization for GPU use")
 
     recipe = json.loads(args.recipe.read_text(encoding="utf-8"))
-    if recipe.get("condition") != "A_supervised_distillation":
-        ap.error(f"unexpected recipe condition: {recipe.get('condition')}")
+    condition = str(recipe.get("condition"))
+    if condition not in ("A_supervised_distillation", "B_repair_specialized"):
+        ap.error(f"unexpected recipe condition: {condition}")
+    is_cond_b = condition == "B_repair_specialized"
+    if not is_cond_b and (args.parent_adapter or args.general_mix):
+        ap.error("--parent-adapter/--general-mix apply to the Condition B recipe only")
+    if is_cond_b and str(args.output).endswith("cond_a"):
+        ap.error("refusing to write Condition B into the Condition A output dir")
 
     exclusivity = check_device_exclusivity(args.device)
     print(f"[exclusivity] OK: {json.dumps({k: v for k, v in exclusivity.items() if k != 'compute_apps_snapshot'}, indent=2)}")
 
+    replay = parent_adapter = None
+    if is_cond_b:
+        bindings = condition_b_bindings(
+            recipe, parent_adapter=args.parent_adapter,
+            general_mix=args.general_mix)
+        replay = bindings.get("replay")
+        parent_adapter = bindings["parent_adapter"]
+        print(f"[parent] continuing from {parent_adapter['path']} "
+              f"sha256={parent_adapter['sha256'][:16]}...")
+        if replay:
+            print(f"[replay] general mix {replay['dataset']} "
+                  f"ratio={replay['ratio']} (20% of final mix)")
+
     config = build_resolved_config(
         recipe, args.data_dir,
         micro_batch=args.micro_batch, grad_accum=args.grad_accum,
+        replay=replay, parent_adapter=parent_adapter,
     )
     overrides = {}
     if args.micro_batch is not None or args.grad_accum is not None:
@@ -273,27 +387,55 @@ def main() -> int:
         seed=int(recipe["training"]["seed"]),
         resolved_config=config,
     )
-    experiment = Experiment(
-        experiment_id="cond-a-supervised-distillation-pilot",
-        parent_id=None,
-        hypothesis=Hypothesis(
-            observation=(
-                "Untouched Qwen3-1.7B produces no verifiable chowder repairs "
-                "in the zero-shot baseline"
+    if is_cond_b:
+        experiment = Experiment(
+            experiment_id="cond-b-repair-specialized-continuation",
+            parent_id="cond-a-supervised-distillation-pilot",
+            hypothesis=Hypothesis(
+                observation=(
+                    "The Condition A student regressed on general capability "
+                    "(MMLU 0.340 -> 0.235; GSM8K 0.575/0.580 -> 0.105; dev PPL "
+                    "5.49) while gaining sandbox-verified repair behavior"
+                ),
+                suspected_cause=(
+                    "Repair-specific updates displaced general-capability "
+                    "behavior; if forgetting is monotonic in specialization "
+                    "pressure, continuing without replay deepens the regression"
+                ),
+                intervention=(
+                    "LoRA continuation from the Condition A adapter (parent "
+                    "digest-pinned) on 55 sandbox-verified SWE-smith repair "
+                    "examples mixed with 20% general replay from the pilot_v3 "
+                    "train split (executor replay mechanism, seed 2026); "
+                    "forgetting probed by re-running the same MMLU/GSM8K/PPL "
+                    "evals against the Condition A numbers"
+                ),
             ),
-            suspected_cause=(
-                "The student has never been fine-tuned on verified "
-                "reasoning-to-repair traces"
+            config_patch={},
+            estimated_gpu_hours=0.5,
+        )
+    else:
+        experiment = Experiment(
+            experiment_id="cond-a-supervised-distillation-pilot",
+            parent_id=None,
+            hypothesis=Hypothesis(
+                observation=(
+                    "Untouched Qwen3-1.7B produces no verifiable chowder repairs "
+                    "in the zero-shot baseline"
+                ),
+                suspected_cause=(
+                    "The student has never been fine-tuned on verified "
+                    "reasoning-to-repair traces"
+                ),
+                intervention=(
+                    "LoRA SFT (r=16, completion-only loss) on 5,015 accepted "
+                    "license-gated OT3-distilled examples (pilot_v3, "
+                    "manifest f2560954); no teacher model is ever loaded"
+                ),
             ),
-            intervention=(
-                "LoRA SFT (r=16, completion-only loss) on 5,015 accepted "
-                "license-gated OT3-distilled examples (pilot_v3, "
-                "manifest f2560954); no teacher model is ever loaded"
-            ),
-        ),
-        config_patch={},
-        estimated_gpu_hours=0.5,
-    )
+            config_patch={},
+            estimated_gpu_hours=0.5,
+        )
 
     executor = TransformersPeftExecutor()
     #: Points seen by THIS process. They are the fallback loss history when the
@@ -345,16 +487,20 @@ def main() -> int:
         "dataset_sha256": config["backend"]["dataset_sha256"],
         "recipe": str(args.recipe),
         "overrides": overrides or None,
-        "authorization": {
-            "operator_authorized": True,
-            "authorized_on": "2026-09-25",
-            "device_exclusivity_check": exclusivity,
-        },
-        "run_dir": str(run_dir),
-        "artifact_ref": artifact.artifact_ref,
-        "wall_seconds": round(wall, 1),
-        "telemetry": dict(artifact.telemetry),
     }
+    if parent_adapter is not None:
+        record["parent_adapter"] = dict(parent_adapter)
+    if replay is not None:
+        record["general_mix"] = dict(replay)
+    record["authorization"] = {
+        "operator_authorized": True,
+        "authorized_on": "2026-09-25",
+        "device_exclusivity_check": exclusivity,
+    }
+    record["run_dir"] = str(run_dir)
+    record["artifact_ref"] = artifact.artifact_ref
+    record["wall_seconds"] = round(wall, 1)
+    record["telemetry"] = dict(artifact.telemetry)
     record_path = args.output / "run_record.json"
     record_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
 

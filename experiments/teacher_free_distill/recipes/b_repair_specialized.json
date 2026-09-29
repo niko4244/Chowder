@@ -4,6 +4,7 @@
   "backend": "chowder.backends.transformers_peft.TransformersPeftExecutor",
   "starts_from": "condition A adapter (parent adapter continuation)",
   "student": "qwen3-1.7b",
+  "student_revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
   "data": {
     "train": "prepared_repair/train.jsonl",
     "dev": "prepared_repair/dev.jsonl",

@@ -71,15 +71,32 @@ def check_prompt_overlap(train_rows: list[dict], eval_rows: list[dict]) -> dict:
 
 
 ANSWER_RE = re.compile(r"####\s*(-?\$?[\d,]+(?:\.\d+)?%?)")
+#: Base models asked for "#### <n>" routinely answer with LaTeX instead
+#: (``\boxed{18}``). Accepting that shape is a standard extraction rule
+#: (lm-eval-harness calls it flexible-extract); it does not loosen the
+#: requirement that a *number* be present at the end of the reasoning.
+BOXED_RE = re.compile(r"\\boxed\{\s*(-?\$?[\d,]+(?:\.\d+)?%?)\s*\}")
 NUMBER_RE = re.compile(r"-?\$?[\d,]+(?:\.\d+)?")
 
 
+def _clean_number(text: str) -> str:
+    return text.replace(",", "").replace("$", "")
+
+
 def gsm8k_extract(prediction: str) -> str | None:
-    m = ANSWER_RE.search(prediction)
-    if m:
-        return m.group(1).replace(",", "").replace("$", "")
-    numbers = NUMBER_RE.findall(prediction.splitlines()[-1]) if prediction.strip() else []
-    return numbers[-1].replace(",", "").replace("$", "") if numbers else None
+    for pattern in (ANSWER_RE, BOXED_RE):
+        m = pattern.search(prediction)
+        if m:
+            return _clean_number(m.group(1))
+    if not prediction.strip():
+        return None
+    # Fall back to the last number on the last non-empty line ("... = 41"),
+    # skipping trailing blank lines or bare "$$" fences.
+    for line in reversed(prediction.strip().splitlines()):
+        if line.strip():
+            numbers = NUMBER_RE.findall(line)
+            return _clean_number(numbers[-1]) if numbers else None
+    return None
 
 
 def gsm8k_correct(prediction: str, gold: str) -> bool:
@@ -189,9 +206,15 @@ def main() -> None:
         print(json.dumps({"repair_split": check_repair_split_leakage(train, ev),
                           "prompt_overlap": check_prompt_overlap(train, ev)}, indent=2))
     elif args.cmd == "repair-metrics":
-        # One trajectory per JSONL row (each a list of recorded events),
-        # matching what the replay/generation steps write.
-        print(json.dumps(repair_aggregate(load_jsonl(args.trajectories)), indent=2))
+        # Rows may be bare event lists ("each row is a trajectory") or the
+        # replay records replay_smith.py writes (row["events"] = event list).
+        # Project the events so repair_behaviors gets what it expects; rows
+        # with neither shape are skipped, never silently scored as empty.
+        rows = load_jsonl(args.trajectories)
+        trajectories = [r if isinstance(r, list) else r.get("events")
+                        for r in rows]
+        usable = [t for t in trajectories if isinstance(t, list) and t]
+        print(json.dumps(repair_aggregate(usable), indent=2))
     elif args.cmd == "compare":
         print(json.dumps(compare(json.loads(args.baseline.read_text()),
                                  json.loads(args.candidate.read_text())), indent=2))

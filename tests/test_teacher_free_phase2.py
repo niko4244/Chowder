@@ -170,6 +170,15 @@ def test_gsm8k_scoring():
     assert mod.gsm8k_correct("The answer is #### 42", "42")
     assert mod.gsm8k_correct("#### 1,200", "1200")
     assert not mod.gsm8k_correct("I think it is 41", "42")
+    # Base models asked for "#### <n>" routinely answer in LaTeX instead; the
+    # first adapter-free smoke run scored 0/2 purely because of this shape.
+    assert mod.gsm8k_correct("### Final Answer:\n$$\n\\boxed{18}\n$$", "18")
+    assert mod.gsm8k_correct("So the answer is:\n\\boxed{3}", "3")
+    assert mod.gsm8k_extract("so \\boxed{4} is my guess") == "4"   # boxed beats the tail scan
+    assert mod.gsm8k_extract("#### 9 but also \\boxed{4}") == "9"   # explicit marker wins
+    # A trailing blank line or bare fence must not hide the final number.
+    assert mod.gsm8k_correct("the total is 7\n\n", "7")
+    assert mod.gsm8k_extract("   ") is None
 
 
 def test_repair_behavior_metrics():
@@ -282,6 +291,50 @@ def test_best_effort_cleanup_never_raises(monkeypatch):
     replay._best_effort(["rm", "-f", "chowder-setup-deadbeef"])
 
 
+def test_image_mode_mirror_ignores_the_official_image(tmp_path, monkeypatch):
+    """A disk-poor host must be able to say "use the cheap env path" without
+    mutating the row's metadata or silently mixing two environments."""
+    calls = []
+    monkeypatch.setattr(replay, "ensure_base_image", lambda: None)
+    monkeypatch.setattr(replay, "claim_row", lambda d: {"claimed": True})
+    monkeypatch.setattr(replay, "bump_attempts", lambda *a, **k: None)
+    monkeypatch.setattr(replay, "finalize_row", lambda d, r: r)
+    monkeypatch.setattr(replay, "read_json", lambda p: {})
+    monkeypatch.setattr(replay, "_replay_one_inner",
+                        lambda r, w, instance=None: calls.append("mirror") or
+                        {"task_id": r["traj_id"], "status": "not_green"})
+    monkeypatch.setattr(replay, "_replay_one_official",
+                        lambda r, w, instance=None: calls.append("official") or
+                        {"task_id": r["traj_id"], "status": "not_green"})
+    record = {"traj_id": "t1", "instance_id": "x", "patch": "diff"}
+    instance = {"instance_id": "x", "image_name": "docker.io/jyangballin/swesmith.x86_64.a_1776_b.c",
+                "FAIL_TO_PASS": ["tests/test_x.py::test_y"]}
+    result = replay.replay_one(record, tmp_path / "work", instance=instance,
+                               image_mode="mirror")
+    assert calls == ["mirror"]
+    assert result["image_mode"] == "mirror"
+    official = replay.replay_one(record, tmp_path / "work", instance=instance,
+                                 image_mode="official")
+    assert calls == ["mirror", "official"] and official["image_mode"] == "official"
+    monkeypatch.setattr(replay, "read_json", replay.read_json)
+
+
+def test_official_mode_without_image_name_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr(replay, "ensure_base_image", lambda: None)
+    monkeypatch.setattr(replay, "_replay_one_inner",
+                        lambda *a, **k: pytest.fail("must not fall back silently"))
+    monkeypatch.setattr(replay, "claim_row", lambda d: {"claimed": True})
+    monkeypatch.setattr(replay, "bump_attempts", lambda *a, **k: None)
+    monkeypatch.setattr(replay, "finalize_row", lambda d, r: r)
+    monkeypatch.setattr(replay, "read_json", lambda p: {})
+    record = {"traj_id": "t1", "instance_id": "x", "patch": "diff"}
+    result = replay.replay_one(record, tmp_path / "work",
+                               instance={"instance_id": "x", "FAIL_TO_PASS": []},
+                               image_mode="official")
+    assert result["status"] == "setup_failed"
+    assert "image_name" in result["reason"] and result["retryable"] is False
+
+
 def test_replay_batch_reports_setup_failures_under_their_own_name(tmp_path, monkeypatch):
     """Summary buckets must not conflate infra failure with a failed test run,
     and skipped rows must not consume the row budget."""
@@ -301,13 +354,30 @@ def test_replay_batch_reports_setup_failures_under_their_own_name(tmp_path, monk
     monkeypatch.setattr(replay, "ensure_base_image", lambda: None)
     monkeypatch.setattr(replay.subprocess, "run", lambda *a, **k: R())
     monkeypatch.setattr(replay, "replay_one",
-                        lambda row, work, instance=None: {"task_id": row["traj_id"],
-                                                          "status": row["expect"]})
+                        lambda row, work, instance=None, **kwargs: {
+                            "task_id": row["traj_id"], "status": row["expect"]})
     summary = replay.replay_batch(inp, tmp_path / "work", tmp_path / "out.jsonl",
                                   limit=3)
-    assert summary == {"rows": 4, "verified": 1, "not_green": 1,
-                       "setup_failed": 1, "skipped": 1}
-    assert json.loads((tmp_path / "replay_summary.json").read_text()) == summary
+    # The queue reports what it consumed as well as what it recorded: the
+    # skipped row must not consume the row budget.
+    assert summary["queue_rows"] == 4
+    assert summary["attempted_this_run"] == 3
+    for key, value in {"verified": 1, "not_green": 1, "setup_failed": 1,
+                       "skipped": 1}.items():
+        assert summary[key] == value, key
+    # The summary file is derived from the results file, so it survives a kill.
+    assert json.loads((tmp_path / "replay_summary.json").read_text()) == {
+        "rows": 4, "verified": 1, "not_green": 1, "setup_failed": 1, "skipped": 1}
+
+
+def test_mirror_pytest_neutralises_repo_addopts():
+    """A repo whose pytest config needs an uninstalled plugin must still run.
+
+    Regression: mypy's pyproject.toml sets ``addopts = -nauto``; the mirror
+    venv has no xdist, so pytest exited 4 with "unrecognized arguments" and
+    zero tests collected -- indistinguishable from a red state never observed.
+    """
+    assert "-o addopts=" in replay.PYTEST
 
 
 def test_parse_test_summary_counts_pure_failure_runs():
