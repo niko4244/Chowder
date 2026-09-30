@@ -246,3 +246,21 @@ def test_stem_name_clauses_cover_pypi_and_mypy_conventions():
     assert "-name 'fscache_test.py'" in clauses
     # mypy's testx.py convention, previously missing -> full-suite fallback.
     assert "-name 'testfscache.py'" in clauses
+
+
+def test_setup_commands_are_idempotent_across_resumes():
+    """A mid-clone kill must not turn the resumed row into setup_failed.
+
+    Setup re-runs on resume; without the guard the fresh clone fails on the
+    partial /work/repo left by the killed attempt (observed on dask pr_8860
+    after a host restart), a non-retryable verdict for a host-side artifact.
+    """
+    mod = load()
+    for cmd in (mod.mirror_setup_command("swesmith/dask__dask.5f61e423",
+                                         ["dask__dask.5f61e423.pr_8860"]),
+                mod.upstream_setup_command("dask/dask", "abc123")):
+        assert cmd.startswith("rm -rf /work/repo /work/build /work/venv && ")
+        assert "git clone -q" in cmd
+    # The mirror variant keeps the multi-candidate checkout fallback chain.
+    mirror = mod.mirror_setup_command("swesmith/o__r.a.b.c", ["o__r.a.b", "o__r.a"])
+    assert "git checkout -q o__r.a.b || git checkout -q o__r.a" in mirror

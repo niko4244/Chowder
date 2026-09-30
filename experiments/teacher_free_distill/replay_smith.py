@@ -82,6 +82,31 @@ STEP_TIMEOUT = 300
 #: harness had failed. Tests get their own, generous budget.
 TEST_TIMEOUT = 1200
 
+
+def mirror_setup_command(mirror_repo: str, branch_candidates: list[str]) -> str:
+    """Shell command that materialises ``/work/repo`` from the swesmith mirror.
+
+    Guarded for resume: setup re-runs on a resumed row, and a mid-clone kill
+    leaves a partial ``/work/repo`` behind on the persistent bind mount -- the
+    fresh clone then refuses with ``destination path already exists`` and the
+    row records a bogus non-retryable ``setup_failed`` (observed 2026-09-30 on
+    dask ``pr_8860`` after a host restart killed the batch mid-clone). Clearing
+    the setup-owned trees first makes every setup attempt idempotent.
+    """
+    checkout_cmd = " || ".join(
+        f"git checkout -q {shlex.quote(c)}" for c in branch_candidates)
+    return ("rm -rf /work/repo /work/build /work/venv"
+            f" && git clone -q https://github.com/swesmith/{shlex.quote(mirror_repo)}.git /work/repo"
+            f" && cd /work/repo && ({checkout_cmd})")
+
+
+def upstream_setup_command(repo: str, base_commit: str) -> str:
+    """Upstream fallback twin of :func:`mirror_setup_command` (same guard)."""
+    return ("rm -rf /work/repo /work/build /work/venv"
+            f" && git clone -q https://github.com/{shlex.quote(repo)}.git /work/repo"
+            f" && cd /work/repo && git checkout -q {shlex.quote(base_commit)}")
+
+
 # ----------------------------------------------------------------- row queue
 # A batch is a queue over on-disk row state, never a bare loop: a host under
 # load (or a killed process) must not turn a row into a permanent verdict, and
@@ -805,11 +830,8 @@ def _replay_one_inner(record: dict, work_root: Path, *, instance: dict | None = 
                 branch_candidates.append(cand)
     if mirror_repo:
         update_row_state(task_dir, stage="setup_clone", instance_id=instance_id)
-        checkout_cmd = " || ".join(
-            f"git checkout -q {shlex.quote(c)}" for c in branch_candidates)
         rc, out = run_podman(_container_cmd(True, work_mount) + [
-            f"git clone -q https://github.com/swesmith/{shlex.quote(mirror_repo)}.git /work/repo"
-            f" && cd /work/repo && ({checkout_cmd})"],
+            mirror_setup_command(mirror_repo, branch_candidates)],
             timeout=SETUP_TIMEOUT)
         observe("tool", {"tool": "run_command",
                          "command": f"clone swesmith/{mirror_repo} + checkout {branch_candidates[0]}"},
@@ -822,8 +844,7 @@ def _replay_one_inner(record: dict, work_root: Path, *, instance: dict | None = 
     else:
         # No parseable instance id: fall back to upstream repo @ parsed commit.
         rc, out = run_podman(_container_cmd(True, work_mount) + [
-            f"git clone -q https://github.com/{shlex.quote(repo)}.git /work/repo"
-            f" && cd /work/repo && git checkout -q {shlex.quote(base_commit)}"],
+            upstream_setup_command(repo, base_commit)],
             timeout=SETUP_TIMEOUT)
         observe("tool", {"tool": "run_command",
                          "command": f"clone {repo}@{base_commit[:12]}"}, rc, out)
