@@ -72,6 +72,15 @@ def test_memory_override_preserves_effective_batch(tmp_path):
     assert training["batch_size"] * training["gradient_accumulation_steps"] == effective
     # Only memory knobs move: the rest of the frozen recipe is untouched.
     assert training["learning_rate"] == 2e-4 and training["epochs"] == 2.0
+
+
+def test_logging_steps_is_per_step(tmp_path):
+    """Pilot runs can be a handful of optimizer steps (Condition B: 23 rows
+    x 2 epochs / effective batch 32 = 2 steps); interval logging then
+    produces an empty step log and the launcher refuses to publish a loss
+    history for a completed run."""
+    cfg = train_pilot.build_resolved_config(recipe(), data_dir(tmp_path))
+    assert cfg["backend"]["training"]["logging_steps"] == 1
     assert cfg["backend"]["lora"]["r"] == 16
 
 

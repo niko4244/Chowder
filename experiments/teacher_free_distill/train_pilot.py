@@ -239,7 +239,11 @@ def build_resolved_config(
                 "warmup_ratio": float(t["warmup_ratio"]),
                 "batch_size": eff_mb,
                 "gradient_accumulation_steps": eff_ga,
-                "logging_steps": 10,
+                # Per-step logging: continuation runs can be a handful of
+                # optimizer steps (Condition B: 23 rows x 2 epochs / effective
+                # batch 32 = 2 steps), where interval logging yields an empty
+                # step log and the launcher refuses to publish it.
+                "logging_steps": 1,
                 "gradient_checkpointing": bool(t["gradient_checkpointing"]),
                 "save_strategy": "no",
             },
