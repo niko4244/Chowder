@@ -107,6 +107,33 @@ def upstream_setup_command(repo: str, base_commit: str) -> str:
             f" && cd /work/repo && git checkout -q {shlex.quote(base_commit)}")
 
 
+def recovery_instance_for(instance: dict | None) -> dict:
+    """Instance metadata for a mispaired-metadata recovery row.
+
+    Drops FAIL_TO_PASS (the mispairing is exactly why the row is recovered)
+    but KEEPS ``image_name``: the official per-instance image is the honest
+    environment for a patch-derived test surface, and nulling it forced every
+    recovery row onto the mirror path, where full-suite fragility turned 28
+    of 41 recovery rows into zero-evidence verdicts (2026-09-30 tally).
+    """
+    return {**(instance or {}), "FAIL_TO_PASS": []}
+
+
+def recovery_tests_from(targets: list[str], resolved: list[str]) -> tuple[str, str] | None:
+    """Pytest command for a patch-derived recovery surface, or None.
+
+    ``None`` (nothing in the environment matches the patch's test targets) is
+    the honest ``recovery_evidence_insufficient`` outcome -- a recovery row
+    must never fall back to the whole suite, where an unrelated collection
+    error manufactures a zero-evidence red.
+    """
+    if not resolved:
+        return None
+    return ("python -m pytest -q -p no:cacheprovider "
+            + " ".join(shlex.quote(t) for t in resolved[:10])), \
+        "recovery_patch_derived_stems"
+
+
 # ----------------------------------------------------------------- row queue
 # A batch is a queue over on-disk row state, never a bare loop: a host under
 # load (or a killed process) must not turn a row into a permanent verdict, and
@@ -567,9 +594,7 @@ def _replay_one_official(record: dict, work_root: Path, *, instance: dict) -> di
             f2p = json.loads(f2p)
         except ValueError:
             f2p = [f2p]
-    if not f2p:
-        return {"task_id": traj_id, "status": "skipped",
-                "reason": "official-image path requires instance FAIL_TO_PASS"}
+    recovery_mode = not f2p  # mispaired-metadata recovery: surface from patch
 
     task_dir = work_root / traj_id.replace("/", "_")
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -611,10 +636,42 @@ def _replay_one_official(record: dict, work_root: Path, *, instance: dict) -> di
                  else (resolve_full_sha(upstream_repo, upstream_commit) or upstream_commit))
 
     image = str(instance["image_name"])
-    tests = ("python -m pytest -q -p no:cacheprovider "
-             + " ".join(shlex.quote(str(t)) for t in f2p[:80]))
-    test_source = ("instance_FAIL_TO_PASS" if len(f2p) <= 80
-                   else "instance_FAIL_TO_PASS_first80")
+    if f2p:
+        tests = ("python -m pytest -q -p no:cacheprovider "
+                 + " ".join(shlex.quote(str(t)) for t in f2p[:80]))
+        test_source = ("instance_FAIL_TO_PASS" if len(f2p) <= 80
+                       else "instance_FAIL_TO_PASS_first80")
+    else:
+        # Recovery row: derive the test surface from the patch itself and
+        # resolve the stems against the official image's /testbed. No match
+        # is the honest recovery_evidence_insufficient outcome (classified
+        # by classify_replay_status via the zero-test phases below) -- never
+        # a whole-suite fallback.
+        targets, _ = derive_test_targets(patch)
+        if not targets:
+            return {"task_id": traj_id, "status": "recovery_evidence_insufficient",
+                    "reason": "recovery: no test target derivable from the patch",
+                    "retryable": False, "instance_id": instance_id,
+                    "repo": repo, "base_commit": base_commit}
+        name_args = stem_name_clauses(targets)
+        rc_d, out_d = run_podman([
+            "run", "--rm", "--pull", "never", "--memory", MEMORY_LIMIT,
+            "--cpus", CPUS, "--pids-limit", str(PIDS_LIMIT), image,
+            "bash", "-lc", f"cd /testbed && find . -type f \\( {name_args} \\) | head -20"],
+            timeout=STEP_TIMEOUT)
+        observe("tool", {"tool": "run_command",
+                         "command": f"recovery: resolve patch-derived test modules for {targets[:5]}"},
+                rc_d, out_d)
+        resolved = [ln.strip().lstrip("./") for ln in out_d.splitlines()
+                    if ln.strip().endswith(".py")]
+        plan = recovery_tests_from(targets, resolved)
+        if plan is None:
+            return {"task_id": traj_id, "status": "recovery_evidence_insufficient",
+                    "reason": f"recovery: no /testbed module matching patch targets {targets[:5]}",
+                    "retryable": False, "instance_id": instance_id,
+                    "repo": repo, "base_commit": base_commit,
+                    "patch_targets": targets[:10]}
+        tests, test_source = plan
 
     def phase_cmd(network: bool, tail: list[str], *, base_image: str | None = None,
                   mount: str | None = None) -> list[str]:
@@ -1190,8 +1247,7 @@ def replay_batch(input_path: Path, work_root: Path, out_path: Path,
                                   require_congruence=require_congruence,
                                   recover_derived_tests=recover_derived_tests)
             if gated is not None and gated.get("recovery") == "derived_tests":
-                recovered_instance = {**(instance or {}), "FAIL_TO_PASS": [],
-                                      "image_name": None}
+                recovered_instance = recovery_instance_for(instance)
                 result = replay_one(row, work_root, instance=recovered_instance,
                                     image_mode=image_mode)
                 if str(result.get("status")) != "skipped":
@@ -1238,7 +1294,10 @@ def main() -> None:
                         help="fit verdicts per instance (host-side patch-fit diagnosis)")
     parser.add_argument("--recover-mispaired-derived-tests", action="store_true",
                         help="replay module-mispaired rows with tests derived from the patch, "
-                             "labelled recovered_from=mispaired_metadata (weaker evidence)")
+                             "labelled recovered_from=mispaired_metadata (weaker evidence); "
+                             "the official per-instance image is used when the instance "
+                             "provides one, and the derived surface is resolved against "
+                             "/testbed (no full-suite fallback)")
     parser.add_argument("--image-mode", choices=("auto", "official", "mirror"), default="auto",
                         help="environment source: official per-instance image (3-4 GB pull) "
                              "when available, or always the cheap mirror path")

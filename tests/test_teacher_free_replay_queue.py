@@ -264,3 +264,30 @@ def test_setup_commands_are_idempotent_across_resumes():
     # The mirror variant keeps the multi-candidate checkout fallback chain.
     mirror = mod.mirror_setup_command("swesmith/o__r.a.b.c", ["o__r.a.b", "o__r.a"])
     assert "git checkout -q o__r.a.b || git checkout -q o__r.a" in mirror
+
+
+def test_recovery_instance_keeps_the_official_image():
+    """A mispaired-metadata recovery row drops FAIL_TO_PASS (the mispairing)
+    but must KEEP image_name: nulling it forced every recovery row onto the
+    mirror path, where full-suite fragility manufactured 28 zero-evidence
+    verdicts out of 41 recovery rows (2026-09-30 tally)."""
+    mod = load()
+    inst = {"FAIL_TO_PASS": ["tests/test_a.py::t"],
+            "image_name": "jyangballin/swesmith.x86_64.o_1776_r.abc",
+            "repo": "o/r"}
+    rec = mod.recovery_instance_for(inst)
+    assert rec["FAIL_TO_PASS"] == []
+    assert rec["image_name"] == inst["image_name"]
+    assert mod.recovery_instance_for(None) == {"FAIL_TO_PASS": []}
+
+
+def test_recovery_tests_never_fall_back_to_the_full_suite():
+    mod = load()
+    resolved = mod.recovery_tests_from(["wrap"], ["dask/array/tests/test_wrap.py"])
+    assert resolved is not None
+    cmd, source = resolved
+    assert "test_wrap.py" in cmd and "pytest" in cmd
+    assert source == "recovery_patch_derived_stems"
+    # Nothing in the environment matches the patch's targets -> the honest
+    # recovery_evidence_insufficient outcome, never a whole-suite command.
+    assert mod.recovery_tests_from(["wrap"], []) is None
