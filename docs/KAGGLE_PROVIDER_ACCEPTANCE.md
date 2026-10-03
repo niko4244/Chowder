@@ -108,3 +108,52 @@ never be averaged with a local-GPU number into a "capability" claim.
   will carry it.
 - The observation's `wall_gpu_hours` records the request's estimate (0.1);
   per-run metering inside the kernel is future work.
+
+## Run 2 (2026-10-03, later same day) — per-run metering live-proven
+
+Second real run through the identical path, pinning commit
+`0ae358faecf710e917b3b56115dc1a07b621001d` (the metered template).
+`chowder_result.json` (verbatim):
+
+```json
+{
+  "accelerator_count": 2,
+  "campaign_spec_received": true,
+  "device_gpu_hours": 0.004621,
+  "dtype": "torch.float16",
+  "exit_code": 0,
+  "gpu_count": 2,
+  "gpu_name": "Tesla T4",
+  "kernel": "Batch",
+  "matmul_fp16_tflops": 0.38,
+  "metering": "measured_wall_clock_x_attached_accelerators",
+  "status": "complete",
+  "torch": "2.11.0+cu128",
+  "wall_gpu_hours": 0.00231,
+  "wall_seconds": 8.318
+}
+```
+
+What this proves:
+
+- **The kernel measures its own cost**: wall clock around the operator
+  command (8.318 s) × the accelerators actually attached (2) = 0.004621
+  device-hours, replacing the 0.2 request estimate (which was ~43× the
+  reality — exactly why estimates must not settle budgets when measurement
+  is available).
+- **Quota settlement uses the measured cost**: the provider reconciled its
+  weekly model with 0.004621 on completion, not 0.2.
+- **A real metering distinction discovered by this run**: after both runs,
+  Kaggle's own `quota_view` reports 0.0326 device-hours consumed of the
+  weekly 30 h — more than our two measured commands (0.0046 + ~0.005)
+  because the SESSION (container start, pinned pip install, torch import,
+  teardown) also bills. The two accountings answer different questions and
+  both are recorded: in-kernel metering attributes cost **per experiment**;
+  `quota_view` is the authoritative **weekly** budget. The provider's
+  `sync_quota_from_api()` remains the gate for availability; the kernel's
+  metering feeds evidence and the mission ledger.
+- Total free-tier spend across both runs: ~0.033 of 30 weekly device-hours
+  (≈0.1%). The lane stays free by design; the paid RunPod probe was
+  deliberately deferred (operator decision: keep it free — Kaggle is the
+  lane), so `docs/RUNPOD_PROVIDER_ACCEPTANCE.md` remains pending until the
+  operator chooses to spend.

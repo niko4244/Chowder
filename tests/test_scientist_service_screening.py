@@ -414,6 +414,84 @@ def test_graduation_refuses_without_a_pinned_benchmark_mapping(
     assert "campaign_draft_refused" in journal
 
 
+def test_cli_graduate_runs_the_full_handoff(tmp_path: Path, capsys) -> None:
+    """One durable CLI step: screen to graduation, then compose drafts."""
+    import argparse
+    from chowder.scientist.cli import register_scientist_subcommands
+    from fixtures_growth_loop import GEN2_MANIFEST
+    service = _run_lane_to_graduation(tmp_path)
+    # the service already graduated; the CLI rebuilds from the same state root
+    mission = {
+        "mission_id": "m-screen", "objective": "improve reasoning",
+        "priorities": {"reasoning": 1.0},
+        "budget": {"max_gpu_hours": 8.0, "max_tree_nodes": 32,
+                   "max_parallel_branches": 8},
+    }
+    (tmp_path / "mission.json").write_text(json.dumps(mission), encoding="utf-8")
+    (tmp_path / "policy.json").write_text(
+        json.dumps(_policy([_KAGGLE], _SCHEDULE)), encoding="utf-8")
+    loop_policy_doc = {
+        "maximum_generations": 3,
+        "maximum_total_wall_gpu_hours": 6.0,
+        "maximum_consecutive_non_promotions": 2,
+        "maximum_same_target_attempts": 2,
+        "maximum_candidates": 2,
+        "plateau_epsilon": 0.01,
+        "allowed_training_types": ["data", "targeted_repair", "sft"],
+        "protected_benchmarks": ["math500@2024-04"],
+        "broad_benchmarks": ["math500@2024-04", "mgsm@2022-11"],
+        "calibration_benchmarks": [],
+        "reliability_benchmarks": [],
+        "campaign_budget": {
+            "device_gpu_hours_ceiling_per_recipe": 0.9,
+            "wall_gpu_hours_ceiling_per_recipe": 1.8,
+            "device_gpu_hours_ceiling_campaign": 1.8,
+            "wall_gpu_hours_ceiling_campaign": 3.6,
+            "device_time_measured": True,
+        },
+        "protection": {
+            "trusted_ancestor_version": "gen0",
+            "slice_regression_max": 0.0625,
+            "n_samples": 16,
+            "seed": 1234,
+            "shuffle": False,
+            "decoding": {"temperature": 0.0, "do_sample": False,
+                         "max_new_tokens": 512},
+            "prompt_policy": "chat_template",
+        },
+        "evaluation_execution": {"batch_size": 16},
+        "candidate_selection_policy": "first_successful",
+        "stopping_rules": [],        "promotion_policy_version": "promotion-policy-v2-provenance-settlement",
+        "human_review_triggers": [],
+    }
+    (tmp_path / "loop-policy.json").write_text(
+        json.dumps(loop_policy_doc), encoding="utf-8")
+    document = json.loads(GEN2_MANIFEST.read_text(encoding="utf-8"))
+    document["state_root"] = str(tmp_path / "parent-run")
+    (tmp_path / "parent-campaign.json").write_text(
+        json.dumps(document), encoding="utf-8")
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="top", required=True)
+    register_scientist_subcommands(sub)
+    args = parser.parse_args([
+        "scientist", "graduate",
+        "--mission", str(tmp_path / "mission.json"),
+        "--policy", str(tmp_path / "policy.json"),
+        "--state-root", str(tmp_path / "state"),
+        "--loop-policy", str(tmp_path / "loop-policy.json"),
+        "--parent-manifest", str(tmp_path / "parent-campaign.json"),
+        "--generation-root", str(tmp_path / "generations"),
+        "--benchmark-map", "reasoning=mgsm@2022-11",
+    ])
+    assert args.func(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["phase"] == "graduated"
+    assert len(payload["campaign_drafts"]) == 1
+    draft = payload["campaign_drafts"][0]
+    assert draft["cycle_id"].startswith("gen3-a1-")
+    assert draft["draft"]["frozen"] is False
+
+
 def test_graduation_refusal_carries_the_loop_reason(tmp_path: Path) -> None:
     service = _run_lane_to_graduation(tmp_path)
     # case 1: the mapped benchmark is in the policy's PROTECTED set — the loop

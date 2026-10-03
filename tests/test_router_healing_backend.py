@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -968,30 +969,65 @@ def test_an_abruptly_killed_worker_leaves_a_complete_resumable_checkpoint(
         "--chowder-identity",
         str(identity_path),
     ]
-    process = subprocess.Popen(
-        command, cwd=str(run_dir), env=worker_env({"PYTHONUNBUFFERED": "1"}),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    try:
-        deadline = time.time() + 600
-        while time.time() < deadline:
-            published = sorted(checkpoints.glob("step-*")) if checkpoints.is_dir() else []
-            if published:
-                # Kill only once the earliest checkpoint is *complete* on
-                # disk. Under heavy load the directory can be visible while
-                # its files are still being written; killing inside that
-                # publication window would test a partial write, not abrupt
-                # death after a durable checkpoint.
-                if inventory_checkpoint(published[0]).is_complete:
-                    break
-            if process.poll() is not None:
-                raise AssertionError("the worker exited before publishing a checkpoint")
-            time.sleep(0.5)
-        else:  # pragma: no cover - only on a pathologically slow machine
-            raise AssertionError("no checkpoint was published in time")
-    finally:
-        process.kill()
-        process.wait(timeout=60)
+
+    # The worker's stderr is captured to disk instead of discarded: a startup
+    # death (import error, GPU state left dirty by an earlier test, model-load
+    # refusal) must surface ITS OWN error, not an anonymous assertion.
+    stderr_path = run_dir / "worker-startup.log"
+
+    def _launch() -> tuple[subprocess.Popen, Any]:
+        handle = stderr_path.open("wb")
+        process = subprocess.Popen(
+            command, cwd=str(run_dir), env=worker_env({"PYTHONUNBUFFERED": "1"}),
+            stdout=subprocess.DEVNULL, stderr=handle,
+        )
+        return process, handle
+
+    def _stderr_tail() -> str:
+        try:
+            return stderr_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+        except OSError:  # pragma: no cover
+            return "(stderr log unreadable)"
+
+    # Under full-suite load the worker can lose the startup race (imports,
+    # CUDA init, model load all run before step 1). That is not the property
+    # under test — death AFTER a durable checkpoint is — so one clean retry
+    # keeps the test honest without testing the scheduler's mood. A second
+    # startup death fails WITH the worker's stderr.
+    for attempt in (1, 2):
+        process, stderr_handle = _launch()
+        try:
+            deadline = time.time() + 600
+            while time.time() < deadline:
+                published = sorted(checkpoints.glob("step-*")) if checkpoints.is_dir() else []
+                if published:
+                    # Kill only once the earliest checkpoint is *complete* on
+                    # disk. Under heavy load the directory can be visible while
+                    # its files are still being written; killing inside that
+                    # publication window would test a partial write, not abrupt
+                    # death after a durable checkpoint.
+                    if inventory_checkpoint(published[0]).is_complete:
+                        break
+                if process.poll() is not None:
+                    if attempt == 2:
+                        raise AssertionError(
+                            "the worker exited before publishing a checkpoint "
+                            f"(exit {process.returncode}); worker stderr tail:\n"
+                            f"{_stderr_tail()}"
+                        )
+                    break  # retry once
+                time.sleep(0.5)
+            else:  # pragma: no cover - only on a pathologically slow machine
+                raise AssertionError(
+                    "no checkpoint was published in time; worker stderr tail:\n"
+                    f"{_stderr_tail()}"
+                )
+            if process.poll() is None:
+                break  # a healthy worker is running past its first checkpoint
+        finally:
+            process.kill()
+            process.wait(timeout=60)
+            stderr_handle.close()
 
     published = sorted(checkpoints.glob("step-*"))
     assert published, "a killed worker must still have left its last durable checkpoint"

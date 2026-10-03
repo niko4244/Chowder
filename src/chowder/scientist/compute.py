@@ -585,7 +585,14 @@ class KaggleProvider:
         """Reconcile the declared weekly quota with the operator's REAL Kaggle
         GPU budget (quota_view → ApiAcceleratorQuota timedeltas). Reserved time
         counts against availability exactly like used time. Missing/zero fields
-        keep the declared model untouched — never a fake refresh."""
+        keep the declared model untouched — never a fake refresh.
+
+        Two accountings with different jobs (live-verified,
+        docs/KAGGLE_PROVIDER_ACCEPTANCE.md): the kernel's measured
+        device_gpu_hours attributes cost PER EXPERIMENT; quota_view is the
+        authoritative WEEKLY budget — the session (container, install,
+        teardown) bills beyond the command, so availability always follows
+        quota_view, never the kernel's smaller number."""
         from datetime import timedelta
         client = self._client()
         try:

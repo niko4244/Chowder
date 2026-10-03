@@ -14,7 +14,46 @@ for it:
   [`TEACHER_FABRIC_BRIEF.md`](TEACHER_FABRIC_BRIEF.md) — read it before
   any Teacher Fabric slice; it is the source of the non-negotiable rules.
 
-## Current state (updated 2026-09-17, integrity re-adjudication) — READ THE HEADLINE FIRST
+## Current state (updated 2026-10-03, scientist compute lane live) — READ THE HEADLINE FIRST
+
+**The scientist research layer is built, pushed, and has run real free-tier
+Kaggle compute end-to-end — twice.** Branch
+`feature/scientist-research-director` (based on `main` tip `245f48a`)
+carries: the native ResearchDirector/Scientist subsystem (commits `bb27cea`,
+`badd367`), the ComputeProvider seam with LocalCuda/Kaggle/RunPod and the
+successive-halving screening allocator (`1f02af0`), the service-level
+resumable screening lane + the first real Kaggle acceptance run (`492f66a`),
+and measured GPU metering + the survivors→campaign-drafts graduation bridge
+(`0ae358f`). All pushed. Full suite green on every commit except one
+pre-existing flake (see hazards).
+
+Key facts for the next session:
+
+- **Free-compute policy (operator decision, 2026-10-03): Kaggle T4×2 is the
+  compute lane; paid providers stay deferred.** The RunPod acceptance runner
+  (`kaggle/runpod_first_pod.py`) is committed and ready but NOT run — it
+  spends money. Do not run it without the operator's explicit go.
+- Two real Kaggle runs are recorded with verbatim artifacts in
+  `docs/KAGGLE_PROVIDER_ACCEPTANCE.md`: pinned-commit install verified
+  in-kernel, 2× Tesla T4, in-kernel metering proven
+  (`device_gpu_hours=0.004621` measured vs `0.2` estimate), and the
+  session-vs-command accounting distinction (availability follows
+  `quota_view`, never the kernel's smaller number). Total free-tier spend:
+  ~0.033 of 30 weekly device-hours.
+- The graduation bridge (`graduate_survivors_to_campaign_drafts` + the
+  `scientist graduate` CLI) hands screening survivors to the growth loop's
+  own `NextCampaignBuilder.draft` — composes drafts, never
+  freezes/executes/promotes. The `benchmark_for_skill` mapping
+  (capability surface → pinned `name@version` benchmark, outside the loop's
+  protected set) is an explicit OPERATOR input; the bridge refuses rather
+  than invent an eval instrument.
+- Two live-API gotchas already fixed (regression-tested): Kaggle push refs
+  are URL paths needing normalization; the kaggle client's cp1252 console
+  crash on output fetch.
+- The AI-Scientist-v2 sidecar adapter remains license-clean (zero upstream
+  source; clean-room over file formats only) — `docs/SCIENTIST_LICENSE.md`.
+
+## Prior state (2026-09-17, integrity re-adjudication)
 
 **Gen-1's effective verdict is now INCONCLUSIVE (target repair validated);
 the original PROMOTED record is preserved history.** The post-merge
@@ -1352,6 +1391,18 @@ corpus must NOT be protected tournament content.
   selector needed.
 - `agent-a66d39fd3e0ec3607`'s untracked EI files are now safely on the
   pushed rescue branch, so that worktree is prunable.
+- `tests/test_router_healing_backend.py::
+  test_an_abruptly_killed_worker_leaves_a_complete_resumable_checkpoint`
+  failed once under full-suite load (worker died during startup before its
+  first checkpoint; stderr went to DEVNULL). Deflaked 2026-10-03: startup
+  deaths now retry once cleanly and a real failure surfaces the worker's
+  own stderr. If it still flakes, suspect GPU/driver state contamination
+  from earlier real-model tests, not the checkpoint property.
+- The scientist compute lane's Kaggle provider resolves credentials from
+  the ambient kaggle.json / KAGGLE_* env on this machine; `scientist
+  screen`/`graduate` with `push: true` therefore REALLY pushes kernels —
+  treat `push: false` as the offline default in any policy you hand to an
+  unattended session.
 
 ## Update rule
 

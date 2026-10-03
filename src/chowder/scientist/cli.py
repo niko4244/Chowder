@@ -126,6 +126,58 @@ def _error_json(error: Exception) -> int:
     return 1
 
 
+def _graduate(args: argparse.Namespace) -> int:
+    """One durable hand-off: advance the screening lane to graduation, then
+    compose the growth loop's campaign drafts for the final survivors.
+
+    --loop-policy is the GROWTH loop policy document (the same shape
+    `chowder growth loop ...` reads); --benchmark-map maps each candidate's
+    requested capability surface to a PINNED (name@version) benchmark that is
+    not in the loop policy's protected set ('skill=benchmark@version'). The
+    bridge composes drafts only: planning, freezing, execution and promotion
+    stay the growth loop's own, unchanged paths.
+    """
+    service = _build_service(args)
+    try:
+        step = service.advance_screening()
+    except ResearchServiceError as error:
+        return _error_json(error)
+    if step.get("phase") not in ("graduated", "complete"):
+        service.save()
+        return _print_json({
+            "phase": step.get("phase"),
+            "detail": "the screening lane has not graduated yet; record the "
+                      "awaiting observations (`scientist observe`) and re-run",
+            "step": step,
+        })
+    benchmark_map = _parse_benchmark_map(args.benchmark_map)
+    from ..growth.next_campaign import LoopPolicy
+    loop_policy = LoopPolicy.from_file(args.loop_policy)
+    try:
+        drafts = service.graduate_survivors_to_campaign_drafts(
+            parent_manifest_path=args.parent_manifest,
+            loop_policy=loop_policy,
+            generation_root=args.generation_root,
+            benchmark_for_skill=benchmark_map,
+        )
+    except Exception as error:  # the loop's refusals are expected outcomes
+        return _error_json(error)
+    service.save()
+    return _print_json({"phase": "graduated", "campaign_drafts": list(drafts)})
+
+
+def _parse_benchmark_map(pairs: list[str] | None) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for pair in pairs or []:
+        if "=" not in pair:
+            raise SystemExit(
+                f"--benchmark-map expects 'skill=benchmark@version', got {pair!r}"
+            )
+        skill, benchmark = pair.split("=", 1)
+        mapping[skill.strip()] = benchmark.strip()
+    return mapping
+
+
 def _observe(args: argparse.Namespace) -> int:
     service = _build_service(args)
     payload = json.loads(Path(args.observation).read_text(encoding="utf-8"))
@@ -180,6 +232,25 @@ def register_scientist_subcommands(sub: argparse._SubParsersAction) -> None:
                        "(submit round / await observations / settle / graduate)")
     _common(screen)
     screen.set_defaults(func=_screen)
+
+    graduate = scientist_sub.add_parser(
+        "graduate", help="Run the full hand-off in one durable step: advance the "
+                         "screening lane to graduation, then compose the growth "
+                         "loop's campaign drafts for the final survivors")
+    _common(graduate)
+    graduate.add_argument("--loop-policy", required=True,
+                          help="growth loop policy JSON (the `chowder growth loop` "
+                               "document; its protected set and treatment allowlist "
+                               "bind the drafts)")
+    graduate.add_argument("--parent-manifest", required=True,
+                          help="the parent generation's campaign.json")
+    graduate.add_argument("--generation-root", required=True,
+                          help="directory the new generation's draft lives under")
+    graduate.add_argument("--benchmark-map", action="append", default=[],
+                          metavar="SKILL=BENCHMARK@VERSION",
+                          help="pinned benchmark per capability surface (repeatable; "
+                               "e.g. reasoning=mgsm@2022-11)")
+    graduate.set_defaults(func=_graduate)
 
     observe = scientist_sub.add_parser("observe",
                                        help="Record a run-grounded ExperimentObservation JSON")
