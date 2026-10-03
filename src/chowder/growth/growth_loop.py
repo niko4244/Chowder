@@ -49,6 +49,11 @@ from .next_campaign import (
     NextCampaignRefusal,
     ParentEvidenceRef,
 )
+from .scientist_handoff import (
+    ScreeningGraduate,
+    clear_consumed_handoff,
+    load_graduated_survivor,
+)
 from .target_selection import (
     GrowthState,
     NextTargetSelector,
@@ -755,6 +760,22 @@ class GrowthLoop:
                 "be chosen from evidence",
                 (NO_MEASURED_CAPABILITY,),
             )
+        # Scientist-mode auto-consume: a graduated survivor from the screening
+        # lane becomes this generation's target INSTEAD OF the selector's pick,
+        # then flows through every gate below unchanged (treatment, budget,
+        # draft, prepare, freeze). The loop never spends on the scientist's
+        # behalf; it nominates the target the evidence already earned. One
+        # survivor per generation: after a generation adopts it, the file is
+        # cleared (in run_generation's finally) and normal selection resumes.
+        handoff = load_graduated_survivor(Path(self.state.root))
+        if handoff is not None:
+            graduate, _handoff_path = handoff
+            return (
+                graduate.to_target_proposal(
+                    parent_version=self.parent_declaration.resolved_candidate_version()
+                ),
+                None,
+            )
         # The profile must be a measurement of the generation it is used as the
         # parent *of*. It is handed in from outside (a run root, or a stated
         # file), so the loop is the only place that can pair it with the
@@ -885,6 +906,12 @@ class GrowthLoop:
                 (TREATMENT_REQUIRES_REVIEW,),
             )
         self.state.record_target(proposal)
+        # The hand-off file did its job once this target is durably recorded:
+        # one survivor per generation, and a crash between here and the freeze
+        # leaves the recorded target (which re-preparation replays from), not
+        # a re-adopted duplicate.
+        _consumed = clear_consumed_handoff(
+            Path(self.state.root), target_skill=proposal.target_skill)
 
         # Preparation *plans*: it is the phase that runs the production
         # capability/curriculum planner and the production recipe planner, so it

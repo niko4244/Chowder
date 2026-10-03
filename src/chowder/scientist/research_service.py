@@ -661,6 +661,29 @@ class ModelResearchService:
                     "directory": str(draft.directory),
                     "placeholder_recipe_ids": list(draft.placeholder_recipe_ids),
                 })
+            # The auto-consume hand-off: the growth loop adopts this survivor
+            # as its next generation's target without a manual copy step. The
+            # loop still applies every one of its own gates (treatment,
+            # budget, protected sets, freeze); the file nominates, never
+            # bypasses. Written for the LAST composed survivor (one survivor
+            # per generation).
+            from ..growth.scientist_handoff import ScreeningGraduate, write_handoff_file
+            write_handoff_file(
+                self.state_root,
+                graduate=ScreeningGraduate(
+                    experiment_id=experiment_id,
+                    proposal_id=proposal.proposal_id,
+                    intervention=proposal.intervention,
+                    falsification_rule=proposal.falsification_rule,
+                    target_skill=target.target_skill,
+                    suggested_training_type=target.suggested_training_type,
+                    priority=target.priority,
+                    expected_cost_gpu_hours=target.expected_cost_gpu_hours,
+                    survivor_score=target.factors.total,
+                    benchmark_map=dict(skill_map),
+                    screening_mission_id=self.mission.mission_id,
+                ),
+            )
             results.append({
                 "experiment_id": experiment_id,
                 "proposal_id": proposal.proposal_id,

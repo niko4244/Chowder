@@ -39,14 +39,26 @@ Key facts for the next session:
   (`device_gpu_hours=0.004621` measured vs `0.2` estimate), and the
   session-vs-command accounting distinction (availability follows
   `quota_view`, never the kernel's smaller number). Total free-tier spend:
-  ~0.033 of 30 weekly device-hours.
+  ~0.033 of 30 weekly device-hours. **A third run added the first real
+  candidate screening job**: a spec-driven trainer consumed the compiled
+  `campaign_spec` (echoed `spec_honored` proves it), trained 300 real steps
+  (loss 3.46 → 0.033), the spec's falsification rule was evaluated
+  (survived), and the run is recorded in the same doc — see
+  `kaggle/first_candidate_screening.py`.
 - The graduation bridge (`graduate_survivors_to_campaign_drafts` + the
   `scientist graduate` CLI) hands screening survivors to the growth loop's
   own `NextCampaignBuilder.draft` — composes drafts, never
   freezes/executes/promotes. The `benchmark_for_skill` mapping
   (capability surface → pinned `name@version` benchmark, outside the loop's
   protected set) is an explicit OPERATOR input; the bridge refuses rather
-  than invent an eval instrument.
+  than invent an eval instrument. **Auto-consume is wired**: graduation now
+  writes `scientist-handoff.json` into the service state root, and
+  `GrowthLoop._proposal_or_decision` adopts a pending survivor as the next
+  generation's target INSTEAD of the selector's pick — through every
+  existing gate (treatment, budget, protected sets, prepare, freeze)
+  unchanged. One survivor per generation; the file clears when the target
+  is durably recorded (`growth/scientist_handoff.py`, tests in
+  `tests/test_growth_scientist_handoff.py`).
 - Two live-API gotchas already fixed (regression-tested): Kaggle push refs
   are URL paths needing normalization; the kaggle client's cp1252 console
   crash on output fetch.

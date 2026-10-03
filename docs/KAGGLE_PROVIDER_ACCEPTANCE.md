@@ -157,3 +157,55 @@ What this proves:
   deliberately deferred (operator decision: keep it free — Kaggle is the
   lane), so `docs/RUNPOD_PROVIDER_ACCEPTANCE.md` remains pending until the
   operator chooses to spend.
+
+## Run 3 (2026-10-03) — first real candidate screening job (spec-driven trainer)
+
+The third run upgrades the probe to a **candidate**: the kernel command is an
+operator trainer that CONSUMES the compiled `campaign_spec` — it refuses a
+spec it cannot parse, takes its hyperparameters from the spec's
+`recipe_patch` (lr 0.003, batch 64, 300 steps via `backend.training.*` keys),
+trains a real model on the T4×2 for 300 real steps, echoes every applied
+value into its result (`spec_honored`), and evaluates the spec's own
+falsification rule. Runner: `kaggle/first_candidate_screening.py` (checked
+in). Verbatim trainer result (from the fetched `chowder_result.json`):
+
+```json
+{
+  "first_loss": 3.460735,
+  "final_loss": 0.032976,
+  "loss_delta": -3.427759,
+  "loss_improved": true,
+  "spec_honored": {
+    "batch_size": 64, "learning_rate": 0.003, "seed": 2026, "steps": 300
+  },
+  "steps_run": 300,
+  "device_gpu_hours": 0.0071,
+  "wall_seconds": 12.781,
+  "metering": "measured_wall_clock_x_attached_accelerators",
+  "torch": "2.11.0+cu128",
+  "status": "complete"
+}
+```
+
+- **spec_drove_run: true** — the run-side check compares the trainer's
+  echoed `spec_honored` values against the request's spec; the record proves
+  the spec drove the hyperparameters rather than defaults.
+- **Falsification decided from the spec's rule** (`loss_delta >= 0` →
+  falsified): measured `loss_delta = −3.4278` → the candidate **survived**.
+  This is the screening lane's actual judgment mechanic working end-to-end
+  on real hardware.
+- **Measured cost: 0.0071 device-hours** (12.781 s × 2 T4s), settled into
+  the weekly model; the 0.1 estimate was replaced by measurement.
+- **A real finding fixed between two pushes of this run**: the first
+  attempt's trainer printed its result to stdout (the RunPod logs pattern)
+  while the Kaggle template reads `/kaggle/working/chowder_result.json` —
+  `spec_drove_run` came back false and the summary said so HONESTLY (no fake
+  success). The trainer now writes the result file (and keeps the stdout
+  marker); second attempt verified spec-driven end to end. Cross-provider
+  artifact conventions are documented: Kaggle = working-dir result file,
+  RunPod = stdout marker via the logs endpoint.
+- Evidence: run-grounded observation `obs-candidate-screening-20261003-173730`
+  (efficiency + loss surfaces, `hardware_class kaggle_2x_t4_16gb`) recorded
+  through durable research memory.
+- Cumulative free-tier spend across all three runs: ~0.047 of 30 weekly
+  device-hours (≈0.16%).
