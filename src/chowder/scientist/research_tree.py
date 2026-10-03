@@ -174,9 +174,9 @@ class TreeScoreWeights:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TreeScoreWeights":
-        unknown = sorted(set(data) - set(cls.__dict__.keys()) - {"to_dict", "from_dict"})
-        valid = {f: getattr(cls(), f) for f in cls().__dict__ if not f.startswith("_")}
-        unknown = sorted(set(data) - set(valid))
+        valid = {f for f in cls().__dict__ if not f.startswith("_")
+                 and not callable(getattr(cls, f, None))}
+        unknown = sorted(set(data) - valid)
         if unknown:
             raise ValueError(f"unknown tree-score weights: {unknown}")
         return cls(**{k: float(v) for k, v in data.items()})
