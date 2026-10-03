@@ -372,9 +372,17 @@ screening lane's allocator is now wired successive halving
 (grow the per-candidate budget, halve the candidates by the tree's
 deterministic score, eliminate by gate vs cutoff, graduate only the final
 round's survivors to substantial runs), mirroring the growth library's
-`run_successive_halving` semantics. All of it is stub-tested against the
-API contracts; no paid GPU-hours have been spent by this code — the first
-real push/pod should be observed and recorded before the lane is trusted.
+`run_successive_halving` semantics. The wiring is now service-level and
+resumable: a policy `compute` section (closed `provider_from_config` set:
+local_cuda | kaggle | runpod) builds the scheduler, `advance_screening`
+advances ONE durable step per call (`scientist screen`; `scientist run`
+advances it automatically when the policy authorizes compute), candidates
+come from admitted proposals in durable memory, and the session survives
+restarts (`screening-session.json`). The first real end-to-end Kaggle run
+through this path is recorded with verbatim artifacts in
+docs/KAGGLE_PROVIDER_ACCEPTANCE.md (pinned-commit install verified in-kernel,
+2× Tesla T4, real quota reconciliation, one measured fp16 workload,
+0.0155 device GPU-hours of the operator's real 30 h weekly quota).
 
 ## 6. Phases — what is proven, what is scaffolded
 

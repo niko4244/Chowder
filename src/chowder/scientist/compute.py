@@ -447,6 +447,7 @@ class KaggleProvider:
                 f"KAGGLE_PUSH_REFUSED: kaggle rejected the kernel: {error_field}"
             )
         ref = str(getattr(response, "ref", "") or f"{self.resolved_username()}/{slug}")
+        ref = self._normalize_kernel_ref(ref)
         self._quota = replace(self._quota, used_gpu_hours=self._quota.used_gpu_hours + cost)
         return Submission(
             submission_id=f"sub-kaggle-{request.experiment_id}",
@@ -462,6 +463,16 @@ class KaggleProvider:
     # -- session lifecycle -----------------------------------------------------
 
     _QUEUED_STATUS_NAMES = ("QUEUED", "CANCEL_REQUESTED", "NEW_SCRIPT")
+
+    @staticmethod
+    def _normalize_kernel_ref(ref: str) -> str:
+        """The push response's `ref` is a URL path ('/code/{owner}/{slug}');
+        kernels_status/kernels_output require '{owner}/{slug}'. Normalize at
+        the boundary so every stored provider_ref is directly pollable."""
+        parts = [p for p in str(ref).split("/") if p]
+        if len(parts) >= 2:
+            return f"{parts[-2]}/{parts[-1]}"
+        return str(ref)
 
     def poll(self, submission: Submission) -> Submission:
         """Map the kernel session's real status onto the submission. A queued
@@ -507,8 +518,25 @@ class KaggleProvider:
         slug = submission.provider_ref.split("/")[-1]
         root = Path(self._workdir) if self._workdir else Path.home() / ".chowder" / "kaggle-kernels"
         out_dir = root / slug / "output"
+        import contextlib
+        import io
         try:
-            files, _token = client.kernels_output(submission.provider_ref, str(out_dir))
+            # the kaggle client prints per-file progress lines; on Windows its
+            # console output can crash with cp1252 encode errors even with
+            # quiet=True — the provider consumes the RETURNED files, not the
+            # client's console chatter
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                files, _token = client.kernels_output(submission.provider_ref, str(out_dir))
+        except UnicodeEncodeError:
+            # the kaggle client prints a console summary AFTER downloading;
+            # on a cp1252 console that print can crash even though the
+            # artifacts are safely on disk. The files — not the console
+            # chatter — are the evidence: fall back to what landed.
+            files = (sorted(str(p) for p in out_dir.iterdir() if p.is_file())
+                     if out_dir.exists() else [])
+            if not files:
+                raise
         except SchedulerRefusal:
             raise
         except Exception as error:
@@ -947,6 +975,59 @@ def json_dumps_compact(value: Any) -> str:
 def json_loads(text: str) -> Any:
     import json
     return json.loads(text)
+
+
+# ---------------------------------------------------------------------------
+# policy-driven provider construction (closed set, like every other config)
+# ---------------------------------------------------------------------------
+
+
+_PROVIDER_KINDS: dict[str, tuple[type, tuple[str, ...]]] = {
+    "local_cuda": (LocalCudaProvider, ("accelerators", "weekly_gpu_hours")),
+    "kaggle": (KaggleProvider, (
+        "username", "api_key", "weekly_gpu_hours", "screening_lane", "push",
+        "chowder_commit", "kernel_command", "repo_url", "session_timeout_seconds",
+        "workdir",
+    )),
+    "runpod": (RunPodProvider, (
+        "api_key", "gpu_type_id", "gpu_count", "image", "command",
+        "weekly_gpu_hours", "concurrent_jobs", "cloud", "disk_gb", "base_url",
+        "screening",
+    )),
+}
+
+
+def provider_from_config(spec: dict[str, Any]) -> Any:
+    """Build a provider from a policy document entry — closed set, closed keys
+    (the repo's frozen-dataclass + closed-_KEYS idiom): an unknown kind or an
+    unknown key refuses by name instead of being ignored."""
+    if not isinstance(spec, dict):
+        raise SchedulerRefusal(
+            f"PROVIDER_CONFIG_INVALID: a provider entry must be a mapping, "
+            f"got {type(spec).__name__}"
+        )
+    kind = str(spec.get("kind", ""))
+    entry = _PROVIDER_KINDS.get(kind)
+    if entry is None:
+        raise SchedulerRefusal(
+            f"UNKNOWN_PROVIDER_KIND: {kind!r}; known kinds: "
+            f"{sorted(_PROVIDER_KINDS)}"
+        )
+    cls, allowed = entry
+    unknown = sorted(set(spec) - set(allowed) - {"kind"})
+    if unknown:
+        raise SchedulerRefusal(
+            f"UNKNOWN_PROVIDER_CONFIG_KEYS: {kind}: {unknown}"
+        )
+    kwargs = {k: v for k, v in spec.items() if k != "kind"}
+    try:
+        return cls(**kwargs)
+    except SchedulerRefusal:
+        raise
+    except TypeError as error:
+        raise SchedulerRefusal(
+            f"PROVIDER_CONFIG_INVALID: {kind}: {error}"
+        ) from error
 
 
 # ---------------------------------------------------------------------------

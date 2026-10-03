@@ -180,6 +180,11 @@ call against the installed kaggle package (2.2.3, kagglesdk-based):
   reserved time counts against availability like used time; a missing/zero
   response keeps the declared model untouched. Refusals (`KAGGLE_PUSH_REFUSED`,
   `KAGGLE_API_ERROR`, `KAGGLE_PACKAGE_MISSING`) never charge quota.
+- Live-API notes from the first real run (docs/KAGGLE_PROVIDER_ACCEPTANCE.md):
+  push responses carry a URL-path ref (`/code/{owner}/{slug}`) that is
+  normalized to `{owner}/{slug}` at the submit boundary, and the client's
+  post-download console print can crash on cp1252 Windows consoles — the
+  fetch falls back to the artifacts on disk (the files are the evidence).
 
 ## 6. What is proven vs scaffolded (honest)
 
@@ -191,14 +196,16 @@ call against the installed kaggle package (2.2.3, kagglesdk-based):
   two-ledger integrity (mission ledger charged identically regardless of
   provider), LocalCudaProvider availability detection from the real
   `HardwareSnapshot`.
-- **Proven against the real API contract, stub-tested**: the Kaggle path
-  (`kernels_push`/`kernels_status`/`kernels_output`/`quota_view` — push
-  folder + metadata construction, status mapping, output collection, quota
-  reconciliation, refusal ladder) and the RunPod path (REST v2
-  `POST /v2/pods`, `GET /v2/pods/{id}`, `DELETE`, through an injectable
-  transport). Tests inject a stub client/transport; no live call is made in
-  CI. The first real push/pod should be done once, observed, and recorded in
-  DDP_ACCEPTANCE-style notes before the lane is trusted.
+- **Proven END-TO-END on real Kaggle hardware (2026-10-03)**: the first
+  real push → poll → output → evidence run, recorded with verbatim artifacts
+  in docs/KAGGLE_PROVIDER_ACCEPTANCE.md — pinned-commit install verified
+  in-kernel, 2× Tesla T4, real quota reconciliation (30 h weekly), one real
+  measured fp16 workload, an observation recorded through durable memory.
+  Two live-API findings were fixed with regression tests (URL-path push refs;
+  the client's cp1252 console crash during output fetch). Unit tests still
+  stub the client so CI never spends quota. The RunPod path remains proven
+  against the REST v2 contract with a stub transport; the first real pod
+  should get the same acceptance treatment before it is trusted.
 - **Scaffolded**: a RunPod pod's EXITED status never reports `complete`
   without a `result_fetcher` confirming an artifact
   (`RUNPOD_EXIT_UNVERIFIED`); fetching pod artifacts out-of-band (volume/S3)

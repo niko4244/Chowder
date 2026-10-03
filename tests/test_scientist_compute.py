@@ -368,7 +368,8 @@ class _FakeKaggleApi:
                  status_sequence: tuple[str, ...] = ("QUEUED", "RUNNING", "COMPLETE"),
                  failure_message: str = "",
                  result: dict | None = None, fingerprint: dict | None = None,
-                 quota: tuple[float, float, float] | None = None) -> None:
+                 quota: tuple[float, float, float] | None = None,
+                 push_ref: str = "u/chowder-e1") -> None:
         self.pushed: list[dict] = []
         self.status_calls: list[str] = []
         self.output_calls: list[str] = []
@@ -379,6 +380,7 @@ class _FakeKaggleApi:
         self._result = result
         self._fingerprint = fingerprint
         self._quota = quota
+        self._push_ref = push_ref
 
     def kernels_push(self, folder, timeout=None, acc=None):
         self.pushed.append({"folder": folder, "timeout": timeout, "acc": acc})
@@ -386,7 +388,7 @@ class _FakeKaggleApi:
             raise self._raise_on_push
         if self._push_error:
             return _FakeKaggleResponse(error=self._push_error)
-        return _FakeKaggleResponse(ref="u/chowder-e1", url="https://kaggle/u/e1",
+        return _FakeKaggleResponse(ref=self._push_ref, url="https://kaggle/u/e1",
                                    version_number=1)
 
     def kernels_status(self, ref):
@@ -482,6 +484,16 @@ def test_kaggle_real_push_writes_kernel_and_records_ref(tmp_path) -> None:
     assert "campaign_spec.json" in script
 
 
+def test_push_response_ref_is_normalized_to_owner_slug(tmp_path) -> None:
+    # the live kernels_push returns a URL-path ref ('/code/{owner}/{slug}');
+    # the stored provider_ref must be pollable as {owner}/{slug}
+    stub = _FakeKaggleApi(push_ref="/code/nikmarco/chowder-e1")
+    provider = _push_provider(api=stub, workdir=str(tmp_path), username="nikmarco")
+    submission = provider.submit(_push_request())
+    assert submission.provider_ref == "nikmarco/chowder-e1"
+    assert provider.poll(submission).status == "queued"  # status accepts it
+
+
 def test_kaggle_push_api_errors_refuse_and_stay_honest(tmp_path) -> None:
     provider = _push_provider(api=_FakeKaggleApi(raise_on_push=RuntimeError("503")),
                               workdir=str(tmp_path))
@@ -521,6 +533,28 @@ def test_kaggle_poll_failure_travels_with_the_submission(tmp_path) -> None:
     assert failed.status == "failed"
     assert failed.result["kernel_status"] == "ERROR"
     assert failed.result["failure_message"] == "CUDA out of memory"
+
+
+def test_output_fetch_survives_client_console_encode_errors(tmp_path) -> None:
+    """The kaggle client prints a console summary AFTER downloading; on a
+    cp1252 Windows console that print can raise UnicodeEncodeError even
+    though the artifacts are on disk. The files are the evidence."""
+    class _EncodeErrorApi(_FakeKaggleApi):
+        def kernels_output(self, ref, path, **kw):
+            from pathlib import Path as _P
+            out = _P(path)
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "chowder_result.json").write_text(
+                '{"status": "complete", "exit_code": 0}', encoding="utf-8")
+            raise UnicodeEncodeError("charmap", "x" * 100, 55, 94, "<undefined>")
+
+    provider = _push_provider(api=_EncodeErrorApi(status_sequence=("COMPLETE",)),
+                              workdir=str(tmp_path))
+    submission = provider.submit(_push_request())
+    complete = provider.poll(submission)
+    assert complete.status == "complete"
+    assert complete.result["output_files"] == ["chowder_result.json"]
+    assert complete.result["chowder_result"]["status"] == "complete"
 
 
 def test_kaggle_quota_sync_uses_the_real_weekly_budget(tmp_path) -> None:

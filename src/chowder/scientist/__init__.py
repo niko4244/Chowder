@@ -15,6 +15,7 @@ from .compute import (
     RunPodProvider,
     SchedulerRefusal,
     Submission,
+    provider_from_config,
 )
 from .screening_halving import (
     HalvingRoundOutcome,
@@ -83,6 +84,7 @@ __all__ = [
     "ResearchTree",
     "RunPodProvider",
     "SchedulerRefusal",
+    "provider_from_config",
     "ScreeningHalving",
     "ScreeningHalvingOutcome",
     "settle_screening_round",

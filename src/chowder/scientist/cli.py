@@ -78,23 +78,52 @@ def _run(args: argparse.Namespace) -> int:
     service = _build_service(args)
     # The headless research session: portfolio -> admission -> (execution
     # happens through the production path; the session records observations
-    # fed to it) -> findings -> next decision. Execution itself is NOT
-    # triggered here: no GPU work starts from a CLI flag the policy did not
-    # authorize.
+    # fed to it) -> findings -> next decision. Experiment execution itself is
+    # NOT triggered here; the one exception is the policy-authorized screening
+    # lane: when the policy declares compute providers, each step advances the
+    # successive-halving schedule (submitting screening jobs through the
+    # scheduler is exactly what the policy's compute section authorizes).
     portfolio = service.generate_portfolio(count=args.count)
     compiled = service.request_experiments()
     decisions = []
+    screening_steps = []
     for _ in range(args.max_steps):
+        if service.scheduler is not None:
+            try:
+                screening_steps.append(service.advance_screening())
+            except ResearchServiceError as error:
+                screening_steps.append({"phase": "refused", "detail": str(error)})
         decision = service.next_decision()
         decisions.append(decision.to_dict())
         if decision.terminal:
             break
     service.save()
-    return _print_json({
+    payload = {
         "hypotheses": [h.to_dict() for h in portfolio],
         "experiments": [e.to_dict() for _, e in compiled],
         "decisions": decisions,
-    })
+    }
+    if screening_steps:
+        payload["screening"] = screening_steps
+    return _print_json(payload)
+
+
+def _screen(args: argparse.Namespace) -> int:
+    """Advance the budget-driven screening lane one durable step. Re-run the
+    command after recording observations (`scientist observe`) to settle the
+    round and submit the next; the schedule survives restarts."""
+    service = _build_service(args)
+    try:
+        payload = service.advance_screening()
+    except ResearchServiceError as error:
+        return _error_json(error)
+    service.save()
+    return _print_json(payload)
+
+
+def _error_json(error: Exception) -> int:
+    print(json.dumps({"error": str(error)}, indent=2))
+    return 1
 
 
 def _observe(args: argparse.Namespace) -> int:
@@ -140,11 +169,17 @@ def register_scientist_subcommands(sub: argparse._SubParsersAction) -> None:
     plan.add_argument("--count", type=int, default=3)
     plan.set_defaults(func=_plan)
 
-    run = scientist_sub.add_parser("run", help="Run the research session loop (no direct GPU work)")
+    run = scientist_sub.add_parser("run", help="Run the research session loop (no direct experiment execution; policy-authorized screening advances through the compute providers)")
     _common(run)
     run.add_argument("--count", type=int, default=3)
     run.add_argument("--max-steps", type=int, default=8)
     run.set_defaults(func=_run)
+
+    screen = scientist_sub.add_parser(
+        "screen", help="Advance the budget-driven screening lane one durable step "
+                       "(submit round / await observations / settle / graduate)")
+    _common(screen)
+    screen.set_defaults(func=_screen)
 
     observe = scientist_sub.add_parser("observe",
                                        help="Record a run-grounded ExperimentObservation JSON")

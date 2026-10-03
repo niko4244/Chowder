@@ -40,7 +40,23 @@
       "min_survivors_for_generalization": 2
     },
     "protected_benchmarks": ["instruction_following@eval"],
-    "sandbox_required": true
+    "sandbox_required": true,
+
+    "_compute_comment": "Optional. Absent = the screening lane refuses (no default compute). Declared = `scientist screen` and `scientist run` advance the successive-halving screening lane through these providers. Providers come from the closed set via provider_from_config: local_cuda | kaggle | runpod — unknown kinds or keys refuse by name. The kaggle entry below is the screening lane; push=true performs a REAL kernels_push and additionally requires chowder_commit (40-hex) and kernel_command (the operator executor) at submit time.",
+    "compute": {
+      "providers": [
+        { "kind": "kaggle", "weekly_gpu_hours": 20.0, "push": false },
+        { "kind": "local_cuda", "weekly_gpu_hours": 1000000.0 }
+      ],
+      "screening": {
+        "initial_budget_gpu_hours": 0.05,
+        "budget_cap_gpu_hours": 0.25,
+        "step_multiplier": 2.0,
+        "survival_fraction": 0.5,
+        "min_survivors": 1,
+        "max_rounds": 4
+      }
+    }
   },
 
   "scientist_policy_with_ai_scientist_v2_sidecar": {
@@ -95,6 +111,7 @@
     "chowder scientist plan   --mission mission.json --policy policy.json --state-root ./state --count 3",
     "chowder scientist run    --mission mission.json --policy policy.json --state-root ./state --max-steps 8",
     "chowder scientist observe --mission mission.json --policy policy.json --state-root ./state --observation observation.json",
+    "chowder scientist screen  --mission mission.json --policy policy.json --state-root ./state   # advance the budget-driven screening lane one durable step; re-run after recording observations",
     "chowder scientist findings --mission mission.json --policy policy.json --state-root ./state",
     "chowder scientist tree   --mission mission.json --policy policy.json --state-root ./state"
   ],

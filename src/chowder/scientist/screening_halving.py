@@ -64,6 +64,9 @@ class ScreeningHalving:
         if self.max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
 
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.__dict__)
+
     def round_budget(self, round_index: int) -> float:
         """Per-candidate screening budget for a round: grow by the
         multiplier, saturate at the cap."""
