@@ -518,6 +518,158 @@ class ModelResearchService:
         session = self._load_screening_session()
         return None if session is None else session.to_dict()
 
+    # -- graduation: survivors become real campaign drafts ----------------------
+
+    def _target_proposal_for(
+        self,
+        proposal: ExperimentProposal,
+        experiment: CompiledExperiment,
+        *,
+        parent_version: str,
+        benchmark_for_skill: Mapping[str, str],
+    ) -> Any:
+        """Project a graduated candidate onto the growth loop's TargetProposal
+        shape: the campaign target comes from the proposal's own declared
+        evaluation surface and recipe, not from a new invention. The audit
+        fields (weakness evidence, factors, why-not) carry the screening
+        session's own provenance — what competed, what survived, at what
+        score —        instead of invented numbers."""
+        from ..growth.next_campaign import NextCampaignRefusal
+        from ..growth.target_selection import TargetProposal, TargetScoreFactors
+        session = self._load_screening_session()
+        scores = {
+            eid: score
+            for round_doc in (session.settled_rounds if session else ())
+            for eid, score in round_doc.get("scores", ())
+        }
+        survivor_score = scores.get(f"sciexp-{proposal.proposal_id}")
+        target_skill = (proposal.requested_evaluations or ("reasoning",))[0]
+        pinned = benchmark_for_skill.get(target_skill, "")
+        if not pinned:
+            raise NextCampaignRefusal(
+                f"GRADUATION_NO_PINNED_BENCHMARK: the surface {target_skill!r} has "
+                "no pinned benchmark mapping; naming the eval instrument that "
+                "measures it is an operator decision, not an invention"
+            )
+        treatment = (proposal.training_recipe_delta.training_type or "data")
+        note = (
+            f"graduated from screening: {proposal.intervention} "
+            f"(proposal {proposal.proposal_id}, falsification: "
+            f"{proposal.falsification_rule})"
+        )
+        return TargetProposal(
+            parent_version=parent_version,
+            target_skill=target_skill,
+            # the campaign schema requires pinned (name@version) ids; the
+            # operator mapping provides the instrument per capability surface
+            target_benchmarks=(pinned,),
+            weakness_evidence=(note,),
+            priority=float(self.mission.priorities.get(target_skill, 1.0)),
+            confidence=0.5,
+            expected_trainability=0.5,
+            regression_risks=(),
+            suggested_training_type=treatment,
+            expected_cost_gpu_hours=max(0.01, experiment.estimated_gpu_hours),
+            why_not_other_targets={},
+            factors=TargetScoreFactors(
+                weakness=0.0, confidence=0.5, importance=0.0, recurrence=0.0,
+                frontier_gap=0.0, trainability=0.5, novelty=0.0, efficiency=0.0,
+                regression_risk=0.0, repeat_penalty=0.0,
+                uncertainty_penalty=0.0,
+                total=float(survivor_score if survivor_score is not None else 0.0),
+            ),
+            treatment_reason=note,
+        )
+
+    def graduate_survivors_to_campaign_drafts(
+        self,
+        *,
+        parent_manifest_path: str | Path,
+        loop_policy: Any,
+        generation_root: str | Path,
+        benchmark_for_skill: Mapping[str, str] | None = None,
+        attempt: int = 1,
+    ) -> tuple[dict[str, Any], ...]:
+        """Turn the screening lane's FINAL survivors into real campaign drafts
+        through the growth loop's own NextCampaignBuilder.
+
+        This is the hand-off the three-part design pointed at: screening finds
+        the branches worth spending; the growth loop plans, runs, gates and —
+        only through its unchanged promotion path — promotes the resulting
+        candidates. The bridge COMPOSES drafts (the planner still owns recipe
+        identities); it never freezes, executes, or promotes anything.
+
+        Requires: the lane has graduated (`final_survivors` is set), the
+        survivors' admitted proposals still resolve, and the mission's
+        priorities cover the target skill. Every survivor is journaled as a
+        campaign_draft_composed (or campaign_draft_refused, with the loop's
+        own refusal reason) to the refusals ledger — durable, auditable.
+        """
+        from ..growth.campaign import CampaignManifest
+        from ..growth.next_campaign import NextCampaignBuilder, NextCampaignRefusal
+        if self.scheduler is None:
+            raise ResearchServiceError(
+                "GRADUATION_NOT_CONFIGURED: no compute layer; run the "
+                "screening lane first"
+            )
+        session = self._load_screening_session()
+        if session is None or session.final_survivors is None:
+            raise ResearchServiceError(
+                "GRADUATION_NOT_READY: the screening lane has not graduated "
+                "any survivors yet"
+            )
+        builder = NextCampaignBuilder(policy=loop_policy)
+        parent = CampaignManifest.from_file(Path(parent_manifest_path))
+        skill_map = dict(benchmark_for_skill or {})
+        results: list[dict[str, Any]] = []
+        for experiment_id in session.final_survivors:
+            candidate = session.candidates.get(experiment_id)
+            if candidate is None:
+                raise ResearchServiceError(
+                    f"GRADUATION_CANDIDATE_UNKNOWN: {experiment_id!r} is not in "
+                    "the screening session's durable candidate set"
+                )
+            proposal = ExperimentProposal.from_dict(candidate["proposal"])
+            experiment = self._compiled_from_dict(candidate["experiment"])
+            try:
+                target = self._target_proposal_for(
+                    proposal, experiment,
+                    parent_version=parent.resolved_candidate_version(),
+                    benchmark_for_skill=skill_map)
+                draft = builder.draft(
+                    parent=parent,
+                    target=target,
+                    generation_root=generation_root,
+                    attempt=attempt,
+                )
+            except NextCampaignRefusal as error:
+                self.memory.record_refusal(
+                    provider="graduation_bridge", kind="campaign_draft_refused",
+                    detail=str(error), payload={"experiment_id": experiment_id})
+                results.append({"experiment_id": experiment_id,
+                                "refused": str(error)})
+                continue
+            self.memory.record_refusal(
+                provider="graduation_bridge", kind="campaign_draft_composed",
+                detail=(
+                    f"survivor {experiment_id} became campaign draft "
+                    f"{draft.cycle_id}"),
+                payload={
+                    "experiment_id": experiment_id,
+                    "proposal_id": proposal.proposal_id,
+                    "cycle_id": draft.cycle_id,
+                    "directory": str(draft.directory),
+                    "placeholder_recipe_ids": list(draft.placeholder_recipe_ids),
+                })
+            results.append({
+                "experiment_id": experiment_id,
+                "proposal_id": proposal.proposal_id,
+                "cycle_id": draft.cycle_id,
+                "directory": str(draft.directory),
+                "draft": draft.to_dict(),
+            })
+        return tuple(results)
+
     def status(self) -> MissionView:
         st = self._director_status()
         decision = self.next_decision()

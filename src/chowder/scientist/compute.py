@@ -565,6 +565,19 @@ class KaggleProvider:
                 fingerprint = json.loads(environment_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError) as error:
                 result["environment_fingerprint_error"] = str(error)
+        probe = result.get("chowder_result")
+        measured = probe.get("device_gpu_hours") if isinstance(probe, dict) else None
+        if isinstance(measured, (int, float)) and measured >= 0:
+            # real cost replaces the submit-time estimate: settle the
+            # difference against the weekly budget honestly
+            estimate = submission.device_gpu_hours
+            self._quota = replace(
+                self._quota,
+                used_gpu_hours=max(0.0, self._quota.used_gpu_hours - estimate + float(measured)),
+            )
+            return replace(submission, status="complete", result=result,
+                           environment_fingerprint=fingerprint,
+                           device_gpu_hours=float(measured))
         return replace(submission, status="complete", result=result,
                        environment_fingerprint=fingerprint)
 
@@ -628,6 +641,7 @@ import sys
 from pathlib import Path
 
 import base64
+import time
 
 WORKING = Path("/kaggle/working")
 RESULT_PATH = WORKING / "chowder_result.json"
@@ -647,6 +661,19 @@ def _base_result(status: str, **extra) -> dict:
     }
     payload.update(extra)
     return payload
+
+
+# Real per-run metering (wall clock of the operator command). Device-hours
+# derive from the accelerators this session actually attached — the honest
+# cost, replacing the request's estimate everywhere evidence is recorded.
+_T0 = time.monotonic()
+try:
+    import torch
+    _ACCELERATOR_COUNT = torch.cuda.device_count() if torch.cuda.is_available() else 0
+except Exception:
+    _ACCELERATOR_COUNT = 0
+if _ACCELERATOR_COUNT <= 0:
+    _ACCELERATOR_COUNT = max(1, int(os.environ.get("CHOWDER_DEVICE_COUNT", "1")))
 
 
 def main() -> int:
@@ -691,15 +718,33 @@ def main() -> int:
     env = dict(os.environ)
     env["CHOWDER_CAMPAIGN_SPEC"] = str(WORKING / "campaign_spec.json")
     env["CHOWDER_EXPERIMENT_ID"] = EXPERIMENT_ID
+    command_started = time.monotonic()
     completed = subprocess.run(KERNEL_COMMAND, shell=True, env=env)
+    wall_seconds = time.monotonic() - command_started
+    wall_hours = wall_seconds / 3600.0
+    device_gpu_hours = wall_hours * _ACCELERATOR_COUNT
     status = "complete" if completed.returncode == 0 else "failed"
-    payload = _base_result(status, exit_code=completed.returncode)
+    payload = _base_result(
+        status,
+        exit_code=completed.returncode,
+        wall_seconds=round(wall_seconds, 3),
+        wall_gpu_hours=round(wall_hours, 6),
+        device_gpu_hours=round(device_gpu_hours, 6),
+        accelerator_count=_ACCELERATOR_COUNT,
+        metering="measured_wall_clock_x_attached_accelerators",
+    )
     if RESULT_PATH.exists():
         try:
             command_result = json.loads(RESULT_PATH.read_text(encoding="utf-8"))
             if isinstance(command_result, dict):
-                command_result.update(payload)  # the template's own fields win
-                payload = command_result
+                # metering fields stay the template's (measured here, not
+                # claimable by the command); the command's own fields follow
+                payload.update({
+                    k: v for k, v in command_result.items()
+                    if k not in ("status", "exit_code", "wall_seconds",
+                                 "wall_gpu_hours", "device_gpu_hours",
+                                 "accelerator_count", "metering", "experiment_id")
+                })
         except json.JSONDecodeError as error:
             payload["command_result_error"] = str(error)
     RESULT_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -856,6 +901,12 @@ class RunPodProvider:
                 "CHOWDER_KERNEL_COMMAND": self._command,
             },
         }
+        if self._command:
+            # Container CMD in exec form (the v2 schema: cmd is an array, not a
+            # string). sh -lc gives the operator command a shell and the env
+            # vars above; when the image defines an ENTRYPOINT this becomes its
+            # argument list.
+            body["cmd"] = ["/bin/sh", "-lc", self._command]
         try:
             status, text = self._call("POST", "/pods", body)
         except SchedulerRefusal:
@@ -952,7 +1003,29 @@ class RunPodProvider:
             )
             return replace(submission, status="failed", result=note)
         note["chowder_result"] = artifact
+        measured = (artifact.get("device_gpu_hours")
+                    if isinstance(artifact, dict) else None)
+        if isinstance(measured, (int, float)) and measured >= 0:
+            estimate = submission.device_gpu_hours
+            self._quota = replace(
+                self._quota,
+                used_gpu_hours=max(0.0, self._quota.used_gpu_hours - estimate + float(measured)),
+            )
+            return replace(submission, status="complete", result=note,
+                           device_gpu_hours=float(measured))
         return replace(submission, status="complete", result=note)
+
+    def logs(self, submission: Submission) -> str:
+        """The pod's streamed logs (GET /v2/pods/{id}/logs) — the operator's
+        debugging window; never an evidence source by itself."""
+        if not submission.provider_ref:
+            return ""
+        status, text = self._call("GET", f"/pods/{submission.provider_ref}/logs")
+        if status < 200 or status >= 300:
+            raise SchedulerRefusal(
+                f"RUNPOD_API_ERROR: pod logs returned HTTP {status}: {text[:300]}"
+            )
+        return text
 
     def terminate(self, submission: Submission) -> bool:
         """Delete the pod (operator/loop hygiene: a refused or dead run must

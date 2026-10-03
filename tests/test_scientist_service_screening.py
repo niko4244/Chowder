@@ -305,3 +305,139 @@ def test_cli_screen_advances_one_durable_step(tmp_path: Path, capsys) -> None:
     # plan --count 3 leaves exactly one admissible candidate (fake provider
     # positions 1/2 are over-budget/architecture)
     assert len(step["awaiting"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# graduation: survivors → growth-loop campaign drafts
+# ---------------------------------------------------------------------------
+
+
+def _run_lane_to_graduation(tmp_path: Path) -> ModelResearchService:
+    """A service whose screening lane has graduated with one survivor."""
+    service = _admit_three(tmp_path, _policy([_KAGGLE], _SCHEDULE))
+
+    def record_results(triples, round_index):
+        for proposal, experiment, submission in triples:
+            quality = {"fake-prop-fake-hyp-000": 0.05,
+                       "fake-prop-fake-hyp-003": 0.60,
+                       "fake-prop-fake-hyp-004": 0.90}[proposal.proposal_id]
+            service.record_observation(ExperimentObservation(
+                observation_id=f"obs-r{round_index}-{proposal.proposal_id}",
+                run_id=f"run-r{round_index}-{proposal.proposal_id}",
+                experiment_ref=experiment.experiment_id,
+                proposal_id=proposal.proposal_id,
+                hypothesis_id=proposal.hypothesis_id,
+                measurements=(Measurement(surface="reasoning", benchmark="b",
+                                          value=quality),),
+                wall_gpu_hours=0.05, hardware_class=submission.hardware_class,
+            ))
+
+    for _ in range(6):
+        step = service.advance_screening(record_results=record_results)
+        if step["phase"] == "graduated":
+            break
+    assert service._load_screening_session().final_survivors is not None
+    return service
+
+
+def _fixture_loop_policy(tmp_path: Path, **overrides):
+    from fixtures_growth_loop import GEN2_MANIFEST, parent_manifest, policy_from
+    parent = parent_manifest(tmp_path)
+    manifest_path = tmp_path / "parent-campaign.json"
+    # the fixture's own declaration file, with the run root relocated the same
+    # way parent_manifest does it, so from_file() sees a consistent document
+    document = json.loads(GEN2_MANIFEST.read_text(encoding="utf-8"))
+    document["state_root"] = str(tmp_path / "parent-run")
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+    return manifest_path, policy_from(parent, **overrides)
+
+
+def test_graduation_refuses_before_any_graduation(tmp_path: Path) -> None:
+    service = _service(tmp_path, _policy())  # no compute section at all
+    with pytest.raises(ResearchServiceError, match="GRADUATION_NOT_CONFIGURED"):
+        service.graduate_survivors_to_campaign_drafts(
+            parent_manifest_path="x", loop_policy=None, generation_root=tmp_path)
+    service2 = _admit_three(tmp_path, _policy([_KAGGLE], _SCHEDULE))
+    _manifest_path, policy = _fixture_loop_policy(tmp_path)
+    with pytest.raises(ResearchServiceError, match="GRADUATION_NOT_READY"):
+        service2.graduate_survivors_to_campaign_drafts(
+            parent_manifest_path="x", loop_policy=policy,
+            generation_root=tmp_path / "generations")
+
+
+def test_graduated_survivor_becomes_a_campaign_draft(tmp_path: Path) -> None:
+    service = _run_lane_to_graduation(tmp_path)
+    # the operator's loop protects math500 only (an operator choice); mgsm
+    # stays pinned but is a legitimate optimization target in this policy
+    manifest_path, policy = _fixture_loop_policy(
+        tmp_path, allowed_training_types=["data", "targeted_repair", "sft"],
+        protected_benchmarks=["math500@2024-04"])
+    results = service.graduate_survivors_to_campaign_drafts(
+        parent_manifest_path=manifest_path,
+        loop_policy=policy,
+        generation_root=tmp_path / "generations",
+        benchmark_for_skill={"reasoning": "mgsm@2022-11"},
+    )
+    # the bridge composes; it does not freeze
+    assert len(results) == 1
+    outcome = results[0]
+    assert outcome["proposal_id"] == "fake-prop-fake-hyp-004"
+    assert outcome["cycle_id"].startswith("gen3-a1-")
+    assert outcome["draft"]["frozen"] is False
+    assert Path(outcome["directory"]).exists()
+    # the composed target carries the screening provenance, not inventions
+    document = outcome["draft"]
+    assert document is not None
+    # journaled, durably, as a composed draft
+    journal = (tmp_path / "state" / "research" / "refusals.jsonl").read_text(
+        encoding="utf-8")
+    assert "campaign_draft_composed" in journal
+    assert outcome["cycle_id"] in journal
+
+
+def test_graduation_refuses_without_a_pinned_benchmark_mapping(
+        tmp_path: Path) -> None:
+    service = _run_lane_to_graduation(tmp_path)
+    manifest_path, policy = _fixture_loop_policy(
+        tmp_path, allowed_training_types=["data", "targeted_repair", "sft"])
+    # no mapping for the 'reasoning' surface: the bridge refuses per survivor
+    # rather than inventing an eval instrument
+    results = service.graduate_survivors_to_campaign_drafts(
+        parent_manifest_path=manifest_path,
+        loop_policy=policy,
+        generation_root=tmp_path / "generations",
+    )
+    assert len(results) == 1
+    assert "GRADUATION_NO_PINNED_BENCHMARK" in results[0]["refused"]
+    journal = (tmp_path / "state" / "research" / "refusals.jsonl").read_text(
+        encoding="utf-8")
+    assert "campaign_draft_refused" in journal
+
+
+def test_graduation_refusal_carries_the_loop_reason(tmp_path: Path) -> None:
+    service = _run_lane_to_graduation(tmp_path)
+    # case 1: the mapped benchmark is in the policy's PROTECTED set — the loop
+    # refuses it as an optimization target (gates are never targets)
+    manifest_path, policy = _fixture_loop_policy(
+        tmp_path, allowed_training_types=["data", "targeted_repair", "sft"])
+    results = service.graduate_survivors_to_campaign_drafts(
+        parent_manifest_path=manifest_path,
+        loop_policy=policy,
+        generation_root=tmp_path / "generations",
+        benchmark_for_skill={"reasoning": "math500@2024-04"},
+    )
+    assert len(results) == 1
+    assert "PROTECTED" in results[0]["refused"].upper()
+    # case 2: the default fixture policy protects BOTH benchmarks, so the
+    # same mapping refuses again (protected-set boundary, journaled verbatim)
+    manifest_path2, policy2 = _fixture_loop_policy(tmp_path)
+    results2 = service.graduate_survivors_to_campaign_drafts(
+        parent_manifest_path=manifest_path2,
+        loop_policy=policy2,
+        generation_root=tmp_path / "generations2",
+        benchmark_for_skill={"reasoning": "mgsm@2022-11"},
+    )
+    assert "PROTECTED" in results2[0]["refused"].upper()
+    journal = (tmp_path / "state" / "research" / "refusals.jsonl").read_text(
+        encoding="utf-8")
+    assert journal.count("campaign_draft_refused") == 2

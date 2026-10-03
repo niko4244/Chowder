@@ -382,7 +382,16 @@ restarts (`screening-session.json`). The first real end-to-end Kaggle run
 through this path is recorded with verbatim artifacts in
 docs/KAGGLE_PROVIDER_ACCEPTANCE.md (pinned-commit install verified in-kernel,
 2× Tesla T4, real quota reconciliation, one measured fp16 workload,
-0.0155 device GPU-hours of the operator's real 30 h weekly quota).
+0.0155 device GPU-hours of the operator's real 30 h weekly quota). The
+kernel template now measures each run's real wall clock and attached
+accelerator count, `chowder_result.json` carries measured
+`device_gpu_hours`, and the provider settles its weekly budget with the
+measured cost (the estimate stands only when a result omits the metering
+fields). Graduated survivors hand off to the growth loop through
+`graduate_survivors_to_campaign_drafts` — the loop's own
+`NextCampaignBuilder` composes real campaign drafts from them (never
+freezing, executing, or promoting), with the per-surface pinned-benchmark
+mapping an explicit operator input and every hand-off journaled.
 
 ## 6. Phases — what is proven, what is scaffolded
 

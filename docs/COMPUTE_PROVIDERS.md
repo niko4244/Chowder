@@ -185,6 +185,15 @@ call against the installed kaggle package (2.2.3, kagglesdk-based):
   normalized to `{owner}/{slug}` at the submit boundary, and the client's
   post-download console print can crash on cp1252 Windows consoles — the
   fetch falls back to the artifacts on disk (the files are the evidence).
+- **Per-run metering (proven in-kernel design, live-verified next run)**: the
+  generated kernel measures the operator command's real wall clock
+  (`time.monotonic` around the command) and counts the accelerators actually
+  attached; `chowder_result.json` carries `wall_seconds`, `wall_gpu_hours`,
+  `device_gpu_hours`, `accelerator_count` and
+  `metering=measured_wall_clock_x_attached_accelerators`. On COMPLETE the
+  provider settles the weekly budget with the MEASURED cost (the submit-time
+  estimate is replaced, including on the submission itself) — the estimate
+  only stands when a result omits the metering fields.
 
 ## 6. What is proven vs scaffolded (honest)
 
@@ -230,3 +239,35 @@ call against the installed kaggle package (2.2.3, kagglesdk-based):
   ERROR/TERMINATED to `failed`; EXITED only completes through a confirmed
   artifact (§6). The transport is injectable — tests never touch the
   network, and the default is stdlib `urllib` (no new dependency).
+- **The command runs through the container CMD**: `cmd: ["/bin/sh", "-lc",
+  command]` in exec form (the v2 schema defines `cmd` as an array, not a
+  string); the campaign spec and ids travel as env vars the command reads.
+- **Artifacts via stdout**: the acceptance pattern (`kaggle/runpod_first_pod.py`)
+  has the probe print one marker line (`CHOWDER_RESULT_JSON: {...}`) on
+  stdout and confirms the artifact from `GET /v2/pods/{id}/logs` — a real
+  API response, no SSH or exposed ports required. `logs()` is a debugging
+  window, never evidence by itself; the marker-parsed JSON is. Measured
+  device-hours reconcile the quota exactly like the Kaggle path.
+
+## 8. Graduation: survivors become campaign drafts
+
+`ModelResearchService.graduate_survivors_to_campaign_drafts` projects the
+screening lane's final survivors onto the growth loop's own
+`NextCampaignBuilder.draft` — screening finds the branches worth spending;
+the growth loop plans, runs, gates, and (only through its unchanged promotion
+path) promotes. The bridge composes drafts (the production planner still owns
+recipe identities); it never freezes, executes, or promotes.
+
+- The composed `TargetProposal` carries the screening session's own
+  provenance (survivor score in `factors.total`, the intervention and
+  falsification rule in `treatment_reason`), never invented audit numbers.
+- **`benchmark_for_skill` is an operator mapping** (`capability surface →
+  pinned `name@version` benchmark`): naming the eval instrument that measures
+  a surface is an operator decision, not an invention; a survivor whose
+  surface has no mapping is refused per-survivor
+  (`GRADUATION_NO_PINNED_BENCHMARK`) and journaled.
+- Every composed draft (`campaign_draft_composed`) and every refusal
+  (`campaign_draft_refused`, with the loop's verbatim reason — protected-set
+  violations, treatment-not-allowed, schema) lands in the refusals ledger:
+  the hand-off is durable and auditable, and the loop's own policy boundaries
+  remain the only gates that matter.

@@ -602,7 +602,9 @@ class _StubTransport:
 
 def _runpod(**kw):
     base = dict(api_key="rp-key", gpu_type_id="NVIDIA A100", image="chowder/train:pin",
-                command="python run_experiment.py", weekly_gpu_hours=8.0)
+                command="python run_experiment.py", weekly_gpu_hours=8.0,
+                result_fetcher=lambda submission: {"status": "complete",
+                                                   "device_gpu_hours": 0.31})
     base.update(kw)
     return RunPodProvider(**base)
 
@@ -630,10 +632,25 @@ def test_runpod_submit_creates_pod_carries_spec_and_charges_quota() -> None:
     body = call["body"]
     assert body["name"] == "chowder-e1"
     assert body["gpu"] == {"id": "NVIDIA A100", "count": 1}
+    assert body["cmd"] == ["/bin/sh", "-lc", "python run_experiment.py"]
     import json
     spec = json.loads(body["env"]["CHOWDER_CAMPAIGN_SPEC"])
     assert spec == {} or isinstance(spec, dict)
     assert body["env"]["CHOWDER_EXPERIMENT_ID"] == "e1"
+
+
+def test_runpod_measured_hours_replace_the_estimate() -> None:
+    transport = _StubTransport([
+        (201, {"id": "pod_abc", "status": "PROVISIONING"}),
+        (200, {"id": "pod_abc", "status": "EXITED"}),
+    ])
+    provider = _runpod(transport=transport, gpu_count=2)
+    submission = provider.submit(_request(estimated_gpu_hours=0.5))
+    assert submission.device_gpu_hours == pytest.approx(1.0)  # 0.5 × 2 estimate
+    complete = provider.poll(submission)  # fetcher returns measured device hours
+    assert complete.status == "complete"
+    assert complete.device_gpu_hours == pytest.approx(0.31)  # measured wins
+    assert provider.quota().used_gpu_hours == pytest.approx(0.31)
 
 
 def test_runpod_submit_api_error_refuses_without_charging() -> None:
@@ -643,13 +660,39 @@ def test_runpod_submit_api_error_refuses_without_charging() -> None:
     assert provider.quota().used_gpu_hours == 0
 
 
+def test_kaggle_measured_hours_replace_the_estimate(tmp_path) -> None:
+    stub = _FakeKaggleApi(
+        status_sequence=("COMPLETE",),
+        result={"status": "complete", "exit_code": 0,
+                "wall_seconds": 112.4, "wall_gpu_hours": 0.031222,
+                "device_gpu_hours": 0.062444, "accelerator_count": 2},
+    )
+    provider = _push_provider(api=stub, workdir=str(tmp_path))
+    submission = provider.submit(_push_request())  # estimate: 0.5 × 2 = 1.0
+    complete = provider.poll(submission)
+    assert complete.status == "complete"
+    assert complete.device_gpu_hours == pytest.approx(0.062444)  # measured wins
+    assert provider.quota().used_gpu_hours == pytest.approx(0.062444)  # settled
+
+
+def test_kaggle_measured_hours_survive_a_result_that_omits_them(tmp_path) -> None:
+    stub = _FakeKaggleApi(status_sequence=("COMPLETE",),
+                          result={"status": "complete"})  # old-style result
+    provider = _push_provider(api=stub, workdir=str(tmp_path))
+    submission = provider.submit(_push_request())
+    complete = provider.poll(submission)
+    assert complete.status == "complete"
+    assert complete.device_gpu_hours == pytest.approx(1.0)  # estimate stands
+    assert provider.quota().used_gpu_hours == pytest.approx(1.0)
+
+
 def test_runpod_poll_lifecycle_maps_statuses() -> None:
     transport = _StubTransport([
         (201, {"id": "pod_abc", "status": "PROVISIONING"}),
         (200, {"id": "pod_abc", "status": "RUNNING"}),
         (200, {"id": "pod_abc", "status": "EXITED"}),
     ])
-    provider = _runpod(transport=transport)  # no result_fetcher
+    provider = _runpod(transport=transport, result_fetcher=None)  # no fetcher
     submission = provider.submit(_request())
     assert provider.poll(submission).status == "running"
     exited = provider.poll(submission)
