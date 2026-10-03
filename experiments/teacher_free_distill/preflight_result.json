@@ -1,0 +1,21 @@
+{
+  "checks": {
+    "adapter_created": true,
+    "checkpoint_roundtrip": true,
+    "finite_loss": true,
+    "gradient_flow_adapter_only": true,
+    "masking_assistant_only": true,
+    "masking_nonempty_targets": true,
+    "resume_integrity": true,
+    "tokenization_roundtrip": true
+  },
+  "detail": {
+    "loss": "3.4649",
+    "supervised_span": "Assistant: the answer is 42",
+    "trainable_params": "4"
+  },
+  "note": "CPU-only preflight on a 1-layer model using the production masking function",
+  "ok": true,
+  "passed": 8,
+  "total": 8
+}
