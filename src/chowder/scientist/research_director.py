@@ -363,12 +363,19 @@ class ResearchDirector:
         self,
         scheduler: Any,
         pairs: tuple[tuple[ExperimentProposal, Any], ...],
+        *,
+        budget_gpu_hours: float = 0.25,
     ) -> tuple[tuple[ExperimentProposal, Any, Any], ...]:
         """Route the screening stage: short/cheap runs for each candidate,
-        preferably on the declared screening lane (Kaggle). Returns the
-        (proposal, experiment, submission) triples that were admitted by the
-        scheduler; refusals are journaled."""
+        preferably on the declared screening lane (Kaggle). `budget_gpu_hours`
+        caps each candidate's screening budget — successive-halving rounds
+        pass the round's own budget here (still bounded by the caller's cap).
+        Returns the (proposal, experiment, submission) triples that were
+        admitted by the scheduler; refusals are journaled."""
         from .compute import ExperimentClass, ExperimentRequest
+        if budget_gpu_hours < 0:
+            raise DirectorRefusal("SCREENING_BUDGET_NEGATIVE: a screening round "
+                                  "cannot spend negative GPU-hours")
         out: list[tuple[ExperimentProposal, Any, Any]] = []
         for proposal, experiment in pairs:
             request = ExperimentRequest(
@@ -377,7 +384,7 @@ class ResearchDirector:
                 hypothesis_id=proposal.hypothesis_id,
                 campaign_spec=experiment.campaign_spec,
                 experiment_class=ExperimentClass.SCREENING,
-                estimated_gpu_hours=min(experiment.estimated_gpu_hours, 0.25),
+                estimated_gpu_hours=min(experiment.estimated_gpu_hours, budget_gpu_hours),
             )
             try:
                 submission = scheduler.schedule(request)
@@ -433,6 +440,101 @@ class ResearchDirector:
                 continue
             out.append((proposal, experiment, submission))
         return tuple(out)
+
+    # -- screening successive-halving ------------------------------------------
+
+    def run_screening_halving(
+        self,
+        scheduler: Any,
+        pairs: tuple[tuple[ExperimentProposal, Any], ...],
+        *,
+        halving: Any | None = None,
+        record_results: Callable[..., None] | None = None,
+    ) -> Any:
+        """Budget-driven elimination for the screening lane (successive
+        halving over the scheduler instead of the local runner; schedule
+        semantics in chowder/scientist/screening_halving.py, mirroring the
+        growth library's `run_successive_halving`).
+
+        Round r submits every surviving candidate at the round's budget via
+        `submit_screening_batch`, calls `record_results(triples, round_index)`
+        — the production seam: the loop records run-grounded observations and
+        returns when they are durable — then settles the round mechanically:
+        tree-scored candidates compete, candidates with no usable observation
+        are eliminated by gate, the rest by cutoff. Only the FINAL round's
+        survivors graduate; feed them to `submit_survivor_batch`.
+
+        Refuses BEFORE any compute when no `record_results` seam is provided:
+        rounds advance only on recorded observations, never on assumptions.
+        Eliminations are journaled to the refusals ledger (durable, auditable).
+        """
+        from .screening_halving import (
+            ScreeningHalving, ScreeningHalvingOutcome, HalvingRoundOutcome,
+            screening_score_from_node, settle_screening_round,
+        )
+        if record_results is None:
+            raise DirectorRefusal(
+                "SCREENING_RESULTS_CALLBACK_REQUIRED: successive halving "
+                "advances only on recorded observations; provide the loop's "
+                "record_results seam before requesting compute"
+            )
+        schedule = halving or ScreeningHalving()
+        rounds: list[HalvingRoundOutcome] = []
+        current: list[tuple[ExperimentProposal, Any]] = list(pairs)
+        round_index = 0
+        while current:
+            budget = schedule.round_budget(round_index)
+            triples = self.submit_screening_batch(
+                scheduler, tuple(current), budget_gpu_hours=budget)
+            submitted_ids = tuple(e.experiment_id for _, e, _ in triples)
+            refused = tuple(
+                e.experiment_id for _, e in current
+                if e.experiment_id not in set(submitted_ids)
+            )
+            if triples:
+                record_results(triples, round_index)
+            scores: dict[str, float | None] = {}
+            for experiment_id in submitted_ids:
+                node_id = f"node-{experiment_id}"
+                if not self.tree_has_node(node_id):
+                    scores[experiment_id] = None
+                    continue
+                node = self.tree.node(node_id)
+                scores[experiment_id] = screening_score_from_node(node, self.tree.score_node)
+            survivors, by_gate, by_cutoff, ranked = settle_screening_round(scores, schedule)
+            by_gate = tuple(sorted(set(by_gate) | set(refused)))
+            eliminations = [(eid, "gate: no usable observation") for eid in by_gate]
+            eliminations += [(eid, "cutoff: scored below the survivor line")
+                             for eid in by_cutoff]
+            for experiment_id, reason in eliminations:
+                score = next((s for eid2, s in ranked if eid2 == experiment_id), None)
+                self.memory.record_refusal(
+                    provider="screening_halving",
+                    kind="screening_eliminated",
+                    detail=f"round {round_index}: {reason}",
+                    payload={
+                        "round_index": round_index,
+                        "experiment_id": experiment_id,
+                        "budget_gpu_hours": budget,
+                        "score": score,
+                    },
+                )
+            rounds.append(HalvingRoundOutcome(
+                round_index=round_index,
+                budget_gpu_hours=budget,
+                submitted_experiment_ids=submitted_ids,
+                survivor_experiment_ids=survivors,
+                eliminated_by_gate_experiment_ids=by_gate,
+                eliminated_by_cutoff_experiment_ids=by_cutoff,
+                scores=ranked,
+            ))
+            if not survivors or schedule.is_final_round(round_index, len(survivors)):
+                return ScreeningHalvingOutcome(
+                    rounds=tuple(rounds), final_survivors=survivors)
+            lookup = {e.experiment_id: (p, e) for p, e in current}
+            current = [lookup[eid] for eid in survivors]
+            round_index += 1
+        return ScreeningHalvingOutcome(rounds=tuple(rounds), final_survivors=())
 
     def tree_has_node(self, node_id: str) -> bool:
         try:

@@ -1,9 +1,13 @@
 # Compute providers: opportunistic external compute under the research layer
 
-Status: **the scheduler seam, the two providers and the evidence rules are
-implemented and tested; no real Kaggle session has been launched by this
-code.** The ResearchDirector does not care where an experiment runs; the
-scheduler decides, from a provider's declared availability and quota model.
+Status: **the scheduler seam, three providers, successive-halving screening and
+the evidence rules are implemented and tested.** Kaggle kernel-push, session
+polling, output fetch and quota reconciliation run against the real Kaggle API
+package (stub-injected in tests; no paid GPU-hours have been spent by this
+code). RunPod runs against REST v2 through an injectable transport (same
+honesty: stub-tested, no real pod launched). The ResearchDirector does not
+care where an experiment runs; the scheduler decides, from a provider's
+declared availability and quota model.
 
 ## 1. What the audit found (why this design, not another)
 
@@ -36,12 +40,12 @@ ExperimentScheduler                     (scientist/compute.py)
      name, available(), quota(), estimate_cost(request),
      submit(request), poll(submission), fetch_result(submission)
         │
-   ┌────┴─────────────┐
-   ▼                  ▼
-LocalCudaProvider   KaggleProvider          (more later: RunPod, Vast, SSH)
- (the machine        (T4×2 notebooks,
-  Chowder runs on)    12 h sessions, weekly
-                      GPU quota, opportunistic)
+   ┌────┼──────────────────┐
+   ▼    ▼                  ▼
+LocalCudaProvider  KaggleProvider   RunPodProvider   (later: Vast, SSH,
+ (the machine       (T4×2 kernels,    (REST v2 pods,    Lambda)
+  Chowder runs on)   push/poll/       injectable
+                      quota-reconcile)  transport)
         │
         ▼
 Chowder Evidence Layer (RunRegistry)  — unchanged, all runs land there
@@ -104,10 +108,22 @@ The scheduler implements the screening shape from the design discussion:
 - The director's `submit_screening_batch` / `submit_survivor_batch` helpers
   wrap this: screening runs are capped by the provider's own quota model
   (see below), and the tree's branch competition consumes the results.
-- **Successive halving stays the designated allocator** for the in-branch
-  parameter/recipe competition (docs/SCIENTIST_MODE.md §6, unchanged): the
-  screening lane *finds* the branches worth spending; successive halving (once
-  wired) would decide how they spend. This pass does not wire it.
+- **Successive halving is wired as the screening lane's allocator**
+  (`scientist/screening_halving.py` + `ResearchDirector.run_screening_halving`):
+  round r submits every surviving candidate at `min(budget_cap,
+  initial × step_multiplier^r)` GPU-hours, the loop records the round's
+  observations through the `record_results` seam, and settlement is
+  mechanical — tree-scored candidates compete (score descending,
+  experiment-id-ascending tiebreak), candidates with no usable observation
+  are eliminated **by gate**, the rest **by cutoff**, and only the FINAL
+  round's survivors graduate to `submit_survivor_batch`. The schedule
+  semantics mirror the growth library's `run_successive_halving` exactly
+  (survivor counting, stop rules); what differs is the execution substrate:
+  the library runs against the local ExperimentCycleRunner with checkpoint
+  resume, the screening lane against the scheduler and its providers. The
+  driver refuses **before any compute** when no `record_results` seam is
+  provided — rounds advance only on recorded observations — and journals
+  every elimination to the refusals ledger.
 
 ## 5. KaggleProvider's honest quota model
 
@@ -128,20 +144,82 @@ Kaggle notebooks: up to 12 h sessions, ~20 GB `/kaggle/working`, T4×2 (two
   declared order when Kaggle is unavailable, and the mission budget is charged
   the same either way.
 
+### 5b. The real push path (proven against the API contract, stub-tested)
+
+With `push=True` (the default), `submit` is a real `KaggleApi.kernels_push`
+call against the installed kaggle package (2.2.3, kagglesdk-based):
+
+- **Three things must be true or nothing ships**: credentials (explicit,
+  `KAGGLE_USERNAME`/`KAGGLE_KEY`, or a `kaggle.json` — resolved *without*
+  importing kaggle, because the package's `authenticate()` calls `exit(1)`
+  when unauthenticated), a pinned **40-hex** chowder commit
+  (`KAGGLE_KERNEL_PIN_REQUIRED` otherwise — never a branch, mirroring
+  `kaggle/bootstrap_environment.py`), and an operator-supplied
+  `kernel_command` (`KAGGLE_EXECUTOR_NOT_CONFIGURED` otherwise — the
+  compiled `campaign_spec` is a declaration and Chowder ships no default
+  remote executor that would silently guess what to run).
+- The kernel folder gets `kernel-metadata.json` (script, private, GPU,
+  `machine_shape: NvidiaTeslaT4` — the T4×2 shape since the P100 retirement)
+  and a generated `kernel.py` that: installs chowder at the pinned commit,
+  cross-checks the resolved commit from `direct_url.json`, captures the
+  `BackendFingerprint` into `/kaggle/working/environment.json`, persists the
+  campaign spec, runs the operator command, and writes
+  `/kaggle/working/chowder_result.json` (the command's own result file wins;
+  the template only fills status/exit-code). HF tokens stay in Kaggle
+  Secrets and are the operator command's concern, as in the repo's existing
+  notebook scripts.
+- `poll` maps the real `KernelWorkerStatus` (QUEUED/RUNNING/COMPLETE/ERROR
+  via `kernels_status`); on COMPLETE it fetches output (`kernels_output`) —
+  `chowder_result.json` becomes the submission's result, `environment.json`
+  its fingerprint; on ERROR/CANCEL the failure message travels with the
+  submission. A `push=False` submission has no `provider_ref` and `poll`
+  leaves it exactly as it was (spec-only mode is for offline scheduling
+  tests; production constructs with push).
+- `sync_quota_from_api()` reconciles the declared weekly budget with the
+  operator's **real** Kaggle GPU quota (`quota_view` → `ApiAcceleratorQuota`):
+  reserved time counts against availability like used time; a missing/zero
+  response keeps the declared model untouched. Refusals (`KAGGLE_PUSH_REFUSED`,
+  `KAGGLE_API_ERROR`, `KAGGLE_PACKAGE_MISSING`) never charge quota.
+
 ## 6. What is proven vs scaffolded (honest)
 
 - **Proven (unit-tested, no network/GPU)**: provider protocol, scheduler
-  preference/fallback/pinning rules, quota refusal, capability-vs-efficiency
-  claim gating, hardware-class stamping, screening/survivor batching, the
+  preference/fallback/pinning rules across three providers, quota refusal,
+  capability-vs-efficiency claim gating, hardware-class stamping,
+  successive-halving screening (schedule arithmetic, deterministic gate/cutoff
+  settlement, journaling, graduation), screening/survivor batching, the
   two-ledger integrity (mission ledger charged identically regardless of
   provider), LocalCudaProvider availability detection from the real
   `HardwareSnapshot`.
-- **Scaffolded**: the actual Kaggle submission path. `KaggleProvider.submit`
-  constructs the submission (job spec + notebook-facing command lines using
-  the existing `kaggle/` script conventions) and returns it as `queued`;
-  the kernel-push/session management is **not implemented** — it requires the
-  Kaggle API plumbing this pass deliberately leaves out. Until then,
-  `KaggleProvider.available()` on this machine reports the operator
-  configuration state honestly, and tests use an injected fake.
-- **Not started**: RunPod/Vast/Lambda/SSH providers (the protocol accepts
-  them; nothing pretends they exist).
+- **Proven against the real API contract, stub-tested**: the Kaggle path
+  (`kernels_push`/`kernels_status`/`kernels_output`/`quota_view` — push
+  folder + metadata construction, status mapping, output collection, quota
+  reconciliation, refusal ladder) and the RunPod path (REST v2
+  `POST /v2/pods`, `GET /v2/pods/{id}`, `DELETE`, through an injectable
+  transport). Tests inject a stub client/transport; no live call is made in
+  CI. The first real push/pod should be done once, observed, and recorded in
+  DDP_ACCEPTANCE-style notes before the lane is trusted.
+- **Scaffolded**: a RunPod pod's EXITED status never reports `complete`
+  without a `result_fetcher` confirming an artifact
+  (`RUNPOD_EXIT_UNVERIFIED`); fetching pod artifacts out-of-band (volume/S3)
+  is the operator's seam. Kaggle-side, everything up to the fetched output
+  is real; enriching `chowder_result.json` beyond exit status is the
+  operator command's job.
+- **Not started**: Vast/Lambda/SSH providers (the protocol accepts them;
+  nothing pretends they exist).
+
+## 7. RunPodProvider (REST v2)
+
+- **Endpoint discipline**: `POST /v2/pods` with `name`, `image`,
+  `gpu: {id, count}`, `env` (campaign spec + ids + operator command as JSON),
+  `cloud`/`disk`; poll `GET /v2/pods/{id}` → `PodStatus`; `terminate` →
+  `DELETE` (a dead or refused run must not keep billing). REST v1 was
+  deprecated upstream and is not used.
+- **Refuses to create an unrunnable pod**: missing `RUNPOD_API_KEY`,
+  `gpu_type_id` (from `GET /v2/catalog/gpus`), `image`, or `command` are
+  named in the refusal. Creating a pod is a billing event; the declared
+  weekly GPU-hour quota gates every submit.
+- **No fake success**: PROVISIONING/STARTING/RUNNING map to `running`;
+  ERROR/TERMINATED to `failed`; EXITED only completes through a confirmed
+  artifact (§6). The transport is injectable — tests never touch the
+  network, and the default is stdlib `urllib` (no new dependency).

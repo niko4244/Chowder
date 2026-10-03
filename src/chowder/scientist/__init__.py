@@ -12,8 +12,15 @@ from .compute import (
     KaggleProvider,
     LocalCudaProvider,
     ProviderQuota,
+    RunPodProvider,
     SchedulerRefusal,
     Submission,
+)
+from .screening_halving import (
+    HalvingRoundOutcome,
+    ScreeningHalving,
+    ScreeningHalvingOutcome,
+    settle_screening_round,
 )
 from .findings import Claim, ClaimEvidence, ReplicationPolicy, ResearchFinding
 from .hypothesis import Hypothesis, ResearchQuestion
@@ -58,6 +65,7 @@ __all__ = [
     "ExperimentObservation",
     "ExperimentProposal",
     "Hypothesis",
+    "HalvingRoundOutcome",
     "Measurement",
     "MissionBudget",
     "ModelResearchService",
@@ -73,7 +81,11 @@ __all__ = [
     "ResearchQuestion",
     "ResearchServiceError",
     "ResearchTree",
+    "RunPodProvider",
     "SchedulerRefusal",
+    "ScreeningHalving",
+    "ScreeningHalvingOutcome",
+    "settle_screening_round",
     "SkillSummary",
     "Submission",
     "ScientistProvider",

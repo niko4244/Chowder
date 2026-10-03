@@ -31,6 +31,7 @@ from chowder.scientist.compute import (
     KaggleProvider,
     LocalCudaProvider,
     ProviderQuota,
+    RunPodProvider,
     SchedulerRefusal,
     Submission,
 )
@@ -47,8 +48,11 @@ def _request(**kw) -> ExperimentRequest:
 
 
 def _providers(*, kaggle_hours: float = 10.0):
+    # push=False: the routing tests exercise scheduling, not the network —
+    # the real-push behavior has its own stub-client tests below.
     local = LocalCudaProvider(accelerators=1)
-    kaggle = KaggleProvider(username="u", api_key="k", weekly_gpu_hours=kaggle_hours)
+    kaggle = KaggleProvider(username="u", api_key="k", weekly_gpu_hours=kaggle_hours,
+                            push=False)
     return local, kaggle
 
 
@@ -94,13 +98,35 @@ def test_pinned_request_never_reroutes_and_unknown_pin_refuses() -> None:
         scheduler.schedule(_request(require_provider="vast"))
 
 
-def test_unconfigured_kaggle_is_unavailable_not_fake() -> None:
+def test_unconfigured_kaggle_is_unavailable_not_fake(tmp_path, monkeypatch) -> None:
+    # isolate from the machine's real kaggle.json / KAGGLE_* env credentials
+    monkeypatch.setenv("KAGGLE_CONFIG_DIR", str(tmp_path / "no-kaggle-here"))
+    monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
+    monkeypatch.delenv("KAGGLE_KEY", raising=False)
     provider = KaggleProvider()
     assert provider.configured() is False
     assert provider.available() is False
     scheduler = ExperimentScheduler([LocalCudaProvider(accelerators=0), provider])
     with pytest.raises(SchedulerRefusal, match="NO_PROVIDER_AVAILABLE"):
         scheduler.schedule(_request())
+
+
+def test_env_and_config_credentials_resolve_without_importing_kaggle(
+        tmp_path, monkeypatch) -> None:
+    # env credentials are enough to be configured — and checking them must
+    # not import kaggle (its authenticate() exits the process when unauthenticated)
+    monkeypatch.setenv("KAGGLE_USERNAME", "env-user")
+    monkeypatch.setenv("KAGGLE_KEY", "env-key")
+    provider = KaggleProvider(push=False)
+    assert provider.configured() is True
+    assert provider.resolved_username() == "env-user"
+    monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
+    monkeypatch.delenv("KAGGLE_KEY", raising=False)
+    monkeypatch.setenv("KAGGLE_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "kaggle.json").write_text('{"username": "cfg-user"}', encoding="utf-8")
+    assert provider.configured() is True  # kaggle.json presence is enough
+    monkeypatch.setenv("KAGGLE_CONFIG_DIR", str(tmp_path / "empty"))
+    assert provider.configured() is False
 
 
 def test_empty_provider_list_refuses() -> None:
@@ -307,3 +333,337 @@ def test_mission_ledger_charges_identically_across_providers(tmp_path: Path) -> 
         wall_gpu_hours=0.75, hardware_class="kaggle_2x_t4_16gb",
     ))
     assert director.spend.spent_gpu_hours == pytest.approx(before + 0.75)
+
+
+# ---------------------------------------------------------------------------
+# kaggle: real kernel-push, session polling, quota reconciliation
+# (stub client — the contract under test is the provider's behavior, not
+# Kaggle's network)
+# ---------------------------------------------------------------------------
+
+
+class _FakeKaggleResponse:
+    def __init__(self, **fields):
+        self.error = ""
+        self.ref = ""
+        self.url = ""
+        self.version_number = 0
+        for key, value in fields.items():
+            setattr(self, key, value)
+
+
+class _FakeStatusResponse:
+    def __init__(self, status_name: str, failure_message: str = ""):
+        class _S:  # KernelWorkerStatus-shaped
+            name = status_name
+        self.status = _S
+        self.failure_message = failure_message
+
+
+class _FakeKaggleApi:
+    """KaggleApi-shaped stub: kernels_push / kernels_status / kernels_output /
+    quota_view, serving a scripted session lifecycle."""
+
+    def __init__(self, *, push_error: str = "", raise_on_push: Exception | None = None,
+                 status_sequence: tuple[str, ...] = ("QUEUED", "RUNNING", "COMPLETE"),
+                 failure_message: str = "",
+                 result: dict | None = None, fingerprint: dict | None = None,
+                 quota: tuple[float, float, float] | None = None) -> None:
+        self.pushed: list[dict] = []
+        self.status_calls: list[str] = []
+        self.output_calls: list[str] = []
+        self._push_error = push_error
+        self._raise_on_push = raise_on_push
+        self._status_sequence = list(status_sequence)
+        self._failure_message = failure_message
+        self._result = result
+        self._fingerprint = fingerprint
+        self._quota = quota
+
+    def kernels_push(self, folder, timeout=None, acc=None):
+        self.pushed.append({"folder": folder, "timeout": timeout, "acc": acc})
+        if self._raise_on_push is not None:
+            raise self._raise_on_push
+        if self._push_error:
+            return _FakeKaggleResponse(error=self._push_error)
+        return _FakeKaggleResponse(ref="u/chowder-e1", url="https://kaggle/u/e1",
+                                   version_number=1)
+
+    def kernels_status(self, ref):
+        self.status_calls.append(ref)
+        name = self._status_sequence[min(len(self.status_calls) - 1,
+                                         len(self._status_sequence) - 1)]
+        return _FakeStatusResponse(name, self._failure_message)
+
+    def kernels_output(self, ref, path, file_pattern=None, force=False, **kw):
+        import json as _json
+        from pathlib import Path as _P
+        out = _P(path)
+        out.mkdir(parents=True, exist_ok=True)
+        if self._result is not None:
+            (out / "chowder_result.json").write_text(_json.dumps(self._result),
+                                                     encoding="utf-8")
+        if self._fingerprint is not None:
+            (out / "environment.json").write_text(_json.dumps(self._fingerprint),
+                                                  encoding="utf-8")
+        files = [str(out / n) for n in ("chowder_result.json", "environment.json")]
+        self.output_calls.append(ref)
+        return files, ""
+
+    def quota_view(self):
+        import datetime as _dt
+        total, used, reserved = self._quota or (0.0, 0.0, 0.0)
+
+        class _Q:
+            total_time_allowed = _dt.timedelta(hours=total)
+            time_used = _dt.timedelta(hours=used)
+            time_reserved = _dt.timedelta(hours=reserved)
+
+        class _V:
+            gpu_quota = _Q()
+
+        return _V()
+
+
+def _push_provider(**kw):
+    base = dict(username="u", api_key="k", chowder_commit="a" * 40,
+                kernel_command="python /kaggle/working/run_experiment.py",
+                workdir=None, api=None)
+    base.update(kw)
+    return KaggleProvider(**base)
+
+
+def _push_request(**kw):
+    return _request(experiment_class=ExperimentClass.SCREENING,
+                    estimated_gpu_hours=0.5, **kw)
+
+
+def test_kaggle_real_push_requires_a_pinned_commit() -> None:
+    stub = _FakeKaggleApi()
+    provider = _push_provider(chowder_commit="", api=stub)
+    with pytest.raises(SchedulerRefusal, match="KAGGLE_KERNEL_PIN_REQUIRED"):
+        provider.submit(_push_request())
+    provider2 = _push_provider(chowder_commit="main", api=stub)  # never a branch
+    with pytest.raises(SchedulerRefusal, match="KAGGLE_KERNEL_PIN_REQUIRED"):
+        provider2.submit(_push_request())
+    assert stub.pushed == []  # nothing ever shipped
+
+
+def test_kaggle_real_push_requires_an_executor_command() -> None:
+    stub = _FakeKaggleApi()
+    provider = _push_provider(kernel_command="", api=stub)
+    with pytest.raises(SchedulerRefusal, match="KAGGLE_EXECUTOR_NOT_CONFIGURED"):
+        provider.submit(_push_request())
+    assert stub.pushed == []
+    assert provider.quota().used_gpu_hours == 0  # a refusal never charges quota
+
+
+def test_kaggle_real_push_writes_kernel_and_records_ref(tmp_path) -> None:
+    import json
+    stub = _FakeKaggleApi()
+    provider = _push_provider(api=stub, workdir=str(tmp_path))
+    submission = provider.submit(_push_request())
+    assert submission.provider_ref == "u/chowder-e1"
+    assert submission.status == "queued"
+    assert submission.device_gpu_hours == pytest.approx(1.0)  # wall 0.5 × 2 T4s
+    assert provider.quota().used_gpu_hours == pytest.approx(1.0)
+    assert len(stub.pushed) == 1
+    call = stub.pushed[0]
+    assert call["acc"] == "NvidiaTeslaT4"  # the T4×2 machine shape
+    folder = tmp_path / "chowder-e1"
+    metadata = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
+    assert metadata["id"] == "u/chowder-e1"
+    assert metadata["machine_shape"] == "NvidiaTeslaT4"
+    assert metadata["kernel_type"] == "script"
+    script = (folder / "kernel.py").read_text(encoding="utf-8")
+    assert "a" * 40 in script  # pinned commit travels with the kernel
+    assert 'EXPERIMENT_ID = "e1"' in script
+    assert "run_experiment.py" not in script  # command is base64, not plaintext
+    assert "campaign_spec.json" in script
+
+
+def test_kaggle_push_api_errors_refuse_and_stay_honest(tmp_path) -> None:
+    provider = _push_provider(api=_FakeKaggleApi(raise_on_push=RuntimeError("503")),
+                              workdir=str(tmp_path))
+    with pytest.raises(SchedulerRefusal, match="KAGGLE_API_ERROR"):
+        provider.submit(_push_request())
+    provider2 = _push_provider(api=_FakeKaggleApi(push_error="invalid metadata"),
+                               workdir=str(tmp_path))
+    with pytest.raises(SchedulerRefusal, match="KAGGLE_PUSH_REFUSED"):
+        provider2.submit(_push_request())
+    assert provider2.quota().used_gpu_hours == 0
+
+
+def test_kaggle_poll_maps_the_real_status_lifecycle(tmp_path) -> None:
+    result = {"experiment_id": "e1", "status": "complete", "exit_code": 0}
+    fingerprint = {"python_version": "3.11.9", "gpu": ["Tesla T4", "Tesla T4"]}
+    stub = _FakeKaggleApi(status_sequence=("QUEUED", "RUNNING", "COMPLETE"),
+                          result=result, fingerprint=fingerprint)
+    provider = _push_provider(api=stub, workdir=str(tmp_path))
+    submission = provider.submit(_push_request())
+    assert provider.poll(submission).status == "queued"
+    running = provider.poll(submission)
+    assert running.status == "running"
+    complete = provider.poll(submission)
+    assert complete.status == "complete"
+    assert complete.result["chowder_result"] == result
+    assert complete.result["output_files"] == ["chowder_result.json", "environment.json"]
+    assert complete.environment_fingerprint == fingerprint
+    assert stub.status_calls == ["u/chowder-e1"] * 3
+
+
+def test_kaggle_poll_failure_travels_with_the_submission(tmp_path) -> None:
+    stub = _FakeKaggleApi(status_sequence=("ERROR",),
+                          failure_message="CUDA out of memory")
+    provider = _push_provider(api=stub, workdir=str(tmp_path))
+    submission = provider.submit(_push_request())
+    failed = provider.poll(submission)
+    assert failed.status == "failed"
+    assert failed.result["kernel_status"] == "ERROR"
+    assert failed.result["failure_message"] == "CUDA out of memory"
+
+
+def test_kaggle_quota_sync_uses_the_real_weekly_budget(tmp_path) -> None:
+    stub = _FakeKaggleApi(quota=(30.0, 5.0, 2.0))  # 30h allowed, 5 used, 2 reserved
+    provider = _push_provider(api=stub, workdir=str(tmp_path),
+                              weekly_gpu_hours=20.0)
+    quota = provider.sync_quota_from_api()
+    assert quota.weekly_gpu_hours == pytest.approx(30.0)
+    assert quota.used_gpu_hours == pytest.approx(7.0)  # used + reserved
+    assert quota.remaining_gpu_hours() == pytest.approx(23.0)
+
+
+def test_kaggle_pushless_poll_is_a_no_op_not_fake_progress() -> None:
+    stub = _FakeKaggleApi()
+    provider = _push_provider(api=stub, push=False)
+    submission = provider.submit(_push_request())
+    assert submission.provider_ref == ""  # never left the process
+    assert provider.poll(submission) is submission  # stays queued, honestly
+    assert stub.status_calls == []
+
+
+# ---------------------------------------------------------------------------
+# runpod: REST v2 pod lifecycle through an injectable transport
+# ---------------------------------------------------------------------------
+
+
+class _StubTransport:
+    """Transport stub: records calls, answers from a script of (status, body)."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)  # list of (status, body) or callables
+        self.calls: list[dict] = []
+
+    def __call__(self, request):
+        self.calls.append(request)
+        answer = self.responses.pop(0) if self.responses else (500, "{}")
+        if callable(answer):
+            return answer(request)
+        status, body = answer
+        if isinstance(body, (dict, list)):
+            import json
+            body = json.dumps(body)
+        return status, body
+
+
+def _runpod(**kw):
+    base = dict(api_key="rp-key", gpu_type_id="NVIDIA A100", image="chowder/train:pin",
+                command="python run_experiment.py", weekly_gpu_hours=8.0)
+    base.update(kw)
+    return RunPodProvider(**base)
+
+
+def test_runpod_unconfigured_refuses_and_names_what_is_missing() -> None:
+    provider = RunPodProvider()
+    assert provider.available() is False
+    with pytest.raises(SchedulerRefusal, match="RUNPOD_NOT_CONFIGURED") as caught:
+        provider.submit(_request())
+    message = str(caught.value)
+    for needed in ("RUNPOD_API_KEY", "gpu_type_id", "image", "command"):
+        assert needed in message
+
+
+def test_runpod_submit_creates_pod_carries_spec_and_charges_quota() -> None:
+    transport = _StubTransport([(201, {"id": "pod_abc123", "status": "PROVISIONING"})])
+    provider = _runpod(transport=transport, gpu_count=1)
+    submission = provider.submit(_request())
+    assert submission.provider_ref == "pod_abc123"
+    assert submission.hardware_class == "runpod_1x_nvidia_a100"
+    assert provider.quota().used_gpu_hours == pytest.approx(0.5)
+    call = transport.calls[0]
+    assert call["method"] == "POST" and call["url"].endswith("/v2/pods")
+    assert call["headers"]["Authorization"] == "Bearer rp-key"
+    body = call["body"]
+    assert body["name"] == "chowder-e1"
+    assert body["gpu"] == {"id": "NVIDIA A100", "count": 1}
+    import json
+    spec = json.loads(body["env"]["CHOWDER_CAMPAIGN_SPEC"])
+    assert spec == {} or isinstance(spec, dict)
+    assert body["env"]["CHOWDER_EXPERIMENT_ID"] == "e1"
+
+
+def test_runpod_submit_api_error_refuses_without_charging() -> None:
+    provider = _runpod(transport=_StubTransport([(503, "no capacity")]))
+    with pytest.raises(SchedulerRefusal, match="RUNPOD_API_ERROR.*503"):
+        provider.submit(_request())
+    assert provider.quota().used_gpu_hours == 0
+
+
+def test_runpod_poll_lifecycle_maps_statuses() -> None:
+    transport = _StubTransport([
+        (201, {"id": "pod_abc", "status": "PROVISIONING"}),
+        (200, {"id": "pod_abc", "status": "RUNNING"}),
+        (200, {"id": "pod_abc", "status": "EXITED"}),
+    ])
+    provider = _runpod(transport=transport)  # no result_fetcher
+    submission = provider.submit(_request())
+    assert provider.poll(submission).status == "running"
+    exited = provider.poll(submission)
+    # EXITED without a confirmed artifact is NOT a complete: fail-closed
+    assert exited.status == "failed"
+    assert "RUNPOD_EXIT_UNVERIFIED" in exited.result["failure_message"]
+
+
+def test_runpod_exited_pod_completes_only_with_a_confirmed_artifact() -> None:
+    transport = _StubTransport([
+        (201, {"id": "pod_abc", "status": "PROVISIONING"}),
+        (200, {"id": "pod_abc", "status": "EXITED"}),
+    ])
+    provider = _runpod(
+        transport=transport,
+        result_fetcher=lambda submission: {"experiment_id": "e1", "status": "complete"},
+    )
+    submission = provider.submit(_request())
+    complete = provider.poll(submission)
+    assert complete.status == "complete"
+    assert complete.result["chowder_result"]["experiment_id"] == "e1"
+
+
+def test_runpod_terminate_deletes_the_pod() -> None:
+    transport = _StubTransport([
+        (201, {"id": "pod_abc", "status": "PROVISIONING"}),
+        (200, {"id": "pod_abc"}),
+    ])
+    provider = _runpod(transport=transport)
+    submission = provider.submit(_request())
+    assert provider.terminate(submission) is True
+    assert transport.calls[-1]["method"] == "DELETE"
+    assert transport.calls[-1]["url"].endswith("/pods/pod_abc")
+
+
+def test_scheduler_routes_across_three_providers() -> None:
+    """The seam proof: local, Kaggle, and RunPod coexist; screening prefers
+    the declared lane, and a substantial run falls through exhaustion to the
+    next provider in declaration order."""
+    kaggle = KaggleProvider(username="u", api_key="k", weekly_gpu_hours=1.0, push=False)
+    runpod = _runpod(transport=_StubTransport([(201, {"id": "pod_x", "status": "RUNNING"})]))
+    local = LocalCudaProvider(accelerators=1)
+    scheduler = ExperimentScheduler([kaggle, runpod, local])
+    screening = scheduler.schedule(_push_request())
+    assert screening.provider_name == "kaggle"  # the screening lane
+    # kaggle quota is now out (1.0 device-hours); substantial falls through
+    substantial = scheduler.schedule(_request(experiment_class=ExperimentClass.SUBSTANTIAL))
+    assert substantial.provider_name == "runpod"
+    third = scheduler.schedule(_request(experiment_id="e3",
+                                        experiment_class=ExperimentClass.SUBSTANTIAL))
+    assert third.provider_name == "local_cuda"

@@ -356,9 +356,25 @@ claims may cite cross-hardware runs (protocol-scoped); efficiency claims
 shares one hardware class** — and the director's capability-delta feed takes
 quality measurements only, so a cross-hardware efficiency number can never
 masquerade as a capability gain. Full design + honest status:
-docs/COMPUTE_PROVIDERS.md (the Kaggle kernel-push path is scaffolded; the
-scheduling/evidence rules are unit-proven; no real Kaggle session has been
-launched by this code).
+docs/COMPUTE_PROVIDERS.md.
+
+**2026-10-03 update (same section):** the seam now carries three providers —
+`LocalCudaProvider`, `KaggleProvider`, `RunPodProvider` — and the Kaggle path
+is real: `submit` performs an actual `KaggleApi.kernels_push` (pinned 40-hex
+commit + operator-supplied `kernel_command` required, or it refuses), `poll`
+maps the real `KernelWorkerStatus` lifecycle and fetches output artifacts,
+and `sync_quota_from_api` reconciles the declared weekly budget with the
+operator's actual Kaggle GPU quota. RunPod goes through REST v2
+(`POST /v2/pods` → `GET /v2/pods/{id}`) behind an injectable transport, and
+an EXITED pod never reports complete without a confirmed artifact. The
+screening lane's allocator is now wired successive halving
+(`scientist/screening_halving.py`): budget-driven elimination rounds
+(grow the per-candidate budget, halve the candidates by the tree's
+deterministic score, eliminate by gate vs cutoff, graduate only the final
+round's survivors to substantial runs), mirroring the growth library's
+`run_successive_halving` semantics. All of it is stub-tested against the
+API contracts; no paid GPU-hours have been spent by this code — the first
+real push/pod should be observed and recorded before the lane is trusted.
 
 ## 6. Phases — what is proven, what is scaffolded
 
