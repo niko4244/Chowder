@@ -275,6 +275,20 @@ class ResearchDirector:
         node.observation_ids = tuple({*node.observation_ids, observation.observation_id})
         node.evidence_refs = tuple({*node.evidence_refs, observation.run_id})
         node.measured_cost_gpu_hours += observation.wall_gpu_hours
+        # The capability-delta feed takes quality deltas only, and only from
+        # the mission's declared hardware context when one is established: a
+        # cross-hardware efficiency number never masquerades as a capability
+        # gain (docs/COMPUTE_PROVIDERS.md §3). The first observed hardware
+        # class anchors the context; others are recorded but scored 0.
+        quality = [m for m in observation.measurements
+                   if not m.surface.startswith("efficiency:")]
+        if quality and observation.status == "complete":
+            if node.capability_delta is None:
+                node.capability_delta = max(m.value for m in quality)
+                self._node_hardware_class = observation.hardware_class
+            elif observation.hardware_class == getattr(self, "_node_hardware_class", ""):
+                node.capability_delta = max(node.capability_delta,
+                                            max(m.value for m in quality))
         return observation
 
     def review_finding(self, finding: ResearchFinding) -> ResearchFinding:
@@ -344,6 +358,88 @@ class ResearchDirector:
         return tuple(set(declared))
 
     # -- decisions ---------------------------------------------------------------
+
+    def submit_screening_batch(
+        self,
+        scheduler: Any,
+        pairs: tuple[tuple[ExperimentProposal, Any], ...],
+    ) -> tuple[tuple[ExperimentProposal, Any, Any], ...]:
+        """Route the screening stage: short/cheap runs for each candidate,
+        preferably on the declared screening lane (Kaggle). Returns the
+        (proposal, experiment, submission) triples that were admitted by the
+        scheduler; refusals are journaled."""
+        from .compute import ExperimentClass, ExperimentRequest
+        out: list[tuple[ExperimentProposal, Any, Any]] = []
+        for proposal, experiment in pairs:
+            request = ExperimentRequest(
+                experiment_id=experiment.experiment_id,
+                proposal_id=proposal.proposal_id,
+                hypothesis_id=proposal.hypothesis_id,
+                campaign_spec=experiment.campaign_spec,
+                experiment_class=ExperimentClass.SCREENING,
+                estimated_gpu_hours=min(experiment.estimated_gpu_hours, 0.25),
+            )
+            try:
+                submission = scheduler.schedule(request)
+            except Exception as error:
+                self.memory.record_refusal(
+                    provider=getattr(scheduler, "name", "scheduler"),
+                    kind="screening_refused",
+                    detail=str(error),
+                    payload={"experiment_id": experiment.experiment_id},
+                )
+                continue
+            out.append((proposal, experiment, submission))
+        return tuple(out)
+
+    def submit_survivor_batch(
+        self,
+        scheduler: Any,
+        triples: tuple[tuple[ExperimentProposal, Any, Any], ...],
+        *,
+        keep_top: int = 2,
+    ) -> tuple[tuple[ExperimentProposal, Any, Any], ...]:
+        """Promote the best `keep_top` screening survivors to substantial
+        runs through the scheduler's preference order. Selection is the tree's
+        deterministic branch score, not an LLM's opinion."""
+        from .compute import ExperimentClass, ExperimentRequest
+        scored = sorted(
+            triples,
+            key=lambda t: self.tree.score_node(
+                self.tree.node(f"node-{t[1].experiment_id}"),
+            ) if self.tree_has_node(f"node-{t[1].experiment_id}") else -1e9,
+            reverse=True,
+        )
+        survivors = scored[:keep_top]
+        out: list[tuple[ExperimentProposal, Any, Any]] = []
+        for proposal, experiment, _screening in survivors:
+            request = ExperimentRequest(
+                experiment_id=experiment.experiment_id,
+                proposal_id=proposal.proposal_id,
+                hypothesis_id=proposal.hypothesis_id,
+                campaign_spec=experiment.campaign_spec,
+                experiment_class=ExperimentClass.SUBSTANTIAL,
+                estimated_gpu_hours=experiment.estimated_gpu_hours,
+            )
+            try:
+                submission = scheduler.schedule(request)
+            except Exception as error:
+                self.memory.record_refusal(
+                    provider=getattr(scheduler, "name", "scheduler"),
+                    kind="survivor_refused",
+                    detail=str(error),
+                    payload={"experiment_id": experiment.experiment_id},
+                )
+                continue
+            out.append((proposal, experiment, submission))
+        return tuple(out)
+
+    def tree_has_node(self, node_id: str) -> bool:
+        try:
+            self.tree.node(node_id)
+            return True
+        except KeyError:
+            return False
 
     def next_decision(self) -> ResearchDecision:
         """The research loop's next move, from durable state only."""

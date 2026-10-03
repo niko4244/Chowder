@@ -54,6 +54,12 @@ class Claim:
     conditions: tuple[str, ...] = ()
     confidence_basis: str = ""
     replication_count: int = 0
+    #: True for efficiency claims (tokens/sec, VRAM, wall time, time-to-):
+    #: such a claim is a claim about that hardware, and the memory layer
+    #: refuses a replicated status unless every cited run shares one
+    #: hardware class. Quality claims with an identical protocol may be False
+    #: and may cite runs from different hardware classes.
+    hardware_dependent: bool = False
 
     def __post_init__(self) -> None:
         if not self.claim_id:
@@ -77,6 +83,7 @@ class Claim:
             "conditions": list(self.conditions),
             "confidence_basis": self.confidence_basis,
             "replication_count": self.replication_count,
+            "hardware_dependent": self.hardware_dependent,
         }
 
     @classmethod
@@ -84,7 +91,7 @@ class Claim:
         _KEYS = (
             "claim_id", "statement", "scope", "status", "supporting_experiments",
             "contradicting_experiments", "affected_capabilities", "conditions",
-            "confidence_basis", "replication_count",
+            "confidence_basis", "replication_count", "hardware_dependent",
         )
         unknown = sorted(set(data) - set(_KEYS))
         if unknown:
@@ -100,6 +107,7 @@ class Claim:
             conditions=tuple(str(c) for c in data.get("conditions", ())),
             confidence_basis=str(data.get("confidence_basis", "")),
             replication_count=int(data.get("replication_count", 0)),
+            hardware_dependent=bool(data.get("hardware_dependent", False)),
         )
 
 

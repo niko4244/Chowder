@@ -68,11 +68,16 @@ class ExperimentObservation:
     provider: str = ""          # recorded for provenance; never an authority
     mission_id: str = ""
     carried: bool = False       # True only for explicitly imported prior evidence
+    #: The hardware class this measurement came from (e.g. "kaggle_2x_t4_16gb",
+    #: "local_cuda_..."), stamped by the compute scheduler. Quality findings
+    #: may compare across hardware classes when the protocol is identical;
+    #: efficiency findings never leave theirs (docs/COMPUTE_PROVIDERS.md §3).
+    hardware_class: str = ""
 
     _KNOWN = (
         "observation_id", "run_id", "experiment_ref", "proposal_id",
         "hypothesis_id", "measurements", "status", "wall_gpu_hours", "notes",
-        "provider", "mission_id", "carried",
+        "provider", "mission_id", "carried", "hardware_class",
     )
 
     def __post_init__(self) -> None:
@@ -97,6 +102,7 @@ class ExperimentObservation:
             "provider": self.provider,
             "mission_id": self.mission_id,
             "carried": self.carried,
+            "hardware_class": self.hardware_class,
         }
 
     @classmethod
@@ -122,4 +128,5 @@ class ExperimentObservation:
             provider=str(data.get("provider", "")),
             mission_id=str(data.get("mission_id", "")),
             carried=bool(data.get("carried", False)),
+            hardware_class=str(data.get("hardware_class", "")),
         )

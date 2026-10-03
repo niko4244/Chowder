@@ -339,6 +339,27 @@ The exact provider names and knobs are documented in the example file.
 
 ---
 
+## 5b. Compute providers: where experiments run (2026-10-03 addendum)
+
+`chowder/scientist/compute.py` adds the scheduler seam the Phase-3 compiler
+needed: a `ComputeProvider` protocol (name/hardware_class, `available()`,
+`quota()`, `estimate_cost`, `submit`, `poll`), a `LocalCudaProvider` (detected
+from the real `HardwareSnapshot`), a `KaggleProvider` (T4×2, 12 h sessions,
+declined weekly quota — opportunistic capacity, never load-bearing), and an
+`ExperimentScheduler` with fail-closed routing: explicit provider list (no
+default), preference order, a screening lane (`experiment_class=screening`
+prefers a provider that declares `screening = True`), pinned requests that
+never reroute, and quota-out fallback along the declared order. The
+hardware-context evidence rule is enforced in the memory layer: **quality
+claims may cite cross-hardware runs (protocol-scoped); efficiency claims
+(`hardware_dependent: true`) can reach `replicated` only when every cited run
+shares one hardware class** — and the director's capability-delta feed takes
+quality measurements only, so a cross-hardware efficiency number can never
+masquerade as a capability gain. Full design + honest status:
+docs/COMPUTE_PROVIDERS.md (the Kaggle kernel-push path is scaffolded; the
+scheduling/evidence rules are unit-proven; no real Kaggle session has been
+launched by this code).
+
 ## 6. Phases — what is proven, what is scaffolded
 
 ### Phase 1 — native scientist contract (PROVEN)

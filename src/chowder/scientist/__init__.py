@@ -4,6 +4,17 @@ The scientist proposes; Chowder admits; Chowder executes; Chowder measures;
 the scientist interprets; Chowder verifies. See docs/SCIENTIST_MODE.md.
 """
 
+from .compute import (
+    ComputeProvider,
+    ExperimentClass,
+    ExperimentRequest,
+    ExperimentScheduler,
+    KaggleProvider,
+    LocalCudaProvider,
+    ProviderQuota,
+    SchedulerRefusal,
+    Submission,
+)
 from .findings import Claim, ClaimEvidence, ReplicationPolicy, ResearchFinding
 from .hypothesis import Hypothesis, ResearchQuestion
 from .lab_bridge import CompiledExperiment, CompilationRefusal, ExperimentCompiler
@@ -33,6 +44,12 @@ __all__ = [
     "Claim",
     "ClaimEvidence",
     "CompiledExperiment",
+    "ComputeProvider",
+    "ExperimentClass",
+    "ExperimentRequest",
+    "ExperimentScheduler",
+    "KaggleProvider",
+    "LocalCudaProvider",
     "CompilationRefusal",
     "DataStrategy",
     "DirectorRefusal",
@@ -45,6 +62,7 @@ __all__ = [
     "MissionBudget",
     "ModelResearchService",
     "ProviderUnavailability",
+    "ProviderQuota",
     "ReplicationPolicy",
     "ResearchContext",
     "ResearchDecision",
@@ -55,7 +73,9 @@ __all__ = [
     "ResearchQuestion",
     "ResearchServiceError",
     "ResearchTree",
+    "SchedulerRefusal",
     "SkillSummary",
+    "Submission",
     "ScientistProvider",
     "TrainingRecipeDelta",
 ]

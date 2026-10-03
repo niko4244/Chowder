@@ -134,8 +134,32 @@ class ResearchMemory:
         self._assert_observations_resolve(finding.observation_ids)
         for claim in finding.claims:
             self._assert_claim_runs_resolve(claim)
+            self._assert_hardware_context(claim, finding.observation_ids)
         _append_jsonl(self.findings_path, {"schema_version": SCHEMA_VERSION,
                                            "record": finding.to_dict()})
+
+    def _assert_hardware_context(self, claim: Any, observation_ids: tuple[str, ...]) -> None:
+        """The hardware-context rule (docs/COMPUTE_PROVIDERS.md §3): a
+        hardware-dependent (efficiency) claim may only reach `replicated` when
+        every cited run shares one hardware class — a throughput number is
+        about that hardware, not about the model. Cross-hardware replication
+        is exactly how a quality claim earns its status, so quality claims
+        (hardware_dependent=False) are not restricted here."""
+        if not isinstance(claim, Claim):
+            claim = Claim.from_dict(dict(claim))
+        if not claim.hardware_dependent or claim.status != "replicated":
+            return
+        observations = {o["record"]["observation_id"]: o["record"]
+                        for o in _read_jsonl(self.observations_path)}
+        cited = [observations[oid] for oid in observation_ids if oid in observations]
+        hardware_classes = {str(o.get("hardware_class", "")) for o in cited
+                            if o.get("status", "complete") == "complete"}
+        if len(hardware_classes) > 1:
+            raise ValueError(
+                f"REFUSAL_HARDWARE_CONTEXT: claim {claim.claim_id} is hardware-"
+                f"dependent yet cites runs from {sorted(hardware_classes)}; an "
+                "efficiency claim replicates only on one hardware class"
+            )
 
     def record_rejected_hypothesis(self, hypothesis: Hypothesis, *,
                                    reason: str) -> None:
