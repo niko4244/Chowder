@@ -105,10 +105,59 @@ PROFILE_GENERATION_MISMATCH = "PROFILE_GENERATION_MISMATCH"
 PREPARATION_PRODUCED_NO_RECIPE_SET = "PREPARATION_PRODUCED_NO_RECIPE_SET"
 FROZEN_RECIPE_SET_REFUSED = "FROZEN_RECIPE_SET_REFUSED"
 OPERATOR_STOP_REQUESTED = "OPERATOR_STOP_REQUESTED"
+RESEARCH_MISSION_CREATED = "RESEARCH_MISSION_CREATED"
+
+class ScientistPolicyError(RuntimeError):
+    """The policy's scientist_policy document is malformed. Fail-closed."""
+
+
+_SCIENTIST_TREATMENT_MODES = ("human_review", "scientist_allowed", "scientist_then_review")
+_SCIENTIST_POLICY_KEYS = (
+    "provider", "provider_config", "state_treatments", "mission",
+    "replication_policy", "protected_benchmarks", "max_tree_nodes",
+    "max_parallel_branches", "max_cost_usd", "max_gpu_hours", "sandbox_required",
+)
+
+
+def scientist_treatment_mode(policy: Any, treatment: str) -> str:
+    """Read the policy's scientist treatment mode for a REVIEW-treatment.
+
+    Default (no scientist_policy, unknown treatment, malformed document) is
+    always ``human_review`` — the historical behaviour. The policy document is
+    the only authority; a provider can never widen it."""
+    scientist = getattr(policy, "scientist_policy", None)
+    if not isinstance(scientist, Mapping):
+        return "human_review"
+    unknown = sorted(set(scientist) - set(_SCIENTIST_POLICY_KEYS))
+    if unknown:
+        raise ScientistPolicyError(
+            f"scientist_policy has unknown fields {unknown}; a switch nothing "
+            "reads is not a switch"
+        )
+    treatments = scientist.get("state_treatments") or {}
+    mode = str(treatments.get(str(treatment), "human_review"))
+    if mode not in _SCIENTIST_TREATMENT_MODES:
+        raise ScientistPolicyError(
+            f"scientist_policy state_treatments[{treatment!r}] is {mode!r}; "
+            f"known modes: {_SCIENTIST_TREATMENT_MODES}"
+        )
+    return mode
+
+
+def research_mission_document(policy: Any) -> dict[str, Any] | None:
+    """The mission document the policy carries for scientist diversion (or
+    None when the policy does not provide one)."""
+    scientist = getattr(policy, "scientist_policy", None)
+    if not isinstance(scientist, Mapping):
+        return None
+    mission = scientist.get("mission")
+    return dict(mission) if isinstance(mission, Mapping) else None
+
 
 #: Treatments that the loop will never start on its own, whatever the score.
 #: They are not "bad targets": they are targets whose safety this loop cannot
-#: establish, so a human decides.
+#: establish, so a human decides -- unless an explicit scientist_policy names
+#: a research diversion for that treatment (scientist_treatment_mode above).
 REVIEW_TREATMENTS = frozenset(
     {
         "architecture_research",
@@ -159,10 +208,14 @@ class LoopDecision:
     action: str
     reason: str
     reason_codes: tuple[str, ...] = ()
+    #: Scientist-mode diversion payload: the mission document the policy
+    #: carries, present only on RESEARCH_MISSION_CREATED decisions.
+    mission_document: dict[str, Any] | None = None
+    target_skill: str = ""
 
     @property
     def terminal(self) -> bool:
-        return self.action in TERMINAL_DECISIONS
+        return self.action in TERMINAL_DECISIONS or self.action == RESEARCH_MISSION_CREATED
 
     @property
     def requires_human(self) -> bool:
@@ -174,6 +227,8 @@ class LoopDecision:
             "reason": self.reason,
             "reason_codes": list(self.reason_codes),
             "terminal": self.terminal,
+            "mission_document": self.mission_document,
+            "target_skill": self.target_skill,
         }
 
 
@@ -736,6 +791,30 @@ class GrowthLoop:
             )
 
         if str(proposal.suggested_training_type) in REVIEW_TREATMENTS:
+            # Scientist-mode diversion (Phase 5): the policy — never the
+            # provider — decides per treatment whether the loop may end the
+            # growth session with a research mission instead of human review.
+            # Default (no scientist_policy) is human_review: unchanged
+            # behaviour. The loop never runs the research tree itself; the
+            # mission is executed by ModelResearchService, and
+            # scientist_then_review means the research findings still land in
+            # front of a human before anything trains.
+            mode = scientist_treatment_mode(self.policy, str(proposal.suggested_training_type))
+            if mode in ("scientist_allowed", "scientist_then_review"):
+                mission_document = research_mission_document(self.policy)
+                reason_text = (
+                    f"the target {proposal.target_skill!r} needs "
+                    f"{proposal.suggested_training_type!r}: {proposal.treatment_reason}; "
+                    f"policy diverts to a research mission ({mode})"
+                )
+                decision = LoopDecision(
+                    RESEARCH_MISSION_CREATED,
+                    reason_text,
+                    (TREATMENT_REQUIRES_REVIEW,),
+                    mission_document=mission_document,
+                    target_skill=str(proposal.target_skill),
+                )
+                return None, decision
             return None, LoopDecision(
                 REQUIRES_HUMAN_REVIEW,
                 f"the target {proposal.target_skill!r} needs "

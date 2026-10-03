@@ -1,0 +1,122 @@
+{
+  "_comment": "Scientist-mode configuration example. Two documents: the ResearchMission (what to improve, in capability terms) and the scientist_policy (who researches, under what limits). The mission is a standalone JSON file passed to `chowder scientist ...`; the scientist_policy is either the standalone policy document of the CLI, or the `scientist_policy` key inside a growth loop policy — the same shape in both places.",
+
+  "research_mission": {
+    "mission_id": "demo-reasoning-001",
+    "objective": "Improve genuine multi-step reasoning without regressing instruction following",
+    "priorities": {
+      "reasoning": 0.6,
+      "coding": 0.3,
+      "factual_synthesis": 0.1
+    },
+    "protected_capabilities": ["instruction_following"],
+    "budget": {
+      "max_gpu_hours": 4.0,
+      "max_tree_nodes": 12,
+      "max_parallel_branches": 2,
+      "max_cost_usd": 15.0
+    },
+    "autonomy": "high",
+    "allowed_experiment_types": ["data", "optimization", "adapter", "training_strategy", "measurement"],
+    "stop_conditions": [
+      "compute_budget_exhausted",
+      "no_admissible_hypothesis",
+      "plateau_across_rounds",
+      "human_review_required"
+    ]
+  },
+
+  "scientist_policy_standalone": {
+    "provider": "fake_deterministic",
+    "provider_config": {},
+    "state_treatments": {
+      "evaluation_needed": "human_review",
+      "architecture_research": "human_review",
+      "untrainable_with_current_path": "human_review"
+    },
+    "replication_policy": {
+      "seeds_for_replication": 3,
+      "require_transfer_stage": true,
+      "min_survivors_for_generalization": 2
+    },
+    "protected_benchmarks": ["instruction_following@eval"],
+    "sandbox_required": true
+  },
+
+  "scientist_policy_with_ai_scientist_v2_sidecar": {
+    "provider": "ai_scientist_v2",
+    "provider_config": {
+      "runtime": "docker",
+      "home": "C:/external/AI-Scientist-v2",
+      "workspace_dir": "D:/chowder-scientist/sidecar-workspaces",
+      "image": "aiscientist-v2:cuda",
+      "python": "python",
+      "model": "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
+      "max_num_generations": 3,
+      "num_reflections": 2,
+      "sandbox_required": true
+    },
+    "state_treatments": {
+      "evaluation_needed": "human_review",
+      "architecture_research": "scientist_then_review",
+      "untrainable_with_current_path": "scientist_allowed"
+    },
+    "replication_policy": { "seeds_for_replication": 3, "require_transfer_stage": true },
+    "protected_benchmarks": ["instruction_following@eval"],
+    "sandbox_required": true
+  },
+
+  "scientist_policy_inside_a_growth_loop_policy": {
+    "_comment": "Embed as the `scientist_policy` key of the loop policy document (sibling of maximum_generations, protected_benchmarks, ...). Absent key = historical behaviour: research-heavy states always go to human review.",
+    "scientist_policy": {
+      "provider": "ai_scientist_v2",
+      "provider_config": {
+        "runtime": "wsl",
+        "home": "/home/operator/AI-Scientist-v2",
+        "workspace_dir": "/home/operator/chowder-scientist-workspaces",
+        "model": "anthropic/claude-3-5-sonnet-latest",
+        "sandbox_required": true
+      },
+      "state_treatments": {
+        "architecture_research": "scientist_allowed",
+        "untrainable_with_current_path": "scientist_then_review"
+      },
+      "mission": {
+        "mission_id": "from-growth-architecture-research",
+        "objective": "research alternative mechanisms for the structurally limited skill",
+        "priorities": { "math.reasoning": 1.0 },
+        "budget": { "max_gpu_hours": 4.0, "max_tree_nodes": 8, "max_parallel_branches": 2, "max_cost_usd": 5.0 }
+      }
+    }
+  },
+
+  "usage_cli": [
+    "chowder scientist status --mission mission.json --policy policy.json --state-root ./state",
+    "chowder scientist plan   --mission mission.json --policy policy.json --state-root ./state --count 3",
+    "chowder scientist run    --mission mission.json --policy policy.json --state-root ./state --max-steps 8",
+    "chowder scientist observe --mission mission.json --policy policy.json --state-root ./state --observation observation.json",
+    "chowder scientist findings --mission mission.json --policy policy.json --state-root ./state",
+    "chowder scientist tree   --mission mission.json --policy policy.json --state-root ./state"
+  ],
+
+  "usage_growth_loop": [
+    "chowder growth loop plan   <policy-with-scientist_policy.json> --parent <manifest>   # shows RESEARCH_MISSION_CREATED where the treatment policy allows it",
+    "chowder growth loop run    <policy-with-scientist_policy.json> --parent <manifest>   # ends the growth session with the mission document when diverted"
+  ],
+
+  "runtime_setup_ai_scientist_v2": [
+    "1. Obtain AI Scientist v2 yourself (external, own license):",
+    "   git clone https://github.com/SakanaAI/AI-Scientist-v2 && cd AI-Scientist-v2",
+    "   conda create -n ai_scientist python=3.11 && conda activate ai_scientist",
+    "   pip install -r requirements.txt",
+    "2. Configure provider access for the SIDECAR (its own keys, not Chowder's):",
+    "   export OPENAI_API_KEY=...        # or AWS credentials for Bedrock models",
+    "3. Point Chowder at it (provider_config.home) and choose an isolated runtime:",
+    "   docker (recommended): build the upstream container, set image + workspace_dir",
+    "   wsl: home on the Linux side; Chowder invokes `wsl -e python -m ...`",
+    "   local: ONLY with local_isolated=true, acknowledging the environment is isolated",
+    "4. Chowder never imports, vendors, or executes sidecar code in-process; the",
+    "   protocol is files (workshop.md -> ideas.json -> journal.json) plus one",
+    "   subprocess of the sidecar's own entry point inside its own runtime."
+  ]
+}

@@ -57,6 +57,7 @@ Three different operating modes, and it matters which one you are in:
 | **Single project** | Trains and evaluates one project you configured | `chowder train`, or the guided TUI |
 | **Autonomous repair** | Repairs one rejected candidate within a GPU-hour budget | `repair` section of a project config |
 | **Autonomous multi-generation growth** | Chooses the next improvement target from measured evidence and advances Gen N → Gen N+1 → … under a finite envelope | Autonomous Growth in `chowder tui`, or `chowder growth loop ...` for headless use |
+| **Scientist mode (research director)** | Optional research layer: capability missions, hypothesis portfolios from a pluggable provider (AI Scientist v2 sidecar), typed experiment proposals admitted/compiled/executed by Chowder, replication-policy-gated findings. Default off; promotion authority unchanged | `chowder scientist ...`; see [`docs/SCIENTIST_MODE.md`](docs/SCIENTIST_MODE.md) |
 
 Still ahead: FSDP for multi-GPU (DDP now supported). HF/model infrastructure resilience (download retries, offline mode, dependency/disk-space/architecture preflight, and cache-hit/miss reporting) is now fully supported. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full, currently-accurate list.
 

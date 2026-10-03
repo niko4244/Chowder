@@ -470,6 +470,8 @@ def build_parser() -> argparse.ArgumentParser:
     account_parameters.set_defaults(func=_moe_account_parameters)
 
     register_growth_subcommands(sub)
+    from .scientist.cli import register_scientist_subcommands
+    register_scientist_subcommands(sub)
     return parser
 
 

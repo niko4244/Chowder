@@ -104,6 +104,13 @@ class LoopPolicy:
     #: path. The loop routes them to human review rather than spending an
     #: envelope proving again that the same intervention does not work.
     structural_skills: tuple[str, ...] = ()
+    #: Scientist-mode policy (optional, default absent = the historical
+    #: behaviour: every research-heavy treatment goes to human review). When
+    #: present it names the provider and, per treatment in REVIEW-ish states,
+    #: whether the loop may divert to a research mission
+    #: (scientist_allowed / scientist_then_review) or must keep human review.
+    #: The loop only reads this document; it never widens it.
+    scientist_policy: Mapping[str, Any] | None = None
 
     #: Every key a policy document may carry. A key nothing reads would be a
     #: limit that looks enforced and is not.
@@ -131,6 +138,7 @@ class LoopPolicy:
         "calibration_benchmarks",
         "reliability_benchmarks",
         "structural_skills",
+        "scientist_policy",
     )
 
     def __post_init__(self) -> None:
@@ -220,6 +228,10 @@ class LoopPolicy:
             calibration_benchmarks=_strings("calibration_benchmarks", optional=True),
             reliability_benchmarks=_strings("reliability_benchmarks", optional=True),
             structural_skills=_strings("structural_skills", optional=True),
+            scientist_policy=(
+                dict(document["scientist_policy"])
+                if isinstance(document.get("scientist_policy"), Mapping) else None
+            ),
         )
 
     @classmethod
@@ -265,6 +277,11 @@ class LoopPolicy:
             "calibration_benchmarks": list(self.calibration_benchmarks),
             "reliability_benchmarks": list(self.reliability_benchmarks),
             "structural_skills": list(self.structural_skills),
+            "scientist_policy": (
+                {k: (dict(v) if isinstance(v, Mapping) else v)
+                 for k, v in self.scientist_policy.items()}
+                if self.scientist_policy is not None else None
+            ),
         }
 
     def digest(self) -> str:
