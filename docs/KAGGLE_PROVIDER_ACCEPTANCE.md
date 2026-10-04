@@ -209,3 +209,34 @@ in). Verbatim trainer result (from the fetched `chowder_result.json`):
   through durable research memory.
 - Cumulative free-tier spend across all three runs: ~0.047 of 30 weekly
   device-hours (≈0.16%).
+
+## Run 4 (2026-10-03) — gen3 survivor screening job PREPARED, not yet launched
+
+The survivor the growth loop auto-consumed (dry-run proof,
+`scripts/dryrun_survivor_handoff.py`) is frozen as `gen3-a1-reasoning`.
+`kaggle/gen3_survivor_screening.py` prepares its real screening job on the
+free Kaggle lane — the campaign_spec is DERIVED from the frozen durable
+artifacts (campaign.json + preregistration.json), nothing hand-typed:
+
+- intervention under test: replay ratio 0.25 → 0.05 at half the steps
+  (parsed fail-closed from the frozen `treatment_reason`);
+- design: 3-seed A/B — control arm at constant replay 0.25 vs intervention
+  arm with the decay, identical data/init/batch draws per seed;
+- gate: the survivor's verbatim rule "transfer delta <= 0 on 2 of 3 seeds",
+  operationalized at screening scale as transfer_delta = intervention −
+  control final loss per seed; the runner RECOMPUTES the verdict from the
+  per-seed deltas and cross-checks the trainer's own claim;
+- honest scope: a synthetic-probe measurement — NOT a mgsm@2022-11
+  measurement; the campaign tier re-runs the rule on the real benchmark.
+
+Verified locally before any Kaggle contact (`--selftest-local` executes the
+exact trainer body on CPU/GPU with a 30-step spec): spec_drove_run true,
+runner/trainer verdicts agree, 2-of-3 seeds satisfied (mean transfer delta
++0.0074), ~0.0007 device-hours. The full job (6 × 300-step arms on T4×2) is
+launch-ready and gated behind an explicit `--launch` flag — launching starts
+a real free-tier run and awaits the operator's go:
+
+    python kaggle/gen3_survivor_screening.py --launch \
+        --commit 4fd5e68321c00dd47f9f8844258855800d7abc51   # must be on origin
+
+Estimated cost at Run-3 rates: ≈0.014 of 30 weekly device-hours.
