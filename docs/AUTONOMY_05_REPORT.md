@@ -31,7 +31,14 @@ test named alongside it.
    constraint is a violation, never a pass, and a PROMOTED verdict over a
    violation is downgraded to REJECTED with the machine codes
    `RETENTION_REGRESSION` / `RETENTION_FLOOR` / `RETENTION_UNMEASURED`
-   (`RetentionViolation.code`, owned in `retention.py`).
+   (`RetentionViolation.code`, owned in `retention.py`). Every violation's
+   reason reaches the record whatever the incoming verdict: a declared gate
+   that fires on a candidate the predeclared protected arithmetic already
+   rejected is still a fact about that candidate, and only the verdict is
+   tightened -- PROMOTED becomes REJECTED, while REJECTED, TAINTED and
+   INCONCLUSIVE keep the verdict the predeclared rule earned, because a
+   declared breach must not manufacture a strong verdict over evidence the
+   rule found too thin to decide.
 6. **Settlement refusals stop advancing.** `compute_cost.settlement_refusal`
    reads exactly the two shapes production writes — the `budget_settlement`
    verdict (`training_binding.py`) and the `refused_by`/`refusal_reason`
@@ -157,41 +164,73 @@ records the fact:
 - Attribution: judged against the real frozen manifest instead of the
   fixture's, the root additionally fails bookkeeping the fixture cannot
   carry (the real base/adapter digests, recipe ids, contamination pin) --
-  deployment mismatch, not a fact about the judge's gates. Whether to amend
-  the frozen judge (it predates the declared profiles) or ship Gen-2 with
-  this documented is a product decision, deliberately not taken here.
+  deployment mismatch, not a fact about the judge's gates.
+
+### The minimal amendment, proposed for review and **not implemented**
+
+`docs/gen2/JUDGE_AMENDMENT_PROPOSAL_T21.md` states it in full, with the exact
+insertion points and a diff sketch; `docs/gen2/judge_gen2.py` is unchanged. In
+one line: **one gate, four named reasons, one wiring line.** A new `T21` reads
+`<run_root>/campaign-run.json` -- the artifact the run already writes beside the
+arms the judge reads -- and compares what the run decided against the declared
+profile: a run that REJECTED on a declared gate (`RETENTION_*` in
+`promotion.decision.reasons`) is `FAIL`, because the judge's own table cannot
+overturn a refusal the branch has already recorded; a run PROMOTED together with
+such a reason, or a breach on a dimension the declaration does not name, is
+`FAIL` too; an absent, unreadable, wrong-cycle or decision-less record is
+`UNKNOWN`, which the judge already treats as refusing to certify. `branch_verdict`
+and the exit code need no change, no threshold moves, and the reason
+classification is a prefix match on production's own codes
+(`RetentionViolation.code`), never a parse of human-readable prose. Admissibility
+under the freeze: it changes no threshold, and no Gen-2 candidate evaluation
+exists to be visible. It would be numbered amendment 15, after amendment 14.
 
 ## The Gen-2 pre-compute state (2026-10-04)
 
-`docs/gen2/gen2_campaign.json` now declares its preregistered protection
-mechanically (GEN2_PREREG_AMENDMENT7_2026-10-04): `retention_profile`
-(`gen2-protection`: max-regression 0.0625 -- one 16th of a 16-item
-mini-slice -- on `math500@2024-04` and `mgsm@2022-11`) and
-`eval_tier_policy` (both protected benchmarks are promotion-evidence). The
-loader accepts it, and `check_campaign_readiness` reports `schema: ok`,
-`base_identity: ok`, `parent_adapter_identity: ok`, and
-`protection_policy: ok`.
+`docs/gen2/gen2_campaign.json` declares its preregistered protection
+mechanically (`GEN2_PREREG_AMENDMENT14_2026-10-04.md`; the tag first written
+into `notes` collided with the real `GEN2_PREREG_AMENDMENT7_2026-09-18` and is
+corrected): `retention_profile` (`gen2-protection`: max-regression 0.0625 -- one
+16th of a 16-item mini-slice -- on `math500@2024-04` and `mgsm@2022-11`) and
+`eval_tier_policy` (both protected benchmarks are promotion-evidence).
 
-**Exactly what still blocks `run_campaign` -- 7 declared inputs
-(`READINESS_DECLARED_INPUT`):**
+**The seven previously-undeclared inputs now exist, produced by production
+code, and readiness is fully green.** `chowder growth campaign prepare` wrote
+them into one directory (`<state_root>/prepared-v10`, never over `prepared-v2`,
+which holds the preserved measurement), and the declaration names them at
+`prepared_input_paths`' predicted paths plus the planner's own recipe ids
+(`recipe-00-lr5e-05`, `recipe-01-lr0.0001`) in place of the placeholders the
+planner had never proposed. Measured, not asserted --
+`check_campaign_readiness` reports `READY`, `reason_codes: []`, and **all
+seventeen checks `ok`** (321 s, most of it the base model-content digest over
+ten payload files):
 
-1. `project_template_path` -- the executor has no project to compose.
-2. `training_material_path` -- the executor writes the corpus this run
-   trains on.
-3. `data_registry_path` -- nothing may train on an unadmitted source.
-4. `hardware_budget_path` -- recipes are projected against measured
-   hardware, never guesses.
-5. `parent_profile_path` -- a curriculum cannot be planned from nothing
-   (needs a Gen-1 measurement; the Gen-0 freeze profile is not the Gen-1
-   profile).
-6. `evaluation_material_path` -- the production evaluator has no data to
-   measure the selected candidate on (the run would spend its training
-   compute and refuse afterwards).
-7. `parent_eval_report_path` -- the promotion rule compares the candidate
-   against its parent; without that arm the run can only reach
-   INCONCLUSIVE.
+| check | detail |
+| --- | --- |
+| `schema`, `declared_inputs` | FIELD_ENFORCEMENT; every run-phase input declared |
+| `base_identity`, `parent_adapter_identity` | `59e767aab1da` over 10 payload files; `ca8769c5e7e0` verified over base |
+| `contamination`, `project_template`, `training_material`, `data_registry`, `hardware_budget` | each parses from the prepared bundle |
+| `parent_profile` | gen1 `SkillProfile` in the attributed `estimates` shape (the stale legacy shape that blocked `prepared-v2` is not reproduced) |
+| `parent_arm`, `ancestor_arm` | 3 gen1 rows, 2 gen0 rows |
+| `protection_policy` | gen0 branch protection, tolerance 0.0625, 16 items |
+| `plan`, `recipe_set`, `candidate_search`, `campaign_projection` | 5 items -> 2 recipes; 0.000312 device / 0.001091 wall GPU-h within the ceilings |
+| `evaluator`, `evaluator_coverage` | `SubprocessEvaluationFn` available; covers every declared benchmark |
 
-Every downstream check (contamination, evaluator, plan, projection) reports
-`skipped` until these exist. Producing them from production code, plus
-measuring the declared Gen-0 baseline arm, is the remaining pre-compute
-build; starting the run itself is a separate decision.
+Where the evidence came from, since "readiness is green" is only worth what its
+inputs are: the hardware budget is a real CUDA device probe on this machine
+(RTX 5060 Ti; bounded synthetic step timings, and its own `measurement_method`
+says it is not a measurement of the campaign's model); the evaluation material
+is the pinned offline `HuggingFaceH4/MATH-500` and `juletxara/mgsm` caches plus
+the in-repo instrument prompts; the corpus (10,340 examples, 79,904 tokens,
+`verifier_pass_rate` 1.0, `duplicate_rate` 0.0) and its registry and project
+template come from production planning; and the parent arm is the **preserved**
+2026-09-19 Gen-1 measurement carried forward through `--parent-measurement`,
+row-for-row identical including `artifact_sha256` and `slice_sha256` -- not
+re-measured, not a carried quotation. No path, digest or measurement was
+invented; the two inputs that would have needed new GPU measurement already had
+their measurements on disk.
+
+Starting the run is still a separate decision, and two facts are unchanged: no
+Gen-2 candidate evaluation exists (the run refused at the `candidate_evaluation`
+phase), and the target instrument's diagnostic metadata -- the judge's T1-T10 --
+still lives only in the historical Gen-1 driver.
