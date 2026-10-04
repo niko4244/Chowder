@@ -34,7 +34,6 @@ from ..adapter_guard import assert_adapter_is_live
 from ..adapter_bundle import write_adapter_bundle_manifest
 from ..hf_resilience import cache_status, with_hub_retries
 from ..provenance import sha256_directory  # noqa: E402
-from safetensors import SafetensorError  # noqa: E402
 from .activation_offload_hooks import offload_pack, offload_unpack
 from .training_data import (
     _build_chat_example,
@@ -375,6 +374,11 @@ def _save_adapter_with_retry(
     failures (os error 32). safetensors surfaces those as SafetensorError,
     not OSError, so both exception types are retried; the message is matched
     so genuine I/O failures still raise on first attempt."""
+    # Imported here, not at module level: the light CI environments install
+    # neither safetensors nor torch, and this helper only runs after a real
+    # training pass (which required torch already).
+    from safetensors import SafetensorError
+
     try:
         model.save_pretrained(
             output_dir, safe_serialization=True, selected_adapters=selected_adapters
