@@ -65,6 +65,16 @@ requires remote spend through the same settlement — but the *runner's*
 advance rule itself still needs the settlement-refusal check wired in.
 That is the single most important open code change on the road to 0.5.
 
+**Resolved (the one next action, now wired):** `compute_cost.settlement_refusal`
+is the one owner of the refusal vocabulary; `run_search` ends the lineage of
+a settlement-refused attempt, `advanced` and `cycle.select_candidate` refuse
+it, and `GrowthCycle.decide_promotion`/`decide_promotion_from_runs` apply
+the preregistered retention profile (fail-closed) and the tier wall. As
+predicted, the fake fixture economics were hiding the hole: with the gate
+in place the harness's "clean" run refused at settlement, so the fixtures
+now report settleable costs and the deliberate-overrun scenarios assert the
+honest refusal path. Tests: `tests/test_growth_runner_gates.py`.
+
 ## 4. Architectural state found (gaps that motivated this branch)
 
 | Gap (mandate phase) | State found |

@@ -766,6 +766,13 @@ def run_campaign(
         # Nothing was produced to evaluate. The accounting is still written --
         # the compute was really spent -- and the run records its refusal.
         accounting_digest = ledger.write(accounting_path)
+        # A run that stopped mid-flight must say so even when the stop left it
+        # nothing to select: the stop is part of what happened, not a detail
+        # only successful runs report.
+        if stopped_by:
+            phases.append(
+                {"phase": "stopping", "verdict": "stopped", "detail": stopped_by}
+            )
         phases.append(
             {
                 "phase": "candidate_evaluation",
@@ -806,6 +813,10 @@ def run_campaign(
     except CampaignRunRefusal as refusal:
         accounting_digest = ledger.write(accounting_path)
         total = ledger.total()
+        if stopped_by:
+            phases.append(
+                {"phase": "stopping", "verdict": "stopped", "detail": stopped_by}
+            )
         phases.append(
             {
                 "phase": "candidate_evaluation",

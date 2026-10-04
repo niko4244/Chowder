@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
+from .compute_cost import settlement_refusal
+
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard for type checkers only
     from .evidence import EvidenceStore
 
@@ -146,7 +148,12 @@ def classify_failure(attempt: Mapping[str, Any]) -> FailureClassification:
             ),
         )
 
-    settle_refusal = attempt.get("settle_refusal")
+    # The production binding records a settlement refusal as a non-compliant
+    # ``budget_settlement`` verdict plus a ``budget_settlement`` ``refused_by``
+    # stamp; ``settle_refusal`` is the classifier-facing vocabulary for the
+    # same fact. One predicate reads both, so classification and the runner's
+    # advance rule can never disagree about what was refused.
+    settle_refusal = settlement_refusal(attempt)
     if settle_refusal:
         return FailureClassification(
             failure_class=FailureClass.BUDGET_EXHAUSTED,

@@ -19,10 +19,10 @@ Three rules are enforced here rather than trusted:
   the per-round step budget and the survivor count, so this module cannot drift
   from the controller that already runs the EvolutionEngine stack;
 * **the screen is training-side only.** A candidate advances because its
-  attempt succeeded and produced an artifact -- the same fields
-  ``cycle.select_candidate`` reads. No protected, target or broad benchmark
-  score is visible to the search at any point, so a hyperparameter winner can
-  never be chosen on final-gate evidence;
+  attempt succeeded, produced an artifact, and settled inside its budget --
+  the same fields ``cycle.select_candidate`` reads. No protected, target or
+  broad benchmark score is visible to the search at any point, so a
+  hyperparameter winner can never be chosen on final-gate evidence;
 * **the cost is bounded before it is spent.** The whole schedule is projected
   first (worst case: every candidate survives every round), checked against the
   declaration's own envelope *and* the campaign's ceilings, and refused if the
@@ -39,6 +39,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from chowder.successive_halving import HalvingSchedule, latest_checkpoint_dir
 
+from .compute_cost import settlement_refusal
 from .recipe_planner import TrainingRecipe
 
 __all__ = [
@@ -383,9 +384,14 @@ _ADVANCE_FIELDS = ("status", "candidate_succeeded", "artifact_ref")
 def advanced(results: Sequence[Mapping[str, Any]], *, survivor_count: int) -> tuple[str, ...]:
     """Which attempts advance, in preregistered order, on training-side evidence.
 
-    No ranking and no score: an attempt advances because it trained and produced
-    an artifact. ``first_by_loss`` and every other selection policy still apply
-    to the *final* round through ``cycle.select_candidate`` -- they decide the
+    No ranking and no score: an attempt advances because it trained, produced
+    an artifact, and settled inside its declared budget. Settlement runs
+    *after* ``candidate_succeeded`` is set, so an over-budget attempt can
+    carry a success flag -- and must not carry it past this screen. Unpriced
+    evidence does not advance.
+
+    ``first_by_loss`` and every other selection policy still apply to the
+    *final* round through ``cycle.select_candidate`` -- they decide the
     winner, not who is allowed to earn a larger budget.
     """
     succeeded = [
@@ -393,6 +399,7 @@ def advanced(results: Sequence[Mapping[str, Any]], *, survivor_count: int) -> tu
         for row in results
         if (row.get("candidate_succeeded") is True or row.get("status") == "SUCCEEDED")
         and row.get("artifact_ref")
+        and settlement_refusal(row) is None
     ]
     return tuple(succeeded[:survivor_count])
 
@@ -515,6 +522,9 @@ def run_search(
       declared continuation has admitted it restarted: the attempt stays in
       the accounting, but its lineage cannot advance, so a silent restart can
       never win progressive allocation;
+    * an attempt that settles over budget (``settlement_refusal``) ends its
+      lineage the same way: the spend stays in the accounting, but unpriced
+      evidence cannot earn a larger budget, however well it trained;
     * every attempt's evidence records the continuation it declared and the
       checkpoint it produced, so the search's record is auditable round by
       round and an interrupted run resumes from exactly what it recorded.
@@ -679,15 +689,26 @@ def run_search(
 
         # Who advances: candidates that trained and produced an artifact -- and,
         # when a continuation was declared, did not report restarting. A silent
-        # restart must never win progressive allocation.
-        eligible = [
-            evidence
-            for evidence in attempts
+        # restart must never win progressive allocation; neither may an
+        # over-budget one. A settlement refusal ends the lineage too: the
+        # attempt cost more than its declared projection, so its evidence is
+        # unpriced, and an unpriced attempt cannot earn a larger budget.
+        eligible: list[Mapping[str, Any]] = []
+        for evidence in attempts:
+            settlement = settlement_refusal(evidence)
+            if settlement is not None:
+                lineage_stops.setdefault(
+                    str(evidence.get("recipe_id", "")),
+                    f"settlement refused the attempt ({settlement}): an "
+                    "over-budget attempt's evidence is unpriced, so it cannot "
+                    "earn a larger budget",
+                )
+                continue
             if not (
                 evidence.get("declared_resume_from")
                 and evidence.get("resume_state") == "not-a-resume"
-            )
-        ]
+            ):
+                eligible.append(evidence)
         for evidence in attempts:
             if (
                 evidence.get("declared_resume_from")

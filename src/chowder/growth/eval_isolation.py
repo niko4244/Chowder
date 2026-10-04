@@ -26,12 +26,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
+
+if TYPE_CHECKING:  # pragma: no cover - type-only, keeps the wall import-light
+    from .retention import RetentionProfile
 
 __all__ = [
     "EvalTier",
     "EvalTierPolicy",
     "SearchIsolationRefusal",
+    "assert_promotion_gate_isolation",
     "assert_search_isolation",
     "classify_benchmarks",
 ]
@@ -160,4 +164,30 @@ def assert_search_isolation(
             raise SearchIsolationRefusal(
                 f"selection policy {policy_name!r} names protected evidence; "
                 "selection over the final round reads training-side fields only"
+            )
+
+
+def assert_promotion_gate_isolation(
+    *,
+    policy: EvalTierPolicy,
+    retention_profile: "RetentionProfile",
+) -> None:
+    """Refuse a promotion gate measured on evidence the search can see.
+
+    A retention constraint names the benchmark its measurement must come
+    from. If that benchmark classifies below promotion evidence, the gate is
+    readable by the very search that produced the candidate -- the search
+    could then shape its own gate. This is wiring, not a measured outcome, so
+    it refuses outright instead of downgrading a verdict: fixing the
+    classification or moving the measurement is the only way past it.
+    """
+    for constraint in retention_profile.constraints:
+        tier = policy.tier_of(constraint.benchmark)
+        if tier is not EvalTier.PROMOTION_EVIDENCE:
+            raise SearchIsolationRefusal(
+                f"retention constraint {constraint.dimension!r} is measured on "
+                f"{constraint.benchmark!r}, which the campaign classified as "
+                f"{tier.value}; a promotion gate on search-readable evidence "
+                "lets the search shape its own gate -- measure the constraint "
+                "on promotion evidence, or reclassify the benchmark honestly"
             )

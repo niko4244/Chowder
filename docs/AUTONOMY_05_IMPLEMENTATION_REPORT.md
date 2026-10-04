@@ -50,6 +50,49 @@ executable test in this branch. Test commands at the end.
 | `docs/CAMPAIGN_DESIGN_05.md` | first 0.5 campaign, NOT run: 4 candidates, 3 rounds (300→600→1200 steps), ~0.14 device-GPU-h total from **measured** costs (Run 4: 0.008026 device-GPU-h per 3-seed A/B), preregistered tiers/retention/decision rules, ladder verdict computed (DETERMINISTIC — 3 of 4 families have no history) | launching is a decision about the document, so a post-hoc threshold change is detectable |
 | `tests/test_growth_mutation_checks.py` (6 tests) | the six mandated sabotages, each run against its real enforcement point and caught | the guards cannot rot silently |
 
+## The one next action, wired: settlement refusals stop advancing, promotion consults the gates
+
+The audit's single most important open change, implemented on top of the
+commit stack above:
+
+- **One owner of the settlement-refusal vocabulary.**
+  `compute_cost.settlement_refusal(evidence)` reads every shape a settlement
+  refusal is recorded in (the `budget_settlement` verdict, the classifier's
+  `settle_refusal` vocabulary, the `refused_by` stamp) and returns the
+  machine-readable identifier, or `None`. `attempt_failure.classify_failure`
+  now derives its settlement branch from the same predicate, so the
+  classifier and the runner can never disagree about what was refused — the
+  classifier's old `settle_refusal`-only read could never fire on a real
+  production record.
+- **Settlement-refused attempts stop advancing.** `run_search` ends the
+  lineage of an attempt that settled over budget (the spend stays in the
+  accounting; the stop lands in `lineage_stops`), and both advance surfaces —
+  `candidate_search.advanced` and `cycle.select_candidate` — refuse such
+  rows. `candidate_succeeded` is set *before* settlement runs, so "it
+  trained" was never "it may win".
+- **The promotion path consults the preregistered gates.**
+  `GrowthCycle._apply_promotion_gates` runs in both `decide_promotion` and
+  `decide_promotion_from_runs`: a declared `RetentionProfile` is evaluated
+  fail-closed (unmeasured constraint = violation; verdict downgraded to
+  REJECTED with `RETENTION_REGRESSION` / `RETENTION_FLOOR` /
+  `RETENTION_UNMEASURED` reasons), and a declared `EvalTierPolicy` refuses a
+  constraint measured on search-readable evidence outright — that is
+  campaign wiring, not a measured outcome.
+- **The wiring caught the predicted second instance of the same disease.**
+  With the gate in place, the campaign fixtures' "clean" runner (a fixed
+  0.05 wall against a ~0.006 projection) refused at settlement and the
+  dry-run matrix's clean-promotion scenario stopped promoting: it had only
+  ever promoted because selection ignored settlement refusals — exactly the
+  #204 hole. The fixtures now report a settleable cost (`ATTEMPT_WALL_GPU_HOURS
+  = 0.006`) with the deliberate overruns made explicit (`OVERRUN_WALL_GPU_HOURS`),
+  and the three scenarios that relied on the hole assert the honest refusal
+  path. The REFUSED-at-selection record also now carries the `stopping`
+  phase, which it previously dropped.
+
+New tests: `tests/test_growth_runner_gates.py` (20 — the predicate's
+vocabulary, the advance/selection/search refusals, the classifier agreement,
+and the retention/tier gates on both promotion paths).
+
 ## Verification
 
 ```
@@ -66,9 +109,12 @@ python -m pytest tests/test_growth_candidate_search.py \
   tests/test_growth_campaign.py tests/test_growth_decisions.py \
   tests/test_growth_next_campaign.py tests/test_growth_budget_settlement.py \
   tests/test_growth_candidate_selection.py tests/test_growth_metric_binding.py \
-  tests/test_growth_target_selection.py -q
+  tests/test_growth_target_selection.py \
+  tests/test_growth_runner_gates.py -q
 python -m ruff check src/chowder/growth/
 ```
 
 At commit time: all of the above green (261-growth-regression + 24 + 24 + 16
-+ 6 additions), ruff clean; full-suite run recorded in the PR body.
++ 6 + 20 additions; the campaign-runner, certification-coupling,
+evaluation-binding and dry-run-matrix suites re-pointed to the honest
+settlement semantics), ruff clean; full-suite run recorded in the PR body.

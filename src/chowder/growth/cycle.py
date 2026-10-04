@@ -31,21 +31,24 @@ and are executed through this cycle's own ``TrainingFn``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Sequence
 
-from chowder.evals.result import BenchmarkRun
+from chowder.evals.result import UNMEASURED, BenchmarkRun
 
 from .capability import CapabilityProfile, profile_delta
+from .compute_cost import settlement_refusal
 from .contamination import ContaminationFirewall
 from .curriculum import CurriculumEngine, CurriculumItem
 from .eval_tiers import EvalPlan, plan_eval_tier
+from .eval_isolation import EvalTierPolicy, assert_promotion_gate_isolation
 from .failure_bank import FailureBank
 from .frontier_reference import FrontierSnapshot, SnapshotStore
 from .lineage import GenerationLedger, RegressionMemory
 from .metric_binding import MetricBinder, PromotionAssembly
 from .promotion import PromotionDecision, PromotionInput, BenchmarkResult, evaluate_promotion
 from .recipe_planner import RecipePlanner, TrainingRecipe
+from .retention import RetentionProfile, evaluate_retention
 
 # A training execution: recipe -> durable evidence ref (artifact/eval report).
 TrainingFn = Callable[[TrainingRecipe, Sequence[CurriculumItem]], Mapping[str, Any]]
@@ -72,6 +75,11 @@ def select_candidate(
     could accept protected or broad benchmark scores, so recipe selection
     cannot peek at final-gate evidence by construction.
 
+    A settlement-refused attempt is not selectable either: settlement runs
+    after ``candidate_succeeded`` is set, so an over-budget attempt can carry
+    a success flag, and the attempt that gets measured for promotion must be
+    one whose cost claims settled.
+
     Policies:
     - ``first_successful`` (default): the first recipe (in preregistered
       order) whose training succeeded and produced an artifact.
@@ -88,6 +96,7 @@ def select_candidate(
         for r in results
         if (r.get("candidate_succeeded") is True or r.get("status") == "SUCCEEDED")
         and r.get("artifact_ref")
+        and settlement_refusal(r) is None
     ]
     if not successful:
         return None
@@ -103,6 +112,44 @@ def select_candidate(
     # first_successful: the first recipe (in preregistered order) that
     # succeeded and produced an artifact.
     return successful[0]
+
+
+def _retention_values(
+    profile: RetentionProfile,
+    results: Mapping[str, BenchmarkResult],
+    *,
+    candidate_side: bool,
+) -> dict[str, float]:
+    """dimension -> measured score, from the benchmark each constraint names.
+
+    The candidate side counts only rows measured on this generation
+    (``gate_eligible``); the parent side counts only rows a measurement
+    exists for. A missing or unmeasured row is left out, so
+    :func:`evaluate_retention` fails closed on it -- an unmeasured gate is
+    not a passed gate.
+    """
+    values: dict[str, float] = {}
+    for constraint in profile.constraints:
+        result = results.get(constraint.benchmark)
+        if result is None:
+            continue
+        if candidate_side and not result.gate_eligible:
+            continue
+        if not candidate_side and result.measurement_origin == UNMEASURED:
+            continue
+        values[constraint.dimension] = float(result.score)
+    return values
+
+
+def _retention_reason(violation: Any) -> str:
+    """One machine-readable identifier per retention failure shape."""
+    if violation.measured != violation.measured:  # NaN: never measured
+        code = "RETENTION_UNMEASURED"
+    elif violation.constraint.kind == "absolute-floor":
+        code = "RETENTION_FLOOR"
+    else:
+        code = "RETENTION_REGRESSION"
+    return f"{code}: {violation.detail}"
 
 
 @dataclass(frozen=True)
@@ -125,6 +172,19 @@ class CycleConfig:
     budget_examples: int = 20000
     recipe_count: int = 4
     eval_budget_gpu_hours: float = 1.0
+    #: The campaign's preregistered retention constraints. The promotion
+    #: phase consults them before anything promotes: a candidate that wins
+    #: its target while breaching a declared constraint is REJECTED, and an
+    #: unmeasured constraint is a violation, not a pass. Optional only in the
+    #: sense that a campaign must declare it for it to bind -- when it is
+    #: declared, the gate is structural, not advisory.
+    retention_profile: RetentionProfile | None = None
+    #: The declared tier classification of the campaign's benchmarks. When
+    #: declared alongside a retention profile, every constraint's benchmark
+    #: must classify as promotion evidence; a constraint measured on
+    #: search-readable evidence refuses outright (the search could otherwise
+    #: shape its own gate).
+    eval_tier_policy: EvalTierPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -261,6 +321,52 @@ class GrowthCycle:
         """
         return select_candidate(results, order=order)
 
+    # ---------------- promotion gates ----------------
+
+    def _apply_promotion_gates(
+        self,
+        decision: PromotionDecision,
+        *,
+        candidate_results: Mapping[str, BenchmarkResult],
+        parent_results: Mapping[str, BenchmarkResult],
+    ) -> PromotionDecision:
+        """The gates the promotion path consults before anything promotes.
+
+        The predeclared promotion rule keeps its protected-benchmark
+        arithmetic; the campaign's preregistered retention profile is
+        evaluated on top of it, so a candidate that wins its target while
+        breaching a declared constraint is REJECTED with the violation named
+        -- not a promotion with a footnote. Unmeasured constraints fail
+        closed: an unmeasured gate is not a passed gate.
+
+        When the campaign also declares a tier classification, every
+        constraint's benchmark must be promotion evidence. A constraint
+        measured on search-readable evidence would let the search shape its
+        own gate, so that is refused outright -- it is wiring, not a
+        measured outcome.
+        """
+        profile = self.config.retention_profile
+        if profile is None:
+            return decision
+        if self.config.eval_tier_policy is not None:
+            assert_promotion_gate_isolation(
+                policy=self.config.eval_tier_policy,
+                retention_profile=profile,
+            )
+        violations = evaluate_retention(
+            profile,
+            parent_values=_retention_values(profile, parent_results, candidate_side=False),
+            candidate_values=_retention_values(profile, candidate_results, candidate_side=True),
+        )
+        if violations and decision.verdict == "PROMOTED":
+            decision = replace(
+                decision,
+                verdict="REJECTED",
+                reasons=tuple(decision.reasons)
+                + tuple(_retention_reason(violation) for violation in violations),
+            )
+        return decision
+
     def decide_promotion(
         self,
         *,
@@ -271,8 +377,9 @@ class GrowthCycle:
         actual_device_gpu_hours: float | None = None,
         wall_gpu_hours_ceiling: float | None = None,
     ) -> PromotionDecision:
-        """Phase: the single predeclared promotion rule."""
-        return evaluate_promotion(
+        """Phase: the single predeclared promotion rule, then the declared
+        retention and isolation gates."""
+        decision = evaluate_promotion(
             PromotionInput(
                 candidate_version=self.config.candidate_version,
                 parent_version=self.config.parent_version,
@@ -291,6 +398,11 @@ class GrowthCycle:
                 actual_device_gpu_hours=actual_device_gpu_hours,
                 wall_gpu_hours_ceiling=wall_gpu_hours_ceiling,
             )
+        )
+        return self._apply_promotion_gates(
+            decision,
+            candidate_results=candidate_results,
+            parent_results=parent_results,
         )
 
     def decide_promotion_from_runs(
@@ -311,9 +423,10 @@ class GrowthCycle:
         scores. Splitting it this way is what keeps the arithmetic reviewable:
         no conversion happens in a phase body, and a benchmark the cycle names
         but the registry does not declare refuses rather than quietly
-        disappearing from the comparison.
+        disappearing from the comparison. The declared retention and
+        isolation gates are applied to the bound decision before it returns.
         """
-        return binder.promotion_input(
+        assembly = binder.promotion_input(
             candidate_version=self.config.candidate_version,
             parent_version=self.config.parent_version,
             candidate_runs=candidate_runs,
@@ -330,6 +443,14 @@ class GrowthCycle:
             actual_wall_gpu_hours=actual_wall_gpu_hours,
             wall_gpu_hours_ceiling=wall_gpu_hours_ceiling,
         )
+        decision = self._apply_promotion_gates(
+            assembly.decision,
+            candidate_results=assembly.promotion_input.candidate_results,
+            parent_results=assembly.promotion_input.parent_results,
+        )
+        if decision is assembly.decision:
+            return assembly
+        return replace(assembly, decision=decision)
 
     def finalize(
         self,

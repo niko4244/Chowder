@@ -105,10 +105,18 @@ CANDIDATE_VERSION = "gen2"
 
 DEVICE_PER_RECIPE = 0.30
 WALL_PER_RECIPE = 0.10
-#: Wall-charged cost one attempt reports. Deliberately far above what the
-#: planner *projects* for this hardware, so the difference between an admitted
-#: plan and an overrunning actual is a real signal in these tests.
-ATTEMPT_WALL_GPU_HOURS = 0.05
+#: Wall-charged cost one attempt reports in a *clean* run: within the
+#: planner's projection and its declared settlement tolerance, because a fake
+#: clean run must be a run production settlement would accept. (While
+#: selection ignored settlement refusals, an overrunning "clean" fixture
+#: promoted anyway -- the settlement gate caught the fixture, not the code.)
+ATTEMPT_WALL_GPU_HOURS = 0.006
+#: Wall-charged cost of a deliberate overrun: far above what the planner
+#: projects, so it blows both the per-attempt settlement tolerance and the
+#: tight campaign ceilings. Pass an explicit runner with this cost only to
+#: scenarios whose point is a settlement refusal or a mid-run stop; the
+#: default runner must stay settleable.
+OVERRUN_WALL_GPU_HOURS = 0.05
 
 HARDWARE: Mapping[str, Any] = {
     "gpu_name": "test-gpu",
@@ -872,24 +880,33 @@ def test_a_campaign_ceiling_breach_stops_the_remaining_recipes_and_vetoes_promot
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The declared stopping rule changes how much compute runs, and a
-    campaign that blew its own envelope does not promote."""
-    manifest, runner, _document = _campaign(tmp_path, budget=_tight_campaign_budget())
+    campaign that blew its own envelope does not promote.
+
+    The first attempt's overrun refuses the attempt itself (per-attempt
+    settlement: an 8x projection overrun is far past the declared tolerance),
+    the tripped campaign ceiling then stops the remaining recipes, and with
+    no settleable candidate to select the run records REFUSED. The spend
+    stays in the accounting and nothing promotes -- an overrunning campaign
+    is stopped harder than adjudicated, not waved through selection.
+    """
+    manifest, runner, _document = _campaign(
+        tmp_path,
+        budget=_tight_campaign_budget(),
+        runner=_RecordingRunner(gpu_hours=OVERRUN_WALL_GPU_HOURS),
+    )
     _patch_seams(monkeypatch, runner)
 
     run = run_campaign(manifest)
 
     assert _verbs(runner).count("train") == 1
-    assert run.verdict == "REJECTED"
+    assert run.verdict == "REFUSED"
     assert _phase(run, "stopping")["verdict"] == "stopped"
-    assert _phase(run, "resource_veto")["verdict"] == "REJECTED"
-    assert run.settlement["budget_compliant"] is False
-    assert any("WALL" in reason for reason in run.settlement["budget_failure_reasons"])
-    # The artifact, the measurements and the honest verdict all survive, but
-    # the overrun campaign records no promoted generation: the resource veto
-    # is authoritative over lineage, not just over the report.
+    assert run.promotion is None
+    # The overrun attempt's spend is in the durable accounting even though
+    # its settlement refusal made it unselectable.
+    assert run.cost["wall_gpu_hours"] == pytest.approx(OVERRUN_WALL_GPU_HOURS)
     record = json.loads(Path(run.record_path).read_text(encoding="utf-8"))
-    assert record["verdict"] == "REJECTED"
-    assert record["cycle_outcome"]["verdict"] == "REJECTED"
+    assert record["verdict"] == "REFUSED"
     assert Path(record["cost"]["accounting_path"]).exists()
     ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
     assert CANDIDATE_VERSION not in ledger.versions()
@@ -898,19 +915,30 @@ def test_a_campaign_ceiling_breach_stops_the_remaining_recipes_and_vetoes_promot
 def test_without_the_overrun_rule_every_recipe_runs_and_the_resource_gate_still_vetoes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """No stopping rule means every recipe runs -- and still nothing promotes.
+
+    Both attempts blow their own projection tolerance, so per-attempt
+    settlement refuses each of them; with no settleable candidate to select,
+    the campaign refuses instead of adjudicating. The resource gate held
+    without the stopping rule; it just refused earlier in the pipeline.
+    """
     manifest, runner, _document = _campaign(
         tmp_path,
         budget=_tight_campaign_budget(),
         stopping_rules=[STOPPING_RULE_ON_ADMISSION_REFUSAL],
+        runner=_RecordingRunner(gpu_hours=OVERRUN_WALL_GPU_HOURS),
     )
     _patch_seams(monkeypatch, runner)
 
     run = run_campaign(manifest)
 
     assert _verbs(runner).count("train") == 2
-    assert run.verdict == "REJECTED"
-    assert _phase(run, "settlement")["verdict"] == "violated"
+    assert run.verdict == "REFUSED"
+    assert CANDIDATE_EVALUATION_NOT_PRODUCED in _phase(run, "candidate_evaluation")["detail"]
     assert "stopping" not in [phase["phase"] for phase in run.phases]
+    assert run.cost["wall_gpu_hours"] == pytest.approx(2 * OVERRUN_WALL_GPU_HOURS)
+    ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
+    assert CANDIDATE_VERSION not in ledger.versions()
 
 
 def test_a_plan_that_does_not_fit_the_campaign_envelope_refuses_before_compute(
@@ -1619,18 +1647,25 @@ def test_the_evaluations_measured_cost_is_charged_and_can_veto_promotion(
 ):
     """Measuring the candidate is compute, and it counts.
 
-    Two attempts at 0.05 wall fit the declared 0.12 campaign ceiling; the 0.05
-    the evaluation cost does not. The same run promotes when the evaluation
-    reports an explicit, measured zero -- which is what makes this a statement
-    about accounting rather than about the rule.
+    Two attempts at the honest projection-honest cost fit the declared 0.03
+    campaign ceiling; the 0.05 the evaluation reports does not. The same run
+    promotes when the evaluation reports an explicit, measured zero -- which
+    is what makes this a statement about accounting rather than about the
+    rule. (The evaluation leg is charged *after* the attempts settle, so this
+    is the reachable path to a campaign-level resource veto: the attempts
+    themselves settle inside their projection tolerance.)
     """
     budget = {
         "device_gpu_hours_ceiling_per_recipe": DEVICE_PER_RECIPE,
         "wall_gpu_hours_ceiling_per_recipe": WALL_PER_RECIPE,
         "device_gpu_hours_ceiling_campaign": 0.60,
-        "wall_gpu_hours_ceiling_campaign": 0.12,
+        "wall_gpu_hours_ceiling_campaign": 0.03,
     }
-    manifest, runner, _document = _campaign(tmp_path, with_ancestor=True, budget=budget)
+    manifest, runner, _document = _campaign(
+        tmp_path,
+        with_ancestor=True,
+        budget=budget,
+    )
 
     _patch_runner(monkeypatch, runner)
     monkeypatch.setattr(
@@ -1658,7 +1693,9 @@ def test_the_evaluations_measured_cost_is_charged_and_can_veto_promotion(
 
     assert charged.verdict == "REJECTED"
     assert charged.settlement["budget_compliant"] is False
-    assert charged.cost["wall_gpu_hours"] == pytest.approx(0.15)
+    assert charged.cost["wall_gpu_hours"] == pytest.approx(
+        2 * ATTEMPT_WALL_GPU_HOURS + 0.05
+    )
     assert any(
         "WALL" in reason for reason in charged.settlement["budget_failure_reasons"]
     )
