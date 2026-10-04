@@ -385,15 +385,14 @@ def _retention_profile_from_mapping(
                 "closed on it every time, so the declaration refuses here "
                 "rather than after the compute it would waste"
             )
-        if kind not in ("max-regression", "absolute-floor"):
-            raise CampaignManifestError(
-                f"{where}: kind {kind!r} is not one of max-regression / "
-                "absolute-floor"
-            )
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
             raise CampaignManifestError(
                 f"{where}: value must be a finite number, got {value!r}"
             )
+        # The kind rule has one owner: RetentionConstraint's own validation.
+        # The loader wraps the domain error with source context, so a
+        # malformed manifest refuses at load naming the constraint it declared
+        # -- never a raw domain exception.
         try:
             constraints.append(
                 RetentionConstraint(

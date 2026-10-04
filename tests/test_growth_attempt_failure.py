@@ -47,11 +47,21 @@ class TestClassificationPrecedence:
         assert result.action is NextAction.RETRY_UNCHANGED
 
     def test_settlement_refusal_is_budget_and_writes_no_record(self):
-        result = classify_failure({"settle_refusal": "ACTUAL_EXCEEDS_PROJECTION"})
+        """The production settlement shape: trained, succeeded, settled over."""
+        result = classify_failure(
+            {
+                "candidate_succeeded": True,
+                "status": "REFUSED",
+                "refused_by": "budget_settlement",
+                "refusal_reason": "ACTUAL_EXCEEDS_PROJECTION: actual wall 0.05 "
+                "exceeds projection 0.006 by more than the declared tolerance 0.25",
+            }
+        )
         assert result.failure_class is FailureClass.BUDGET_EXHAUSTED
         assert result.evidence_state is None
         # Precedence: settlement is read even when the run "succeeded".
         assert result.reason.startswith("settlement refused")
+        assert "ACTUAL_EXCEEDS_PROJECTION" in result.reason
 
     def test_failed_training_is_infrastructure(self):
         result = classify_failure({"candidate_succeeded": False, "status": "FAILED"})

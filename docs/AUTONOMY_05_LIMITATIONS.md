@@ -31,9 +31,14 @@ The loader seam is closed too: a campaign manifest can declare
 fail-closed — unknown fields, unmeasurable constraints, unknown tiers and a
 gate demoted into the search's view refuse at load), `_build_cycle` passes
 them into `CycleConfig`, and `FIELD_ENFORCEMENT` names what each drives.
-Tests: `tests/test_growth_manifest_promotion_gates.py` (8) — parse-valid
+Tests: `tests/test_growth_manifest_promotion_gates.py` (9) — parse-valid
 binding with an observed gate downgrade, twelve malformed-declaration
-refusals, and unchanged promotion when neither section is declared.
+refusals, an ownership proof that the kind rule lives in the domain and is
+wrapped with source context at load, and unchanged promotion when neither
+section is declared. Ownership is consolidated: the `RETENTION_*`
+reason codes live on `RetentionViolation` (`retention.py`), the settlement
+refusal vocabulary reads exactly the three production shapes, and the
+constraint `kind` rule is validated once, in the domain.
 
 ## Proven only at small scale
 

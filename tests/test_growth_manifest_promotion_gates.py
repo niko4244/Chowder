@@ -27,7 +27,7 @@ from chowder.growth.campaign_runner import _build_cycle
 from chowder.growth.contamination import ContaminationFirewall
 from chowder.growth.eval_isolation import EvalTier, SearchIsolationRefusal
 from chowder.growth.promotion import BenchmarkResult
-from chowder.growth.retention import RetentionProfile
+from chowder.growth.retention import RetentionConstraint, RetentionProfile
 
 import test_growth_campaign_runner as campaign_fixture
 
@@ -255,7 +255,9 @@ def test_malformed_declarations_refuse_at_load(tmp_path) -> None:  # noqa: ANN00
                     ],
                 }
             },
-            "kind",
+            # The kind rule's owner is the domain type; the loader wraps the
+            # domain error with source context.
+            "has unknown kind 'no-worse'",
         ),
         (
             {
@@ -315,6 +317,40 @@ def test_malformed_declarations_refuse_at_load(tmp_path) -> None:  # noqa: ANN00
         assert expected in str(manifest_error), (
             f"{expected!r} not named for {section_override}: {manifest_error}"
         )
+
+
+def test_the_kind_rule_has_one_owner_and_the_loader_wraps_it(tmp_path) -> None:  # noqa: ANN001
+    """A change to the kind rule lands in the domain, not in two places.
+
+    The domain type raises its own named error; the loader's refusal carries
+    that error with the manifest's source context, so load-time behavior is
+    fail-closed without re-implementing the rule.
+    """
+    with pytest.raises(ValueError) as domain_error:
+        RetentionConstraint(dimension="d", kind="no-worse", value=0.0, benchmark=CONSTRAINED)
+    assert "has unknown kind" in str(domain_error.value)
+
+    document = _base_document(tmp_path)
+    with pytest.raises(CampaignManifestError) as load_error:
+        CampaignManifest.from_mapping(
+            {
+                **document,
+                "retention_profile": {
+                    "profile_id": "p",
+                    "constraints": [
+                        {
+                            "dimension": "d",
+                            "kind": "no-worse",
+                            "value": 0.0,
+                            "benchmark": CONSTRAINED,
+                        }
+                    ],
+                },
+            },
+            source="<owner-test>",
+        )
+    assert "<owner-test>" in str(load_error.value)
+    assert str(domain_error.value) in str(load_error.value)
 
 
 def test_an_undeclared_top_level_key_still_refuses(tmp_path) -> None:  # noqa: ANN001

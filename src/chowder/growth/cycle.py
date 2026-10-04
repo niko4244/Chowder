@@ -141,17 +141,6 @@ def _retention_values(
     return values
 
 
-def _retention_reason(violation: Any) -> str:
-    """One machine-readable identifier per retention failure shape."""
-    if violation.measured != violation.measured:  # NaN: never measured
-        code = "RETENTION_UNMEASURED"
-    elif violation.constraint.kind == "absolute-floor":
-        code = "RETENTION_FLOOR"
-    else:
-        code = "RETENTION_REGRESSION"
-    return f"{code}: {violation.detail}"
-
-
 @dataclass(frozen=True)
 class CycleConfig:
     cycle_id: str
@@ -363,7 +352,7 @@ class GrowthCycle:
                 decision,
                 verdict="REJECTED",
                 reasons=tuple(decision.reasons)
-                + tuple(_retention_reason(violation) for violation in violations),
+                + tuple(violation.reason for violation in violations),
             )
         return decision
 

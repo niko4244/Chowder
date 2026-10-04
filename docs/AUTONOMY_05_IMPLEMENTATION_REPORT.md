@@ -56,12 +56,12 @@ The audit's single most important open change, implemented on top of the
 commit stack above:
 
 - **One owner of the settlement-refusal vocabulary.**
-  `compute_cost.settlement_refusal(evidence)` reads every shape a settlement
-  refusal is recorded in (the `budget_settlement` verdict, the classifier's
-  `settle_refusal` vocabulary, the `refused_by` stamp) and returns the
+  `compute_cost.settlement_refusal(evidence)` reads exactly the three shapes
+  production writes (the `budget_settlement` verdict, the `refused_by` stamp,
+  and the evaluation path's `settlement_failed` marker) and returns the
   machine-readable identifier, or `None`. `attempt_failure.classify_failure`
-  now derives its settlement branch from the same predicate, so the
-  classifier and the runner can never disagree about what was refused — the
+  derives its settlement branch from the same predicate, so the classifier
+  and the runner can never disagree about what was refused — the
   classifier's old `settle_refusal`-only read could never fire on a real
   production record.
 - **Settlement-refused attempts stop advancing.** `run_search` ends the
@@ -125,6 +125,24 @@ binding through the real fixture and builder with an observed gate downgrade
 (the same regression that promotes without the section is REJECTED with it),
 twelve malformed-declaration refusals, an unknown-top-level-key control, and
 the unchanged-default path.
+
+### Ownership consolidation (design review, behavior-preserving)
+
+- The `RETENTION_REGRESSION` / `RETENTION_FLOOR` / `RETENTION_UNMEASURED`
+  machine codes moved from `cycle._retention_reason` into `retention.py` as
+  `RetentionViolation.code` (with `reason` = code + detail); the cycle
+  consumes `violation.reason`, so a reason-code change lands in one place.
+  `test_growth_runner_gates.py` pins the reason to the domain's own `code`.
+- The phantom `settle_refusal` arm of `settlement_refusal` was deleted: it
+  was a vocabulary for a field nothing in `src` writes. The predicate reads
+  exactly the three production shapes; the tests that exercised the phantom
+  shape were re-pointed to real ones (the classifier test now feeds the
+  binding's actual refusal record), keeping coverage, not deleting it.
+- The constraint `kind` validation has one owner —
+  `RetentionConstraint.__post_init__` — and the manifest loader wraps the
+  domain error with source context (`CampaignManifestError` at load, never a
+  raw domain exception), pinned by an ownership test asserting both the
+  domain message and the loader's `<source>` context.
 
 ## Verification
 

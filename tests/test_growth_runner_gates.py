@@ -33,7 +33,11 @@ from chowder.growth.frontier_reference import SnapshotStore
 from chowder.growth.lineage import GenerationLedger, RegressionMemory
 from chowder.growth.metric_binding import BindingReport, PromotionAssembly
 from chowder.growth.promotion import BenchmarkResult, PromotionInput, evaluate_promotion
-from chowder.growth.retention import RetentionConstraint, RetentionProfile
+from chowder.growth.retention import (
+    RetentionConstraint,
+    RetentionProfile,
+    evaluate_retention,
+)
 
 from test_growth_candidate_search import (
     _attempt,
@@ -81,6 +85,11 @@ def _samples(mean: float, spread: float = 0.02, blocks: int = 5) -> tuple[float,
     """Per-sample scores centered on ``mean`` with honest spread."""
     pattern = (-1.5, -0.5, 0.0, 0.5, 1.5)
     return tuple(mean + spread * p for p in pattern * blocks)
+
+
+def _retention_code_reasons(decision) -> list[str]:  # noqa: ANN001
+    """The decision's reasons that carry a RETENTION_* machine identifier."""
+    return [r for r in decision.reasons if str(r).split(":", 1)[0].startswith("RETENTION_")]
 
 
 def _result(benchmark: str, score: float, *, origin: str) -> BenchmarkResult:
@@ -197,8 +206,8 @@ def test_the_predicate_reads_the_production_settlement_verdict() -> None:
     assert settlement_refusal(evidence) == "ACTUAL_EXCEEDS_PROJECTION"
 
 
-def test_the_predicate_reads_the_classifier_vocabulary() -> None:
-    assert settlement_refusal({"settle_refusal": "ACTUAL_EXCEEDS_PROJECTION"}) == (
+def test_the_predicate_reads_the_evaluation_paths_settlement_failed_marker() -> None:
+    assert settlement_refusal({"settlement_failed": "ACTUAL_EXCEEDS_PROJECTION"}) == (
         "ACTUAL_EXCEEDS_PROJECTION"
     )
 
@@ -209,13 +218,17 @@ def test_the_predicate_reads_the_refusal_stamp_alone() -> None:
     ) == "ACTUAL_EXCEEDS_PROJECTION"
 
 
-def test_the_predicate_leaves_compliant_and_absent_records_alone() -> None:
+def test_the_predicate_leaves_compliant_absent_and_other_refusal_records_alone() -> None:
     assert settlement_refusal(_attempt("a")) is None
     assert settlement_refusal(
         _attempt(
             "a",
             budget_settlement={"budget_compliant": True, "budget_failure_reasons": []},
         )
+    ) is None
+    # A different gate's refusal stamp is not settlement's to claim.
+    assert settlement_refusal(
+        _attempt("a", refused_by="readiness", refusal_reason="no evaluator wired")
     ) is None
 
 
@@ -311,9 +324,20 @@ def test_a_retention_regression_rejects_a_promotion(tmp_path) -> None:  # noqa: 
     decision = _decide(cycle, candidate=candidate, parent=parent)
 
     assert decision.verdict == "REJECTED"
-    assert any(
-        reason.startswith("RETENTION_REGRESSION") and "reasoning@heldout" in reason
-        for reason in decision.reasons
+    regression = [
+        reason for reason in _retention_code_reasons(decision)
+        if reason.startswith("RETENTION_REGRESSION") and "reasoning@heldout" in reason
+    ]
+    assert regression, decision.reasons
+    # The code is the domain's own: the reason string is the violation's
+    # ``code`` property rendered, so the vocabulary cannot drift from its
+    # owner. (Pinned here, not to the literal, so a rename lands in one file.)
+    assert regression[0].startswith(
+        evaluate_retention(
+            _profile(REASONING),
+            parent_values={"reasoning@heldout": 0.71},
+            candidate_values={"reasoning@heldout": 0.51},
+        )[0].code
     )
 
 

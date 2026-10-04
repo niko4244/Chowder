@@ -148,11 +148,9 @@ def classify_failure(attempt: Mapping[str, Any]) -> FailureClassification:
             ),
         )
 
-    # The production binding records a settlement refusal as a non-compliant
-    # ``budget_settlement`` verdict plus a ``budget_settlement`` ``refused_by``
-    # stamp; ``settle_refusal`` is the classifier-facing vocabulary for the
-    # same fact. One predicate reads both, so classification and the runner's
-    # advance rule can never disagree about what was refused.
+    # One predicate owns the refusal vocabulary, so classification and the
+    # runner's advance rule can never disagree about what was refused: the
+    # same settlement fact the gate reads is the one classified here.
     settle_refusal = settlement_refusal(attempt)
     if settle_refusal:
         return FailureClassification(

@@ -52,10 +52,13 @@ class RetentionConstraint:
     benchmark: str
 
     def __post_init__(self) -> None:
+        # The single kind validation. The manifest loader wraps this error
+        # with its own source context rather than re-implementing the rule.
         if self.kind not in ("max-regression", "absolute-floor"):
             raise ValueError(
                 f"retention constraint {self.dimension!r} has unknown kind "
-                f"{self.kind!r}"
+                f"{self.kind!r}; a constraint is max-regression or "
+                "absolute-floor"
             )
 
 
@@ -87,6 +90,27 @@ class RetentionViolation:
     constraint: RetentionConstraint
     measured: float
     detail: str
+
+    @property
+    def code(self) -> str:
+        """The machine-readable identifier for this failure shape.
+
+        One owner of the vocabulary a promotion rejection records:
+        ``RETENTION_UNMEASURED`` (NaN measured: the constraint could not be
+        evaluated at all), ``RETENTION_FLOOR`` (an absolute-floor breach),
+        ``RETENTION_REGRESSION`` (a max-regression breach). Renaming or adding
+        a shape changes here and nowhere else.
+        """
+        if self.measured != self.measured:  # NaN: the gate was never measured
+            return "RETENTION_UNMEASURED"
+        if self.constraint.kind == "absolute-floor":
+            return "RETENTION_FLOOR"
+        return "RETENTION_REGRESSION"
+
+    @property
+    def reason(self) -> str:
+        """The rejection reason a promotion records: identifier plus detail."""
+        return f"{self.code}: {self.detail}"
 
 
 def evaluate_retention(

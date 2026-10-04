@@ -252,11 +252,11 @@ def settle_cost(
 def settlement_refusal(evidence: Mapping[str, Any]) -> str | None:
     """The machine-readable settlement reason an attempt was refused for.
 
-    Reads every shape a settlement refusal is recorded in: the
-    ``budget_settlement`` verdict the training binding writes, the
-    ``settle_refusal`` vocabulary the attempt-failure classifier reads, and
-    the ``refused_by``/``refusal_reason`` pair ``_finish`` stamps on the
-    refusal itself. ``None`` means the record carries no settlement refusal.
+    Reads exactly the three shapes production writes: the
+    ``budget_settlement`` verdict the training binding records, the
+    ``refused_by``/``refusal_reason`` pair ``_finish`` stamps on the refusal
+    itself, and ``settlement_failed`` on the in-process evaluation path's
+    attempt summary. ``None`` means the record carries no settlement refusal.
 
     Advancement and selection must refuse any attempt this returns a reason
     for. A settlement-refused attempt can carry ``candidate_succeeded=True``
@@ -272,12 +272,12 @@ def settlement_refusal(evidence: Mapping[str, Any]) -> str | None:
             if identifier:
                 return identifier
         return "budget_settlement"
-    settle_refusal = evidence.get("settle_refusal")
-    if settle_refusal:
-        return str(settle_refusal)
     if evidence.get("refused_by") == "budget_settlement":
         identifier = str(evidence.get("refusal_reason") or "").split(":", 1)[0].strip()
         return identifier or "budget_settlement"
+    settlement_failed = evidence.get("settlement_failed")
+    if settlement_failed:
+        return str(settlement_failed)
     return None
 
 
