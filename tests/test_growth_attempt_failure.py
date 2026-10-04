@@ -1,6 +1,6 @@
-"""The failure taxonomy: a failed attempt is classified, and the class
-decides both the evidence record (or the honest absence of one) and the
-next action. Plus the anti-repeat gate: a measured negative is not a
+"""Attempt-failure classification: a failed attempt is classified, and the
+class decides both the evidence record (or the honest absence of one) and
+the next action. Plus the anti-repeat gate: a measured negative is not a
 starting point for another identical run.
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from chowder.growth.evidence import EvidenceRecord, EvidenceState, EvidenceStore
-from chowder.growth.failure_taxonomy import (
+from chowder.growth.attempt_failure import (
     FailureClass,
     NextAction,
     classify_failure,
