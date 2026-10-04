@@ -40,6 +40,13 @@ from .compute_cost import (
     ComputeCost,
     settle_cost,
 )
+from .eval_isolation import (
+    EvalTierPolicy,
+    SearchIsolationRefusal,
+    assert_promotion_gate_isolation,
+    classify_benchmarks,
+)
+from .retention import RetentionConstraint, RetentionProfile
 
 #: The promotion rule this package implements. A campaign that declares any
 #: other version is refused: the manifest is a preregistration, so it must not
@@ -310,6 +317,133 @@ class EvaluationExecution:
         return {"batch_size": self.batch_size}
 
 
+def _retention_profile_from_mapping(
+    document: Mapping[str, Any],
+    *,
+    source: str,
+    measured_benchmarks: frozenset[str],
+) -> RetentionProfile:
+    """Parse the manifest's ``retention_profile`` section, fail-closed.
+
+    The campaign's preregistered promotion gates: each constraint is one
+    decision a promotion may not skip. Every structural problem refuses at
+    load time — a gate that cannot be measured is not a passed gate but a
+    guaranteed rejection, so a constraint naming a benchmark outside the
+    campaign's declared measurement sets refuses here, before the compute it
+    would waste is spent.
+    """
+    if not isinstance(document, Mapping):
+        raise CampaignManifestError(f"{source}: retention_profile must be an object")
+    allowed = {"profile_id", "constraints"}
+    unknown = sorted(set(document) - allowed)
+    if unknown:
+        raise CampaignManifestError(
+            f"{source}: unknown retention_profile fields {unknown}; a gate "
+            "nothing reads is not a gate"
+        )
+    profile_id = document.get("profile_id")
+    if not isinstance(profile_id, str) or not profile_id.strip():
+        raise CampaignManifestError(
+            f"{source}: retention_profile.profile_id must be a non-empty string"
+        )
+    constraints_doc = document.get("constraints")
+    if not isinstance(constraints_doc, list) or not constraints_doc:
+        raise CampaignManifestError(
+            f"{source}: retention_profile.constraints must be a non-empty list; "
+            "a campaign with no constraints is a capability trader, and "
+            "declaring an empty profile must say so by not declaring one"
+        )
+    constraints: list[RetentionConstraint] = []
+    for index, entry in enumerate(constraints_doc):
+        where = f"{source}: retention_profile.constraints[{index}]"
+        if not isinstance(entry, Mapping) or set(entry) != {
+            "dimension",
+            "kind",
+            "value",
+            "benchmark",
+        }:
+            raise CampaignManifestError(
+                f"{where} must declare exactly "
+                "['benchmark', 'dimension', 'kind', 'value']"
+            )
+        dimension, kind, benchmark = entry["dimension"], entry["kind"], entry["benchmark"]
+        value = entry["value"]
+        if (
+            not isinstance(dimension, str)
+            or not dimension.strip()
+            or not isinstance(benchmark, str)
+            or not benchmark.strip()
+        ):
+            raise CampaignManifestError(
+                f"{where}: dimension and benchmark must be non-empty strings"
+            )
+        _require_pinned(benchmark, where)
+        if benchmark not in measured_benchmarks:
+            raise CampaignManifestError(
+                f"{where} measures {benchmark!r}, which the campaign's declared "
+                "benchmark sets never cover: the promotion gate would fail "
+                "closed on it every time, so the declaration refuses here "
+                "rather than after the compute it would waste"
+            )
+        if kind not in ("max-regression", "absolute-floor"):
+            raise CampaignManifestError(
+                f"{where}: kind {kind!r} is not one of max-regression / "
+                "absolute-floor"
+            )
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise CampaignManifestError(
+                f"{where}: value must be a finite number, got {value!r}"
+            )
+        try:
+            constraints.append(
+                RetentionConstraint(
+                    dimension=dimension,
+                    kind=kind,
+                    value=float(value),
+                    benchmark=benchmark,
+                )
+            )
+        except ValueError as error:
+            raise CampaignManifestError(f"{where}: {error}") from error
+    try:
+        return RetentionProfile(profile_id=profile_id, constraints=tuple(constraints))
+    except ValueError as error:
+        raise CampaignManifestError(f"{source}: retention_profile: {error}") from error
+
+
+def _eval_tier_policy_from_mapping(
+    document: Mapping[str, Any], *, source: str
+) -> EvalTierPolicy:
+    """Parse the manifest's ``eval_tier_policy`` section, fail-closed.
+
+    The declared trust classification of the campaign's benchmarks: a
+    benchmark is promotion evidence unless the campaign explicitly earns a
+    lower tier for it, and a reserved name (``protected``, ``frozen``, ...)
+    cannot be demoted at all. Unknown tier names and demotions refuse here,
+    at load, not when a promotion first reads them.
+    """
+    if not isinstance(document, Mapping):
+        raise CampaignManifestError(f"{source}: eval_tier_policy must be an object")
+    unknown = sorted(set(document) - {"classification"})
+    if unknown:
+        raise CampaignManifestError(
+            f"{source}: unknown eval_tier_policy fields {unknown}; a tier "
+            "classification nothing reads is not a classification"
+        )
+    classification = document.get("classification")
+    if not isinstance(classification, Mapping) or not classification:
+        raise CampaignManifestError(
+            f"{source}: eval_tier_policy.classification must be a non-empty "
+            "object mapping benchmark@version to a tier name"
+        )
+    for benchmark in classification:
+        _require_pinned(benchmark, f"{source}: eval_tier_policy.classification")
+    try:
+        return classify_benchmarks(dict(classification), source=source)
+    except SearchIsolationRefusal as error:
+        raise CampaignManifestError(f"{source}: {error}") from error
+
+
 @dataclass(frozen=True)
 class CampaignManifest:
     """One preregistered campaign, and nothing this runner may invent.
@@ -385,6 +519,16 @@ class CampaignManifest:
     candidate_search: CandidateSearchDeclaration = field(
         default_factory=CandidateSearchDeclaration
     )
+    #: The campaign's preregistered promotion gates. Absent means the cycle is
+    #: built without them (the historical behavior, and what every manifest
+    #: that predates them runs); declared, the cycle's promotion path
+    #: evaluates them before anything promotes — the same objects, the same
+    #: enforcement, as a programmatically constructed cycle.
+    retention_profile: RetentionProfile | None = None
+    #: The declared trust classification of the campaign's benchmarks. With a
+    #: retention profile, a constraint measured on search-readable evidence
+    #: refuses — at load when both are declared, and again at promotion.
+    eval_tier_policy: EvalTierPolicy | None = None
     notes: str = ""
 
     @property
@@ -428,7 +572,8 @@ class CampaignManifest:
             "project_template_path", "training_material_path", "data_registry_path",
             "hardware_budget_path", "parent_profile_path", "parent_eval_report_path",
             "baseline_eval_report_path", "protection", "evaluation_material_path",
-            "evaluation_execution", "candidate_search",
+            "evaluation_execution", "candidate_search", "retention_profile",
+            "eval_tier_policy",
         }
         retired = sorted(set(document) & set(RETIRED_FIELDS))
         if retired:
@@ -516,6 +661,15 @@ class CampaignManifest:
 
         _require_sha256(document["base_model_digest"], "base_model_digest", source)
 
+        measured_benchmark_ids = frozenset(
+            qualified_id
+            for set_name in (
+                "target_benchmarks", "protected_benchmarks", "broad_benchmarks",
+                "calibration_benchmarks", "reliability_benchmarks",
+            )
+            for qualified_id in document[set_name]
+        )
+
         # The adapter pair is all-or-nothing: a path without a digest would be
         # an unverifiable parent, and a digest without a path cannot be checked.
         adapter_path = document.get("parent_adapter_path", "")
@@ -528,6 +682,33 @@ class CampaignManifest:
             )
         if str(adapter_digest).strip():
             _require_sha256(adapter_digest, "parent_adapter_digest", source)
+
+        retention_profile = (
+            _retention_profile_from_mapping(
+                document["retention_profile"],
+                source=source,
+                measured_benchmarks=measured_benchmark_ids,
+            )
+            if "retention_profile" in document
+            else None
+        )
+        eval_tier_policy = (
+            _eval_tier_policy_from_mapping(document["eval_tier_policy"], source=source)
+            if "eval_tier_policy" in document
+            else None
+        )
+        # Both declared: the tier wall is checked at load as well as at
+        # promotion. A gate the search could see is malformed wiring, and
+        # wiring errors surface when the campaign is declared, not after the
+        # compute is spent.
+        if retention_profile is not None and eval_tier_policy is not None:
+            try:
+                assert_promotion_gate_isolation(
+                    policy=eval_tier_policy,
+                    retention_profile=retention_profile,
+                )
+            except SearchIsolationRefusal as error:
+                raise CampaignManifestError(f"{source}: {error}") from error
 
         return cls(
             cycle_id=str(document["cycle_id"]),
@@ -581,6 +762,12 @@ class CampaignManifest:
                 if "candidate_search" in document
                 else CandidateSearchDeclaration()
             ),
+            # Absent means the cycle is built without the promotion gates,
+            # which is what every manifest predating them runs. Declared, they
+            # are parsed fail-closed here — a malformed gate refuses at load,
+            # never silently drops.
+            retention_profile=retention_profile,
+            eval_tier_policy=eval_tier_policy,
             notes=str(document.get("notes", "")),
         )
 

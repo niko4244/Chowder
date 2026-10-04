@@ -9,14 +9,6 @@ Stated plainly, because an optimistic limitation list is just marketing.
    efficiency per GPU-hour) has no production definition yet; campaigns
    start DETERMINISTIC by construction, and the ladder escalates only when
    the evidence store says so.
-2. **A campaign manifest cannot declare the promotion gates yet.** The
-   promotion path enforces `CycleConfig.retention_profile` and
-   `eval_tier_policy` whenever the cycle is constructed with them (the
-   programmatic and test paths do), but the manifest → CycleConfig loader in
-   `campaign_runner` does not build them from the declaration yet — so
-   today the settlement gate binds on every campaign and the retention/tier
-   gates bind on declaration. A manifest section for the two profiles is the
-   natural next seam: one loader change plus its schema tests.
 
 ## Wired since the original list (was items 1–2 here)
 
@@ -33,6 +25,15 @@ settlement refusals — the fixtures now report settleable costs and the
 deliberate-overrun scenarios assert the honest refusal path. Tests:
 `tests/test_growth_runner_gates.py`; the campaign-runner, coupling,
 evaluation-binding and dry-run-matrix suites re-pointed.
+
+The loader seam is closed too: a campaign manifest can declare
+`retention_profile` and `eval_tier_policy` (`campaign.py` parses both
+fail-closed — unknown fields, unmeasurable constraints, unknown tiers and a
+gate demoted into the search's view refuse at load), `_build_cycle` passes
+them into `CycleConfig`, and `FIELD_ENFORCEMENT` names what each drives.
+Tests: `tests/test_growth_manifest_promotion_gates.py` (8) — parse-valid
+binding with an observed gate downgrade, twelve malformed-declaration
+refusals, and unchanged promotion when neither section is declared.
 
 ## Proven only at small scale
 

@@ -144,6 +144,8 @@ FIELD_ENFORCEMENT: Mapping[str, str] = {
     "protection": "the declared branch-protection policy (trusted ancestor version + slice regression tolerance) the certification gate applies before any lineage record is written",
     "evaluation_execution": "how many rows one generate call decodes, for every arm and for the candidate: the candidate evaluator and both arm measurements read this one value, and each records it in its own evidence; batching changes generated tokens (measured: 14/16 rows agree with a single-row pass), so the arms and the candidate must share it and never be chosen per path",
     "candidate_search": "the declared bounded candidate search: its rounds, starting step budget, multiplier and survival rule are preregistered here, its worst-case cost is projected before any compute and must fit its own declared device/wall envelope *and* the campaign's ceilings, and the runner refuses a declared search that does not. Absent (rounds=0) means one pass over the declared recipes, which is what every manifest predating it does",
+    "retention_profile": "the campaign's preregistered promotion gates: the cycle evaluates every constraint fail-closed before anything promotes (a target win over a constrained regression is REJECTED, an unmeasured constraint is a violation), and a constraint naming a benchmark the declared sets never measure refuses at load",
+    "eval_tier_policy": "the declared trust classification of the campaign's benchmarks: a retention constraint measured on search-readable evidence refuses — at load when both are declared, and again at promotion",
     "notes": "documentation only: it drives no behavior and gates nothing",
 }
 
@@ -1615,6 +1617,13 @@ def _build_cycle(
         # exactly what the campaign plans to run, and an id it cannot propose
         # refuses below.
         recipe_count=len(manifest.recipe_ids),
+        # The promotion gates bind from the declaration, not from who built
+        # the cycle: a manifest that declares them gets the same objects, the
+        # same enforcement, and the same load-time refusals a programmatic
+        # construction gets. Absent (every manifest predating them) means no
+        # gates — the historical behavior, unchanged.
+        retention_profile=manifest.retention_profile,
+        eval_tier_policy=manifest.eval_tier_policy,
     )
     return GrowthCycle(
         config,

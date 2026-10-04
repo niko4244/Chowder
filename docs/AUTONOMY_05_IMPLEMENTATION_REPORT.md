@@ -93,6 +93,39 @@ New tests: `tests/test_growth_runner_gates.py` (20 — the predicate's
 vocabulary, the advance/selection/search refusals, the classifier agreement,
 and the retention/tier gates on both promotion paths).
 
+## The loader seam, closed: the gates bind from the manifest
+
+The promotion gates above were reachable from programmatically constructed
+cycles only; the manifest → CycleConfig loader now closes that gap:
+
+- **Two new optional manifest sections.** `retention_profile` (profile id +
+  a non-empty list of constraints, each exactly
+  `{dimension, kind, value, benchmark}`) parses into the domain's
+  `RetentionProfile`; `eval_tier_policy` (`{classification:
+  {benchmark@version: tier}}`) parses into `EvalTierPolicy`. Both live in
+  `campaign.py` beside the other declared sections and are passed through
+  `_build_cycle` into `CycleConfig` — a declared gate reaches the promotion
+  path as the same object a programmatic construction would pass.
+- **Fail-closed at load.** Unknown section fields, an empty profile, a
+  constraint with a missing/unknown-kind/non-finite-value field, an
+  unpinned benchmark, a constraint naming a benchmark the declared
+  measurement sets never cover (an unmeasurable gate is a guaranteed
+  rejection, not a constraint), an unknown tier name, a reserved-name
+  demotion, and a tier policy that demotes a declared constraint into the
+  search's view (the pair is checked at load, not first at promotion) all
+  refuse as `CampaignManifestError` from `from_mapping`. A manifest
+  declaring neither loads with both unset: every pre-existing manifest runs
+  unchanged.
+- **Schema/table discipline holds.** Both fields are named in
+  `FIELD_ENFORCEMENT`, so `assert_every_field_enforced` still proves no
+  declared field is decorative.
+
+New tests: `tests/test_growth_manifest_promotion_gates.py` (8) — parse-valid
+binding through the real fixture and builder with an observed gate downgrade
+(the same regression that promotes without the section is REJECTED with it),
+twelve malformed-declaration refusals, an unknown-top-level-key control, and
+the unchanged-default path.
+
 ## Verification
 
 ```
@@ -110,11 +143,12 @@ python -m pytest tests/test_growth_candidate_search.py \
   tests/test_growth_next_campaign.py tests/test_growth_budget_settlement.py \
   tests/test_growth_candidate_selection.py tests/test_growth_metric_binding.py \
   tests/test_growth_target_selection.py \
-  tests/test_growth_runner_gates.py -q
+  tests/test_growth_runner_gates.py \
+  tests/test_growth_manifest_promotion_gates.py -q
 python -m ruff check src/chowder/growth/
 ```
 
 At commit time: all of the above green (261-growth-regression + 24 + 24 + 16
-+ 6 + 20 additions; the campaign-runner, certification-coupling,
++ 6 + 20 + 8 additions; the campaign-runner, certification-coupling,
 evaluation-binding and dry-run-matrix suites re-pointed to the honest
 settlement semantics), ruff clean; full-suite run recorded in the PR body.
