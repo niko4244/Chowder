@@ -245,3 +245,198 @@ def test_cache_status_passes_repo_id_revision_and_filename_through(monkeypatch):
     )
     cache_status("org/model", "abc123")
     assert seen == {"repo_id": "org/model", "filename": "config.json", "revision": "abc123"}
+
+
+# --- resolve_model_commit -----------------------------------------------------
+#
+# Transformers 5.18 stopped populating ``config._commit_hash`` on fresh
+# downloads, which silently degraded ``model_provenance.resolved_model_commit``
+# to None (the real-ML smoke caught it: the same sha passed CI on 2026-09-26
+# and failed on 2026-10-04 with no code change). These tests pin the fallback
+# resolution order: config attribute, local cache refs, lone snapshot, Hub.
+
+
+import hashlib
+
+
+def _sha(label: str) -> str:
+    return hashlib.sha1(label.encode()).hexdigest()
+
+
+def _make_cache(tmp_path, *, refs=None, snapshots, revision=None):
+    """Fabricate an HF cache layout for one repo and return its root."""
+    import json
+
+    root = tmp_path / "hub"
+    model_dir = root / "models--org--model"
+    for name in snapshots:
+        snap = model_dir / "snapshots" / name
+        snap.mkdir(parents=True)
+        (snap / "config.json").write_text(json.dumps({"_name_or_path": "org/model"}))
+    for ref_name, target in (refs or {}).items():
+        ref_file = model_dir / "refs" / ref_name
+        ref_file.parent.mkdir(parents=True, exist_ok=True)
+        ref_file.write_text(target + "\n")
+    if revision is not None:
+        (model_dir / "refs" / revision).parent.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def test_the_config_attribute_still_wins_when_populated(tmp_path):
+    from chowder.hf_resilience import resolve_model_commit
+
+    assert (
+        resolve_model_commit(
+            "org/model",
+            "main",
+            config_commit="a" * 40,
+            cache_root=_make_cache(tmp_path, snapshots=[_sha("other")]),
+        )
+        == "a" * 40
+    )
+
+
+def test_a_local_model_directory_has_no_hub_commit(tmp_path):
+    from chowder.hf_resilience import resolve_model_commit
+
+    local = tmp_path / "local-model"
+    local.mkdir()
+    assert (
+        resolve_model_commit(str(local), None, config_commit=None, cache_root=tmp_path)
+        is None
+    )
+
+
+def test_refs_resolve_a_branch_revision_to_its_cached_snapshot(tmp_path):
+    from chowder.hf_resilience import resolve_model_commit
+
+    commit = _sha("main")
+    root = _make_cache(tmp_path, refs={"main": commit}, snapshots=[commit])
+    assert (
+        resolve_model_commit("org/model", "main", config_commit=None, cache_root=root)
+        == commit
+    )
+
+
+def test_a_pinned_sha_revision_matches_its_own_snapshot(tmp_path):
+    from chowder.hf_resilience import resolve_model_commit
+
+    commit = _sha("pinned")
+    root = _make_cache(tmp_path, refs={"main": _sha("main")}, snapshots=[commit])
+    assert (
+        resolve_model_commit("org/model", commit, config_commit=None, cache_root=root)
+        == commit
+    )
+
+
+def test_a_lone_snapshot_is_unambiguous_without_refs(tmp_path):
+    """A freshly downloaded repo may have no refs file yet (or the test env
+    pruned it); a single snapshot directory is still the identity the model
+    actually loaded from."""
+    from chowder.hf_resilience import resolve_model_commit
+
+    commit = _sha("only")
+    root = _make_cache(tmp_path, snapshots=[commit])
+    assert (
+        resolve_model_commit("org/model", "main", config_commit=None, cache_root=root)
+        == commit
+    )
+
+
+def test_two_snapshots_without_refs_are_ambiguous_and_stay_unknown_offline(tmp_path):
+    from chowder.hf_resilience import resolve_model_commit
+
+    root = _make_cache(tmp_path, snapshots=[_sha("one"), _sha("two")])
+    assert (
+        resolve_model_commit(
+            "org/model",
+            "main",
+            config_commit=None,
+            cache_root=root,
+            allow_network_fallback=False,
+        )
+        is None
+    )
+
+
+def test_an_empty_cache_degrades_to_none_offline(tmp_path):
+    from chowder.hf_resilience import resolve_model_commit
+
+    assert (
+        resolve_model_commit(
+            "org/model",
+            "main",
+            config_commit=None,
+            cache_root=tmp_path / "empty",
+            allow_network_fallback=False,
+        )
+        is None
+    )
+
+
+def test_a_non_repo_id_is_not_resolved(tmp_path):
+    from chowder.hf_resilience import resolve_model_commit
+
+    for source in ("", "model", "a/b/c", "https://huggingface.co/org/model"):
+        assert (
+            resolve_model_commit(
+                source,
+                "main",
+                config_commit=None,
+                cache_root=tmp_path,
+                allow_network_fallback=False,
+            )
+            is None
+        )
+
+
+def test_the_hub_is_the_last_resort_and_is_used_only_when_the_cache_is_silent(
+    tmp_path, monkeypatch
+):
+    from chowder import hf_resilience
+
+    hub_commit = _sha("from-hub")
+    seen = {}
+
+    def fake_hub_sha(repo_id, revision):
+        seen["repo_id"] = repo_id
+        seen["revision"] = revision
+        return hub_commit
+
+    monkeypatch.setattr(hf_resilience, "_hub_sha_from_hub", fake_hub_sha)
+
+    # Cache miss -> Hub.
+    root = _make_cache(tmp_path, snapshots=[])
+    assert (
+        hf_resilience.resolve_model_commit(
+            "org/model", "main", config_commit=None, cache_root=root
+        )
+        == hub_commit
+    )
+    assert seen == {"repo_id": "org/model", "revision": "main"}
+
+    # Cache hit -> the Hub is never contacted.
+    seen.clear()
+    root = _make_cache(tmp_path, refs={"main": _sha("main")}, snapshots=[_sha("main")])
+    assert (
+        hf_resilience.resolve_model_commit(
+            "org/model", "main", config_commit=None, cache_root=root
+        )
+        == _sha("main")
+    )
+    assert seen == {}
+
+
+def test_a_hub_failure_degrades_to_none_rather_than_raising(tmp_path, monkeypatch):
+    from chowder import hf_resilience
+
+    def failing_hub_sha(repo_id, revision):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(hf_resilience, "_hub_sha_from_hub", failing_hub_sha)
+    assert (
+        hf_resilience.resolve_model_commit(
+            "org/model", "main", config_commit=None, cache_root=tmp_path / "none"
+        )
+        is None
+    )
