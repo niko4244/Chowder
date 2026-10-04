@@ -54,13 +54,113 @@ CONSUMED_RECIPE_FIELDS: Mapping[str, frozenset[str]] = {
             "seq_len",
             "lora_rank",
             "lora_alpha",
+            "target_modules",
+            "batch_size",
+            "gradient_accumulation",
             "resume_from_checkpoint",
         }
     ),
     "router-healing": frozenset(
-        {"learning_rate", "max_steps", "seq_len", "resume_from_checkpoint"}
+        {
+            "learning_rate",
+            "scheduler",
+            "warmup_steps",
+            "max_steps",
+            "seq_len",
+            "batch_size",
+            "resume_from_checkpoint",
+        }
     ),
 }
+
+#: Fields no search may vary, with the reason stated rather than implied. A
+#: field lands here because varying it would either change what the run *is*
+#: (data identity, budget ownership) or corrupt the record (projections,
+#: prose), not because no backend reads it.
+UNSAFE_SEARCH_FIELDS: Mapping[str, str] = {
+    "max_steps": (
+        "owned by the halving schedule: successive halving allocates it per "
+        "round, and a candidate that also varied it would fight the allocator"
+    ),
+    "resume_from_checkpoint": (
+        "operational continuation state owned by the search's own progressive "
+        "allocation, not a property of the proposal"
+    ),
+    "curriculum_item_ids": (
+        "data identity: varying it is a new campaign's curriculum, bound by "
+        "the contamination and provenance gates, not a recipe knob"
+    ),
+    "dataset_manifest": (
+        "data identity: the manifest pins the dataset the provenance gates "
+        "verified; a search over manifests would bypass them"
+    ),
+    "recipe_id": "identity, not an input",
+    "projected_device_gpu_hours": "a projection, not an input",
+    "projected_wall_gpu_hours": "a projection, not an input",
+    "notes": "provenance prose",
+}
+
+#: Fields a backend *could* consume but no mapper emits yet, with the missing
+#: wiring named. These are the honest expansion candidates: wire the mapper,
+#: prove the path with the contract tests, then -- and only then -- consider
+#: the field as a search axis.
+PLANNED_UNMAPPED_FIELDS: Mapping[str, Mapping[str, str]] = {
+    "transformers-peft": {
+        "replay_rate": (
+            "the peft spec resumes replay only from a declared replay dataset "
+            "with its own sha256; a bare ratio has nothing to land in -- wire "
+            "replay dataset selection first"
+        ),
+        "objective": (
+            "only the sft path is qualified on the peft backend; dpo and "
+            "continued_pretrain have no spec mapping"
+        ),
+        "mixture": (
+            "curriculum composition is materialized by campaign preparation, "
+            "not the backend config; wiring a ratio into the backend would "
+            "fork the two sources of truth"
+        ),
+    },
+    "router-healing": {
+        "target_modules": (
+            "the router engine trains gate parameters, not adapter modules"
+        ),
+        "gradient_accumulation": ("the engine has no accumulation setting"),
+        "lora_rank": ("the engine trains gates directly; no adapter namespace"),
+        "lora_alpha": ("the engine trains gates directly; no adapter namespace"),
+        "replay_rate": ("no replay surface in the engine's settings"),
+        "objective": ("the engine has a single training objective"),
+        "mixture": (
+            "curriculum composition is materialized by campaign preparation"
+        ),
+    },
+}
+
+
+def classify_recipe_fields(backend_type: str) -> dict[str, str]:
+    """Every recipe field in exactly one of the four audit buckets.
+
+    1. ``consumed`` -- a backend config reader reads it, so varying it changes
+       the run;
+    2. ``recorded-only`` -- provenance travels with it, nothing reads it;
+    3. ``planned-unmapped`` -- a mapper could land it, none does yet (the
+       missing wiring is named in :data:`PLANNED_UNMAPPED_FIELDS`);
+    4. ``unsafe`` -- varying it would change what the run *is* or corrupt the
+       record; never a search dimension (:data:`UNSAFE_SEARCH_FIELDS`).
+    """
+    consumed = consumed_recipe_fields(backend_type)
+    unmapped = PLANNED_UNMAPPED_FIELDS.get(backend_type, {})
+    classification: dict[str, str] = {}
+    for field_name in sorted(ALL_RECIPE_FIELDS):
+        if field_name in consumed:
+            classification[field_name] = "consumed"
+        elif field_name in UNSAFE_SEARCH_FIELDS:
+            classification[field_name] = "unsafe"
+        elif field_name in unmapped:
+            classification[field_name] = "planned-unmapped"
+        else:
+            classification[field_name] = "recorded-only"
+    return classification
 
 #: Every recipe field, so "recorded only" can be stated as a difference rather
 #: than rediscovered from whatever is missing.
@@ -128,8 +228,17 @@ def assert_search_axes_consumed(
 
     Called before a candidate set is proposed, so an edit that adds an inert
     axis fails here rather than silently producing candidates that differ only
-    in their names.
+    in their names. Also refuses axes the classification marks unsafe: an
+    axis that changes what the run *is* (data identity, budget ownership) is
+    not a knob no matter who reads it.
     """
+    unsafe = sorted(axis for axis in axes if axis in UNSAFE_SEARCH_FIELDS)
+    if unsafe:
+        raise ValueError(
+            f"search axes {unsafe} are classified unsafe and must never be "
+            "search dimensions: "
+            + "; ".join(f"{name}: {UNSAFE_SEARCH_FIELDS[name]}" for name in unsafe)
+        )
     supported = tuple(backend_types or sorted(CONSUMED_RECIPE_FIELDS))
     for backend_type in supported:
         consumed = consumed_recipe_fields(backend_type)
@@ -260,6 +369,9 @@ class TrainingRecipe:
                 "max_steps": self.max_steps,
                 "learning_rate": self.learning_rate,
                 "seq_len": self.seq_len,
+                "batch_size": self.batch_size,
+                "scheduler": self.scheduler,
+                "warmup_steps": self.warmup_steps,
             }
             if self.resume_from_checkpoint is not None:
                 # The router engine's own continuation setting: it resolves the
@@ -271,12 +383,18 @@ class TrainingRecipe:
         if backend_type == "transformers-peft":
             backend: dict[str, Any] = {
                 "max_length": self.seq_len,
-                "lora": {"r": self.lora_rank, "alpha": self.lora_alpha},
+                "lora": {
+                    "r": self.lora_rank,
+                    "alpha": self.lora_alpha,
+                    "target_modules": list(self.target_modules),
+                },
                 "training": {
                     "max_steps": self.max_steps,
                     "learning_rate": self.learning_rate,
                     "lr_scheduler_type": self.scheduler,
                     "warmup_steps": self.warmup_steps,
+                    "batch_size": self.batch_size,
+                    "gradient_accumulation_steps": self.gradient_accumulation,
                 },
             }
             if self.resume_from_checkpoint is not None:
