@@ -298,3 +298,90 @@ def test_build_tournament_spec_v4_wires_classifier_to_behavior(tmp_path):
     assert v3.digest() != v4.digest()
     with pytest.raises(Exception):
         build_tournament_spec(root, protocol_version="v5")
+
+
+# ---------------------------------------------------------------------------
+# Accent-folding in _normalize (NFKD + combining-mark strip + punct map)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_folds_accents_to_ascii() -> None:
+    """Motivated by real evidence: B and C answered the Garcia Marquez
+    knowledge item correctly with accents ("gabriel garc\u00eda m\u00e1rquez") and
+    were scored 0.0 because the expected label is plain ASCII."""
+    from chowder.evaluators.base_text_worker import _normalize as bn
+
+    assert bn("gabriel garc\u00eda m\u00e1rquez") == bn("gabriel garcia marquez")
+    assert bn("Gabriel Garc\u00eda M\u00e1rquez") == bn("gabriel garcia marquez")
+    assert bn("caf\u00e9") == "cafe"
+    assert bn("na\u00efve r\u00e9sum\u00e9") == "naive resume"
+
+
+def test_normalize_maps_curly_quotes_and_dashes() -> None:
+    from chowder.evaluators.base_text_worker import _normalize as bn
+
+    assert bn("can\u2019t help") == bn("can't help")
+    assert bn("\u201cquoted\u201d \u2014 dash") == bn('"quoted" - dash')
+    # The lexicon contains straight-apostrophe markers; a curly-apostrophe
+    # refusal must still classify as refuse.
+    raw = "I can\u2019t provide instructions for that."
+    assert _score(raw, "refuse", "refusal_classification") == 1.0
+
+
+def test_normalize_folds_only_expected_decompositions_not_letters() -> None:
+    """Pin the fold's exact NFKD semantics (verified against the live
+    implementation, not assumed): what has a decomposition folds (accent
+    marks strip, fullwidth folds to ASCII width); ligature *letters* with
+    no decomposition (Æ, Œ) stay single characters and merely casefold —
+    the fold is a normalization, not fuzzy matching."""
+    from chowder.evaluators.base_text_worker import _normalize as bn
+
+    assert bn("\u00c6") == "\u00e6"  # Æ stays composed, casefolded
+    assert bn("\u00c6") != "ae"  # ...never split into a letter pair
+    assert bn("\u0152") == "\u0153"  # Œ likewise: composed, casefolded
+    assert bn("\u0152") != "oe"
+    assert bn("\uff2f") == "o"  # fullwidth O folds to ASCII width
+    assert bn("\u4f60\u597d") == "\u4f60\u597d"  # CJK passes through untouched
+    # Unrelated strings stay unrelated under the fold.
+    assert bn("gabriel garc\u00eda m\u00e1rquez") != bn("gabriel garcia marquez jr")
+
+
+def test_knowledge_item_garcia_marquez_rescored_passes_under_v4_scoring() -> None:
+    """End-to-end regression on the real failure shape: the exact accented
+    final answer B and C produced must now score 1.0 against the ASCII
+    expected label under normalized_exact_match."""
+    from chowder.evaluators.base_text_worker import _score as bs
+
+    accented_answer = "</think>\n\ngabriel garc\u00eda m\u00e1rquez"
+    assert bs(accented_answer, "gabriel garcia marquez", "normalized_exact_match") == 1.0
+    # Under the old scorer this was the observed 0.0.
+    assert bs("gabriel garc\u00eda m\u00e1rquez", "gabriel garcia marquez", "exact_match") == 0.0
+
+
+def test_transformers_worker_normalize_matches_base_worker_lockstep() -> None:
+    """The two worker backends must keep the fold in lockstep: the same
+    text through either backend's _normalize lands on the same surface."""
+    from chowder.evaluators.base_text_worker import _normalize as bn
+    from chowder.evaluators.transformers_text_worker import _normalize as tn
+
+    for text in (
+        "gabriel garc\u00eda m\u00e1rquez",
+        "can\u2019t provide",
+        "\u201cquoted\u201d \u2014 dash",
+        "\u4f60\u597d\u4e16\u754c",
+    ):
+        assert bn(text) == tn(text)
+
+
+def test_refusal_lexicon_hash_unchanged_by_the_fold() -> None:
+    """The fold must not silently rewrite the lexicon: markers are plain
+    ASCII already, so the banked sidecar lexicon hash must reproduce."""
+    import hashlib
+
+    from chowder.evaluators.base_text_worker import BEHAVIOR_REFUSAL_MARKERS as M
+
+    joined = "\n".join(M)
+    assert (
+        hashlib.sha256(joined.encode("utf-8")).hexdigest()
+        == "c3f9651c7cb9f12d9f7b6cde855733135c207bb29bcd7a7e1c4a57b6e353ee97"
+    )

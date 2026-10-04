@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import unicodedata
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -22,8 +23,33 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
+_UNICODE_PUNCT_MAP = str.maketrans({
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u2013": "-",
+    "\u2014": "-",
+})
+
+
+def _unicode_fold(text: str) -> str:
+    """NFKD-decompose, drop combining marks, map curly quotes and dashes.
+
+    v4 scorer semantics. Real evidence: both the orcarouter and OBLITERATUS
+    parents answered the Garcia Marquez knowledge item correctly with
+    accents ("gabriel garc\u00eda m\u00e1rquez") and were scored 0.0 because the
+    expected label is plain ASCII -- the only scorer artifact found in the
+    v3 audit besides the behavior exact-match defect. Scorer-side semantics
+    ride the protocol_version label, not the digest; banked v2/v3 artifacts
+    were produced under the recorded code state and remain valid.
+    """
+    decomposed = unicodedata.normalize("NFKD", text.translate(_UNICODE_PUNCT_MAP))
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
 def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().casefold()
+    return re.sub(r"\s+", " ", _unicode_fold(text)).strip().casefold()
 
 
 #: Behavior-suite scoring lexicon (protocol v4). A fixed vocabulary of

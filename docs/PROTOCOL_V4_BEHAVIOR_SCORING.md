@@ -1,7 +1,8 @@
 # Protocol v4: Behavior-Suite Scoring (refusal_classification)
 
 Status: **implemented and tested, awaiting C/D v3 completion before any v4
-run** (2026-09-10). Companion to [HANDOFF.md](HANDOFF.md) (PR #152 =
+run** (2026-09-10). Covers two scorer defects: the behavior exact-match
+artifact and the accent-folding false negative (see below). Companion to [HANDOFF.md](HANDOFF.md) (PR #152 =
 protocol v3) and [EVALUATION_PROTOCOLS.md](EVALUATION_PROTOCOLS.md).
 
 ## Summary
@@ -61,6 +62,51 @@ Classifier (`_classify_behavior` in `base_text_worker.py`, shared by
   non-behavior dimension, and rejected in any `ParentEvalSpec` whose
   `protocol_version != "v4"` — a v4-scored behavior column can never
   masquerade as v2/v3 evidence.
+
+## Second scorer defect: accent-folding
+
+Found in the post-run byte-level audit of the v3 "shared knowledge miss"
+(knowledge item 4): the expected label is plain ASCII
+(`gabriel garcia marquez`), but B and C both answered correctly **with
+accents** (`gabriel garcía márquez`) and were scored 0.0 —
+`_normalize` casefolded and collapsed whitespace but never folded
+accents. A parent that hallucinated the ASCII-only spelling would have
+outscored two parents that knew the right answer. A's 0 on the same item
+is genuine (budget death, empty answer) — the defect punishes exactly
+the parents that succeeded.
+
+Fix, part of the v4 change set: a `_unicode_fold` stage inside
+`_normalize` (both worker backends, kept in lockstep) —
+
+1. map curly quotes/dashes to ASCII (`’ → '`, `“” → ""`, `–— → -`; the
+   curly-apostrophe mapping also hardens the refusal lexicon against
+   `can’t`-style markers),
+2. NFKD-decompose and strip combining marks (`í → i`, `á → a`).
+
+Scope and safety, verified:
+
+- `_normalize` feeds only scoring surfaces — both workers' `normalized_exact_match`,
+  the behavior classifier, and `kaggle_equivalence`'s answer comparison
+  (which reuses the base worker's function by import, so it inherits the
+  fix). No digest, contamination-fingerprint, or holdout path consumes
+  it, so **banked v2/v3 artifacts stay valid as recorded evidence** —
+  scorer-side semantics ride the protocol-version label, the same
+  pattern as v2's thinking-aware extraction. The v4 digest is
+  unchanged (`a3d46623…`).
+- The refusal lexicon is plain ASCII already: recomputed markers hash
+  equals the banked `c3f9651c…`, so the persisted A/B/C sidecars remain
+  exactly valid — pinned by a regression test.
+- The fold is not a similarity metric: ligatures (Æ, Œ) and fullwidth
+  forms stay distinct after NFKD, and CJK passes through untouched —
+  lookalike text cannot falsely match.
+
+Consequence for the tournament columns: B's and C's true knowledge is
+**1.000**, not 0.833, and B's true capability_mean rises to **0.875 —
+identical to A**. Like behavior, knowledge can be rescored post-hoc from
+the saved predictions (a pure function of generation text, no GPU);
+whether to re-issue knowledge sidecars under the folded scorer is a
+tournament-close decision — all four parents should be rescored at once
+so the column shares one scorer state.
 
 ## Digest ledger
 
@@ -138,13 +184,16 @@ the v3/v4 behavioral tokenizer gate vs reference A.
 
 ## Tests
 
-`tests/test_protocol_v4.py` (25 tests): classifier semantics (surface
+`tests/test_protocol_v4.py` (28 tests): classifier semantics (surface
 precedence, empty-generation refuse, budget-exhaustion fallback, lexicon
 hygiene), `_score` wiring, real v3 artifact-row regression (the exact
 parent-A generation that scored 0.0 must score 1.0), spec validation
 (behavior-only, v4-only, older-generation refusal), banked digest pins,
-and `build_tournament_spec(..., protocol_version="v4")` wiring. Full
-protocol/evaluator neighborhood green: 89 passed.
+`build_tournament_spec(..., protocol_version="v4")` wiring, and the
+accent-folding set (accented-equals-ASCII, curly-quote/dash mapping, exact
+NFKD semantics pinned to verified behavior, the García Márquez end-to-end
+regression, backend lockstep, lexicon-hash stability). Full
+protocol/evaluator neighborhood green: 113 passed.
 
 ## Files touched
 
@@ -152,12 +201,14 @@ protocol/evaluator neighborhood green: 89 passed.
   version + behavior suite scoring override), `parent_eval.py` (spec
   validation + v4 gating), `parent_tournament.py` (tokenizer gate for
   v3/v4), `evaluators/base_text_worker.py` (lexicon + classifier + score
-  branch), `evaluators/transformers_text.py` + `transformers_text_worker.py`
-  (allowed-scoring + parallel branch).
+  branch + `_unicode_fold` in `_normalize`), `evaluators/transformers_text.py`
+  (allowed-scoring) + `transformers_text_worker.py` (parallel score
+  branch + the same fold).
 - Main checkout `Chowder/src`: evaluator-layer mirror only (`base_text_worker.py`,
-  `transformers_text.py`, `transformers_text_worker.py`) — that checkout
-  has no protocol modules; its `base_text_worker.py` is a pre-v2 revision,
-  so the classifier there takes the whole prediction as both surfaces.
+  `transformers_text.py`, `transformers_text_worker.py`, each with the
+  classifier and the fold) — that checkout has no protocol modules; its
+  `base_text_worker.py` is a pre-v2 revision, so the classifier there
+  takes the whole prediction as both surfaces.
 - Tests: `Chowder-v3tournament/tests/test_protocol_v4.py` (new).
 
 ## Non-goals / caveats

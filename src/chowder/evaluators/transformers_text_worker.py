@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import unicodedata
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -20,8 +21,27 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
+def _unicode_fold(text: str) -> str:
+    """NFKD-decompose, drop combining marks, map curly quotes and dashes.
+
+    v4 scorer semantics: correct accented answers must not be rejected
+    against plain-ASCII expected labels. See base_text_worker for the full
+    rationale; the two worker modules keep this fold in lockstep.
+    """
+    punct_map = str.maketrans({
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+    })
+    decomposed = unicodedata.normalize("NFKD", text.translate(punct_map))
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
 def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().casefold()
+    return re.sub(r"\s+", " ", _unicode_fold(text)).strip().casefold()
 
 
 def _score(prediction: str, expected: str, scoring: str) -> float:
