@@ -1,0 +1,5 @@
+== default rebuild (no flags) ==
+exit=0
+== v4 build (ids + preceding context) ==
+exit=0
+DONE
