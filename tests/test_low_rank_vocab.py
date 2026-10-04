@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 
 import pytest
-import torch
-from safetensors import safe_open
+
+torch = pytest.importorskip("torch", reason="low-rank vocab needs torch")
+safe_open = pytest.importorskip("safetensors").safe_open
 
 from chowder.low_rank_checkpoint import (
     EMBED_KEY_CANDIDATES,

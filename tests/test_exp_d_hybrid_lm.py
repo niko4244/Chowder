@@ -2,11 +2,17 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
-from chowder_batch.exp_d_hybrid_lm import collate_registry, smoke, train
+pytest.importorskip("torch", reason="experiment D's runner imports torch")
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))  # chowder_batch is a script dir, not a package
+
+from chowder_batch.exp_d_hybrid_lm import collate_registry, smoke, train  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -5,8 +5,9 @@ import json
 from pathlib import Path
 
 import pytest
-import torch
-from torch import nn
+
+torch = pytest.importorskip("torch", reason="experiment D needs torch")
+from torch import nn  # noqa: E402
 
 from chowder.experimental_hybrid_lm import (
     ExperimentDError,

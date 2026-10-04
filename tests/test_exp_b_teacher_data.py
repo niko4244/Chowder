@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
-from chowder_batch.exp_b_teacher_data import (
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))  # chowder_batch is a script dir, not a package
+
+from chowder_batch.exp_b_teacher_data import (  # noqa: E402
     DEV_REPAIR_TASKS,
     _assert_new_output_paths,
     _experiment_output_paths,
