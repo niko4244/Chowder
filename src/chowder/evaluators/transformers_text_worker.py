@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Iterator
 
 from ..adapter_guard import assert_adapter_is_live
+from ..adapter_bundle import read_adapter_bundle_manifest
 from ..contamination import write_holdout_fingerprint_index
 from ..hf_resilience import cache_status, with_hub_retries
 from ..local_model_compat import patch_transformers5_custom_model
@@ -29,6 +31,7 @@ from .scoring import (
     score,
 )
 from .vram import MemorySampler, peak_vram as _peak_vram
+from ..runtime_eval import make_transformers_generate, run_live_benchmark
 from .placement import (
     dispatch_offloaded,
     needs_redispatch_after_adapter,
@@ -183,6 +186,19 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         # Refuse to score an adapter that cannot change the model. PEFT only
         # warns when no saved key matches, leaving every LoRA B at zero.
         adapter_liveness = assert_adapter_is_live(model, spec.adapter_dir)
+        repair_dir = Path(spec.adapter_dir) / "repair"
+        if (Path(spec.adapter_dir) / "chowder-adapter-bundle.json").is_file():
+            read_adapter_bundle_manifest(spec.adapter_dir)
+        if (repair_dir / "adapter_config.json").is_file():
+            model.load_adapter(str(repair_dir), adapter_name="repair", is_trainable=False)
+            adapter_liveness["repair"] = assert_adapter_is_live(model, repair_dir)
+            model.base_model.add_weighted_adapter(
+                ["default", "repair"],
+                [1.0, 1.0],
+                adapter_name="combined",
+                combination_type="linear",
+            )
+            model.set_adapter("combined", inference_mode=True)
         base = placement_after_adapter(base, spec=spec, device_name=device_name)
     model.eval()
     if spec.placement == "offload":
@@ -355,6 +371,20 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
                 **render_evidence,
             }
 
+        if spec.runtime_benchmark and spec.runtime_benchmark.get("enabled", False):
+            runtime_result = run_live_benchmark(
+                make_transformers_generate(
+                    tokenizer,
+                    model,
+                    max_new_tokens=int(spec.runtime_benchmark.get("max_new_tokens", 128)),
+                    device=device,
+                ),
+                max_turns=int(spec.runtime_benchmark.get("max_turns", 8)),
+                harness=str(spec.runtime_benchmark.get("harness", "plain")),
+            )
+            metrics.update(runtime_result["metrics"])
+            suite_evidence["runtime_benchmark"] = runtime_result["tasks"]
+
     # The candidate arm's own generation, timed and sampled separately from the
     # baseline's -- one arm cannot measure the other, and the ledger says so.
     generation_timer.__exit__()
@@ -426,6 +456,56 @@ def placement_after_adapter(base: Any, *, spec: Any, device_name: str) -> Any:
     return dispatch_offloaded(base, device_name)
 
 
+def _acquire_eval_gpu_lock():
+    """Advisory GPU queue ticket for scoring jobs (C:/training/GPU_ARBITRATION.md).
+
+    Evals wait for the single-file FCFS ticket instead of fragmenting VRAM
+    next to a trainer. Skips when an ancestor process already holds the
+    ticket (the campaign launcher holds it for the whole run, so a nested
+    eval must not deadlock on its parent). Opt out with CHOWDER_GPU_LOCK=off.
+    Degradation policy: any failure here proceeds unlocked - a broken lock
+    must never fail a scoring run.
+    """
+    import atexit
+
+    if os.environ.get("CHOWDER_GPU_LOCK", "").lower() in {"off", "0", "false"}:
+        return None
+    lock_src = Path(os.environ.get("CHOWDER_GPU_LOCK_SRC", r"C:	raining"))
+    try:
+        sys.path.insert(0, str(lock_src))
+        from gpu_lock import GPULock, LOCK_DIR
+
+        holder_file = LOCK_DIR / "gpu0.lock"
+        if holder_file.exists():
+            try:
+                holder_pid = json.loads(holder_file.read_text(encoding="utf-8")).get("pid")
+                import psutil
+
+                ancestors = set()
+                parent = psutil.Process().parent()
+                while parent is not None:
+                    ancestors.add(parent.pid)
+                    parent = parent.parent()
+                if holder_pid in ancestors:
+                    print("[gpu] ancestor holds the GPU ticket; eval proceeds under it",
+                          flush=True)
+                    return None
+            except Exception as exc:
+                print(f"[gpu] could not check lock ancestry ({exc!r}); "
+                      "proceeding unlocked", flush=True)
+                return None
+        lock = GPULock("chowder-eval", budget_mib=4000, wait_vram_free_mib=9000,
+                       poll_s=10)
+        if lock.acquire():
+            atexit.register(lock.release)
+            return lock
+        return None
+    except Exception as exc:
+        print(f"[gpu] eval lock unavailable ({exc!r}); proceeding unlocked",
+              flush=True)
+        return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--spec", required=True)
@@ -456,6 +536,7 @@ def main() -> int:
     raw = json.loads(Path(args.spec).read_text(encoding="utf-8"))
     raw["suites"] = tuple(EvalSuiteSpec(**suite) for suite in raw["suites"])
     spec = TransformersTextEvalSpec(**raw)
+    _eval_gpu_lock = _acquire_eval_gpu_lock()
     result = evaluate(spec)
     Path(args.result).write_bytes(
         (json.dumps(result, sort_keys=True, indent=2) + "\n").encode("utf-8")

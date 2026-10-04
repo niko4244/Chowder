@@ -14,6 +14,478 @@ for it:
   [`TEACHER_FABRIC_BRIEF.md`](TEACHER_FABRIC_BRIEF.md) — read it before
   any Teacher Fabric slice; it is the source of the non-negotiable rules.
 
+## Session 2026-09-25 — Experiment E / batch-009 hardening: correctness, tests, docs (measured vs not-run)
+
+Branch `docs/roadmap-sync-priority6`. This session landed **code, tests, and
+documentation only**. No live model run happened, so **no new measured
+numbers exist**; nothing below contradicts that. All changes are on disk,
+uncommitted, alongside unrelated modified files — only experiment files were
+touched.
+
+### Measured vs implemented-not-run (the one-line rule)
+
+Everything in `SPARK_GSM8K_CAMPAIGN.md`'s batch-009 table and
+`EXPERIMENT_E_PREDICTIVE_INFERENCE.md` §1–6 is **measured history under old
+semantics** (five families, non-revocable green, lax citation grading,
+self-review router). Everything added on 2026-09-25 is **implemented and
+unit-tested but never run**: the Phase-4 logprob-margin router, the sixth
+`wrong_second_fix` family, the compact `state_aware` prompt, green-revocation
+scoring, and the batch-010 export guards. Do not quote a margin value, a v2
+green rate, or a compact-prompt token saving — none exists.
+
+### What was implemented (all unit-tested; 21/21 focused tests pass)
+
+* **Phase 4 router** (`exp_e_confidence.py`, `exp_e_run.py`): confidence is
+  now the mean **selected-token logprob margin** (selected vs best returned
+  alternative per token; a response missing any usable logprob is
+  `logprob_error`, never guessed). Dev-only calibration picks the
+  highest-coverage cutoff with precision ≥ 0.80 and ≥ `min_samples` selected
+  responses; routing fails closed to the teacher unless calibration is
+  `calibrated` and the live margin is finite and above threshold. Findings
+  detail: `EXPERIMENT_E_PREDICTIVE_INFERENCE.md` §7.
+* **Citation grading tightened** (`grade_citation`): a citation counts only
+  with an actual `[source: doc_id]` string **and** the cited doc retrieved.
+  Historical 1.00 citation rates used a laxer rule and are not comparable.
+* **Corpus provenance** (`exp_e_corpus.py`): `--corpus` runs embed a
+  re-validated `corpus_manifest` (exact per-document sha256, duplicate-text
+  and whitespace rejection); retrieval eval requires explicit disjoint
+  train/holdout queries with verified content hashes; the markdown chunker
+  dedups identical chunk hashes, fragments overlong lines, and writes only
+  atomically; `write_verified_markdown_corpus` refuses < 300 documents (only
+  7 seed docs exist, so no corpus artifact was written).
+* **Batch-010 export guards** (`exp_e_pipeline.py`): evolve-only green-verified
+  trajectories, re-verified traces, rejection of held-out names, held-out
+  content hashes, held-out metadata, duplicate digests; atomic create.
+* **Batch-009 v2 harness** (`runtime_eval.py`, `batch009_harness_experiment.py`):
+  sixth `wrong_second_fix` family (real trajectories only, synthetic forced-red
+  removed), green is revocable (a content-changing write or red test resets
+  `green_seen_so_far`; final report counts only if green still holds),
+  `budget_exhausted` trace role, compact default `state_aware` prompt with
+  `state_aware_legacy` retained, `run_config` fingerprint that refuses the
+  stale `F:/chowder-campaign/batch009-harness/harness_compare.json` (24/13
+  tasks, old scoring), and SystemExit on stale/unreadable checkpoints.
+
+### Fixes this session
+
+* Repaired a SyntaxError in `src/chowder/runtime_eval.py` (eaten newline after
+  the trace append) that broke all `chowder` imports.
+* `SparseMemoryLayer.scores` now accepts torch tensors (training passed tensor
+  rows; `.astype` AttributeError).
+* `_messages_from_trace` selects the last assistant row carrying
+  `prompt_messages` (final reports are separate `final_report` rows).
+* Test-fixture corrections driven by the stricter code: the revocation test
+  script must re-verify green after regression; the markdown chunker test
+  writes exact source bytes (the chunker faithfully preserves CRLF on Windows);
+  the batch-010 held-out fixture now has genuinely distinct content (a
+  name-only clone is itself contamination and the new guard correctly rejects
+  it).
+
+### ModelOpt PTQ lane (Experiment F scaffold, 2026-09-25)
+
+Evaluated `NVIDIA/Model-Optimizer` and adopted it **core-only** as a fourth
+cost lever: PTQ of the small model measured through the existing paired,
+harness-verified methodology. Verdict recorded here so it is not re-litigated:
+
+* Fits: `mtq` PTQ (INT8 SmoothQuant / INT4 AWQ / NVFP4-on-Blackwell) of the
+  small model, bound to the same batch-009 harness via
+  `make_transformers_generate` — green rate, reward, policy tokens, and
+  margin shift vs a BF16 arm on identical tasks. Windows is in ModelOpt's PTQ
+  support matrix. A novel question this repo is uniquely positioned to
+  answer: does quantization shift the Phase-4 logprob-margin signal that the
+  router calibrates on?
+* Does not fit: rerouting serving through TensorRT-LLM/vLLM (the working
+  backend is llama.cpp GGUF + Ollama), and the `[hf]` extra locally — it pins
+  `transformers>=4.57,<5.15` vs the installed 5.16.1 (verified from the 0.47.0
+  wheel metadata), i.e. the peft/torchao breakage class. QAT/distillation
+  belongs in a Kaggle-side venv.
+* Landed: `nvidia-modelopt==0.47.0` core installed (stack verified intact:
+  torch 2.11+cu128 / transformers 5.16.1 / peft 0.20 untouched); optional
+  dependency group `ptq` in `pyproject.toml` (tight pin, rationale inline);
+  `chowder_batch/exp_f_ptq_margin.py` — GPU-gated, fail-closed, caller-supplied
+  calibration texts, paired-arm enforcement, margins-or-`logprob_error` (never
+  guessed), no speedup claims; `tests/test_exp_f_ptq_margin.py` (6 CPU-safe
+  tests, including a real `mtq.quantize` INT8-SmoothQuant run on a tiny MLP).
+  Verified API on 0.47.0: `mtq.quantize(model, cfg, forward_loop=...)` with
+  `INT8_SMOOTHQUANT_CFG` etc.; `model_quant` is a submodule, not a function.
+* **Live run done (2026-09-25).** `--model Qwen/Qwen2.5-1.5B-Instruct
+  --ptq-config int8_smoothquant --tasks 12 --max-new-tokens 160 --max-turns 4`
+  → `evidence/exp_f_ptq_margin_qwen25_1p5b_int8sq_20260925.json`. Paired, greedy,
+  `state_aware`; RTX 5060 Ti; 706 quantizers inserted, 196 modules smoothed.
+  BF16 mean margin 4.5040, INT8-SmoothQuant 4.5419, **mean shift +0.0379**
+  (within the 0.2 tolerance, so `margin_shift_fails_closed` is False); 12/12
+  tasks produced a margin in both arms; green rate **0/12 in both arms**.
+* **The earlier 2-task smoke shift of −2.0551 was noise, not quant damage.**
+  Per-task paired deltas span −4.16 … +3.31 — a spread ~20× the tolerance — so
+  a small-n shift is meaningless in either direction. The router must keep
+  consuming an n-task paired shift, and any shift claim should state its `n`.
+* **No speedup claim is licensed** (fake kernels, no compiled
+  `modelopt_cuda_ext`), and none is made. `run_ptq_margin_experiment` still
+  refuses to execute on CPU.
+* Reporting fix from the live run: the harness block used to report
+  `total_tokens` read off the per-task outcome, which has no such key (it lives
+  in the aggregate `_split_metrics`) — so it silently printed 0 for both arms.
+  It now sums the prompt/generated token counts each turn actually used, and a
+  test pins the phantom key out.
+* **Why the gate could not be exercised, and what the 0/12 really meant
+  (2026-09-26).** Chasing the green rate turned up two defects, neither of them
+  a difficulty problem, and both of them *measurement artifacts* — so the
+  earlier "0/12 greens" said nothing about the model and nothing about
+  quantization:
+  1. *Tool-call dialect.* `_render_prompt` passes JSON-schema `TOOLS` to
+     `apply_chat_template`, so the model correctly answers in Qwen's native
+     JSON dialect (`<tool_call>{"name": …, "arguments": …}</tool_call>`),
+     while `runtime_eval.parse_tool_call` parses only
+     `<tool_call>name<arg_key>…`. Not one call was ever executed:
+     `tool_calls: 0` and `reward: -21.0`, which is exactly no-green (−10) +
+     no-writes (−8) + premature (−3). `--tool-call-format json` adds the
+     decode-side twin of `_render_prompt`; `harness` stays the default so
+     prior runs remain comparable. Malformed JSON is left untouched, never
+     guessed.
+  2. *Batched turns.* The model emits `read_file` then `write_file` in one
+     turn and the harness acts on one call. Keeping the first executes the
+     read and discards the fix — and since `_evaluate_task` grades the
+     workspace and only a write mutates it, that truncation alone manufactures
+     a greenless run out of a model that did propose the fix. The translator
+     keeps the first *advancing* call and reports `dropped_calls` /
+     `reordered_turns` so the interpretation stays auditable.
+  3. *Verification is a separate act.* Green is granted only by a passed
+     `run_tests`; the model reliably writes the fix and then narrates. Hence
+     `--difficulty`: `hard` (bare goal, byte-identical to every prior run),
+     `guided` (the goal also names the verification step), `mixed` (blocks of
+     two, so both split halves get the same composition — a one-by-one
+     alternation would line every guided task up with the calibration half and
+     make the transfer test measure the split).
+* **Measured effect** (BF16 pilots, 12 tasks, `Qwen/Qwen2.5-1.5B-Instruct`):
+  `hard` 0/12 greens → `guided` **5/12**, and the margin separates *perfectly* —
+  every correct task scores 4.53–5.42 while every incorrect one scores
+  3.74–4.27, so a cutoff near 4.4 splits them with precision and recall 1.0.
+  Raising the budget to 6 turns / 256 tokens reproduced it *exactly* — the same
+  5 green tasks, the same margins, the same `tool_calls`/`dropped_calls`, only
+  more tokens spent — so the ~40% success rate is a property of the model, and
+  the extra budget buys nothing.
+* **The gate still rejects, and the reason is now the useful finding.** With
+  5/12 greens the calibration half holds only 2 correct of 6, so no cutoff
+  reaches 0.80 precision at ≥ `min_samples` selected →
+  `no_threshold_meets_precision` → `heldout_rejected`. The binding constraint
+  is the *success rate*, not the margin: at ~40% the 0.8-and-≥4 combination is
+  structurally unreachable in a 6-task half. Exercising the gate's pass path
+  needs ≈ n=20 (a 10-task held-out half) or a stronger small model — loosening
+  the gate would only make it agree with itself.
+* **n=20 `guided` + JSON run (2026-09-26, RUN)** — the run that was supposed to
+  supply that 10-task half. `--model Qwen/Qwen2.5-1.5B-Instruct --ptq-config
+  int8_smoothquant --tasks 20 --difficulty guided --tool-call-format json
+  --max-new-tokens 160 --max-turns 4` →
+  `evidence/exp_f_ptq_margin_qwen25_1p5b_int8sq_guided20_20260926.json`
+  (~1 h 40 m wall clock). BF16 mean margin 4.4662, INT8-SmoothQuant 4.4737,
+  **mean shift +0.0076** (inside 0.2, `margin_shift_fails_closed` False);
+  20/20 tasks produced a margin in both arms; **green rate BF16 6/20 vs INT8
+  0/20**; paired per-task deltas −2.123 … +2.457; mean runtime reward −1.8 vs
+  −12.0; executed tool calls 29 vs 20.
+* **The two guards disagree, and that is the result.** Every BF16 green
+  (margins 4.53–5.79) came back non-green under INT8 while the *mean* margin
+  barely moved, so a router licensed by the shift tolerance alone would have
+  served an arm that scored 0/20. The per-precision calibration and the
+  held-out gate blocked it instead (both `no_threshold_meets_precision` →
+  `heldout_rejected` / "calibration is not calibrated"). **The gate is
+  load-bearing, not hardening** — of the two checks, only it saw this.
+* **"≈ n=20 reaches the pass path" is falsified and retired.** Precision is a
+  ratio, not a count: the BF16 miss that caps the ceiling (`exp_f_repair_16`,
+  4.966) *outranks* a green (`exp_f_repair_6`, 4.909), so more tasks grow
+  numerator and denominator together and leave the ceiling at 0.75; the INT8
+  calibration half has zero positives, i.e. precision 0.0 at every threshold.
+  What the pass path needs is better margin *ordering* or a quantized arm that
+  still succeeds (stronger small model, gentler PTQ recipe, tasks easier
+  without being trivial) — not a longer task list. The n=12 "perfect
+  separation" is likewise retired: at n=20 two incorrect tasks sit inside the
+  green band (4.966, 5.121).
+* **`int8_weight_only` at n=20 (2026-09-26, RUN).** Same command with
+  `--ptq-config int8_weight_only` →
+  `evidence/exp_f_ptq_margin_qwen25_1p5b_int8wo_guided20_20260926.json`
+  (~41 min wall clock). The arm lives: green **5/20** (0.25) vs SmoothQuant's
+  0/20, mean reward −1.95 vs −12.0, 39 executable calls vs 20 (BF16: 29).
+  Retention measured for the first time: 6 BF16 greens → **3 retained, 3 lost,
+  2 gained** (lost `repair_6`, `_9`, `_14`; gained `repair_0`, `_4`), loss
+  fraction **0.5** — the green-retention guard refuses at the default 0.0 and
+  would pass only under a declared tolerance ≥0.5. Mean shift **+0.0881**
+  within 0.2, so the shift bound passed *again* while half the reference
+  greens were lost. The gate still blocks, now for a quantified reason: a
+  10-task half needs ≥4 correct tasks before any cutoff can be eligible
+  (precision ≥0.80 × `min_samples` 4), and both arms hold exactly 3 per half
+  (BF16 ceiling precision 0.75, weight-only 0.6); under the interleaved split,
+  ≥4 per half is guaranteed only from ≥14 correct of 20. The SmoothQuant
+  collapse is therefore the *recipe*, not 8-bit weights, and the gate's pass
+  path needs success density plus ordering — not a longer task list.
+
+### Quant-aware Phase-4 router (2026-09-25, implemented; shift measured, routing UNRUN)
+
+Extends the router so a quantized small model can never borrow a BF16
+threshold. All in `chowder_batch/exp_e_confidence.py` (+ `exp_e_run.py`
+wiring), unit-tested; **no live run yet** (same GPU blocker).
+
+* `calibrate_margin_threshold_per_precision({bf16: rows, int8_smoothquant: rows})`
+  calibrates each serving precision independently and tags each record
+  `precision_arm`. (Tag is separate from the record's numeric `precision`
+  — the winning cutoff's precision fraction — so audits stay intact.) An arm
+  whose dev rows fail keeps its fail-closed status; it never inherits the
+  BF16 threshold.
+* `margin_shift_fails_closed(shift, tolerance)` is the guard: `tolerance=None`
+  means no quantized arm is served (guard inactive). Otherwise it fails
+  closed on an unmeasured (`None`) shift, a boolean/NaN/inf shift, a
+  missing/invalid/negative tolerance, or `abs(shift) > tolerance`. An
+  unmeasured shift blocks **even under a loose tolerance** — you cannot
+  verify a bound you never measured.
+* `small_route_allowed` gained keyword-only `quantized_margin_shift` /
+  `max_quantized_margin_shift` (default None = BF16 lane, behavior
+  unchanged) and now rejects booleans in margin/threshold. `quant_route_allowed`
+  additionally requires a `precision_arm`-tagged `calibrated` record and
+  forces both shift arguments, so no caller can skip the measurement.
+* **Held-out transfer gate.** A shift bound alone is not enough: it says the
+  two arms' mean margins are close, not that the *cutoff* calibrated on one
+  task set still separates the arms on tasks it never saw.
+  `calibrate_margin_threshold_per_precision` now records `fit_task_ids` /
+  `n_fit_tasks` (from each row's `task` or `id`; an empty set for anonymous
+  rows), and `heldout_transfer_gate(calibration, heldout_rows, ...)` scores a
+  quantized arm on tasks excluded from its own fit. Status is
+  `heldout_validated` only when the per-precision cutoff reproduces on the
+  held-out half at `min_precision=0.80` with `min_samples=4` and
+  `min_tasks=4`. It fails closed — `heldout_rejected` / `heldout_contaminated`
+  with a `reason` — on an uncalibrated or non-finite threshold, a missing or
+  empty `fit_task_ids`, a held-out row with no task id, **any** fit/held-out
+  task overlap (reported as `n_overlapping_tasks`), too few usable margins,
+  too few above the cutoff, or precision below target.
+  `heldout_transfer_gate_allows` additionally requires the gate's
+  `precision_arm` to match the calibration's and the thresholds to be
+  identical and finite, so a BF16-validated gate cannot authorize the INT8
+  arm.
+* `quant_route_allowed(..., heldout_gate=None)` now **requires** the gate:
+  omitting it blocks, exactly as an unmeasured shift blocks. `exp_e_run.py`
+  gains `--quantized-heldout-rows` (JSONL) and `--quantized-precision-arm`
+  (default `int8_smoothquant`), writes `calibration["heldout_transfer_gate"]`
+  (or `not_applicable_bf16_lane` when the guard is inactive), stamps each
+  eval row with `heldout_transfer_gate_status`, and routes only through
+  `quant_route_allowed`.* **What the gate did on real Experiment F data.** Feeding the measured report
+  through `router_rows_from_report` (interleaved 6/6 split) gives two
+  `no_threshold_meets_precision` calibrations with `threshold: null` — with
+  0/12 greens, no cutoff can reach 0.80 precision — so the gate records
+  `heldout_rejected` / "calibration is not calibrated" and
+  `quant_route_allowed` stays closed. The shift guard passed (+0.0379 within
+  0.2) and the router was blocked anyway: **the gate, not the tolerance, did
+  the blocking**, which is the ordering the design intends. Caveat worth
+  keeping: the gate's *pass* path is still unexercised, because a task set the
+  1.5B model never solves gives the margin→correctness relation no positive
+  class. Do not read that rejection as "the gate is calibrated".
+  **Superseded in part by the n=20 run above:** there, with the tool dialect
+  fixed and 6/20 greens available, the same gate blocked anyway — because the
+  *quantized* arm scored 0/20 — so its refusal is now corroborated by
+  behaviour rather than only by an empty positive class.
+* **Green-retention guard (2026-09-26, implemented; measured on the n=20
+  report).** A shift bound says the margin *scale* moved less than declared,
+  not that the arm still solves tasks: at n=20 the shift passed (+0.0076
+  within 0.2) while the quantized arm lost all six BF16 greens.
+  `green_loss_fails_closed(fraction, tolerance)` in `exp_e_confidence.py`
+  blocks on an unmeasured or boolean/NaN/out-of-[0, 1] fraction, an invalid
+  tolerance, or `fraction > tolerance` (tolerance `None` = no quantized arm
+  served → inactive). `validate_quantized_green_retention(reference_rows,
+  quantized_rows, max_green_loss_fraction=...)` pairs per-task
+  `{"task", "correct"}` outcomes and reports `reference_greens`,
+  `retained/lost/gained_greens`, `green_loss_fraction`, and the verdict —
+  counted per task, so equal green *totals* on different tasks still count as
+  losses and gains never offset them. A reference arm with **zero** greens
+  fails closed (vacuous denominator: no demonstrated capability to retain).
+  `quant_route_allowed` now **requires** `green_loss_fraction` /
+  `max_green_loss_fraction` alongside the shift pair, so a passing shift can
+  never license routing by itself. Default
+  `DEFAULT_MAX_GREEN_LOSS_FRACTION=0.0` (no reference green may be lost);
+  `router_rows_from_report` emits the measured record as `green_retention`.
+  4 new confidence tests (19 total) cover the truth table, per-task pairing,
+  vacuous-reference refusal, and the passing-shift-cannot-license case.
+  Measured on `...guided20_20260926.json`: 20 tasks, BF16 6 greens → INT8 0
+  retained, 0 gained, loss fraction 1.0 → guard closed while the shift verdict
+  stayed False and the gate stayed `heldout_rejected`. Three independent
+  refusals now, one of them newly measured.
+* **One admission artifact (2026-09-26).** `quantized_arm_admission` aggregates
+  calibration / held-out gate / margin shift / green retention into one record
+  with per-guard verdicts and a `refusals` list; a missing measurement or
+  tolerance is a refusal (the artifact only ever describes a quantized arm).
+  `verify_arm_admission` re-derives every verdict from the recorded
+  measurements and checks their sha256, so edited inputs or a fabricated
+  verdict fail verification — tamper-evidence, not a signature (there is no
+  key on this lane). `exp_e_run.py` records `phase4.arm_admission`
+  (`not_applicable_bf16_lane` on the BF16 lane) and requires `admitted` for
+  every small-route decision through `quantized_route_decision`. 2 more
+  confidence tests (21 total).
+* **Evidence file instead of scalars (2026-09-26).**
+  `--quantized-evidence <exp_f_report.json>` derives the arm name, shift,
+  green retention, report-side calibration/gate, and held-out rows from the
+  report's per-task data (`load_quantized_evidence` →
+  `router_rows_from_report`), verifies the derived admission artifact, and
+  refuses to combine with the scalar flags it replaces. Tested in
+  `tests/test_exp_e_run.py` (4 tests: one-measurement-alone closes the lane,
+  routing/admission agreement, synthetic evidence + conflict error, and the
+  measured n=20 report).
+* 10 confidence tests (15 total), covering fit-set recording, gate pass, gate
+  reject, contamination detection, arm+threshold binding, and the
+  blocked-without-heldout default.
+* `exp_e_run.py`: `--quantized-margin-shift` (the measured shift from
+  Experiment F) and `--max-quantized-margin-shift` (default
+  `DEFAULT_MARGIN_SHIFT_TOLERANCE=0.2`). The quantized lane activates when
+  *either* measurement is supplied, so the pure-BF16 lane routes exactly as
+  before; the calibration record and every eval row carry the guard decision
+  inputs. The green-retention guard adds
+  `--quantized-green-loss-fraction` (measured; printed by
+  `router_rows_from_report` as `green_retention`) and
+  `--max-quantized-green-loss-fraction` (default
+  `DEFAULT_MAX_GREEN_LOSS_FRACTION=0.0`); supplying one measurement and
+  omitting the other leaves the active lane blocked, not unguarded.
+* 5 new confidence tests (9 total): guard truth table, strict parsing,
+  per-precision independence (different winning thresholds per arm),
+  untagged/insufficient records route closed.
+
+### Kaggle QAT/distill lane (2026-09-25, implemented; UNRUN)
+
+`kaggle/run_qat_distill_lane.py` — the isolated-venv companion the earlier
+evaluation called for. Verified modelopt 0.47.0 APIs used: `mtd.convert(model,
+[("kd_loss", mtd.KDLossConfig(teacher_model=..., criterion=mtd.LogitsDistillationLoss(temperature=2.0)))])`,
+`mtd.export`, `mtq.quantize`, and the `TensorQuantizer.amax` property (scales
+frozen via `requires_grad_(False)`; **no** `mtq.freeze` exists in 0.47 —
+do not invent that call).
+
+* Install: `chowder-ai[ptq,train] @ git+...@<40-char-sha>`, cross-checked
+  against pip's `direct_url.json` (mismatch aborts before any GPU work) —
+  same provenance contract as `bootstrap_environment.py`. It installs the
+  **core** modelopt plus the `ptq` extra; `modelopt[hf]` is deliberately not
+  required because the pinned `transformers>=5.12,<6` range has no safe
+  overlap with the `[hf]` extra (`<5.15`) on the local 5.16.1 stack.
+* Flow: validate batch-010 → BF16 margin probe (greedy,
+  `output_scores=True`, in-process margins) → QAT recovery (INT8
+  SmoothQuant + frozen amax + LoRA, refuses if any non-LoRA parameter is
+  trainable or if no amax was frozen) → quantized margin probe →
+  shift report → optional KD vs a teacher path → SFT on the batch-010
+  teacher trajectories (assistant-only label masks, prefix-consistency
+  checked, non-finite loss aborts) → adapter + report written atomically
+  (`open("x")`).
+* Fail-closed everywhere: empty/non-evolve/non-green/foreign-harness rows are
+  rejected, every number is measured in-process, no speedup claims, no
+  Kaggle Secrets touched. `build_shift_report` mirrors
+  `exp_e_confidence.margin_shift_fails_closed` and a contract test keeps the
+  two in sync across within-tolerance / over-tolerance / unmeasured /
+  NaN-tolerance cases.
+* 4 CPU-safe tests (`tests/test_kaggle_qat_lane.py`), including a tokenizer
+  test that skips offline. The lane needs a batch-010 dataset, which is
+  itself still blocked on the GPU — do not fabricate one.
+
+### Batch-010 producer/consumer contract (2026-09-25, passing)
+
+`tests/test_batch010_contract.py` (11 tests) closes the loop that previously
+only existed on a GPU session: it builds a **real** batch-010 dataset and then
+feeds the produced JSONL through the Kaggle lane's own validator,
+`kaggle/run_qat_distill_lane.py::load_teacher_rows`, loaded by path so the
+test exercises the shipping consumer rather than a copy of its rules.
+
+The chain is the real one — `RuntimeTask` → `run_live_benchmark(
+harness="state_aware", max_turns=4)` → `repair_trajectory_row` →
+`build_batch010_dataset` — over 2 evolve + 2 held-out tasks. A fresh solving
+generator per task, parameterized on `int(task["expected_fix"].split()[-1])`,
+so no trajectory can go green by a hard-coded `return 2` (task 2 must return
+3); the fixture is module-scoped, so the build happens once.
+
+**It found a real break.** The producer emitted `tool`-role messages inside
+`messages`, but the consumer's role whitelist is `{system, user, assistant}` —
+so *every* real dataset would have been refused on Kaggle, with the error
+pointing at the data rather than at the schema mismatch. Chosen fix: the
+producer folds tool turns into user turns in `messages`
+(`exp_e_pipeline._messages_from_trace`, with the portability reason in a
+comment); `trace` keeps the faithful tool roles and exact observation bytes,
+so fidelity survives where it is not a chat-template portability hazard.
+`tests/test_exp_e_pipeline.py` was updated to the new rendering.
+
+Drift coverage, so the test fails in both directions:
+
+* 7 parametrized cases, each mutating one real row and asserting the consumer
+  then *refuses* it with its specific message — `split`/`green_verified`/
+  `harness` changed, `messages` emptied, truncated, blank-terminated, or
+  given a `tool` role. A producer rename breaks the happy path; a consumer
+  that quietly stops checking a field breaks this test. Test ids are derived
+  from the case tuple, so no test name leaks which assertion it makes.
+* File level: an all-blank dataset and a line holding a JSON array are both
+  rejected.
+* `test_tool_observations_survive_the_tool_free_rendering` asserts the green
+  tool observation text is still present after the fold — the fix must not
+  quietly drop the evidence it keeps.
+* `CONSUMER_REQUIRED_FIELDS` is declared in the test and asserted against
+  real output, so a consumer that adds a field surfaces as a failure here
+  rather than as a rejection on Kaggle.
+
+### Verification status
+
+`python -m pytest tests/test_runtime_harness_mechanisms.py
+tests/test_exp_e_confidence.py tests/test_exp_e_pipeline.py
+tests/test_exp_f_ptq_margin.py tests/test_kaggle_qat_lane.py
+tests/test_batch010_contract.py -q` → **63 passed**; `compileall` and
+`ruff check` clean on all touched files. The broader suite was not run this
+session.
+
+### Blockers (updated 2026-09-26)
+
+Preflight re-run this session **changed the picture**; treat the older text as
+superseded:
+
+* The historical llama.cpp endpoint lane is **gone**: ports 18081/18082/18083
+  now refuse connections (WinError 10061, nothing listening) rather than
+  timing out. Ollama (PID 23044) serves only GGUF quants on 11434. The old
+  "served wrong Ollama-blob models" failure mode is no longer what is
+  observed; there is simply no teacher/Spark endpoint to probe.
+* The claim that an unrelated llama-server (PID 3764) holds **both** GPUs is
+  stale. PID 3764 is `hermes-agentsd.py` on port 7779 and holds no GPU. GPU 0
+  (RTX 5060 Ti) had ~15.2 GB free on 2026-09-25 and was used successfully then;
+  GPU 1 is a 6 GB RTX 2060. Free memory fluctuates with other users' jobs (a
+  `crypto_bot.py` run was seen at ~2.2 GB), so re-check before a big job.
+* The GPU lane is usable for quantized arms, and the earlier "plan hours"
+  warning was too pessimistic: measured 2026-09-26 on a 20-task paired run,
+  the INT8 arm ran **3–10 min/task** (whole run 04:59→06:39, ≈1 h 40 m) against
+  ~20 s/task for BF16. It is still fake-quant on the CPU-fallback path
+  (`modelopt_cuda_ext` cannot build — no `cl` on PATH), so no throughput claim
+  follows, but a 20-task paired run now fits in one sitting.
+* Rival GPU jobs are the real hazard, not the lane: a foreign
+  `eval_student.py` plus a Gemma `llama-server` held roughly 5–11 GB of GPU 0
+  during the 2026-09-26 run, leaving as little as **754 MiB free** while the
+  INT8 arm was mid-generation (the run completed anyway). Check `nvidia-smi`
+  immediately before launching and treat free memory as the first suspect if a
+  run dies with OOM.
+
+Still blocked, unchanged in substance: the batch-009 paired v2 rerun (incl.
+combined `state_aware+recovery` and the compact-prompt token measurement),
+Phase-4 calibration/routing against a real teacher, batch-010 trajectory
+generation from live endpoints, and the several-hundred-document corpus
+evaluation (`write_verified_markdown_corpus` refuses < 300 documents; only 7
+seed docs exist). The private `.chowder-spark-calib/exp-e/` artifacts were not
+read, written, or exposed, and the stale
+`F:/chowder-campaign/batch009-harness/harness_compare.json` stayed refused.
+
+### Next session's order of operations
+
+1. Backend preflight proving the correct teacher/Spark models on known ports.
+   The historical 18081–18083 lane is gone, so this now means *starting* the
+   endpoints (or relocating them) and proving which model answers, not just
+   that something listens.
+2. Batch-009 v2 paired rerun (all four arms incl. combined) → replace the
+   historical table's framing, keeping it labeled as v1.
+3. Phase-4 dev logprobs → calibration → routing comparison. Note the measured
+   constraints from Experiment F: the held-out gate's pass path needs ≥4
+   correct tasks per 10-task half (coverage floor) *and* margins that order
+   them above the misses at ≥0.80 precision; more tasks at the same ~25–30%
+   density only reshuffle which half is short, and the weight-only arm now
+   shows a live quantized lane (5/20 greens, 3 of 6 reference greens retained)
+   that still falls under that floor. The quantized arm must also retain the
+   reference arm's greens — the green-retention guard tolerates zero loss by
+   default, so an arm keeping fewer than all BF16 greens stays blocked unless
+   a nonzero `--max-quantized-green-loss-fraction` is declared on purpose.
+4. Generate batch-010 trajectories on the evolve split under the winning
+   harness; held-out tasks stay untouched. The contract test proves the shape
+   is now accepted; the content still needs a live teacher.
+5. Grow the verified corpus toward 300+ documents via
+   `exp_e_corpus.py --markdown-root ... --out ...`.
+
 ## Current state (updated 2026-09-17, integrity re-adjudication) — READ THE HEADLINE FIRST
 
 **Gen-1's effective verdict is now INCONCLUSIVE (target repair validated);

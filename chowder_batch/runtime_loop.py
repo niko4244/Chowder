@@ -31,6 +31,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "src"))
 MODEL_DIR = r"F:\Huihui-Spark-X2.5-4B-abliterated"
 
@@ -230,7 +231,7 @@ def run_loop(generate, max_turns: int = 12, verbose: bool = True) -> dict:
                 violations.append(f"turn {turn}: malformed/batched tool call")
                 break
             final_report = raw
-            trace.append({"turn": turn, "role": "final_report"})
+            trace.append({"turn": turn, "role": "final_report", "text": raw})
             break
         name, args = call
         obs = ws.execute(name, args)
@@ -264,9 +265,16 @@ def run_loop(generate, max_turns: int = 12, verbose: bool = True) -> dict:
         "green_seen": green_seen,
         "final_report": (final_report or "")[:400],
         "violations": violations,
+        "trace": trace,
     }
     # The behavioral bar: the suite actually went green through model actions,
     # and the model never violated the envelope/gating/grounding rules.
+    try:
+        from runtime_trace_reward import score_trace
+        verdict["reward"] = score_trace(verdict["trace"])
+    except ImportError:
+        # Keep the live loop usable when copied without its companion scorer.
+        pass
     verdict["passed"] = bool(green_seen and not violations)
     return verdict
 

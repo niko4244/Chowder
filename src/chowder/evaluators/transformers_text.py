@@ -22,6 +22,7 @@ from .placement import validate_placement
 from ..provenance import sha256_directory, sha256_file
 from ..local_model_compat import verify_local_custom_code
 from .scoring import OBSERVED_SCORINGS, SAMPLE_SEPARATOR
+from ..runtime_eval import RUNTIME_METRIC_KEYS
 
 # final_number_match compares the LAST number on each side, for arithmetic word
 # problems where the model shows its work; see the workers for the extraction
@@ -182,6 +183,7 @@ class TransformersTextEvalSpec:
     trust_remote_code: bool = False
     local_custom_code_digests: dict[str, str] | None = None
     offline: bool = False
+    runtime_benchmark: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.base_model.strip():
@@ -210,9 +212,24 @@ class TransformersTextEvalSpec:
             raise ValueError("trust_remote_code is disabled for autonomous Chowder evaluation")
         if self.local_custom_code_digests is not None:
             verify_local_custom_code(self.base_model, self.local_custom_code_digests)
+        if self.runtime_benchmark is not None:
+            if not isinstance(self.runtime_benchmark, Mapping):
+                raise ValueError("runtime_benchmark must be a mapping when provided")
+            if not isinstance(self.runtime_benchmark.get("enabled", False), bool):
+                raise ValueError("runtime_benchmark.enabled must be boolean")
+            turns = self.runtime_benchmark.get("max_turns", 8)
+            new_tokens = self.runtime_benchmark.get("max_new_tokens", 128)
+            if not isinstance(turns, int) or turns < 1:
+                raise ValueError("runtime_benchmark.max_turns must be positive")
+            if not isinstance(new_tokens, int) or new_tokens < 1:
+                raise ValueError("runtime_benchmark.max_new_tokens must be positive")
+            if self.runtime_benchmark.get("harness", "plain") not in {"guarded", "plain"}:
+                raise ValueError("runtime_benchmark.harness must be guarded or plain")
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
+        if self.runtime_benchmark is None:
+            payload.pop("runtime_benchmark", None)
         payload["suites"] = [asdict(suite) for suite in self.suites]
         return payload
 
@@ -313,6 +330,11 @@ class TransformersTextEvalSpec:
                 else None
             ),
             offline=bool(evaluation.get("offline", backend.get("offline", False))),
+            runtime_benchmark=(
+                dict(evaluation["runtime_benchmark"])
+                if evaluation.get("runtime_benchmark") is not None
+                else None
+            ),
         )
 
 
@@ -483,15 +505,22 @@ class TransformersTextEvaluator:
         lifecycle_evidence = evaluation_lifecycle_evidence(runtime)
 
         expected_names = {suite.name for suite in spec.suites}
-        if set(metrics) != expected_names:
+        runtime_enabled = bool(spec.runtime_benchmark and spec.runtime_benchmark.get("enabled", False))
+        expected_metric_names = expected_names | (set(RUNTIME_METRIC_KEYS) if runtime_enabled else set())
+        expected_evidence_names = expected_names | ({"runtime_benchmark"} if runtime_enabled else set())
+        if set(metrics) != expected_metric_names:
             raise RuntimeError("evaluation result metric names do not match configured suites")
-        if set(suite_evidence) != expected_names:
+        if set(suite_evidence) != expected_evidence_names:
             raise RuntimeError("evaluation suite evidence names do not match configured suites")
 
         fingerprint_hashes: dict[str, str] = {}
         rendering_evidence: dict[str, dict[str, Any]] = {}
         specs_by_name = {suite.name: suite for suite in spec.suites}
         for suite_name, suite_payload in suite_evidence.items():
+            if suite_name == "runtime_benchmark":
+                if not isinstance(suite_payload, list):
+                    raise RuntimeError("runtime benchmark evidence must be a list")
+                continue
             if not isinstance(suite_payload, Mapping):
                 raise RuntimeError(f"suite evidence for {suite_name!r} is invalid")
             # P4: bind what the worker actually rendered with, validated against

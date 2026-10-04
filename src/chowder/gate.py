@@ -63,12 +63,35 @@ def evaluate_candidate(
         if not target.target_met(value):
             unmet.append(target.name)
 
+    # Runtime safety gates are hard vetoes, not weighted objectives.  Missing
+    # evidence is deliberately a veto too: a text score cannot certify that a
+    # model actually observed a green repair or avoided nonexistent reads.
+    runtime_reasons: list[str] = []
+    runtime_checks = (
+        ("runtime_reward", "runtime_reward_min", "min"),
+        ("runtime_nonexistent_read_rate", "runtime_nonexistent_read_rate_max", "max"),
+    )
+    for metric_name, attribute, bound in runtime_checks:
+        threshold = getattr(goal, attribute)
+        if threshold is None:
+            continue
+        if metric_name not in candidate.metrics:
+            missing.append(metric_name)
+            runtime_reasons.append(f"{metric_name}:missing")
+            continue
+        value = float(candidate.metrics[metric_name])
+        passed = value >= threshold if bound == "min" else value <= threshold
+        if not passed:
+            runtime_reasons.append(f"{metric_name}:{value:g}>{threshold:g}" if bound == "max" else f"{metric_name}:{value:g}<{threshold:g}")
+
     score = weighted_gain / weight_total if weight_total else float("-inf")
-    accepted = not regressions and not missing and score > goal.minimum_promotion_gain
+    accepted = not regressions and not missing and not runtime_reasons and score > goal.minimum_promotion_gain
     goal_met = not unmet and not missing
 
     if missing:
         reason = "rejected: evaluation evidence is incomplete"
+    elif runtime_reasons:
+        reason = "rejected: runtime safety gate failed: " + ", ".join(runtime_reasons)
     elif regressions:
         reason = "rejected: regression tolerance exceeded"
     elif score <= goal.minimum_promotion_gain:

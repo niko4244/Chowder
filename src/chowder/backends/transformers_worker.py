@@ -31,8 +31,10 @@ from ..trainability import (
     resolve_expected_module_paths,
 )
 from ..adapter_guard import assert_adapter_is_live
+from ..adapter_bundle import write_adapter_bundle_manifest
 from ..hf_resilience import cache_status, with_hub_retries
 from ..local_model_compat import patch_transformers5_custom_model
+from ..provenance import sha256_directory
 from safetensors import SafetensorError
 from .activation_offload_hooks import offload_pack, offload_unpack
 from .training_data import (
@@ -57,6 +59,132 @@ def _package_version(name: str) -> str:
 #: Bound on the recorded per-step log, so a long run cannot turn its own
 #: evidence into an unbounded payload. Truncation is recorded, never silent.
 _STEP_LOG_LIMIT = 5000
+
+
+def _bounded_token_unlikelihood(logits: Any, labels: Any) -> Any:
+    """Return a finite, bounded penalty for disfavored target tokens.
+
+    Maximizing ordinary negative log-likelihood has no lower bound: a model can
+    make the rejected continuation arbitrarily unlikely and destabilize the
+    adapter.  This uses a capped target probability instead.  The cap makes
+    the penalty finite while retaining a useful gradient away from the rejected
+    action.
+    """
+    import torch
+    import torch.nn.functional as functional
+
+    target_prob = functional.softmax(logits, dim=-1).gather(
+        -1, labels.clamp_min(0).unsqueeze(-1)
+    ).squeeze(-1)
+    return -torch.log1p(-target_prob.clamp(max=1.0 - 1e-4))
+
+
+def _reward_weighted_loss(logits: Any, labels: Any, rewards: Any) -> Any:
+    """Compute positive NLL plus bounded unlikelihood for rejected rows."""
+    import torch
+    import torch.nn.functional as functional
+
+    shifted_logits = logits[:, :-1, :]
+    shifted_labels = labels[:, 1:]
+    positive_loss = functional.cross_entropy(
+        shifted_logits.reshape(-1, shifted_logits.shape[-1]),
+        shifted_labels.reshape(-1),
+        ignore_index=-100,
+        reduction="none",
+    ).view(shifted_labels.shape)
+    negative_loss = _bounded_token_unlikelihood(shifted_logits, shifted_labels)
+    mask = shifted_labels.ne(-100)
+    positive_rows = (positive_loss * mask).sum(1) / mask.sum(1).clamp_min(1)
+    negative_rows = (negative_loss * mask).sum(1) / mask.sum(1).clamp_min(1)
+    weights = torch.as_tensor(rewards, device=positive_rows.device, dtype=positive_rows.dtype)
+    magnitude = weights.abs().clamp(max=4.0)
+    return torch.where(weights > 0, positive_rows, negative_rows * magnitude).mean()
+
+
+def _prepare_reward_text_dataset(
+    dataset: Any,
+    tokenizer: Any,
+    *,
+    text_field: str,
+    reward_field: str,
+    max_length: int,
+) -> Any:
+    """Tokenize text rows while returning exactly one reward feature."""
+    def tokenize(batch):
+        encoded = tokenizer(
+            batch[text_field], truncation=True, max_length=max_length, padding=False
+        )
+        encoded[reward_field] = [float(value) for value in batch[reward_field]]
+        return encoded
+
+    # Remove all source columns, including reward.  The returned feature is the
+    # sole source of truth for collation; retaining the source column creates a
+    # duplicate Arrow feature and is the cause of the original KeyError.
+    return dataset.map(tokenize, batched=True, remove_columns=dataset.column_names)
+
+
+def _prepare_reward_text_completion_dataset(
+    dataset: Any,
+    tokenizer: Any,
+    *,
+    text_field: str,
+    completion_field: str,
+    reward_field: str,
+    max_length: int,
+) -> Any:
+    """Tokenize full text rows but supervise only the completion suffix."""
+    def tokenize(batch):
+        encoded = tokenizer(
+            batch[text_field], truncation=True, max_length=max_length, padding=False
+        )
+        completions = tokenizer(
+            batch[completion_field], add_special_tokens=False, padding=False
+        )["input_ids"]
+        labels = []
+        for input_ids, completion_ids in zip(encoded["input_ids"], completions):
+            input_ids = list(input_ids)
+            completion_ids = list(completion_ids)
+            start = next(
+                (
+                    index
+                    for index in range(len(input_ids) - len(completion_ids) + 1)
+                    if input_ids[index : index + len(completion_ids)] == completion_ids
+                ),
+                None,
+            )
+            if start is None:
+                raise RuntimeError("completion_field is not a token subsequence of text_field")
+            end = start + len(completion_ids)
+            labels.append(
+                [-100] * start
+                + input_ids[start:end]
+                + [-100] * (len(input_ids) - end)
+            )
+        encoded["labels"] = labels
+        encoded[reward_field] = [float(value) for value in batch[reward_field]]
+        return encoded
+
+    return dataset.map(tokenize, batched=True, remove_columns=dataset.column_names)
+
+
+def _prepare_reward_chat_dataset(
+    dataset: Any,
+    tokenizer: Any,
+    *,
+    messages_field: str,
+    reward_field: str,
+    max_length: int,
+) -> Any:
+    """Tokenize chat rows while returning exactly one reward feature."""
+    def tokenize(example, index):
+        messages = _validate_chat_messages(example[messages_field], row_index=index)
+        encoded = _build_chat_example(
+            tokenizer, messages, max_length=max_length, row_index=index
+        )
+        encoded[reward_field] = float(example[reward_field])
+        return encoded
+
+    return dataset.map(tokenize, with_indices=True, remove_columns=dataset.column_names)
 
 
 def _step_log(trainer: Any) -> dict[str, Any]:
@@ -241,13 +369,17 @@ def _cuda_resource_snapshot(torch: Any, model: Any, trainer: Any) -> dict[str, A
     }
 
 
-def _save_adapter_with_retry(model: Any, output_dir: str | Path) -> None:
+def _save_adapter_with_retry(
+    model: Any, output_dir: str | Path, selected_adapters: list[str] | None = None
+) -> None:
     """save_pretrained() once, with one bounded retry on Windows file-lock
     failures (os error 32). safetensors surfaces those as SafetensorError,
     not OSError, so both exception types are retried; the message is matched
     so genuine I/O failures still raise on first attempt."""
     try:
-        model.save_pretrained(output_dir, safe_serialization=True)
+        model.save_pretrained(
+            output_dir, safe_serialization=True, selected_adapters=selected_adapters
+        )
         return
     except (OSError, SafetensorError) as save_error:
         if "os error 32" not in str(save_error).lower():
@@ -258,7 +390,9 @@ def _save_adapter_with_retry(model: Any, output_dir: str | Path) -> None:
             stale.unlink()
         except OSError:
             pass
-    model.save_pretrained(output_dir, safe_serialization=True)
+    model.save_pretrained(
+        output_dir, safe_serialization=True, selected_adapters=selected_adapters
+    )
 
 
 def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
@@ -313,6 +447,29 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             TrainingArguments,
             set_seed,
         )
+
+        class _RewardWeightedTrainer(Trainer):
+            """Apply signed per-row rewards to token-level causal-LM loss.
+
+            Positive rewards minimize the example's NLL; negative rewards
+            maximize it.  The dataset therefore carries an explicit negative
+            reward rather than silently treating rejected trajectories as
+            positive demonstrations.
+            """
+            def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+                rewards = inputs.pop("reward", None)
+                outputs = model(**inputs)
+                if rewards is None:
+                    loss = outputs.loss
+                else:
+                    # Keep the negative branch bounded: maximizing raw NLL is
+                    # unbounded and can drive the repair adapter into arbitrary
+                    # text. Rejected rows instead use capped token
+                    # unlikelihood on the observed target tokens.
+                    loss = _reward_weighted_loss(
+                        outputs.logits, inputs["labels"], rewards
+                    )
+                return (loss, outputs) if return_outputs else loss
     except ImportError as exc:
         raise RuntimeError(
             "Transformers backend dependencies are missing; install chowder-ai[train] "
@@ -590,11 +747,36 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         model = PeftModel.from_pretrained(
             base_model,
             spec.parent_adapter,
-            is_trainable=True,
+            is_trainable=not spec.repair_only,
         )
         # A parent adapter that silently fails to load would make a
         # 'continued' run a fresh one, with provenance claiming otherwise.
         assert_adapter_is_live(model, spec.parent_adapter)
+        if spec.repair_only:
+            # Keep gen-2 as a frozen inference path and learn a distinct,
+            # named repair adapter.  Saving selected_adapters below publishes
+            # only this module; the parent adapter remains byte-for-byte bound.
+            for parameter in model.parameters():
+                parameter.requires_grad_(False)
+            repair_lora = LoraConfig(
+                r=spec.lora_r,
+                lora_alpha=spec.lora_alpha,
+                lora_dropout=spec.lora_dropout,
+                target_modules=(
+                    _resolve_target_modules(
+                        base_model,
+                        explicit=spec.target_modules,
+                        preset=spec.target_preset,
+                    )
+                ),
+                bias="none",
+                task_type=TaskType.CAUSAL_LM,
+                use_rslora=spec.use_rslora,
+            )
+            model.add_adapter("repair", repair_lora)
+            model.set_adapter("repair")
+            for name, parameter in model.named_parameters():
+                parameter.requires_grad_("lora_" in name and "repair" in name)
     else:
         target_modules = _resolve_target_modules(
             base_model, explicit=spec.target_modules, preset=spec.target_preset
@@ -632,6 +814,25 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             intended, adapted_module_paths(model), unknown_suffixes=unknown_targets
         ).to_dict()
 
+    parent_frozen_verified: bool | None = None
+    repair_trainable_parameters = 0
+    if spec.repair_only:
+        parent_frozen_verified = all(
+            not parameter.requires_grad
+            for name, parameter in model.named_parameters()
+            if "lora_" in name and "default" in name
+        )
+        repair_trainable_parameters = sum(
+            parameter.numel()
+            for name, parameter in model.named_parameters()
+            if "lora_" in name and "repair" in name and parameter.requires_grad
+        )
+        if not parent_frozen_verified or repair_trainable_parameters == 0:
+            raise RuntimeError(
+                "repair-only invariant failed: gen-2 LoRA is not fully frozen "
+                "or the repair adapter has no trainable parameters"
+            )
+
     if spec.gradient_checkpointing:
         model.config.use_cache = False
     load_timer.__exit__()
@@ -645,7 +846,25 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         raise RuntimeError(
             f"dataset is missing {kind} field {field!r}; columns={primary.column_names}"
         )
-    primary = primary.select_columns([field])
+    if spec.reward_aware:
+        if spec.reward_field not in primary.column_names:
+            raise RuntimeError(
+                f"reward-aware dataset is missing reward field {spec.reward_field!r}; "
+                f"columns={primary.column_names}"
+            )
+        selected_fields = [field, spec.reward_field]
+        if spec.completion_field is not None:
+            if spec.completion_field not in primary.column_names:
+                raise RuntimeError(
+                    f"text dataset is missing completion field {spec.completion_field!r}; "
+                    f"columns={primary.column_names}"
+                )
+            selected_fields.append(spec.completion_field)
+        primary = primary.select_columns(selected_fields)
+        if any(float(value) == 0.0 for value in primary[spec.reward_field]):
+            raise RuntimeError("reward-aware dataset contains a zero-reward row")
+    else:
+        primary = primary.select_columns([field])
     primary_rows = len(primary)
     if primary_rows == 0:
         raise RuntimeError("training dataset contains no rows")
@@ -659,7 +878,17 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             raise RuntimeError(
                 f"replay dataset is missing {kind} field {field!r}; columns={replay.column_names}"
             )
-        replay = replay.select_columns([field])
+        if spec.reward_aware:
+            if spec.reward_field not in replay.column_names:
+                raise RuntimeError("reward-aware replay dataset is missing reward field")
+            replay_fields = [field, spec.reward_field]
+            if spec.completion_field is not None:
+                if spec.completion_field not in replay.column_names:
+                    raise RuntimeError("reward-aware replay dataset is missing completion field")
+                replay_fields.append(spec.completion_field)
+            replay = replay.select_columns(replay_fields)
+        else:
+            replay = replay.select_columns([field])
         replay_available_rows = len(replay)
         replay_selected_rows = _replay_sample_count(
             primary_rows, replay_available_rows, spec.replay_ratio
@@ -675,18 +904,36 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     if is_chat:
         mixed_text_sha = _chat_digest(dataset, field)
 
-        def tokenize_chat(example, index):
-            messages = _validate_chat_messages(example[field], row_index=index)
-            return _build_chat_example(
-                tokenizer, messages, max_length=spec.max_length, row_index=index
+        if spec.reward_aware:
+            tokenized = _prepare_reward_chat_dataset(
+                dataset,
+                tokenizer,
+                messages_field=field,
+                reward_field=spec.reward_field,
+                max_length=spec.max_length,
             )
-
-        tokenized = dataset.map(
-            tokenize_chat, with_indices=True, remove_columns=dataset.column_names
-        )
-        collator = DataCollatorForSeq2Seq(
+        else:
+            tokenized = dataset.map(
+                lambda example, index: _build_chat_example(
+                    tokenizer,
+                    _validate_chat_messages(example[field], row_index=index),
+                    max_length=spec.max_length,
+                    row_index=index,
+                ),
+                with_indices=True,
+                remove_columns=dataset.column_names,
+            )
+        base_collator = DataCollatorForSeq2Seq(
             tokenizer=tokenizer, model=None, label_pad_token_id=-100, padding=True
         )
+        if not spec.reward_aware:
+            collator = base_collator
+        else:
+            def collator(features):
+                rewards = [float(item.pop(spec.reward_field)) for item in features]
+                batch = base_collator(features)
+                batch[spec.reward_field] = rewards
+                return batch
         total_token_count = sum(len(row) for row in tokenized["input_ids"])
         assistant_token_count = sum(
             sum(1 for label in row if label != -100) for row in tokenized["labels"]
@@ -694,16 +941,48 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     else:
         mixed_text_sha = _text_digest(dataset, field)
 
-        def tokenize_text(batch):
-            return tokenizer(
-                batch[field],
-                truncation=True,
+        if spec.reward_aware and spec.completion_field is not None:
+            tokenized = _prepare_reward_text_completion_dataset(
+                dataset,
+                tokenizer,
+                text_field=field,
+                completion_field=spec.completion_field,
+                reward_field=spec.reward_field,
                 max_length=spec.max_length,
-                padding=False,
             )
-
-        tokenized = dataset.map(tokenize_text, batched=True, remove_columns=dataset.column_names)
-        collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+        elif spec.reward_aware:
+            tokenized = _prepare_reward_text_dataset(
+                dataset,
+                tokenizer,
+                text_field=field,
+                reward_field=spec.reward_field,
+                max_length=spec.max_length,
+            )
+        else:
+            tokenized = dataset.map(
+                lambda batch: tokenizer(
+                    batch[field], truncation=True, max_length=spec.max_length, padding=False
+                ),
+                batched=True,
+                remove_columns=dataset.column_names,
+            )
+        if spec.completion_field is not None:
+            # Completion-masked text rows need a padding collator that pads
+            # labels alongside inputs; the causal-LM collator assumes labels
+            # are created from inputs and cannot handle pre-masked rows.
+            base_collator = DataCollatorForSeq2Seq(
+                tokenizer=tokenizer, model=None, label_pad_token_id=-100, padding=True
+            )
+        else:
+            base_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+        if not spec.reward_aware:
+            collator = base_collator
+        else:
+            def collator(features):
+                rewards = [float(item.pop(spec.reward_field)) for item in features]
+                batch = base_collator(features)
+                batch[spec.reward_field] = rewards
+                return batch
 
     output_dir = Path(spec.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -734,6 +1013,10 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         "fp16": (dtype is torch.float16),
         "seed": spec.seed,
         "data_seed": spec.seed,
+        # ``reward`` is consumed by _RewardWeightedTrainer, not by the model
+        # signature.  Trainer's default column pruning would remove it before
+        # the custom collator/Trainer sees the row.
+        "remove_unused_columns": not spec.reward_aware,
     }
     if spec.save_strategy == "steps":
         args_kwargs["save_steps"] = spec.save_steps
@@ -758,7 +1041,8 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     if spec.detailed_timing_telemetry:
         timer_callback = _TrainingPhaseTimerCallback()
         callbacks.append(timer_callback)
-    trainer = Trainer(
+    trainer_class = _RewardWeightedTrainer if spec.reward_aware else Trainer
+    trainer = trainer_class(
         model=model,
         args=args,
         train_dataset=tokenized,
@@ -854,7 +1138,20 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     # target path open while safetensors serializes, failing the whole run
     # after training already succeeded. One bounded cleanup+retry on the
     # exact save site; anything that fails twice is a real error.
-    _save_adapter_with_retry(model, output_dir)
+    _save_adapter_with_retry(
+        model,
+        output_dir,
+        selected_adapters=None if spec.repair_only else None,
+    )
+    if spec.repair_only:
+        # Keep the frozen parent as ``default`` and the learned module under
+        # ``repair``.  Evaluators can activate both without mutating either
+        # adapter on disk.
+        write_adapter_bundle_manifest(
+            output_dir,
+            parent_sha256=parent_adapter_sha or "",
+            repair_sha256=sha256_directory(output_dir / "repair"),
+        )
     tokenizer.save_pretrained(output_dir)
     publication_timer.__exit__()
 
@@ -1016,6 +1313,10 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "component_paths": component_paths,
             "continued_from_parent_adapter": parent_adapter_sha is not None,
             "parent_adapter_sha256": parent_adapter_sha,
+            "parent_frozen_verified": parent_frozen_verified,
+            "repair_trainable_parameters": repair_trainable_parameters,
+            "reward_aware": spec.reward_aware,
+            "reward_field": spec.reward_field if spec.reward_aware else None,
         },
         "versions": {
             "torch": _package_version("torch"),

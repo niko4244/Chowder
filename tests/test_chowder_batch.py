@@ -104,6 +104,84 @@ def test_batch_005_replay_repair_records_are_green_gated_when_available():
     assert sum(row["id"].startswith("repair-") for row in text_rows) == 12
 
 
+def test_runtime_trace_reward_compares_before_and_after_replay_sets(tmp_path):
+    import importlib.util
+
+    reward_spec = importlib.util.spec_from_file_location(
+        "runtime_trace_reward", Path(BATCH) / "runtime_trace_reward.py"
+    )
+    reward = importlib.util.module_from_spec(reward_spec)
+    reward_spec.loader.exec_module(reward)
+    before = [
+        {"role": "tool", "tool": "read_file", "args": {"path": "missing.py"},
+         "observation": "ERROR: no such file: missing.py"},
+        {"role": "final_report", "text": "tests pass"},
+    ]
+    after = [
+        {"role": "tool", "tool": "read_file", "args": {"path": "version.py"},
+         "observation": "def parse_version(s): pass"},
+        {"role": "tool", "tool": "write_file", "args": {
+            "path": "version.py", "content": "def parse_version(s): parts.append('0')"
+        }, "observation": "OK version.py written"},
+        {"role": "tool", "tool": "run_tests", "args": {}, "observation": "2 passed"},
+        {"role": "final_report", "text": "Fixed; tests pass."},
+    ]
+    before_path = tmp_path / "before.jsonl"
+    after_path = tmp_path / "after.jsonl"
+    before_path.write_text(json.dumps({"trace": before}) + "\n", encoding="utf-8")
+    after_path.write_text(json.dumps({"trace": after}) + "\n", encoding="utf-8")
+    comparison = reward.compare_trace_sets(before_path, after_path)
+    assert comparison["delta"]["mean_reward"] > 0
+    assert comparison["after"]["green_count"] == 1
+    assert comparison["after"]["nonexistent_reads"] == 0
+    assert comparison["before"]["nonexistent_reads"] == 1
+
+
+def test_batch_007_repair_reward_dataset_has_signed_nonexistent_read_negatives():
+    import pytest
+
+    path = Path(BATCH) / "batch007_repair_only_reward_train.jsonl"
+    if not path.exists():
+        pytest.skip("batch-007 reward data not built")
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 24
+    assert sum(row["reward"] > 0 for row in rows) == 12
+    negatives = [row for row in rows if row["reward"] < 0]
+    assert len(negatives) == 12
+    assert all(row["reward"] == -4.0 for row in negatives)
+    joined = "\n".join(row["text"] for row in negatives)
+    assert "nonexistent" in joined or "missing.py" in joined or "run_tests" in joined
+    assert any("2 passed" in row["text"] for row in rows if row["reward"] > 0)
+
+
+def test_reward_aware_chat_config_is_supported():
+    from chowder.config_validation import validate_transformers_backend_config
+
+    validate_transformers_backend_config({
+        "backend": {
+            "type": "transformers-peft",
+            "base_model": "unused",
+            "dataset": "unused.jsonl",
+            "dataset_format": "chat",
+            "messages_field": "messages",
+            "reward_field": "reward",
+            "reward_aware": True,
+            "training": {},
+            "lora": {"target_modules": ["q_proj"]},
+        }
+    })
+
+
+def test_repair_only_requires_a_frozen_parent_adapter():
+    import pytest
+    from chowder.backends.transformers_peft import TransformersPeftRunSpec
+
+    with pytest.raises(ValueError, match="repair_only requires"):
+        TransformersPeftRunSpec(
+            base_model="unused", dataset="unused", output_dir="unused", repair_only=True
+        )
+
+
 def test_batch_006_teacher_data_has_corrected_preference_context():
     import pytest
 
@@ -195,6 +273,15 @@ def test_runtime_loop_machinery_offline():
     ]
     verdict = rl.run_loop(lambda msgs: actions.pop(0), max_turns=8, verbose=False)
     assert verdict["passed"] and verdict["green_seen"] and not verdict["violations"]
+    reward_spec = importlib.util.spec_from_file_location(
+        "runtime_trace_reward", root / "runtime_trace_reward.py"
+    )
+    reward = importlib.util.module_from_spec(reward_spec)
+    reward_spec.loader.exec_module(reward)
+    good_reward = reward.score_trace(verdict["trace"])
+    assert good_reward["reward"] > 0
+    assert good_reward["green_seen"] and good_reward["write_count"] == 1
+    assert good_reward["nonexistent_reads"] == 0
 
     # A fabricator (model-authored <tool_response>) fails.
     def fabricator(msgs):
@@ -213,3 +300,18 @@ def test_runtime_loop_machinery_offline():
     lazy = rl.run_loop(lambda msgs: "All done, green.", max_turns=4, verbose=False)
     assert not lazy["passed"] and lazy["green_seen"] is False
     assert re.search(r"pass|green", lazy["final_report"], re.I)
+
+    bad_trace = [
+        {"role": "tool", "tool": "read_file", "args": {"path": "missing.py"},
+         "observation": "ERROR: no such file: missing.py"},
+        {"role": "tool", "tool": "read_file", "args": {"path": "missing.py"},
+         "observation": "ERROR: no such file: missing.py"},
+        {"role": "tool", "tool": "run_tests", "args": {},
+         "observation": "FAILED 2 - broken"},
+        {"role": "final_report", "text": "All fixed; tests pass."},
+    ]
+    bad_reward = reward.score_trace(bad_trace)
+    assert bad_reward["reward"] < 0
+    assert bad_reward["nonexistent_reads"] == 2
+    assert bad_reward["repeated_read_paths"] == {"missing.py": 2}
+    assert bad_reward["terms"]["premature_success"] == -10.0

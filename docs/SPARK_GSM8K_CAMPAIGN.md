@@ -565,3 +565,273 @@ should change the training mechanism rather than add more near-duplicate
 positive repair rows: freeze gen-2, train a repair-only module or use a
 preference-aware objective, and include runtime traces where nonexistent
 reads receive an explicit negative reward.
+
+### Batch-007: frozen gen-2 repair-only reward-weighted module (prepared)
+
+Batch-007 changes the mechanism rather than adding another continuation pass.
+The new `chowder_batch/runtime_trace_reward.py` scores saved transcripts with
+signed additive reward. It awards reward for a real `write_file`, an observed
+`N passed` summary, a post-write final report, and bounded completion. It
+applies explicit negative reward to every nonexistent read, repeated read
+paths, recurrent malformed path families, tests before a write, repeated
+post-write tests without green, budget exhaustion, fabricated observations,
+and premature success claims. `runtime_loop.run_loop()` now embeds its
+transcript and the reward report in each verdict, so the score is auditable
+from the same run.
+
+The repair-only backend path is guarded by `backend.repair_only: true` and a
+hash-bound gen-2 `parent_adapter`. The worker loads gen-2 with
+`is_trainable=False`, verifies that every gen-2 LoRA parameter is frozen,
+adds a separately named `repair` LoRA, verifies that it has trainable
+parameters, and records both invariants in worker provenance. The adapter
+artifact retains `default` plus `repair`; evaluators activate both and check
+liveness independently.
+
+`chowder_batch/build_repair_reward_data.py` produced 24 rows: 12 positive
+observed-green repair trajectories and 12 negative-reward rows targeting
+nonexistent reads, repeated tests, and ungrounded success. The trainer recipe
+is `.chowder-spark-calib/gsm8k/run_batch007_repair_only.py`, capped at 24
+steps at lr 2e-6 with no replay. The dataset builder and offline tests pass.
+
+#### Batch-007 infrastructure verification
+
+Before any rerun, the reward-column failure was reproduced against a CPU
+`Trainer` step for both text and chat rows. The worker now removes all source
+columns during `datasets.map()` and returns exactly one encoded reward field;
+it also disables Trainer's unused-column pruning for reward-aware runs. The
+negative objective is capped token unlikelihood, not unbounded negative NLL.
+Focused CPU coverage is in `tests/test_reward_training_cpu.py` and includes
+finite extreme-logit behavior, one-step text/chat training, event rows, bundle
+hashing, and runtime-gate vetoes.
+
+`chowder_batch/build_event_reward_data.py` emits one row per tool action with
+context, action, observation, event label, and signed reward.
+`chowder_batch/runtime_benchmark.py` exercises three deterministic repair
+workspaces and reports `runtime_reward`, `runtime_green_rate`, and
+`runtime_nonexistent_read_rate`. `Goal` and the existing promotion gate now
+support hard runtime-reward and nonexistent-read thresholds; missing runtime
+evidence is a veto.
+
+The adapter bundle is now `chowder-adapter-bundle-v1` with frozen `default`
+plus `repair`, linear activation, repair-content hash, and a root parent
+adapter hash. Both text evaluators validate the manifest before loading the
+combined adapter.
+
+The corrected Spark batch-007 rerun completed training and evaluation. The
+candidate scored **0.720** on the GSM8K holdout versus the frozen gen-2 parent
+**0.730**, with no candidate error. The lifecycle ended `STOP_PLATEAU` /
+`UNMET` at the 0.74 bar and did not promote the candidate. The reward-column
+failure and the earlier manifest-root validation failure are therefore both
+resolved in the real run; batch-007 remains rejected on measured GSM8K
+performance, not on a training or adapter-load error.
+
+#### Batch-007 live runtime comparison
+
+The runtime benchmark is now part of the Transformers evaluation protocol when
+`evaluation.runtime_benchmark.enabled` is true. Both arms load the same Spark
+model and use the same three workspaces, turn budget, and tool protocol. The
+completed comparison was:
+
+| metric | gen-2 parent | batch-007 candidate |
+|---|---:|---:|
+| GSM8K holdout | 0.730 | 0.720 |
+| runtime green rate | 0.333 | 0.333 |
+| runtime nonexistent-read rate | 0.333 | 0.333 |
+| runtime reward | -4.333 | -4.333 |
+
+The candidate and parent traces are behaviorally identical on this benchmark.
+Both solve `sum_text`; both fail `version_parser` after writing an incorrect
+fix, then read a nonexistent test path and repeat red tests; both stop after
+only reading `slugify.py`. The runtime safety gate therefore vetoes promotion
+even before the GSM8K target is considered.
+
+#### Proposed batch-008: event-grounded repair-only module
+
+Batch-008 should remain a frozen-gen-2 repair-only run, but change the data
+unit and the acceptance rule:
+
+1. Build action-level rows from the three live traces with the exact context,
+   tool call, observation, event label, and signed action reward. Include the
+   failed version-parser write as a negative row, the nonexistent
+   `test_version.py` read as `-4`, repeated red tests as `-1` each, and the
+   slugify early stop as a negative completion example.
+2. Add corrected positive demonstrations for all three tasks. The version
+   demonstration must contain the real padding loop, and the slugify
+   demonstration must write the file, run tests, observe green, and only then
+   report success.
+3. Preserve completion-only assistant masking for chat rows and use the bounded
+   unlikelihood objective. Keep the adapter small (`r=8`) and lower the update
+   rate to `1e-6` for 12--16 steps to reduce the observed 1-point GSM8K
+   regression.
+4. Declare runtime gates before training: `runtime_green_rate == 1.0`,
+   `runtime_nonexistent_read_rate == 0.0`, and candidate runtime reward above
+   the parent. Keep GSM8K non-regression as a separate protected metric.
+5. Abort promotion if the runtime evaluator is missing, if either arm has
+   incomplete runtime evidence, or if the candidate merely matches the parent
+   runtime score.
+
+The next experiment should be accepted only if it improves runtime behavior
+without sacrificing the frozen parent’s GSM8K baseline; batch-007 currently
+fails both runtime safety gates and the GSM8K target.
+
+#### Batch-008 result and RRSI pivot
+
+The first batch-008 event-only run exposed a real training-system issue rather
+than a model-quality signal: Spark's chat template is not prefix-consistent for
+completion-only masking, and an initial masked-text collator also tried to pad
+unmasked labels incorrectly. The worker now supports `completion_field`, searches
+for the completion token subsequence in the rendered text, pads labels to the
+input length, and uses a seq2seq padding collator for those rows. A corrected
+16-step run then completed training and evaluation. It reached GSM8K **0.700**
+with runtime green rate `0.333`, nonexistent-read rate `0.333`, and runtime
+reward `-4.333`; it was rejected. The parent remains `0.730` with the same
+runtime metrics.
+
+A guarded harness variant was also tested directly against gen-2 and batch-008.
+It made behavior worse: parent runtime reward fell to `-8.333`, candidate to
+`-12.333`, while green rate stayed `0.333` and nonexistent-read rate stayed
+`0.333`. It is therefore rejected rather than enabled.
+
+The next direction follows RRSI (arXiv:2609.24972): evolve the frozen-model
+harness, not more adapter weights. The new `chowder.harness_evolution` module
+implements the paper's transferable pieces: annealed edit budgets, leakage
+screening, noise-aware conservative acceptance, cost-aware acceptance, and
+component pruning. The current plain harness remains the incumbent; guarded
+prompt/control-flow edits must earn their place on held-out tasks before they
+can become the default.
+
+### Batch-009: controlled harness experiment
+
+Batch-009 isolates harness changes from any training update. The gen-2 parent
+(`F:\Huihui-Spark-X2.5-4B-abliterated` + gen-2 adapter) and the plain harness
+stay frozen as the reference; every candidate differs only in harness code.
+
+#### Expanded benchmark
+
+`chowder.runtime_eval` was rebuilt around a task-family model. The evolve split
+now has **24 development tasks** and the held-out split **13 tasks**, spanning
+five families in both splits: imports, stateful bugs, multi-file repairs,
+failed-first fixes, and misleading test output. Each task carries a `check`
+function instead of a single-substring oracle; the old substring oracle had
+latent false-greens (`sum_text`'s marker was a substring of its own bug, and
+`shared_memo`'s matched the bug itself). `_is_green` now rejects "0 passed",
+partial-count lines, and observations containing failure/traceback markers, so
+misleading output can be scored correctly. Tests assert that every task starts
+red and that the two splits stay disjoint.
+
+New named metrics are published by `run_live_benchmark` and whitelisted by both
+text evaluators through `RUNTIME_METRIC_KEYS`: green completion, invalid
+(nonexistent) reads, premature completion, repeated actions, execution cost
+(read 1 / write 2 / run_tests 5), and policy tokens, plus per-family green
+rates.
+
+#### Two generic mechanisms
+
+* `state_aware` — file discovery from actual workspace state: a system message
+  listing the real files, refreshed every turn, and a miss that reports the real
+  available paths. Nothing is hard-coded; the listing comes from the live
+  workspace dict.
+* `recovery` — an explicit post-red state: after a failed `run_tests`, the
+  harness requires a corrected `write_file` and refuses to execute a re-run
+  until the workspace changes (the blocked call is recorded as a zero-cost
+  synthetic event and is not counted as a repeated real action).
+
+The old `guarded` prompt is retained only as a legacy variant; it is not one of
+the mechanisms.
+
+#### Paired results (identical tasks, decoding, seeds; full traces in
+`F:/chowder-campaign/batch009-harness/harness_compare.json`)
+
+| metric | plain evo | state_aware evo | recovery evo | plain held | state_aware held | recovery held |
+|---|---:|---:|---:|---:|---:|---:|
+| reward | -10.42 | -9.75 | -6.63 | -13.08 | -4.85 | -8.15 |
+| green completion | 0.292 | 0.292 | 0.375 | 0.231 | **0.538** | 0.385 |
+| invalid reads | 0.250 | 0.208 | 0.250 | 0.615 | 0.462 | 0.538 |
+| premature completion | 0.708 | 0.750 | 0.750 | 0.769 | 0.615 | 0.692 |
+| repeated actions | 0.417 | 0.792 | **0.250** | 0.692 | 0.923 | 0.462 |
+| execution cost | 7.54 | 9.25 | 6.63 | 11.31 | 10.46 | 8.31 |
+| policy tokens | 5339 | 13885 | 14015 | 3924 | 6203 | 5899 |
+
+Both mechanisms passed the regularized selector (`accepted: evolve gain
+transferred without held-out regression`). Trace inspection explains why, and
+where each one breaks:
+
+* `state_aware` converts the dominant early-report failure (report after only a
+  read) into completed repairs. Plain traces like `read -> (stop)` became
+  `read -> write -> run_tests[green] -> report` on held-out tasks
+  (`mutable_kwargs`, `shared_buffer`, `size_parser`, `import_typo`,
+  `import_pkg_reexport`). The listing steers the model toward missing imports
+  (`lib/__init__.py` instead of hallucinated `lib/shout.py`).
+* `recovery` fixes the repetition failure: repeated actions fall 0.417 -> 0.250
+  on evolve, and execution cost falls with them, because a blocked re-run is
+  never executed. Its failures shift to acting without re-reading the target.
+* Costs are real: both mechanisms roughly triple evolve policy tokens, and
+  `state_aware` regressed two evolve tasks (`single_file` 0.33 -> 0.00,
+  `multi_file` 0.25 -> 0.00) plus one held-out multi-file task while it fixed
+  four held-out families. `state_aware` also raised evolve repeated actions to
+  0.792 — the file listing invites revisits.
+
+The failure modes that remain in every arm are semantic: `failed_first_fix`
+tasks need a genuinely different second-attempt fix, and misleading-output
+tasks need the model to distrust a stale report line. No prompt mechanism in
+this batch addressed those.
+
+#### Batch-009 outcome and the training gate
+
+This is the first transferable harness improvement since batch-008: `state_aware`
+lifts held-out green completion from 0.231 to 0.538 (including 1.000 on the
+held-out import and stateful families), and `recovery` is a cheaper, safer
+loop. The next training batch, if any, should train only on
+genuinely new trajectories generated under the winning harness on the expand
+split, keeping the held-out tasks here untouched as the final test set.The alternatives — accept the token cost on the harness alone, or generate the new
+trajectories under a combined `state_aware+recovery` harness — are exactly the
+next paired measurements to take.
+
+#### 2026-09-25 — batch-009 v2: sixth family, compact prompt, green revocation (code, not measurements)
+
+The batch-009 harness code was substantially revised on 2026-09-25. **No live
+rerun has happened since**: everything in the paired-results table above is
+historical, computed under the *v1* semantics and the *five-family* benchmark,
+and must not be quoted as current. The stale artifact
+`F:/chowder-campaign/batch009-harness/harness_compare.json` (24 evo / 13
+held-out tasks, old scoring) is refused by the new code via the `run_config`
+fingerprint.
+
+What changed in `chowder.runtime_eval` / `batch009_harness_experiment.py`:
+
+* **Sixth task family `wrong_second_fix`.** Targets the dominant semantic
+  failure left after v1: the second attempt after a red test is a cosmetic
+  variant of the first fix rather than a genuinely different repair. The
+  synthetic forced-red `wrong_second_fix_partial_red_seen` row was removed;
+  the family is scored purely on real partial-then-corrected trajectories.
+  Splits were therefore grown past the 24/13 recorded above; the v2 numbers do
+  not exist yet.
+* **Scoring semantics change — green is revocable.** A content-changing
+  `write_file` after a green test, or a subsequent red test, resets
+  `green_seen_so_far`; `green_seen` now means the *last* state is green, and a
+  final report counts only if green still holds at report time. Any historical
+  green-rate comparison across this change is invalid. `budget_exhausted` is a
+  new trace role (distinguished from premature reports).
+* **Compact `state_aware` prompt.** The default system message is now
+  `"Files: <paths>. Read listed paths; test before success."` — the verbose
+  form is retained as `state_aware_legacy` for a like-for-like cost
+  comparison. `RUNTIME_METRIC_KEYS` additionally records prompt/policy char
+  and token counts, so the compact-prompt token saving is directly measurable
+  in the next run.
+* **`state_aware+recovery` combined harness** is first-class (harness list
+  validated: unique, known, plain required; stale/unreadable checkpoints abort
+  with `SystemExit` instead of silently resuming; the model loads only when
+  arms are missing; resume requires metrics present). The `run_config`
+  fingerprint covers both splits' task names, max_turns, max_new_tokens,
+  harnesses, and resolved base/parent paths, tagged
+  `harness_version="batch009-v2-wrong-second-fix-compact-state-aware"`.
+* **Trajectory/export guards** (`exp_e_pipeline.py`): repair trajectories are
+  evolve-only, re-verified for green-at-end plus final-report-after-green, and
+  batch-010 export rejects held-out task names, held-out content hashes,
+  held-out metadata fields, duplicate digests, and stale traces.
+
+Blocked (unchanged): the paired v2 rerun — including the combined
+`state_aware+recovery` arm, the compact-prompt token measurement, and any
+batch-010 trajectory generation — requires the GPU backend, which remains held
+by an unrelated llama-server process (PID 3764) with probes to the historical
+ports timing out. No v2 artifact has been fabricated to fill the gap.

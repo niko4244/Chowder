@@ -551,6 +551,19 @@ def project_from_mapping(
             path="goal.minimum_promotion_gain",
         ),
         require_protocol_match=bool(goal_raw.get("require_protocol_match", False)),
+        runtime_reward_min=(
+            None
+            if goal_raw.get("runtime_reward_min") is None
+            else _finite(goal_raw["runtime_reward_min"], path="goal.runtime_reward_min")
+        ),
+        runtime_nonexistent_read_rate_max=(
+            None
+            if goal_raw.get("runtime_nonexistent_read_rate_max") is None
+            else _finite(
+                goal_raw["runtime_nonexistent_read_rate_max"],
+                path="goal.runtime_nonexistent_read_rate_max",
+            )
+        ),
     )
 
     baseline_raw = _mapping(raw.get("baseline", {"mode": "auto"}), path="baseline")
