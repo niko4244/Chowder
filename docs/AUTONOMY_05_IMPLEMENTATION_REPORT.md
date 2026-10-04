@@ -56,9 +56,9 @@ The audit's single most important open change, implemented on top of the
 commit stack above:
 
 - **One owner of the settlement-refusal vocabulary.**
-  `compute_cost.settlement_refusal(evidence)` reads exactly the three shapes
-  production writes (the `budget_settlement` verdict, the `refused_by` stamp,
-  and the evaluation path's `settlement_failed` marker) and returns the
+  `compute_cost.settlement_refusal(evidence)` reads exactly the two shapes
+  production writes (the `budget_settlement` verdict and the `refused_by`
+  stamp) and returns the
   machine-readable identifier, or `None`. `attempt_failure.classify_failure`
   derives its settlement branch from the same predicate, so the classifier
   and the runner can never disagree about what was refused — the

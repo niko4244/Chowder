@@ -37,7 +37,7 @@ refusals, an ownership proof that the kind rule lives in the domain and is
 wrapped with source context at load, and unchanged promotion when neither
 section is declared. Ownership is consolidated: the `RETENTION_*`
 reason codes live on `RetentionViolation` (`retention.py`), the settlement
-refusal vocabulary reads exactly the three production shapes, and the
+refusal vocabulary reads exactly the two production shapes, and the
 constraint `kind` rule is validated once, in the domain.
 
 ## Proven only at small scale

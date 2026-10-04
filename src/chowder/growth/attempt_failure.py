@@ -151,14 +151,14 @@ def classify_failure(attempt: Mapping[str, Any]) -> FailureClassification:
     # One predicate owns the refusal vocabulary, so classification and the
     # runner's advance rule can never disagree about what was refused: the
     # same settlement fact the gate reads is the one classified here.
-    settle_refusal = settlement_refusal(attempt)
-    if settle_refusal:
+    settlement_reason = settlement_refusal(attempt)
+    if settlement_reason:
         return FailureClassification(
             failure_class=FailureClass.BUDGET_EXHAUSTED,
             evidence_state=None,
             action=NextAction.RETRY_UNCHANGED,
             reason=(
-                f"settlement refused ({settle_refusal}): the attempt cost more "
+                f"settlement refused ({settlement_reason}): the attempt cost more "
                 "than its declared projection, so the mechanism's evidence is "
                 "unpriced and unrecorded"
             ),

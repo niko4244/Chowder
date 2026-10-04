@@ -7,9 +7,8 @@ two halves — plus the fixture repair the wiring forced.
 
 `compute_cost.settlement_refusal(evidence)` is the single owner of the
 settlement-refusal vocabulary: it reads the production `budget_settlement`
-verdict, the classifier-facing `settle_refusal` field, and the
-`refused_by: budget_settlement` stamp, and returns the machine-readable
-identifier (`ACTUAL_EXCEEDS_PROJECTION`, ...) or `None`.
+verdict and the `refused_by: budget_settlement` stamp, and returns the
+machine-readable identifier (`ACTUAL_EXCEEDS_PROJECTION`, ...) or `None`.
 
 - `run_search` ends the lineage of an attempt that settled over budget: the
   spend stays in the accounting, the attempt stays in the round's record,

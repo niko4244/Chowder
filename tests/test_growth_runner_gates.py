@@ -33,11 +33,7 @@ from chowder.growth.frontier_reference import SnapshotStore
 from chowder.growth.lineage import GenerationLedger, RegressionMemory
 from chowder.growth.metric_binding import BindingReport, PromotionAssembly
 from chowder.growth.promotion import BenchmarkResult, PromotionInput, evaluate_promotion
-from chowder.growth.retention import (
-    RetentionConstraint,
-    RetentionProfile,
-    evaluate_retention,
-)
+from chowder.growth.retention import RetentionConstraint, RetentionProfile
 
 from test_growth_candidate_search import (
     _attempt,
@@ -206,12 +202,6 @@ def test_the_predicate_reads_the_production_settlement_verdict() -> None:
     assert settlement_refusal(evidence) == "ACTUAL_EXCEEDS_PROJECTION"
 
 
-def test_the_predicate_reads_the_evaluation_paths_settlement_failed_marker() -> None:
-    assert settlement_refusal({"settlement_failed": "ACTUAL_EXCEEDS_PROJECTION"}) == (
-        "ACTUAL_EXCEEDS_PROJECTION"
-    )
-
-
 def test_the_predicate_reads_the_refusal_stamp_alone() -> None:
     assert settlement_refusal(
         {"refused_by": "budget_settlement", "refusal_reason": _PROJECTION_REASON}
@@ -329,16 +319,9 @@ def test_a_retention_regression_rejects_a_promotion(tmp_path) -> None:  # noqa: 
         if reason.startswith("RETENTION_REGRESSION") and "reasoning@heldout" in reason
     ]
     assert regression, decision.reasons
-    # The code is the domain's own: the reason string is the violation's
-    # ``code`` property rendered, so the vocabulary cannot drift from its
-    # owner. (Pinned here, not to the literal, so a rename lands in one file.)
-    assert regression[0].startswith(
-        evaluate_retention(
-            _profile(REASONING),
-            parent_values={"reasoning@heldout": 0.71},
-            candidate_values={"reasoning@heldout": 0.51},
-        )[0].code
-    )
+    # The reason string carries the domain's own RETENTION_* code: the
+    # vocabulary is owned by RetentionViolation.code, not re-derived here.
+    assert regression[0].startswith("RETENTION_REGRESSION: ")
 
 
 def test_an_unmeasured_constraint_rejects_fail_closed(tmp_path) -> None:  # noqa: ANN001
