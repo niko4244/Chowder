@@ -3,6 +3,13 @@ from __future__ import annotations
 
 import pytest
 
+# The whole file exercises the real trainer stack (tokenizers/transformers
+# + torch): skip as a module in the light CI environments, run in the
+# cpu-smoke job that installs .[train,dev].
+pytest.importorskip("tokenizers")
+pytest.importorskip("transformers")
+pytest.importorskip("torch")
+
 def _tokenizer():
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
@@ -30,8 +37,6 @@ def _dataset(rows):
 
 
 def _one_step(dataset, tokenizer, *, chat):
-    pytest.importorskip("torch", reason="reward one-step needs the real trainer stack")
-    pytest.importorskip("transformers", reason="reward one-step needs the real trainer stack")
     import torch
     from transformers import (
         DataCollatorForLanguageModeling,
