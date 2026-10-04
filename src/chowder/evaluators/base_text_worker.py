@@ -20,6 +20,10 @@ from .generation import observed_generation, resolve_eos_token_ids
 from .rendering import render_prompt
 from .scoring import final_answer, final_number, normalize, observed_score, score
 from .vram import MemorySampler, peak_vram as _peak_vram
+from ..runtime_eval import make_transformers_generate, run_live_benchmark
+from ..adapter_guard import assert_adapter_is_live
+from ..adapter_bundle import read_adapter_bundle_manifest
+from .transformers_text_worker import placement_after_adapter
 from .placement import dispatch_offloaded, placement_note
 from .transformers_text import EvalSuiteSpec
 
@@ -148,6 +152,33 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
             model = dispatch_offloaded(model, device_name)
         else:
             model = model.to(device_name)
+    # Parent-adapter baseline: this run measures the adapter a continuation
+    # project trains FROM, so attach it exactly the way the candidate worker
+    # does -- including the liveness guard, so an adapter that cannot change
+    # outputs fails the baseline loudly instead of scoring as the dense base.
+    adapter_liveness: dict[str, Any] | None = None
+    if spec.adapter_dir is not None:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, spec.adapter_dir, is_trainable=False)
+        adapter_liveness = assert_adapter_is_live(model, spec.adapter_dir)
+        repair_dir = Path(spec.adapter_dir) / "repair"
+        if (Path(spec.adapter_dir) / "chowder-adapter-bundle.json").is_file():
+            read_adapter_bundle_manifest(spec.adapter_dir)
+        if (repair_dir / "adapter_config.json").is_file():
+            model.load_adapter(str(repair_dir), adapter_name="repair", is_trainable=False)
+            adapter_liveness["repair"] = assert_adapter_is_live(model, repair_dir)
+            model.base_model.add_weighted_adapter(
+                ["default", "repair"],
+                [1.0, 1.0],
+                adapter_name="combined",
+                combination_type="linear",
+            )
+            model.set_adapter("combined", inference_mode=True)
+        if spec.placement == "offload":
+            model = placement_after_adapter(model, spec=spec, device_name=device_name)
+        else:
+            model = model.to(device_name)
     model.eval()
     if spec.placement == "offload":
         # Reported per run: "offload" means nothing unless the dense weights
@@ -257,6 +288,20 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
                 "resolved_eos_token_id": resolved_eos_token_id,
                 **render_evidence,
             }
+
+        if spec.runtime_benchmark and spec.runtime_benchmark.get("enabled", False):
+            runtime_result = run_live_benchmark(
+                make_transformers_generate(
+                    tokenizer,
+                    model,
+                    max_new_tokens=int(spec.runtime_benchmark.get("max_new_tokens", 128)),
+                    device=device,
+                ),
+                max_turns=int(spec.runtime_benchmark.get("max_turns", 8)),
+                harness=str(spec.runtime_benchmark.get("harness", "plain")),
+            )
+            metrics.update(runtime_result["metrics"])
+            evidence["runtime_benchmark"] = runtime_result["tasks"]
 
     # The baseline arm's own generation, timed and sampled separately from the
     # candidate's -- one arm cannot measure the other, and the ledger says so.
