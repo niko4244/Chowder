@@ -28,6 +28,8 @@ from chowder.growth.lineage import GenerationLedger
 from chowder.growth.promotion import BenchmarkResult, PromotionInput, evaluate_promotion
 from chowder.growth.statistics import compare
 
+from growth_gate_fixtures import _samples
+
 
 def _profile_estimates() -> dict[str, float]:
     return {
@@ -170,12 +172,6 @@ def _results(
 LIVECODE = "livecodebench@2025-04"
 GPQA = "gpqa_diamond@2025-05-30"
 MATH500 = "math500@2024-11"
-
-
-def _samples(mean: float, spread: float = 0.02, blocks: int = 5) -> tuple[float, ...]:
-    """Per-sample scores centered on ``mean`` with honest spread."""
-    pattern = (-1.5, -0.5, 0.0, 0.5, 1.5)
-    return tuple(mean + spread * p for p in pattern * blocks)
 
 
 def _promotion_input(candidate_targets, candidate_protected, *, contamination="CLEAN"):

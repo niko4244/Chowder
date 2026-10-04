@@ -47,6 +47,8 @@ from chowder.growth.metric_binding import (
 from chowder.growth.promotion import BenchmarkResult, PromotionInput, evaluate_promotion
 from chowder.growth.retention import RetentionConstraint, RetentionProfile
 
+from growth_gate_fixtures import _result, _samples
+
 from test_growth_candidate_search import (
     _attempt,
     _checkpoint_artifact,
@@ -89,25 +91,9 @@ def _settlement_refused(recipe_id: str, **extra: object) -> dict:
     return row
 
 
-def _samples(mean: float, spread: float = 0.02, blocks: int = 5) -> tuple[float, ...]:
-    """Per-sample scores centered on ``mean`` with honest spread."""
-    pattern = (-1.5, -0.5, 0.0, 0.5, 1.5)
-    return tuple(mean + spread * p for p in pattern * blocks)
-
-
 def _retention_code_reasons(decision) -> list[str]:  # noqa: ANN001
     """The decision's reasons that carry a RETENTION_* machine identifier."""
     return [r for r in decision.reasons if str(r).split(":", 1)[0].startswith("RETENTION_")]
-
-
-def _result(benchmark: str, score: float, *, origin: str) -> BenchmarkResult:
-    return BenchmarkResult(
-        benchmark_qualified_id=benchmark,
-        score=score,
-        samples=_samples(score),
-        contamination="CLEAN",
-        measurement_origin=origin,
-    )
 
 
 def _promotion_results(

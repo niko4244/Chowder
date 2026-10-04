@@ -30,6 +30,7 @@ from chowder.growth.promotion import BenchmarkResult
 from chowder.growth.retention import RetentionConstraint, RetentionProfile
 
 import test_growth_campaign_runner as campaign_fixture
+from growth_gate_fixtures import _result, _samples
 
 TARGET = campaign_fixture.TARGET_ID
 CONSTRAINED = campaign_fixture.PROTECTED_ID
@@ -62,21 +63,6 @@ TIER_SECTION = {
         TARGET: "promotion-evidence",
     }
 }
-
-
-def _samples(mean: float, spread: float = 0.02, blocks: int = 5) -> tuple[float, ...]:
-    pattern = (-1.5, -0.5, 0.0, 0.5, 1.5)
-    return tuple(mean + spread * p for p in pattern * blocks)
-
-
-def _result(benchmark: str, score: float, *, origin: str) -> BenchmarkResult:
-    return BenchmarkResult(
-        benchmark_qualified_id=benchmark,
-        score=score,
-        samples=_samples(score),
-        contamination="CLEAN",
-        measurement_origin=origin,
-    )
 
 
 def _manifest(tmp_path, **overrides) -> CampaignManifest:  # noqa: ANN001
