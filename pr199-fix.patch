@@ -1,0 +1,531 @@
+From b0659ee3973d843838e1b3b09d990eece8b5e4ea Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 25 Sep 2026 20:06:26 -0500
+Subject: [PATCH] fix(ci): unblock PR #199 base and real-ML jobs
+
+- transformers_worker: import SafetensorError lazily inside the save retry so
+  the module imports in base (no [train]) envs; tests importorskip it.
+- project_runner: dispatch non-Transformers engines (unsloth) through the
+  executor factory again; the hardcoded TransformersPeftExecutor rejected
+  backend.engine at preflight.
+- goal lifecycle: defer_plateau keeps a rejected candidate's objective open
+  while autonomous repair runs; close_deferred_plateau settles STOP_PLATEAU
+  afterwards. Repair no longer crashes on a pre-terminated objective.
+- real-ML smoke fixtures: trivially-met "minimum 0.0" goals stopped the
+  objective before training (INCOMPLETE_EVALUATION_IDENTITY / GOALS_MET at
+  gen 0). Plumbing smokes use the documented legacy_unbounded mode with a
+  declared baseline protocol; the repair smoke uses an auto baseline and an
+  unattainable bound and now asserts STOP_PLATEAU.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019gwTtwhCKmJ1xUsRiA1Q3p
+---
+ src/chowder/backends/transformers_worker.py |  5 +-
+ src/chowder/cycle.py                        |  4 ++
+ src/chowder/goal_lifecycle.py               | 33 ++++++++++++-
+ src/chowder/project_runner.py               | 33 ++++++++++---
+ tests/test_goal_lifecycle.py                | 55 +++++++++++++++++++++
+ tests/test_project_runner_repair.py         | 25 ++++++----
+ tests/test_real_ml_training.py              | 34 +++++++++++--
+ tests/test_transformers_backend.py          |  4 +-
+ tests/test_unsloth_integration.py           |  9 +++-
+ 9 files changed, 176 insertions(+), 26 deletions(-)
+
+diff --git a/src/chowder/backends/transformers_worker.py b/src/chowder/backends/transformers_worker.py
+index 37bd05f..fb8735f 100644
+--- a/src/chowder/backends/transformers_worker.py
++++ b/src/chowder/backends/transformers_worker.py
+@@ -33,7 +33,6 @@ from ..trainability import (
+ from ..adapter_guard import assert_adapter_is_live
+ from ..hf_resilience import cache_status, with_hub_retries
+ from ..local_model_compat import patch_transformers5_custom_model
+-from safetensors import SafetensorError
+ from .activation_offload_hooks import offload_pack, offload_unpack
+ from .training_data import (
+     _build_chat_example,
+@@ -246,6 +245,10 @@ def _save_adapter_with_retry(model: Any, output_dir: str | Path) -> None:
+     failures (os error 32). safetensors surfaces those as SafetensorError,
+     not OSError, so both exception types are retried; the message is matched
+     so genuine I/O failures still raise on first attempt."""
++    # Lazy: this module is imported by the base (no-[train]) test envs, where
++    # safetensors is absent. Only the save path itself needs the type.
++    from safetensors import SafetensorError
++
+     try:
+         model.save_pretrained(output_dir, safe_serialization=True)
+         return
+diff --git a/src/chowder/cycle.py b/src/chowder/cycle.py
+index a1b81fc..45cc131 100644
+--- a/src/chowder/cycle.py
++++ b/src/chowder/cycle.py
+@@ -333,6 +333,9 @@ class ExperimentCycleRunner:
+     # triggers it.
+     deferred_baseline: Callable[[CandidateCycleOutcome | None], ExperimentResult] | None = None
+     goal_lifecycle: GoalLifecycle | None = None
++    #: Keep a non-promoted generation's objective open (no STOP_PLATEAU) for a
++    #: caller that continues with autonomous repair and settles it afterwards.
++    defer_plateau: bool = False
+ 
+     def __post_init__(self) -> None:
+         budget = float(self.executor_investigation_budget)
+@@ -732,6 +735,7 @@ class ExperimentCycleRunner:
+                 promoted=promoted is not None,
+                 generation_index=1,
+                 budget_exhausted=self.engine.remaining_budget <= 1e-12,
++                defer_plateau=self.defer_plateau,
+             )
+             goal_assessment = lifecycle_result.assessment
+             goal_terminal_state = (
+diff --git a/src/chowder/goal_lifecycle.py b/src/chowder/goal_lifecycle.py
+index a80ec35..3ac16d0 100644
+--- a/src/chowder/goal_lifecycle.py
++++ b/src/chowder/goal_lifecycle.py
+@@ -167,6 +167,25 @@ class GoalLifecycle:
+                     f"persisted assessment {label} identity does not match frozen objective"
+                 )
+ 
++    def close_deferred_plateau(self) -> GoalLifecycleResult:
++        """Settle an objective left open by ``defer_plateau`` as STOP_PLATEAU.
++
++        Idempotent on an already-terminal objective (returns its terminal
++        result) so a continuation that reached its own terminal state is never
++        overwritten.
++        """
++        if self.terminal_state is not None:
++            return self.terminal_result()
++        if self.last_assessment is None:
++            raise GoalLifecycleError("objective has no assessment to settle")
++        self.terminal_state = GoalTerminalState.STOP_PLATEAU
++        self.registry.record_goal_terminal(
++            self.identity.objective_version,
++            self.terminal_state,
++            self.last_assessment.artifact_identity,
++        )
++        return self.terminal_result()
++
+     def terminal_result(self) -> GoalLifecycleResult:
+         """Return the persisted terminal result for a resumed objective."""
+         if self.terminal_state is None or self.last_assessment is None:
+@@ -219,6 +238,7 @@ class GoalLifecycle:
+         generation_index: int,
+         generation_limit: int | None = None,
+         budget_exhausted: bool = False,
++        defer_plateau: bool = False,
+     ) -> GoalLifecycleResult:
+         """Assess a persisted experiment result without launching evaluation."""
+         return self.assess_candidate(
+@@ -231,6 +251,7 @@ class GoalLifecycle:
+             budget_exhausted=budget_exhausted,
+             evaluation_protocol_digest=result_protocol_fingerprint(result.evidence),
+             benchmark_digest=self.identity.benchmark_digest,
++            defer_plateau=defer_plateau,
+         )
+ 
+     def assess_candidate(
+@@ -246,8 +267,14 @@ class GoalLifecycle:
+         evaluation_protocol_digest: str | None = None,
+         benchmark_digest: str | None = None,
+         measured_at: str | None = None,
++        defer_plateau: bool = False,
+     ) -> GoalLifecycleResult:
+-        """Assess a candidate and turn bounded exhaustion into non-success."""
++        """Assess a candidate and turn bounded exhaustion into non-success.
++
++        ``defer_plateau`` leaves a non-promoted candidate's objective open so a
++        caller-owned continuation (autonomous repair) can still run; that
++        caller must then settle it with :meth:`close_deferred_plateau`.
++        """
+         if generation_index < 1:
+             raise GoalLifecycleError("candidate generation_index must be at least 1")
+         if generation_limit is not None and generation_limit < 1:
+@@ -263,6 +290,7 @@ class GoalLifecycle:
+             generation_index=generation_index,
+             generation_limit=generation_limit,
+             budget_exhausted=budget_exhausted,
++            defer_plateau=defer_plateau,
+         )
+ 
+     def _assess(
+@@ -278,6 +306,7 @@ class GoalLifecycle:
+         generation_index: int,
+         generation_limit: int | None,
+         budget_exhausted: bool,
++        defer_plateau: bool = False,
+     ) -> GoalLifecycleResult:
+         if self.terminal_state is not None:
+             raise GoalLifecycleError(
+@@ -346,7 +375,7 @@ class GoalLifecycle:
+         elif generation_limit is not None and generation_index >= generation_limit:
+             terminal = GoalTerminalState.STOP_GENERATION_LIMIT
+         elif not promoted:
+-            terminal = GoalTerminalState.STOP_PLATEAU
++            terminal = None if defer_plateau else GoalTerminalState.STOP_PLATEAU
+         else:
+             terminal = None
+ 
+diff --git a/src/chowder/project_runner.py b/src/chowder/project_runner.py
+index ae5c76a..e493057 100644
+--- a/src/chowder/project_runner.py
++++ b/src/chowder/project_runner.py
+@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping
+ 
+ from .backend_selection import (
+     ROUTER_HEALING_ENGINE,
++    TRANSFORMERS_ENGINE,
+     create_evaluation_executor,
+     create_training_executor,
+     normalize_training_config_for_executor,
+@@ -636,14 +637,17 @@ def run_project(
+             spent_gpu_hours=0.0 if baseline_deferred else baseline.gpu_hours,
+             baseline_deferred=baseline_deferred,
+         )
+-        if resolve_training_engine(training_config) == ROUTER_HEALING_ENGINE:
+-            trainer = create_training_executor(training_config)
+-            evaluator = create_evaluation_executor(training_config)
+-        else:
+-            # Preserve the existing constructor seam for the mature PEFT path;
+-            # the router backend is the only path that needs factory dispatch.
++        if resolve_training_engine(training_config) == TRANSFORMERS_ENGINE:
++            # Preserve the existing constructor seam for the mature
++            # Transformers PEFT path.
+             trainer = TransformersPeftExecutor()
+             evaluator = TransformersTextEvaluator()
++        else:
++            # Every other engine (unsloth, router-healing) must go through
++            # factory dispatch -- the Transformers executor rejects their
++            # backend keys (e.g. backend.engine) at preflight.
++            trainer = create_training_executor(training_config)
++            evaluator = create_evaluation_executor(training_config)
+         deferred_baseline = None
+         if baseline_deferred:
+             def complete_deferred_baseline(candidate):
+@@ -698,6 +702,9 @@ def run_project(
+             # already are.
+             progress_callback=on_event,
+             goal_lifecycle=lifecycle,
++            # Autonomous repair is the continuation of a rejected candidate,
++            # so its plateau is settled only after repair finishes.
++            defer_plateau=project.repair is not None,
+         )
+         accepted = engine.propose((project.experiment,))
+         if not accepted:
+@@ -717,7 +724,11 @@ def run_project(
+             _emit_candidate_events(on_event, registry, generation.candidates[0])
+ 
+         repair_outcome: RecursiveRepairOutcome | None = None
+-        if project.repair is not None and generation.promoted is None:
++        if (
++            project.repair is not None
++            and generation.promoted is None
++            and lifecycle.terminal_state is None
++        ):
+             repair_spec = project.repair
+             _emit(
+                 on_event,
+@@ -759,6 +770,14 @@ def run_project(
+                 ),
+             )
+ 
++        if project.repair is not None and lifecycle.terminal_state is None and generation.promoted is None:
++            settled = lifecycle.close_deferred_plateau()
++            generation = replace(
++                generation,
++                goal_assessment=settled.assessment,
++                goal_terminal_state=settled.terminal_state.value,
++            )
++
+         if not generation.candidates:
+             return ProjectRunOutcome(
+                 project=project,
+diff --git a/tests/test_goal_lifecycle.py b/tests/test_goal_lifecycle.py
+index b369cad..97188fb 100644
+--- a/tests/test_goal_lifecycle.py
++++ b/tests/test_goal_lifecycle.py
+@@ -263,3 +263,58 @@ def test_lifecycle_identity_is_stable_across_result_assessments(tmp_path):
+         assert assessed.assessment.goal_digest == lifecycle.identity.goal_digest
+     finally:
+         registry.close()
++
++
++def _unpromoted(lifecycle, *, defer_plateau):
++    return lifecycle.assess_candidate(
++        observed_metrics={"quality": 0.6},
++        artifact_identity="candidate-1",
++        evidence=EVIDENCE,
++        promoted=False,
++        generation_index=1,
++        evaluation_protocol_digest=PROTOCOL,
++        benchmark_digest=BENCHMARK,
++        defer_plateau=defer_plateau,
++    )
++
++
++def test_unpromoted_candidate_plateaus_unless_deferred(tmp_path):
++    registry, lifecycle = _open(tmp_path)
++    try:
++        assert _unpromoted(lifecycle, defer_plateau=False).terminal_state is (
++            GoalTerminalState.STOP_PLATEAU
++        )
++    finally:
++        registry.close()
++
++
++def test_deferred_plateau_stays_open_for_repair_then_settles(tmp_path):
++    registry, lifecycle = _open(tmp_path)
++    try:
++        first = _unpromoted(lifecycle, defer_plateau=True)
++        assert first.terminal_state is None
++        assert lifecycle.terminal_state is None
++        # The repair continuation can still record evidence.
++        second = _unpromoted(lifecycle, defer_plateau=True)
++        assert second.terminal_state is None
++
++        settled = lifecycle.close_deferred_plateau()
++        assert settled.terminal_state is GoalTerminalState.STOP_PLATEAU
++        assert settled.succeeded is False
++        # Idempotent: an already-terminal objective is never overwritten.
++        assert lifecycle.close_deferred_plateau().terminal_state is (
++            GoalTerminalState.STOP_PLATEAU
++        )
++        with pytest.raises(GoalLifecycleError, match="already terminated"):
++            _unpromoted(lifecycle, defer_plateau=True)
++    finally:
++        registry.close()
++
++
++def test_close_deferred_plateau_requires_an_assessment(tmp_path):
++    registry, lifecycle = _open(tmp_path)
++    try:
++        with pytest.raises(GoalLifecycleError, match="no assessment"):
++            lifecycle.close_deferred_plateau()
++    finally:
++        registry.close()
+diff --git a/tests/test_project_runner_repair.py b/tests/test_project_runner_repair.py
+index 84972ab..90efb2b 100644
+--- a/tests/test_project_runner_repair.py
++++ b/tests/test_project_runner_repair.py
+@@ -90,7 +90,11 @@ def test_real_run_project_autonomously_repairs_a_rejected_candidate(tmp_path: Pa
+                 "metrics": [
+                     {
+                         "name": "quality",
+-                        "minimum": 0.0,
++                        # Unattainable on a [0, 1] metric: the goal lifecycle
++                        # must see an UNMET parent (so candidates train) and
++                        # UNMET candidates (so repair, not STOP_GOALS_MET,
++                        # follows the rejection).
++                        "minimum": 1.5,
+                         "direction": "maximize",
+                         "regression_tolerance": 1.0,
+                     }
+@@ -105,11 +109,9 @@ def test_real_run_project_autonomously_repairs_a_rejected_candidate(tmp_path: Pa
+                 "minimum_promotion_gain": 2.0,
+                 "require_protocol_match": False,
+             },
+-            "baseline": {
+-                "experiment_id": "baseline",
+-                "metrics": {"quality": 0.0},
+-                "gpu_hours": 0.0,
+-            },
++            # Automatic baseline: the lifecycle freezes the real evaluator's
++            # protocol identity, which a declared fixed baseline cannot know.
++            "baseline": {"mode": "auto"},
+             "experiment": {
+                 "experiment_id": "real-sft",
+                 "estimated_gpu_hours": 0.25,
+@@ -198,7 +200,10 @@ def test_real_run_project_autonomously_repairs_a_rejected_candidate(tmp_path: Pa
+     # metric can ever gain) -- but both trained and evaluated for real
+     # without crashing.
+     assert outcome.promoted_experiment_id is None
+-    assert outcome.succeeded is True
++    # Product success is lifecycle goal completion: an unmet goal after repair
++    # exhausts is settled as a plateau (deferred until repair finished).
++    assert outcome.succeeded is False
++    assert outcome.generation.goal_terminal_state == "STOP_PLATEAU"
+ 
+     repair_events = [event for event in events if isinstance(event, RepairEvent)]
+     assert len(repair_events) == 2, "expected a repair-start and repair-stop event"
+@@ -236,6 +241,8 @@ def test_real_run_project_autonomously_repairs_a_rejected_candidate(tmp_path: Pa
+ 
+     # outcome.generation is reassigned to the repair loop's final generation,
+     # so a caller reading only .generation (as the CLI does) sees the latest
+-    # real attempt, not the stale initial one.
+-    assert outcome.generation is repair_outcome.repair_generation
++    # real attempt, not the stale initial one. (It is re-stamped with the
++    # settled plateau, so compare the attempt itself rather than identity.)
++    assert outcome.generation.candidates == repair_outcome.repair_generation.candidates
++    assert outcome.generation.promoted == repair_outcome.repair_generation.promoted
+     assert outcome.generation.candidates[0].experiment_id == repair_candidate.experiment_id
+diff --git a/tests/test_real_ml_training.py b/tests/test_real_ml_training.py
+index a04c511..ed741dc 100644
+--- a/tests/test_real_ml_training.py
++++ b/tests/test_real_ml_training.py
+@@ -59,7 +59,6 @@ def test_real_tiny_llama_train_evaluate_and_persist(tmp_path: Path):
+                 "metrics": [
+                     {
+                         "name": "quality",
+-                        "minimum": 0.0,
+                         "direction": "maximize",
+                         "regression_tolerance": 1.0,
+                     }
+@@ -75,6 +74,10 @@ def test_real_tiny_llama_train_evaluate_and_persist(tmp_path: Path):
+                 "experiment_id": "baseline",
+                 "metrics": {"quality": 0.0},
+                 "gpu_hours": 0.0,
++                # The goal lifecycle refuses a fixed baseline with no declared
++                # protocol identity. This smoke never compares protocols
++                # (legacy_unbounded), so a fixed placeholder digest suffices.
++                "evaluation_protocol_sha256": "0" * 64,
+             },
+             "experiment": {
+                 "experiment_id": "real-sft",
+@@ -90,6 +93,10 @@ def test_real_tiny_llama_train_evaluate_and_persist(tmp_path: Path):
+             },
+             "config": {
+                 "seed": 123,
++                # Plumbing smoke, not a goal test: an unbounded metric under the
++                # documented legacy mode keeps the parent's MET assessment from
++                # stopping the objective before any candidate trains.
++                "goal_lifecycle": {"mode": "legacy_unbounded"},
+                 "backend": {
+                     "schema_version": 1,
+                     "type": "transformers-peft",
+@@ -233,7 +240,6 @@ def test_real_tiny_llama_automatic_baseline_binds_revision_and_matches_protocol(
+                 "metrics": [
+                     {
+                         "name": "quality",
+-                        "minimum": 0.0,
+                         "direction": "maximize",
+                         "regression_tolerance": 1.0,
+                     }
+@@ -261,6 +267,10 @@ def test_real_tiny_llama_automatic_baseline_binds_revision_and_matches_protocol(
+             },
+             "config": {
+                 "seed": 123,
++                # Plumbing smoke, not a goal test: an unbounded metric under the
++                # documented legacy mode keeps the parent's MET assessment from
++                # stopping the objective before any candidate trains.
++                "goal_lifecycle": {"mode": "legacy_unbounded"},
+                 "backend": {
+                     "schema_version": 1,
+                     "type": "transformers-peft",
+@@ -390,7 +400,7 @@ def test_real_cancellation_terminates_an_in_flight_training_subprocess(tmp_path:
+             "registry_path": ".chowder/runs.db",
+             "seed": 123,
+             "goal": {
+-                "metrics": [{"name": "quality", "minimum": 0.0, "direction": "maximize"}],
++                "metrics": [{"name": "quality", "direction": "maximize"}],
+                 "gpu_hour_budget": 2.0,
+                 "max_parallel_candidates": 1,
+                 "minimum_promotion_gain": 0.0,
+@@ -400,6 +410,10 @@ def test_real_cancellation_terminates_an_in_flight_training_subprocess(tmp_path:
+                 "experiment_id": "baseline",
+                 "metrics": {"quality": 0.0},
+                 "gpu_hours": 0.0,
++                # The goal lifecycle refuses a fixed baseline with no declared
++                # protocol identity. This smoke never compares protocols
++                # (legacy_unbounded), so a fixed placeholder digest suffices.
++                "evaluation_protocol_sha256": "0" * 64,
+             },
+             "experiment": {
+                 "experiment_id": "real-sft",
+@@ -415,6 +429,10 @@ def test_real_cancellation_terminates_an_in_flight_training_subprocess(tmp_path:
+             },
+             "config": {
+                 "seed": 123,
++                # Plumbing smoke, not a goal test: an unbounded metric under the
++                # documented legacy mode keeps the parent's MET assessment from
++                # stopping the objective before any candidate trains.
++                "goal_lifecycle": {"mode": "legacy_unbounded"},
+                 "backend": {
+                     "schema_version": 1,
+                     "type": "transformers-peft",
+@@ -530,7 +548,7 @@ def test_real_training_reports_live_progress_events(tmp_path: Path):
+             "registry_path": ".chowder/runs.db",
+             "seed": 123,
+             "goal": {
+-                "metrics": [{"name": "quality", "minimum": 0.0, "direction": "maximize"}],
++                "metrics": [{"name": "quality", "direction": "maximize"}],
+                 "gpu_hour_budget": 2.0,
+                 "max_parallel_candidates": 1,
+                 "minimum_promotion_gain": 0.0,
+@@ -540,6 +558,10 @@ def test_real_training_reports_live_progress_events(tmp_path: Path):
+                 "experiment_id": "baseline",
+                 "metrics": {"quality": 0.0},
+                 "gpu_hours": 0.0,
++                # The goal lifecycle refuses a fixed baseline with no declared
++                # protocol identity. This smoke never compares protocols
++                # (legacy_unbounded), so a fixed placeholder digest suffices.
++                "evaluation_protocol_sha256": "0" * 64,
+             },
+             "experiment": {
+                 "experiment_id": "real-sft",
+@@ -555,6 +577,10 @@ def test_real_training_reports_live_progress_events(tmp_path: Path):
+             },
+             "config": {
+                 "seed": 123,
++                # Plumbing smoke, not a goal test: an unbounded metric under the
++                # documented legacy mode keeps the parent's MET assessment from
++                # stopping the objective before any candidate trains.
++                "goal_lifecycle": {"mode": "legacy_unbounded"},
+                 "backend": {
+                     "schema_version": 1,
+                     "type": "transformers-peft",
+diff --git a/tests/test_transformers_backend.py b/tests/test_transformers_backend.py
+index dc14fcf..71b210a 100644
+--- a/tests/test_transformers_backend.py
++++ b/tests/test_transformers_backend.py
+@@ -4346,7 +4346,7 @@ class _LockingModel:
+ 
+ 
+ def test_adapter_save_retries_safetensor_file_lock(tmp_path, monkeypatch):
+-    from safetensors import SafetensorError
++    SafetensorError = pytest.importorskip("safetensors").SafetensorError
+ 
+     monkeypatch.setattr(time, "sleep", lambda _s: None)
+     model = _LockingModel(
+@@ -4361,7 +4361,7 @@ def test_adapter_save_retries_safetensor_file_lock(tmp_path, monkeypatch):
+ 
+ 
+ def test_adapter_save_retry_is_bounded_and_reraises_other_errors(tmp_path, monkeypatch):
+-    from safetensors import SafetensorError
++    SafetensorError = pytest.importorskip("safetensors").SafetensorError
+ 
+     monkeypatch.setattr(time, "sleep", lambda _s: None)
+     # A non-lock I/O failure must propagate on the first attempt.
+diff --git a/tests/test_unsloth_integration.py b/tests/test_unsloth_integration.py
+index 75c31fb..f42d22d 100644
+--- a/tests/test_unsloth_integration.py
++++ b/tests/test_unsloth_integration.py
+@@ -234,7 +234,6 @@ def test_real_unsloth_trained_adapter_flows_through_the_real_evaluator_gate_and_
+                 "metrics": [
+                     {
+                         "name": "quality",
+-                        "minimum": 0.0,
+                         "direction": "maximize",
+                         "regression_tolerance": 1.0,
+                     }
+@@ -248,6 +247,10 @@ def test_real_unsloth_trained_adapter_flows_through_the_real_evaluator_gate_and_
+                 "experiment_id": "baseline",
+                 "metrics": {"quality": 0.0},
+                 "gpu_hours": 0.0,
++                # The goal lifecycle refuses a fixed baseline with no declared
++                # protocol identity. This smoke never compares protocols
++                # (legacy_unbounded), so a fixed placeholder digest suffices.
++                "evaluation_protocol_sha256": "0" * 64,
+             },
+             "experiment": {
+                 "experiment_id": "real-unsloth-sft",
+@@ -263,6 +266,10 @@ def test_real_unsloth_trained_adapter_flows_through_the_real_evaluator_gate_and_
+             },
+             "config": {
+                 "seed": 123,
++                # Plumbing smoke, not a goal test: an unbounded metric under the
++                # documented legacy mode keeps the parent's MET assessment from
++                # stopping the objective before any candidate trains.
++                "goal_lifecycle": {"mode": "legacy_unbounded"},
+                 "backend": {
+                     "schema_version": 1,
+                     "type": "peft",
+-- 
+2.43.0
+

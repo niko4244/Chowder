@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "name": "Qwen3.8-9B Abliterated - Phase A Compatibility Pilot",
+  "seed": 17,
+  "goal": {
+    "gpu_hour_budget": 2.0,
+    "max_parallel_candidates": 1,
+    "minimum_promotion_gain": 0.0,
+    "require_protocol_match": true,
+    "metrics": [
+      {
+        "name": "pilot_exactness",
+        "weight": 1.0,
+        "regression_tolerance": 0.15,
+        "minimum": 0.0,
+        "direction": "maximize"
+      }
+    ]
+  },
+  "baseline": {
+    "mode": "auto"
+  },
+  "experiment": {
+    "experiment_id": "phase-a-pilot-40step-v2",
+    "estimated_gpu_hours": 0.5,
+    "tags": ["phase-a", "pilot", "qlora", "qwen3-8b-abliterated"],
+    "hypothesis": {
+      "observation": "The Qwen3.8-9B abliterated base has never been run through the Chowder lifecycle on this hardware.",
+      "suspected_cause": "No adapter, checkpoint, or evaluation evidence exists yet for this model in Chowder.",
+      "intervention": "Run a conservative ~40-step 4-bit QLoRA SFT pilot to prove load -> train -> checkpoint -> resume -> independent-eval -> gate end-to-end before any real capability campaign.",
+      "expected_deltas": {}
+    },
+    "config_patch": {}
+  },
+  "config": {
+    "backend": {
+      "type": "transformers-peft",
+      "base_model": "Goekdeniz-Guelmez/Josiefied-Qwen3-8B-abliterated-v1",
+      "dataset": "campaign/phase_a/train_pilot.jsonl",
+      "dataset_format": "chat",
+      "max_length": 1024,
+      "precision": "auto",
+      "quantization": "4bit",
+      "min_free_disk_gb": 30,
+      "training": {
+        "batch_size": 1,
+        "gradient_accumulation_steps": 16,
+        "gradient_checkpointing": true,
+        "learning_rate": 0.0002,
+        "epochs": 1,
+        "max_steps": 40,
+        "activation_offload": "off",
+        "optimizer_tiering": "off",
+        "frozen_layer_streaming": "off",
+        "detailed_timing_telemetry": true,
+        "logging_steps": 1,
+        "save_strategy": "steps",
+        "save_steps": 10,
+        "save_total_limit": 3
+      },
+      "lora": {
+        "r": 16,
+        "alpha": 32,
+        "dropout": 0.05,
+        "target_preset": "auto"
+      },
+      "runtime": {
+        "timeout_seconds": 7200
+      }
+    },
+    "evaluation": {
+      "type": "transformers-text",
+      "device": "auto",
+      "precision": "inherit",
+      "quantization": "inherit",
+      "suites": [
+        {
+          "name": "pilot_exactness",
+          "dataset": "campaign/phase_a/eval_pilot_exactness.jsonl",
+          "prompt_field": "prompt",
+          "expected_field": "expected",
+          "scoring": "normalized_exact_match",
+          "use_chat_template": true,
+          "max_new_tokens": 24
+        }
+      ]
+    }
+  }
+}
