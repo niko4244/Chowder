@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .activation_offload_hooks import offload_pack, offload_unpack
 from .memory_preflight_worker import load_dry_run_model
 from .transformers_peft import TransformersPeftRunSpec
 
@@ -45,15 +46,12 @@ def run_experiment(spec: TransformersPeftRunSpec, *, batch_size: int = 2) -> dic
         }
 
     def _offload_pack(tensor: Any) -> Any:
-        if not tensor.is_cuda:
-            return tensor
-        return ("cpu", tensor.to("cpu", non_blocking=True))
+        packed, _bytes_moved = offload_pack(tensor)
+        return packed
 
     def _offload_unpack(packed: Any) -> Any:
-        if not isinstance(packed, tuple):
-            return packed
-        _, cpu_tensor = packed
-        return cpu_tensor.to(device, non_blocking=True)
+        tensor, _bytes_moved = offload_unpack(packed)
+        return tensor
 
     def _forward_backward(*, offload: bool) -> float:
         input_ids = torch.randint(

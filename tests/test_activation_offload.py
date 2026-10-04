@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from unittest.mock import patch
 
@@ -12,9 +13,10 @@ from chowder.activation_offload import (
     _write_cache_entry,
     run_activation_offload_experiment,
 )
-from chowder.backends.transformers_peft import TransformersPeftRunSpec
+from chowder.backends.transformers_peft import TransformersPeftExecutor, TransformersPeftRunSpec
 from chowder.executors import ExecutionContext
 from chowder.memory import HardwareProfile
+from chowder.models import Experiment, Hypothesis
 
 _REAL_ML_SMOKE = pytest.mark.skipif(
     os.environ.get("CHOWDER_REAL_ML_SMOKE") != "1",
@@ -339,3 +341,171 @@ def test_real_run_activation_offload_experiment_end_to_end(tmp_path):
     # exercising the same recommendation logic a real large model with
     # genuine memory pressure would also go through.
     assert isinstance(experiment.recommended, bool)
+
+
+# --- real hardware regression: expanded attention-bias stride corruption --
+#
+# Found during the Memory Fabric OOM-acceptance hardware investigation:
+# training a real Qwen2.5-1.5B model with
+# backend.training.activation_offload: "always" at batch_size=96,
+# max_length=1024, fp32, no quantization, LoRA r=8 crashed backward with
+# `RuntimeError: attn_bias is not correctly aligned (strideM).
+# attn_bias.stride(2) = 66, and should be a multiple of 4` -- confirmed a
+# real bug in activation_offload itself (reproduces identically alone and
+# combined with optimizer_tiering/frozen_layer_streaming), never caught by
+# this file's existing tests because they all use batch sizes of 2-8,
+# which never selects the memory-efficient/fused attention kernel that
+# enforces this alignment requirement.
+#
+# Root cause: transformers.masking_utils.sdpa_mask builds the 4D
+# causal+padding attention bias via
+# `attention_mask.expand(batch_size, -1, q_length, kv_length)` -- a
+# broadcast view (stride 0 on the head dimension), never materialized into
+# real memory. saved_tensors_hooks intercepts *every* tensor autograd
+# saves for backward during the wrapped forward, including this one, not
+# just the model's own per-layer activations. A naive `tensor.to("cpu")` /
+# `.to(device)` round trip does not reproduce the broadcast strides --
+# `Tensor.to()` only preserves a handful of recognized memory formats
+# (contiguous, channels-last, or a plain transpose) -- so PyTorch's
+# memory-efficient SDPA backward kernel receives back a differently
+# -strided tensor and rejects it outright.
+
+
+@_REAL_ML_SMOKE
+def test_real_activation_offload_hooks_preserve_stride_of_expanded_attention_bias():
+    """Direct, real-hardware reproduction of the crash and confirmation of
+    the fix, against torch.nn.functional.scaled_dot_product_attention and
+    the real, shipped chowder.backends.activation_offload_hooks -- no full
+    model needed, since the bug is in the pack/unpack hooks themselves,
+    not anything Qwen2-specific. batch=96 (matching the real crash
+    exactly) is large enough to select PyTorch's memory-efficient/fused
+    attention backend; kv_length=66 is deliberately not a multiple of 4,
+    matching the real crash -- a fixed round max_length is often
+    coincidentally aligned, but a real dynamically-padded batch is not.
+
+    Before the fix (activation_offload_hooks.offload_pack/offload_unpack
+    with a naive `.to()` round trip): this test reproduced
+    `RuntimeError: attn_bias is not correctly aligned (strideM).
+    attn_bias.stride(2) = 66, and should be a multiple of 4` verbatim.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device available for a real attention-bias stride comparison")
+
+    from chowder.backends.activation_offload_hooks import offload_pack, offload_unpack
+
+    device = "cuda"
+    batch, heads, kv_heads, seq, head_dim = 96, 12, 2, 66, 128
+
+    def build_expanded_padding_mask(lengths):
+        # Mirrors transformers.masking_utils.sdpa_mask's real construction
+        # (see that module's sdpa_mask function): a per-position boolean
+        # causal+padding function evaluated with a singleton head dim,
+        # then broadcast across heads via .expand() -- never materialized,
+        # exactly the stride-0 view this test is about.
+        q_arange = torch.arange(seq, device=device).view(1, 1, seq, 1)
+        kv_arange = torch.arange(seq, device=device).view(1, 1, 1, seq)
+        lengths_t = torch.tensor(lengths, device=device).view(batch, 1, 1, 1)
+        causal = kv_arange <= q_arange
+        not_padding = kv_arange < lengths_t
+        return (causal & not_padding).expand(batch, heads, seq, seq)
+
+    def build_qkv():
+        torch.manual_seed(0)
+        q = torch.randn(batch, heads, seq, head_dim, device=device, requires_grad=True)
+        k = torch.randn(batch, kv_heads, seq, head_dim, device=device, requires_grad=True)
+        v = torch.randn(batch, kv_heads, seq, head_dim, device=device, requires_grad=True)
+        # GQA repeat, matching how transformers expands KV heads for SDPA.
+        k = k.repeat_interleave(heads // kv_heads, dim=1).detach().requires_grad_()
+        v = v.repeat_interleave(heads // kv_heads, dim=1).detach().requires_grad_()
+        return q, k, v
+
+    torch.manual_seed(0)
+    lengths = torch.randint(low=seq // 2, high=seq + 1, size=(batch,)).tolist()
+    mask = build_expanded_padding_mask(lengths)
+    assert mask.stride(1) == 0, "test setup must produce a real broadcast (stride-0) mask"
+    assert mask.stride(2) % 4 != 0, "test setup must produce a kv-length not aligned to 4"
+
+    # Baseline: real SDPA forward+backward, no offload hooks at all.
+    q_b, k_b, v_b = build_qkv()
+    out_b = torch.nn.functional.scaled_dot_product_attention(q_b, k_b, v_b, attn_mask=mask)
+    out_b.sum().backward()
+
+    # With the real, shipped activation_offload hooks wrapping the same call.
+    q_o, k_o, v_o = build_qkv()
+    with torch.autograd.graph.saved_tensors_hooks(
+        lambda t: offload_pack(t)[0], lambda p: offload_unpack(p)[0]
+    ):
+        out_o = torch.nn.functional.scaled_dot_product_attention(q_o, k_o, v_o, attn_mask=mask)
+        out_o.sum().backward()
+    torch.cuda.synchronize()
+
+    # Value-transparent: activation_offload changes only where saved
+    # tensors physically live, never the computed result.
+    assert torch.allclose(out_b, out_o, atol=1e-4)
+    assert torch.allclose(q_b.grad, q_o.grad, atol=1e-3)
+    assert torch.allclose(k_b.grad, k_o.grad, atol=1e-3)
+    assert torch.allclose(v_b.grad, v_o.grad, atol=1e-3)
+
+
+@_REAL_ML_SMOKE
+def test_real_tiny_llama_trains_with_activation_offload_always_and_a_padded_batch(tmp_path):
+    """Full production-path confirmation that the real training entry
+    point (TransformersPeftExecutor.run -> transformers_worker.train)
+    actually wires activation_offload through the fixed hooks: a batch of
+    genuinely different-length rows forces the real dynamic-padding
+    collator to build a real attention_mask with padding, the same
+    real-world condition that produces the broadcast attention bias in
+    test_real_activation_offload_hooks_preserve_stride_of_expanded_attention_bias
+    above (which is the one that proves the alignment/kernel-scale
+    mechanism itself; this test proves the production wiring around it)."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device available for a real activation-offload training run")
+
+    data = tmp_path / "train.jsonl"
+    rows = [
+        {"text": "Question: What token comes after alpha? Answer: beta"},
+        {"text": "Q: red? A: blue"},
+        {"text": "Question: What token comes after gamma, delta, epsilon? Answer: zeta"},
+        {"text": "Q: green? A: yellow"},
+        {"text": "Question: What comes after one, two, three, four, five? Answer: six"},
+        {"text": "Q: up? A: down"},
+        {"text": "Question: What token comes after north, south, east? Answer: west"},
+        {"text": "Q: hot? A: cold"},
+    ]
+    data.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    config = {
+        "seed": 17,
+        "backend": {
+            "type": "transformers-peft",
+            "base_model": _TINY_MODEL,
+            "dataset": str(data),
+            "max_length": 64,
+            "quantization": "none",
+            "precision": "fp32",
+            "lora": {"r": 4, "alpha": 8, "dropout": 0.0, "target_modules": ["q_proj", "v_proj"]},
+            "training": {
+                "epochs": 1.0,
+                "learning_rate": 1e-3,
+                "batch_size": 8,
+                "gradient_accumulation_steps": 1,
+                "logging_steps": 1,
+                "gradient_checkpointing": False,
+                "activation_offload": "always",
+            },
+            "runtime": {"timeout_seconds": 180.0},
+        },
+    }
+    hardware = HardwareProfile(16, 64, 500, 12, 40, 3)
+    context = ExecutionContext(hardware, str(tmp_path), 17, resolved_config=config)
+    experiment = Experiment("e1", None, Hypothesis("obs", "cause", "fix"), {}, 2.0)
+
+    artifact = TransformersPeftExecutor().run(experiment, context)
+
+    assert artifact.telemetry["global_step"] > 0
+    assert artifact.evidence["hardware_aware_defaults"]["resolved_activation_offload"] is True
+    assert artifact.telemetry["activation_offload_bytes_transferred"] > 0
