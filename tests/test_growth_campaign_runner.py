@@ -63,12 +63,14 @@ from chowder.growth.campaign import (
     CampaignManifestError,
 )
 from chowder.growth.campaign_runner import (
+    _runs_from_report,
     plan_campaign,
     run_campaign,
     stops_on_admission_refusal,
     stops_on_campaign_overrun,
     undeclared_inputs,
 )
+from chowder.growth.campaign_prepare import prepared_input_paths
 from chowder.growth.candidate_search import (
     SEARCH_SCHEMA,
     CandidateSearchRefusal,
@@ -986,44 +988,59 @@ def test_every_recognized_stopping_rule_names_what_enforces_it():
     assert not stops_on_admission_refusal(("stop on campaign overrun",))
 
 
-def test_the_committed_gen2_declaration_is_not_runnable_and_says_so():
+def test_the_committed_gen2_declaration_names_the_inputs_preparation_produced():
     """The checked-in gen2 declaration is pinned to its real readiness.
 
-    Seven of the eight inputs a run reads from disk, none of them present as an
-    artifact: the historical Gen-1 driver composed four of them in process, the
-    parent profile was never measured from gen1, the evaluation material the
-    production evaluator measures with does not exist yet, and there is no
-    measured parent arm. (The eighth, the contamination manifest, is declared
-    but produced by the run into its own state root.) Both entry points refuse
-    before compute and name *every* missing input at once, and the declaration's
-    own notes carry the same statement -- documentation is not allowed to run
-    ahead of what exists.
+    Since GEN2_PREREG_AMENDMENT14_2026-10-04 the declaration names every input
+    the run phase reads from disk, all produced by ``campaign prepare`` from
+    durable evidence -- and names them at the paths preparation predicts for
+    that directory, so the declaration cannot drift onto a bundle nothing
+    writes. The seven inputs it used to leave undeclared are gone from the
+    refusal list because the artifacts exist, not because the requirement was
+    relaxed: ``undeclared_inputs`` is the same predicate either way, and a
+    declaration that dropped one again would list it again.
+
+    The declared inputs are deployment artifacts on the Gen-2 machine, so their
+    existence is asserted only where that machine is. CI (and any other host)
+    pins what it can: that the declaration names the full set, at production's
+    predicted paths, with the planner's recipe ids.
     """
     manifest = CampaignManifest.from_file(ROOT / "docs" / "gen2" / "gen2_campaign.json")
 
-    assert undeclared_inputs(manifest, phase="run") == (
-        "project_template_path",
-        "training_material_path",
-        "data_registry_path",
-        "hardware_budget_path",
-        "parent_profile_path",
-        "evaluation_material_path",
-        "parent_eval_report_path",
-    )
-    assert undeclared_inputs(manifest, phase="plan") == (
-        "parent_profile_path",
-        "hardware_budget_path",
-    )
-    with pytest.raises(CampaignRunRefusal) as error:
-        plan_campaign(manifest)
-    for field_name in ("parent_profile_path", "hardware_budget_path"):
-        assert field_name in str(error.value)
-    with pytest.raises(CampaignRunRefusal) as error:
-        run_campaign(manifest)
-    for field_name in undeclared_inputs(manifest, phase="run"):
-        assert field_name in str(error.value)
+    assert undeclared_inputs(manifest, phase="run") == ()
+    assert undeclared_inputs(manifest, phase="plan") == ()
+
+    declared = {
+        field_name: str(getattr(manifest, field_name)).replace("\\", "/")
+        for field_name in prepared_input_paths(Path("."))
+    }
+    assert declared == {
+        field_name: str(path).replace("\\", "/")
+        for field_name, path in prepared_input_paths(
+            Path(manifest.project_template_path).parent
+        ).items()
+    }, "the declaration must name exactly the documents preparation writes"
+
+    # The planner's own ids, not the placeholders it never proposed.
+    assert manifest.recipe_ids == ("recipe-00-lr5e-05", "recipe-01-lr0.0001")
+
+    assert "GEN2_PREREG_AMENDMENT14_2026-10-04" in manifest.notes
     assert "GEN2_PREREG_AMENDMENT5" in manifest.notes
     assert "run output" in manifest.notes
+
+    if not Path(manifest.base_model_path).is_dir():
+        pytest.skip(f"the Gen-2 deployment is not this host ({manifest.base_model_path})")
+    for field_name, path in declared.items():
+        assert Path(path).is_file(), f"{field_name} names a document that does not exist"
+    # The prepared parent arm is a measurement, not a carried quotation: three
+    # gen1 rows under this campaign's instrument, each naming its own bytes.
+    parent_rows = _runs_from_report(manifest.parent_eval_report_path, "parent_eval_report_path")
+    assert {row.generation_version for row in parent_rows} == {"gen1"}
+    assert {row.benchmark_qualified_id for row in parent_rows} == {
+        "generation-diagnostics@gen2-response-surface-v1",
+        "math500@2024-04",
+        "mgsm@2022-11",
+    }
 
 
 def test_the_committed_gen2_preregistration_manifest_still_loads():

@@ -335,6 +335,16 @@ class GrowthCycle:
         measured on search-readable evidence would let the search shape its
         own gate, so that is refused outright -- it is wiring, not a
         measured outcome.
+
+        Every violation's reason is recorded whatever verdict the predeclared
+        rule already reached. A declared gate that fires on a candidate the
+        protected-benchmark arithmetic rejected anyway is still a fact about
+        that candidate, and a record that names it only when it was the sole
+        cause teaches the wrong lesson from the same run. The verdict is
+        only tightened: PROMOTED becomes REJECTED, and an already REJECTED,
+        TAINTED or INCONCLUSIVE decision keeps the verdict the predeclared
+        rule earned -- a declared breach does not manufacture a stronger
+        verdict out of evidence the rule found too thin to decide.
         """
         profile = self.config.retention_profile
         if profile is None:
@@ -349,14 +359,14 @@ class GrowthCycle:
             parent_values=_retention_values(profile, parent_results, candidate_side=False),
             candidate_values=_retention_values(profile, candidate_results, candidate_side=True),
         )
-        if violations and decision.verdict == "PROMOTED":
-            decision = replace(
-                decision,
-                verdict="REJECTED",
-                reasons=tuple(decision.reasons)
-                + tuple(violation.reason for violation in violations),
-            )
-        return decision
+        if not violations:
+            return decision
+        return replace(
+            decision,
+            verdict="REJECTED" if decision.verdict == "PROMOTED" else decision.verdict,
+            reasons=tuple(decision.reasons)
+            + tuple(violation.reason for violation in violations),
+        )
 
     def decide_promotion(
         self,

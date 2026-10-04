@@ -52,6 +52,16 @@ MATH = "math500@2024-04"
 MGSM = "mgsm@2022-11"
 DECODING = dict(judge_gen2.PROTECTED_DECODING)
 
+#: The recipe ids the frozen declaration names, read from it rather than copied
+#: here. T14 compares the accounted set against the *declared* set, so a fixture
+#: that hardcoded the ids would test T14 against a copy: when amendment 14
+#: replaced the placeholders the planner had never proposed with the ids the
+#: planner does propose, a hardcoded copy fails the gate it is meant to exercise.
+DECLARED_RECIPE_IDS: tuple[str, ...] = CampaignManifest.from_file(
+    FROZEN_CAMPAIGN_MANIFEST
+).recipe_ids
+assert len(DECLARED_RECIPE_IDS) >= 2, "T14 needs at least two declared recipes"
+
 
 # --------------------------------------------------------------------------
 # instrument fixtures
@@ -306,6 +316,7 @@ def _build_artifact(root: Path) -> tuple[Path, str]:
 
 
 def _accounting(wall: float = 1.1, *, device: float = 0.40, device_measured: bool = False) -> dict:
+    first, second = DECLARED_RECIPE_IDS[0], DECLARED_RECIPE_IDS[1]
     return {
         "totals": {
             "incremental": {
@@ -316,9 +327,9 @@ def _accounting(wall: float = 1.1, *, device: float = 0.40, device_measured: boo
             }
         },
         "entries": [
-            {"kind": "training", "recipe_id": "gen2-recipe-a"},
-            {"kind": "training", "recipe_id": "gen2-recipe-b"},
-            {"kind": "evaluation", "recipe_id": "gen2-recipe-b"},
+            {"kind": "training", "recipe_id": first},
+            {"kind": "training", "recipe_id": second},
+            {"kind": "evaluation", "recipe_id": second},
         ],
     }
 
@@ -371,7 +382,7 @@ def _run_root(
         (root / "chosen_candidate.json").write_text(
             json.dumps(
                 {
-                    "recipe_id": "gen2-recipe-b",
+                    "recipe_id": DECLARED_RECIPE_IDS[1],
                     "artifact_ref": reference,
                     "artifact_sha256": candidate_digest,
                 }
@@ -980,7 +991,7 @@ def test_a_device_settlement_ceiling_cannot_be_satisfied_by_an_unmeasured_device
 
 def test_losing_recipe_accounting_is_required(tmp_path: Path) -> None:
     accounting = _accounting()
-    accounting["entries"] = [{"kind": "training", "recipe_id": "gen2-recipe-a"}]
+    accounting["entries"] = [{"kind": "training", "recipe_id": DECLARED_RECIPE_IDS[0]}]
     assert judge_gen2.judge(_run_root(tmp_path, accounting=accounting)) == 1
 
 
@@ -1076,31 +1087,28 @@ def test_the_declared_recipe_set_must_be_accounted_exactly(tmp_path: Path) -> No
 
     fixture = _accounting()
     declared = [entry for entry in fixture["entries"]]
-    assert {entry["recipe_id"] for entry in declared} == {
-        "gen2-recipe-a",
-        "gen2-recipe-b",
-    }
+    assert {entry["recipe_id"] for entry in declared} == set(DECLARED_RECIPE_IDS)
 
     extra = json.loads(json.dumps(fixture))
     extra["entries"] = [
         *declared,
-        {"kind": "training", "recipe_id": "gen2-recipe-c"},
+        {"kind": "training", "recipe_id": "an-undeclared-recipe"},
     ]
     root = _run_root(tmp_path / "extra", accounting=extra)
     code, output = _judge_output(root)
     assert code == 1, f"an undeclared recipe certified:\n{output}"
     assert "T14" in output
-    assert "gen2-recipe-c" in output
+    assert "an-undeclared-recipe" in output
 
     renamed = json.loads(json.dumps(fixture))
     renamed["entries"] = [
-        {"kind": "training", "recipe_id": "gen2-recipe-a"},
+        {"kind": "training", "recipe_id": DECLARED_RECIPE_IDS[0]},
         {"kind": "training", "recipe_id": "something-else"},
     ]
     root = _run_root(tmp_path / "renamed", accounting=renamed)
     code, output = _judge_output(root)
     assert code == 1, f"a renamed recipe certified:\n{output}"
-    assert "gen2-recipe-b" in output
+    assert DECLARED_RECIPE_IDS[1] in output
 
 
 # --------------------------------------------------------------------------

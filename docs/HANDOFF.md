@@ -202,14 +202,15 @@ the judge pins is registered in the benchmark catalog now too; until this
 transfer it was an id no registry knew, so a campaign could not even plan against
 its declared target.
 
-One thing is deliberately **not** done here: the checked-in
-`docs/gen2/gen2_campaign.json` still
-provides none of the seven inputs a run reads from disk — the Gen-1 driver
-composed four of them in process, gen1 has no measured parent profile, the
-contamination manifest is produced by the run itself, and the evaluation material
-the evaluator measures with does not exist yet. Both entry points refuse before
+One thing was deliberately **not** done here, and is now done (2026-10-04,
+`GEN2_PREREG_AMENDMENT14_2026-10-04.md`): the checked-in
+`docs/gen2/gen2_campaign.json` used to
+provide none of the seven inputs a run reads from disk — the Gen-1 driver
+composed four of them in process, gen1 had no measured parent profile, the
+contamination manifest was produced by the run itself, and the evaluation material
+the evaluator measures with did not exist. Both entry points refused before
 compute, naming **every** missing input at once
-(`require_declared_inputs`), and the declaration's own `notes` say so.
+(`require_declared_inputs`), and the declaration's own `notes` said so.
 `GEN2_PREREG_AMENDMENT11_2026-09-18.md` then produces those documents from
 production code. `chowder growth campaign prepare <manifest> --out-dir DIR
 --parent-evidence ROOT` emits every declared input from durable evidence: a real
@@ -222,16 +223,26 @@ declared benchmark; a carried slice is `UNMEASURED`), while the **profile** keep
 whatever the parent durably measured — arm and profile are different questions.
 `--write-declaration` also fills `recipes` with the ids production proposes.
 `prepare` against the committed declaration produced every input, so readiness no
-longer reports `READINESS_DECLARED_INPUT`. And `chowder growth campaign
+longer reports `READINESS_DECLARED_INPUT`: the declaration now names all eight,
+at the paths `prepared_input_paths` predicts for one prepared directory, and
+`chowder growth campaign readiness` reports **READY** with all seventeen checks
+`ok` and no reason code (321 s on 2026-10-04, mostly the base model-content
+digest over ten payload files). Nothing was invented to get there: the hardware
+budget is a real CUDA device probe, the evaluation material is the pinned
+offline dataset caches, the corpus/registry/template come from production
+planning, and the parent arm is the preserved 2026-09-19 Gen-1 measurement
+carried forward unchanged (three `MEASURED_PARENT` rows, same artifact and slice
+digests) — `prepared-v10` in the Gen-2 state root, never over `prepared-v2`,
+which holds that measurement. And `chowder growth campaign
 measure-ancestor <manifest>` measures the untouched dense Gen-0 base through the
 same production worker with no adapter loaded, writing the declared
 `baseline_eval_report_path` with `MEASURED_PARENT` / gen0 rows, per-item scores
-and digest-bound artifacts at zero incremental campaign cost. One pre-compute
-blocker is *reported*, not papered over: the parent arm has no measurement under
-the Gen-2 target instrument, so the target comparison still lacks a parent row
-and Gen-2 can only reach `INCONCLUSIVE` on target until that is resolved. The
-remaining pre-compute
-build; nothing is invented to make the declaration look runnable.
+and digest-bound artifacts at zero incremental campaign cost. What is still
+*reported*, not papered over: the target instrument's diagnostic metadata (the
+judge's T1-T10) is not in any run output, and the frozen judge never reads the
+run's own promotion decision, so a declared-gate rejection is invisible to it
+(`docs/gen2/JUDGE_AMENDMENT_PROPOSAL_T21.md` proposes the minimal amendment;
+nothing is implemented). Starting the run itself is still a separate decision.
 
 Earlier state for the record (2026-09-17): the first real Model N → N+1
 cycle executed and was recorded PROMOTED at the time

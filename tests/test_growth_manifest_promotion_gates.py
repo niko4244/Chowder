@@ -15,6 +15,9 @@ Three contracts are pinned here:
   section.
 - **declaring neither changes nothing.** Every manifest predating the fields
   loads with both unset and promotes exactly as it did before.
+
+The attribution contract rides along: a declared gate's reasons reach the
+record whenever it fires, not only when it was the sole cause of the verdict.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from chowder.growth.promotion import BenchmarkResult
 from chowder.growth.retention import RetentionConstraint, RetentionProfile
 
 import test_growth_campaign_runner as campaign_fixture
+from growth_gate_fixtures import _result, _samples
 
 TARGET = campaign_fixture.TARGET_ID
 CONSTRAINED = campaign_fixture.PROTECTED_ID
@@ -42,6 +46,18 @@ _UNGATED_SETS = {
     "target_benchmarks": [TARGET, CONSTRAINED],
     "protected_benchmarks": [],
     "broad_benchmarks": [TARGET],
+}
+
+#: The constrained benchmark is a *protected* benchmark here, so the predeclared
+#: rule alone already rejects a regression on it. The declared profile measures
+#: the same dimension, so both gates fire on the same candidate -- the shape
+#: where the record used to name only the predeclared rule. The broad battery is
+#: empty so the verdict comes from the protected arithmetic, not from an
+#: unrelated unmeasured arm.
+_GATED_SETS = {
+    "target_benchmarks": [TARGET],
+    "protected_benchmarks": [CONSTRAINED],
+    "broad_benchmarks": [],
 }
 
 PROFILE_SECTION = {
@@ -62,21 +78,6 @@ TIER_SECTION = {
         TARGET: "promotion-evidence",
     }
 }
-
-
-def _samples(mean: float, spread: float = 0.02, blocks: int = 5) -> tuple[float, ...]:
-    pattern = (-1.5, -0.5, 0.0, 0.5, 1.5)
-    return tuple(mean + spread * p for p in pattern * blocks)
-
-
-def _result(benchmark: str, score: float, *, origin: str) -> BenchmarkResult:
-    return BenchmarkResult(
-        benchmark_qualified_id=benchmark,
-        score=score,
-        samples=_samples(score),
-        contamination="CLEAN",
-        measurement_origin=origin,
-    )
 
 
 def _manifest(tmp_path, **overrides) -> CampaignManifest:  # noqa: ANN001
@@ -192,6 +193,71 @@ def test_a_manifest_declared_tier_policy_refuses_a_search_readable_gate_at_load(
             eval_tier_policy=demoted,
         )
     assert "shape its own gate" in str(error.value)
+
+
+def test_a_declared_gate_is_attributed_even_when_the_rule_already_rejected(
+    tmp_path,  # noqa: ANN001
+) -> None:
+    """A declared gate that fires on an already-rejected candidate is recorded.
+
+    Enforcement was never in question here -- the predeclared protected
+    arithmetic had already rejected. What was missing was the attribution: the
+    record named the predeclared rule and stayed silent about the declared
+    gate that fired on the same candidate, which reads as a gate that passed.
+    """
+    manifest = _manifest(tmp_path, **_GATED_SETS, retention_profile=PROFILE_SECTION)
+    cycle = _cycle(tmp_path, manifest)
+
+    decision = _decide(
+        cycle,
+        candidate_target=0.45,        # the target improved
+        candidate_constrained=0.05,   # the protected benchmark regressed hard
+        parent_target=0.28,
+        parent_constrained=0.31,
+    )
+
+    # The predeclared rule's own verdict and its reason survive untouched.
+    assert decision.verdict == "REJECTED"
+    assert decision.checks["protected_regression"] == "violated"
+    assert "1 protected regression(s)" in decision.reasons
+
+    # And the declared gate's breach is attributed to the same candidate.
+    assert any(
+        reason.startswith("RETENTION_REGRESSION") and "protected-math" in reason
+        for reason in decision.reasons
+    ), decision.reasons
+
+
+def test_a_declared_gate_annotates_but_does_not_strengthen_an_inconclusive_verdict(
+    tmp_path,  # noqa: ANN001
+) -> None:
+    """Annotating an INCONCLUSIVE decision records the breach without
+    upgrading the verdict.
+
+    The predeclared rule found the evidence too thin to decide. A declared
+    breach is a real fact about that candidate and belongs in the record, but
+    it must not manufacture a REJECTED the rule's own evidence never earned --
+    a strong verdict over thin evidence is the same category of mistake as a
+    promotion over a breached gate.
+    """
+    manifest = _manifest(tmp_path, **_GATED_SETS, retention_profile=PROFILE_SECTION)
+    cycle = _cycle(tmp_path, manifest)
+
+    decision = _decide(
+        cycle,
+        candidate_target=0.45,
+        # Inside the predeclared 0.02 tolerance, outside the declared 0.0 one.
+        candidate_constrained=0.30,
+        parent_target=0.28,
+        parent_constrained=0.31,
+    )
+
+    assert decision.checks["protected_regression"] != "violated"
+    assert decision.verdict == "INCONCLUSIVE"
+    assert any(
+        reason.startswith("RETENTION_REGRESSION") and "protected-math" in reason
+        for reason in decision.reasons
+    ), decision.reasons
 
 
 # --------------------------------------------------------------------------
