@@ -45,6 +45,7 @@ from .campaign import (
     ProtectionDeclaration,
 )
 from .campaign_prepare import prepared_input_paths
+from .candidate_search import CandidateSearchDeclaration, CandidateSearchRefusal
 from .target_selection import TargetProposal
 
 #: Named refusals. Each names the thing that was asked for and why it cannot be.
@@ -104,6 +105,14 @@ class LoopPolicy:
     #: path. The loop routes them to human review rather than spending an
     #: envelope proving again that the same intervention does not work.
     structural_skills: tuple[str, ...] = ()
+    #: The bounded candidate search every generation this policy composes
+    #: carries into its frozen declaration. Undeclared (the default) means one
+    #: pass over the declared recipes, which is what every policy predating it
+    #: does; declared, its rounds, budget and envelope are frozen with the rest
+    #: of the preregistration, so a search cannot be widened after a freeze.
+    candidate_search: CandidateSearchDeclaration = field(
+        default_factory=CandidateSearchDeclaration
+    )
 
     #: Every key a policy document may carry. A key nothing reads would be a
     #: limit that looks enforced and is not.
@@ -131,6 +140,7 @@ class LoopPolicy:
         "calibration_benchmarks",
         "reliability_benchmarks",
         "structural_skills",
+        "candidate_search",
     )
 
     def __post_init__(self) -> None:
@@ -200,6 +210,19 @@ class LoopPolicy:
         execution = EvaluationExecution.from_mapping(
             document["evaluation_execution"], source=f"{source}: evaluation_execution"
         )
+        # Absent means no search at all: the policy dictates what every
+        # generation's declaration carries, and only a declared search does.
+        # A malformed search is named through the policy's own refusal, so a
+        # client reads one code for "this policy is not executable".
+        if "candidate_search" in document:
+            try:
+                search = CandidateSearchDeclaration.from_mapping(
+                    document["candidate_search"], source=f"{source}: candidate_search"
+                )
+            except CandidateSearchRefusal as refusal:
+                raise NextCampaignRefusal(f"{POLICY_SCHEMA}: {refusal}") from refusal
+        else:
+            search = CandidateSearchDeclaration()
         return cls(
             maximum_generations=document["maximum_generations"],
             maximum_total_wall_gpu_hours=document["maximum_total_wall_gpu_hours"],
@@ -220,6 +243,7 @@ class LoopPolicy:
             calibration_benchmarks=_strings("calibration_benchmarks", optional=True),
             reliability_benchmarks=_strings("reliability_benchmarks", optional=True),
             structural_skills=_strings("structural_skills", optional=True),
+            candidate_search=search,
         )
 
     @classmethod
@@ -262,6 +286,11 @@ class LoopPolicy:
             "stopping_rules": list(self.stopping_rules),
             "promotion_policy_version": self.promotion_policy_version,
             "human_review_triggers": list(self.human_review_triggers),
+            # Emitted only when declared, so the digest of a policy that declares
+            # no search is exactly what it was before this field existed.
+            **({"candidate_search": self.candidate_search.to_dict()}
+               if self.candidate_search.declared
+               else {}),
             "calibration_benchmarks": list(self.calibration_benchmarks),
             "reliability_benchmarks": list(self.reliability_benchmarks),
             "structural_skills": list(self.structural_skills),
@@ -600,6 +629,14 @@ class NextCampaignBuilder:
             "promotion_policy_version": self.policy.promotion_policy_version,
             "protection": self.policy.protection.to_dict(),
             "evaluation_execution": self.policy.evaluation_execution.to_dict(),
+            # The search the policy declared is frozen with the rest of the
+            # preregistration; a policy that declared none adds no key, so a
+            # policy predating the field composes exactly what it always did.
+            **(
+                {"candidate_search": self.policy.candidate_search.to_dict()}
+                if self.policy.candidate_search.declared
+                else {}
+            ),
             # The trusted ancestor is the lineage's, not this generation's: a
             # generation that just promoted does not silently become the floor.
             "baseline_eval_report_path": parent.baseline_eval_report_path,

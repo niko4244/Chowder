@@ -25,6 +25,7 @@ from chowder.cli import main as chowder_main
 from chowder.growth.campaign_runner import (
     READINESS_ANCESTOR_ARM,
     READINESS_BASE_IDENTITY,
+    READINESS_CANDIDATE_SEARCH,
     READINESS_DECLARED_INPUT,
     READINESS_EVALUATOR,
     READINESS_EVALUATOR_COVERAGE,
@@ -315,3 +316,54 @@ def test_the_readiness_command_exits_non_zero_when_a_prerequisite_is_missing(
 
     assert payload["status"] == "REFUSED"
     assert READINESS_BASE_IDENTITY in payload["reason_codes"]
+
+
+# --------------------------------------------------------------------------
+# the declared bounded candidate search is itself a prerequisite
+# --------------------------------------------------------------------------
+
+SEARCH: dict[str, Any] = {
+    "rounds": 2,
+    "initial_max_steps": 12,
+    "step_multiplier": 2.0,
+    "survival_fraction": 0.5,
+    "min_survivors": 1,
+    "device_gpu_hours_ceiling": 0.30,
+    "wall_gpu_hours_ceiling": 0.20,
+}
+
+
+def test_readiness_reports_the_declared_search_as_its_own_check(tmp_path: Path):
+    manifest, runner, _document = _campaign(
+        tmp_path, with_ancestor=True, candidate_search=dict(SEARCH)
+    )
+
+    report = check_campaign_readiness(manifest)
+
+    assert report.ready, report.to_dict()
+    check = next(c for c in report.checks if c.check == "candidate_search")
+    assert check.status == "ok"
+    assert "2 declared round(s)" in check.detail
+    # Zero compute by construction: readiness starts no subprocess.
+    assert runner.commands == []
+
+
+def test_readiness_refuses_a_search_that_cannot_fit_its_declared_envelope(
+    tmp_path: Path,
+):
+    _manifest, _runner, document = _campaign(
+        tmp_path, with_ancestor=True, candidate_search=dict(SEARCH)
+    )
+    manifest = _redeclare(
+        document, candidate_search={**SEARCH, "device_gpu_hours_ceiling": 1e-9}
+    )
+
+    report = check_campaign_readiness(manifest)
+
+    assert report.status == "REFUSED"
+    assert READINESS_CANDIDATE_SEARCH in report.reason_codes
+    # The projection depends on the search it must cover, so it is skipped
+    # rather than reported against a search that was never admitted.
+    statuses = {c.check: c.status for c in report.checks}
+    assert statuses["campaign_projection"] == "skipped"
+    assert report.ready is False

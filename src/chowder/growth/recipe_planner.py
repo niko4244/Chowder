@@ -4,10 +4,13 @@ Given the curriculum plan and measured hardware reality (the device
 preflight numbers Chowder's routers/PEFT backends already measure), propose
 a small set of competing recipes whose projected cost fits the preregistered
 budget. The planner proposes; selection is whatever the caller's `TrainingFn`
-and the cycle's predeclared promotion rule decide. Chowder's successive-halving
-controller would be the qualified selector, but it has no production caller
-yet and `run_project` has no `search` config for it to read
-(`docs/ROADMAP.md`), so nothing here may assume that interface exists.
+and the cycle's predeclared promotion rule decide, and how much budget each
+candidate gets is the declared bounded candidate search's decision
+(`chowder.growth.candidate_search`, over
+`successive_halving.HalvingSchedule`). It does not vary anything the production
+backend would ignore: :data:`SEARCH_AXES` is the learning rate, the one field
+every supported backend's config reader consumes, and
+:func:`assert_search_axes_consumed` refuses an inert axis.
 
 Variables stay inside the currently qualified training path: LoRA-family
 post-training with measured memory/step/load budgets. Architecture changes
@@ -20,6 +23,233 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from .curriculum import CurriculumItem
+
+#: Which recipe fields actually reach the production backend's config reader,
+#: per backend type. A field absent from this table is *recorded* by ``to_dict``
+#: as provenance but never consumed, so it cannot be a search axis: varying it
+#: would produce candidates that differ in name and not in the run.
+#:
+#: Read from the backends themselves, not from a comment:
+#:
+#: * ``transformers-peft`` (``backends/transformers_peft.py``, the spec
+#:   constructor around its ``training``/``lora`` sections):
+#:   ``backend.max_length``, ``backend.lora.{r,alpha}``,
+#:   ``backend.training.{learning_rate,lr_scheduler_type,warmup_steps,max_steps,
+#:   batch_size,gradient_accumulation_steps,...}``, and
+#:   ``backend.resume_from_checkpoint`` (progressive-search continuation;
+#:   the backend's own checkpoint manifest verifies it against the bound
+#:   inputs the checkpoint was produced under);
+#: * ``router-healing`` (``training_binding._compose``'s documented namespace):
+#:   ``backend.router_healing.{max_steps,learning_rate,seq_len}``, and
+#:   ``backend.router_healing.resume_from`` -- the engine's own continuation
+#:   setting, so a progressive-search survivor continues from its checkpoint
+#:   in the namespace the router engine actually reads.
+CONSUMED_RECIPE_FIELDS: Mapping[str, frozenset[str]] = {
+    "transformers-peft": frozenset(
+        {
+            "learning_rate",
+            "scheduler",
+            "warmup_steps",
+            "max_steps",
+            "seq_len",
+            "lora_rank",
+            "lora_alpha",
+            "target_modules",
+            "batch_size",
+            "gradient_accumulation",
+            "resume_from_checkpoint",
+        }
+    ),
+    "router-healing": frozenset(
+        {
+            "learning_rate",
+            "scheduler",
+            "warmup_steps",
+            "max_steps",
+            "seq_len",
+            "batch_size",
+            "resume_from_checkpoint",
+        }
+    ),
+}
+
+#: Fields no search may vary, with the reason stated rather than implied. A
+#: field lands here because varying it would either change what the run *is*
+#: (data identity, budget ownership) or corrupt the record (projections,
+#: prose), not because no backend reads it.
+UNSAFE_SEARCH_FIELDS: Mapping[str, str] = {
+    "max_steps": (
+        "owned by the halving schedule: successive halving allocates it per "
+        "round, and a candidate that also varied it would fight the allocator"
+    ),
+    "resume_from_checkpoint": (
+        "operational continuation state owned by the search's own progressive "
+        "allocation, not a property of the proposal"
+    ),
+    "curriculum_item_ids": (
+        "data identity: varying it is a new campaign's curriculum, bound by "
+        "the contamination and provenance gates, not a recipe knob"
+    ),
+    "dataset_manifest": (
+        "data identity: the manifest pins the dataset the provenance gates "
+        "verified; a search over manifests would bypass them"
+    ),
+    "recipe_id": "identity, not an input",
+    "projected_device_gpu_hours": "a projection, not an input",
+    "projected_wall_gpu_hours": "a projection, not an input",
+    "notes": "provenance prose",
+}
+
+#: Fields a backend *could* consume but no mapper emits yet, with the missing
+#: wiring named. These are the honest expansion candidates: wire the mapper,
+#: prove the path with the contract tests, then -- and only then -- consider
+#: the field as a search axis.
+PLANNED_UNMAPPED_FIELDS: Mapping[str, Mapping[str, str]] = {
+    "transformers-peft": {
+        "replay_rate": (
+            "the peft spec resumes replay only from a declared replay dataset "
+            "with its own sha256; a bare ratio has nothing to land in -- wire "
+            "replay dataset selection first"
+        ),
+        "objective": (
+            "only the sft path is qualified on the peft backend; dpo and "
+            "continued_pretrain have no spec mapping"
+        ),
+        "mixture": (
+            "curriculum composition is materialized by campaign preparation, "
+            "not the backend config; wiring a ratio into the backend would "
+            "fork the two sources of truth"
+        ),
+    },
+    "router-healing": {
+        "target_modules": (
+            "the router engine trains gate parameters, not adapter modules"
+        ),
+        "gradient_accumulation": ("the engine has no accumulation setting"),
+        "lora_rank": ("the engine trains gates directly; no adapter namespace"),
+        "lora_alpha": ("the engine trains gates directly; no adapter namespace"),
+        "replay_rate": ("no replay surface in the engine's settings"),
+        "objective": ("the engine has a single training objective"),
+        "mixture": (
+            "curriculum composition is materialized by campaign preparation"
+        ),
+    },
+}
+
+
+def classify_recipe_fields(backend_type: str) -> dict[str, str]:
+    """Every recipe field in exactly one of the four audit buckets.
+
+    1. ``consumed`` -- a backend config reader reads it, so varying it changes
+       the run;
+    2. ``recorded-only`` -- provenance travels with it, nothing reads it;
+    3. ``planned-unmapped`` -- a mapper could land it, none does yet (the
+       missing wiring is named in :data:`PLANNED_UNMAPPED_FIELDS`);
+    4. ``unsafe`` -- varying it would change what the run *is* or corrupt the
+       record; never a search dimension (:data:`UNSAFE_SEARCH_FIELDS`).
+    """
+    consumed = consumed_recipe_fields(backend_type)
+    unmapped = PLANNED_UNMAPPED_FIELDS.get(backend_type, {})
+    classification: dict[str, str] = {}
+    for field_name in sorted(ALL_RECIPE_FIELDS):
+        if field_name in consumed:
+            classification[field_name] = "consumed"
+        elif field_name in UNSAFE_SEARCH_FIELDS:
+            classification[field_name] = "unsafe"
+        elif field_name in unmapped:
+            classification[field_name] = "planned-unmapped"
+        else:
+            classification[field_name] = "recorded-only"
+    return classification
+
+#: Every recipe field, so "recorded only" can be stated as a difference rather
+#: than rediscovered from whatever is missing.
+ALL_RECIPE_FIELDS: frozenset[str] = frozenset(
+    {
+        "recipe_id",
+        "curriculum_item_ids",
+        "mixture",
+        "learning_rate",
+        "scheduler",
+        "warmup_steps",
+        "lora_rank",
+        "lora_alpha",
+        "target_modules",
+        "seq_len",
+        "batch_size",
+        "gradient_accumulation",
+        "max_steps",
+        "objective",
+        "replay_rate",
+        "dataset_manifest",
+        "projected_device_gpu_hours",
+        "projected_wall_gpu_hours",
+        "resume_from_checkpoint",
+        "notes",
+    }
+)
+
+#: The recipe fields the planner is allowed to vary between candidates. A field
+#: may participate in search only when *every* supported backend consumes it:
+#: an axis that is live for one backend and inert for another would make the
+#: same candidate set mean different things depending on the project template.
+#:
+#: The step budget is deliberately *not* here: successive halving owns it, and
+#: ``chowder.growth.candidate_search`` allocates it per round from a declared
+#: schedule. A candidate therefore differs from its siblings in learning rate
+#: and nothing else, which is what makes a survivor's second round a larger
+#: budget for the same proposal rather than a different proposal.
+SEARCH_AXES: tuple[str, ...] = ("learning_rate",)
+
+
+def consumed_recipe_fields(backend_type: str) -> frozenset[str]:
+    """The recipe fields this backend's config reader actually consumes."""
+    try:
+        return CONSUMED_RECIPE_FIELDS[backend_type]
+    except KeyError:
+        raise ValueError(
+            f"recipe knobs have no recorded consumer for backend type "
+            f"{backend_type!r}; search-active fields cannot be established, so "
+            "the planner refuses rather than assuming a mapping"
+        ) from None
+
+
+def recorded_only_recipe_fields(backend_type: str) -> frozenset[str]:
+    """Recipe fields this backend records as provenance but never consumes."""
+    return ALL_RECIPE_FIELDS - consumed_recipe_fields(backend_type)
+
+
+def assert_search_axes_consumed(
+    axes: Sequence[str] = SEARCH_AXES,
+    *,
+    backend_types: Sequence[str] | None = None,
+) -> None:
+    """Refuse a search axis that any supported backend would ignore.
+
+    Called before a candidate set is proposed, so an edit that adds an inert
+    axis fails here rather than silently producing candidates that differ only
+    in their names. Also refuses axes the classification marks unsafe: an
+    axis that changes what the run *is* (data identity, budget ownership) is
+    not a knob no matter who reads it.
+    """
+    unsafe = sorted(axis for axis in axes if axis in UNSAFE_SEARCH_FIELDS)
+    if unsafe:
+        raise ValueError(
+            f"search axes {unsafe} are classified unsafe and must never be "
+            "search dimensions: "
+            + "; ".join(f"{name}: {UNSAFE_SEARCH_FIELDS[name]}" for name in unsafe)
+        )
+    supported = tuple(backend_types or sorted(CONSUMED_RECIPE_FIELDS))
+    for backend_type in supported:
+        consumed = consumed_recipe_fields(backend_type)
+        inert = sorted(axis for axis in axes if axis not in consumed)
+        if inert:
+            raise ValueError(
+                f"search axes {inert} are not consumed by backend "
+                f"{backend_type!r}, so varying them would produce candidates "
+                "that differ in name and not in the run; a search axis must be "
+                "read by every backend a recipe can be composed for"
+            )
 
 
 @dataclass(frozen=True)
@@ -64,6 +294,13 @@ class TrainingRecipe:
     dataset_manifest: Mapping[str, Any]
     projected_device_gpu_hours: float
     projected_wall_gpu_hours: float
+    #: The checkpoint a continuation continues from. ``None`` means a fresh
+    #: run from the parent. This is *operational*, not mathematical: the peft
+    #: backend excludes it from the checkpoint recipe digest, so a progressive
+    #: search round can continue the same proposal at a larger step budget
+    #: without the continuation looking like a recipe change to the
+    #: checkpoint-manifest identity check.
+    resume_from_checkpoint: str | None = None
     notes: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -87,6 +324,7 @@ class TrainingRecipe:
             "dataset_manifest": dict(self.dataset_manifest),
             "projected_device_gpu_hours": self.projected_device_gpu_hours,
             "projected_wall_gpu_hours": self.projected_wall_gpu_hours,
+            "resume_from_checkpoint": self.resume_from_checkpoint,
             "notes": self.notes,
         }
 
@@ -100,9 +338,12 @@ class TrainingRecipe:
 
         - ``router-healing``: the router engine's knobs.
         - ``transformers-peft``: the same training knobs in the peft
-          validator's namespace (``backend.training.*`` plus ``max_length``).
-          Note the peft path has no ``seq_len``: sequence length is the
-          backend-level ``max_length``.
+          validator's namespace (``backend.training.*`` plus ``max_length``),
+          and the LoRA rank/alpha in the namespace the peft spec constructor
+          reads (``backend.lora.{r,alpha}``) -- so a recipe's declared rank is
+          the rank the run actually trains at, not provenance only. Note the
+          peft path has no ``seq_len``: sequence length is the backend-level
+          ``max_length``.
 
         ``ExperimentGraph`` resolves a patch by merging it with
         ``deep_merge_config``, so any other key -- bookkeeping included --
@@ -111,38 +352,57 @@ class TrainingRecipe:
         recipe's knobs; emitting router-healing keys into another backend
         would fail validation anyway (both discovered on real runs).
 
-        LoRA rank/alpha, and anything else the target path names inside its
-        own spec, stay proposed-but-unmapped: inventing a namespace for them
-        here would be drift, not integration. Recipe identity, mixture, and
-        projections travel in ``to_dict()``, which is what the cycle ledger
-        records.
+        Every field this emits appears in :data:`CONSUMED_RECIPE_FIELDS` for
+        that backend, and every field it does not is reported by
+        :func:`recorded_only_recipe_fields` -- named, rather than implied to
+        have driven the run. Recipe identity, mixture, and projections travel
+        in ``to_dict()``, which is what the cycle ledger records.
 
         There is no project-level ``search`` config to target: ``run_project``
-        has no search section and Chowder's successive-halving controller has
-        no production caller yet (``docs/ROADMAP.md``).
+        has no search section, so bounded candidate search is declared on the
+        campaign and executed by the runner over these recipes (see
+        ``chowder.growth.candidate_search``) rather than by inventing a project
+        section nothing reads.
         """
         if backend_type == "router-healing":
-            return {
-                "backend": {
-                    "router_healing": {
-                        "max_steps": self.max_steps,
-                        "learning_rate": self.learning_rate,
-                        "seq_len": self.seq_len,
-                    }
-                }
+            router: dict[str, Any] = {
+                "max_steps": self.max_steps,
+                "learning_rate": self.learning_rate,
+                "seq_len": self.seq_len,
+                "batch_size": self.batch_size,
+                "scheduler": self.scheduler,
+                "warmup_steps": self.warmup_steps,
             }
+            if self.resume_from_checkpoint is not None:
+                # The router engine's own continuation setting: it resolves the
+                # declared path against the work dir and reports the checkpoints
+                # it wrote, so the search's continuation reaches the engine in
+                # the namespace it actually reads.
+                router["resume_from"] = self.resume_from_checkpoint
+            return {"backend": {"router_healing": router}}
         if backend_type == "transformers-peft":
-            return {
-                "backend": {
-                    "max_length": self.seq_len,
-                    "training": {
-                        "max_steps": self.max_steps,
-                        "learning_rate": self.learning_rate,
-                        "lr_scheduler_type": self.scheduler,
-                        "warmup_steps": self.warmup_steps,
-                    },
-                }
+            backend: dict[str, Any] = {
+                "max_length": self.seq_len,
+                "lora": {
+                    "r": self.lora_rank,
+                    "alpha": self.lora_alpha,
+                    "target_modules": list(self.target_modules),
+                },
+                "training": {
+                    "max_steps": self.max_steps,
+                    "learning_rate": self.learning_rate,
+                    "lr_scheduler_type": self.scheduler,
+                    "warmup_steps": self.warmup_steps,
+                    "batch_size": self.batch_size,
+                    "gradient_accumulation_steps": self.gradient_accumulation,
+                },
             }
+            if self.resume_from_checkpoint is not None:
+                # The peft spec constructor reads backend.resume_from_checkpoint
+                # and its checkpoint manifest verifies the continuation against
+                # the exact bound inputs the checkpoint was produced under.
+                backend["resume_from_checkpoint"] = self.resume_from_checkpoint
+            return {"backend": backend}
         raise ValueError(
             f"recipe knobs have no mapping for backend type {backend_type!r}; "
             "a patch for an unknown backend would either be dropped or refused "
@@ -183,11 +443,20 @@ class RecipePlanner:
     ) -> tuple[TrainingRecipe, ...]:
         """A deterministic spread of recipes around evidence-based defaults.
 
-        The spread is over the highest-leverage hyperparameters for small
-        LoRA post-training (LR x rank x replay), each projected against the
-        measured budget; recipes that bust either ceiling are refused, not
+        The spread is over :data:`SEARCH_AXES` only -- the learning rate, the
+        one knob every supported backend's config reader consumes -- so every
+        candidate differs in the run and not merely in its name.
+        ``lora_rank``/``replay_rate``/``batch_size`` and the rest stay recorded
+        properties of the proposal (``recorded_only_recipe_fields`` names
+        them); they are not search axes, because a router-healing project would
+        ignore them. The step budget is not a search axis either: successive
+        halving owns it (``chowder.growth.candidate_search``).
+
+        Each candidate is projected against the measured budget, and a recipe
+        that cannot be scaled to fit either ceiling raises rather than being
         silently included.
         """
+        assert_search_axes_consumed()
         if not items:
             return ()
         item_ids = tuple(item.item_id for item in items)
@@ -201,15 +470,10 @@ class RecipePlanner:
         total_examples = sum(item.example_count for item in items) or base_examples
         steps_estimate = max(12, min(400, total_examples // 30))
 
-        # LR x rank x replay grid: 2 x 2 x 2 candidates, truncated to `count`.
-        grid = [
-            (lr, rank, replay)
-            for lr in (1e-4, 2e-4)
-            for rank in (16, 32)
-            for replay in (0.1, 0.25)
-        ]
+        # LR grid over SEARCH_AXES, truncated to `count`.
+        grid = [(lr,) for lr in (5e-5, 1e-4, 2e-4, 4e-4)]
         recipes: list[TrainingRecipe] = []
-        for index, (lr, rank, replay) in enumerate(grid[:count]):
+        for index, (lr,) in enumerate(grid[:count]):
             seq_len = 2048
             device, wall = self.project_cost(seq_len=seq_len, max_steps=steps_estimate)
             if device > self.max_device or wall > self.max_wall:
@@ -226,11 +490,12 @@ class RecipePlanner:
                         f"{wall:.4f} wall GPU-h vs ceilings {self.max_device:.4f}/"
                         f"{self.max_wall:.4f}"
                     )
+            rank = 16
             recipes.append(
                 TrainingRecipe(
-                    recipe_id=f"recipe-{index:02d}-lr{lr:g}-r{rank}-replay{replay:g}",
+                    recipe_id=f"recipe-{index:02d}-lr{lr:g}",
                     curriculum_item_ids=item_ids,
-                    mixture={"TARGET": 0.5, "PRESERVE": 0.15, "GENERAL": 0.2, "REPLAY": replay, "STRETCH": 0.1},
+                    mixture={"TARGET": 0.5, "PRESERVE": 0.15, "GENERAL": 0.2, "REPLAY": 0.1, "STRETCH": 0.1},
                     learning_rate=lr,
                     scheduler="cosine",
                     warmup_steps=max(2, steps_estimate // 10),
@@ -242,11 +507,15 @@ class RecipePlanner:
                     gradient_accumulation=4,
                     max_steps=steps_estimate,
                     objective="sft",
-                    replay_rate=replay,
+                    replay_rate=0.1,
                     dataset_manifest=dataset_manifest,
                     projected_device_gpu_hours=device,
                     projected_wall_gpu_hours=wall,
-                    notes=f"projected from measured step cost {self.budget.step_seconds(seq_len):.3f}s/step @ {seq_len}",
+                    notes=(
+                        f"search axis lr {lr:g} at {steps_estimate} base steps; "
+                        f"projected from measured step cost "
+                        f"{self.budget.step_seconds(seq_len):.3f}s/step @ {seq_len}"
+                    ),
                 )
             )
         return tuple(recipes)

@@ -26,6 +26,18 @@ from typing import Any, Mapping, Sequence
 
 import pytest
 
+
+def _latest_checkpoint_of(attempt_dir: Path) -> str:
+    """The highest real checkpoint-N under an attempt's artifact, the same
+    resolution the search's continuation uses against real training output."""
+    trainer = attempt_dir / "work" / "artifact" / "trainer"
+    checkpoints = sorted(
+        (p for p in trainer.glob("checkpoint-*") if p.is_dir()),
+        key=lambda p: int(p.name.rsplit("-", 1)[1]),
+    )
+    assert checkpoints, f"no checkpoint under {trainer}"
+    return str(checkpoints[-1].resolve())
+
 from chowder.cli import main as chowder_main
 from chowder.evals.result import (
     MEASURED_PARENT,
@@ -34,6 +46,14 @@ from chowder.evals.result import (
     EvalReport,
 )
 from chowder.growth import campaign_runner
+from chowder.growth.campaign_runner import (
+    NON_BEHAVIORAL_FIELDS,
+    assert_every_field_enforced,
+    CANDIDATE_ARTIFACT_DIGEST_STALE,
+    FIELD_ENFORCEMENT,
+    build_evaluator,
+    CampaignRunRefusal,
+)
 from chowder.growth.campaign import (
     STOPPING_RULE_ENFORCEMENT,
     STOPPING_RULE_ON_ADMISSION_REFUSAL,
@@ -41,19 +61,20 @@ from chowder.growth.campaign import (
     STOPPING_RULES,
     CampaignManifest,
     CampaignManifestError,
-    stops_on_admission_refusal,
-    stops_on_campaign_overrun,
 )
 from chowder.growth.campaign_runner import (
-    CANDIDATE_ARTIFACT_DIGEST_STALE,
-    FIELD_ENFORCEMENT,
-    NON_BEHAVIORAL_FIELDS,
-    CampaignRunRefusal,
-    assert_every_field_enforced,
     plan_campaign,
     run_campaign,
+    stops_on_admission_refusal,
+    stops_on_campaign_overrun,
     undeclared_inputs,
 )
+from chowder.growth.candidate_search import (
+    SEARCH_SCHEMA,
+    CandidateSearchRefusal,
+    SearchPlan,
+)
+from chowder.growth.campaign_runner import CANDIDATE_ARTIFACT_DIGEST_STALE, build_evaluator
 from chowder.growth.candidate_evaluation import (
     CANDIDATE_EVALUATION_COST_UNMEASURED,
     CANDIDATE_EVALUATION_COST_UNREPORTED,
@@ -84,10 +105,18 @@ CANDIDATE_VERSION = "gen2"
 
 DEVICE_PER_RECIPE = 0.30
 WALL_PER_RECIPE = 0.10
-#: Wall-charged cost one attempt reports. Deliberately far above what the
-#: planner *projects* for this hardware, so the difference between an admitted
-#: plan and an overrunning actual is a real signal in these tests.
-ATTEMPT_WALL_GPU_HOURS = 0.05
+#: Wall-charged cost one attempt reports in a *clean* run: within the
+#: planner's projection and its declared settlement tolerance, because a fake
+#: clean run must be a run production settlement would accept. (While
+#: selection ignored settlement refusals, an overrunning "clean" fixture
+#: promoted anyway -- the settlement gate caught the fixture, not the code.)
+ATTEMPT_WALL_GPU_HOURS = 0.006
+#: Wall-charged cost of a deliberate overrun: far above what the planner
+#: projects, so it blows both the per-attempt settlement tolerance and the
+#: tight campaign ceilings. Pass an explicit runner with this cost only to
+#: scenarios whose point is a settlement refusal or a mid-run stop; the
+#: default runner must stay settleable.
+OVERRUN_WALL_GPU_HOURS = 0.05
 
 HARDWARE: Mapping[str, Any] = {
     "gpu_name": "test-gpu",
@@ -851,24 +880,33 @@ def test_a_campaign_ceiling_breach_stops_the_remaining_recipes_and_vetoes_promot
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """The declared stopping rule changes how much compute runs, and a
-    campaign that blew its own envelope does not promote."""
-    manifest, runner, _document = _campaign(tmp_path, budget=_tight_campaign_budget())
+    campaign that blew its own envelope does not promote.
+
+    The first attempt's overrun refuses the attempt itself (per-attempt
+    settlement: an 8x projection overrun is far past the declared tolerance),
+    the tripped campaign ceiling then stops the remaining recipes, and with
+    no settleable candidate to select the run records REFUSED. The spend
+    stays in the accounting and nothing promotes -- an overrunning campaign
+    is stopped harder than adjudicated, not waved through selection.
+    """
+    manifest, runner, _document = _campaign(
+        tmp_path,
+        budget=_tight_campaign_budget(),
+        runner=_RecordingRunner(gpu_hours=OVERRUN_WALL_GPU_HOURS),
+    )
     _patch_seams(monkeypatch, runner)
 
     run = run_campaign(manifest)
 
     assert _verbs(runner).count("train") == 1
-    assert run.verdict == "REJECTED"
+    assert run.verdict == "REFUSED"
     assert _phase(run, "stopping")["verdict"] == "stopped"
-    assert _phase(run, "resource_veto")["verdict"] == "REJECTED"
-    assert run.settlement["budget_compliant"] is False
-    assert any("WALL" in reason for reason in run.settlement["budget_failure_reasons"])
-    # The artifact, the measurements and the honest verdict all survive, but
-    # the overrun campaign records no promoted generation: the resource veto
-    # is authoritative over lineage, not just over the report.
+    assert run.promotion is None
+    # The overrun attempt's spend is in the durable accounting even though
+    # its settlement refusal made it unselectable.
+    assert run.cost["wall_gpu_hours"] == pytest.approx(OVERRUN_WALL_GPU_HOURS)
     record = json.loads(Path(run.record_path).read_text(encoding="utf-8"))
-    assert record["verdict"] == "REJECTED"
-    assert record["cycle_outcome"]["verdict"] == "REJECTED"
+    assert record["verdict"] == "REFUSED"
     assert Path(record["cost"]["accounting_path"]).exists()
     ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
     assert CANDIDATE_VERSION not in ledger.versions()
@@ -877,19 +915,30 @@ def test_a_campaign_ceiling_breach_stops_the_remaining_recipes_and_vetoes_promot
 def test_without_the_overrun_rule_every_recipe_runs_and_the_resource_gate_still_vetoes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """No stopping rule means every recipe runs -- and still nothing promotes.
+
+    Both attempts blow their own projection tolerance, so per-attempt
+    settlement refuses each of them; with no settleable candidate to select,
+    the campaign refuses instead of adjudicating. The resource gate held
+    without the stopping rule; it just refused earlier in the pipeline.
+    """
     manifest, runner, _document = _campaign(
         tmp_path,
         budget=_tight_campaign_budget(),
         stopping_rules=[STOPPING_RULE_ON_ADMISSION_REFUSAL],
+        runner=_RecordingRunner(gpu_hours=OVERRUN_WALL_GPU_HOURS),
     )
     _patch_seams(monkeypatch, runner)
 
     run = run_campaign(manifest)
 
     assert _verbs(runner).count("train") == 2
-    assert run.verdict == "REJECTED"
-    assert _phase(run, "settlement")["verdict"] == "violated"
+    assert run.verdict == "REFUSED"
+    assert CANDIDATE_EVALUATION_NOT_PRODUCED in _phase(run, "candidate_evaluation")["detail"]
     assert "stopping" not in [phase["phase"] for phase in run.phases]
+    assert run.cost["wall_gpu_hours"] == pytest.approx(2 * OVERRUN_WALL_GPU_HOURS)
+    ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
+    assert CANDIDATE_VERSION not in ledger.versions()
 
 
 def test_a_plan_that_does_not_fit_the_campaign_envelope_refuses_before_compute(
@@ -1598,18 +1647,25 @@ def test_the_evaluations_measured_cost_is_charged_and_can_veto_promotion(
 ):
     """Measuring the candidate is compute, and it counts.
 
-    Two attempts at 0.05 wall fit the declared 0.12 campaign ceiling; the 0.05
-    the evaluation cost does not. The same run promotes when the evaluation
-    reports an explicit, measured zero -- which is what makes this a statement
-    about accounting rather than about the rule.
+    Two attempts at the honest projection-honest cost fit the declared 0.03
+    campaign ceiling; the 0.05 the evaluation reports does not. The same run
+    promotes when the evaluation reports an explicit, measured zero -- which
+    is what makes this a statement about accounting rather than about the
+    rule. (The evaluation leg is charged *after* the attempts settle, so this
+    is the reachable path to a campaign-level resource veto: the attempts
+    themselves settle inside their projection tolerance.)
     """
     budget = {
         "device_gpu_hours_ceiling_per_recipe": DEVICE_PER_RECIPE,
         "wall_gpu_hours_ceiling_per_recipe": WALL_PER_RECIPE,
         "device_gpu_hours_ceiling_campaign": 0.60,
-        "wall_gpu_hours_ceiling_campaign": 0.12,
+        "wall_gpu_hours_ceiling_campaign": 0.03,
     }
-    manifest, runner, _document = _campaign(tmp_path, with_ancestor=True, budget=budget)
+    manifest, runner, _document = _campaign(
+        tmp_path,
+        with_ancestor=True,
+        budget=budget,
+    )
 
     _patch_runner(monkeypatch, runner)
     monkeypatch.setattr(
@@ -1637,7 +1693,9 @@ def test_the_evaluations_measured_cost_is_charged_and_can_veto_promotion(
 
     assert charged.verdict == "REJECTED"
     assert charged.settlement["budget_compliant"] is False
-    assert charged.cost["wall_gpu_hours"] == pytest.approx(0.15)
+    assert charged.cost["wall_gpu_hours"] == pytest.approx(
+        2 * ATTEMPT_WALL_GPU_HOURS + 0.05
+    )
     assert any(
         "WALL" in reason for reason in charged.settlement["budget_failure_reasons"]
     )
@@ -1783,3 +1841,132 @@ def test_the_cli_refuses_a_malformed_manifest_without_touching_compute(
         chowder_main()
     assert "unknown manifest fields" in str(error.value)
     assert capsys.readouterr().out == ""
+
+
+# --------------------------------------------------------------------------
+# the declared bounded candidate search, through the real run surface
+# --------------------------------------------------------------------------
+
+#: A search that fits this fixture's ceilings: two rounds over the declared
+#: recipes, the second at twice the step budget.
+SEARCH_DECLARATION: Mapping[str, Any] = {
+    "rounds": 2,
+    "initial_max_steps": 12,
+    "step_multiplier": 2.0,
+    "survival_fraction": 0.5,
+    "min_survivors": 1,
+    "device_gpu_hours_ceiling": 0.30,
+    "wall_gpu_hours_ceiling": 0.20,
+}
+
+
+def test_a_declared_search_runs_bounded_rounds_and_records_every_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The search is declared, projected, then actually run -- and it is one pass.
+
+    Round 0 runs both candidates at the cheap budget, only the survivor earns
+    round 1, and every attempt (including the cheap round's) stays in the record
+    and in the accounting: losing-candidate compute does not disappear.
+    """
+    manifest, runner, _document = _campaign(
+        tmp_path, with_ancestor=True, candidate_search=dict(SEARCH_DECLARATION)
+    )
+    _patch_seams(monkeypatch, runner)
+
+    run = run_campaign(manifest)
+
+    plan_phase = _phase(run, "candidate_search")
+    assert plan_phase["verdict"] == "ok"
+    assert "2 declared round(s)" in plan_phase["detail"]
+    ran = _phase(run, "candidate_search_run")
+    assert ran["verdict"] == "ok"
+    assert "2 round(s) ran" in ran["detail"]
+
+    rounds = [attempt["search_round"] for attempt in run.attempts]
+    assert rounds == [0, 0, 1], run.attempts
+    assert [attempt["search_max_steps"] for attempt in run.attempts] == [12, 12, 24]
+    # Three attempts really ran and all three were charged.
+    assert run.cost["wall_gpu_hours"] == pytest.approx(3 * ATTEMPT_WALL_GPU_HOURS)
+    assert Path(run.cost["accounting_path"]).is_file()
+
+    # Progressive allocation is continuation, not restart -- proven at the
+    # composed-project level: the round-1 attempt's backend config names the
+    # checkpoint the survivor's own round-0 attempt produced, in the
+    # namespace the backend's engine actually reads. If a later round ever
+    # silently restarted from the parent, this assertion fails.
+    round0_checkpoint = _latest_checkpoint_of(tmp_path / "state" / "attempts" / "attempt-01")
+    round1_project = json.loads(
+        (tmp_path / "state" / "attempts" / "attempt-03" / "project.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    router = round1_project["config"]["backend"]["router_healing"]
+    assert router["resume_from"] == round0_checkpoint
+    assert round1_project["config"]["backend"]["router_healing"]["max_steps"] == 24
+
+
+def test_a_search_over_its_declared_envelope_refuses_before_any_compute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The bound has teeth: an unfittable search never starts training."""
+    _planned, runner, document = _campaign(
+        tmp_path, with_ancestor=True, candidate_search=dict(SEARCH_DECLARATION)
+    )
+    # The declaration is a preregistration, so an unfittable envelope is
+    # *declared* and then refused, not discovered at planning time.
+    manifest = _redeclare(
+        document, candidate_search={**SEARCH_DECLARATION, "device_gpu_hours_ceiling": 1e-9}
+    )
+    _patch_seams(monkeypatch, runner)
+
+    run = run_campaign(manifest)
+
+    assert run.verdict == "REFUSED"
+    assert SEARCH_SCHEMA in _refusal(run)
+    assert _phase(run, "candidate_search")["verdict"] == "refused"
+    # Nothing trained: the refusal is a pre-compute one.
+    assert "train" not in _verbs(runner)
+    assert run.cost == {}
+
+
+def test_an_undeclared_campaign_is_still_a_single_pass(tmp_path: Path) -> None:
+    """Absent the field, behaviour is exactly what every earlier manifest ran."""
+    manifest, _runner, _document = _campaign(tmp_path, with_ancestor=True)
+
+    plan = plan_campaign(manifest)
+
+    assert plan.search.declared is False
+    assert plan.search.rounds == ()
+    assert len(manifest.recipe_ids) == 2
+
+
+def test_the_plan_command_prints_the_declared_search(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """The bounded search is visible before it is run, through the real CLI."""
+    _manifest, _runner, _document = _campaign(
+        tmp_path, with_ancestor=True, candidate_search=dict(SEARCH_DECLARATION)
+    )
+    monkeypatch_argv = [
+        "chowder",
+        "growth",
+        "campaign",
+        "plan",
+        str(tmp_path / "inputs" / "campaign.json"),
+    ]
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(sys, "argv", monkeypatch_argv)
+        code = chowder_main()
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "PLANNED"
+    assert payload["candidate_search_declared"] is True
+    assert payload["candidate_search_rounds"] == 2
+    rounds = payload["plan"]["candidate_search"]["rounds"]
+    assert [row["max_steps"] for row in rounds] == [12, 24]
+    # The printed projection is the search's worst case, not a single pass.
+    assert payload["projected_wall_gpu_hours"] == pytest.approx(
+        payload["plan"]["candidate_search"]["total_wall_gpu_hours"]
+    )

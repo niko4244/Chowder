@@ -36,11 +36,11 @@ evaluation. This module is the binding that can, and
    stranded on a non-terminal row is surfaced, not laundered into success.
 
 Two things this binding deliberately does **not** do. It does not invent a
-``search`` section: ``run_project`` has no search config and Chowder's
-successive-halving controller has no production caller (``docs/ROADMAP.md``),
-so a recipe's knobs are merged into the qualified backend config and nothing
-else. And it does not retry in place: a new attempt is a new directory with a new
-experiment id.
+``search`` section: ``run_project`` has no search config, and bounded candidate
+search is declared on the campaign (``chowder.growth.candidate_search``) rather
+than smuggled into the project a backend validates -- so a recipe's knobs are
+merged into the qualified backend config and nothing else. And it does not retry
+in place: a new attempt is a new directory with a new experiment id.
 """
 
 from __future__ import annotations
@@ -610,9 +610,10 @@ class SubprocessTrainingFn:
         if "search" in merged_config or "search" in template:
             return template, (
                 "template-contract",
-                "a `search` section is present; run_project has no search config "
-                "and no production caller for the successive-halving controller, "
-                "so this binding will not pretend to drive one",
+                "a `search` section is present; run_project has no search config, "
+                "and bounded candidate search is declared on the campaign rather "
+                "than in the project -- so this binding will not pretend to "
+                "drive one from here",
             )
         template["config"] = merged_config
 

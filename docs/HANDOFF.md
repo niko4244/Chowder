@@ -1391,9 +1391,34 @@ instrument, and `campaign_prepare` emits a `CapabilityProfile` where the loop
 consumes a `SkillProfile`, so the loop refuses with `NO_MEASURED_CAPABILITY`
 rather than reading a mean as a capability.
 
-**Gen-2 readiness is READY** as of `prepared-v2` (`chowder growth campaign
-prepare docs/gen2/gen2_campaign.json --out-dir <prepared-v2> --parent-evidence
-<gen1 run root>`): every pre-compute prerequisite passes, both arms included,
+**A prepared bundle is code output, and it goes stale against its producer.**
+`prepared-v2` was READY when it was written and stopped being READY without
+anyone touching it, because this branch then changed two things it had baked in:
+the parent profile's schema (`campaign_prepare` now writes `build_skill_profile`'s
+`estimates`; `_load_profile` refuses anything else by name) and the recipe id
+format (the LR x rank x replay grid became an LR-only axis, so
+`recipe-00-lr0.0001-r16-replay0.1` is no longer an id the planner proposes).
+Regenerating it cleared both. Do not read a bundle's existence, or its age, as
+readiness -- re-run `prepare` and let the readiness verdict say so.
+
+Regenerating it also surfaced two real gaps, because a *re-measured* parent could
+not be handed to `prepare` at all: `--parent-measurement` was documented on
+`prepare_campaign` but never exposed by the CLI or passed through, and the row
+matcher behind it only understood the run root's `candidate_evaluation.json`
+(a `diagnostics` aggregate). The report `measure-parent` writes is an
+`EvalReport` with `runs[]` and no `diagnostics` key, so every row of a fresh
+62-minute measurement silently became `UNMEASURED` and the curriculum planned
+from nothing. `_eval_report_measured_row` now reads that shape, admitting a row
+only on the exact declared benchmark id, the declared metric, a numeric score,
+`MEASURED_PARENT` origin, and a matching generation -- the same strictness the
+diagnostics path already had.
+
+**Gen-2 readiness is READY** as of `prepared-v3` (`chowder growth campaign
+prepare docs/gen2/gen2_campaign.json --out-dir <prepared-v3> --parent-evidence
+<gen1 campaign run root> --parent-measurement <prepared-v2/parent-eval-report.json>`),
+recipes `recipe-00-lr5e-05` / `recipe-01-lr0.0001`, corpus 10,340 examples,
+contamination CLEAN, verifier pass rate 1.0, no check skipped or refused. The
+same was true of `prepared-v2` when it was written:
 and the declaration now declares the recipe ids the planner actually proposes
 (declaring hand-written ids was the last refusal, `READINESS_RECIPE_SET`).
 Readiness is not an outcome, but both sides of every comparison are now
@@ -1456,11 +1481,41 @@ and machine reason codes rather than one red state. Start is enabled only by the
 service's readiness verdict, and a programmatic click on a refused campaign
 spends nothing.
 
-Still **not** built, and not claimed: bounded production candidate search
-(successive halving) -- the library controller drives `ExperimentCycleRunner`
-rounds while the growth path trains through `training_binding`, and
-`run_project` has no `search` section to read, so wiring it is a pass of its own.
-No real Gen-2 candidate training has been run.
+**Bounded candidate search is now wired.** It is one decision made in three
+places that cannot disagree. The audit is code: `recipe_planner`
+`CONSUMED_RECIPE_FIELDS` names, per backend, the recipe fields the backend's
+config reader actually consumes, `recorded_only_recipe_fields` names the rest,
+and `SEARCH_AXES` is the intersection -- the learning rate -- with
+`assert_search_axes_consumed()` refusing an inert axis before a candidate set is
+proposed. The step budget is deliberately not a search axis: successive halving
+owns it. The schedule is declared once, on the loop policy or the campaign
+(`candidate_search`: rounds, starting step budget, multiplier, survival rule and
+its own device/wall envelope) and frozen with the rest of the preregistration.
+`candidate_search.plan_search` projects the whole schedule before any compute --
+worst case, every candidate surviving every round -- and refuses a round that
+would exceed the per-recipe ceilings, a total over the search's own envelope, or
+a total over the campaign's ceilings. `candidate_search.run_search` then runs
+those rounds over the campaign's own attempts: cheap round first, the survivors
+(attempt succeeded and produced an artifact -- the same fields
+`cycle.select_candidate` reads, so no protected score can choose a winner) earn
+`step_multiplier` x the budget, and only the final round's results are offered to
+selection. `successive_halving.HalvingSchedule` is the single owner of the
+per-round budget and survivor count, so this path and the EvolutionEngine
+controller cannot drift. Readiness reports it as its own check
+(`READINESS_CANDIDATE_SEARCH`), every round's attempts stay in the record and in
+its ledger, and an undeclared search is one pass over the declared recipes,
+exactly as before. Two boundedness holes in `run_search` are closed: a tripped
+ceiling now ends the round it fires in rather than finishing that round's
+remaining candidates (the single pass always broke immediately; the search must
+not be the looser path), and round 0 is seeded from the *plan's* projected
+candidates rather than whatever recipe set the call was handed, so a caller
+cannot spend a round on candidates no ceiling was checked against. Both were
+reproduced before they were fixed, and both carry a regression test; the
+pre-existing stop test asserted the whole round's spend and was corrected, since
+it encoded the defect. Known limitation, not claimed otherwise: each round
+re-trains the same proposal rather than resuming a survivor's checkpoint. The
+checked-in Gen-2 declaration declares no search, so it single-passes. No real
+Gen-2 candidate training has been run.
 
 **The corpus is now provider-attributed and quality-gated.** `data_providers`
 dispatches each curriculum item to the provider that serves its declared skill

@@ -31,7 +31,7 @@ from ..trainability import (
     resolve_expected_module_paths,
 )
 from ..adapter_guard import assert_adapter_is_live
-from ..hf_resilience import cache_status, with_hub_retries
+from ..hf_resilience import cache_status, resolve_model_commit, with_hub_retries
 from .activation_offload_hooks import offload_pack, offload_unpack
 from .training_data import (
     _build_chat_example,
@@ -981,7 +981,11 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             "requested_base_model": spec.base_model,
             "requested_revision": spec.revision,
             "model_cache_status": model_cache_status,
-            "resolved_model_commit": getattr(model.config, "_commit_hash", None),
+            "resolved_model_commit": resolve_model_commit(
+                spec.base_model,
+                spec.revision,
+                config_commit=getattr(model.config, "_commit_hash", None),
+            ),
             "model_type": getattr(model.config, "model_type", None),
             "resolved_target_modules": resolved_target_modules,
             "adapted_modules_by_leaf": adapted_by_leaf,

@@ -418,6 +418,18 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
         help="The parent generation's durable run root (its candidate_evaluation.json)",
     )
     prepare.add_argument(
+        "--parent-measurement",
+        default="",
+        help=(
+            "The report whose rows are the parent's measurements under THIS "
+            "campaign's declared protocol. Defaults to the run root's own "
+            "candidate_evaluation.json; a parent re-measured under a newer "
+            "instrument (chowder growth campaign measure-parent) names that "
+            "report here, so the curriculum is planned from the fresh "
+            "measurement rather than an older instrument version"
+        ),
+    )
+    prepare.add_argument(
         "--write-declaration",
         default="",
         help="Write the declaration with the prepared inputs filled in to this path",
@@ -579,11 +591,12 @@ def _growth_campaign_plan(args: argparse.Namespace) -> int:
     """
     from .campaign import CampaignManifest
     from .campaign_runner import CampaignRunRefusal, plan_campaign
+    from .candidate_search import CandidateSearchRefusal
 
     manifest = CampaignManifest.from_file(Path(args.manifest))
     try:
         plan = plan_campaign(manifest)
-    except CampaignRunRefusal as refusal:
+    except (CampaignRunRefusal, CandidateSearchRefusal) as refusal:
         return _print_json(
             {
                 "cycle_id": manifest.cycle_id,
@@ -592,8 +605,28 @@ def _growth_campaign_plan(args: argparse.Namespace) -> int:
                 "refusal_reason": str(refusal),
             }
         ) or 1
-    projected = sum(
-        recipe.projected_wall_gpu_hours for recipe in plan.recipes
+    if plan.search_refusal:
+        # A declared search that cannot be projected is not a plan an author may
+        # freeze: say so here rather than printing it as if it were planned.
+        return _print_json(
+            {
+                "cycle_id": manifest.cycle_id,
+                "status": "REFUSED",
+                "refused_by": "candidate-search",
+                "refusal_reason": plan.search_refusal,
+            }
+        ) or 1
+    # A declared search spends its rounds, so the projection a reader is shown
+    # is the search's worst-case total -- not a single pass that understates it.
+    projected_device = (
+        plan.search.total_device_gpu_hours
+        if plan.search.declared
+        else sum(recipe.projected_device_gpu_hours for recipe in plan.recipes)
+    )
+    projected = (
+        plan.search.total_wall_gpu_hours
+        if plan.search.declared
+        else sum(recipe.projected_wall_gpu_hours for recipe in plan.recipes)
     )
     declared = set(manifest.recipe_ids)
     proposed = {recipe.recipe_id for recipe in plan.recipes}
@@ -605,7 +638,10 @@ def _growth_campaign_plan(args: argparse.Namespace) -> int:
             "recipes": [recipe.recipe_id for recipe in plan.recipes],
             "declared_recipes": sorted(declared),
             "recipes_declared": sorted(declared) == sorted(proposed),
+            "projected_device_gpu_hours": projected_device,
             "projected_wall_gpu_hours": projected,
+            "candidate_search_declared": plan.search.declared,
+            "candidate_search_rounds": len(plan.search.rounds),
             "wall_gpu_hours_ceiling_campaign": manifest.budget.wall_gpu_hours_ceiling_campaign,
             "plan": plan.to_dict(),
         }
@@ -648,6 +684,7 @@ def _growth_campaign_prepare(args: argparse.Namespace) -> int:
             manifest,
             out_dir=args.out_dir,
             parent_evidence=args.parent_evidence or None,
+            parent_measurement=args.parent_measurement or None,
         )
     except CampaignPrepareRefusal as refusal:
         return _print_json(

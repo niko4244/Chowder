@@ -48,7 +48,9 @@ onto declared metric semantics with the reliability set as a hard gate
 compliance; frontier reference seeding is honest-empty with provenance
 gates (`docs/FRONTIER_REFERENCE_SEED_2026-09-17.md`). Successive-halving
 search remains a library capability with no production caller — not
-required by, and not wired into, the growth cycle.
+required by, and not wired into, the growth cycle. *(Superseded: bounded
+candidate search is now wired into the growth cycle as a declared, projected and
+fail-closed campaign search — see the later autonomous-growth entry below.)*
 
 Integrity pass (2026-09-17): measurement provenance is now first-class
 (candidate gates require candidate-measured rows; carried/parent evidence
@@ -364,7 +366,10 @@ These are proven package capabilities, not yet Chowder's default operational
 controller: no production caller under `src/chowder/` invokes
 `run_successive_halving()` or `prioritize_candidates()` today. Wiring them
 into `project_runner.py` remains open and must not be inferred from the
-library implementation or its integration tests.
+library implementation or its integration tests. *(The growth path later
+reused `successive_halving.HalvingSchedule` — the single owner of the per-round
+budget and survivor rule — from `chowder.growth.candidate_search` rather than
+teaching `project_runner.py` to consume the engine-level controller.)*
 
 **Meta-controller evidence foundation — Priority 6 (dataset slice complete, both halves)**
 - `intervention_outcomes.py` (PR #89) builds a normalized, queryable
@@ -944,15 +949,24 @@ for a promotion it cannot bind to an adapter. `run(resume=True)` adopts the
 durable record instead of re-spending. The fake-compute simulator runs the real
 loop against six pinned terminal states, and `chowder growth loop
 status|plan|run|resume` exposes it with no injectable training seam, so a run
-that cannot proceed refuses having spent nothing. (PR #193.) Still missing now:
-bounded production candidate search. The task-specific training-data providers
-and their quality gate have since been delivered: `data_providers` dispatches
-each curriculum item to the provider that serves its declared skill and
-verification, records provider/source/generation/skill/verification/contamination
-per admitted example, refuses an item no provider serves, refuses a protected
-evaluation text as training material, and measures the corpus (counts, duplicate
-rate, verifier pass rate, skill and source composition) so a thin, duplicated,
-unverified or contaminated corpus refuses before any compute.
+that cannot proceed refuses having spent nothing. (PR #193.) Both of those are
+since delivered. The task-specific training-data providers and their quality gate
+live in `data_providers`: each curriculum item is dispatched to the provider that
+serves its declared skill and verification, every admitted example records
+provider/source/generation/skill/verification/contamination, an item no provider
+serves refuses, a protected evaluation text can never become training material,
+and the corpus is measured (counts, duplicate rate, verifier pass rate, skill and
+source composition) so a thin, duplicated, unverified or contaminated corpus
+refuses before any compute. Bounded production candidate search lives in
+`candidate_search`: the schedule is declared on the loop policy or the campaign
+(round count, starting step budget, multiplier, survival rule and its own
+device/wall envelope), projected worst-case and refused if it does not fit before
+any compute, run over the campaign's own attempts with
+`successive_halving.HalvingSchedule` owning the per-round budget and survivor
+rule, and screened on training-side evidence only -- a protected score can never
+choose a hyperparameter winner. `SEARCH_AXES` is the learning rate, the one field
+every supported backend's config reader consumes; `assert_search_axes_consumed`
+refuses an inert axis.
 
 **Autonomous growth is production-wired, with one service behind the interface
 and the CLI.** Four cross-generation defects that let *simulated* autonomy
@@ -976,7 +990,7 @@ workspace over `AutonomousGrowthService` -- inspect, plan, prepare + readiness,
 start, stop after the current campaign, resume and growth history, with Start
 enabled by the service's readiness verdict alone. The Gen-1 parent arm has since
 been measured under the Gen-2 instrument (target 0.5625, math500/mgsm 0.0), so
-the target comparison is decidable. Still missing, and deliberately not claimed:
-bounded production candidate search (successive halving has no production caller
-on the growth path and `run_project` has no `search` section). No real Gen-2
+the target comparison is decidable. Bounded candidate search has since been wired
+and is declared per campaign (or per loop policy); the checked-in Gen-2
+declaration declares none, so it runs its recipes once each. No real Gen-2
 candidate training has been run.

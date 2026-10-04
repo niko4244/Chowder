@@ -34,7 +34,7 @@ campaigns; it never replaces or loosens them.
 | Protected skills derived from the policy's protected benchmarks | **delivered** (`protected_skills_for_policy`) |
 | One shared plan/run decision path | **delivered** (`GrowthLoop.plan_next`, used by CLI and TUI) |
 | Task-specific training-data providers + corpus quality gate | **delivered** (`data_providers`: dispatch by skill/verification, measured quality report, refusal on thin/duplicated/unverified/contaminated corpora) |
-| Bounded production candidate search (successive halving) | **not built** — `run_successive_halving` still has no production caller on the growth path and `run_project` has no `search` section for it to read; recipe identity/mixture travel in `to_dict()` while LoRA rank/alpha stay proposed-but-unmapped |
+| Bounded production candidate search (successive halving) | **delivered** (`candidate_search`: declared on the policy or the campaign, projected worst-case and refused before compute, driven over the campaign's own attempts with `successive_halving.HalvingSchedule` owning the budget and survivor rule; screened on training-side evidence only) |
 | Gen-0 trusted-ancestor arm | **measured** — `math500@2024-04` 0.0, `mgsm@2022-11` 0.0 (16 rows each) |
 | Gen-1 parent arm under the *Gen-2* instrument | **measured** — target `generation-diagnostics@gen2-response-surface-v1` 0.5625, `math500@2024-04` 0.0, `mgsm@2022-11` 0.0 (16 rows each, `MEASURED_PARENT`, bound to the gen1 adapter digest) |
 | Gen-2 readiness gate | **READY** (all pre-compute prerequisites pass) |
@@ -209,6 +209,61 @@ Three rules are enforced rather than documented:
   both targetable and protected evidence keeps its targetable evidence and is
   reported in `regression_risks`.
 
+### Bounded candidate search (`candidate_search`, `successive_halving`)
+
+Successive halving over the campaign's own recipes, in the production cycle:
+
+```text
+SEARCH_AXES audit  ->  declared schedule  ->  projected worst case
+   ->  cheap round over every candidate  ->  training-side screen
+   ->  survivors earn round+1 at step_multiplier x the budget
+   ->  the final round's results alone are offered to selection
+   ->  one protected evaluation of the selected artifact
+```
+
+**The audit, as code.** `recipe_planner.CONSUMED_RECIPE_FIELDS` names, per
+backend, the recipe fields whose values reach that backend's config reader
+(`transformers-peft` reads `backend.lora.{r,alpha}` and
+`backend.training.*`; `router-healing` reads
+`backend.router_healing.{max_steps,learning_rate,seq_len}`), and
+`recorded_only_recipe_fields` names everything else -- mixture, replay rate,
+batch size, gradient accumulation, target modules, objective and the
+projections. `SEARCH_AXES` is the one field every supported backend consumes:
+**the learning rate**. `assert_search_axes_consumed()` runs before a candidate
+set is proposed, so an edit that adds an inert axis fails there instead of
+producing candidates that differ only in their names. The step budget is
+*deliberately* not a search axis: successive halving owns it, which is what
+makes a survivor's second round a larger budget for the same proposal. The peft
+patch now emits `backend.lora.{r,alpha}`, so a recipe's declared rank is the
+rank the run trains at rather than provenance alone.
+
+**The bounds are declared and fail closed.** `CandidateSearchDeclaration`
+(`candidate_search` on a campaign, or on the loop policy that freezes every
+generation's declaration) pins the round count, the starting step budget, the
+multiplier, the survival rule and its own device/wall GPU-hour envelope. The
+whole schedule is projected *before* any compute, worst case (every candidate
+survives every round), and refuses if a round would exceed the per-recipe
+ceilings the executor enforces, if the total exceeds the search's own declared
+envelope, or if it exceeds the campaign's ceilings. `run_successive_halving`'s
+`HalvingSchedule` is the single owner of the per-round budget and the survivor
+count, so this path and the EvolutionEngine controller cannot disagree about
+what halving means. An undeclared search is no search: one pass over the
+declared recipes, exactly as before.
+
+**The screen is training-side only.** A candidate advances because its attempt
+succeeded and produced an artifact -- the fields `cycle.select_candidate` reads,
+and nothing else. A protected, target or broad score is not visible to the
+search at any point, so a hyperparameter winner cannot be chosen on final-gate
+evidence. Selection among the final round's results still uses the declared
+`candidate_selection_policy`, and only that round's results are offered to it.
+
+Every attempt from every round is recorded in the campaign's `attempts` and
+charged to its ledger, so a losing cheap round's compute does not disappear; the
+`candidate_search` and `candidate_search_run` phases record the plan and what
+actually ran. Readiness reports the declared search as its own check
+(`READINESS_CANDIDATE_SEARCH`), which is what the interface shows and what gates
+Start.
+
 ### Training-data providers and the corpus quality gate (`data_providers`)
 
 A curriculum item says *what* to train (skill, role, training type, size, and the
@@ -241,20 +296,21 @@ anything.
 
 Still manual or missing for the autonomous case:
 
-* bounded production candidate search (successive halving) -- an existing library
-  implementation (`successive_halving.run_successive_halving`) that is not yet
-  wired: it drives `ExperimentCycleRunner` rounds, while the growth path trains
-  recipes through `training_binding`, and `run_project` has no `search` section
-  for it to read. Recipe identity and mixture travel in `to_dict()`, and LoRA
-  rank/alpha stay proposed-but-unmapped in the planner's own words. Wiring it is
-  a pass of its own, not something to reimplement;
 * a measured Gen-2 outcome: readiness is READY and no real Gen-2 candidate
-  training has been run, so nothing here is evidence about Gen-2's verdict.
+  training has been run, so nothing here is evidence about Gen-2's verdict;
+* a search round that *resumes* a survivor instead of re-training it: each round
+  trains the same proposal at a larger step budget from the parent adapter. That
+  is a real allocation decision and a real bound, but it costs more than the
+  checkpoint-resume form the EvolutionEngine controller uses, and it is not
+  claimed to be equivalent;
+* a policy that declares a search for Gen-2 as frozen today. The checked-in
+  `docs/gen2/gen2_campaign.json` declares no search, so it runs its recipes once
+  each -- the shipped Gen-2 preregistration did not opt in, and nothing here
+  retroactively changes it.
 
-Until candidate search is wired, Chowder can compose, freeze, plan, prepare and
-monitor the next campaign without a human, and the corpus it trains on is
-provider-attributed and quality-gated -- but it still cannot *compete* candidates
-for that corpus. It must not claim otherwise.
+Chowder can now compose, freeze, plan, prepare, *compete* candidates and monitor
+the next campaign without a human, on a corpus that is provider-attributed and
+quality-gated.
 
 ## What the measured arms imply
 

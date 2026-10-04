@@ -15,6 +15,79 @@ _DEFAULT_CHECKPOINT_FRACTION = 0.5
 
 
 @dataclass(frozen=True)
+class HalvingSchedule:
+    """The one owner of every successive-halving policy decision.
+
+    A halving run makes exactly three kinds of decision, and this object makes
+    all of them so two callers cannot disagree about what "halving" means:
+
+    * how much budget round *r* gets (:meth:`round_max_steps`);
+    * how many candidates survive a round (:meth:`survivors`);
+    * whether a round is the last one (:meth:`is_final_round`).
+
+    ``run_successive_halving`` below drives the ``EvolutionEngine`` stack and
+    ``chowder.growth.candidate_search`` drives the growth campaign stack; both
+    ask this object rather than restating its arithmetic.
+
+    Every bound is declared before a run starts and is refused if it is not a
+    real bound: a multiplier of 1 grows nothing, a survival fraction of 1
+    eliminates nobody, and zero survivors would end a search by accident rather
+    than by a rule. Max rounds is optional only in the sense that "None" means
+    "run until the survivor rule stops it" -- never "unbounded compute",
+    because the survivor rule strictly shrinks each round and the caller's own
+    budget envelope is checked before it allocates anything.
+    """
+
+    initial_max_steps: int
+    step_multiplier: float = 2.0
+    survival_fraction: float = 0.5
+    min_survivors: int = 1
+    max_rounds: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.initial_max_steps < 1:
+            raise ValueError("initial_max_steps must be at least 1")
+        if self.step_multiplier <= 1:
+            raise ValueError("step_multiplier must be greater than 1")
+        if not 0 < self.survival_fraction < 1:
+            raise ValueError("survival_fraction must be strictly between 0 and 1")
+        if self.min_survivors < 1:
+            raise ValueError("min_survivors must be at least 1")
+        if self.max_rounds is not None and self.max_rounds < 1:
+            raise ValueError("max_rounds must be at least 1 when declared")
+
+    def round_max_steps(self, round_index: int) -> int:
+        """The real step budget round ``round_index`` runs at."""
+        return max(
+            1, round(self.initial_max_steps * (self.step_multiplier**round_index))
+        )
+
+    def survivors(self, accepted: int) -> int:
+        """How many of ``accepted`` ranked candidates advance past this round."""
+        return min(
+            accepted,
+            max(self.min_survivors, math.ceil(accepted * self.survival_fraction)),
+        )
+
+    def is_final_round(self, round_index: int, survivor_count: int) -> bool:
+        """Whether this round ends the search -- the only round that promotes."""
+        return (
+            survivor_count <= self.min_survivors
+            or (self.max_rounds is not None and round_index + 1 >= self.max_rounds)
+            or survivor_count == 0
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "initial_max_steps": self.initial_max_steps,
+            "step_multiplier": self.step_multiplier,
+            "survival_fraction": self.survival_fraction,
+            "min_survivors": self.min_survivors,
+            "max_rounds": self.max_rounds,
+        }
+
+
+@dataclass(frozen=True)
 class HalvingRoundOutcome:
     """One real round of successive halving: every candidate in this
     round ran for real (a real, bounded-budget training + independent
@@ -81,7 +154,10 @@ def _latest_checkpoint_dir(artifact_ref: str) -> Path | None:
 
 
 def _round_max_steps(*, initial_max_steps: int, round_index: int, step_multiplier: float) -> int:
-    return max(1, round(initial_max_steps * (step_multiplier**round_index)))
+    """Kept as the historical private spelling; the schedule owns the rule."""
+    return HalvingSchedule(
+        initial_max_steps=initial_max_steps, step_multiplier=step_multiplier
+    ).round_max_steps(round_index)
 
 
 def _round_experiment_config_patch(*, max_steps: int, resume_from_checkpoint: Path | None) -> dict[str, Any]:
@@ -216,12 +292,13 @@ def run_successive_halving(
     between persistence and proposal. Non-PLANNED same-ID rows are never
     re-executed as a shortcut for replaying their existing outcome.
     """
-    if not 0 < survival_fraction < 1:
-        raise ValueError("survival_fraction must be strictly between 0 and 1")
-    if min_survivors < 1:
-        raise ValueError("min_survivors must be at least 1")
-    if step_multiplier <= 1:
-        raise ValueError("step_multiplier must be greater than 1")
+    schedule = HalvingSchedule(
+        initial_max_steps=initial_max_steps,
+        step_multiplier=step_multiplier,
+        survival_fraction=survival_fraction,
+        min_survivors=min_survivors,
+        max_rounds=max_rounds,
+    )
 
     rounds: list[HalvingRoundOutcome] = []
     current_experiments: dict[str, Experiment] = {
@@ -230,9 +307,7 @@ def run_successive_halving(
     round_index = 0
 
     while current_experiments:
-        max_steps = _round_max_steps(
-            initial_max_steps=initial_max_steps, round_index=round_index, step_multiplier=step_multiplier
-        )
+        max_steps = schedule.round_max_steps(round_index)
         round_input = tuple(
             replace(
                 experiment,
@@ -251,10 +326,7 @@ def run_successive_halving(
 
         accepted_ranking = tuple(item for item in generation.ranking if item.decision.accepted)
         rejected_ranking = tuple(item for item in generation.ranking if not item.decision.accepted)
-        survivor_count = min(
-            len(accepted_ranking),
-            max(min_survivors, math.ceil(len(accepted_ranking) * survival_fraction)),
-        )
+        survivor_count = schedule.survivors(len(accepted_ranking))
         survivors = accepted_ranking[:survivor_count]
         cutoff = accepted_ranking[survivor_count:]
 
@@ -273,18 +345,12 @@ def run_successive_halving(
             )
         )
 
-        is_final_round = (
-            len(survivors) <= min_survivors
-            or (max_rounds is not None and round_index + 1 >= max_rounds)
-            or not survivors
-        )
+        is_final_round = schedule.is_final_round(round_index, len(survivors))
         if is_final_round:
             promoted = runner.engine.promote(generation.ranking)
             return SuccessiveHalvingOutcome(rounds=tuple(rounds), promoted=promoted)
 
-        next_max_steps = _round_max_steps(
-            initial_max_steps=initial_max_steps, round_index=round_index + 1, step_multiplier=step_multiplier
-        )
+        next_max_steps = schedule.round_max_steps(round_index + 1)
         candidate_lookup = {
             outcome.experiment_id: outcome for outcome in generation.candidates
         }
@@ -311,3 +377,9 @@ def run_successive_halving(
         round_index += 1
 
     return SuccessiveHalvingOutcome(rounds=tuple(rounds), promoted=None)
+
+
+#: Public name for the checkpoint resolver the growth campaign's progressive
+#: search also uses, so both controllers cannot drift apart about what "the
+#: checkpoint a survivor continues from" means.
+latest_checkpoint_dir = _latest_checkpoint_dir

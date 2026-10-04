@@ -29,6 +29,10 @@ from chowder.evals.result import (
 
 from .statistics import compare
 
+#: The measurement origins a promotion gate may anchor a parent side on.
+#: A baseline is earned evidence or it is not a baseline.
+_PARENT_EVIDENCE_ORIGINS = frozenset({MEASURED_PARENT, MEASURED_THIS_GENERATION})
+
 
 @dataclass(frozen=True)
 class BenchmarkResult:
@@ -60,6 +64,20 @@ class BenchmarkResult:
         of evidence.
         """
         return self.measurement_origin == MEASURED_THIS_GENERATION
+
+    @property
+    def parent_measured(self) -> bool:
+        """May this row anchor a declared constraint's parent side?
+
+        The symmetric wall to :attr:`gate_eligible`. A baseline must be a
+        measurement too: parent-measured rows are the parent arm's earned
+        evidence (and a row the parent's own cycle measured qualifies),
+        while a carried reference is a quotation from history, not a
+        measurement of this parent. An unearned row reads as unmeasured,
+        so the gate fails closed rather than comparing against a number
+        nothing produced.
+        """
+        return self.measurement_origin in _PARENT_EVIDENCE_ORIGINS
 
 
 @dataclass(frozen=True)
