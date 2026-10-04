@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("torch", reason="the exp_e runner imports torch")
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "chowder_batch"))
 sys.path.insert(0, str(ROOT / "src"))

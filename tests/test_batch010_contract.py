@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("torch", reason="the batch-010 runtime benchmark imports torch")
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "chowder_batch"))
 sys.path.insert(0, str(ROOT / "src"))

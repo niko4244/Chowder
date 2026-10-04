@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytest.importorskip("torch", reason="the exp_e pipeline imports torch via runtime_eval")
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "chowder_batch"))
 sys.path.insert(0, str(ROOT / "src"))
