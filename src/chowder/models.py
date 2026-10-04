@@ -74,6 +74,12 @@ class Goal:
     max_parallel_candidates: int = 4
     minimum_promotion_gain: float = 0.0
     require_protocol_match: bool = False
+    # Optional safety gates for observation-grounded runtime evaluations.
+    # They are separate from optimization targets: a candidate may improve
+    # GSM8K while still being unsafe to promote if it reads nonexistent paths
+    # or loses runtime reward.
+    runtime_reward_min: float | None = None
+    runtime_nonexistent_read_rate_max: float | None = None
 
     def __post_init__(self) -> None:
         if not self.metrics:
@@ -91,6 +97,12 @@ class Goal:
         ):
             raise ValueError("goal max_parallel_candidates must be a positive integer")
         _finite(self.minimum_promotion_gain, label="goal minimum_promotion_gain")
+        for label, value in (
+            ("runtime_reward_min", self.runtime_reward_min),
+            ("runtime_nonexistent_read_rate_max", self.runtime_nonexistent_read_rate_max),
+        ):
+            if value is not None and _finite(value, label=label) < 0:
+                raise ValueError(f"{label} cannot be negative")
 
     def target(self, name: str) -> MetricTarget | None:
         return next((m for m in self.metrics if m.name == name), None)
