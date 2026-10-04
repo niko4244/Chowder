@@ -44,6 +44,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+#: Pin the worktree's own src BEFORE any chowder import: the ambient editable
+#: install still points at the stale main clone, whose chowder predates the
+#: scientist package entirely (the same trap scripts/dryrun_survivor_handoff.py
+#: pins against).
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+import chowder  # noqa: E402
+
+assert str(_REPO_ROOT) in str(Path(chowder.__file__).resolve()), (
+    f"imported chowder from {chowder.__file__}, not the worktree {_REPO_ROOT}")
+
 DEFAULT_FROZEN_DIR = Path(__file__).resolve().parents[1] / "tmp" / "dryrun-survivor-handoff" / "gen3-a1-reasoning"
 RESULT_MARKER = "CHOWDER_RESULT_JSON:"
 

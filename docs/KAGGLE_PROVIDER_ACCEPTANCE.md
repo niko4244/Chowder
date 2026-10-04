@@ -210,7 +210,7 @@ in). Verbatim trainer result (from the fetched `chowder_result.json`):
 - Cumulative free-tier spend across all three runs: ~0.047 of 30 weekly
   device-hours (≈0.16%).
 
-## Run 4 (2026-10-03) — gen3 survivor screening job PREPARED, not yet launched
+## Run 4 (2026-10-03) — gen3 survivor A/B screening: MEASURED, intervention FALSIFIED
 
 The survivor the growth loop auto-consumed (dry-run proof,
 `scripts/dryrun_survivor_handoff.py`) is frozen as `gen3-a1-reasoning`.
@@ -229,14 +229,28 @@ artifacts (campaign.json + preregistration.json), nothing hand-typed:
 - honest scope: a synthetic-probe measurement — NOT a mgsm@2022-11
   measurement; the campaign tier re-runs the rule on the real benchmark.
 
-Verified locally before any Kaggle contact (`--selftest-local` executes the
-exact trainer body on CPU/GPU with a 30-step spec): spec_drove_run true,
-runner/trainer verdicts agree, 2-of-3 seeds satisfied (mean transfer delta
-+0.0074), ~0.0007 device-hours. The full job (6 × 300-step arms on T4×2) is
-launch-ready and gated behind an explicit `--launch` flag — launching starts
-a real free-tier run and awaits the operator's go:
+LAUNCHED and measured (kernel `nikmarco/chowder-gen3-survivor-screening-20261003-203018`,
+T4×2 `kaggle_2x_t4_16gb`, commit 563e61e81763, torch 2.11.0+cu128):
 
-    python kaggle/gen3_survivor_screening.py --launch \
-        --commit 4fd5e68321c00dd47f9f8844258855800d7abc51   # must be on origin
+- spec_drove_run: true — every echoed spec value (lr, batch, steps, seeds,
+  both replay ratios, decay point) matched the derived spec; the runner's
+  recomputed verdict agreed with the trainer's own.
+- per-seed transfer deltas (intervention − control final loss, negative
+  would favor the intervention): seed 2026 **+0.143334**, seed 2027
+  **+0.063655**, seed 2028 **+0.035709**; mean **+0.080899**.
+- verdict: **FALSIFIED — 0 of 3 seeds satisfied** the survivor's rule
+  ("transfer delta <= 0 on 2 of 3 seeds", 2 required). At screening scale
+  the decayed-replay intervention was WORSE than constant replay 0.25 on
+  every seed.
+- cost: 14.4 s wall, **0.008026 device-GPU-hours** measured and settled.
 
-Estimated cost at Run-3 rates: ≈0.014 of 30 weekly device-hours.
+Reading: the screening lane did exactly its job — the survivor that the
+auto-consume hand-off nominated (screening score 1.34 from the halving
+lane's quality signal) was put to its own falsification rule on real T4
+hardware for ~0.008 GPU-hours and failed it 0-for-3. gen3-a1-reasoning
+should NOT proceed to the campaign tier as-is; the recorded observation
+`obs-gen3-survivor-screening-20261003-203018` (screening:transfer_delta
+surfaces) is the durable evidence for that decision.
+
+Cumulative free-tier spend across all four runs: ~0.055 of 30 weekly
+device-hours (≈0.18%).
