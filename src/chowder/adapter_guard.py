@@ -71,7 +71,9 @@ def _normalise(name: str) -> str:
     Live parameters carry the active adapter's name (`...lora_B.default.weight`);
     saved tensors do not (`...lora_B.weight`).
     """
-    return name.replace(".default.", ".")
+    for adapter_name in (".default.", ".repair."):
+        name = name.replace(adapter_name, ".")
+    return name
 
 
 def adapter_liveness_report(model: Any, adapter_dir: str | Path) -> dict[str, Any]:

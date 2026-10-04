@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "experiment": "D",
+  "name": "low-active-compute-hybrid-language-model",
+  "status": "prototype-not-trained",
+  "configurations": [
+    {"id": "A", "file": "A_hybrid_dense.json", "role": "hybrid-backbone-dense-ffn"},
+    {"id": "B", "file": "B_hybrid_sparse_moe.json", "role": "hybrid-backbone-sparse-moe"},
+    {"id": "C", "file": "C_hybrid_moe_ple.json", "role": "hybrid-moe-plus-per-layer-embeddings"},
+    {"id": "D", "file": "D_narrow_hybrid_moe_ple.json", "role": "narrower-shared-backbone-ablation"},
+    {"id": "E", "file": "E_hybrid_moe_ple_low_rank_head.json", "role": "optional-low-rank-output-projection"}
+  ],
+  "completed_experiments": [],
+  "measurements": [],
+  "source_revision": null,
+  "warning": "Configurations are CPU-scale design fixtures, not trained models, benchmarks, observed Pareto points, or scale-up approvals. Record an actual source revision and measured artifacts after separately authorized runs."
+}

@@ -34,6 +34,13 @@ train = [
 qlora = [
   "bitsandbytes>=0.50,<0.51",
 ]
+# Experiment F PTQ lane (chowder_batch/exp_f_ptq_margin.py). Core modelopt only:
+# the [hf] extra pins transformers>=4.57,<5.15, which would downgrade the
+# train lane's transformers 5.x -- the exact breakage class the torchao note
+# above documents. Pre-1.0 upstream with ~1-month deprecation windows: pin tight.
+ptq = [
+  "nvidia-modelopt>=0.47,<0.48",
+]
 eval = [
   "lm-eval[hf]>=0.4.13,<0.5",
 ]
@@ -42,6 +49,8 @@ dev = [
   "pytest-asyncio>=0.24,<1",
   "ruff>=0.12,<1",
   "build>=1,<2",
+  "numpy>=1.26,<3",
+  "rank_bm25>=0.2,<1",
 ]
 
 [project.scripts]

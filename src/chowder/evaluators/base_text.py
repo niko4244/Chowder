@@ -19,6 +19,7 @@ from .scorer_identity import scorer_identity
 from ..executors import EvaluationOutcome, ExecutionContext
 from ..protocol import protocol_fingerprint
 from ..provenance import sha256_file
+from ..runtime_eval import RUNTIME_METRIC_KEYS
 from .transformers_text import EvalSuiteSpec
 
 
@@ -40,6 +41,17 @@ class BaseTextEvalSpec:
     timeout_seconds: float | None = None
     trust_remote_code: bool = False
     offline: bool = False
+    # Parent-adapter continuation projects must be baselined against the
+    # adapter they continue from, not the dense base: a candidate that
+    # regresses its parent must not "promote" against a weaker reference
+    # (the RFT-2 finding -- parent 0.73, candidate 0.54, still promoted
+    # because the auto-baseline measured the base model at 0.39). None =
+    # legacy behavior (measure the untouched base); a path = attach that
+    # adapter before scoring. Like the candidate evaluator, the adapter is
+    # the *treatment* being measured, so it is deliberately excluded from
+    # the protocol fingerprint.
+    adapter_dir: str | None = None
+    runtime_benchmark: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.base_model.strip():
@@ -57,9 +69,24 @@ class BaseTextEvalSpec:
             raise ValueError("baseline timeout_seconds must be positive")
         if self.trust_remote_code:
             raise ValueError("trust_remote_code is disabled for baseline evaluation")
+        if self.runtime_benchmark is not None:
+            if not isinstance(self.runtime_benchmark, Mapping):
+                raise ValueError("runtime_benchmark must be a mapping when provided")
+            if not isinstance(self.runtime_benchmark.get("enabled", False), bool):
+                raise ValueError("runtime_benchmark.enabled must be boolean")
+            turns = self.runtime_benchmark.get("max_turns", 8)
+            new_tokens = self.runtime_benchmark.get("max_new_tokens", 128)
+            if not isinstance(turns, int) or turns < 1:
+                raise ValueError("runtime_benchmark.max_turns must be positive")
+            if not isinstance(new_tokens, int) or new_tokens < 1:
+                raise ValueError("runtime_benchmark.max_new_tokens must be positive")
+            if self.runtime_benchmark.get("harness", "plain") not in {"guarded", "plain"}:
+                raise ValueError("runtime_benchmark.harness must be guarded or plain")
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
+        if self.runtime_benchmark is None:
+            payload.pop("runtime_benchmark", None)
         payload["suites"] = [asdict(suite) for suite in self.suites]
         return payload
 
@@ -146,7 +173,37 @@ class BaseTextEvalSpec:
             ),
             trust_remote_code=bool(evaluation.get("trust_remote_code", False)),
             offline=bool(evaluation.get("offline", backend.get("offline", False))),
+            adapter_dir=cls._parent_adapter_dir(backend),
+            runtime_benchmark=(
+                dict(evaluation["runtime_benchmark"])
+                if evaluation.get("runtime_benchmark") is not None
+                else None
+            ),
         )
+
+
+    @staticmethod
+    def _parent_adapter_dir(backend: Mapping[str, Any]) -> str | None:
+        """Resolve ``backend.parent_adapter.path`` when the config declares one.
+
+        A continuation project trains *from* an existing adapter, so its honest
+        baseline is that adapter re-measured under this exact protocol -- not
+        the dense base underneath it. The digest key (``sha256``) is validated
+        for shape here; the worker verifies the directory itself via the
+        adapter liveness guard before scoring.
+        """
+        parent = backend.get("parent_adapter")
+        if not isinstance(parent, Mapping):
+            return None
+        path = parent.get("path")
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("backend.parent_adapter.path must be a non-empty string when present")
+        sha = parent.get("sha256")
+        if not isinstance(sha, str) or len(sha) != 64:
+            raise ValueError(
+                "backend.parent_adapter.sha256 must be a 64-char digest when a parent_adapter path is declared"
+            )
+        return str(Path(path).resolve())
 
 
 class BaseModelTextEvaluator:
@@ -264,13 +321,20 @@ class BaseModelTextEvaluator:
         # so neither leg of a comparison is a blind spot.
         lifecycle_evidence = evaluation_lifecycle_evidence(runtime)
         expected_names = {suite.name for suite in spec.suites}
-        if set(metrics) != expected_names or set(suite_evidence) != expected_names:
+        runtime_enabled = bool(spec.runtime_benchmark and spec.runtime_benchmark.get("enabled", False))
+        expected_metric_names = expected_names | (set(RUNTIME_METRIC_KEYS) if runtime_enabled else set())
+        expected_evidence_names = expected_names | ({"runtime_benchmark"} if runtime_enabled else set())
+        if set(metrics) != expected_metric_names or set(suite_evidence) != expected_evidence_names:
             raise RuntimeError("baseline evaluation metrics do not match configured suites")
 
         fingerprint_hashes: dict[str, str] = {}
         rendering_evidence: dict[str, dict[str, Any]] = {}
         specs_by_name = {suite.name: suite for suite in spec.suites}
         for suite_name, suite_payload in suite_evidence.items():
+            if suite_name == "runtime_benchmark":
+                if not isinstance(suite_payload, list):
+                    raise RuntimeError("runtime benchmark evidence must be a list")
+                continue
             if not isinstance(suite_payload, Mapping):
                 raise RuntimeError(f"suite evidence for {suite_name!r} is invalid")
             # P4: bind what the worker actually rendered with. A suite rendered
