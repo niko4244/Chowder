@@ -268,7 +268,10 @@ def test_an_unreadable_gradient_is_an_evidence_gap_not_a_measured_zero():
         probe.assert_qualified()
 
 
-def test_a_zero_gradient_on_the_first_step_is_not_a_failure_when_the_window_covers_more():
+@pytest.mark.parametrize("first_step", [0, 20])
+def test_a_zero_gradient_on_the_first_step_is_not_a_failure_when_the_window_covers_more(
+    first_step,
+):
     """LoRA A legitimately starts at zero gradient while B is zero. The window is
     declared up front, so 'not yet' is not the same as 'never'."""
     torch.manual_seed(0)
@@ -281,21 +284,59 @@ def test_a_zero_gradient_on_the_first_step_is_not_a_failure_when_the_window_cove
     optimizer.zero_grad()
     out = 0.0 * model.first(torch.randn(2, 4)).sum()
     out.backward()
-    probe.record_gradients(0)
-    probe.record_update(0)
+    probe.record_gradients(first_step)
+    probe.record_update(first_step)
 
     # step 1: real gradient and a real update
     optimizer.zero_grad()
     model.first(torch.randn(2, 4)).sum().backward()
-    probe.record_gradients(1)
+    probe.record_gradients(first_step + 1)
     optimizer.step()
-    probe.record_update(1)
+    probe.record_update(first_step + 1)
 
     entry = probe.assert_qualified()["components"]["first.weight"]
     # the report records the *set* of states plus which steps were non-zero, so
     # "zero on step 0, real on step 1" is exactly what is asserted
     assert set(entry["gradient_states"]) == {GRAD_ZERO, GRAD_NONZERO}
-    assert entry["nonzero_steps"] == [1]
+    assert entry["nonzero_steps"] == [first_step + 1]
+
+
+@pytest.mark.parametrize("first_step", [0, 20])
+@pytest.mark.parametrize("initial_state", [GRAD_NONE, GRAD_ZERO])
+def test_a_late_gradient_and_update_cannot_qualify_a_missed_probe_window(
+    first_step, initial_state,
+):
+    model = _Tiny()
+    probe = _probe(model, ["first.weight"], window_steps=2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    inputs = torch.ones(2, 4)
+    for step in range(first_step, first_step + 2):
+        optimizer.zero_grad(set_to_none=True)
+        loss = (
+            model.second(inputs).sum()
+            if initial_state == GRAD_NONE
+            else 0.0 * model.first(inputs).sum()
+        )
+        loss.backward()
+        probe.record_gradients(step)
+        optimizer.step()
+        probe.record_update(step)
+
+    optimizer.zero_grad(set_to_none=True)
+    model.first(inputs).sum().backward()
+    probe.record_gradients(first_step + 2)
+    optimizer.step()
+    probe.record_update(first_step + 2)
+
+    report = probe.report()
+    assert report["ok"] is False
+    entry = report["components"]["first.weight"]
+    assert entry["observed_steps"] == 2
+    assert entry["gradient_states"] == [initial_state]
+    assert entry["nonzero_steps"] == []
+    assert entry["update_steps"] == []  # no stale pre-window snapshot comparison
+    with pytest.raises(TrainabilityError, match="within 2 observed step"):
+        probe.assert_qualified()
 
 
 def test_a_gradient_without_an_update_is_refused():

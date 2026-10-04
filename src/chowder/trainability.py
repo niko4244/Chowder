@@ -393,6 +393,7 @@ class TrainabilityProbe:
         self._frozen_names = tuple(str(name) for name in frozen_names)
         self._frozen_before = hash_parameters({n: params[n] for n in self._frozen_names})
         self._observed = {name: _ComponentObservation(name) for name in self._names}
+        self._observed_steps = 0
         #: Value sample taken by `record_gradients` (i.e. before the step) so
         #: `record_update` can measure a real change rather than assume one.
         self._update_before: dict[str, dict[str, Any]] = {}
@@ -404,8 +405,13 @@ class TrainabilityProbe:
 
         Called after `loss.backward()` and before the optimizer step, so the
         parameter values are also sampled here for the update comparison.
+        Only the first `window_steps` calls count; resumed global step indices
+        label observations but do not shorten or extend the declared window.
         """
         self._update_before = {}
+        if self._observed_steps >= self.window_steps:
+            return
+        self._observed_steps += 1
         for name in self._names:
             try:
                 self._update_before[name] = _tensor_digest(self._params[name])

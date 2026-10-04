@@ -27,8 +27,8 @@ Honesty rules this module implements
 ------------------------------------
 * A phase it did not measure is recorded as unavailable **with the reason** --
   never as ``0.0``.
-* CPU is the only qualified device. The frozen-tensor digest path is not
-  accelerator-safe yet, so a CUDA request is refused rather than half-done.
+* CPU is the only qualified device. A device-safe digest alone does not qualify
+  the accelerator training, interruption, and evaluation path.
 * Expert-row utilisation is reported only when it was actually collected; it is
   `not_reported` otherwise, because a made-up routing table is worse than none.
 * A run that hits a hard limit still writes its result, with the limit named.
@@ -40,6 +40,8 @@ import argparse
 import hashlib
 import json
 import math
+import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -77,6 +79,12 @@ LOSS_LOG_LIMIT = 5000
 
 #: How often the worker writes its best-effort progress file.
 PROGRESS_EVERY = 10
+
+CHECKPOINT_KIND = "router_healing_checkpoint.v2"
+CHECKPOINT_FILES = (
+    "optimizer.pt", "scheduler.pt", "rng_state.pth", "trainer_state.json",
+    "router_state.safetensors",
+)
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -130,7 +138,7 @@ def _publish_checkpoint(
     root: Path,
     *,
     step: int,
-    max_steps: int,
+    spec: RouterHealingRunSpec,
     optimizer: Any,
     tensors: Mapping[str, Any],
     torch: Any,
@@ -138,19 +146,17 @@ def _publish_checkpoint(
     """Write a complete checkpoint directory, then expose it atomically.
 
     Files land in a ``.partial`` sibling and the directory is renamed into place
-    only once every required piece is durable, so a checkpoint that exists is a
-    checkpoint that can be resumed. A half-written directory can therefore never
-    masquerade as a resume point.
+    after flushing every required file. This is atomic publication, not a claim
+    of power-loss durability of the directory rename on every filesystem.
+    Incomplete or existing artifacts are preserved, never overwritten.
     """
     from safetensors.torch import save_file
 
     root.mkdir(parents=True, exist_ok=True)
     final = root / f"step-{step}"
     partial = root / f".step-{step}.partial"
-    if partial.exists():
-        for child in partial.iterdir():
-            child.unlink()
-        partial.rmdir()
+    if final.exists() or partial.exists():
+        raise RuntimeError(f"checkpoint publication would overwrite existing state at {final}")
     partial.mkdir(parents=True)
 
     torch.save(optimizer.state_dict(), partial / "optimizer.pt")
@@ -158,13 +164,24 @@ def _publish_checkpoint(
         {
             "kind": "router_healing_scheduler.v1",
             "global_step": int(step),
-            "max_steps": int(max_steps),
+            "max_steps": spec.max_steps,
+            "recipe_digest": spec.recipe_digest(),
         },
         partial / "scheduler.pt",
     )
-    torch.save(torch.get_rng_state(), partial / "rng_state.pth")
+    import numpy as np
+
+    numpy_state = np.random.get_state()
+    torch.save({
+        "torch": torch.get_rng_state(),
+        "python": random.getstate(),
+        # Primitive lists keep this compatible with weights_only=True.
+        "numpy": (numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]),
+    }, partial / "rng_state.pth")
     (partial / "trainer_state.json").write_text(
-        json.dumps({"global_step": int(step), "max_steps": int(max_steps)}) + "\n",
+        json.dumps({"global_step": int(step), "max_steps": spec.max_steps,
+                    "tokens_consumed_total": step * spec.batch_size * spec.seq_len,
+                    "samples_consumed_total": step * spec.batch_size}) + "\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -175,12 +192,70 @@ def _publish_checkpoint(
         },
         str(partial / "router_state.safetensors"),
     )
+    manifest = {
+        "kind": CHECKPOINT_KIND,
+        "recipe_digest": spec.recipe_digest(),
+        "max_tokens": spec.max_tokens,
+        "parameter_paths": sorted(tensors),
+        "files": {name: _sha256_file(partial / name) for name in CHECKPOINT_FILES},
+    }
+    (partial / "checkpoint_manifest.json").write_text(
+        json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
+    )
+    for name in (*CHECKPOINT_FILES, "checkpoint_manifest.json"):
+        with (partial / name).open("r+b") as handle:
+            os.fsync(handle.fileno())
     partial.rename(final)
     return {
         "directory": str(final),
         "global_step": int(step),
-        "max_steps": int(max_steps),
+        "max_steps": spec.max_steps,
+        "manifest_sha256": _sha256_file(final / "checkpoint_manifest.json"),
     }
+
+
+def _read_checkpoint(spec: RouterHealingRunSpec, torch: Any) -> dict[str, Any]:
+    """Refuse incomplete, altered, or differently bound state before model load."""
+    from safetensors.torch import load_file
+
+    root = Path(spec.resume_from)
+    try:
+        manifest = json.loads((root / "checkpoint_manifest.json").read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict) or manifest.get("kind") != CHECKPOINT_KIND:
+            raise ValueError("missing versioned checkpoint binding")
+        if manifest.get("recipe_digest") != spec.recipe_digest():
+            raise ValueError("recipe mismatch (base, corpus, schedule, or training settings)")
+        if manifest.get("max_tokens") != spec.max_tokens:
+            raise ValueError("token budget mismatch")
+        if set(manifest.get("files", {})) != set(CHECKPOINT_FILES):
+            raise ValueError("incomplete checkpoint file inventory")
+        for name in CHECKPOINT_FILES:
+            if _sha256_file(root / name) != manifest["files"][name]:
+                raise ValueError(f"content hash mismatch for {name}")
+        trainer = json.loads((root / "trainer_state.json").read_text(encoding="utf-8"))
+        if not isinstance(trainer, dict):
+            raise ValueError("trainer state is not an object")
+        step = trainer.get("global_step")
+        if type(step) is not int or not 0 < step <= spec.max_steps:
+            raise ValueError("invalid checkpoint step")
+        if trainer != {
+            "global_step": step, "max_steps": spec.max_steps,
+            "tokens_consumed_total": step * spec.batch_size * spec.seq_len,
+            "samples_consumed_total": step * spec.batch_size,
+        }:
+            raise ValueError("trainer step, horizon, or data position mismatch")
+        scheduler = torch.load(root / "scheduler.pt", map_location="cpu", weights_only=True)
+        if scheduler != {"kind": "router_healing_scheduler.v1", "global_step": step,
+                         "max_steps": spec.max_steps, "recipe_digest": spec.recipe_digest()}:
+            raise ValueError("scheduler state disagrees with the bound recipe and step")
+        return {
+            "manifest": manifest, "trainer": trainer,
+            "rng": torch.load(root / "rng_state.pth", map_location="cpu", weights_only=True),
+            "optimizer": torch.load(root / "optimizer.pt", map_location="cpu", weights_only=True),
+            "tensors": load_file(str(root / "router_state.safetensors")),
+        }
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+        raise RuntimeError(f"checkpoint at {root} refused: {exc}") from exc
 
 
 def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
@@ -188,20 +263,24 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
     if spec.device not in QUALIFIED_DEVICES:
         raise RuntimeError(
             f"device {spec.device!r} is not qualified for router training; this worker "
-            f"is CPU-only until the frozen-tensor digest is device-safe. Qualified: "
+            f"has only been qualified on CPU. Qualified: "
             f"{list(QUALIFIED_DEVICES)}"
         )
     if Path(spec.base_model_dir).resolve() == Path(spec.output_dir).resolve():
         raise RuntimeError("output_dir cannot be the base model directory")
 
     import torch
+    import numpy as np
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     torch.manual_seed(spec.seed)
+    random.seed(spec.seed)
+    np.random.seed(spec.seed % (2**32))
     synchronize = cuda_synchronize(torch)
     device = torch.device(spec.device)
     accelerator_count = 0 if device.type == "cpu" else 1
     started = time.perf_counter()
+    restored_state = _read_checkpoint(spec, torch) if spec.resume_from else None
 
     base_identity = resolve_base_identity(spec.base_model_dir)
     if base_identity["content_sha256"] != spec.base_content_sha256:
@@ -253,7 +332,7 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
     source_inventory = None
     if spec.resume_from:
         source_inventory = inventory_checkpoint(spec.resume_from)
-        assert_resumable(source_inventory, require_rng=False)
+        assert_resumable(source_inventory, require_rng=True)
         if source_inventory.global_step is None:
             raise RuntimeError(
                 f"the checkpoint at {spec.resume_from} records no global step, so the "
@@ -267,17 +346,16 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
                 "cannot demonstrate trainability, so this is refused rather than "
                 "reported as a no-op success."
             )
-        from safetensors.torch import load_file
-
-        optimizer.load_state_dict(
-            torch.load(
-                Path(spec.resume_from) / "optimizer.pt", map_location="cpu", weights_only=True
-            )
-        )
-        restored = load_file(str(Path(spec.resume_from) / "router_state.safetensors"))
-        missing = sorted(set(trainable_names) - set(restored))
-        if missing:
-            raise RuntimeError(f"the checkpoint does not carry router state for: {missing}")
+        restored = restored_state["tensors"]
+        if (set(restored) != set(trainable_names)
+                or restored_state["manifest"]["parameter_paths"] != sorted(trainable_names)):
+            raise RuntimeError("checkpoint router parameter paths differ from the intended set")
+        for name in trainable_names:
+            tensor = restored[name]
+            if (tensor.shape != parameters[name].shape or tensor.dtype != parameters[name].dtype
+                    or not bool(torch.isfinite(tensor).all())):
+                raise RuntimeError(f"checkpoint router tensor shape, dtype, or values invalid: {name}")
+        optimizer.load_state_dict(restored_state["optimizer"])
         with torch.no_grad():
             for name in trainable_names:
                 parameters[name].copy_(restored[name].to(parameters[name].device))
@@ -288,6 +366,16 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         window_steps=max(1, min(spec.probe_window, spec.max_steps - start_step)),
         frozen_names=frozen_names,
     )
+    if restored_state is not None:
+        rng = restored_state["rng"]
+        try:
+            torch.set_rng_state(rng["torch"])
+            random.setstate(rng["python"])
+            numpy_state = rng["numpy"]
+            np.random.set_state((numpy_state[0], np.array(numpy_state[1], dtype=np.uint32),
+                                 *numpy_state[2:]))
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            raise RuntimeError(f"checkpoint RNG state cannot be restored: {exc}") from exc
 
     state = {
         "step": start_step,
@@ -296,6 +384,7 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         "losses_truncated": False,
         "stop_reason": "max_steps",
         "samples_consumed": 0,
+        "step_trace": [],
     }
     checkpoint_seconds = 0.0
     checkpoints: list[dict[str, Any]] = []
@@ -316,7 +405,7 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
             if deadline is not None and time.perf_counter() >= deadline:
                 state["stop_reason"] = "max_seconds"
                 break
-            if state["tokens"] + batch_tokens > spec.max_tokens:
+            if step * batch_tokens + batch_tokens > spec.max_tokens:
                 state["stop_reason"] = "max_tokens"
                 break
 
@@ -329,6 +418,8 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
             optimizer.zero_grad(set_to_none=True)
             forward_started = time.perf_counter()
             loss = model(input_ids=batch, labels=batch).loss
+            if not bool(torch.isfinite(loss)):
+                raise RuntimeError(f"non-finite training loss at step {step}")
             if spec.detailed_timing and first_step_seconds["forward"] is None:
                 first_step_seconds["forward"] = time.perf_counter() - forward_started
 
@@ -357,6 +448,8 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
             value = float(loss.detach())
             if len(state["losses"]) < LOSS_LOG_LIMIT:
                 state["losses"].append(value)
+                state["step_trace"].append({"global_step": step + 1, "block_indices": indices,
+                                            "learning_rate": learning_rate})
             else:
                 state["losses_truncated"] = True
 
@@ -366,7 +459,7 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
                     _publish_checkpoint(
                         Path(spec.checkpoint_dir),
                         step=step + 1,
-                        max_steps=spec.max_steps,
+                        spec=spec,
                         optimizer=optimizer,
                         tensors={name: parameters[name] for name in trainable_names},
                         torch=torch,
@@ -414,6 +507,16 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
             declared_max_steps=spec.max_steps,
         )
     )
+    if resume is not None:
+        resume["state_restoration"] = {
+            "optimizer": True, "scheduler_position": True,
+            "rng_streams": ["torch_cpu", "python", "numpy"],
+            "recipe_digest": spec.recipe_digest(),
+            "samples_consumed_before_resume": start_step * spec.batch_size,
+            "checkpoint_manifest_sha256": _sha256_file(
+                Path(spec.resume_from) / "checkpoint_manifest.json"
+            ),
+        }
     total_wall = time.perf_counter() - started
     ledger = training_lifecycle_ledger(
         accelerator_count=accelerator_count,
@@ -438,6 +541,7 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
         "loss_first": losses[0] if losses else None,
         "loss_last": losses[-1] if losses else None,
         "losses": losses,
+        "step_trace": state["step_trace"],
         "losses_truncated": state["losses_truncated"],
         "loss_log_limit": LOSS_LOG_LIMIT,
         "limits": {
@@ -447,6 +551,8 @@ def train(spec: RouterHealingRunSpec) -> dict[str, Any]:
             "tokens_consumed": int(state["tokens"]),
             "stop_reason": state["stop_reason"],
             "samples_consumed": int(state["samples_consumed"]),
+            "tokens_consumed_total": int(state["step"] * batch_tokens),
+            "samples_consumed_total": int(state["step"] * spec.batch_size),
         },
         "lifecycle": ledger.to_dict(),
         "trainability": trainability,

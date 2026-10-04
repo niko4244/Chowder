@@ -7,6 +7,7 @@ corruption, so each test names the corruption it blocks.
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -248,3 +249,70 @@ def test_publishing_writes_the_tensor_file_before_the_manifest(tmp_path):
     assert Path(artifact["manifest_path"]).is_file()
     assert Path(artifact["tensor_path"]).name == TENSOR_FILE
     assert Path(artifact["manifest_path"]).name == MANIFEST_FILE
+
+
+def test_receipt_manifest_hash_covers_exact_published_bytes(tmp_path):
+    artifact = _publish(_model(), tmp_path, shift=0.0)
+    assert artifact["manifest_sha256"] == sha256_file(artifact["manifest_path"])
+
+
+def test_pinned_receipt_round_trips(tmp_path):
+    artifact = _publish(_model(), tmp_path, shift=0.25)
+    loaded = load_router_payload(
+        artifact["payload_dir"], expected_base_content_sha256=_BASE_SHA,
+        expected_manifest_sha256=artifact["manifest_sha256"],
+        expected_tensor_sha256=artifact["tensor_file_sha256"],
+    )
+    assert loaded["manifest_sha256"] == artifact["manifest_sha256"]
+    assert loaded["tensor_file_sha256"] == artifact["tensor_file_sha256"]
+    assert loaded["receipt_verified"] is True
+
+
+def test_original_receipt_refuses_another_valid_payload(tmp_path):
+    original = _publish(_model(), tmp_path / "original", shift=0.25)
+    replacement = _publish(_model(), tmp_path / "replacement", shift=0.5)
+    with pytest.raises(RouterPayloadError, match="manifest.*hash mismatch"):
+        load_router_payload(
+            replacement["payload_dir"], expected_base_content_sha256=_BASE_SHA,
+            expected_manifest_sha256=original["manifest_sha256"],
+            expected_tensor_sha256=original["tensor_file_sha256"],
+        )
+
+
+def test_original_receipt_refuses_changed_application_semantics(tmp_path):
+    artifact = _publish(_model(), tmp_path, shift=0.25)
+    path = Path(artifact["manifest_path"])
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["payload_kind"] = ADDITIVE
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(RouterPayloadError, match="manifest.*hash mismatch"):
+        load_router_payload(
+            artifact["payload_dir"], expected_base_content_sha256=_BASE_SHA,
+            expected_manifest_sha256=artifact["manifest_sha256"],
+            expected_tensor_sha256=artifact["tensor_file_sha256"],
+        )
+
+
+def test_pinned_tensor_hash_is_checked_independently(tmp_path):
+    artifact = _publish(_model(), tmp_path, shift=0.25)
+    with pytest.raises(RouterPayloadError, match="tensor.*receipt.*hash mismatch"):
+        load_router_payload(
+            artifact["payload_dir"], expected_base_content_sha256=_BASE_SHA,
+            expected_manifest_sha256=artifact["manifest_sha256"],
+            expected_tensor_sha256="0" * 64,
+        )
+
+
+def test_legacy_newline_omitting_receipt_is_not_silently_accepted(tmp_path):
+    artifact = _publish(_model(), tmp_path, shift=0.25)
+    before = Path(artifact["manifest_path"]).read_bytes()
+    legacy_digest = hashlib.sha256(before.removesuffix(b"\n")).hexdigest()
+    with pytest.raises(RouterPayloadError, match="manifest.*hash mismatch"):
+        load_router_payload(
+            artifact["payload_dir"], expected_base_content_sha256=_BASE_SHA,
+            expected_manifest_sha256=legacy_digest,
+            expected_tensor_sha256=artifact["tensor_file_sha256"],
+        )
+    assert Path(artifact["manifest_path"]).read_bytes() == before
+    inspection = load_router_payload(artifact["payload_dir"], expected_base_content_sha256=_BASE_SHA)
+    assert inspection["receipt_verified"] is False

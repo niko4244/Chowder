@@ -753,12 +753,21 @@ def test_an_abruptly_killed_worker_leaves_a_complete_resumable_checkpoint(
 
 
 def _eval_artifact(experiment: Experiment, payload_dir: Path) -> TrainingArtifact:
+    manifest = payload_dir / "router_payload.json"
+    receipt = {}
+    if manifest.is_file():
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        receipt = {
+            "manifest_sha256": sha256_file(manifest),
+            "tensor_file_sha256": payload["tensor_file_sha256"],
+        }
     return TrainingArtifact(
         run_id="exp-router-backend-run",
         experiment_id=experiment.experiment_id,
         artifact_ref=str(payload_dir),
         gpu_hours=0.0,
         evidence={
+            "payload": receipt,
             "freeze_summary": {
                 "trainable_param_names": [
                     "model.layers.0.mlp.gate.weight",
@@ -854,6 +863,8 @@ def test_an_eval_spec_refuses_configurations_that_cannot_score_honestly(override
         "base_model_dir": "base",
         "base_content_sha256": "a" * 64,
         "payload_dir": "payload",
+        "payload_manifest_sha256": "c" * 64,
+        "payload_tensor_sha256": "d" * 64,
         "holdout_corpus_path": "holdout",
         "holdout_corpus_sha256": "b" * 64,
         "expected_parameter_paths": ("model.layers.0.mlp.gate.weight",),

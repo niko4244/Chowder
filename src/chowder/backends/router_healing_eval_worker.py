@@ -112,7 +112,7 @@ def _logits_fingerprint(torch: Any, model: Any, probe: Any) -> dict[str, Any]:
 
 
 def _routing_counts(torch: Any, model: Any, batches: list[Any]) -> dict[str, list[int]]:
-    """Per-layer top-1 expert counts, measured from the router's own logits.
+    """Per-layer selected-expert counts, including every routed top-k choice.
 
     A forward hook on each ``mlp.gate`` reads the routing logits the model
     actually computed. This is behaviour, not configuration: a router that has
@@ -120,14 +120,31 @@ def _routing_counts(torch: Any, model: Any, batches: list[Any]) -> dict[str, lis
     """
     counts: dict[str, list[int]] = {}
     handles = []
+    modules = dict(model.named_modules())
 
-    def _hook(name: str):
+    def _hook(name: str, top_k: Any):
         def hook(_module: Any, _inputs: Any, output: Any) -> None:
             logits = output[0] if isinstance(output, tuple) else output
             if not torch.is_tensor(logits) or logits.dim() < 2:
-                return
-            rows = logits.detach().reshape(-1, logits.shape[-1]).argmax(dim=-1)
-            tally = torch.bincount(rows.cpu(), minlength=int(logits.shape[-1])).tolist()
+                raise RuntimeError(f"router {name} returned unsupported routing logits")
+            experts = int(logits.shape[-1])
+            if type(top_k) is not int or not 1 <= top_k <= experts:
+                raise RuntimeError(f"router {name} has unsupported top-k: {top_k!r}")
+            if isinstance(output, tuple):
+                if len(output) != 3:
+                    raise RuntimeError(f"router {name} returned unsupported selection structure")
+                selected = output[2]
+            else:
+                selected = torch.topk(
+                    torch.softmax(logits.detach().reshape(-1, experts).float(), dim=-1),
+                    top_k, dim=-1,
+                ).indices
+            rows = logits.numel() // experts
+            if (not torch.is_tensor(selected) or selected.dtype not in (torch.int32, torch.int64)
+                    or tuple(selected.shape) != (rows, top_k)
+                    or bool(((selected < 0) | (selected >= experts)).any().item())):
+                raise RuntimeError(f"router {name} returned invalid selected-expert indices")
+            tally = torch.bincount(selected.detach().reshape(-1).cpu(), minlength=experts).tolist()
             existing = counts.get(name)
             if existing is None:
                 counts[name] = [int(value) for value in tally]
@@ -136,9 +153,11 @@ def _routing_counts(torch: Any, model: Any, batches: list[Any]) -> dict[str, lis
 
         return hook
 
-    for name, module in model.named_modules():
+    for name, module in modules.items():
         if name.endswith("mlp.gate"):
-            handles.append(module.register_forward_hook(_hook(name)))
+            parent = modules.get(name.rsplit(".", 1)[0])
+            top_k = getattr(module, "top_k", getattr(parent, "top_k", None))
+            handles.append(module.register_forward_hook(_hook(name, top_k)))
     try:
         with torch.no_grad():
             for batch in batches:
@@ -146,6 +165,8 @@ def _routing_counts(torch: Any, model: Any, batches: list[Any]) -> dict[str, lis
     finally:
         for handle in handles:
             handle.remove()
+    if not counts:
+        raise RuntimeError("no supported router selections were observed")
     return counts
 
 
@@ -171,6 +192,16 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
             "base identity mismatch: the spec scores against content "
             f"{spec.base_content_sha256!r} but {spec.base_model_dir} is "
             f"{base_identity['content_sha256']!r}"
+        )
+
+    payload: dict[str, Any] | None = None
+    if spec.payload_dir is not None:
+        if not spec.payload_manifest_sha256 or not spec.payload_tensor_sha256:
+            raise RuntimeError("candidate evaluation requires trusted payload receipt hashes")
+        payload = load_router_payload(
+            spec.payload_dir, expected_base_content_sha256=spec.base_content_sha256,
+            expected_manifest_sha256=spec.payload_manifest_sha256,
+            expected_tensor_sha256=spec.payload_tensor_sha256,
         )
 
     model_load = PhaseTimer(synchronize=synchronize)
@@ -203,7 +234,6 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
     before = _logits_fingerprint(torch, model, probe)
     baseline_timer.__exit__(None, None, None)
 
-    payload: dict[str, Any] | None = None
     comparison: dict[str, Any] | None = None
     apply_report: dict[str, Any] | None = None
     candidate_timer: PhaseTimer | None = None
@@ -216,9 +246,7 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
         after = before
         candidate_loss = base_loss
     else:
-        payload = load_router_payload(
-            spec.payload_dir, expected_base_content_sha256=spec.base_content_sha256
-        )
+        assert payload is not None
         comparison = payload_matches_model(model, payload)
         declared = tuple(str(name) for name in spec.expected_parameter_paths)
         provided = tuple(str(name) for name in payload["tensors"])
@@ -293,6 +321,8 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
         payload_verification = {
             "payload_dir": payload["payload_dir"],
             "manifest_sha256": payload["manifest_sha256"],
+            "tensor_file_sha256": payload["tensor_file_sha256"],
+            "receipt_verified": payload["receipt_verified"],
             "payload_kind": payload["payload_kind"],
             "base_content_sha256": payload["base_content_sha256"],
             "parameter_names": payload["parameter_names"],
@@ -334,7 +364,7 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
                 "routing behaviour"
             ),
             "dead_experts": (
-                "measured: experts receiving no top-1 assignment across the holdout blocks"
+                "measured: experts receiving no top-k assignment across the holdout blocks"
             ),
         },
         "base_holdout_loss": base_loss,
@@ -342,7 +372,7 @@ def evaluate(spec: RouterHealingEvalSpec) -> dict[str, Any]:
         "holdout_loss_delta": candidate_loss - base_loss if payload_arm else None,
         "application_control": application_control,
         "payload_verification": payload_verification,
-        "routing": {"per_layer_top1": counts, "utilization": utilization},
+        "routing": {"per_layer_topk": counts, "utilization": utilization},
         "base_identity": base_identity,
         "lifecycle": ledger.to_dict(),
         "holdout": {

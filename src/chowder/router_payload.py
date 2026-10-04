@@ -171,7 +171,7 @@ def save_router_payload(
         "payload_dir": str(out),
         "manifest_path": str(out / MANIFEST_FILE),
         "tensor_path": str(tensor_path),
-        "manifest_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "manifest_sha256": sha256_file(out / MANIFEST_FILE),
         "tensor_file_sha256": tensor_sha,
         "parameter_names": manifest["parameter_names"],
         "parameter_count": manifest["parameter_count"],
@@ -183,7 +183,9 @@ def save_router_payload(
 
 
 def load_router_payload(
-    payload_dir: str | Path, *, expected_base_content_sha256: str
+    payload_dir: str | Path, *, expected_base_content_sha256: str,
+    expected_manifest_sha256: str | None = None,
+    expected_tensor_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Read a payload back, verifying everything before returning any tensor.
 
@@ -191,6 +193,12 @@ def load_router_payload(
     manifest hash, the tensor-file hash, a per-tensor hash, or the base identity
     each stops the read; the caller cannot accidentally consume a payload that
     failed one check because none is returned until all of them pass.
+
+    Expected hashes come from the training receipt, not this directory. Both
+    cover exact file bytes, including the manifest's trailing newline. Legacy
+    receipts that omitted that newline are refused, never silently normalized.
+    Omitting receipt hashes permits historical inspection only; it does not
+    establish that this is the artifact a training run published.
     """
     from safetensors.torch import load_file
 
@@ -198,7 +206,14 @@ def load_router_payload(
     manifest_path = directory / MANIFEST_FILE
     if not manifest_path.is_file():
         raise RouterPayloadError(f"no router payload manifest at {manifest_path}")
-    raw = manifest_path.read_text(encoding="utf-8")
+    raw = manifest_path.read_bytes()
+    manifest_sha = hashlib.sha256(raw).hexdigest()
+    if expected_manifest_sha256 is not None and manifest_sha != expected_manifest_sha256:
+        raise RouterPayloadError(
+            "router payload manifest receipt hash mismatch: expected "
+            f"{expected_manifest_sha256!r}, file is {manifest_sha!r}; hashes cover exact "
+            "file bytes, including the trailing newline (legacy receipts are not normalized)"
+        )
     try:
         manifest = json.loads(raw)
     except ValueError as exc:
@@ -227,6 +242,11 @@ def load_router_payload(
     if not tensor_path.is_file():
         raise RouterPayloadError(f"router payload tensor file is missing: {tensor_path}")
     actual_tensor_sha = sha256_file(tensor_path)
+    if expected_tensor_sha256 is not None and actual_tensor_sha != expected_tensor_sha256:
+        raise RouterPayloadError(
+            "router payload tensor receipt hash mismatch: expected "
+            f"{expected_tensor_sha256!r}, file is {actual_tensor_sha!r}"
+        )
     if actual_tensor_sha != manifest.get("tensor_file_sha256"):
         raise RouterPayloadError(
             f"router payload tensor file hash mismatch: manifest records "
@@ -272,7 +292,9 @@ def load_router_payload(
 
     return {
         "manifest": dict(manifest),
-        "manifest_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "manifest_sha256": manifest_sha,
+        "tensor_file_sha256": actual_tensor_sha,
+        "receipt_verified": expected_manifest_sha256 is not None and expected_tensor_sha256 is not None,
         "payload_dir": str(directory),
         "payload_kind": application,
         "base_content_sha256": recorded_base,

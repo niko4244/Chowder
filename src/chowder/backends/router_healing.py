@@ -13,8 +13,8 @@ Three deliberate boundaries
   loads weights is not a preflight.
 * **CPU is the only qualified device.** `QUALIFIED_DEVICES` is enforced when the
   spec is constructed, so an accelerator request fails before a subprocess is
-  launched rather than halfway through a load. The frozen-tensor digest is not
-  device-safe yet; refusing is the honest outcome.
+  launched rather than halfway through a load. Accelerator qualification is a
+  separate acceptance run, not something inferred from CPU tests.
 * **The parent never trusts the child's summary.** The worker's result is
   re-parsed: the ledger is rebuilt through `ledger_from_payload`, the required
   training phases are demanded, and the trainability / frozen / coverage
@@ -36,6 +36,8 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from ..base_identity import BaseIdentityError, resolve_base_identity
+from ..cancellation import CancellationToken, OperationCancelled
+from ..execution_failure import ExecutionFailure, ExecutionStage
 from ..executors import (
     CostEstimate,
     EvaluationOutcome,
@@ -75,6 +77,39 @@ _ALLOWED_SCHEDULERS = {"constant", "cosine"}
 
 class RouterHealingBackendError(RuntimeError):
     """A router-healing run cannot be launched, or its result cannot be trusted."""
+
+
+class RouterHealingRunFailure(ExecutionFailure, RouterHealingBackendError):
+    """Structured attempt failure, retaining the backend's exception contract."""
+
+
+def _terminal_failure(
+    exc: Exception, *, run_id: str, experiment_id: str, executor_name: str,
+    run_dir: Path, wall_seconds: float, stage: ExecutionStage,
+    failure_type: type[ExecutionFailure],
+) -> ExecutionFailure:
+    usage = ResourceUsage.from_wall_time(wall_seconds=wall_seconds, active_accelerator_count=0)
+    terminal = "cancelled" if isinstance(exc, OperationCancelled) else "failed"
+    metadata = {"terminal_state": terminal, "run_dir": str(run_dir)}
+    payload = {
+        "kind": "router_healing_run_failure.v1", "run_id": run_id,
+        "experiment_id": experiment_id, "terminal_state": terminal,
+        "reason": str(exc), "cause_type": type(exc).__name__,
+        "wall_seconds": wall_seconds, "active_accelerator_count": 0,
+        "gpu_hours": 0.0, "stage": stage.value,
+    }
+    try:
+        (run_dir / "run-failure.json").write_text(
+            json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8",
+        )
+    except OSError as write_error:
+        metadata["failure_evidence_write_error"] = str(write_error)
+    return failure_type(
+        str(exc), run_id=run_id, experiment_id=experiment_id, executor_name=executor_name,
+        stage=stage, cause_type=type(exc).__name__, cause_message=str(exc),
+        resource_usage=usage, stdout_ref=str(run_dir / "worker-stdout.log"),
+        stderr_ref=str(run_dir / "worker-stderr.log"), runtime_metadata=metadata,
+    )
 
 
 def _resolve_declared_path(value: Any, work_dir: Path) -> Path:
@@ -170,8 +205,8 @@ class RouterHealingRunSpec:
         if self.device not in QUALIFIED_DEVICES:
             raise ValueError(
                 f"device {self.device!r} is not qualified for router training; qualified "
-                f"devices are {list(QUALIFIED_DEVICES)}. The frozen-tensor digest is not "
-                "device-safe yet, so an accelerator run is refused rather than attempted."
+                f"devices are {list(QUALIFIED_DEVICES)}. Accelerator execution has not "
+                "passed the separate hardware qualification."
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -219,6 +254,10 @@ class RouterHealingExecutor:
     def __init__(self) -> None:
         self._processes: dict[str, subprocess.Popen[bytes]] = {}
         self._cancelled: set[str] = set()
+        self._cancellation: CancellationToken | None = None
+
+    def bind_cancellation(self, token: CancellationToken | None) -> None:
+        self._cancellation = token
 
     # -- configuration -----------------------------------------------------
 
@@ -310,7 +349,7 @@ class RouterHealingExecutor:
             learning_rate=float(settings["learning_rate"]),
             seq_len=seq_len,
             batch_size=batch_size,
-            seed=int(settings["seed"]),
+            seed=int(settings.get("seed", context.seed)),
             probe_window=int(settings.get("probe_window", min(2, int(settings["max_steps"])))),
             max_tokens=max_tokens,
             checkpoint_dir=str((run_dir / "checkpoints").resolve()),
@@ -407,6 +446,22 @@ class RouterHealingExecutor:
         run_id = f"{experiment.experiment_id}-{uuid4().hex[:12]}"
         run_dir = (Path(context.work_dir) / ".chowder" / "runs" / run_id).resolve()
         run_dir.mkdir(parents=True, exist_ok=False)
+        started = time.perf_counter()
+        try:
+            if self._cancellation is not None:
+                self._cancellation.raise_if_requested()
+            return self._run(experiment, context, run_id=run_id, run_dir=run_dir)
+        except Exception as exc:
+            raise _terminal_failure(
+                exc, run_id=run_id, experiment_id=experiment.experiment_id,
+                executor_name=self.name, run_dir=run_dir,
+                wall_seconds=time.perf_counter() - started, stage=ExecutionStage.TRAIN,
+                failure_type=RouterHealingRunFailure,
+            ) from exc
+
+    def _run(
+        self, experiment: Experiment, context: ExecutionContext, *, run_id: str, run_dir: Path,
+    ) -> TrainingArtifact:
         spec = self._spec_for(experiment, context, run_dir=run_dir)
 
         spec_path = run_dir / "run-spec.json"
@@ -435,19 +490,24 @@ class RouterHealingExecutor:
             self._processes[run_id] = process
             timeout = (spec.max_seconds or 0.0) + _PROCESS_GRACE_SECONDS
             try:
+                if self._cancellation is not None:
+                    self._cancellation._register_active(self, run_id)
                 while True:
-                    if process.poll() is not None:
-                        break
-                    if run_id in self._cancelled:
-                        process.terminate()
+                    if run_id in self._cancelled or (
+                        self._cancellation is not None and self._cancellation.requested
+                    ):
+                        if process.poll() is None:
+                            process.terminate()
                         try:
                             process.wait(timeout=30)
                         except subprocess.TimeoutExpired:  # pragma: no cover - stubborn child
                             process.kill()
                             process.wait(timeout=30)
-                        raise RouterHealingBackendError(
+                        raise OperationCancelled(
                             f"router healing run {run_id} was cancelled by the controller"
                         )
+                    if process.poll() is not None:
+                        break
                     if time.perf_counter() - started > timeout:
                         process.kill()
                         process.wait(timeout=30)
@@ -457,6 +517,8 @@ class RouterHealingExecutor:
                         )
                     time.sleep(0.05)
             finally:
+                if self._cancellation is not None:
+                    self._cancellation._clear_active()
                 self._processes.pop(run_id, None)
                 self._cancelled.discard(run_id)
 
@@ -579,6 +641,8 @@ class RouterHealingExecutor:
                 "freeze_summary": result.get("freeze_summary"),
                 "checkpoints": result.get("checkpoints"),
                 "resume": result.get("resume"),
+                "step_trace": result.get("step_trace"),
+                "losses": result.get("losses"),
                 "limits": result.get("limits"),
                 "tensor_inventory": result.get("tensor_inventory"),
                 "quantization_reality": result.get("quantization_reality"),
@@ -601,6 +665,10 @@ class RouterHealingExecutor:
 
 class RouterHealingEvaluationError(RuntimeError):
     """A router payload cannot be independently evaluated honestly."""
+
+
+class RouterHealingEvalFailure(ExecutionFailure, RouterHealingEvaluationError):
+    """An independently evaluated attempt with measured CPU failure cost."""
 
 
 @dataclass(frozen=True)
@@ -630,6 +698,8 @@ class RouterHealingEvalSpec:
     batches: int
     device: str = "cpu"
     detailed_timing: bool = False
+    payload_manifest_sha256: str | None = None
+    payload_tensor_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -671,6 +741,17 @@ class RouterHealingEvalSpec:
                 "empty allowlist cannot prove the payload touched what it claims"
             )
         object.__setattr__(self, "expected_parameter_paths", names)
+        for label, digest in (
+            ("payload_manifest_sha256", self.payload_manifest_sha256),
+            ("payload_tensor_sha256", self.payload_tensor_sha256),
+        ):
+            if self.payload_dir is None:
+                if digest is not None:
+                    raise ValueError(f"base-arm spec must not declare {label}")
+            elif not isinstance(digest, str) or len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest
+            ):
+                raise ValueError(f"candidate eval spec requires a recorded {label} sha256 digest")
         if self.device not in QUALIFIED_DEVICES:
             raise ValueError(
                 f"device {self.device!r} is not qualified for router evaluation; qualified "
@@ -681,6 +762,19 @@ class RouterHealingEvalSpec:
     def payload_applied(self) -> bool:
         """Whether this spec scores a payload or the untouched base."""
         return self.payload_dir is not None
+
+    def protocol_digest(self, source_sha256: str) -> str:
+        """Comparable arms exclude payload identity and operational output paths."""
+        protocol = {
+            "kind": "router_holdout_protocol.v1", "source_sha256": source_sha256,
+            "base_content_sha256": self.base_content_sha256,
+            "holdout_corpus_sha256": self.holdout_corpus_sha256,
+            "seq_len": self.seq_len, "batches": self.batches, "device": self.device,
+            "model_mode": "eval", "dtype": "float32", "loss": "causal-cross-entropy",
+        }
+        return hashlib.sha256(
+            json.dumps(protocol, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
@@ -746,6 +840,9 @@ class RouterHealingEvaluator:
         else:
             knobs = self._knobs(context)
         settings: dict[str, Any] = dict(knobs)
+        evaluation_config = (config or context.resolved_config).get("evaluation", {})
+        if isinstance(evaluation_config, Mapping) and "eval_batches" in evaluation_config:
+            settings["eval_batches"] = evaluation_config["eval_batches"]
         settings["base_model_dir"] = research.get("base_model_dir", knobs.get("base_model_dir"))
         settings["holdout_corpus_path"] = research.get(
             "holdout_corpus_path", knobs.get("holdout_corpus_path")
@@ -860,10 +957,16 @@ class RouterHealingEvaluator:
                 "cannot be checked for scope; refusing to evaluate it blindly"
             )
 
+        receipt = artifact.evidence.get("payload")
+        if not isinstance(receipt, Mapping):
+            raise RouterHealingEvaluationError("artifact has no recorded payload receipt")
+
         return RouterHealingEvalSpec(
             base_model_dir=str(settings["_base_dir"]),
             base_content_sha256=settings["_identity"]["content_sha256"],
             payload_dir=str(payload_dir.resolve()),
+            payload_manifest_sha256=receipt.get("manifest_sha256"),
+            payload_tensor_sha256=receipt.get("tensor_file_sha256"),
             holdout_corpus_path=str(settings["_holdout"]),
             holdout_corpus_sha256=settings["_holdout_sha"],
             expected_parameter_paths=expected_names,
@@ -943,22 +1046,25 @@ class RouterHealingEvaluator:
             self._processes[run_id] = process
             timeout = (spec.batches * 600.0) + _PROCESS_GRACE_SECONDS
             try:
+                if self._cancellation is not None:
+                    self._cancellation._register_active(self, run_id)
                 while True:
-                    if process.poll() is not None:
-                        break
                     if run_id in self._cancelled or (
                         self._cancellation is not None
                         and getattr(self._cancellation, "requested", False)
                     ):
-                        process.terminate()
+                        if process.poll() is None:
+                            process.terminate()
                         try:
                             process.wait(timeout=30)
                         except subprocess.TimeoutExpired:  # pragma: no cover
                             process.kill()
                             process.wait(timeout=30)
-                        raise RouterHealingEvaluationError(
+                        raise OperationCancelled(
                             f"router evaluation {run_id} was cancelled by the controller"
                         )
+                    if process.poll() is not None:
+                        break
                     if time.perf_counter() - started > timeout:
                         process.kill()
                         process.wait(timeout=30)
@@ -967,6 +1073,8 @@ class RouterHealingEvaluator:
                         )
                     time.sleep(0.05)
             finally:
+                if self._cancellation is not None:
+                    self._cancellation._clear_active()
                 self._processes.pop(run_id, None)
                 self._cancelled.discard(run_id)
 
@@ -997,18 +1105,24 @@ class RouterHealingEvaluator:
         run_id = f"{experiment.experiment_id}-eval-{uuid4().hex[:12]}"
         eval_dir = (Path(context.work_dir) / ".chowder" / "evals" / run_id).resolve()
         eval_dir.mkdir(parents=True, exist_ok=False)
-        spec = self._spec_for(experiment, artifact, context, eval_dir=eval_dir)
-        result, wall_seconds, identity = self._spawn(spec, run_id, eval_dir)
-        return self._outcome_from_result(
-            result,
-            experiment_id=experiment.experiment_id,
-            artifact_ref=str(artifact.artifact_ref),
-            spec=spec,
-            run_id=run_id,
-            eval_dir=eval_dir,
-            identity=identity,
-            wall_seconds=wall_seconds,
-        )
+        started = time.perf_counter()
+        try:
+            if self._cancellation is not None:
+                self._cancellation.raise_if_requested()
+            spec = self._spec_for(experiment, artifact, context, eval_dir=eval_dir)
+            result, wall_seconds, identity = self._spawn(spec, run_id, eval_dir)
+            return self._outcome_from_result(
+                result, experiment_id=experiment.experiment_id,
+                artifact_ref=str(artifact.artifact_ref), spec=spec, run_id=run_id,
+                eval_dir=eval_dir, identity=identity, wall_seconds=wall_seconds,
+            )
+        except Exception as exc:
+            raise _terminal_failure(
+                exc, run_id=run_id, experiment_id=experiment.experiment_id,
+                executor_name=self.name, run_dir=eval_dir,
+                wall_seconds=time.perf_counter() - started, stage=ExecutionStage.EVALUATE,
+                failure_type=RouterHealingEvalFailure,
+            ) from exc
 
     def evaluate_base(
         self,
@@ -1028,19 +1142,24 @@ class RouterHealingEvaluator:
         run_id = f"{experiment_id}-eval-{uuid4().hex[:12]}"
         eval_dir = (Path(context.work_dir) / ".chowder" / "evals" / run_id).resolve()
         eval_dir.mkdir(parents=True, exist_ok=False)
-        spec = self._base_spec_for(context, config=config, eval_dir=eval_dir)
-        result, wall_seconds, identity = self._spawn(spec, run_id, eval_dir)
-        return self._outcome_from_result(
-            result,
-            experiment_id=experiment_id,
-            artifact_ref=None,
-            spec=spec,
-            run_id=run_id,
-            eval_dir=eval_dir,
-            identity=identity,
-            wall_seconds=wall_seconds,
-            payload_arm=False,
-        )
+        started = time.perf_counter()
+        try:
+            if self._cancellation is not None:
+                self._cancellation.raise_if_requested()
+            spec = self._base_spec_for(context, config=config, eval_dir=eval_dir)
+            result, wall_seconds, identity = self._spawn(spec, run_id, eval_dir)
+            return self._outcome_from_result(
+                result, experiment_id=experiment_id, artifact_ref=None, spec=spec,
+                run_id=run_id, eval_dir=eval_dir, identity=identity,
+                wall_seconds=wall_seconds, payload_arm=False,
+            )
+        except Exception as exc:
+            raise _terminal_failure(
+                exc, run_id=run_id, experiment_id=experiment_id,
+                executor_name=self.name, run_dir=eval_dir,
+                wall_seconds=time.perf_counter() - started, stage=ExecutionStage.EVALUATE,
+                failure_type=RouterHealingEvalFailure,
+            ) from exc
 
     def _outcome_from_result(
         self,
@@ -1173,6 +1292,7 @@ class RouterHealingEvaluator:
                 "payload_applied": payload_arm,
                 "eval_spec": spec.to_dict(),
                 "eval_spec_digest": spec.digest(),
+                "protocol_sha256": spec.protocol_digest(str(identity.get("source_sha256", ""))),
                 "source_identity": dict(identity),
                 "source_artifact_ref": artifact_ref,
                 "base_identity": result.get("base_identity"),
