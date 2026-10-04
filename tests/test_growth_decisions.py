@@ -442,10 +442,24 @@ def test_recipe_config_patch_emits_only_knobs_the_validator_reads():
     assert set(patch) == {"backend"}
     assert set(patch["backend"]) == {"router_healing"}
     knobs = patch["backend"]["router_healing"]
-    assert set(knobs) == {"max_steps", "learning_rate", "seq_len"}
-    # The load-bearing link: every key must be one the project validator
-    # reads for this backend, so a rename on either side breaks this test.
-    assert set(knobs) <= set(ROUTER_HEALING_REQUIRED_KNOBS)
+    # Every knob the router settings reader consumes (batch_size, scheduler,
+    # warmup_steps are read in backends/router_healing.py -- proven by the
+    # source census in test_growth_search_axis_contract.py).
+    assert set(knobs) == {
+        "max_steps",
+        "learning_rate",
+        "seq_len",
+        "batch_size",
+        "scheduler",
+        "warmup_steps",
+    }
+    # The load-bearing link: every knob the engine cannot start without is
+    # emitted, so a rename on either side breaks this test. The optional
+    # knobs are held to the same standard by the axis-contract census.
+    assert {"max_steps", "learning_rate", "seq_len"} <= set(knobs)
+    assert set(ROUTER_HEALING_REQUIRED_KNOBS) <= (
+        set(knobs) | {"base_model_dir", "corpus_path", "holdout_corpus_path"}
+    )
 
     merged = deep_merge_config(
         {"backend": {"router_healing": {"corpus_path": "corpus.txt"}}}, patch
@@ -455,6 +469,9 @@ def test_recipe_config_patch_emits_only_knobs_the_validator_reads():
         "max_steps",
         "learning_rate",
         "seq_len",
+        "batch_size",
+        "scheduler",
+        "warmup_steps",
     }
 
 
@@ -477,12 +494,15 @@ def test_recipe_patch_maps_into_the_peft_backend_namespace():
     assert patch["backend"]["lora"] == {
         "r": recipe.lora_rank,
         "alpha": recipe.lora_alpha,
+        "target_modules": list(recipe.target_modules),
     }
     assert set(patch["backend"]["training"]) == {
         "max_steps",
         "learning_rate",
         "lr_scheduler_type",
         "warmup_steps",
+        "batch_size",
+        "gradient_accumulation_steps",
     }
 
     merged = deep_merge_config(
@@ -501,6 +521,11 @@ def test_recipe_patch_maps_into_the_peft_backend_namespace():
     assert merged["backend"]["max_length"] == recipe.seq_len
     assert merged["backend"]["training"]["max_steps"] == recipe.max_steps
     assert merged["backend"]["training"]["learning_rate"] == recipe.learning_rate
+    assert merged["backend"]["training"]["batch_size"] == recipe.batch_size
+    assert (
+        merged["backend"]["training"]["gradient_accumulation_steps"]
+        == recipe.gradient_accumulation
+    )
 
 
 def test_recipe_patch_refuses_an_unknown_backend_type():
