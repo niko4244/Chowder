@@ -34,7 +34,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Sequence
 
-from chowder.evals.result import UNMEASURED, BenchmarkRun
+from chowder.evals.result import BenchmarkRun
 
 from .capability import CapabilityProfile, profile_delta
 from .compute_cost import settlement_refusal
@@ -122,11 +122,13 @@ def _retention_values(
 ) -> dict[str, float]:
     """dimension -> measured score, from the benchmark each constraint names.
 
-    The candidate side counts only rows measured on this generation
-    (``gate_eligible``); the parent side counts only rows a measurement
-    exists for. A missing or unmeasured row is left out, so
-    :func:`evaluate_retention` fails closed on it -- an unmeasured gate is
-    not a passed gate.
+    Both sides count only earned measurements. The candidate side counts
+    only rows measured on this generation (``gate_eligible``); the parent
+    side counts rows measured on the parent arm (``parent_measured``) -- a
+    carried reference is a quotation from history, not a baseline, so it
+    reads as unmeasured. A missing, unmeasured, or unearned row is left
+    out, so :func:`evaluate_retention` fails closed on it -- an unmeasured
+    gate is not a passed gate.
     """
     values: dict[str, float] = {}
     for constraint in profile.constraints:
@@ -135,7 +137,7 @@ def _retention_values(
             continue
         if candidate_side and not result.gate_eligible:
             continue
-        if not candidate_side and result.measurement_origin == UNMEASURED:
+        if not candidate_side and not result.parent_measured:
             continue
         values[constraint.dimension] = float(result.score)
     return values

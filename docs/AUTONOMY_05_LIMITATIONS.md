@@ -40,6 +40,20 @@ reason codes live on `RetentionViolation` (`retention.py`), the settlement
 refusal vocabulary reads exactly the two production shapes, and the
 constraint `kind` rule is validated once, in the domain.
 
+The declared constraints' parent side now demands earned provenance too.
+It used to trust any non-`UNMEASURED` row, so a carried reference could
+anchor a gate on a number nothing measured; the gate's baseline is now held
+to the same standard as its candidate (`parent_measured`, owned beside
+`gate_eligible` in `promotion.py`), an unearned row reads as unmeasured and
+the promotion refuses `RETENTION_UNMEASURED`. This closes an asymmetry, not
+a live hole: the production binder path already refused carried parent
+rows, and the parent arm only writes earned `MEASURED_PARENT` rows — the
+gap was reachable only through the caller-passed `decide_promotion` seam,
+which is exactly where the new tests pin it. The same pin caught a latent
+shape mislabel: a missing parent measurement used to be coded
+`RETENTION_REGRESSION` (the candidate's score rode along as `measured`);
+it is now `RETENTION_UNMEASURED`, as the vocabulary defines.
+
 ## Proven only at small scale
 
 2. **Checkpoint-resuming progressive halving has never run against a real

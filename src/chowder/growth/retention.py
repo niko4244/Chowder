@@ -163,10 +163,15 @@ def evaluate_retention(
                 RetentionViolation(
                     dimension=constraint.dimension,
                     constraint=constraint,
-                    measured=candidate_value,
+                    # The missing measurement is the parent's: NaN is what
+                    # makes RetentionViolation.code name the shape
+                    # RETENTION_UNMEASURED. The candidate's own value is
+                    # preserved in the detail; it never measured the delta.
+                    measured=float("nan"),
                     detail=(
-                        "no parent measurement for a max-regression "
-                        "constraint -- the delta cannot be certified"
+                        f"no parent measurement for a max-regression "
+                        f"constraint (candidate {candidate_value:g}) -- the "
+                        "delta cannot be certified"
                     ),
                 )
             )

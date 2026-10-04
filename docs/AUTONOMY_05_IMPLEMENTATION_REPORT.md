@@ -135,14 +135,50 @@ the unchanged-default path.
   `test_growth_runner_gates.py` pins the reason to the domain's own `code`.
 - The phantom `settle_refusal` arm of `settlement_refusal` was deleted: it
   was a vocabulary for a field nothing in `src` writes. The predicate reads
-  exactly the three production shapes; the tests that exercised the phantom
-  shape were re-pointed to real ones (the classifier test now feeds the
-  binding's actual refusal record), keeping coverage, not deleting it.
+  exactly the two shapes production writes -- the `budget_settlement`
+  verdict and the `refused_by` stamp (a later commit, 6e67427, owned the
+  correction of this section's earlier "three shapes" claim, which rested
+  on a phantom `settlement_failed` marker). The tests that exercised the
+  phantom shape were re-pointed to real ones (the classifier test now feeds
+  the binding's actual refusal record), keeping coverage, not deleting it.
 - The constraint `kind` validation has one owner —
   `RetentionConstraint.__post_init__` — and the manifest loader wraps the
   domain error with source context (`CampaignManifestError` at load, never a
   raw domain exception), pinned by an ownership test asserting both the
   domain message and the loader's `<source>` context.
+
+### The parent side of a declared constraint demands earned provenance
+
+The retention gate's two sides now agree on what counts as evidence. The
+parent side of `_retention_values` trusted any row whose
+`measurement_origin` was not `UNMEASURED`, so a `CARRIED_REFERENCE` row —
+a quotation from history — could silently anchor a declared constraint
+with a number nothing measured. The contract is decided by the codebase's
+own vocabulary (`evals/result.py`: carried rows "never satisfy a
+regression or improvement gate"; `MODEL_GROWTH_SYSTEM.md`: "a carried
+parent row reads inconclusive, never not-regressed") and by the provenance
+owner (`metric_binding` refuses carried rows on the parent role).
+
+- `BenchmarkResult.parent_measured` is the wall, owned beside
+  `gate_eligible` in `promotion.py`: a baseline is earned evidence
+  (`MEASURED_PARENT`, or `MEASURED_THIS_GENERATION` from the parent's own
+  cycle) or it is not a baseline. `cycle._retention_values` applies it, so
+  an unearned non-`UNMEASURED` row reads as unmeasured and the gate
+  refuses with `RETENTION_UNMEASURED` — promotion refused, never a silent
+  compare against a borrowed number. On the production binder path this is
+  defense in depth, pinned as a no-op: the binder already refuses carried
+  parent rows, and the parent arm only writes earned `MEASURED_PARENT` rows.
+- The single owner of violation shapes surfaced a latent mislabel the new
+  pin test caught: the parent-side missing-measurement violation carried
+  the candidate's score as `measured`, so `RetentionViolation.code` named
+  the shape `RETENTION_REGRESSION` when nothing had been measured.
+  `evaluate_retention` now records the parent's absence as NaN (the shape
+  `code` already defines as `RETENTION_UNMEASURED`) and keeps the
+  candidate's value in the detail.
+
+Tests: `tests/test_growth_runner_gates.py` — a measured candidate against
+a carried baseline refuses `RETENTION_UNMEASURED` through `decide_promotion`,
+and the binder-path no-op is pinned directly.
 
 ## Verification
 

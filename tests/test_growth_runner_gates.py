@@ -20,7 +20,14 @@ from __future__ import annotations
 
 import pytest
 
-from chowder.evals.result import MEASURED_PARENT, MEASURED_THIS_GENERATION
+from chowder.evals.result import (
+    CARRIED_REFERENCE,
+    MEASURED_PARENT,
+    MEASURED_THIS_GENERATION,
+    SUPPORTED,
+    BenchmarkRun,
+)
+from chowder.growth.benchmark_registry import BenchmarkRegistry
 from chowder.growth.attempt_failure import FailureClass, classify_failure
 from chowder.growth.candidate_search import advanced, run_search
 from chowder.growth.compute_cost import settlement_refusal
@@ -31,7 +38,12 @@ from chowder.growth.eval_isolation import SearchIsolationRefusal, classify_bench
 from chowder.growth.failure_bank import FailureBank
 from chowder.growth.frontier_reference import SnapshotStore
 from chowder.growth.lineage import GenerationLedger, RegressionMemory
-from chowder.growth.metric_binding import BindingReport, PromotionAssembly
+from chowder.growth.metric_binding import (
+    BindingRefusal,
+    BindingReport,
+    MetricBinder,
+    PromotionAssembly,
+)
 from chowder.growth.promotion import BenchmarkResult, PromotionInput, evaluate_promotion
 from chowder.growth.retention import RetentionConstraint, RetentionProfile
 
@@ -347,6 +359,60 @@ def test_an_unmeasured_parent_side_refuses_the_delta(tmp_path) -> None:  # noqa:
 
     assert decision.verdict == "REJECTED"
     assert any("no parent measurement" in reason for reason in decision.reasons)
+
+
+def test_a_carried_parent_row_is_not_a_baseline(tmp_path) -> None:  # noqa: ANN001
+    """A carried reference is a quotation from history, not a parent measurement.
+
+    The parent side of a declared constraint demands earned provenance
+    (``parent_measured``), symmetric with the candidate side's
+    ``gate_eligible``: a carried row reads as unmeasured, so the gate
+    refuses with RETENTION_UNMEASURED instead of silently anchoring the
+    delta on a number nothing measured.
+    """
+    cycle = _cycle(tmp_path, retention_profile=_profile(REASONING))
+    candidate, parent = _promotion_results(target=(0.45, 0.28), reasoning=None)
+    # A measured candidate against a carried baseline with a plausible
+    # number: trusting the carried row would anchor the declared delta on a
+    # number nothing measured (here it would read as a regression); the
+    # earned-provenance rule reads it as absent instead.
+    candidate[REASONING] = _result(REASONING, 0.51, origin=MEASURED_THIS_GENERATION)
+    parent[REASONING] = _result(REASONING, 0.71, origin=CARRIED_REFERENCE)
+
+    decision = _decide(cycle, candidate=candidate, parent=parent)
+
+    assert decision.verdict == "REJECTED"
+    assert any(
+        reason.startswith("RETENTION_UNMEASURED") and "no parent measurement" in reason
+        for reason in decision.reasons
+    )
+
+
+def test_the_binder_path_never_hands_the_gate_a_carried_parent(tmp_path) -> None:  # noqa: ANN001
+    """The wall is defense in depth: the provenance owner refuses first.
+
+    ``metric_binding`` refuses a CARRIED_REFERENCE row on the parent role,
+    so the production run path (``decide_promotion_from_runs``) never
+    delivers one to the gate; the fail-closed rule in ``_retention_values``
+    is the backstop for the caller-passed seam. This pins the no-op: the
+    same carried row through the binder comes out as a refusal, not a
+    parent result.
+    """
+    carried_parent_run = BenchmarkRun(
+        benchmark_qualified_id=REASONING,
+        adapter="native",
+        generation_version="gen0",
+        metric="accuracy",
+        score=0.71,
+        support=SUPPORTED,
+        n_samples=25,
+        measurement_origin=CARRIED_REFERENCE,
+    )
+    binder = MetricBinder(BenchmarkRegistry())
+    outcome = binder.bind(carried_parent_run, generation_version="gen0", role="parent")
+
+    assert isinstance(outcome, BindingRefusal)
+    assert "carried reference" in outcome.reason
 
 
 def test_an_absolute_floor_breach_is_named(tmp_path) -> None:  # noqa: ANN001
