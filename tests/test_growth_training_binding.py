@@ -375,6 +375,13 @@ class _RecordingRunner:
             (artifact / "router_payload.json").write_text(
                 json.dumps({"steps_completed": 4}), encoding="utf-8"
             )
+            # The real trainer checkpoints under artifact/trainer; the search's
+            # continuation resolution (latest_checkpoint_dir) reads that layout,
+            # so the fake writes the same shape its production counterpart does.
+            (artifact / "trainer" / "checkpoint-4").mkdir(parents=True, exist_ok=True)
+            (artifact / "trainer" / "checkpoint-4" / "optimizer.pt").write_bytes(
+                b"optimizer-state"
+            )
         if self.write_identity:
             (work_dir / "chowder-identity.json").write_text(
                 json.dumps(_identity_of_this_process()), encoding="utf-8"

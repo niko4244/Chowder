@@ -26,6 +26,18 @@ from typing import Any, Mapping, Sequence
 
 import pytest
 
+
+def _latest_checkpoint_of(attempt_dir: Path) -> str:
+    """The highest real checkpoint-N under an attempt's artifact, the same
+    resolution the search's continuation uses against real training output."""
+    trainer = attempt_dir / "work" / "artifact" / "trainer"
+    checkpoints = sorted(
+        (p for p in trainer.glob("checkpoint-*") if p.is_dir()),
+        key=lambda p: int(p.name.rsplit("-", 1)[1]),
+    )
+    assert checkpoints, f"no checkpoint under {trainer}"
+    return str(checkpoints[-1].resolve())
+
 from chowder.cli import main as chowder_main
 from chowder.evals.result import (
     MEASURED_PARENT,
@@ -1840,6 +1852,21 @@ def test_a_declared_search_runs_bounded_rounds_and_records_every_attempt(
     # Three attempts really ran and all three were charged.
     assert run.cost["wall_gpu_hours"] == pytest.approx(3 * ATTEMPT_WALL_GPU_HOURS)
     assert Path(run.cost["accounting_path"]).is_file()
+
+    # Progressive allocation is continuation, not restart -- proven at the
+    # composed-project level: the round-1 attempt's backend config names the
+    # checkpoint the survivor's own round-0 attempt produced, in the
+    # namespace the backend's engine actually reads. If a later round ever
+    # silently restarted from the parent, this assertion fails.
+    round0_checkpoint = _latest_checkpoint_of(tmp_path / "state" / "attempts" / "attempt-01")
+    round1_project = json.loads(
+        (tmp_path / "state" / "attempts" / "attempt-03" / "project.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    router = round1_project["config"]["backend"]["router_healing"]
+    assert router["resume_from"] == round0_checkpoint
+    assert round1_project["config"]["backend"]["router_healing"]["max_steps"] == 24
 
 
 def test_a_search_over_its_declared_envelope_refuses_before_any_compute(

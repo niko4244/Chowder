@@ -14,6 +14,7 @@ manifest, executor and CLI surfaces.
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +22,7 @@ from chowder.growth.candidate_search import (
     SEARCH_SCHEMA,
     CandidateSearchDeclaration,
     CandidateSearchRefusal,
+    SearchProgress,
     advanced,
     plan_search,
     round_recipe,
@@ -220,6 +222,15 @@ def _attempt(recipe_id: str, *, succeeded: bool = True, **extra: object) -> dict
     return row
 
 
+def _checkpoint_artifact(root, recipe_id: str, *, step: int = 12) -> str:
+    """A fake attempt artifact carrying the real trainer checkpoint layout
+    (``trainer/checkpoint-N``), so the search's checkpoint resolution runs the
+    same code path it runs against real training output."""
+    artifact = root / f"attempts-{recipe_id}" / "adapter"
+    (artifact / "trainer" / f"checkpoint-{step}").mkdir(parents=True, exist_ok=True)
+    return str(artifact)
+
+
 def test_only_attempts_that_trained_and_produced_an_artifact_advance() -> None:
     results = [
         _attempt("a", succeeded=False),
@@ -260,15 +271,20 @@ def test_a_benchmark_score_cannot_advance_a_candidate() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_the_run_walks_the_rounds_and_offers_only_the_last_round_to_selection() -> None:
+def test_the_run_walks_the_rounds_and_offers_only_the_last_round_to_selection(tmp_path) -> None:
     recipes = [_recipe("a"), _recipe("b")]
     plan = _plan(recipes)
     seen: list[tuple[str, int]] = []
+    resumed: list[str | None] = []
     charged: list[str] = []
+    checkpoints: dict[str, str] = {}
 
     def run_attempt(recipe: TrainingRecipe):
         seen.append((recipe.recipe_id, recipe.max_steps))
-        return _attempt(recipe.recipe_id)
+        resumed.append(recipe.resume_from_checkpoint)
+        artifact = _checkpoint_artifact(tmp_path, recipe.recipe_id)
+        checkpoints[recipe.recipe_id] = artifact
+        return _attempt(recipe.recipe_id, artifact_ref=artifact)
 
     def on_attempt(evidence, row) -> None:
         charged.append(f"{evidence['recipe_id']}@{row.round_index}")
@@ -289,9 +305,24 @@ def test_the_run_walks_the_rounds_and_offers_only_the_last_round_to_selection() 
     assert [row["recipe_id"] for row in run.final_results] == ["a"]
     assert len(run.round_attempts) == 2
     assert sum(len(rows) for rows in run.round_attempts) == 3
+    # Progressive allocation is continuation, not restart: round 0 starts
+    # from the parent, and round 1 resumes the checkpoint the survivor's own
+    # round-0 attempt produced (the highest real checkpoint-N under its
+    # artifact, resolved the same way the EvolutionEngine controller resolves
+    # its own continuations).
+    round0_checkpoint = str(Path(checkpoints["a"]) / "trainer" / "checkpoint-12")
+    assert resumed == [None, None, round0_checkpoint]
+    round1 = run.round_attempts[1][0]
+    assert round1["declared_resume_from"] == round0_checkpoint
+    assert round1["checkpoint_dir"] == round0_checkpoint
+    assert round1["search_incremental_steps"] == 12  # 24 - 12, not 24 again
+    # A lineage's cumulative spend is one lookup, in addition to the
+    # per-attempt incremental rows.
+    assert run.candidate_cumulative["a"]["rounds"] == 2
+    assert run.candidate_cumulative["b"]["rounds"] == 1
 
 
-def test_a_candidate_that_fails_its_cheap_round_never_earns_a_larger_budget() -> None:
+def test_a_candidate_that_fails_its_cheap_round_never_earns_a_larger_budget(tmp_path) -> None:
     recipes = [_recipe("a"), _recipe("b")]
     plan = _plan(recipes)
     seen: list[str] = []
@@ -299,7 +330,15 @@ def test_a_candidate_that_fails_its_cheap_round_never_earns_a_larger_budget() ->
 
     def run_attempt(recipe: TrainingRecipe):
         seen.append(recipe.recipe_id)
-        return _attempt(recipe.recipe_id, succeeded=outcomes[recipe.recipe_id])
+        return _attempt(
+            recipe.recipe_id,
+            succeeded=outcomes[recipe.recipe_id],
+            artifact_ref=(
+                _checkpoint_artifact(tmp_path, recipe.recipe_id)
+                if outcomes[recipe.recipe_id]
+                else None
+            ),
+        )
 
     run = run_search(
         plan,
@@ -439,3 +478,223 @@ def test_a_run_may_not_train_a_recipe_the_plan_never_projected() -> None:
     assert set(trained) <= set(plan.rounds[0].recipe_ids)
     assert "c" not in trained and "d" not in trained
     assert run.total_device_gpu_hours <= plan.total_device_gpu_hours
+
+
+# --------------------------------------------------------------------------
+# progressive allocation is continuation, not restart
+# --------------------------------------------------------------------------
+
+
+def test_a_round_after_the_first_is_priced_at_the_step_delta_not_a_full_retrain() -> None:
+    """Continuation economics: round 1 trains 24-12=12 incremental steps.
+
+    Pricing a continuation at the full round budget would double-charge the
+    earlier round and make progressive allocation look unaffordable -- the
+    projection must measure what the round actually adds.
+    """
+    recipes = [_recipe("a"), _recipe("b")]
+    plan = _plan(recipes)
+    assert plan.rounds[0].max_steps == 12
+    assert plan.rounds[1].max_steps == 24
+    # Round 0 is priced at its full budget (two candidates); round 1 at the
+    # 12-step delta for the schedule's own worst-case survivor count (1).
+    assert plan.rounds[0].projected_device_gpu_hours == pytest.approx(
+        2 * _project_cost(seq_len=2048, max_steps=12)[0]
+    )
+    assert plan.rounds[1].projected_device_gpu_hours == pytest.approx(
+        _project_cost(seq_len=2048, max_steps=12)[0]
+    )
+    # ...and a full-retrain pricing of round 1 would have been strictly larger.
+    full_retrain = _project_cost(seq_len=2048, max_steps=24)[0]
+    assert plan.rounds[1].projected_device_gpu_hours < 2 * full_retrain
+
+
+def test_a_survivor_with_no_checkpoint_ends_its_lineage_instead_of_restarting(
+    tmp_path,
+) -> None:
+    """No checkpoint, no continuation: the honest stop.
+
+    A survivor whose round produced no resumable checkpoint cannot earn a
+    larger budget -- continuing it would mean silently restarting the recipe
+    from step 0 and paying for its earlier rounds a second time.
+    """
+    recipes = [_recipe("a")]
+    plan = _plan(recipes)
+
+    def run_attempt(recipe: TrainingRecipe):
+        artifact = tmp_path / "a-artifact"
+        artifact.mkdir(parents=True, exist_ok=True)
+        return _attempt("a", artifact_ref=str(artifact))
+
+    run = run_search(
+        plan,
+        declaration=_declaration(),
+        recipes=recipes,
+        project_cost=_project_cost,
+        run_attempt=run_attempt,
+    )
+
+    assert run.lineage_stops == {
+        "a": "no checkpoint from the previous round to continue from"
+    }
+    # The lineage ended: no continuation attempt was made or charged, and the
+    # dead lineage is not reported as a survivor.
+    assert len(run.round_attempts) == 1
+    assert run.survivors == ()
+    assert run.total_device_gpu_hours == pytest.approx(
+        _project_cost(seq_len=2048, max_steps=12)[0]
+    )
+
+
+def test_an_executor_reported_restart_never_earns_a_larger_budget(tmp_path) -> None:
+    """A silent restart is detected and disqualified, not rewarded.
+
+    When the executor reports ``resume_state == "not-a-resume"`` for a
+    declared continuation, the attempt stays in the accounting -- the compute
+    really happened -- but its lineage cannot advance, so a restart can never
+    win progressive allocation.
+    """
+    recipes = [_recipe("a"), _recipe("b")]
+    plan = _plan(recipes)
+
+    def run_attempt(recipe: TrainingRecipe):
+        extra: dict = {"artifact_ref": _checkpoint_artifact(tmp_path, recipe.recipe_id)}
+        if recipe.resume_from_checkpoint is not None:
+            # The executor admits it restarted instead of resuming.
+            extra["resume_state"] = "not-a-resume"
+        return _attempt(recipe.recipe_id, **extra)
+
+    run = run_search(
+        plan,
+        declaration=_declaration(),
+        recipes=recipes,
+        project_cost=_project_cost,
+        run_attempt=run_attempt,
+    )
+
+    assert run.lineage_stops == {
+        "a": (
+            "the attempt reported it restarted instead of resuming the "
+            "declared checkpoint"
+        )
+    }
+    # Both rounds ran (the restart attempt still happened and was recorded),
+    # but the round-1 lineage ends: nobody advances past a silent restart.
+    assert len(run.round_attempts) == 2
+    assert run.survivors == ()
+
+
+def test_an_interrupted_search_resumes_from_its_recorded_progress(tmp_path) -> None:
+    """A stopped search continues as the same search, not a new one.
+
+    The completed rounds, their spend, and their survivors are carried over;
+    only the remaining rounds run, and the survivor continues from the
+    checkpoint its interrupted run recorded.
+    """
+    recipes = [_recipe("a"), _recipe("b")]
+    plan = _plan(recipes)
+    checkpoints: dict[tuple[str, int], str] = {}
+
+    def run_attempt(recipe: TrainingRecipe):
+        key = (recipe.recipe_id, recipe.max_steps)
+        artifact = _checkpoint_artifact(tmp_path, f"{recipe.recipe_id}-{recipe.max_steps}")
+        checkpoints[key] = artifact
+        return _attempt(recipe.recipe_id, artifact_ref=artifact)
+
+    # First pass: stop as soon as round 0 is over.
+    def stop_after_round0(_device: float, _wall: float) -> str | None:
+        return "operator interrupt"
+
+    interrupted = run_search(
+        plan,
+        declaration=_declaration(),
+        recipes=recipes,
+        project_cost=_project_cost,
+        run_attempt=run_attempt,
+        should_stop=stop_after_round0,
+    )
+    assert interrupted.stopped_by == "operator interrupt"
+    assert len(interrupted.rounds) == 1
+    spent_before = interrupted.total_device_gpu_hours
+
+    # Resume: the recorded progress is carried over and round 1 continues.
+    progress = SearchProgress.from_run(interrupted)
+    resumed = run_search(
+        plan,
+        declaration=_declaration(),
+        recipes=recipes,
+        project_cost=_project_cost,
+        run_attempt=run_attempt,
+        progress=progress,
+    )
+
+    assert resumed.stopped_by is None
+    assert len(resumed.rounds) == 2
+    # Round 0 was NOT re-run: only the continuation round trained.
+    assert resumed.round_attempts[0] == interrupted.round_attempts[0]
+    assert [row["recipe_id"] for row in resumed.round_attempts[1]] == ["a"]
+    # The interrupted run's spend is carried, not double-counted.
+    assert resumed.total_device_gpu_hours == pytest.approx(
+        spent_before + _project_cost(seq_len=2048, max_steps=12)[0]
+    )
+    # And the continuation still resumes the survivor's own checkpoint.
+    round0_checkpoint = str(
+        Path(checkpoints[("a", 12)]) / "trainer" / "checkpoint-12"
+    )
+    assert resumed.round_attempts[1][0]["declared_resume_from"] == round0_checkpoint
+
+
+def test_progress_from_a_concluded_search_refuses() -> None:
+    """Only an interrupted search has something to resume."""
+    declaration = _declaration(rounds=1)
+    plan = _plan([_recipe("a")], declaration=declaration)
+    run = run_search(
+        plan,
+        declaration=declaration,
+        recipes=[_recipe("a")],
+        project_cost=_project_cost,
+        run_attempt=lambda recipe: _attempt(recipe.recipe_id),
+    )
+    try:
+        SearchProgress.from_run(run)
+    except CandidateSearchRefusal:
+        pass
+    else:
+        raise AssertionError("a concluded search must not produce a resumable progress")
+
+
+def test_progress_from_a_different_plan_refuses(tmp_path) -> None:
+    """A search may only resume as the search it was declared as."""
+    recipes = [_recipe("a"), _recipe("b")]
+    plan = _plan(recipes)
+
+    def run_attempt(recipe: TrainingRecipe):
+        return _attempt(
+            recipe.recipe_id,
+            artifact_ref=_checkpoint_artifact(tmp_path, recipe.recipe_id),
+        )
+
+    interrupted = run_search(
+        plan,
+        declaration=_declaration(),
+        recipes=recipes,
+        project_cost=_project_cost,
+        run_attempt=run_attempt,
+        should_stop=lambda _d, _w: "interrupt",
+    )
+    progress = SearchProgress.from_run(interrupted)
+    other_declaration = _declaration(initial_max_steps=20)
+    other_plan = _plan(recipes, declaration=other_declaration)
+    try:
+        run_search(
+            other_plan,
+            declaration=other_declaration,
+            recipes=recipes,
+            project_cost=_project_cost,
+            run_attempt=run_attempt,
+            progress=progress,
+        )
+    except CandidateSearchRefusal as error:
+        assert "prefix" in str(error)
+    else:
+        raise AssertionError("progress from a different plan must refuse")

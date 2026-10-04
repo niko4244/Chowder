@@ -377,3 +377,9 @@ def run_successive_halving(
         round_index += 1
 
     return SuccessiveHalvingOutcome(rounds=tuple(rounds), promoted=None)
+
+
+#: Public name for the checkpoint resolver the growth campaign's progressive
+#: search also uses, so both controllers cannot drift apart about what "the
+#: checkpoint a survivor continues from" means.
+latest_checkpoint_dir = _latest_checkpoint_dir

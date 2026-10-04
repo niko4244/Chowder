@@ -35,9 +35,15 @@ from .curriculum import CurriculumItem
 #:   constructor around its ``training``/``lora`` sections):
 #:   ``backend.max_length``, ``backend.lora.{r,alpha}``,
 #:   ``backend.training.{learning_rate,lr_scheduler_type,warmup_steps,max_steps,
-#:   batch_size,gradient_accumulation_steps,...}``;
+#:   batch_size,gradient_accumulation_steps,...}``, and
+#:   ``backend.resume_from_checkpoint`` (progressive-search continuation;
+#:   the backend's own checkpoint manifest verifies it against the bound
+#:   inputs the checkpoint was produced under);
 #: * ``router-healing`` (``training_binding._compose``'s documented namespace):
-#:   ``backend.router_healing.{max_steps,learning_rate,seq_len}``.
+#:   ``backend.router_healing.{max_steps,learning_rate,seq_len}``, and
+#:   ``backend.router_healing.resume_from`` -- the engine's own continuation
+#:   setting, so a progressive-search survivor continues from its checkpoint
+#:   in the namespace the router engine actually reads.
 CONSUMED_RECIPE_FIELDS: Mapping[str, frozenset[str]] = {
     "transformers-peft": frozenset(
         {
@@ -48,9 +54,12 @@ CONSUMED_RECIPE_FIELDS: Mapping[str, frozenset[str]] = {
             "seq_len",
             "lora_rank",
             "lora_alpha",
+            "resume_from_checkpoint",
         }
     ),
-    "router-healing": frozenset({"learning_rate", "max_steps", "seq_len"}),
+    "router-healing": frozenset(
+        {"learning_rate", "max_steps", "seq_len", "resume_from_checkpoint"}
+    ),
 }
 
 #: Every recipe field, so "recorded only" can be stated as a difference rather
@@ -75,6 +84,7 @@ ALL_RECIPE_FIELDS: frozenset[str] = frozenset(
         "dataset_manifest",
         "projected_device_gpu_hours",
         "projected_wall_gpu_hours",
+        "resume_from_checkpoint",
         "notes",
     }
 )
@@ -175,6 +185,13 @@ class TrainingRecipe:
     dataset_manifest: Mapping[str, Any]
     projected_device_gpu_hours: float
     projected_wall_gpu_hours: float
+    #: The checkpoint a continuation continues from. ``None`` means a fresh
+    #: run from the parent. This is *operational*, not mathematical: the peft
+    #: backend excludes it from the checkpoint recipe digest, so a progressive
+    #: search round can continue the same proposal at a larger step budget
+    #: without the continuation looking like a recipe change to the
+    #: checkpoint-manifest identity check.
+    resume_from_checkpoint: str | None = None
     notes: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -198,6 +215,7 @@ class TrainingRecipe:
             "dataset_manifest": dict(self.dataset_manifest),
             "projected_device_gpu_hours": self.projected_device_gpu_hours,
             "projected_wall_gpu_hours": self.projected_wall_gpu_hours,
+            "resume_from_checkpoint": self.resume_from_checkpoint,
             "notes": self.notes,
         }
 
@@ -238,28 +256,35 @@ class TrainingRecipe:
         section nothing reads.
         """
         if backend_type == "router-healing":
-            return {
-                "backend": {
-                    "router_healing": {
-                        "max_steps": self.max_steps,
-                        "learning_rate": self.learning_rate,
-                        "seq_len": self.seq_len,
-                    }
-                }
+            router: dict[str, Any] = {
+                "max_steps": self.max_steps,
+                "learning_rate": self.learning_rate,
+                "seq_len": self.seq_len,
             }
+            if self.resume_from_checkpoint is not None:
+                # The router engine's own continuation setting: it resolves the
+                # declared path against the work dir and reports the checkpoints
+                # it wrote, so the search's continuation reaches the engine in
+                # the namespace it actually reads.
+                router["resume_from"] = self.resume_from_checkpoint
+            return {"backend": {"router_healing": router}}
         if backend_type == "transformers-peft":
-            return {
-                "backend": {
-                    "max_length": self.seq_len,
-                    "lora": {"r": self.lora_rank, "alpha": self.lora_alpha},
-                    "training": {
-                        "max_steps": self.max_steps,
-                        "learning_rate": self.learning_rate,
-                        "lr_scheduler_type": self.scheduler,
-                        "warmup_steps": self.warmup_steps,
-                    },
-                }
+            backend: dict[str, Any] = {
+                "max_length": self.seq_len,
+                "lora": {"r": self.lora_rank, "alpha": self.lora_alpha},
+                "training": {
+                    "max_steps": self.max_steps,
+                    "learning_rate": self.learning_rate,
+                    "lr_scheduler_type": self.scheduler,
+                    "warmup_steps": self.warmup_steps,
+                },
             }
+            if self.resume_from_checkpoint is not None:
+                # The peft spec constructor reads backend.resume_from_checkpoint
+                # and its checkpoint manifest verifies the continuation against
+                # the exact bound inputs the checkpoint was produced under.
+                backend["resume_from_checkpoint"] = self.resume_from_checkpoint
+            return {"backend": backend}
         raise ValueError(
             f"recipe knobs have no mapping for backend type {backend_type!r}; "
             "a patch for an unknown backend would either be dropped or refused "
