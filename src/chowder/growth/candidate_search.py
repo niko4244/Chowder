@@ -491,6 +491,7 @@ def run_search(
     on_attempt: Callable[[Mapping[str, Any], SearchRound], None] | None = None,
     should_stop: Callable[[float, float], str | None] | None = None,
     progress: SearchProgress | None = None,
+    order_survivors: Callable[[Sequence[str], SearchRound], Sequence[str]] | None = None,
 ) -> SearchRun:
     """Run the planned rounds, screening on training-side evidence only.
 
@@ -521,6 +522,13 @@ def run_search(
     ``progress`` resumes an interrupted search: the completed rounds, their
     spend and their survivors are carried over unchanged and the remaining
     rounds continue from the recorded survivors.
+
+    ``order_survivors`` (the budget ladder's adaptive seam) may reorder the
+    survivors each round runs in -- the order is what ``advanced`` truncates,
+    so it decides who a binding survivor cut keeps. It receives the round's
+    runnable ids and the round row, and must return the same ids: a hook that
+    drops or adds a candidate refuses, because admission is the plan's
+    decision, not the ordering hook's.
     """
     if not plan.declared:
         raise CandidateSearchRefusal(
@@ -610,6 +618,16 @@ def run_search(
             runnable[recipe_id] = checkpoint
         if not runnable:
             break
+        if order_survivors is not None:
+            ordered_ids = list(order_survivors(list(runnable), row))
+            if set(ordered_ids) != set(runnable):
+                raise CandidateSearchRefusal(
+                    f"{SEARCH_SCHEMA}: the survivor-ordering hook changed who "
+                    f"runs round {row.round_index} ({sorted(ordered_ids)} vs "
+                    f"{sorted(runnable)}); allocation may reorder a round, "
+                    "never rewrite who was admitted"
+                )
+            runnable = {recipe_id: runnable[recipe_id] for recipe_id in ordered_ids}
         attempts: list[Mapping[str, Any]] = []
         for recipe_id, checkpoint in runnable.items():
             recipe = by_id[recipe_id]
