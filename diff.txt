@@ -1,0 +1,382 @@
+diff --git a/src/chowder/growth/campaign_runner.py b/src/chowder/growth/campaign_runner.py
+index 4da2548..4e177f1 100644
+--- a/src/chowder/growth/campaign_runner.py
++++ b/src/chowder/growth/campaign_runner.py
+@@ -62,6 +62,13 @@ from .candidate_evaluation import (
+     write_candidate_evaluation,
+ )
+ 
++from .candidate_search import (
++    CandidateSearchRefusal,
++    SearchPlan,
++    plan_search,
++    run_search,
++)
++
+ from .campaign import (
+     PROMOTION_POLICY_VERSION,
+     CampaignManifest,
+@@ -136,6 +143,7 @@ FIELD_ENFORCEMENT: Mapping[str, str] = {
+     "baseline_eval_report_path": "the trusted-ancestor (gen0) arm of the judged evidence set: branch protection is judged against it, never against an unresolved parent",
+     "protection": "the declared branch-protection policy (trusted ancestor version + slice regression tolerance) the certification gate applies before any lineage record is written",
+     "evaluation_execution": "how many rows one generate call decodes, for every arm and for the candidate: the candidate evaluator and both arm measurements read this one value, and each records it in its own evidence; batching changes generated tokens (measured: 14/16 rows agree with a single-row pass), so the arms and the candidate must share it and never be chosen per path",
++    "candidate_search": "the declared bounded candidate search: its rounds, starting step budget, multiplier and survival rule are preregistered here, its worst-case cost is projected before any compute and must fit its own declared device/wall envelope *and* the campaign's ceilings, and the runner refuses a declared search that does not. Absent (rounds=0) means one pass over the declared recipes, which is what every manifest predating it does",
+     "notes": "documentation only: it drives no behavior and gates nothing",
+ }
+ 
+@@ -231,14 +239,28 @@ class CampaignPlan:
+     ``recipe_ids`` select them: ``chowder growth campaign plan`` prints these
+     ids so a preregistration can name the recipes it will actually run, and
+     the runner refuses a declared id the planner did not propose.
++
++    ``search`` is the declared bounded candidate search projected over those
++    same recipes -- the rounds, their step budgets and the worst-case total. It
++    is planned here, once, so the plan a command prints, the readiness check
++    that admits it and the run that executes it are the same arithmetic.
+     """
+ 
+     items: tuple[CurriculumItem, ...]
+     recipes: tuple[TrainingRecipe, ...]
++    search: SearchPlan = SearchPlan(declared=False)
++    #: Why the declared search could not be projected, when it could not. The
++    #: *plan* still exists -- the curriculum and the recipe proposal are what
++    #: this object answers for -- and the search's own refusal is carried here
++    #: so the check that owns it can report it, rather than every reader of a
++    #: plan inheriting a refusal that belongs to one of its parts.
++    search_refusal: str = ""
+ 
+     def to_dict(self) -> dict[str, Any]:
+         return {
+             "curriculum_items": [item.item_id for item in self.items],
++            "candidate_search": self.search.to_dict(),
++            "candidate_search_refusal": self.search_refusal,
+             "recipes": [
+                 {
+                     "recipe_id": recipe.recipe_id,
+@@ -286,7 +308,25 @@ def plan_campaign(manifest: CampaignManifest) -> CampaignPlan:
+         root=root,
+     )
+     items = cycle.plan_curriculum(_load_profile(manifest))
+-    return CampaignPlan(items=items, recipes=cycle.plan_recipes(items))
++    recipes = cycle.plan_recipes(items)
++    # The declared search is projected over the recipes this campaign will run
++    # (the declared ids), never over the planner's whole grid: a search over
++    # candidates nobody declared is not this campaign's search. While the ids
++    # are still placeholders -- which is how an author learns them, and why
++    # planning must work before they are written down -- it is projected over
++    # the planner's own proposal instead, and the ``recipe_set`` check is what
++    # refuses a declared id the planner never proposed. No *run* is planned
++    # this way: ``run_campaign`` selects the declared recipes (raising on an
++    # unproposed id) before it asks for this plan.
++    by_id = {recipe.recipe_id: recipe for recipe in recipes}
++    declared = tuple(
++        by_id[recipe_id] for recipe_id in manifest.recipe_ids if recipe_id in by_id
++    )
++    try:
++        search = search_plan_for(manifest, cycle=cycle, recipes=declared or recipes)
++    except CandidateSearchRefusal as refusal:
++        return CampaignPlan(items=items, recipes=recipes, search_refusal=str(refusal))
++    return CampaignPlan(items=items, recipes=recipes, search=search)
+ 
+ 
+ @dataclass(frozen=True)
+@@ -486,14 +526,56 @@ def run_campaign(
+         }
+     )
+ 
++    # The declared bounded candidate search, projected before anything is spent.
++    # A search that cannot fit its own envelope, or a round the executor would
++    # refuse to admit, refuses here -- the same rule the single pass applies to
++    # its recipes. Undeclared, this is an undeclared plan and the loop below is
++    # exactly the single pass it always was.
++    try:
++        search = search_plan_for(manifest, cycle=cycle, recipes=recipes)
++    except CandidateSearchRefusal as refusal:
++        phases.append(
++            {"phase": "candidate_search", "verdict": "refused", "detail": str(refusal)}
++        )
++        return _refuse(manifest, root, candidate_version, phases, admission)
++    if search.declared:
++        phases.append(
++            {
++                "phase": "candidate_search",
++                "verdict": "ok",
++                "detail": (
++                    f"{len(search.rounds)} declared round(s) over "
++                    f"{len(recipes)} candidate(s), worst case "
++                    f"{search.total_device_gpu_hours:.6f} device / "
++                    f"{search.total_wall_gpu_hours:.6f} wall GPU-h within the "
++                    "declared search envelope"
++                ),
++            }
++        )
++
+     # Campaign admission: the per-recipe ceilings bound what the executor may
+     # start, and these bound what the campaign as a whole plans to spend. A
+     # campaign whose own plan does not fit its declared envelope refuses here,
+     # before compute, rather than discovering it only when the actuals land.
++    # A declared search spends its rounds, so it is the search's total -- not a
++    # single pass -- that the campaign ceiling has to cover.
+     projected = ComputeCost(
+-        device_gpu_hours=sum(recipe.projected_device_gpu_hours for recipe in recipes),
+-        wall_gpu_hours=sum(recipe.projected_wall_gpu_hours for recipe in recipes),
+-        source=f"campaign projection ({len(recipes)} admitted recipes)",
++        device_gpu_hours=(
++            search.total_device_gpu_hours
++            if search.declared
++            else sum(recipe.projected_device_gpu_hours for recipe in recipes)
++        ),
++        wall_gpu_hours=(
++            search.total_wall_gpu_hours
++            if search.declared
++            else sum(recipe.projected_wall_gpu_hours for recipe in recipes)
++        ),
++        source=(
++            f"campaign projection ({len(search.rounds)} search rounds over "
++            f"{len(recipes)} recipes)"
++            if search.declared
++            else f"campaign projection ({len(recipes)} admitted recipes)"
++        ),
+     )
+     projection = settle_campaign_projection(manifest, projected=projected)
+     if not projection.compliant:
+@@ -585,23 +667,84 @@ def run_campaign(
+     ledger = CycleCostLedger(cycle_id=manifest.cycle_id)
+     results: list[Mapping[str, Any]] = []
+     stopped_by: str | None = None
+-    for recipe in recipes:
+-        evidence = dict(executor(recipe, plan.items))
+-        evidence["recipe_id"] = recipe.recipe_id
+-        results.append(evidence)
+-        cost = _attempt_cost(evidence)
++
++    def charge(evidence: Mapping[str, Any]) -> None:
++        """Charge one attempt to the campaign's own ledger as it happens."""
+         ledger.add(
+-            f"{recipe.recipe_id} attempt",
++            f"{evidence.get('recipe_id')} attempt",
+             "failed_attempt" if evidence.get("status") != STATUS_SUCCEEDED else "training",
+-            cost,
+-            recipe_id=recipe.recipe_id,
+-            notes=f"status={evidence.get('status')}",
++            _attempt_cost(evidence),
++            recipe_id=str(evidence.get("recipe_id", "")),
++            notes=(
++                f"status={evidence.get('status')}"
++                + (
++                    f" round={evidence.get('search_round')}"
++                    if evidence.get("search_round") is not None
++                    else ""
++                )
++            ),
++        )
++
++    def overrun() -> str | None:
++        if not stops_on_campaign_overrun(manifest.stopping_rules):
++            return None
++        running = settle_campaign(manifest, total=ledger.total())
++        if running.compliant:
++            return None
++        return "campaign ceiling reached before the remaining candidates"
++
++    search_run = None
++    if search.declared:
++        # Bounded candidate search: cheap rounds first, only the final round's
++        # survivors offered to selection. Every attempt is charged and recorded
++        # exactly as a single-pass recipe is, so a stopped round still leaves
++        # its spend in the accounting.
++        search_run = run_search(
++            search,
++            declaration=manifest.candidate_search,
++            recipes=recipes,
++            project_cost=cycle.planner.project_cost,
++            run_attempt=lambda recipe: executor(recipe, plan.items),
++            on_attempt=lambda evidence, row: charge(evidence),  # noqa: ARG005
++            should_stop=lambda _device, _wall: overrun(),  # noqa: ARG005
++        )
++        results = list(search_run.final_results)
++        stopped_by = search_run.stopped_by
++        phases.append(
++            {
++                "phase": "candidate_search_run",
++                "verdict": "stopped" if stopped_by else "ok",
++                "detail": (
++                    stopped_by
++                    or (
++                        f"{len(search_run.rounds)} round(s) ran; "
++                        f"{len(search_run.survivors)} survivor(s) from the last "
++                        f"round, whose results alone selection may read"
++                    )
++                ),
++            }
+         )
+-        if stops_on_campaign_overrun(manifest.stopping_rules):
+-            running = settle_campaign(manifest, total=ledger.total())
+-            if not running.compliant:
+-                stopped_by = "campaign ceiling reached before the remaining recipes"
++    else:
++        for recipe in recipes:
++            evidence = dict(executor(recipe, plan.items))
++            evidence["recipe_id"] = recipe.recipe_id
++            results.append(evidence)
++            charge(evidence)
++            stopped_by = overrun()
++            if stopped_by:
+                 break
++    # Every attempt, from every round: a search's earlier, cheaper rounds are
++    # real compute and real evidence, so they stay in the record even though
++    # selection may only read the final round's results.
++    attempted: tuple[Mapping[str, Any], ...] = (
++        tuple(
++            evidence
++            for round_attempts in search_run.round_attempts
++            for evidence in round_attempts
++        )
++        if search_run is not None
++        else tuple(results)
++    )
+     accounting_path = root / "cycle_compute_accounting.json"
+     total = ledger.total()
+ 
+@@ -682,7 +825,7 @@ def run_campaign(
+                 "accounting_path": str(accounting_path),
+                 "accounting_digest": accounting_digest,
+             },
+-            attempts=_attempt_summary(results),
++            attempts=_attempt_summary(attempted),
+             selection=selected,
+         )
+     # ``validate_candidate_report`` has already refused an evaluation that
+@@ -749,7 +892,7 @@ def run_campaign(
+                 "accounting_path": str(accounting_path),
+                 "accounting_digest": accounting_digest,
+             },
+-            attempts=_attempt_summary(results),
++            attempts=_attempt_summary(attempted),
+             selection=selected,
+         )
+     phases.append(
+@@ -858,6 +1001,10 @@ def run_campaign(
+         ceiling_enforcement=ceiling_enforcement,
+         certification=certification.to_dict(),
+         selection=dict(selected) if selected else {},
++        # Every attempt the run made, including a declared search's earlier,
++        # cheaper rounds: they are real compute and real evidence even though
++        # selection may only read the final round's results.
++        attempts=_attempt_summary(attempted),
+         promotion=assembly.to_dict(),
+         record_path="",
+     )
+@@ -1468,6 +1615,30 @@ def _build_cycle(
+     )
+ 
+ 
++def search_plan_for(
++    manifest: CampaignManifest, *, cycle: Any, recipes: Sequence[TrainingRecipe]
++) -> SearchPlan:
++    """The declared search's own bound, projected through the planner's costs.
++
++    One owner of the arithmetic: the plan command prints this, readiness admits
++    it and the run executes it, all calling here. An undeclared search returns
++    an undeclared plan -- no rounds, no spend, exactly the single pass every
++    manifest predating the field runs.
++    """
++    declaration = manifest.candidate_search
++    if not declaration.declared:
++        return SearchPlan(declared=False, schedule=declaration.to_dict())
++    return plan_search(
++        declaration,
++        recipes=recipes,
++        project_cost=cycle.planner.project_cost,
++        per_recipe_device_ceiling=manifest.budget.device_gpu_hours_ceiling_per_recipe,
++        per_recipe_wall_ceiling=manifest.budget.wall_gpu_hours_ceiling_per_recipe,
++        campaign_device_ceiling=manifest.budget.device_gpu_hours_ceiling_campaign,
++        campaign_wall_ceiling=manifest.budget.wall_gpu_hours_ceiling_campaign,
++    )
++
++
+ def _select_recipes(
+     manifest: CampaignManifest, proposed: Sequence[TrainingRecipe]
+ ) -> tuple[TrainingRecipe, ...]:
+@@ -1789,6 +1960,10 @@ def _attempt_summary(results: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str,
+             "artifact_ref": evidence.get("artifact_ref"),
+             "artifact_sha256": evidence.get("artifact_sha256"),
+             "measured_gpu_hours": evidence.get("measured_gpu_hours"),
++            # Absent for a single-pass campaign; the round an attempt belonged
++            # to when a declared search ran it.
++            "search_round": evidence.get("search_round"),
++            "search_max_steps": evidence.get("search_max_steps"),
+         }
+         for evidence in results
+     )
+@@ -1894,6 +2069,7 @@ READINESS_ANCESTOR_ARM = "READINESS_ANCESTOR_ARM"
+ READINESS_PROTECTION_POLICY = "READINESS_PROTECTION_POLICY"
+ READINESS_PLAN = "READINESS_PLAN"
+ READINESS_RECIPE_SET = "READINESS_RECIPE_SET"
++READINESS_CANDIDATE_SEARCH = "READINESS_CANDIDATE_SEARCH"
+ READINESS_CAMPAIGN_PROJECTION = "READINESS_CAMPAIGN_PROJECTION"
+ READINESS_EVALUATOR = "READINESS_EVALUATOR"
+ READINESS_EVALUATOR_COVERAGE = "READINESS_EVALUATOR_COVERAGE"
+@@ -2150,12 +2326,49 @@ def check_campaign_readiness(
+         f"{len(recipes_of())} declared recipe(s) proposed by the planner"
+     ))
+ 
++    def search_detail() -> str:
++        plan = plan_of()
++        if plan.search_refusal:
++            raise CampaignRunRefusal(plan.search_refusal)
++        if not plan.search.declared:
++            return (
++                "no candidate search declared: the declared recipes run once "
++                "each"
++            )
++        return (
++            f"{len(plan.search.rounds)} declared round(s), worst case "
++            f"{plan.search.total_device_gpu_hours:.6f} device / "
++            f"{plan.search.total_wall_gpu_hours:.6f} wall GPU-h within the "
++            "declared search envelope"
++        )
++
++    check(
++        "candidate_search",
++        READINESS_CANDIDATE_SEARCH,
++        ("recipe_set",),
++        search_detail,
++    )
++
+     def projection_detail() -> str:
++        plan = plan_of()
+         recipes = recipes_of()
+-        projected = ComputeCost(
+-            device_gpu_hours=sum(r.projected_device_gpu_hours for r in recipes),
+-            wall_gpu_hours=sum(r.projected_wall_gpu_hours for r in recipes),
+-            source=f"campaign projection ({len(recipes)} recipes)",
++        # A declared search spends its rounds, so the ceiling has to cover the
++        # search's worst-case total rather than a single pass over the recipes.
++        projected = (
++            ComputeCost(
++                device_gpu_hours=plan.search.total_device_gpu_hours,
++                wall_gpu_hours=plan.search.total_wall_gpu_hours,
++                source=(
++                    f"campaign projection ({len(plan.search.rounds)} search "
++                    f"rounds over {len(recipes)} recipes)"
++                ),
++            )
++            if plan.search.declared
++            else ComputeCost(
++                device_gpu_hours=sum(r.projected_device_gpu_hours for r in recipes),
++                wall_gpu_hours=sum(r.projected_wall_gpu_hours for r in recipes),
++                source=f"campaign projection ({len(recipes)} recipes)",
++            )
+         )
+         verdict = settle_campaign_projection(manifest, projected=projected)
+         if not verdict.compliant:
+@@ -2171,7 +2384,7 @@ def check_campaign_readiness(
+     check(
+         "campaign_projection",
+         READINESS_CAMPAIGN_PROJECTION,
+-        ("recipe_set",),
++        ("recipe_set", "candidate_search"),
+         projection_detail,
+     )
+ 

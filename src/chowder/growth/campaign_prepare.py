@@ -1265,6 +1265,17 @@ def _write_project_template(
                 "max_new_tokens": int(
                     getattr(manifest.protection, "decoding", {}).get("max_new_tokens", 512)
                 ),
+                # The declared batch size, which the arms already measure under.
+                # ``EvalSuiteSpec.batch_size`` defaults to 1, and at one row per
+                # call the offloaded weights are re-streamed per decode step --
+                # 16 rows is 16 full passes over the model instead of one. The
+                # arms got this value and the in-run candidate evaluation did
+                # not, so the candidate was being measured under a batching the
+                # arms never used; ``evaluation_execution`` declares that the
+                # arms and the candidate share this one value and that it is
+                # "never chosen per path". Omitting it here broke that, and cost
+                # a run: 5400 s bought one of three suites.
+                "batch_size": int(manifest.evaluation_execution.batch_size),
                 "use_chat_template": True,
             }
         )
@@ -1358,15 +1369,15 @@ def _write_project_template(
                 "placement": "offload",
                 "device": "cuda",
                 "trust_remote_code": False,
-                # The in-run evaluation measures exactly what an arm measures:
-                # the declared suites at the declared batch size. The parent arm
-                # took 3706 s over these three suites x 16 rows, so 1800 s could
-                # never finish -- both gen2 attempts trained their full horizon
-                # and were then killed here, 1800 s into the evaluation. This
-                # must also leave room inside the attempt's own process budget
+                # Sized against the parent arm's 3706 s over these same three
+                # suites, which is a fair comparison *only* because the suites
+                # above now carry the declared batch size, as the arm did. It
+                # was not a fair comparison before: unbatched, 5400 s bought one
+                # suite of three, and no timeout would have been the right fix.
+                # This also has to fit inside the attempt's own process budget
                 # (``SubprocessTrainingFn.timeout_seconds``), which holds
-                # training *and* this evaluation: ~1766 s of training plus 5400 s
-                # here fits the 7200 s that budget now allows.
+                # training *and* this evaluation: ~1400-1800 s of training plus
+                # 5400 s here fits the 7200 s that budget allows.
                 "runtime": {"timeout_seconds": 5400.0},
                 "suites": suites,
             },
