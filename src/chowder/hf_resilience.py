@@ -179,6 +179,146 @@ def cache_status(repo_id: str, revision: str | None, *, filename: str = "config.
     return "hit" if isinstance(cached, str) else "miss"
 
 
+def _hub_sha_from_hub(repo_id: str, revision: str | None) -> str | None:
+    """Resolve a commit sha for ``repo_id@revision`` through the Hub API.
+
+    Split out so tests can stub the network boundary. Import errors and Hub
+    failures degrade to ``None`` -- provenance stays unknown rather than
+    inventing an identity -- but a missing optional dependency must never
+    take down an evaluation that already loaded its model.
+    """
+    try:
+        from huggingface_hub import HfApi
+    except ImportError:  # pragma: no cover - depends on the installed env
+        logger.warning(
+            "huggingface_hub unavailable; cannot resolve %s@%s to a commit",
+            repo_id,
+            revision or "main",
+        )
+        return None
+    try:
+        info = with_hub_retries(
+            lambda: HfApi().model_info(repo_id, revision=revision),
+            label=f"commit resolution for {repo_id}@{revision or 'main'}",
+        )
+    except Exception as exc:
+        logger.warning(
+            "could not resolve %s@%s to a commit: %s: %s",
+            repo_id,
+            revision or "main",
+            type(exc).__name__,
+            exc,
+        )
+        return None
+    return getattr(info, "sha", None)
+
+
+def _hex_commit(value: str) -> str | None:
+    """Return ``value`` when it looks like a 40-character hex commit sha."""
+    return value if len(value) == 40 and all(c in "0123456789abcdef" for c in value.lower()) else None
+
+
+def resolve_model_commit(
+    repo_id: str,
+    revision: str | None,
+    *,
+    config_commit: str | None,
+    cache_root: str | Path | None = None,
+    allow_network_fallback: bool = True,
+) -> str | None:
+    """Resolve the commit sha a model load actually ran from.
+
+    Historically Chowder read ``model.config._commit_hash`` after loading.
+    Transformers 5.18 stopped populating that attribute on freshly downloaded
+    models, which silently degraded ``model_provenance.resolved_model_commit``
+    to ``None`` -- an evaluator and a trainer could then both report "no
+    identity" for what must be one bound identity (the real-ML smoke caught
+    this; the same sha that passed CI on 2026-09-26 failed on 2026-10-04 with
+    no code change in between, which is what pinned the cause to dependency
+    drift rather than to any branch).
+
+    Resolution order, cheapest and most local first:
+
+    1. ``config_commit`` -- the classic attribute, still honored when the
+       installed transformers populates it;
+    2. the local HF cache -- ``refs/<revision>`` names the snapshot a
+       revision resolves to, and a lone snapshot directory is unambiguous;
+       this is deterministic and needs no network, so a baseline and its
+       candidate resolve identically on one machine;
+    3. the Hub API -- what the revision resolves to *now*; last resort,
+       retried, and never fatal (it degrades to ``None``).
+
+    A local directory has no Hub identity and returns ``None``; callers keep
+    recording the requested source separately, as they already do.
+    """
+    if config_commit:
+        return config_commit
+
+    if is_local_model_source(repo_id):
+        return None
+
+    parts = str(repo_id).strip().strip("/").split("/")
+    if len(parts) != 2 or not all(parts):
+        # Not a hub repo id (a URL, a path-like id, malformed): no commit to
+        # resolve, and guessing would risk binding the wrong identity.
+        return None
+    model_dir_name = "models--{}--{}".format(*parts)
+
+    root = Path(cache_root) if cache_root is not None else _default_hub_cache()
+    model_dir = root / model_dir_name
+    snapshots_dir = model_dir / "snapshots"
+
+    wanted = (revision or "main").strip()
+    direct = _hex_commit(wanted)
+    if direct is not None and (snapshots_dir / direct).is_dir():
+        return direct
+
+    ref_file = model_dir.joinpath("refs", *wanted.split("/"))
+    try:
+        if ref_file.is_file():
+            ref_commit = _hex_commit(ref_file.read_text(encoding="utf-8").strip())
+            if ref_commit is not None and (snapshots_dir / ref_commit).is_dir():
+                return ref_commit
+    except OSError:
+        pass
+
+    try:
+        snapshot_names = [p.name for p in snapshots_dir.iterdir() if p.is_dir()]
+    except OSError:
+        snapshot_names = []
+    if len(snapshot_names) == 1:
+        return snapshot_names[0]
+
+    if not allow_network_fallback:
+        return None
+    try:
+        return _hub_sha_from_hub(str(repo_id), revision)
+    except Exception as exc:  # pragma: no cover - _hub_sha_from_hub catches its own
+        # Belt and braces: a provenance lookup must never take down an
+        # evaluation that already loaded its model.
+        logger.warning(
+            "commit resolution for %s@%s failed unexpectedly: %s: %s",
+            repo_id,
+            revision or "main",
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
+def _default_hub_cache() -> Path:
+    """The HF cache root, honoring the same env vars the hub library does."""
+    import os
+
+    override = os.environ.get("HF_HUB_CACHE")
+    if override:
+        return Path(override)
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        return Path(hf_home) / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
 def with_hub_retries(
     func: Callable[[], _T],
     *,
