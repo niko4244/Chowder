@@ -352,6 +352,26 @@ class RouterHealingExecutor:
             if key in research:
                 settings[key] = research[key]
 
+        # The search controller's scheduling contract: a successive-halving
+        # round patch carries the round horizon, checkpoint cadence, and the
+        # parent checkpoint to resume from under the same keys the PEFT engine
+        # reads (`backend.training.max_steps` / `save_steps` /
+        # `backend.resume_from_checkpoint`). This is a scheduling decision made
+        # by the controller after preregistration, so it overrides knobs and
+        # the research step count for search projects; a solo project never
+        # has these keys unless the user declares the horizon this way, which
+        # matches PEFT semantics.
+        backend_config = context.resolved_config.get("backend", {})
+        if isinstance(backend_config, Mapping):
+            training_contract = backend_config.get("training", {})
+            if isinstance(training_contract, Mapping):
+                if "max_steps" in training_contract:
+                    settings["max_steps"] = int(training_contract["max_steps"])
+                if training_contract.get("save_steps") is not None:
+                    settings["checkpoint_every"] = int(training_contract["save_steps"])
+            if backend_config.get("resume_from_checkpoint"):
+                settings["resume_from"] = str(backend_config["resume_from_checkpoint"])
+
         missing = [
             key for key in ("base_model_dir", "corpus_path", "max_steps", "learning_rate", "seq_len")
             if key not in settings

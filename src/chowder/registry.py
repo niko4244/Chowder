@@ -104,6 +104,15 @@ CREATE TABLE IF NOT EXISTS combined_mechanism_experiments (
     per_mechanism_predicted_savings_gb_json TEXT NOT NULL,
     telemetry_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS search_rounds (
+    round_index INTEGER NOT NULL,
+    experiment_id TEXT NOT NULL,
+    eliminated_by TEXT,
+    parent_id TEXT,
+    max_steps INTEGER NOT NULL,
+    PRIMARY KEY (round_index, experiment_id)
+);
 """
 
 _EXPERIMENT_INSERT = """INSERT INTO experiments
@@ -719,6 +728,94 @@ class RunRegistry:
                 artifact_ref=artifact_ref,
                 evidence=json.loads(evidence),
             )
+
+    def get_experiment(self, experiment_id: str) -> Experiment | None:
+        """One persisted Experiment by ID, or None. The targeted lookup the
+        successive-halving round persistence wants (scanning the whole
+        table per round was the documented interim approach)."""
+        row = self._conn.execute(
+            """SELECT experiment_id, parent_id, estimated_gpu_hours, hypothesis_json, config_json, status
+               FROM experiments WHERE experiment_id = ?""",
+            (experiment_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        (
+            experiment_id_value,
+            parent_id,
+            estimated_gpu_hours,
+            hypothesis_json,
+            config_json,
+            status,
+        ) = row
+        return Experiment(
+            experiment_id=experiment_id_value,
+            parent_id=parent_id,
+            hypothesis=Hypothesis(**json.loads(hypothesis_json)),
+            config_patch=json.loads(config_json),
+            estimated_gpu_hours=estimated_gpu_hours,
+            status=ExperimentStatus(status),
+        )
+
+    def record_search_round(
+        self,
+        *,
+        round_index: int,
+        experiment_id: str,
+        eliminated_by: str | None,
+        parent_id: str | None,
+        max_steps: int,
+    ) -> None:
+        """Persist one candidate's membership/outcome in one halving round.
+
+        Primary key (round_index, experiment_id) makes re-recording an
+        identical row idempotent and a divergent one an invariant error:
+        the durable round lineage can never be rewritten to tell a
+        different story about who ran where and why they stopped.
+        """
+        if eliminated_by not in (None, "gate", "cutoff"):
+            raise RegistryInvariantError(
+                f"eliminated_by must be None, 'gate', or 'cutoff', got {eliminated_by!r}"
+            )
+        row = self._conn.execute(
+            "SELECT eliminated_by, parent_id, max_steps FROM search_rounds "
+            "WHERE round_index = ? AND experiment_id = ?",
+            (round_index, experiment_id),
+        ).fetchone()
+        if row is not None:
+            existing_eliminated, existing_parent, existing_max_steps = row
+            if (
+                existing_eliminated != eliminated_by
+                or existing_parent != parent_id
+                or existing_max_steps != max_steps
+            ):
+                raise RegistryInvariantError(
+                    f"search round row ({round_index}, {experiment_id!r}) already exists "
+                    "with different content"
+                )
+            return
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO search_rounds (round_index, experiment_id, eliminated_by, parent_id, max_steps) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (round_index, experiment_id, eliminated_by, parent_id, max_steps),
+            )
+
+    def list_search_rounds(self) -> list[dict[str, object]]:
+        rows = self._conn.execute(
+            "SELECT round_index, experiment_id, eliminated_by, parent_id, max_steps "
+            "FROM search_rounds ORDER BY round_index, experiment_id"
+        )
+        return [
+            {
+                "round_index": round_index,
+                "experiment_id": experiment_id,
+                "eliminated_by": eliminated_by,
+                "parent_id": parent_id,
+                "max_steps": max_steps,
+            }
+            for round_index, experiment_id, eliminated_by, parent_id, max_steps in rows
+        ]
 
     def audit_stranded_results(self) -> list[dict[str, object]]:
         """Flag results stranded on a non-terminal experiment row.

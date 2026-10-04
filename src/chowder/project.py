@@ -28,6 +28,7 @@ from .models import (
 )
 from .recursive_repair import RecursiveRepairPolicy
 from .repair_candidates import RepairVariant
+from .graph import deep_merge_config
 
 
 PROJECT_SCHEMA_VERSION = 1
@@ -104,6 +105,62 @@ class RepairSpec:
 
 
 @dataclass(frozen=True)
+class SearchSpec:
+    """Config-driven production search: successive halving over the declared
+    experiment plus deterministic config-patch variants, through the same
+    ExperimentCycleRunner/gate/registry path a single candidate uses.
+
+    The declared `experiment` is variant 0; each entry of `variants` is a
+    config_patch deep-merged onto the experiment's own patch, spawning a
+    numbered sibling (`<experiment_id>-v1`, `<experiment_id>-v2`, ...).
+    Repair and search are mutually exclusive: a search replaces the
+    single-candidate-plus-repair ladder for that project.
+    """
+
+    initial_max_steps: int
+    variants: tuple[Mapping[str, Any], ...]
+    step_multiplier: float = 2.0
+    survival_fraction: float = 0.5
+    min_survivors: int = 1
+    max_rounds: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.initial_max_steps < 1:
+            raise ProjectValidationError("search.initial_max_steps must be >= 1")
+        if not self.variants:
+            raise ProjectValidationError("search.variants must be a non-empty list")
+        if self.step_multiplier <= 1:
+            raise ProjectValidationError(
+                "search.step_multiplier must be greater than 1"
+            )
+        if not 0 < self.survival_fraction < 1:
+            raise ProjectValidationError(
+                "search.survival_fraction must be strictly between 0 and 1"
+            )
+        if self.min_survivors < 1:
+            raise ProjectValidationError("search.min_survivors must be >= 1")
+        if self.max_rounds is not None and self.max_rounds < 1:
+            raise ProjectValidationError("search.max_rounds must be >= 1 when given")
+
+    def variant_patches(self, experiment: Experiment) -> tuple[Experiment, ...]:
+        """The deterministic round-0 population: the declared experiment
+        followed by one numbered sibling per declared variant patch."""
+        population = [experiment]
+        for index, patch in enumerate(self.variants, start=1):
+            population.append(
+                Experiment(
+                    experiment_id=f"{experiment.experiment_id}-v{index}",
+                    parent_id=experiment.parent_id,
+                    hypothesis=experiment.hypothesis,
+                    config_patch=deep_merge_config(experiment.config_patch, dict(patch)),
+                    estimated_gpu_hours=experiment.estimated_gpu_hours,
+                    tags=experiment.tags,
+                )
+            )
+        return tuple(population)
+
+
+@dataclass(frozen=True)
 class ProjectSpec:
     name: str
     work_dir: Path
@@ -115,6 +172,7 @@ class ProjectSpec:
     experiment: Experiment
     config: Mapping[str, Any]
     repair: RepairSpec | None = None
+    search: SearchSpec | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -134,6 +192,12 @@ class ProjectSpec:
                 )
         elif self.baseline is not None:
             raise ProjectValidationError("automatic baseline must not include fixed metrics")
+
+        if self.search is not None and self.repair is not None:
+            raise ProjectValidationError(
+                "project cannot declare both search and repair: a search replaces the "
+                "single-candidate-plus-repair ladder for this project"
+            )
 
         try:
             training_engine = resolve_training_engine(self.config)
@@ -506,6 +570,52 @@ def _repair_from_mapping(raw: Any, *, base: Path, path: str = "repair") -> Repai
     )
 
 
+def _search_from_mapping(raw: Any, *, path: str = "search") -> SearchSpec | None:
+    if raw is None:
+        return None
+    search_raw = _mapping(raw, path=path)
+    variants_raw = search_raw.get("variants")
+    if not isinstance(variants_raw, (list, tuple)) or not variants_raw:
+        raise ProjectValidationError(f"{path}.variants must be a non-empty list")
+    variants: list[Mapping[str, Any]] = []
+    for index, variant in enumerate(variants_raw):
+        variant_map = _mapping(variant, path=f"{path}.variants[{index}]")
+        if not variant_map:
+            raise ProjectValidationError(
+                f"{path}.variants[{index}] must be a non-empty config patch"
+            )
+        variants.append(variant_map)
+    max_rounds_raw = search_raw.get("max_rounds")
+    if max_rounds_raw is not None and (
+        isinstance(max_rounds_raw, bool) or not isinstance(max_rounds_raw, int)
+    ):
+        raise ProjectValidationError(f"{path}.max_rounds must be an integer")
+    return SearchSpec(
+        initial_max_steps=(
+            int(search_raw["initial_max_steps"])
+            if "initial_max_steps" in search_raw
+            else 4
+        ),
+        variants=tuple(variants),
+        step_multiplier=(
+            float(search_raw["step_multiplier"])
+            if "step_multiplier" in search_raw
+            else 2.0
+        ),
+        survival_fraction=(
+            float(search_raw["survival_fraction"])
+            if "survival_fraction" in search_raw
+            else 0.5
+        ),
+        min_survivors=(
+            int(search_raw["min_survivors"])
+            if "min_survivors" in search_raw
+            else 1
+        ),
+        max_rounds=max_rounds_raw,
+    )
+
+
 def project_from_mapping(
     raw: Mapping[str, Any],
     *,
@@ -594,6 +704,7 @@ def project_from_mapping(
     config.setdefault("seed", seed_raw)
 
     repair = _repair_from_mapping(raw.get("repair"), base=work_dir)
+    search = _search_from_mapping(raw.get("search"))
 
     return ProjectSpec(
         name=str(raw.get("name", "Chowder Project")),
@@ -606,6 +717,7 @@ def project_from_mapping(
         experiment=experiment,
         config=config,
         repair=repair,
+        search=search,
     )
 
 

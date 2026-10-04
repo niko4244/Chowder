@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -14,6 +14,7 @@ from .backend_selection import (
 )
 from .cancellation import CancellationToken
 from .cycle import ExperimentCycleRunner, GenerationOutcome
+from .successive_halving import SuccessiveHalvingOutcome, run_successive_halving
 from .engine import EvolutionEngine
 from .evaluators.base_text import BaseModelTextEvaluator
 from .executors import EvaluationOutcome, ExecutionContext
@@ -49,6 +50,7 @@ class ProjectRunOutcome:
     hardware: HardwareSnapshot
     generation: GenerationOutcome
     repair: RecursiveRepairOutcome | None = None
+    search: SuccessiveHalvingOutcome | None = None
     registry_audit: tuple[dict[str, object], ...] = ()
 
     @property
@@ -320,8 +322,22 @@ def run_project(
             training_config = project.config
 
         training_config = normalize_training_config_for_executor(training_config)
+        # A search round proposes its whole population in one admission wave;
+        # the project's parallelism cap governs the single-candidate path, so
+        # for search projects the engine's cap rises to the population size
+        # (this is admission batching, not concurrent execution -- run_round
+        # still trains candidates one at a time).
+        engine_goal = project.goal
+        if project.search is not None:
+            population_size = len(project.search.variant_patches(project.experiment))
+            engine_goal = replace(
+                project.goal,
+                max_parallel_candidates=max(
+                    project.goal.max_parallel_candidates, population_size
+                ),
+            )
         engine = EvolutionEngine(
-            goal=project.goal,
+            goal=engine_goal,
             # A deferred baseline is a real seam, not a placeholder: the
             # engine runs with no baseline at all and refuses every gate-time
             # operation until the paired evaluation's measurement lands.
@@ -360,24 +376,77 @@ def run_project(
                 _paired_baseline_completer(registry, on_event) if deferred else None
             ),
         )
-        accepted = engine.propose((project.experiment,))
-        if not accepted:
-            raise RuntimeError(
-                "initial experiment does not fit the configured GPU-hour budget"
-            )
-        registry.record_experiment(project.experiment)
-        _emit_stage(
-            on_event,
-            registry,
-            "train",
-            f"Starting {project.experiment.experiment_id} with {engine.reservation_for(project.experiment.experiment_id):.4g} reserved GPU-hours",
-            experiment_id=project.experiment.experiment_id,
-        )
-        generation = runner.run_generation(accepted)
-        _emit_candidate_events(on_event, registry, generation.candidates[0])
-
+        search_outcome: SuccessiveHalvingOutcome | None = None
         repair_outcome: RecursiveRepairOutcome | None = None
-        if project.repair is not None and generation.promoted is None:
+        if project.search is not None:
+            # The production search controller: the same engine/runner/gate/
+            # registry machinery the single-candidate path uses, driving the
+            # successive-halving controller over the declared experiment plus
+            # its declared variants. The controller owns round persistence and
+            # proposal (the documented resume seam), so the runner must NOT
+            # pre-propose or pre-record the declared experiment here -- its
+            # round-0 row carries the round's scheduling patch, and a
+            # divergent pre-recorded row would refuse exactly as designed.
+            if deferred:
+                raise RuntimeError(
+                    "search requires a measured baseline: a deferred baseline cannot be "
+                    "shared across a search population"
+                )
+            population = project.search.variant_patches(project.experiment)
+            _emit_stage(
+                on_event,
+                registry,
+                "search",
+                f"Starting successive halving over {len(population)} variant(s)",
+            )
+            search_outcome = run_successive_halving(
+                runner,
+                population,
+                initial_max_steps=project.search.initial_max_steps,
+                step_multiplier=project.search.step_multiplier,
+                survival_fraction=project.search.survival_fraction,
+                min_survivors=project.search.min_survivors,
+                max_rounds=project.search.max_rounds,
+            )
+            generation = search_outcome.rounds[-1].generation
+            for round_outcome in search_outcome.rounds:
+                for candidate in round_outcome.generation.candidates:
+                    _emit_candidate_events(on_event, registry, candidate)
+            if search_outcome.promoted is not None:
+                promoted = search_outcome.promoted
+                _emit_stage(
+                    on_event,
+                    registry,
+                    "promoted",
+                    f"Promoted {promoted.experiment_id} (search final round)",
+                    experiment_id=promoted.experiment_id,
+                )
+                _emit(
+                    on_event,
+                    registry,
+                    PromotionEvent(
+                        experiment_id=promoted.experiment_id,
+                        metrics=dict(promoted.metrics),
+                    ),
+                )
+        else:
+            accepted = engine.propose((project.experiment,))
+            if not accepted:
+                raise RuntimeError(
+                    "initial experiment does not fit the configured GPU-hour budget"
+                )
+            registry.record_experiment(project.experiment)
+            _emit_stage(
+                on_event,
+                registry,
+                "train",
+                f"Starting {project.experiment.experiment_id} with {engine.reservation_for(project.experiment.experiment_id):.4g} reserved GPU-hours",
+                experiment_id=project.experiment.experiment_id,
+            )
+            generation = runner.run_generation(accepted)
+            _emit_candidate_events(on_event, registry, generation.candidates[0])
+
+        if project.repair is not None and generation.promoted is None and search_outcome is None:
             repair_spec = project.repair
             _emit(
                 on_event,
@@ -420,45 +489,46 @@ def run_project(
             )
 
         candidate = generation.candidates[0]
-        if candidate.error is not None:
-            _emit_stage(
-                on_event, registry, "failed", candidate.error, experiment_id=candidate.experiment_id
-            )
-        elif candidate.result is not None:
-            metrics = ", ".join(
-                f"{name}={value:.4f}" for name, value in sorted(candidate.result.metrics.items())
-            )
-            _emit_stage(
-                on_event,
-                registry,
-                "evaluate",
-                f"Evaluation complete: {metrics}",
-                experiment_id=candidate.experiment_id,
-            )
-            if generation.promoted is not None:
-                promoted = generation.promoted
+        if search_outcome is None:
+            if candidate.error is not None:
+                _emit_stage(
+                    on_event, registry, "failed", candidate.error, experiment_id=candidate.experiment_id
+                )
+            elif candidate.result is not None:
+                metrics = ", ".join(
+                    f"{name}={value:.4f}" for name, value in sorted(candidate.result.metrics.items())
+                )
                 _emit_stage(
                     on_event,
                     registry,
-                    "promoted",
-                    f"Promoted {promoted.experiment_id}",
-                    experiment_id=promoted.experiment_id,
-                )
-                _emit(
-                    on_event,
-                    registry,
-                    PromotionEvent(
-                        experiment_id=promoted.experiment_id, metrics=dict(promoted.metrics)
-                    ),
-                )
-            else:
-                _emit_stage(
-                    on_event,
-                    registry,
-                    "rejected",
-                    "Candidate completed but did not pass the promotion gate",
+                    "evaluate",
+                    f"Evaluation complete: {metrics}",
                     experiment_id=candidate.experiment_id,
                 )
+                if generation.promoted is not None:
+                    promoted = generation.promoted
+                    _emit_stage(
+                        on_event,
+                        registry,
+                        "promoted",
+                        f"Promoted {promoted.experiment_id}",
+                        experiment_id=promoted.experiment_id,
+                    )
+                    _emit(
+                        on_event,
+                        registry,
+                        PromotionEvent(
+                            experiment_id=promoted.experiment_id, metrics=dict(promoted.metrics)
+                        ),
+                    )
+                else:
+                    _emit_stage(
+                        on_event,
+                        registry,
+                        "rejected",
+                        "Candidate completed but did not pass the promotion gate",
+                        experiment_id=candidate.experiment_id,
+                    )
 
         # Closeout audit: a result stranded on a non-terminal row is the class
         # of durable-evidence disagreement the automatic-baseline settlement
@@ -484,6 +554,7 @@ def run_project(
         hardware=hardware,
         generation=generation,
         repair=repair_outcome,
+        search=search_outcome,
         registry_audit=registry_audit,
     )
 

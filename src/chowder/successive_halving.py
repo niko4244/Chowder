@@ -61,14 +61,36 @@ class SuccessiveHalvingOutcome:
 
 def _latest_checkpoint_dir(artifact_ref: str) -> Path | None:
     """The real checkpoint a survivor's next round resumes from --
-    globbing the same trainer/checkpoint-N layout every real checkpoint/
-    resume test in this codebase already relies on, picking the highest
-    real step number actually written."""
-    trainer_dir = Path(artifact_ref) / "trainer"
-    if not trainer_dir.is_dir():
-        return None
-    checkpoints = [p for p in trainer_dir.glob("checkpoint-*") if p.is_dir()]
-    if not checkpoints:
+    globbing the checkpoint-N layouts the real engines publish, picking the
+    highest real step number actually written.
+
+    Two artifact layouts exist among the engines:
+    * PEFT: ``<artifact_ref>/trainer/checkpoint-N`` (the layout every
+      existing checkpoint/resume test relies on).
+    * router healing: the artifact_ref is the published payload
+      (``<run_dir>/output/payload``) while the worker publishes complete
+      checkpoint directories beside it at ``<run_dir>/checkpoints/step-N``
+      -- written fully into a ``.partial`` sibling then renamed atomically,
+      so an existing checkpoint directory is a resumable one.
+    """
+    artifact_path = Path(artifact_ref)
+    candidates: list[Path] = []
+    trainer_dir = artifact_path / "trainer"
+    if trainer_dir.is_dir():
+        candidates.extend(p for p in trainer_dir.glob("checkpoint-*") if p.is_dir())
+    router_checkpoint_root = artifact_path.parent.parent / "checkpoints"
+    if router_checkpoint_root.is_dir():
+        candidates.extend(
+            p
+            for p in router_checkpoint_root.glob("step-*")
+            if p.is_dir() and not p.name.startswith(".")
+        )
+        candidates.extend(
+            p
+            for p in router_checkpoint_root.glob("checkpoint-*")
+            if p.is_dir() and not p.name.startswith(".")
+        )
+    if not candidates:
         return None
 
     def _step(path: Path) -> int:
@@ -77,7 +99,7 @@ def _latest_checkpoint_dir(artifact_ref: str) -> Path | None:
         except (IndexError, ValueError):
             return -1
 
-    return max(checkpoints, key=_step)
+    return max(candidates, key=_step)
 
 
 def _round_max_steps(*, initial_max_steps: int, round_index: int, step_multiplier: float) -> int:
@@ -143,18 +165,15 @@ def _persist_round_experiments(
     registry = runner.registry
     if registry is None:
         return
-    # ponytail: scan once/round. Ceiling: huge histories. Upgrade: add RunRegistry.get_experiment().
-    persisted = {row.experiment_id: row for row in registry.list_experiments()}
-    missing: list[Experiment] = []
     for experiment in experiments:
         if experiment.status is not ExperimentStatus.PLANNED:
             raise RegistryInvariantError(
                 f"successive-halving experiment {experiment.experiment_id!r} "
                 f"must be planned, got {experiment.status.value}"
             )
-        existing = persisted.get(experiment.experiment_id)
+        existing = registry.get_experiment(experiment.experiment_id)
         if existing is None:
-            missing.append(experiment)
+            registry.record_experiment(experiment)
             continue
         if existing.status is not ExperimentStatus.PLANNED:
             raise RegistryInvariantError(
@@ -172,7 +191,50 @@ def _persist_round_experiments(
                 f"immutable experiment record {experiment.experiment_id!r} "
                 "already exists with different content"
             )
-    registry.record_experiments(missing)
+
+def _record_round_outcome(
+    runner: ExperimentCycleRunner,
+    *,
+    round_index: int,
+    max_steps: int,
+    round_input: tuple[Experiment, ...],
+    generation: GenerationOutcome,
+    survivors: tuple,
+    eliminated_by_gate: tuple,
+    eliminated_by_cutoff: tuple,
+) -> None:
+    """Persist every round candidate's membership and elimination reason.
+
+    The durable search_rounds rows must tell the same story as the
+    in-memory outcome: who ran in this round, who the gate rejected,
+    who the budget cutoff eliminated, and who survived. An errored
+    candidate (no result, no ranking entry) is recorded as gate-
+    eliminated: it did not survive the round, and "gate" is the honest
+    label for not passing through the hard verdict.
+    """
+    registry = runner.registry
+    if registry is None:
+        return
+    parents = {
+        experiment.experiment_id: experiment.parent_id for experiment in round_input
+    }
+    survivor_ids = {ranked.result.experiment_id for ranked in survivors}
+    gate_ids = set(eliminated_by_gate)
+    cutoff_ids = set(eliminated_by_cutoff)
+    for candidate in generation.candidates:
+        if candidate.experiment_id in gate_ids or candidate.result is None:
+            eliminated_by: str | None = "gate"
+        elif candidate.experiment_id in cutoff_ids:
+            eliminated_by = "cutoff"
+        else:
+            eliminated_by = None
+        registry.record_search_round(
+            round_index=round_index,
+            experiment_id=candidate.experiment_id,
+            eliminated_by=eliminated_by,
+            parent_id=parents.get(candidate.experiment_id),
+            max_steps=max_steps,
+        )
 
 
 def run_successive_halving(
@@ -271,6 +333,18 @@ def run_successive_halving(
                     item.result.experiment_id for item in cutoff
                 ),
             )
+        )
+        _record_round_outcome(
+            runner,
+            round_index=round_index,
+            max_steps=max_steps,
+            round_input=round_input,
+            generation=generation,
+            survivors=survivors,
+            eliminated_by_gate=tuple(
+                item.result.experiment_id for item in rejected_ranking
+            ),
+            eliminated_by_cutoff=tuple(item.result.experiment_id for item in cutoff),
         )
 
         is_final_round = (
