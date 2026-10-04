@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("torch", reason="the PTQ lane quantizes real tiny modules")
+pytest.importorskip("modelopt", reason="nvidia-modelopt is the optional 'ptq' extra")
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "chowder_batch"))
 sys.path.insert(0, str(ROOT / "src"))
