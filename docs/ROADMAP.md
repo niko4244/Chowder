@@ -246,6 +246,48 @@ hardware-failure auto-remediation, scored against real dev/hidden incident
 fixtures. Distinct from model-quality regression repair above; was entirely
 missing from this roadmap before this update.
 
+**Scientist research director — real on the `feature/scientist-research-director`
+branch, not yet merged** (each bullet names its commit; all pushed)
+
+- native scientist subsystem — hypothesis portfolios, typed/compiled
+  experiments, findings, research missions (`src/chowder/scientist/`,
+  bb27cea, badd367)
+- compute-provider seam with a closed `provider_from_config` factory —
+  Kaggle / RunPod / Local providers plus the successive-halving screening
+  allocator (`compute.py`, `screening_halving.py`, 1f02af0)
+- service-level resumable screening lane — a durable step machine (submit →
+  await → settle → graduate that survives restarts) — and the FIRST real
+  end-to-end Kaggle acceptance run (492f66a)
+- measured device-GPU-hour metering settled by the provider on completion,
+  the RunPod acceptance runner (live run deferred pending an API key, by
+  operator decision), and the graduation bridge composing growth-loop
+  campaign drafts from survivors (0ae358f)
+- `scientist graduate` CLI — the whole hand-off in one durable step:
+  advance the lane to graduation, then compose the drafts (a7c1c1d)
+- auto-consume wiring (e763171): graduation writes `scientist-handoff.json`
+  into the shared state root; the growth loop's own gate chain adopts the
+  survivor as the next generation's target (survivor score + screening
+  provenance carried into the TargetProposal); the file is cleared only
+  after the target is durably recorded — one survivor per generation — and
+  every downstream gate (treatment allowlist, budget, draft, prepare,
+  freeze) is unchanged. Proven two ways: the test suite
+  (`tests/test_growth_scientist_handoff.py`, incl. the full
+  service → handoff → loop → draft cycle) and an offline end-to-end dry
+  run (`scripts/dryrun_survivor_handoff.py`) that drives the REAL graduate
+  CLI through the halving lane (round 0: 3 candidates → round 1: 2 →
+  graduated with 1 survivor) to a frozen `gen3-a1-reasoning` generation,
+  with an executor that raises if the loop tries to spend anything —
+  Kaggle never contacted.
+- third free-tier Kaggle acceptance run (e763171,
+  `docs/KAGGLE_PROVIDER_ACCEPTANCE.md` Run 3): a compiled campaign_spec
+  executed by a pinned-commit operator trainer proved `spec_drove_run`
+  end-to-end — loss 3.460735 → 0.032976 over 300 real steps on T4×2, the
+  falsification rule evaluated against the measured loss delta
+  (falsified: false), 0.0071 device-GPU-hours metered and settled. The
+  first attempt's honest negative finding (stdout-only marker vs the
+  working-dir result-file convention) is recorded too. Cumulative
+  free-tier spend ~0.047 of 30 weekly device-hours.
+
 ## IN PRODUCTION HARDENING
 
 Real, shipped code that needs more real-world validation before it should be

@@ -94,3 +94,37 @@ no file deletion anywhere. Multiple agent sessions share these checkouts; the
 rescue-before-prune rule (the same one that saved the EI selector files)
 applies to every path above. Executing the plan needs the operator's
 go-ahead — each numbered step is safe to run independently and reversibly.
+
+## 6. Execution record — 2026-10-03 (steps 1–3 executed with operator go-ahead)
+
+**Inventory (step 1)** — no risk, done first:
+`C:\Users\nikma\main-clone-dirty-inventory.txt`, `main-clone-dirty.patch`
+(103 KB), `main-clone-untracked.tar` (181 MB, includes everything below).
+
+**Untracked rescue (step 2)** — `rescue/main-clone-untracked-2026-10-03`
+@ `cb92214`, **pushed**. 82 files, +23,232 lines: the chowder_batch
+experiment series, new src modules, experiment docs, the test_exp_* family,
+evidence/, examples/, the QAT lane, pr199-fix.patch. Deliberately NOT
+staged: `.venv-repro/` (a virtualenv, not work), `.claude/worktrees/`
+(nested registered worktrees), `.scratch_exp_d_smoke*.json` (scratch) —
+all preserved in the tar.
+
+**Modified rescue (step 3)** — `rescue/main-clone-modified-2026-10-03`
+@ `1d08bcb` (built on cb92214), **pushed**. The 16 paths with REAL content
+diffs (`--ignore-cr-at-eol`), +1431/−31. CRLF-only churn deliberately left
+out. The main clone now sits on this branch; residue fell 94 → 5 paths (only
+the excluded junk). Original branch `docs/roadmap-sync-priority6` untouched.
+
+**Prunability sweep (section-3 rule: clean AND merged into origin/main):**
+
+| Verdict | Worktrees |
+|---|---|
+| **prunable now** | `claude-moe-instrument` (stale-main hostage, clean, main merged — §4), `Chowder-p7-verification` (detached, clean) |
+| **rescue-then-prune (merged, real tracked diffs)** | `Chowder-p7-evidence-fixes` (5f +438/−64), `Chowder-router-review` (8f +495/−91), `agent-af43e28fc0d45b5bf` (3f +193/−28), `Chowder-v3tournament` (4f +195/−11), `gen1-rebase` (1f +19/−8) |
+| **rescue-then-prune (merged, untracked strays only)** | `agent-a66d39fd3e0ec3607` (2 — HANDOFF's "prunable" claim is stale), `eval-7445759` (2), `eval-d98edb5` (3), `Chowder-freeze-fix` (2), `rung4` (4), `tfd-revised` (20) |
+| **keep: unmerged branch (all pushed except 2)** | `agent-ae537f2ed08ff8828` (now clean), `Chowder-tfd-pilot`, `Chowder-handoff-update`, `Chowder-kaggle-cd`, `Chowder-qwen38-freeze`, `Chowder-router-healing`, `kaggle-a3-lane`, `lora-preset-a8f123dc`, all nine `F:/chowder-worktrees` feature lanes, `scientist` (active) |
+
+Unpushed branches flagged (safe in shared refs regardless — removal of a
+worktree never deletes its branch; push is machine-loss hardening):
+`lora-preset-qwen3-5`, `feat/candidate-search`. Nothing was removed, reset,
+or stashed in this sweep; removal remains the operator's call per worktree.
