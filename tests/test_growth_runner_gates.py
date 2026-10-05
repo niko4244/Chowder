@@ -379,7 +379,7 @@ def test_the_binder_path_never_hands_the_gate_a_carried_parent(tmp_path) -> None
 
     ``metric_binding`` refuses a CARRIED_REFERENCE row on the parent role,
     so the production run path (``decide_promotion_from_runs``) never
-    delivers one to the gate; the fail-closed rule in ``_retention_values``
+    delivers one to the gate; the fail-closed rule in ``retention_values``
     is the backstop for the caller-passed seam. This pins the no-op: the
     same carried row through the binder comes out as a refusal, not a
     parent result.

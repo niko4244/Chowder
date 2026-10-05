@@ -1,10 +1,13 @@
-# Proposal: amendment 15 to the frozen Gen-2 judge (gate T21) — for review, not implemented
+# Proposal: amendment 15 to the frozen Gen-2 judge (gate T21) — **implemented, 2026-10-04**
 
-**Status: proposal only. `docs/gen2/judge_gen2.py` is unchanged in this
-branch.** This document states the measured defect, the minimal amendment that
-closes it, the exact insertion points, and what the amendment deliberately does
-not do. Nothing here has been applied; the diff sketch below is the review
-artifact.
+**Status: ACCEPTED AND IMPLEMENTED** (branch `feature/judge-retention-coupling`,
+prereg `GEN2_PREREG_AMENDMENT15_2026-10-04.md`). The proposal below is kept as
+the record of what was asked for and why; the shipped amendment is T21 (the
+recorded decision) **plus T22** (the judge's own recomputation through
+production's evaluator, added because reading the record alone still left two
+answers to compare by eye), and it also corrected a sign error in amendment 14's
+declared retention value. This document's diff sketch is therefore historical:
+read the amendment doc for what shipped.
 
 ## The defect, as measured
 
@@ -260,14 +263,14 @@ def _declared_gate_agreement(
 - The `INFO` row naming the frozen policy gains `+ GEN2_PREREG_AMENDMENT15`
   (see below), so a judge table still names the policy it was frozen with.
 
-## Governance: what amending the frozen judge requires
+## Governance: what amending the frozen judge required
 
 1. **A named prereg amendment**, in the same series as amendments 1-14:
    `docs/quals/GEN2_PREREG_AMENDMENT15_2026-10-04.md` (amendment 14, the
    declared-inputs declaration, lands on 2026-10-04 and is independent of this
    one). The judge is frozen
    *with* the prereg; it is amended by amending the prereg, in writing, before
-   the change.
+   the change. **Done.**
 2. **The no-visible-candidate-results rule.** The freeze says thresholds may
    not change after candidate results are visible. Two things make this
    amendment admissible, and the reviewer should confirm both:
@@ -284,6 +287,9 @@ def _declared_gate_agreement(
    of `tests/test_growth_gen2_judge_agreement.py`: with T21 present, that test's
    fixture root must yield REJECTED (not INCONCLUSIVE), and its
    all-passing-a-run-rejected-root claim must be what the amendment retires.
+   **Done and verified**: reverting only `docs/gen2/judge_gen2.py` makes that
+   test fail with `the judge's verdict on a run-rejected root changed:
+   INCONCLUSIVE`.
 
 ## What the amendment deliberately does NOT do
 
@@ -305,7 +311,11 @@ def _declared_gate_agreement(
 
 ## Cost and risk
 
-- Diff size: ~60 lines added, 0 lines of existing logic modified.
+- Diff size as shipped: 241 lines added to the judge (the gate, the recomputation
+  helper, the vocabulary re-export, the reason names, the wiring), 4 modified;
+  plus the public rename of `_retention_values` to `retention_values` in
+  `src/chowder/growth/cycle.py` so both callers use one function, and the
+  amendment-14 sign correction in the declaration.
 - Behaviour change on a real Gen-2 root: a run that PROMOTED keeps certifying
   (T21 PASS); a run REJECTED on a declared gate can no longer certify as
   INCONCLUSIVE-with-everything-passing; a run REJECTED on the predeclared rule

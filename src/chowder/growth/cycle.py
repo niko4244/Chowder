@@ -114,7 +114,7 @@ def select_candidate(
     return successful[0]
 
 
-def _retention_values(
+def retention_values(
     profile: RetentionProfile,
     results: Mapping[str, BenchmarkResult],
     *,
@@ -129,6 +129,12 @@ def _retention_values(
     reads as unmeasured. A missing, unmeasured, or unearned row is left
     out, so :func:`evaluate_retention` fails closed on it -- an unmeasured
     gate is not a passed gate.
+
+    Public because it is the *one* provenance filter over declared-gate
+    inputs: the promotion path calls it here, and the Gen-2 judge
+    (``docs/gen2/judge_gen2.py``, prereg amendment 15) calls the same
+    function so its own recomputation of a declared constraint cannot
+    diverge from the run's on which rows count.
     """
     values: dict[str, float] = {}
     for constraint in profile.constraints:
@@ -356,8 +362,8 @@ class GrowthCycle:
             )
         violations = evaluate_retention(
             profile,
-            parent_values=_retention_values(profile, parent_results, candidate_side=False),
-            candidate_values=_retention_values(profile, candidate_results, candidate_side=True),
+            parent_values=retention_values(profile, parent_results, candidate_side=False),
+            candidate_values=retention_values(profile, candidate_results, candidate_side=True),
         )
         if not violations:
             return decision

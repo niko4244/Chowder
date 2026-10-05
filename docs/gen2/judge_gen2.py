@@ -2,9 +2,10 @@
 """Frozen mechanical judge for the gen2 response-surface-compliance cycle.
 
 Frozen with ``docs/quals/GEN2_PREREG_2026-09-17.md`` and its amendments
-``GEN2_PREREG_AMENDMENT1/2/3_2026-09-18.md``. Thresholds may not change after
-candidate results are visible. Reads the run's durable artifacts read-only and
-emits one verdict table over the branch rules.
+``GEN2_PREREG_AMENDMENT1/2/3_2026-09-18.md``; amended by
+``GEN2_PREREG_AMENDMENT15_2026-10-04.md`` (the declared-gate coupling, T21/T22).
+Thresholds may not change after candidate results are visible. Reads the run's
+durable artifacts read-only and emits one verdict table over the branch rules.
 
 Evidence is verified, never assumed. Two rules follow from that, and both are
 fail-closed:
@@ -48,6 +49,17 @@ plus one run per protected mini-slice carrying its protocol metadata. The
 judge never reads a parent score out of the candidate's own file: the parent
 arm is its own provenance-bound artifact.
 
+With amendment 15 the judge reads one more artifact from the same directory:
+``campaign-run.json``, the run's own record of what it decided
+(``CampaignRun.to_dict``). It is read, never written, and it is what lets the
+judge stop certifying a candidate the run already refused: T21 audits the
+recorded decision and T22 recomputes the declared ``retention_profile`` through
+production's own evaluator (``evaluate_retention`` plus the promotion path's
+``retention_values``) and compares the two answers. Neither row re-derives the
+policy -- the declaration owns the constraint, production owns the comparison,
+and this judge owns only the agreement between the two authorities. A run root
+with no such record is UNKNOWN, never a pass.
+
 Usage:
     python docs/gen2/judge_gen2.py <run_root>
 
@@ -85,6 +97,13 @@ from chowder.evals.result import (  # noqa: E402
     EvalReport,
 )
 from chowder.growth.campaign import CampaignManifest, settle_campaign  # noqa: E402
+from chowder.growth.cycle import retention_values  # noqa: E402
+from chowder.growth.promotion import BenchmarkResult  # noqa: E402
+from chowder.growth.retention import (  # noqa: E402
+    RetentionConstraint,
+    RetentionViolation,
+    evaluate_retention,
+)
 from chowder.growth import certification as _certification  # noqa: E402
 from chowder.growth.certification import ArmError, MeasuredArm  # noqa: E402
 from chowder.growth.catalog import default_registry  # noqa: E402
@@ -123,6 +142,21 @@ CONTAMINATION_PIN_ABSENT = "CONTAMINATION_PIN_ABSENT"
 CONTAMINATION_PIN_MISSING = "CONTAMINATION_PIN_MISSING"
 CONTAMINATION_EVIDENCE_NOT_IN_RUN_ROOT = "CONTAMINATION_EVIDENCE_NOT_IN_RUN_ROOT"
 CONTAMINATION_EVIDENCE_NOT_PINNED = "CONTAMINATION_EVIDENCE_NOT_PINNED"
+#: Why the run's own promotion decision could not be audited (GEN2 prereg
+#: amendment 15). Absence is UNKNOWN, never an assumed pass -- the same rule
+#: every other gate here follows.
+RUN_RECORD_ABSENT = "RUN_RECORD_ABSENT"
+RUN_RECORD_WRONG_CYCLE = "RUN_RECORD_WRONG_CYCLE"
+RUN_DECISION_ABSENT = "RUN_DECISION_ABSENT"
+#: A candidate the run refused on a declared gate cannot be certified here: this
+#: judge audits no declared gate, so its own table cannot overturn that refusal.
+DECLARED_GATE_REJECTED_RUN = "DECLARED_GATE_REJECTED_RUN"
+#: A run record that contradicts itself, or a gate the declaration does not name.
+UNDECLARED_GATE_IN_RUN = "UNDECLARED_GATE_IN_RUN"
+#: The run's recorded breaches and this judge's own recomputation, through the
+#: production evaluator, do not match: the two authorities disagree about the
+#: same candidate, and neither may be assumed right.
+RETENTION_RECOMPUTATION_DISAGREES = "RETENTION_RECOMPUTATION_DISAGREES"
 #: The measurement reason codes are production's (see the verification block
 #: below): the judge re-exports them so a refusal is named identically wherever
 #: it is raised.
@@ -145,6 +179,37 @@ SLICE_REGRESSION_MAX = 0.0625
 
 REQUIRED_RECIPES_MIN = 2
 CONTAMINATED = {"KNOWN_CONTAMINATION", "POSSIBLE"}
+
+#: The durable record the run writes beside the evidence it certifies:
+#: ``CampaignRun.to_dict`` at ``<state_root>/campaign-run.json``, the same
+#: directory this judge reads the arms from.
+RUN_RECORD_NAME = "campaign-run.json"
+
+#: Production's declared-gate vocabulary, read off its owner rather than restated
+#: here. ``RetentionViolation.code`` answers NaN -> ``RETENTION_UNMEASURED`` and
+#: otherwise selects by constraint kind, so one violation per reachable shape is
+#: the whole vocabulary;
+#: ``test_growth_gen2_judge.py`` asserts this set equals the codes the promotion
+#: gate actually emits, so a new shape cannot slip past a prefix match here.
+RETENTION_CODES: frozenset[str] = frozenset(
+    RetentionViolation(
+        dimension="code-probe",
+        constraint=RetentionConstraint(
+            dimension="code-probe",
+            kind=kind,
+            value=0.0,
+            benchmark="code-probe@2026-01",
+        ),
+        measured=measured,
+        detail="",
+    ).code
+    for kind, measured in (
+        ("max-regression", 0.0),           # RETENTION_REGRESSION
+        ("absolute-floor", 0.0),           # RETENTION_FLOOR
+        ("max-regression", float("nan")),  # RETENTION_UNMEASURED
+    )
+)
+RETENTION_REASON_PREFIX = "RETENTION_"
 
 #: The frozen 16-prompt instrument, in order, with the expected answer the
 #: correctness check looks for on the answer surface (the same pairs the gen1
@@ -466,6 +531,7 @@ def judge(run_root: Path) -> int:
     _protected_gates(verdict, arms, campaign, run_root=run_root)
     _evidence_identity_gate(verdict, run_root, arms, campaign)
     _protection_agreement_gate(verdict, campaign)
+    _declared_gate_agreement(verdict, arms, campaign, run_root=run_root)
     _contamination_gate(verdict, run_root, campaign)
     _settlement_gates(verdict, run_root, campaign)
     _identity_gate(verdict, run_root)
@@ -481,7 +547,8 @@ def judge(run_root: Path) -> int:
         INFO,
         "frozen policy",
         INFO,
-        "docs/quals/GEN2_PREREG_2026-09-17.md + GEN2_PREREG_AMENDMENT1/2/3/4_2026-09-18.md",
+        "docs/quals/GEN2_PREREG_2026-09-17.md + GEN2_PREREG_AMENDMENT1/2/3/4_2026-09-18.md "
+        "+ GEN2_PREREG_AMENDMENT15_2026-10-04.md",
     )
 
     final = branch_verdict(verdict)
@@ -1204,6 +1271,176 @@ def _protection_agreement_gate(verdict: Verdict, campaign: CampaignManifest | No
             else f"the campaign declares {declared}, this judge enforces {frozen}"
         ),
     )
+
+
+def _declared_gate_agreement(
+    verdict: Verdict,
+    arms: Mapping[str, "Arm | None"],
+    campaign: CampaignManifest | None,
+    *,
+    run_root: Path,
+) -> None:
+    """The run's recorded decision and the declared retention profile must agree.
+
+    The run enforces ``retention_profile`` on both promotion paths
+    (``GrowthCycle._apply_promotion_gates``), and records what it decided in
+    ``campaign-run.json`` beside the arms this judge reads. Before amendment 15
+    this judge never opened that record and never read a declared profile, so a
+    candidate the run had already refused could reach a table in which every
+    audited gate passed -- a certification of something the branch rejected.
+    Two rows close that, and both fail closed:
+
+    * the *recorded* decision: a run refused on a declared gate is FAIL here,
+      because this judge audits no declared gate and its own table cannot
+      overturn that refusal; a record that is absent, belongs to another cycle,
+      or carries no decision is UNKNOWN;
+    * the *recomputed* decision: the declared profile is evaluated again here,
+      through production's own evaluator and production's own provenance filter
+      (``evaluate_retention`` + ``retention_values``, the same two functions the
+      promotion path calls), on the arms this judge already audited. A
+      disagreement with the run's recorded breaches is FAIL. Nothing is
+      reimplemented: the policy, the threshold and the rows that count all come
+      from production, and this judge only compares the two answers.
+    """
+    requirement = "the run's promotion decision agrees with the declared profile"
+    profile = campaign.retention_profile if campaign is not None else None
+    record = _load_json(run_root / RUN_RECORD_NAME)
+    if record is None:
+        verdict.add(
+            "T21", requirement, UNKNOWN,
+            f"{RUN_RECORD_ABSENT}: {run_root / RUN_RECORD_NAME} is absent or "
+            "unreadable, so the run's own decision cannot be audited here",
+        )
+        return
+    if campaign is not None and str(record.get("cycle_id", "")) != str(campaign.cycle_id):
+        verdict.add(
+            "T21", requirement, UNKNOWN,
+            f"{RUN_RECORD_WRONG_CYCLE}: the record in this run root belongs to "
+            f"cycle {record.get('cycle_id')!r}, not {campaign.cycle_id!r}",
+        )
+        return
+    decision = (record.get("promotion") or {}).get("decision") or {}
+    if not decision:
+        verdict.add(
+            "T21", requirement, UNKNOWN,
+            f"{RUN_DECISION_ABSENT}: the run record carries no promotion decision "
+            "(a run refused before adjudication records none)",
+        )
+        return
+
+    run_verdict = str(record.get("verdict", ""))
+    reasons = [str(reason) for reason in decision.get("reasons", ()) or ()]
+    recorded = {
+        (reason.split(":", 1)[0].strip(), reason)
+        for reason in reasons
+        if reason.startswith(RETENTION_REASON_PREFIX)
+    }
+    breach_list = [reason for _code, reason in sorted(recorded)]
+    recomputed = _recomputed_retention(arms, profile)
+
+    # T21: the recorded decision. Decided once, recorded once, and never as a
+    # silent skip -- every branch below states what it found.
+    if recorded and profile is None:
+        verdict.add(
+            "T21", requirement, FAIL,
+            f"{UNDECLARED_GATE_IN_RUN}: the run recorded declared-gate breaches "
+            f"{breach_list} while the declaration names no retention profile",
+        )
+    elif run_verdict == "PROMOTED" and recorded:
+        verdict.add(
+            "T21", requirement, FAIL,
+            f"{UNDECLARED_GATE_IN_RUN}: the run recorded PROMOTED together with "
+            f"declared-gate breaches {breach_list}",
+        )
+    elif run_verdict in {"REJECTED", "TAINTED"} and recorded:
+        verdict.add(
+            "T21", requirement, FAIL,
+            f"{DECLARED_GATE_REJECTED_RUN}: the run refused this candidate on the "
+            f"declared gate(s) {breach_list}; this judge audits no declared gate, "
+            "so its table cannot overturn that refusal",
+        )
+    elif run_verdict in {"REJECTED", "TAINTED"}:
+        # Refused on the predeclared rule alone: T11/T16/T17 audit that rule
+        # against the arms, and the run's own reasons belong in the record here
+        # so a reader sees which refusal is being certified.
+        verdict.add(
+            "T21", requirement, PASS,
+            "the run refused this candidate without a declared-gate breach: "
+            f"{'; '.join(reasons) or 'no reasons recorded'}",
+        )
+    else:
+        verdict.add(
+            "T21", requirement, PASS,
+            f"run verdict {run_verdict or 'unrecorded'}; declared-gate breaches "
+            f"{breach_list or 'none'}",
+        )
+
+    # T22: the recomputation, always reported -- whether the run was refused or
+    # not, a reader needs to know whether the two authorities agreed.
+    recomputed_codes = sorted({code for code, _reason in recomputed})
+    recorded_codes = sorted({code for code, _reason in recorded})
+    if recomputed_codes == recorded_codes:
+        verdict.add(
+            "T22", "the judge recomputes the declared profile as the run did",
+            PASS,
+            f"recorded {recorded_codes or 'no breach'} == recomputed through "
+            "production's evaluator "
+            f"({profile.profile_id if profile is not None else 'no profile'})",
+        )
+        return
+    verdict.add(
+        "T22", "the judge recomputes the declared profile as the run did",
+        FAIL,
+        f"{RETENTION_RECOMPUTATION_DISAGREES}: the run recorded "
+        f"{recorded_codes or 'no breach'} and this judge's recomputation through "
+        f"production's evaluator gives {recomputed_codes or 'no breach'}; the two "
+        "authorities disagree about the same candidate and neither may be assumed right",
+    )
+
+
+def _recomputed_retention(
+    arms: Mapping[str, "Arm | None"],
+    profile: Any,
+) -> set[tuple[str, str]]:
+    """``{(code, reason)}`` this judge computes for the declared profile.
+
+    The arms are read through ``Arm.run_for``, so a row only counts when
+    production has already accepted its provenance and generation, and the
+    provenance filter that decides which rows may anchor a constraint is the
+    promotion path's own ``retention_values``. With no declared profile the
+    recomputation is empty, which is not a pass -- T21 refuses that case above.
+    """
+    if profile is None:
+        return set()
+    candidate = arms.get("candidate")
+    parent = arms.get("parent")
+
+    def results(arm: "Arm | None") -> dict[str, BenchmarkResult]:
+        rows: dict[str, BenchmarkResult] = {}
+        if arm is None:
+            return rows
+        for constraint in profile.constraints:
+            run = arm.run_for(constraint.benchmark)
+            if run is None or run.score is None:
+                continue
+            rows[constraint.benchmark] = BenchmarkResult(
+                benchmark_qualified_id=constraint.benchmark,
+                score=float(run.score),
+                samples=tuple(float(value) for value in run.per_sample_scores),
+                measurement_origin=str(run.measurement_origin),
+            )
+        return rows
+
+    violations = evaluate_retention(
+        profile,
+        parent_values=retention_values(
+            profile, results(parent), candidate_side=False
+        ),
+        candidate_values=retention_values(
+            profile, results(candidate), candidate_side=True
+        ),
+    )
+    return {(violation.code, violation.reason) for violation in violations}
 
 
 def _evidence_identity_gate(

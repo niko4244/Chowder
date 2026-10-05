@@ -166,33 +166,67 @@ records the fact:
   carry (the real base/adapter digests, recipe ids, contamination pin) --
   deployment mismatch, not a fact about the judge's gates.
 
-### The minimal amendment, proposed for review and **not implemented**
+### The minimal amendment: proposed, then implemented (amendment 15)
 
-`docs/gen2/JUDGE_AMENDMENT_PROPOSAL_T21.md` states it in full, with the exact
-insertion points and a diff sketch; `docs/gen2/judge_gen2.py` is unchanged. In
-one line: **one gate, four named reasons, one wiring line.** A new `T21` reads
-`<run_root>/campaign-run.json` -- the artifact the run already writes beside the
-arms the judge reads -- and compares what the run decided against the declared
-profile: a run that REJECTED on a declared gate (`RETENTION_*` in
-`promotion.decision.reasons`) is `FAIL`, because the judge's own table cannot
-overturn a refusal the branch has already recorded; a run PROMOTED together with
-such a reason, or a breach on a dimension the declaration does not name, is
-`FAIL` too; an absent, unreadable, wrong-cycle or decision-less record is
-`UNKNOWN`, which the judge already treats as refusing to certify. `branch_verdict`
-and the exit code need no change, no threshold moves, and the reason
-classification is a prefix match on production's own codes
-(`RetentionViolation.code`), never a parse of human-readable prose. Admissibility
-under the freeze: it changes no threshold, and no Gen-2 candidate evaluation
-exists to be visible. It would be numbered amendment 15, after amendment 14.
+`docs/gen2/JUDGE_AMENDMENT_PROPOSAL_T21.md` states the proposal with its exact
+insertion points; **implemented** on `feature/judge-retention-coupling` as prereg
+`GEN2_PREREG_AMENDMENT15_2026-10-04.md`, which shipped T21 *and* T22 and, in
+doing so, caught a defect in amendment 14.
+
+**T21 -- the run's recorded decision.** The judge opens one more artifact from
+the directory it already reads: `campaign-run.json`, the run's own record. A
+candidate the run refused on a declared gate is `FAIL`
+(`DECLARED_GATE_REJECTED_RUN`) -- this judge audits no declared gate, so its
+table cannot overturn a refusal the branch already recorded. Also `FAIL`: a
+record promoting a candidate it simultaneously recorded breaching, and a breach
+on a constraint the declaration does not name. `UNKNOWN` for a record that is
+absent, belongs to another cycle, or carries no decision (a run refused before
+adjudicating). Reasons are classified by production's own codes
+(`RetentionViolation.code`, read off the owner via `RETENTION_CODES`), never by
+parsing prose.
+
+**T22 -- the judge's own recomputation.** Reading a record still leaves two
+answers to compare by eye, so the judge also *recomputes* the declared profile
+through production's own evaluator (`evaluate_retention`) and production's own
+provenance filter (`retention_values`, renamed from the private
+`_retention_values` in `cycle.py` so the judge and the promotion path call one
+function), on the arms it already audited. Recomputed codes must equal recorded
+codes, or the gate is `FAIL` (`RETENTION_RECOMPUTATION_DISAGREES`). Nothing is
+reimplemented: the declaration owns the constraint, production owns the
+comparison, the judge owns the agreement. `branch_verdict`, the exit code and
+T1-T20 are unchanged; a run root with no record can no longer certify, which is
+the intended fail-closed cost.
+
+**What the coupling immediately found: a sign error in amendment 14.** A
+`max-regression` constraint's `value` is the *minimum acceptable
+candidate-vs-parent delta*, so a permitted dip is declared **negative** (pinned
+by production's `test_small_declared_dip_within_budget_passes`, `-0.02` permits
+a -0.015 dip). Amendment 14 wrote `+0.0625` and called it the frozen
+`slice_regression_max`; that requires the candidate to **improve** by one
+sixteenth on both protected benchmarks rather than permitting a one-sixteenth
+regression -- stricter than the frozen protection rule the judge enforces, and
+with Gen-1 at 0.0 on both slices it would have rejected a candidate the frozen
+branch-protection rule accepts. Both constraints are now `-0.0625`, and
+`test_the_declared_retention_profile_states_the_frozen_tolerance_with_the_right_sign`
+pins both the value and its meaning (a dip of exactly the tolerance passes; one
+hundredth past it is `RETENTION_REGRESSION`).
+
+The sharpest proof is a root whose instrument gates T1-T10 are **all decided**
+-- the case the original gap predicted would certify -- on which T21 is the only
+failing row. And reverting only the judge makes
+`tests/test_growth_gen2_judge_agreement.py` fail with the original measurement
+restated: `the judge's verdict on a run-rejected root changed: INCONCLUSIVE`.
 
 ## The Gen-2 pre-compute state (2026-10-04)
 
 `docs/gen2/gen2_campaign.json` declares its preregistered protection
 mechanically (`GEN2_PREREG_AMENDMENT14_2026-10-04.md`; the tag first written
 into `notes` collided with the real `GEN2_PREREG_AMENDMENT7_2026-09-18` and is
-corrected): `retention_profile` (`gen2-protection`: max-regression 0.0625 -- one
-16th of a 16-item mini-slice -- on `math500@2024-04` and `mgsm@2022-11`) and
-`eval_tier_policy` (both protected benchmarks are promotion-evidence).
+corrected): `retention_profile` (`gen2-protection`: max-regression **-0.0625**
+-- a *permitted* dip of one 16th of a 16-item mini-slice, exactly
+`-(protection.slice_regression_max)`, signed per amendment 15 -- on
+`math500@2024-04` and `mgsm@2022-11`) and `eval_tier_policy` (both protected
+benchmarks are promotion-evidence).
 
 **The seven previously-undeclared inputs now exist, produced by production
 code, and readiness is fully green.** `chowder growth campaign prepare` wrote

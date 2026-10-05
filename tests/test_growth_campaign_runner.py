@@ -71,6 +71,7 @@ from chowder.growth.campaign_runner import (
     undeclared_inputs,
 )
 from chowder.growth.campaign_prepare import prepared_input_paths
+from chowder.growth.retention import evaluate_retention
 from chowder.growth.candidate_search import (
     SEARCH_SCHEMA,
     CandidateSearchRefusal,
@@ -1041,6 +1042,55 @@ def test_the_committed_gen2_declaration_names_the_inputs_preparation_produced():
         "math500@2024-04",
         "mgsm@2022-11",
     }
+
+
+def test_the_declared_retention_profile_states_the_frozen_tolerance_with_the_right_sign():
+    """A max-regression value is a signed minimum delta, not a magnitude.
+
+    ``protection.slice_regression_max`` is a permitted regression of 0.0625 --
+    one 16th of a 16-item mini-slice. A ``max-regression`` constraint's ``value``
+    is the *minimum acceptable* candidate-vs-parent delta, so the same allowance
+    is declared as ``-0.0625``; written as ``+0.0625`` the constraint would
+    demand a one-sixteenth *improvement* on every protected benchmark, which is a
+    different and far stricter gate than the one the prereg froze. The two
+    declarations are two authorities over the same rule, so the invariant is
+    pinned here against the shipped document rather than left to review.
+    """
+    manifest = CampaignManifest.from_file(ROOT / "docs" / "gen2" / "gen2_campaign.json")
+    tolerance = manifest.protection.slice_regression_max
+    assert tolerance is not None
+
+    profile = manifest.retention_profile
+    assert profile is not None
+    assert {constraint.benchmark for constraint in profile.constraints} == {
+        "math500@2024-04",
+        "mgsm@2022-11",
+    }
+    for constraint in profile.constraints:
+        assert constraint.kind == "max-regression"
+        assert constraint.value == pytest.approx(-float(tolerance)), (
+            f"{constraint.dimension}: a permitted regression of {tolerance} is "
+            f"declared as {constraint.value}"
+        )
+    # The meaning, not just the sign: a candidate that dips exactly one 16th of
+    # the slice is inside the declared budget, and one that dips further is not.
+    inside = evaluate_retention(
+        profile,
+        parent_values={c.dimension: 0.5 for c in profile.constraints},
+        candidate_values={
+            c.dimension: 0.5 - float(tolerance) for c in profile.constraints
+        },
+    )
+    assert inside == ()
+    outside = evaluate_retention(
+        profile,
+        parent_values={c.dimension: 0.5 for c in profile.constraints},
+        candidate_values={
+            c.dimension: 0.5 - float(tolerance) - 0.01 for c in profile.constraints
+        },
+    )
+    assert {violation.code for violation in outside} == {"RETENTION_REGRESSION"}
+    assert "GEN2_PREREG_AMENDMENT15_2026-10-04" in manifest.notes
 
 
 def test_the_committed_gen2_preregistration_manifest_still_loads():
