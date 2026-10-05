@@ -46,6 +46,27 @@ certification, and the judge over a real run root). Every fix was verified by
 reverting it. Details and measurements in
 [`AUTONOMY_05_REPORT.md`](AUTONOMY_05_REPORT.md).
 
+## Current state (updated 2026-10-05, controller split) — READ THE HEADLINE FIRST
+
+**`campaign_runner` is now a facade over eight per-decision controllers.** 2,490
+lines became a 1,235-line orchestrator plus `campaign_controllers/{readiness,
+certification, evaluation, planning, promotion, training, declared, contracts}.py`.
+The audit (PR #209) is the safety net and passes unchanged over the new import
+graph, alongside 855 growth tests.
+
+Two things a follow-up refactor here must not undo:
+
+- `build_evaluator`/`build_executor` must stay in the facade. Tests monkeypatch
+  `campaign_runner.default_runner` and `.default_evaluator_factory`; a controller
+  reading its own copy would ignore the patch and the seam tests would keep
+  passing while testing nothing.
+- `campaign_runner` re-exports all 47 names it always exported, so `cli`,
+  `growth_loop` and `campaign_prepare` import nothing new.
+
+**`run_campaign` is still 607 lines with all 17 phases inline** — that is the
+remaining half of this refactor and wants its own change. Details and
+measurements in [`AUTONOMY_05_REPORT.md`](AUTONOMY_05_REPORT.md).
+
 ## Current state (updated 2026-09-17, integrity re-adjudication) — READ THE HEADLINE FIRST
 
 **Gen-1's effective verdict is now INCONCLUSIVE (target repair validated);

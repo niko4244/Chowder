@@ -333,3 +333,46 @@ time measurable.
 Every fix was checked by revert: neutering `_baseline` fails 10 audit tests,
 removing the broad-battery filter fails 2, reverting the binder fails the
 provenance suite, and dropping the parameter fails the reachability test.
+
+### `campaign_runner` split into per-decision controllers (2026-10-05)
+
+The 2,490-line module is now a 1,235-line facade over `campaign_controllers`:
+eight modules, one per decision the runner defers, in a strict layering.
+
+```
+readiness      452   may this campaign start? (17 checks, fail-closed)
+certification  378   the judged evidence set + branch protection
+evaluation     237   declared inputs -> the objects that measure
+planning       225   curriculum, recipes, the cycle
+promotion      195   identity, adjudication, the vetoes
+training        95   what an attempt cost and whether to trust it
+declared        95   the inputs a phase may read, and the refusals for the rest
+contracts       86   what a declaration is for; CampaignRunRefusal
+```
+
+Two constraints shaped the split and are worth stating, because both are the
+kind of thing a refactor breaks silently:
+
+* **`build_evaluator` and `build_executor` stayed in the facade.** Tests
+  monkeypatch `campaign_runner.default_runner` and
+  `campaign_runner.default_evaluator_factory`; a controller reading its own copy
+  of those globals would ignore the patch and every seam test would keep passing
+  while testing nothing. The controllers that need `build_evaluator` import it
+  *inside the function body*, which closes the import cycle at import time while
+  still reading the facade attribute at call time.
+* **`campaign_runner` re-exports all 47 names it always exported.** `cli`,
+  `growth_loop`, `campaign_prepare` and the test suite import nothing new, so
+  the refactor's blast radius is one module's internals.
+
+The call graph came out clean and acyclic -- `readiness` depends on everything,
+nothing depends on `readiness` -- which is what makes this a layering rather than
+a reshuffle. It also corrected one placement by refusing to guess: `_preflight_arms`
+went into `training` on the first pass and came back out, because the undefined
+`_EVIDENCE_ARM_SOURCES` it produced said what it actually guards is the judged
+evidence set, so it belongs in `certification`.
+
+**What this did not do.** `run_campaign` is still 607 lines carrying all 17
+phases inline. Splitting the module around it is the easier half of the problem;
+the function is the harder half and belongs in its own change, with the audit as
+the net. Landing both at once would have meant a 607-line control-flow move that
+no test could distinguish from a behaviour change until CI was already red.
