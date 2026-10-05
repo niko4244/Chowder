@@ -47,6 +47,7 @@ from .eval_isolation import (
     classify_benchmarks,
 )
 from .retention import RetentionConstraint, RetentionProfile
+from .training_backends import TrainingBackendDeclaration, TrainingBackendRefusal
 
 #: The promotion rule this package implements. A campaign that declares any
 #: other version is refused: the manifest is a preregistration, so it must not
@@ -443,6 +444,26 @@ def _eval_tier_policy_from_mapping(
         raise CampaignManifestError(f"{source}: {error}") from error
 
 
+def _training_backend_from_mapping(
+    document: Mapping[str, Any], *, source: str
+) -> TrainingBackendDeclaration:
+    """The declared backend, with its refusal re-spoken as a manifest error.
+
+    A manifest parse is one fail-closed boundary, so a provider this build
+    cannot honor refuses as a :class:`CampaignManifestError` (carrying the
+    machine-readable code) rather than leaking a backend-layer exception type
+    through a configuration read.
+    """
+    if "training_backend" not in document:
+        return TrainingBackendDeclaration()
+    try:
+        return TrainingBackendDeclaration.from_mapping(
+            document["training_backend"], source=source
+        )
+    except TrainingBackendRefusal as error:
+        raise CampaignManifestError(f"{source}: {error}") from error
+
+
 @dataclass(frozen=True)
 class CampaignManifest:
     """One preregistered campaign, and nothing this runner may invent.
@@ -528,6 +549,15 @@ class CampaignManifest:
     #: retention profile, a constraint measured on search-readable evidence
     #: refuses — at load when both are declared, and again at promotion.
     eval_tier_policy: EvalTierPolicy | None = None
+    #: *Where and how* this campaign executes, as distinct from the project
+    #: template's ``backend.type`` (which selects the trainer engine *inside* a
+    #: backend). Absent means ``local`` -- the historical subprocess path -- so
+    #: every manifest predating this field runs exactly as before. Declared, the
+    #: runner dispatches the campaign's executor through the named provider, and
+    #: a provider whose declaration is internally inconsistent refuses at load.
+    training_backend: TrainingBackendDeclaration = field(
+        default_factory=TrainingBackendDeclaration
+    )
     notes: str = ""
 
     @property
@@ -570,9 +600,8 @@ class CampaignManifest:
             "contamination_manifest_path", "notes", "candidate_version",
             "project_template_path", "training_material_path", "data_registry_path",
             "hardware_budget_path", "parent_profile_path", "parent_eval_report_path",
-            "baseline_eval_report_path", "protection", "evaluation_material_path",
-            "evaluation_execution", "candidate_search", "retention_profile",
-            "eval_tier_policy",
+            "baseline_eval_report_path", "protection",            "evaluation_material_path", "evaluation_execution", "candidate_search", "retention_profile",
+            "eval_tier_policy", "training_backend",
         }
         retired = sorted(set(document) & set(RETIRED_FIELDS))
         if retired:
@@ -767,6 +796,10 @@ class CampaignManifest:
             # never silently drops.
             retention_profile=retention_profile,
             eval_tier_policy=eval_tier_policy,
+            # Absent means the historical local path; declared, it is parsed
+            # fail-closed here, so a provider or config key nothing can honor
+            # refuses at load rather than at the first attempt.
+            training_backend=_training_backend_from_mapping(document, source=source),
             notes=str(document.get("notes", "")),
         )
 

@@ -146,6 +146,7 @@ FIELD_ENFORCEMENT: Mapping[str, str] = {
     "candidate_search": "the declared bounded candidate search: its rounds, starting step budget, multiplier and survival rule are preregistered here, its worst-case cost is projected before any compute and must fit its own declared device/wall envelope *and* the campaign's ceilings, and the runner refuses a declared search that does not. Absent (rounds=0) means one pass over the declared recipes, which is what every manifest predating it does",
     "retention_profile": "the campaign's preregistered promotion gates: the cycle evaluates every constraint fail-closed before anything promotes (a target win over a constrained regression is REJECTED, an unmeasured constraint is a violation), and a constraint naming a benchmark the declared sets never measure refuses at load",
     "eval_tier_policy": "the declared trust classification of the campaign's benchmarks: a retention constraint measured on search-readable evidence refuses — at load when both are declared, and again at promotion",
+    "training_backend": "the declared execution backend: the runner builds the campaign's executor through the provider it names (absent means local, the historical subprocess path). A declaration error — an unknown provider, an unsupported config key, a template whose trainer is not the declared one, an Unsloth knob the isolated engine refuses — stops the campaign before any compute, and an auto declaration records the provider it chose and why (with every candidate it refused) as the run's own phase",
     "notes": "documentation only: it drives no behavior and gates nothing",
 }
 
@@ -461,7 +462,28 @@ def run_campaign(
         }
     )
 
-    executor = train_fn if train_fn is not None else build_executor(manifest, state_root=root)
+    selection_record: Mapping[str, Any] | None = None
+    if train_fn is not None:
+        executor = train_fn
+    else:
+        executor, selection_record = build_executor_with_selection(
+            manifest, state_root=root
+        )
+    if selection_record is not None:
+        # The auto choice is recorded before any attempt starts: the campaign
+        # says which backend it will run on, and why, while that is still a
+        # declaration rather than a reconstruction.
+        phases.append(
+            {
+                "phase": "training-backend",
+                "verdict": "ok",
+                "detail": (
+                    f"auto selected {selection_record.get('provider', '<none>')}: "
+                    f"{selection_record.get('reason', '')}"
+                ),
+                "selection": selection_record,
+            }
+        )
     if not hasattr(executor, "admit"):
         raise CampaignRunRefusal(
             "the training executor exposes no admission seam (`admit(recipe)`), "
@@ -1553,13 +1575,19 @@ def build_evaluator(
     )
 
 
-def build_executor(
+def build_local_training_fn(
     manifest: CampaignManifest,
     *,
     state_root: str | Path | None = None,
     runner: Any = None,
 ) -> SubprocessTrainingFn:
-    """Build the production executor from the manifest's declared inputs."""
+    """Build the production subprocess executor from the declared inputs.
+
+    The single execution path behind every backend that runs training in
+    process (``local`` and ``unsloth``): the declared project template decides
+    the trainer engine, and this binding materializes, validates, trains and
+    settles against one envelope.
+    """
     root = Path(state_root or manifest.state_root)
     template_path = _require_path(
         manifest.project_template_path,
@@ -1588,6 +1616,87 @@ def build_executor(
         # measurements already run under, with margin over that sum.
         timeout_seconds=7200.0,
     )
+
+
+def build_executor_with_selection(
+    manifest: CampaignManifest,
+    *,
+    state_root: str | Path | None = None,
+    runner: Any = None,
+    providers: Any = None,
+    probes: Any = None,
+) -> tuple[Any, Mapping[str, Any] | None]:
+    """Build the executor the manifest's declared training backend dispatches through.
+
+    One branch point, at the backend boundary: the declared provider decides
+    which executor is built and how, so nothing downstream needs to know which
+    one it was. A *declaration* error -- an unknown provider, an unsupported
+    config key, a template whose trainer is not the declared one, an Unsloth
+    knob the isolated engine refuses, an incomplete remote wiring -- stops the
+    campaign here, before any compute. A hardware fact is not decided here: the
+    preflight panel reports it, and the executor's own admission plus the
+    trainer's own config resolution are where it is enforced.
+
+    Returns the executor and, when ``auto`` chose the provider, the record of
+    that choice -- the provider, the reason, the full preflight and every
+    candidate it refused -- which the run writes as its own phase before any
+    attempt starts.
+
+    ``providers`` and ``probes`` are injectable exactly like ``runner``: the
+    no-GPU harness supplies them, production never does.
+    """
+    from .compute_backend import ComputeBackendRefusal
+    from .training_backends import (
+        STRUCTURAL_PREFLIGHT_CODES,
+        TrainingBackendRefusal,
+        backend_declaration,
+        resolve_training_backend,
+    )
+
+    try:
+        provider, selection = resolve_training_backend(
+            backend_declaration(manifest),
+            manifest,
+            providers=providers,
+            probes=probes,
+        )
+        preflight = provider.preflight(manifest)
+    except TrainingBackendRefusal as refusal:
+        raise CampaignRunRefusal(f"{refusal.code}: {refusal.reason}") from refusal
+    if not preflight.admitted and preflight.code in STRUCTURAL_PREFLIGHT_CODES:
+        raise CampaignRunRefusal(f"{preflight.code}: {preflight.reason}")
+    try:
+        executor = provider.build_training_fn(
+            manifest, state_root=state_root, runner=runner
+        )
+    except (TrainingBackendRefusal, ComputeBackendRefusal) as refusal:
+        # One refusal vocabulary at the runner boundary, whatever layer found
+        # the problem; the machine-readable code travels in the message.
+        raise CampaignRunRefusal(f"{refusal.code}: {refusal.reason}") from refusal
+    record: Mapping[str, Any] | None = None
+    if selection is not None:
+        record = dict(selection.to_dict())
+        record["preflight"] = preflight.to_dict()
+    return executor, record
+
+
+def build_executor(
+    manifest: CampaignManifest,
+    *,
+    state_root: str | Path | None = None,
+    runner: Any = None,
+    providers: Any = None,
+    probes: Any = None,
+) -> Any:
+    """Build the executor the declared training backend dispatches through."""
+    executor, _selection = build_executor_with_selection(
+        manifest,
+        state_root=state_root,
+        runner=runner,
+        providers=providers,
+        probes=probes,
+    )
+    return executor
 
 
 # --------------------------------------------------------------------------

@@ -944,11 +944,30 @@ def _relative_artifact(output_dir: Path, artifact_ref: str) -> str | None:
 def _default_command_runner(
     command: Sequence[str], working_dir: Path, environment: Mapping[str, str]
 ) -> "subprocess.CompletedProcess[str]":
-    env = None
-    if environment:
-        env = {**os.environ, **{str(key): str(value) for key, value in environment.items()}}
+    """Run one declared command as a Chowder worker subprocess.
+
+    The child is launched with ``worker_env``, so it imports the same Chowder
+    this process imported rather than whatever an editable install happens to
+    point at -- the payload runs in a fresh interpreter, which is exactly the
+    case that guard exists for. The caller's per-launch variables are layered
+    on top; a declared ``PYTHONPATH`` refuses rather than quietly undoing the
+    guarantee (the same rule ``worker_env`` itself enforces).
+    """
+    from chowder.worker_env import worker_env
+
+    extra = {str(key): str(value) for key, value in (environment or {}).items()}
+    if "PYTHONPATH" in extra:
+        raise ValueError(
+            "a payload command cannot be launched with a declared PYTHONPATH: it "
+            "would override the guarantee that the child imports the same chowder "
+            "as the process that declared it"
+        )
     return subprocess.run(
-        list(command), cwd=str(working_dir), capture_output=True, text=True, env=env
+        list(command),
+        cwd=str(working_dir),
+        capture_output=True,
+        text=True,
+        env=worker_env(extra),
     )
 
 
