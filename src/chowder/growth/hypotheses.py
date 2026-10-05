@@ -202,6 +202,15 @@ def _addresses(family: InterventionFamily, observation: Observation) -> bool:
         return metric.startswith(("vram", "latency", "throughput"))
     if failure == "long-context-efficiency":
         return "long" in metric or "latency" in metric
+    if failure == "agent-runtime-failure":
+        # Runtime metrics arrive under either separator convention
+        # (runtime_reward from the benchmark, runtime-reward in a profile).
+        normalized = metric.replace("-", "_")
+        return normalized.startswith(
+            ("runtime", "tool", "repair", "premature", "nonexistent")
+        )
+    if failure == "confidence-calibration":
+        return "confidence" in metric or "margin" in metric or "calibration" in metric
     return True
 
 

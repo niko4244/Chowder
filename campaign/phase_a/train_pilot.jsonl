@@ -1,0 +1,24 @@
+{"messages": [{"role": "user", "content": "Answer with only the number: what is 47 + 68?"}, {"role": "assistant", "content": "115"}]}
+{"messages": [{"role": "user", "content": "Answer with only the number: what is 123 - 47?"}, {"role": "assistant", "content": "76"}]}
+{"messages": [{"role": "user", "content": "Answer with only the number: what is 12 * 7?"}, {"role": "assistant", "content": "84"}]}
+{"messages": [{"role": "user", "content": "Answer with only the number: what is 144 / 12?"}, {"role": "assistant", "content": "12"}]}
+{"messages": [{"role": "user", "content": "A store has 34 apples and sells 19. Answer with only the number: how many apples are left?"}, {"role": "assistant", "content": "15"}]}
+{"messages": [{"role": "user", "content": "A train travels 60 miles in 2 hours. Answer with only the number: what is its speed in mph?"}, {"role": "assistant", "content": "30"}]}
+{"messages": [{"role": "user", "content": "Answer with only the city name: what is the capital of France?"}, {"role": "assistant", "content": "Paris"}]}
+{"messages": [{"role": "user", "content": "Answer with only the chemical symbol: what is gold's chemical symbol?"}, {"role": "assistant", "content": "Au"}]}
+{"messages": [{"role": "user", "content": "Answer with only the number: how many continents are there on Earth?"}, {"role": "assistant", "content": "7"}]}
+{"messages": [{"role": "user", "content": "Answer with only the number in Celsius, no unit: what is the boiling point of water at sea level?"}, {"role": "assistant", "content": "100"}]}
+{"messages": [{"role": "user", "content": "Answer with only the name: who wrote the play Romeo and Juliet?"}, {"role": "assistant", "content": "William Shakespeare"}]}
+{"messages": [{"role": "user", "content": "Answer with only the planet name: which planet is known as the Red Planet?"}, {"role": "assistant", "content": "Mars"}]}
+{"messages": [{"role": "user", "content": "Write only the Python code, no explanation: a function named square that returns the square of a number n."}, {"role": "assistant", "content": "def square(n):\n    return n * n"}]}
+{"messages": [{"role": "user", "content": "Write only the Python code, no explanation: a function named is_even that checks if a number n is even."}, {"role": "assistant", "content": "def is_even(n):\n    return n % 2 == 0"}]}
+{"messages": [{"role": "user", "content": "Write only the Python expression, no explanation: reverse a string called s."}, {"role": "assistant", "content": "s[::-1]"}]}
+{"messages": [{"role": "user", "content": "Answer with only one short sentence: what does Python's len() function return when called on a list?"}, {"role": "assistant", "content": "The number of items in the list."}]}
+{"messages": [{"role": "user", "content": "Write only the Python code, no explanation: a function named maximum that returns the larger of two numbers a and b."}, {"role": "assistant", "content": "def maximum(a, b):\n    return a if a > b else b"}]}
+{"messages": [{"role": "user", "content": "Answer with only the keyword: what Python keyword defines a function?"}, {"role": "assistant", "content": "def"}]}
+{"messages": [{"role": "user", "content": "Answer with only the number: what is 9 squared?"}, {"role": "assistant", "content": "81"}]}
+{"messages": [{"role": "user", "content": "Respond with a single word: what color do you get by mixing blue and yellow?"}, {"role": "assistant", "content": "Green"}]}
+{"messages": [{"role": "user", "content": "Answer with only yes or no: is the sun a planet?"}, {"role": "assistant", "content": "No"}]}
+{"messages": [{"role": "user", "content": "Give a one-sentence answer, nothing more: why does the sky appear blue?"}, {"role": "assistant", "content": "The sky appears blue because air molecules scatter shorter blue wavelengths of sunlight more than other colors."}]}
+{"messages": [{"role": "user", "content": "Answer with only the number: how many sides does a hexagon have?"}, {"role": "assistant", "content": "6"}]}
+{"messages": [{"role": "user", "content": "Respond with a single word: what is the opposite of hot?"}, {"role": "assistant", "content": "Cold"}]}

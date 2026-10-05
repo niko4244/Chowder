@@ -14,6 +14,14 @@ research campaign; rejected mechanisms are not proposed again unless a new
 hypothesis and an explicit reopen say otherwise. Nothing here promotes a
 mechanism's maturity -- measured evidence does, through the evidence store and
 an operator; this module only refuses to let code drift past the label.
+
+A family also names the in-repo artifacts that implement and measure it
+(:attr:`InterventionFamily.implementation`). The registry is kept honest
+from both ends by tests: a declared artifact must exist where it says it
+does, and a family that ships no mechanism is not an experiment. The
+mechanisms rescued from the 2026-10-03 main-clone fold entered here by
+file-level extraction, one experiment at a time, each carrying the tests
+and measured records its maturity label cites.
 """
 
 from __future__ import annotations
@@ -78,6 +86,11 @@ class InterventionFamily:
     maturity: Maturity = Maturity.RESEARCH
     #: The experiment artifacts that produced the current maturity label.
     basis: tuple[str, ...] = ()
+    #: In-repo artifacts that implement and measure this family: modules,
+    #: experiment drivers, tests, evidence records -- repo-relative paths.
+    #: A declared artifact that does not exist is a broken claim, and the
+    #: registry drift guard in the tests refuses one.
+    implementation: tuple[str, ...] = ()
     notes: str = ""
 
     def __post_init__(self) -> None:
@@ -97,12 +110,25 @@ class InterventionFamily:
                 f"family {self.family_id!r} is rejected without a recorded "
                 "basis: a rejection is a measured claim, not a taste"
             )
+        for artifact in self.implementation:
+            parts = artifact.replace("\\", "/").split("/")
+            if artifact.startswith(("/", "\\")) or ".." in parts:
+                raise InterventionFamilyRefusal(
+                    f"family {self.family_id!r} declares implementation "
+                    f"artifact {artifact!r}: implementation paths are "
+                    "repo-relative, so a claim cannot point outside the repo"
+                )
 
 
 #: The registry, as of this branch. Maturity labels cite their basis; a label
 #: without a basis is a claim this codebase has not earned. Families from the
-#: rescued experimental work (PR #203's mechanisms) are RESEARCH: they have
-#: artifacts and tests, not production qualification.
+#: rescued experimental work (PR #203's mechanisms) are RESEARCH -- they have
+#: artifacts, tests and measured records, not production qualification -- and
+#: the one whose own measurements rejected it is registered REJECTED with that
+#: measurement as its basis. ``implementation`` names the artifacts behind
+#: every label; the drift guard in
+#: tests/test_growth_interventions_evidence_hypotheses.py refuses a family
+#: whose implementation is missing or undeclared.
 _REGISTRY: tuple[InterventionFamily, ...] = (
     InterventionFamily(
         family_id="training.sft-curriculum",
@@ -128,6 +154,10 @@ _REGISTRY: tuple[InterventionFamily, ...] = (
             "qualified LoRA post-training path (backends/transformers_peft.py)",
             "growth campaign generation loop (#191-#198)",
         ),
+        implementation=(
+            "src/chowder/backends/transformers_peft.py",
+            "src/chowder/backends/transformers_worker.py",
+        ),
         notes="The production path every campaign before 0.5 used.",
     ),
     InterventionFamily(
@@ -144,6 +174,11 @@ _REGISTRY: tuple[InterventionFamily, ...] = (
         eval_dimensions=("target-capability", "retained-capabilities"),
         maturity=Maturity.PRODUCTION,
         basis=("screening lane replay arms (docs/KAGGLE_PROVIDER_ACCEPTANCE.md Run 4)",),
+        implementation=(
+            "src/chowder/backends/transformers_peft.py",
+            "src/chowder/backends/transformers_worker.py",
+            "src/chowder/backends/training_data.py",
+        ),
         notes=(
             "Run 4 measured a replay-decay intervention as harmful on every "
             "seed -- that falsified ONE parameter point, not the family."
@@ -163,6 +198,11 @@ _REGISTRY: tuple[InterventionFamily, ...] = (
         eval_dimensions=("target-capability", "retained-capabilities"),
         maturity=Maturity.PRODUCTION,
         basis=("growth loop continuation campaigns (#190-#198)",),
+        implementation=(
+            "src/chowder/backends/transformers_peft.py",
+            "src/chowder/checkpoint_discovery.py",
+            "src/chowder/adapter_guard.py",
+        ),
     ),
     InterventionFamily(
         family_id="architecture.conditional-ffn",
@@ -178,6 +218,14 @@ _REGISTRY: tuple[InterventionFamily, ...] = (
         eval_dimensions=("target-capability", "retained-capabilities", "latency", "vram"),
         maturity=Maturity.RESEARCH,
         basis=("fold main-clone rescue: conditional_compute.py + conditional_profile.py",),
+        implementation=(
+            "src/chowder/conditional_compute.py",
+            "src/chowder/conditional_profile.py",
+            "chowder_batch/exp_c_profile.py",
+            "tests/test_conditional_compute.py",
+            "tests/test_conditional_profile.py",
+            "docs/EXPERIMENT_C_CONDITIONAL_COMPUTE.md",
+        ),
         notes="Experimental mechanisms from the rescued work; tests only, no production qualification.",
     ),
     InterventionFamily(
@@ -194,6 +242,14 @@ _REGISTRY: tuple[InterventionFamily, ...] = (
         eval_dimensions=("target-capability", "retained-capabilities", "latency"),
         maturity=Maturity.RESEARCH,
         basis=("fold main-clone rescue: experimental_hybrid_lm.py",),
+        implementation=(
+            "src/chowder/experimental_hybrid_lm.py",
+            "chowder_batch/exp_d_hybrid_lm.py",
+            "examples/experiment_d/configs/",
+            "tests/test_experimental_hybrid_lm.py",
+            "tests/test_exp_d_hybrid_lm.py",
+            "docs/EXPERIMENT_D_LOW_ACTIVE_HYBRID_LM.md",
+        ),
     ),
     InterventionFamily(
         family_id="compression.low-rank-vocab",
@@ -209,6 +265,18 @@ _REGISTRY: tuple[InterventionFamily, ...] = (
         eval_dimensions=("perplexity", "generation-quality", "termination"),
         maturity=Maturity.RESEARCH,
         basis=("fold main-clone rescue: low_rank_vocab.py + low_rank_checkpoint.py",),
+        implementation=(
+            "src/chowder/low_rank_vocab.py",
+            "src/chowder/low_rank_checkpoint.py",
+            "chowder_batch/low_rank_convert.py",
+            "chowder_batch/low_rank_real_eval.py",
+            "chowder_batch/low_rank_inventory.py",
+            "chowder_batch/low_rank_probes.py",
+            "chowder_batch/low_rank_recovery_pilot.py",
+            "chowder_batch/low_rank_teacher_cache.py",
+            "tests/test_low_rank_vocab.py",
+            "docs/LOW_RANK_VOCAB_EXPERIMENT.md",
+        ),
         notes=(
             "Prior measured evidence exists in the fold's records: a flat "
             "spectrum made one compression run degrade unacceptably. Record "
@@ -229,9 +297,20 @@ _REGISTRY: tuple[InterventionFamily, ...] = (
         eval_dimensions=("repair-success", "termination", "perplexity", "latency"),
         maturity=Maturity.RESEARCH,
         basis=("fold main-clone rescue + kaggle QAT lane tests",),
+        implementation=(
+            "chowder_batch/exp_f_ptq_margin.py",
+            "kaggle/run_qat_distill_lane.py",
+            "evidence/exp_f_ptq_margin_qwen25_1p5b_int8sq_20260925.json",
+            "evidence/exp_f_ptq_margin_qwen25_1p5b_int8sq_guided20_20260926.json",
+            "evidence/exp_f_ptq_margin_qwen25_1p5b_int8wo_guided20_20260926.json",
+            "tests/test_exp_f_ptq_margin.py",
+            "tests/test_kaggle_qat_lane.py",
+        ),
         notes=(
             "Margin statistics alone never qualify a quantization: the "
-            "measured repair/generation surface decides."
+            "measured repair/generation surface decides. The shipped exp_f "
+            "records are the worked example -- margins moved +0.0076 while "
+            "accuracy fell 0.3 -> 0.0."
         ),
     ),
     InterventionFamily(
@@ -239,30 +318,194 @@ _REGISTRY: tuple[InterventionFamily, ...] = (
         name="Retrieval augmentation",
         target_failure_class="factual-weakness",
         parameters={
+            "method": {"type": "enum-list", "range": ["bm25", "dense", "sparse_learned"]},
             "top_k": {"type": "int", "range": [1, 16]},
         },
         valid_architectures=(),
         evidence_required=("retrieval-corpus-provenance",),
         compute_class="local-cpu",
-        risks=("retrieval-contamination",),
-        eval_dimensions=("factual-accuracy", "fabrication-rate"),
+        risks=("retrieval-contamination", "corpus-scale-misjudgement"),
+        eval_dimensions=("factual-accuracy", "fabrication-rate", "latency"),
         maturity=Maturity.RESEARCH,
-        basis=("no in-repo implementation yet; proposal only",),
+        basis=(
+            "fold main-clone rescue: exp_e_corpus.py (BM25 / dense / learned-sparse retrievers)",
+            "docs/EXPERIMENT_E_PREDICTIVE_INFERENCE.md phase 3: factual +0.50 with a 1.00 citation rate; the learned sparse layer was not competitive at this corpus size (198 KB vs 21 KB)",
+        ),
+        implementation=(
+            "chowder_batch/exp_e_corpus.py",
+            "chowder_batch/exp_e_pipeline.py",
+            "chowder_batch/exp_e_run.py",
+            "chowder_batch/exp_e_tasks.py",
+            "tests/test_exp_e_pipeline.py",
+            "tests/test_exp_e_run.py",
+            "docs/EXPERIMENT_E_PREDICTIVE_INFERENCE.md",
+        ),
+        notes=(
+            "The one lever that measured quality-positive. Its evidence is 18 "
+            "dev tasks and one small corpus: qualified for a research campaign, "
+            "not for a default one."
+        ),
     ),
     InterventionFamily(
         family_id="inference.speculative",
-        name="N-gram speculative decoding",
+        name="Prompt-lookup n-gram speculative decoding",
         target_failure_class="latency",
         parameters={
-            "draft_length": {"type": "int", "range": [1, 8]},
+            "ngram": {"type": "int", "range": [1, 5]},
+            "max_draft": {"type": "int", "range": [1, 16]},
         },
         valid_architectures=(),
-        evidence_required=("acceptance-rate-measurement",),
+        evidence_required=("acceptance-rate-measurement", "output-equivalence-check"),
         compute_class="local-cpu",
-        risks=("output-quality-drift",),
+        risks=("output-quality-drift", "overhead-on-non-copy-work"),
         eval_dimensions=("latency", "output-equivalence", "termination"),
         maturity=Maturity.RESEARCH,
-        basis=("no in-repo implementation yet; proposal only",),
+        basis=(
+            "fold main-clone rescue: exp_e_speculative.py + exp_e_spec_llamacpp.py",
+            "docs/EXPERIMENT_E_PREDICTIVE_INFERENCE.md phase 2: up to 2.8x tok/s with identical outputs on copy-shaped prompts, ~4% overhead elsewhere; every draft token teacher-verified rather than accepted blind",
+        ),
+        implementation=(
+            "chowder_batch/exp_e_speculative.py",
+            "chowder_batch/exp_e_spec_llamacpp.py",
+            "docs/EXPERIMENT_E_PREDICTIVE_INFERENCE.md",
+        ),
+        notes=(
+            "The measured speedup is 4 prompts wide and the mechanism never "
+            "claims equivalence it did not verify: outputs are compared, and "
+            "the teacher argmax verifies every draft position."
+        ),
+    ),
+    InterventionFamily(
+        family_id="inference.confidence-routing",
+        name="Confidence-gated routing to a larger model",
+        target_failure_class="confidence-calibration",
+        parameters={
+            "signal": {"type": "enum", "range": ["logprob-margin", "self-review"]},
+            "margin_shift_tolerance": {"type": "float", "range": [0.0, 1.0]},
+        },
+        valid_architectures=(),
+        evidence_required=("calibration-table", "heldout-transfer-gate"),
+        compute_class="single-gpu",
+        risks=("confident-and-wrong", "quality-loss-versus-large-control"),
+        eval_dimensions=("accuracy", "large-invocation-rate", "calibration"),
+        maturity=Maturity.REJECTED,
+        basis=(
+            "docs/EXPERIMENT_E_PREDICTIVE_INFERENCE.md phase 4: routed small 0.55 / routed large 0.57 against an always-large control at 0.72, with the confident-and-wrong cell 3 of 14 -- self-review confidence is not correctness",
+            "fold main-clone rescue: exp_e_confidence.py -- logprob-margin extraction, margin calibration, and the fail-closed shift/green-retention guards the reopen would have to satisfy",
+        ),
+        implementation=(
+            "chowder_batch/exp_e_confidence.py",
+            "tests/test_exp_e_confidence.py",
+            "docs/EXPERIMENT_E_PREDICTIVE_INFERENCE.md",
+        ),
+        notes=(
+            "Registered REJECTED, not merely unqualified: the rescued work "
+            "measured the dangerous cell as populated. It returns only through "
+            "an explicit reopen naming a NEW confidence signal, and the shipped "
+            "guards (margin-shift and green-retention fail-closed) are the bar "
+            "that signal must clear."
+        ),
+    ),
+    InterventionFamily(
+        family_id="runtime.harness-repair",
+        name="Runtime harness repair mechanisms",
+        target_failure_class="agent-runtime-failure",
+        parameters={
+            "mechanism": {"type": "enum-list", "range": ["state_aware", "recovery"]},
+            "max_turns": {"type": "int", "range": [1, 8]},
+        },
+        valid_architectures=(),
+        evidence_required=("runtime-trace-benchmark", "heldout-task-split"),
+        compute_class="single-gpu",
+        risks=("premature-completion", "nonexistent-read", "task-family-overfit"),
+        eval_dimensions=("runtime-reward", "runtime-green-rate", "runtime-nonexistent-read-rate", "runtime-execution-cost"),
+        maturity=Maturity.RESEARCH,
+        basis=(
+            "fold main-clone rescue: runtime_eval.py (batch-009 controlled harness experiment)",
+            "docs/EXPERIMENT_E_PREDICTIVE_INFERENCE.md phase 5: harness verification is the signal that makes repair escalation trustworthy; LLM self-review is not",
+        ),
+        implementation=(
+            "src/chowder/runtime_eval.py",
+            "chowder_batch/run_runtime_harness_compare.py",
+            "chowder_batch/batch009_harness_experiment.py",
+            "chowder_batch/runtime_benchmark.py",
+            "chowder_batch/runtime_trace_reward.py",
+            "chowder_batch/build_event_reward_data.py",
+            "chowder_batch/build_batch008_event_data.py",
+            "chowder_batch/batch008_event_reward_train.jsonl",
+            "chowder_batch/batch004_runtime_trace.jsonl",
+            "chowder_batch/batch005_runtime_trace.jsonl",
+            "chowder_batch/batch006_runtime_trace.jsonl",
+            "chowder_batch/runtime_loop_trace.jsonl",
+            "tests/test_runtime_harness_mechanisms.py",
+            "tests/test_batch010_contract.py",
+        ),
+        notes=(
+            "The model stays frozen; the harness is the object under change. "
+            "Measured at this scale the repair tasks exceeded both models' "
+            "tool-use ability (0/4 repaired), so these mechanisms are verified "
+            "by named metrics and trace tests, not yet by a capability win."
+        ),
+    ),
+    InterventionFamily(
+        family_id="runtime.harness-evolution",
+        name="Regularized harness selection",
+        target_failure_class="agent-runtime-failure",
+        parameters={
+            "noise_band": {"type": "float", "range": [0.0, 1.0]},
+            "beta0": {"type": "float", "range": [0.0, 1.0]},
+            "beta1": {"type": "float", "range": [0.0, 2.0]},
+            "window": {"type": "int", "range": [1, 10]},
+        },
+        valid_architectures=(),
+        evidence_required=("runtime-trace-benchmark", "heldout-task-split", "cost-attribution"),
+        compute_class="local-cpu",
+        risks=("noise-chasing", "cost-creep", "heldout-leak"),
+        eval_dimensions=("runtime-reward", "runtime-green-rate", "runtime-nonexistent-read-rate", "runtime-execution-cost"),
+        maturity=Maturity.RESEARCH,
+        basis=(
+            "fold main-clone rescue: harness_evolution.py (RRSI-style regularized selection)",
+        ),
+        implementation=(
+            "src/chowder/harness_evolution.py",
+            "chowder_batch/batch009_harness_experiment.py",
+            "tests/test_runtime_harness_mechanisms.py",
+        ),
+        notes=(
+            "Acceptance is a gate, not a score: a gain inside the noise band "
+            "or unaffordable in cost is refused before it becomes a proposal."
+        ),
+    ),
+    InterventionFamily(
+        family_id="training.teacher-distillation",
+        name="Teacher-generated distillation data",
+        target_failure_class="target-capability-weakness",
+        parameters={
+            "max_tokens": {"type": "int", "range": [160, 1024]},
+        },
+        valid_architectures=(),
+        evidence_required=("teacher-provenance", "restricted-execution-verification"),
+        compute_class="single-gpu",
+        risks=("teacher-errors-become-labels", "abstention-collapse"),
+        eval_dimensions=("target-capability", "retained-capabilities", "fabrication-rate"),
+        maturity=Maturity.RESEARCH,
+        basis=(
+            "fold main-clone rescue: exp_b_teacher_data.py (text / tool-decision / abstention rows, restricted-python verification)",
+            "docs/EXPERIMENT_E_PREDICTIVE_INFERENCE.md conclusions: the teacher is still the best reasoner and the verifier of last resort, so its rows are the distillation source -- and its errors are the risk",
+        ),
+        implementation=(
+            "chowder_batch/exp_b_teacher_data.py",
+            "chowder_batch/exp_b_restricted_python.py",
+            "chowder_batch/exp_b_granite_baseline.py",
+            "chowder_batch/exp_b_toolchain_check.py",
+            "tests/test_exp_b_teacher_data.py",
+            "docs/EXPERIMENT_B_GRANITE_DISTILLATION.md",
+        ),
+        notes=(
+            "Rows are only admitted through a verification surface: code rows "
+            "must execute, tool rows are graded against the expected decision, "
+            "and a teacher error is recorded as a failure instead of a label."
+        ),
     ),
 )
 

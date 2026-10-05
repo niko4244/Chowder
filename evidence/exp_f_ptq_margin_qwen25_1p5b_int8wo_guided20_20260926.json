@@ -1,0 +1,234 @@
+{
+  "experiment": "exp_f_ptq_margin",
+  "model_path": "Qwen/Qwen2.5-1.5B-Instruct",
+  "ptq_config": "int8_weight_only",
+  "n_calibration_texts": 20,
+  "bf16": {
+    "arm": "bf16",
+    "harness": {
+      "harness": "state_aware",
+      "max_turns": 4,
+      "max_new_tokens": 160,
+      "green_rate": 0.3,
+      "mean_runtime_reward": -1.8,
+      "tool_calls": 29,
+      "prompt_tokens": 29815,
+      "generated_tokens": 5668,
+      "tool_call_format": "json",
+      "task_set": "small_route:guided",
+      "translated_turns": 29,
+      "dropped_calls": 40,
+      "reordered_turns": 20
+    }
+  },
+  "quant": {
+    "arm": "int8_weight_only",
+    "harness": {
+      "harness": "state_aware",
+      "max_turns": 4,
+      "max_new_tokens": 160,
+      "green_rate": 0.25,
+      "mean_runtime_reward": -1.95,
+      "tool_calls": 39,
+      "prompt_tokens": 29745,
+      "generated_tokens": 5614,
+      "tool_call_format": "json",
+      "task_set": "small_route:guided",
+      "translated_turns": 39,
+      "dropped_calls": 40,
+      "reordered_turns": 20
+    }
+  },
+  "margin_comparison": {
+    "quant_config": "int8_weight_only",
+    "n_tasks": 20,
+    "bf16_mean_margin": 4.46616027882294,
+    "quant_mean_margin": 4.554263945775191,
+    "mean_margin_shift": 0.08810366695225103,
+    "bf16_margin_nulls": 0,
+    "quant_margin_nulls": 0,
+    "bf16_accuracy": 0.3,
+    "quant_accuracy": 0.25,
+    "accuracy_delta": -0.05,
+    "per_task": [
+      {
+        "task": "exp_f_repair_0",
+        "bf16_margin": 3.7378314505605137,
+        "quant_margin": 5.028838875681855,
+        "margin_shift": 1.2910074251213417,
+        "bf16_correct": false,
+        "quant_correct": true
+      },
+      {
+        "task": "exp_f_repair_1",
+        "bf16_margin": 5.05906483842883,
+        "quant_margin": 5.037625855831212,
+        "margin_shift": -0.02143898259761734,
+        "bf16_correct": true,
+        "quant_correct": true
+      },
+      {
+        "task": "exp_f_repair_10",
+        "bf16_margin": 4.5334808752556475,
+        "quant_margin": 4.315786478901977,
+        "margin_shift": -0.2176943963536706,
+        "bf16_correct": true,
+        "quant_correct": true
+      },
+      {
+        "task": "exp_f_repair_11",
+        "bf16_margin": 4.033285179987867,
+        "quant_margin": 3.2552458395861614,
+        "margin_shift": -0.7780393404017052,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_12",
+        "bf16_margin": 4.240309491829219,
+        "quant_margin": 3.6209971477286986,
+        "margin_shift": -0.6193123441005204,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_13",
+        "bf16_margin": 3.533188617401605,
+        "quant_margin": 5.240105756026942,
+        "margin_shift": 1.7069171386253372,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_14",
+        "bf16_margin": 5.787623296557246,
+        "quant_margin": 4.203245940356473,
+        "margin_shift": -1.5843773562007737,
+        "bf16_correct": true,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_15",
+        "bf16_margin": 3.8513773485944776,
+        "quant_margin": 3.7666706253986546,
+        "margin_shift": -0.08470672319582295,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_16",
+        "bf16_margin": 4.965630491929395,
+        "quant_margin": 5.233343005471113,
+        "margin_shift": 0.267712513541718,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_17",
+        "bf16_margin": 5.120745610700895,
+        "quant_margin": 5.2637754007083615,
+        "margin_shift": 0.14302979000746685,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_18",
+        "bf16_margin": 4.034809173463465,
+        "quant_margin": 4.23263698086872,
+        "margin_shift": 0.19782780740525485,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_19",
+        "bf16_margin": 4.305815076745978,
+        "quant_margin": 3.7094535266651825,
+        "margin_shift": -0.5963615500807959,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_2",
+        "bf16_margin": 3.9904299899935722,
+        "quant_margin": 4.230554051172565,
+        "margin_shift": 0.2401240611789932,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_3",
+        "bf16_margin": 5.3105490933162995,
+        "quant_margin": 5.483728342031309,
+        "margin_shift": 0.17317924871500967,
+        "bf16_correct": true,
+        "quant_correct": true
+      },
+      {
+        "task": "exp_f_repair_4",
+        "bf16_margin": 4.099376068597562,
+        "quant_margin": 4.835711177359236,
+        "margin_shift": 0.7363351087616739,
+        "bf16_correct": false,
+        "quant_correct": true
+      },
+      {
+        "task": "exp_f_repair_5",
+        "bf16_margin": 3.9612695902689103,
+        "quant_margin": 4.96394074146162,
+        "margin_shift": 1.0026711511927098,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_6",
+        "bf16_margin": 4.908644431092766,
+        "quant_margin": 5.677629698491564,
+        "margin_shift": 0.768985267398798,
+        "bf16_correct": true,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_7",
+        "bf16_margin": 4.272558474114963,
+        "quant_margin": 5.538532519965193,
+        "margin_shift": 1.2659740458502293,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_8",
+        "bf16_margin": 4.1537954977029345,
+        "quant_margin": 4.1526320078963,
+        "margin_shift": -0.001163489806634388,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_9",
+        "bf16_margin": 5.423420979916674,
+        "quant_margin": 3.2948249439006956,
+        "margin_shift": -2.1285960360159786,
+        "bf16_correct": true,
+        "quant_correct": false
+      }
+    ]
+  },
+  "provenance": {
+    "nvidia_modelopt_version": "0.47.0",
+    "torch_version": "2.11.0+cu128",
+    "device": "NVIDIA GeForce RTX 5060 Ti",
+    "ptq_config_names": {
+      "bf16": null,
+      "int8_smoothquant": "INT8_SMOOTHQUANT_CFG",
+      "int8_weight_only": "INT8_WEIGHT_ONLY_CFG",
+      "int4_awq": "INT4_AWQ_CFG",
+      "nvfp4_default": "NVFP4_DEFAULT_CFG"
+    }
+  },
+  "transfer_scope": {
+    "measured_on": "Qwen/Qwen2.5-1.5B-Instruct",
+    "ptq_config": "int8_weight_only",
+    "claim": "mean margin shift for this model under this PTQ config only",
+    "transfers_to_other_architectures": false
+  }
+}
