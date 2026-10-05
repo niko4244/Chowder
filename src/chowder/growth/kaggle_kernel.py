@@ -16,14 +16,18 @@ without a GPU, a token or Kaggle:
   ``/kaggle/input/<owner>/<slug>/`` -- and the input is the candidate whose
   bytes match the declared digest;
 * the payload command runs against exactly those inputs, and its exit status
-  becomes the record's state;
+  becomes the record's state. Before it runs, the kernel writes the attempt
+  context -- the resolved input locations and the declared payload -- into the
+  output directory, so the command (and any later reader) works from what the
+  kernel verified rather than a re-resolution;
+* a declared resume reports the search's vocabulary -- a marker file the
+  command wrote may say ``resumed``; absent or malformed, the honest answer
+  is ``not-a-resume``, and the backend fails the attempt on it. The marker is
+  read after the command, because the command is what writes it;
 * the artifact manifest is every file under the output directory except the
   record itself and bytecode caches, each with a sha256 and byte count;
 * the environment (python version, resolved packages, model commit) is the
   kernel's own reading, never reconstructed by the dispatcher;
-* a declared resume reports the search's vocabulary -- a marker file written
-  by the command may say ``resumed``; absent or malformed, the honest answer
-  is ``not-a-resume``, and the backend fails the attempt on it.
 
 The record is written to ``<output>/job-record.json`` even on failure: a
 failed attempt without evidence is a dropped failure.
@@ -42,6 +46,7 @@ from typing import Any, Callable, Mapping, Sequence
 __all__ = [
     "JOB_RECORD_NAME",
     "KERNEL_JOB_SPEC_NAME",
+    "ATTEMPT_CONTEXT_NAME",
     "RESUME_STATE_NAME",
     "RESUME_STATES",
     "install_spec",
@@ -56,6 +61,11 @@ __all__ = [
 JOB_RECORD_NAME = "job-record.json"
 #: The job document the transport stages beside the entry script.
 KERNEL_JOB_SPEC_NAME = "chowder-job-spec.json"
+#: The attempt context the kernel writes into the output directory before the
+#: payload command runs: the resolved input locations and the declared payload,
+#: read back by the declared command (``chowder.growth.kaggle_payload``) and by
+#: any reader that must know what the kernel verified.
+ATTEMPT_CONTEXT_NAME = "attempt-context.json"
 #: A command that really loaded a declared checkpoint writes this marker; its
 #: absence is reported as ``not-a-resume``, never as a silent restart.
 RESUME_STATE_NAME = "resume-state.json"
@@ -158,6 +168,36 @@ def _candidate_paths(location: Any) -> tuple[Path, ...]:
     return ()
 
 
+def _write_attempt_context(
+    output_root: Path,
+    spec: Mapping[str, Any],
+    observed_commit: str | None,
+    input_locations: Mapping[str, str],
+    resume_from: Any,
+) -> None:
+    """The context the payload command reads: what the kernel verified."""
+    payload = spec.get("payload")
+    if not isinstance(payload, Mapping):
+        payload = {}
+    source = spec.get("source")
+    if not isinstance(source, Mapping):
+        source = {}
+    context = {
+        "spec_id": str(spec.get("spec_id", "")),
+        "attempt_id": str(source.get("attempt_id", "")),
+        "source_commit_sha": observed_commit or "",
+        "output_dir": str(output_root),
+        "input_locations": {
+            str(name): str(path) for name, path in input_locations.items()
+        },
+        "declared_payload": payload.get("declared_payload"),
+        "resume_from": resume_from,
+    }
+    (output_root / ATTEMPT_CONTEXT_NAME).write_text(
+        json.dumps(context, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
 def _resume_state(output_root: Path, declared_resume_from: str | None) -> str | None:
     if declared_resume_from is None:
         return None
@@ -246,7 +286,6 @@ def run_kernel_job(
         input_locations[name] = str(matched)
 
     resume_from = spec.get("resume_from")
-    resume_state = _resume_state(output_root, resume_from)
 
     command = kernel.get("command") or []
     command_record: dict[str, Any] | None = None
@@ -256,6 +295,9 @@ def run_kernel_job(
         ):
             errors.append("kernel.command must be a list of non-empty strings")
         else:
+            _write_attempt_context(
+                output_root, spec, observed_commit, input_locations, resume_from
+            )
             completed = command_runner(command, output_root)
             command_record = {
                 "command": list(command),
@@ -268,6 +310,11 @@ def run_kernel_job(
                     f"the payload command exited {completed.returncode}: "
                     f"{_tail(completed.stderr) or _tail(completed.stdout)}"
                 )
+
+    # Read after the command: the declared payload writes the resume marker as
+    # part of the run it performed, so a marker read before it ran could only
+    # ever report the previous session's state.
+    resume_state = _resume_state(output_root, resume_from)
 
     artifacts: list[dict[str, Any]] = []
     for path in sorted(output_root.rglob("*")):

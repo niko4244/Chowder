@@ -19,10 +19,15 @@ the declared-input contract:
 
 What this module deliberately does not do: it does not invent the payload
 command (the campaign declares it), does not materialize the curriculum corpus
-(or run the production trainer) inside the kernel -- that is the declared
-payload's job, from the declared inputs -- and it does not evaluate or
-promote. The wiring is complete when a campaign passes a ``KaggleTrainingFn``
-to ``campaign_runner.run_campaign(train_fn=...)``; every refusal before that
+(or run the production trainer) here -- that is the declared payload's job
+inside the kernel, from the declared inputs
+(:mod:`chowder.growth.kaggle_payload` is that payload, ported from the local
+executor) -- and it does not evaluate or promote. A campaign declares its
+payload by passing any object exposing ``command()`` and
+``payload(recipe, items)`` as ``declared_payload``; the declaration travels in
+the attempt request and is bound per attempt. The wiring is complete when a
+campaign passes a ``KaggleTrainingFn`` to
+``campaign_runner.run_campaign(train_fn=...)``; every refusal before that
 point is named rather than defaulted.
 """
 
@@ -30,7 +35,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 from .campaign_prepare import (
     CONTAMINATION_MANIFEST_FIELD,
@@ -48,6 +53,7 @@ from .compute_backend import (
     bind_declared_inputs,
 )
 from .compute_cost import ComputeCost
+from .kaggle_payload import merge_run_summary
 from .recipe_planner import TrainingRecipe
 from .training_binding import GrowthEnvelope, check_growth_envelope
 
@@ -60,6 +66,7 @@ __all__ = [
     "KAGGLE_CAMPAIGN_COMMAND_MISSING",
     "KAGGLE_CAMPAIGN_MOUNTS_MISSING",
     "KAGGLE_CAMPAIGN_INPUT_PATHS_INCOMPLETE",
+    "DeclaredPayload",
     "build_attempt_request",
     "KaggleTrainingFn",
 ]
@@ -82,6 +89,30 @@ DECLARED_PREPARED_FIELDS: tuple[str, ...] = (
 )
 
 
+class DeclaredPayload(Protocol):
+    """What runs inside the kernel, declared rather than defaulted.
+
+    The contract :class:`KaggleTrainingFn` accepts: ``command()`` is the argv
+    every attempt's kernel runs, and ``payload(recipe, items)`` binds one
+    attempt's recipe and curriculum items into the declaration the attempt
+    request carries. :class:`chowder.growth.kaggle_payload.CorpusTraining`
+    materializes the declared corpus and runs the production entry points;
+    this module never inspects the declaration beyond carrying it, so a
+    campaign can declare a payload this package does not implement without
+    changing the wiring.
+    """
+
+    kind: str
+
+    def command(self) -> Sequence[str]:
+        """The argv a kernel runs for this payload."""
+
+    def payload(
+        self, recipe: TrainingRecipe, items: Sequence[Any]
+    ) -> Mapping[str, Any]:
+        """One attempt's declaration, carried in the request payload."""
+
+
 def build_attempt_request(
     prepared: PreparedCampaign,
     *,
@@ -97,6 +128,7 @@ def build_attempt_request(
     pip_extras: Sequence[str] = ("train",),
     projection_tolerance: float = 0.25,
     resume_from: str | None = None,
+    declared_payload: Mapping[str, Any] | None = None,
 ) -> AttemptRequest:
     """One declared attempt, built from the campaign's prepared inputs.
 
@@ -106,7 +138,10 @@ def build_attempt_request(
     appear at (a Kaggle dataset can mount under its bare slug or, on a name
     conflict, under its owner-qualified path); names that are missing or were
     never declared refuse, because an input the kernel cannot reach is an
-    attempt that cannot bind its evidence.
+    attempt that cannot bind its evidence. ``declared_payload`` is the
+    campaign's own kernel-side declaration (what the payload command does with
+    those inputs); it travels untouched in the request payload, and a
+    declaration that cannot be serialized refuses before a kernel exists.
     """
     declared = declared_input_paths(prepared)
     inputs = bind_declared_inputs(declared)
@@ -115,18 +150,22 @@ def build_attempt_request(
     declared_command = validate_command(command)
     declared_mounts = validate_mounts(mounts)
     declared_extras = _validate_extras(pip_extras)
+    declared_payload_document = _validate_declared_payload(declared_payload)
+    payload: dict[str, Any] = {
+        "command": declared_command,
+        "input_paths": {
+            name: list(paths) for name, paths in normalized_paths.items()
+        },
+        "pip_extras": declared_extras,
+        **({"model_commit": str(model_commit)} if model_commit else {}),
+    }
+    if declared_payload_document is not None:
+        payload["declared_payload"] = declared_payload_document
     return AttemptRequest(
         source=source,
         entry_point=entry_point,
         inputs=inputs,
-        payload={
-            "command": declared_command,
-            "input_paths": {
-                name: list(paths) for name, paths in normalized_paths.items()
-            },
-            "pip_extras": declared_extras,
-            **({"model_commit": str(model_commit)} if model_commit else {}),
-        },
+        payload=payload,
         projected_cost=ComputeCost.measured(
             device_gpu_hours=float(recipe.projected_device_gpu_hours),
             wall_gpu_hours=float(recipe.projected_wall_gpu_hours),
@@ -281,6 +320,39 @@ def _validate_extras(pip_extras: Sequence[str]) -> list[str]:
     return extras
 
 
+def _validate_declared_payload(
+    declared_payload: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """The declared kernel payload, or a named refusal -- never dropped.
+
+    A declaration the kernel cannot read would leave the payload command with
+    nothing to execute; dropping it silently would ship an attempt whose
+    behavior the campaign did not declare.
+    """
+    if declared_payload is None:
+        return None
+    if not isinstance(declared_payload, Mapping):
+        raise ComputeBackendRefusal(
+            KAGGLE_CAMPAIGN_SCHEMA,
+            f"declared_payload must be a mapping, got {declared_payload!r}",
+        )
+    document = dict(declared_payload)
+    if not document:
+        raise ComputeBackendRefusal(
+            KAGGLE_CAMPAIGN_SCHEMA,
+            "declared_payload is empty; a payload declaration that declares "
+            "nothing would leave the kernel with no instruction",
+        )
+    try:
+        json.dumps(document, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise ComputeBackendRefusal(
+            KAGGLE_CAMPAIGN_SCHEMA,
+            f"declared_payload cannot be serialized: {exc}",
+        ) from exc
+    return document
+
+
 class KaggleTrainingFn:
     """A ``TrainingFn`` that executes one recipe as a Kaggle kernel attempt.
 
@@ -294,6 +366,13 @@ class KaggleTrainingFn:
     evidence), dispatches one :class:`AttemptRequest` through the injected
     backend, and writes the evidence mapping to that directory's
     ``training-evidence.json``.
+
+    The kernel payload is declared, not defaulted: pass ``declared_payload``
+    (an object exposing ``command()`` and ``payload(recipe, items)``, such as
+    :class:`chowder.growth.kaggle_payload.CorpusTraining`) and this binding
+    derives the argv from it and carries its per-attempt declaration into the
+    request; or pass ``command`` for a hand-declared argv. Passing both
+    refuses, because two declarations could disagree about what runs.
     """
 
     def __init__(
@@ -306,15 +385,35 @@ class KaggleTrainingFn:
         commit_sha: str,
         chowder_version: str,
         entry_point: str,
-        command: Sequence[str],
+        command: Sequence[str] | None = None,
         input_paths: Mapping[str, str | Sequence[str]],
         mounts: Sequence[str],
         attempts_root: str | Path,
         timeout_seconds: float,
+        declared_payload: DeclaredPayload | None = None,
         model_commit: str | None = None,
         pip_extras: Sequence[str] = ("train",),
         projection_tolerance: float = 0.25,
     ) -> None:
+        if declared_payload is not None and command is not None:
+            raise ComputeBackendRefusal(
+                KAGGLE_CAMPAIGN_SCHEMA,
+                "declare the kernel payload once: declared_payload carries its "
+                "own command, and passing command beside it would let two "
+                "declarations disagree about what runs",
+            )
+        if declared_payload is not None:
+            command_fn = getattr(declared_payload, "command", None)
+            payload_fn = getattr(declared_payload, "payload", None)
+            if not callable(command_fn) or not callable(payload_fn):
+                raise ComputeBackendRefusal(
+                    KAGGLE_CAMPAIGN_SCHEMA,
+                    "a declared payload must expose command() and "
+                    "payload(recipe, items); got "
+                    f"{type(declared_payload).__name__}",
+                )
+            command = command_fn()
+        self.declared_payload = declared_payload
         self.backend = backend
         self.prepared = prepared
         self.envelope = envelope
@@ -381,6 +480,7 @@ class KaggleTrainingFn:
             attempt_id=attempt,
         )
         try:
+            declared_payload = self._declared_payload(recipe, items)
             request = build_attempt_request(
                 self.prepared,
                 source=source,
@@ -395,6 +495,7 @@ class KaggleTrainingFn:
                 pip_extras=self.pip_extras,
                 projection_tolerance=self.projection_tolerance,
                 resume_from=recipe.resume_from_checkpoint,
+                declared_payload=declared_payload,
             )
         except ComputeBackendRefusal as refusal:
             evidence = self._refused_evidence(
@@ -410,6 +511,14 @@ class KaggleTrainingFn:
     # ------------------------------------------------------------------
     # attempt bookkeeping and evidence
     # ------------------------------------------------------------------
+
+    def _declared_payload(
+        self, recipe: TrainingRecipe, items: Sequence[Any]
+    ) -> Mapping[str, Any] | None:
+        """This attempt's declaration, or ``None`` for a raw command."""
+        if self.declared_payload is None:
+            return None
+        return dict(self.declared_payload.payload(recipe, items))
 
     def _reserve_attempt(self) -> tuple[str, Path]:
         """The smallest attempt index whose directory does not exist yet.
@@ -437,6 +546,7 @@ class KaggleTrainingFn:
             "attempt": attempt,
             "attempt_dir": str(attempt_dir),
             "recipe_id": recipe.recipe_id,
+            "declared_payload_kind": getattr(self.declared_payload, "kind", None),
             "projected_device_gpu_hours": float(recipe.projected_device_gpu_hours),
             "projected_wall_gpu_hours": float(recipe.projected_wall_gpu_hours),
             "declared_resume_from": recipe.resume_from_checkpoint,
@@ -536,7 +646,11 @@ class KaggleTrainingFn:
                 },
             }
         )
-        return evidence
+        # The declared payload's own summary -- the production experiment id,
+        # metrics and the trained artifact -- is merged from the returned
+        # attempt directory; it is one of the artifacts the kernel's manifest
+        # bound, so its verdict is read rather than re-derived.
+        return merge_run_summary(evidence, attempt_dir)
 
     def _write_evidence(self, attempt_dir: Path, evidence: Mapping[str, Any]) -> None:
         attempt_dir.mkdir(parents=True, exist_ok=True)

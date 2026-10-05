@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from chowder.growth.kaggle_kernel import (
+    ATTEMPT_CONTEXT_NAME,
     JOB_RECORD_NAME,
     RESUME_STATE_NAME,
     install_spec,
@@ -232,6 +233,55 @@ def test_a_declared_resume_reports_the_search_vocabulary(tmp_path: Path) -> None
 def test_no_declared_resume_records_no_resume_state(tmp_path: Path) -> None:
     record = _run(_document(tmp_path), tmp_path / "working")
     assert record["resume_state"] is None
+
+
+def test_a_command_that_writes_the_resume_marker_is_read_after_it_runs(
+    tmp_path: Path,
+) -> None:
+    """The marker is the command's own report, so it is read after the run."""
+    output = tmp_path / "working"
+    document = _document(
+        tmp_path,
+        resume_from="ckpt-0007",
+        command=[
+            sys.executable,
+            "-c",
+            "import json; from pathlib import Path; "
+            "Path('resume-state.json').write_text("
+            "json.dumps({'resume_state': 'resumed'}))",
+        ],
+    )
+    record = _run(document, output)
+    assert record["state"] == "complete", record["error"]
+    assert record["resume_state"] == "resumed"
+
+
+def test_the_attempt_context_carries_what_the_kernel_verified(tmp_path: Path) -> None:
+    material, entry = _declared_input(tmp_path)
+    output = tmp_path / "working"
+    document = _document(
+        tmp_path,
+        input_path=material,
+        input_entry=entry,
+        command=[sys.executable, "-c", "print('payload ran')"],
+    )
+    document["spec"]["payload"] = {
+        "command": ["python", "-m", "chowder.growth.kaggle_payload"],
+        "declared_payload": {"kind": "corpus-training", "item_ids": ["item-1"]},
+    }
+    record = _run(document, output)
+    assert record["state"] == "complete", record["error"]
+    context = json.loads((output / ATTEMPT_CONTEXT_NAME).read_text(encoding="utf-8"))
+    assert context["input_locations"] == {entry["name"]: str(material)}
+    assert context["declared_payload"] == {
+        "kind": "corpus-training",
+        "item_ids": ["item-1"],
+    }
+    assert context["spec_id"] == "gen2:recipe-01:attempt-01"
+    assert context["attempt_id"] == "attempt-01"
+    assert context["output_dir"] == str(output)
+    assert context["source_commit_sha"] == COMMIT
+    assert context["resume_from"] is None
 
 
 def test_bytecode_caches_are_not_artifacts(tmp_path: Path) -> None:
