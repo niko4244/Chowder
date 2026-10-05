@@ -62,6 +62,7 @@ from .benchmark_registry import (
     NormalizationRefused,
 )
 from .promotion import (
+    PARENT_EVIDENCE_ORIGINS,
     BenchmarkResult,
     PromotionDecision,
     PromotionInput,
@@ -193,6 +194,10 @@ class PromotionAssembly:
 class MetricBinder:
     """Applies declared metric semantics to measured runs.
 
+    Provenance is enforced per role against the same
+    ``promotion.PARENT_EVIDENCE_ORIGINS`` the promotion rule filters on, so a
+    row this binder reports as evidence is a row the gates may compare.
+
     ``contamination`` is the ``benchmarks`` section of a generation's
     contamination manifest (``{qualified_id: {"status": ...}}``). A benchmark
     absent from it binds with ``UNKNOWN``, which promotion already treats as an
@@ -274,10 +279,15 @@ class MetricBinder:
           A parent score relabeled with the candidate's generation string is
           the classic fabrication this refuses -- the label is caller-assigned,
           the origin is evidence.
-        - parent side: ``MEASURED_THIS_GENERATION`` or ``MEASURED_PARENT``.
-          Rows predating provenance (``UNMEASURED`` origin) still bind on the
-          parent side, where they cannot inflate a candidate's gates; the
-          dangerous side is the candidate side, and there legacy rows refuse.
+        - parent side: ``MEASURED_THIS_GENERATION`` or ``MEASURED_PARENT`` --
+          exactly ``promotion.PARENT_EVIDENCE_ORIGINS``, the same set the
+          promotion rule and ``retention_values`` filter on. A row predating
+          provenance used to bind here on the argument that it "cannot inflate
+          a candidate's gates"; that argument is backwards for every
+          comparative gate, which is ``candidate - parent`` and so lets a low
+          unearned baseline inflate the candidate. A baseline is earned
+          evidence or it is not a baseline, so both roles now refuse the same
+          two origins for the same reason.
         """
         qualified_id = run.benchmark_qualified_id
         if generation_version is not None and run.generation_version != generation_version:
@@ -313,11 +323,24 @@ class MetricBinder:
                 reason,
                 generation_version=run.generation_version,
             )
-        if role == "parent" and run.measurement_origin == CARRIED_REFERENCE:
+        if role == "parent" and run.measurement_origin not in PARENT_EVIDENCE_ORIGINS:
+            if run.measurement_origin == CARRIED_REFERENCE:
+                reason = (
+                    f"{qualified_id}: row is a carried reference (copied from a "
+                    "historical record), not a measurement of the parent generation"
+                )
+            else:
+                reason = (
+                    f"{qualified_id}: row predates measurement provenance (origin "
+                    "UNMEASURED); it cannot anchor a comparison, because every "
+                    "promotion gate is candidate-minus-parent and an unearned "
+                    "baseline pinned at zero makes them all pass. Re-emit it with "
+                    "origin MEASURED_THIS_GENERATION or MEASURED_PARENT and the "
+                    "artifact that produced it"
+                )
             return BindingRefusal(
                 qualified_id,
-                f"{qualified_id}: row is a carried reference, not a measurement "
-                "of the parent generation",
+                reason,
                 generation_version=run.generation_version,
             )
 
