@@ -92,11 +92,14 @@ def _launches(tree: ast.AST):
 
 
 # Launches that do not start a Chowder Python worker, so the guarantee does not
-# apply: nvidia-smi / system queries, and pip/venv setup for the Unsloth env.
+# apply: nvidia-smi / system queries, pip/venv setup for the Unsloth env, and
+# the external kaggle CLI (its module's only `sys.executable` reference lives
+# inside the entry script it generates for the *remote* kernel).
 _NOT_CHOWDER_WORKERS = {
     ("hardware.py", "nvidia-smi / system query"),
     ("parent_tournament.py", "nvidia-smi VRAM sampler"),
     ("unsloth_env.py", "pip / venv setup"),
+    ("kaggle_cli_transport.py", "the external kaggle CLI, not a Chowder worker"),
 }
 
 

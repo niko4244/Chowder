@@ -151,3 +151,30 @@ rather than an externally-tracked courtesy.
 
 The smoke path (R1-lite through its own commit pin, R7) is already valuable
 and should merge; the bar above gates *campaign* use, not the PR.
+
+## Implementation status — 2026-10-05
+
+The bar now lands as code behind an injectable transport:
+`src/chowder/growth/compute_backend.py` (source binding, declared-input
+hashing and pre-push re-verification, artifact-manifest verification, the
+attempt request/outcome and its growth-vocabulary `to_evidence()`),
+`src/chowder/growth/kaggle_compute.py` (`KaggleComputeBackend` enforcing
+R1–R8; the Kaggle API is a `KaggleTransport` protocol so every check is
+exercised offline), `src/chowder/growth/kaggle_cli_transport.py` (the
+production transport over the official `kaggle` CLI: stage, push, poll,
+pull, quota) and `src/chowder/growth/kaggle_kernel.py` (the kernel-side
+commit echo, input re-hash, command run, artifact manifest, environment and
+record writing), `src/chowder/growth/kaggle_inputs.py` (the declared-input
+upload: flat staging, a content-addressed dataset, create-then-version, and
+the bare-slug plus owner-qualified mount candidates) and
+`src/chowder/growth/kaggle_campaign.py` (`build_attempt_request` from a
+prepared campaign and `KaggleTrainingFn`, the `TrainingFn` that dispatches
+through the backend and writes growth-vocabulary evidence). The five test
+files total **92 passed**, every check with a test that makes it fail,
+including one end-to-end dispatch over a scripted fake CLI, one install
+failure surfaced with its own error (R5: a failed record is classified from
+its own error and settled, so it cannot come back as a derived mismatch), and
+one publisher-to-kernel path integration. See `docs/KAGGLE_COMPUTE_BACKEND_2026-10-05.md` for the mapping
+and what remains: the kernel-side payload command (the campaign's own
+declaration), and a manifest field that declares the Kaggle executor the
+runner already accepts through `run_campaign(train_fn=...)`.

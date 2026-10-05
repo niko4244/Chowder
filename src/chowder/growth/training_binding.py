@@ -50,7 +50,7 @@ import json
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -102,6 +102,38 @@ class GrowthEnvelope:
                 raise GrowthBindingError(f"{label} must be a number")
             if float(value) < 0:
                 raise GrowthBindingError(f"{label} cannot be negative")
+
+
+def check_growth_envelope(
+    recipe: TrainingRecipe, envelope: GrowthEnvelope
+) -> tuple[str, str] | None:
+    """Whether a recipe fits the growth envelope, before any compute.
+
+    Owned here because every executor -- the local subprocess binding and the
+    remote Kaggle binding -- must admit exactly the same recipes: an envelope
+    that admitted a recipe in one place and refused it in the other would make
+    the campaign's admission record a statement about the executor rather than
+    about the declaration. Returns ``None`` when admitted, ``(kind, reason)``
+    otherwise.
+    """
+    device = float(recipe.projected_device_gpu_hours)
+    wall = float(recipe.projected_wall_gpu_hours)
+    if device > envelope.device_gpu_hours_ceiling:
+        return (
+            "growth-envelope",
+            f"recipe projects {device:.6f} device GPU-h against "
+            f"envelope.device_gpu_hours_ceiling "
+            f"{envelope.device_gpu_hours_ceiling:.6f}; the growth "
+            "envelope does not enlarge a ceiling after measurement",
+        )
+    if wall > envelope.wall_gpu_hours_ceiling:
+        return (
+            "growth-envelope",
+            f"recipe projects {wall:.6f} wall GPU-h against "
+            f"envelope.wall_gpu_hours_ceiling "
+            f"{envelope.wall_gpu_hours_ceiling:.6f}",
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -550,24 +582,7 @@ class SubprocessTrainingFn:
     # ------------------------------------------------------------------
 
     def _check_cost(self, recipe: TrainingRecipe) -> tuple[str, str] | None:
-        device = float(recipe.projected_device_gpu_hours)
-        wall = float(recipe.projected_wall_gpu_hours)
-        if device > self.envelope.device_gpu_hours_ceiling:
-            return (
-                "growth-envelope",
-                f"recipe projects {device:.6f} device GPU-h against "
-                f"envelope.device_gpu_hours_ceiling "
-                f"{self.envelope.device_gpu_hours_ceiling:.6f}; the growth "
-                "envelope does not enlarge a ceiling after measurement",
-            )
-        if wall > self.envelope.wall_gpu_hours_ceiling:
-            return (
-                "growth-envelope",
-                f"recipe projects {wall:.6f} wall GPU-h against "
-                f"envelope.wall_gpu_hours_ceiling "
-                f"{self.envelope.wall_gpu_hours_ceiling:.6f}",
-            )
-        return None
+        return check_growth_envelope(recipe, self.envelope)
 
     def _compose(
         self, recipe: TrainingRecipe, attempt: str, attempt_dir: Path
