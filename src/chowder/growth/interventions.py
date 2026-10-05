@@ -156,6 +156,7 @@ _REGISTRY: tuple[InterventionFamily, ...] = (
         ),
         implementation=(
             "src/chowder/backends/transformers_peft.py",
+            "src/chowder/backends/training_data.py",
             "src/chowder/backends/transformers_worker.py",
         ),
         notes="The production path every campaign before 0.5 used.",

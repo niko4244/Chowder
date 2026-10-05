@@ -279,7 +279,11 @@ while the fold shipped working implementations of both. A drift guard now
 refuses both states, and the measured claim travels with the code -- the exp_f
 record showing margins flat (+0.0076) while accuracy collapses (0.3 -> 0.0) is
 read by the test that asserts the `compression.ptq` note, so the label cannot
-outlive the measurement.
+outlive the measurement. A smoke matrix
+(`tests/test_growth_family_smoke_matrix.py`) invokes each family's cheapest
+declared mechanism -- no weights, no GPU -- and records the outcome in
+`evidence/family_smoke_matrix.json`, so a family whose mechanism cannot run is
+caught before a campaign can propose it.
 
 One rescued experiment registers as REJECTED rather than research:
 `inference.confidence-routing`, whose own phase-4 table (routed 0.55 / 0.57

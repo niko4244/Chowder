@@ -1,0 +1,110 @@
+{
+  "note": "Written by tests/test_growth_family_smoke_matrix.py: the cheapest declared mechanism of every registered intervention family, invoked once and recorded. Rows with status 'skipped' need an optional heavy dependency (torch) that this machine did not have.",
+  "family_count": 13,
+  "rows": [
+    {
+      "family_id": "training.sft-curriculum",
+      "maturity": "production",
+      "artifact": "src/chowder/backends/training_data.py",
+      "mechanism": "_validate_chat_messages: the chat-row contract behind the curriculum",
+      "status": "ran",
+      "outcome": "validated a 2-turn chat row with a trainable assistant span"
+    },
+    {
+      "family_id": "training.replay-balanced",
+      "maturity": "production",
+      "artifact": "src/chowder/backends/training_data.py",
+      "mechanism": "_replay_sample_count: the replay mixing arithmetic",
+      "status": "ran",
+      "outcome": "64 primary rows at ratio 0.25 sample 16 of 32 replay rows"
+    },
+    {
+      "family_id": "training.adapter-continuation",
+      "maturity": "production",
+      "artifact": "src/chowder/adapter_guard.py",
+      "mechanism": "assert_adapter_is_live: refuse a loaded-but-inert adapter",
+      "status": "ran",
+      "outcome": "adapter key overlap 1/1 and verified nonzero lora_B: the adapter is live"
+    },
+    {
+      "family_id": "architecture.conditional-ffn",
+      "maturity": "research",
+      "artifact": "src/chowder/conditional_compute.py",
+      "mechanism": "ConditionalFFN + FixedSkipRouter: a token-level skip forward",
+      "status": "ran",
+      "outcome": "parity skip routed 2 of 4 tokens; the output keeps its shape"
+    },
+    {
+      "family_id": "architecture.hybrid-lm",
+      "maturity": "research",
+      "artifact": "src/chowder/experimental_hybrid_lm.py",
+      "mechanism": "HybridLanguageModel: a tiny mamba2+attention forward",
+      "status": "ran",
+      "outcome": "mamba2+attention hybrid forward produced logits (1, 4, 23)"
+    },
+    {
+      "family_id": "compression.low-rank-vocab",
+      "maturity": "research",
+      "artifact": "src/chowder/low_rank_vocab.py",
+      "mechanism": "factorize_svd: a rank-4 factorization of a 16x8 matrix",
+      "status": "ran",
+      "outcome": "rank-4 factorization of 16x8: energy 0.768, relative error 0.482"
+    },
+    {
+      "family_id": "compression.ptq",
+      "maturity": "research",
+      "artifact": "chowder_batch/exp_f_ptq_margin.py",
+      "mechanism": "compare_margin_signal: paired BF16 vs quantized margin deltas",
+      "status": "ran",
+      "outcome": "paired margin comparison over 2 tasks: mean shift +0.100, accuracy delta +0.000"
+    },
+    {
+      "family_id": "inference.retrieval",
+      "maturity": "research",
+      "artifact": "chowder_batch/exp_e_corpus.py",
+      "mechanism": "RetrievalSubsystem.retrieve(method='bm25') over a small corpus",
+      "status": "ran",
+      "outcome": "bm25 top-1 over a 4-document corpus: d1 in 0.073 ms"
+    },
+    {
+      "family_id": "inference.speculative",
+      "maturity": "research",
+      "artifact": "chowder_batch/exp_e_speculative.py",
+      "mechanism": "draft_from_prompt: longest-suffix n-gram lookup",
+      "status": "ran",
+      "outcome": "prompt-lookup ngram=3 drafted 6 tokens from an earlier occurrence"
+    },
+    {
+      "family_id": "inference.confidence-routing",
+      "maturity": "rejected",
+      "artifact": "chowder_batch/exp_e_confidence.py",
+      "mechanism": "validate_quantized_margin_shift: the fail-closed shift guard",
+      "status": "ran",
+      "outcome": "an unvalidated +0.200 margin shift blocks the small route (fails closed)"
+    },
+    {
+      "family_id": "runtime.harness-repair",
+      "maturity": "research",
+      "artifact": "src/chowder/runtime_eval.py",
+      "mechanism": "_run_task(harness='state_aware+recovery') on a scripted single-file repair",
+      "status": "ran",
+      "outcome": "state_aware+recovery single-file repair: green=True, reward=15.0, execution cost 7"
+    },
+    {
+      "family_id": "runtime.harness-evolution",
+      "maturity": "research",
+      "artifact": "src/chowder/harness_evolution.py",
+      "mechanism": "accept_candidate: the noise-band / cost acceptance gate",
+      "status": "ran",
+      "outcome": "the gate accepted +0.30 (cost +20%) and refused +0.01 inside the 0.05 noise band"
+    },
+    {
+      "family_id": "training.teacher-distillation",
+      "maturity": "research",
+      "artifact": "chowder_batch/exp_b_restricted_python.py",
+      "mechanism": "candidate_namespace: restricted execution of a candidate function",
+      "status": "ran",
+      "outcome": "the restricted interpreter executed the candidate's double(21) and returned 42"
+    }
+  ]
+}

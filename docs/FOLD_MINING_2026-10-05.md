@@ -94,6 +94,13 @@ landed files are not any family's mechanism:
   `test_the_measured_ptq_record_underwrites_the_quantization_label` reads the
   shipped exp_f record and asserts the flat-margin/collapsed-accuracy pattern
   the family's note is about.
+- `tests/test_growth_family_smoke_matrix.py` makes every family *runnable* on
+  evidence rather than on trust: one row per registered family invokes its
+  cheapest declared mechanism -- no weights, no GPU -- and the outcome is
+  recorded in `evidence/family_smoke_matrix.json`. A family with no row, or a
+  row pointing at an artifact the family does not declare, fails. Rows whose
+  mechanism needs torch are skipped and recorded as skipped where torch is not
+  installed, so the light CI leg cannot go silently green.
 
 Revert proof, measured: move `src/chowder/low_rank_vocab.py` and
 `evidence/exp_f_ptq_margin_qwen25_1p5b_int8sq_guided20_20260926.json` out of the
@@ -123,7 +130,11 @@ worker, and nothing in this mining pretends those hunks are current.
   `test_exp_e_pipeline`, `test_exp_e_run`, `test_exp_f_ptq_margin`,
   `test_kaggle_qat_lane`, `test_batch010_contract`, `test_exp_b_teacher_data`,
   `test_exp_d_hybrid_lm`).
-- Registry: 13 families, 73 declared artifacts, every path present.
+- Registry: 13 families, 74 declared artifacts, every path present.
+- Family smoke matrix: **13 of 13 rows ran** on this machine (torch present),
+  writing `evidence/family_smoke_matrix.json`; the file is **15 passed** with
+  its coverage and record guards. Under the light-CI import block (torch
+  refused): **10 passed, 5 skipped**, no collection errors.
 - `ruff check src tests` (the CI gate, `select = [E9, F63, F7, F82]`): clean.
 - Light-CI import surface, measured by re-running the mined suites with
   `torch`/`transformers`/`peft`/`datasets`/`modelopt`/`safetensors` refused at
@@ -140,3 +151,5 @@ worker, and nothing in this mining pretends those hunks are current.
   700.83s (`FULL_EXIT=0`). The same suite measured 2803 passed on `main`
   earlier in this worktree, so the delta is exactly the 163 mined tests
   plus the 7 new registry tests -- the mining changed no existing result.
+- Full suite with the smoke matrix: **2988 passed, 77 skipped, 0 failed** in
+  718.88s (`FULL_EXIT=0`) -- the 2973 above plus the 15 smoke tests.
