@@ -3,7 +3,8 @@
 
 Frozen with ``docs/quals/GEN2_PREREG_2026-09-17.md`` and its amendments
 ``GEN2_PREREG_AMENDMENT1/2/3_2026-09-18.md``; amended by
-``GEN2_PREREG_AMENDMENT15_2026-10-04.md`` (the declared-gate coupling, T21/T22).
+``GEN2_PREREG_AMENDMENT15_2026-10-04.md`` (the declared-gate coupling, T21/T22)
+and ``GEN2_PREREG_AMENDMENT16_2026-10-04.md`` (the settlement artifact pin, T23).
 Thresholds may not change after candidate results are visible. Reads the run's
 durable artifacts read-only and emits one verdict table over the branch rules.
 
@@ -60,6 +61,15 @@ policy -- the declaration owns the constraint, production owns the comparison,
 and this judge owns only the agreement between the two authorities. A run root
 with no such record is UNKNOWN, never a pass.
 
+Amendment 16 adds T23, over the same record and the accounting artifact T13
+already settles. The record pins the ledger digest of the artifact it settled
+(``CampaignRun.cost['accounting_digest']``), so T23 recomputes that digest with
+production's ``ledger_digest`` and requires the artifact's own settlement to
+agree with the recorded one. Without it a run the branch refused on its frozen
+envelope could be certified PROMOTED by editing one file in the run root: T13
+would settle the edited bytes and find them compliant, and nothing compared
+that answer with the refusal the run had recorded.
+
 Usage:
     python docs/gen2/judge_gen2.py <run_root>
 
@@ -107,7 +117,7 @@ from chowder.growth.retention import (  # noqa: E402
 from chowder.growth import certification as _certification  # noqa: E402
 from chowder.growth.certification import ArmError, MeasuredArm  # noqa: E402
 from chowder.growth.catalog import default_registry  # noqa: E402
-from chowder.growth.compute_cost import ComputeCost  # noqa: E402
+from chowder.growth.compute_cost import ComputeCost, ledger_digest  # noqa: E402
 from chowder.growth.metric_binding import MetricBinder  # noqa: E402
 from chowder.growth.statistics import compare  # noqa: E402
 from chowder.growth.training_binding import directory_digest  # noqa: E402
@@ -184,6 +194,16 @@ CONTAMINATED = {"KNOWN_CONTAMINATION", "POSSIBLE"}
 #: ``CampaignRun.to_dict`` at ``<state_root>/campaign-run.json``, the same
 #: directory this judge reads the arms from.
 RUN_RECORD_NAME = "campaign-run.json"
+
+#: Why the run's settlement could not be audited against the artifact it names
+#: (T23). All of these are one class of finding -- the record and the
+#: accounting artifact disagree, or one of the two is not there to compare --
+#: and each fails closed rather than certifying the half that happens to be
+#: readable.
+ACCOUNTING_ARTIFACT_MOVED = "ACCOUNTING_ARTIFACT_MOVED"
+ACCOUNTING_UNPINNED = "ACCOUNTING_UNPINNED"
+ACCOUNTING_UNSETTLED_BY_RUN = "ACCOUNTING_UNSETTLED_BY_RUN"
+SETTLEMENT_DISAGREES_WITH_RECORD = "SETTLEMENT_DISAGREES_WITH_RECORD"
 
 #: Production's declared-gate vocabulary, read off its owner rather than restated
 #: here. ``RetentionViolation.code`` answers NaN -> ``RETENTION_UNMEASURED`` and
@@ -534,6 +554,7 @@ def judge(run_root: Path) -> int:
     _declared_gate_agreement(verdict, arms, campaign, run_root=run_root)
     _contamination_gate(verdict, run_root, campaign)
     _settlement_gates(verdict, run_root, campaign)
+    _settlement_artifact_gate(verdict, run_root, campaign)
     _identity_gate(verdict, run_root)
 
     # Context that does not gate certification.
@@ -548,7 +569,8 @@ def judge(run_root: Path) -> int:
         "frozen policy",
         INFO,
         "docs/quals/GEN2_PREREG_2026-09-17.md + GEN2_PREREG_AMENDMENT1/2/3/4_2026-09-18.md "
-        "+ GEN2_PREREG_AMENDMENT15_2026-10-04.md",
+        "+ GEN2_PREREG_AMENDMENT15_2026-10-04.md "
+        "+ GEN2_PREREG_AMENDMENT16_2026-10-04.md",
     )
 
     final = branch_verdict(verdict)
@@ -1219,6 +1241,112 @@ def _settlement_gates(
             if not missing and not extra
             else f"declared but unaccounted: {missing}; accounted but undeclared: {extra}"
         ),
+    )
+
+
+def _settlement_artifact_gate(
+    verdict: Verdict, run_root: Path, campaign: CampaignManifest | None
+) -> None:
+    """The run's recorded settlement must be the settlement of the artifact it pinned.
+
+    T13 settles the accounting artifact against the declared ceilings, from
+    whatever bytes are in the run root. This gate closes the other half: that
+    the artifact *is* the one the run settled. ``CycleCostLedger.write``
+    (``chowder.growth.compute_cost``) stamps a digest over the document it
+    writes and ``CampaignRun.to_dict`` pins that digest in
+    ``cost.accounting_digest``, so an edit to the artifact -- a total, an entry,
+    a measurement flag -- moves a number the record already carries. Without
+    this gate a run the branch refused on its frozen envelope could be
+    certified PROMOTED by editing one file: the refusal lives in the record,
+    and T13 would recompute the settlement from the edited bytes and find them
+    compliant.
+
+    Fail-closed in every branch: an absent record, an absent pin, an absent
+    recorded settlement, an unreadable artifact or an unreadable campaign is
+    UNKNOWN (INCONCLUSIVE), and any disagreement between the record and the
+    artifact's own settlement is a FAIL. Nothing is reimplemented: the digest
+    is production's ``ledger_digest`` and the settlement is production's
+    ``settle_campaign`` -- the same two functions the run itself called.
+    """
+    requirement = (
+        "the run's recorded settlement is the settlement of the artifact it pinned"
+    )
+    record = _load_json(run_root / RUN_RECORD_NAME)
+    if record is None:
+        verdict.add(
+            "T23", requirement, UNKNOWN,
+            f"{RUN_RECORD_ABSENT}: {run_root / RUN_RECORD_NAME} is absent or "
+            "unreadable, so the artifact it settled cannot be identified",
+        )
+        return
+    document = _load_json(run_root / "cycle_compute_accounting.json")
+    if not isinstance(document, Mapping):
+        verdict.add(
+            "T23", requirement, UNKNOWN,
+            "cycle_compute_accounting.json missing or unreadable, so there is no "
+            "artifact to settle",
+        )
+        return
+    pinned = str((record.get("cost") or {}).get("accounting_digest") or "")
+    if not pinned:
+        verdict.add(
+            "T23", requirement, UNKNOWN,
+            f"{ACCOUNTING_UNPINNED}: the run recorded no accounting digest at all "
+            "(a run refused before settlement pins none), so no artifact can be "
+            "settled here",
+        )
+        return
+    recomputed = ledger_digest(document)
+    if recomputed != pinned:
+        verdict.add(
+            "T23", requirement, FAIL,
+            f"{ACCOUNTING_ARTIFACT_MOVED}: the accounting artifact hashes to "
+            f"{recomputed[:12]}, but the run pinned {pinned[:12]}; these are not the "
+            "bytes the run settled, so no settlement may be read out of them",
+        )
+        return
+    recorded = record.get("settlement")
+    if not isinstance(recorded, Mapping) or "budget_compliant" not in recorded:
+        verdict.add(
+            "T23", requirement, UNKNOWN,
+            f"{ACCOUNTING_UNSETTLED_BY_RUN}: the run pinned this artifact but "
+            "recorded no settlement verdict for it",
+        )
+        return
+    if campaign is None:
+        verdict.add(
+            "T23", requirement, UNKNOWN,
+            "the campaign manifest is unreadable, so the recorded settlement cannot "
+            "be recomputed",
+        )
+        return
+    totals = (document.get("totals") or {}).get("incremental")
+    try:
+        total = ComputeCost.from_dict(totals)
+    except (KeyError, TypeError, ValueError) as error:
+        verdict.add(
+            "T23", requirement, UNKNOWN,
+            f"incremental totals are not a readable ComputeCost: {error}",
+        )
+        return
+    settlement = settle_campaign(campaign, total=total)
+    if bool(recorded["budget_compliant"]) != settlement.compliant:
+        verdict.add(
+            "T23", requirement, FAIL,
+            f"{SETTLEMENT_DISAGREES_WITH_RECORD}: the run recorded "
+            f"budget_compliant={recorded['budget_compliant']!r} while the artifact "
+            "it pinned settles "
+            + (
+                "compliant"
+                if settlement.compliant
+                else "non-compliant; " + "; ".join(settlement.failure_reasons)
+            ),
+        )
+        return
+    verdict.add(
+        "T23", requirement, PASS,
+        f"the artifact is the one the run pinned ({pinned[:12]}) and it settles as "
+        f"the record says ({'compliant' if settlement.compliant else 'non-compliant'})",
     )
 
 
