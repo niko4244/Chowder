@@ -26,18 +26,28 @@ and measured records its maturity label cites.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hashlib
+import json
+from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Mapping
 
 __all__ = [
     "Maturity",
     "InterventionFamily",
     "InterventionFamilyRefusal",
+    "FamilySmokeRecord",
+    "FAMILY_SMOKE_RECORD_PATH",
+    "FAMILY_SMOKE_RECORD_VERSION",
     "family_registry",
     "family_from_id",
     "families_for_campaign",
     "assert_maturity_permits",
+    "assert_smoke_permits",
+    "family_smoke_declaration_digest",
+    "load_family_smoke_records",
+    "register_family",
 ]
 
 
@@ -576,13 +586,204 @@ def assert_maturity_permits(
     )
 
 
-def families_for_campaign(campaign_policy: Mapping[str, Any]) -> tuple[InterventionFamily, ...]:
+# --------------------------------------------------------------------------
+# runnability: the smoke record a proposal must stand on
+# --------------------------------------------------------------------------
+
+#: Version of ``evidence/family_smoke_matrix.json``. Bump it when the row
+#: schema changes; a row written under an older schema carries no declaration
+#: digest and therefore certifies nothing.
+FAMILY_SMOKE_RECORD_VERSION = 2
+
+#: The committed smoke record: one row per registered family, written by
+#: ``tests/test_growth_family_smoke_matrix.py``. Proposal paths consult it, so
+#: a family whose cheapest declared mechanism was never invoked -- or whose
+#: declaration changed after it was -- is refused rather than documented.
+#: Resolved from this checkout: an installed copy without the evidence
+#: directory simply proves nothing, and nothing here invents a record.
+FAMILY_SMOKE_RECORD_PATH = (
+    Path(__file__).resolve().parents[3] / "evidence" / "family_smoke_matrix.json"
+)
+
+#: The only row status that permits a proposal. ``skipped`` (a heavy
+#: dependency was absent), ``failed`` and anything unrecognised prove nothing:
+#: runnability is the evidence, not the intention.
+SMOKE_RUNNABLE_STATUS = "ran"
+
+
+@dataclass(frozen=True)
+class FamilySmokeRecord:
+    """One row of the smoke matrix: a family's cheapest mechanism, invoked.
+
+    ``declaration_digest`` binds the row to the exact family declaration it
+    was produced under (identity, maturity, failure class, declared
+    artifacts). A family whose declaration changed since the row was written
+    is stale, and a stale row is not runnability evidence.
+    """
+
+    family_id: str
+    artifact: str
+    mechanism: str
+    status: str
+    outcome: str = ""
+    declaration_digest: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "family_id": self.family_id,
+            "artifact": self.artifact,
+            "mechanism": self.mechanism,
+            "status": self.status,
+            "outcome": self.outcome,
+            "declaration_digest": self.declaration_digest,
+        }
+
+
+def family_smoke_declaration_digest(family: InterventionFamily) -> str:
+    """The declaration a smoke row binds: what the invoked mechanism proves.
+
+    Parameters, notes and priors are deliberately excluded -- they do not
+    change whether the declared artifact runs. Identity, maturity, failure
+    class and the artifact list do: a mechanism smoked under a different
+    label or a different artifact set has not been smoked for this family.
+    """
+    declaration = {
+        "family_id": family.family_id,
+        "maturity": family.maturity.value,
+        "target_failure_class": family.target_failure_class,
+        "implementation": list(family.implementation),
+    }
+    payload = json.dumps(declaration, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def load_family_smoke_records(
+    path: str | Path | None = None,
+) -> dict[str, FamilySmokeRecord]:
+    """Read the committed smoke record, or ``{}`` when no record exists.
+
+    No record means no family has proven runnability, so every proposal is
+    refused -- the same silence the maturity policy treats as a refusal. A
+    record that exists but cannot be read is a refusal, not an empty one:
+    an unreadable proof must not be mistaken for an absent claim.
+    """
+    record_path = Path(path) if path is not None else FAMILY_SMOKE_RECORD_PATH
+    if not record_path.is_file():
+        return {}
+    try:
+        document = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise InterventionFamilyRefusal(
+            f"the family smoke record {record_path} cannot be read: {exc}"
+        ) from exc
+    if not isinstance(document, Mapping):
+        raise InterventionFamilyRefusal(
+            f"the family smoke record {record_path} is not a JSON object"
+        )
+    rows = document.get("rows")
+    if not isinstance(rows, list):
+        raise InterventionFamilyRefusal(
+            f"the family smoke record {record_path} has no 'rows' list"
+        )
+    records: dict[str, FamilySmokeRecord] = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise InterventionFamilyRefusal(
+                f"the family smoke record {record_path} row {index} is not an object"
+            )
+        family_id = row.get("family_id")
+        if not isinstance(family_id, str) or not family_id.strip():
+            raise InterventionFamilyRefusal(
+                f"the family smoke record {record_path} row {index} names no family"
+            )
+        if family_id in records:
+            raise InterventionFamilyRefusal(
+                f"the family smoke record {record_path} has two rows for "
+                f"{family_id!r}; one family, one smoke"
+            )
+        records[family_id] = FamilySmokeRecord(
+            family_id=family_id,
+            artifact=str(row.get("artifact", "")),
+            mechanism=str(row.get("mechanism", "")),
+            status=str(row.get("status", "")),
+            outcome=str(row.get("outcome", "")),
+            declaration_digest=str(row.get("declaration_digest", "")),
+        )
+    return records
+
+
+def _smoke_refusal(
+    family: InterventionFamily, records: Mapping[str, FamilySmokeRecord]
+) -> str | None:
+    """Why this family has no runnable smoke row, or ``None`` when it has one."""
+    record = records.get(family.family_id)
+    if record is None:
+        return (
+            f"family {family.family_id!r} has no smoke record: its cheapest "
+            "declared mechanism has never been invoked and recorded"
+        )
+    if record.status != SMOKE_RUNNABLE_STATUS:
+        return (
+            f"family {family.family_id!r} smoke record status is "
+            f"{record.status!r}, not {SMOKE_RUNNABLE_STATUS!r}: a skipped or "
+            "failed smoke proves nothing"
+        )
+    if record.artifact not in family.implementation:
+        return (
+            f"family {family.family_id!r} smoke record points at "
+            f"{record.artifact!r}, which the family no longer declares"
+        )
+    expected = family_smoke_declaration_digest(family)
+    if record.declaration_digest != expected:
+        return (
+            f"family {family.family_id!r} smoke record is stale: it binds "
+            f"declaration {record.declaration_digest or '<none>'!r}, but the "
+            f"family's declaration now digests to {expected!r}"
+        )
+    return None
+
+
+def _effective_smoke_records(
+    smoke_records: Mapping[str, FamilySmokeRecord] | None,
+) -> Mapping[str, FamilySmokeRecord]:
+    if smoke_records is not None:
+        return smoke_records
+    merged = load_family_smoke_records()
+    merged.update(_EXTRA_SMOKE)
+    return merged
+
+
+def assert_smoke_permits(
+    family: InterventionFamily,
+    *,
+    smoke_records: Mapping[str, FamilySmokeRecord] | None = None,
+) -> None:
+    """The runnability gate: refuse a family with an absent or stale smoke row.
+
+    The record is the committed smoke matrix unless a caller injects one (the
+    tests do, so the gate's semantics are checkable without rewriting the
+    repository's evidence). A row registered with :func:`register_family`
+    travels with its family.
+    """
+    refusal = _smoke_refusal(family, _effective_smoke_records(smoke_records))
+    if refusal is not None:
+        raise InterventionFamilyRefusal(refusal)
+
+
+def families_for_campaign(
+    campaign_policy: Mapping[str, Any],
+    *,
+    smoke_records: Mapping[str, FamilySmokeRecord] | None = None,
+) -> tuple[InterventionFamily, ...]:
     """The families this campaign's policy may propose, in registry order.
 
-    A REJECTED family appears only when the policy explicitly reopens it, and
-    then only with a new hypothesis id attached -- the reopen mapping's value
-    is the hypothesis that justifies revisiting the rejection.
+    Two gates must both permit a family: maturity (who may propose it) and
+    runnability, proven by its smoke row. A REJECTED family appears only when
+    the policy explicitly reopens it, and then only with a new hypothesis id
+    attached -- and a reopened family still needs a runnable smoke record,
+    because reopening a rejection does not make its mechanism execute.
     """
+    records = _effective_smoke_records(smoke_records)
     permitted: list[InterventionFamily] = []
     for family in family_registry():
         try:
@@ -591,6 +792,7 @@ def families_for_campaign(campaign_policy: Mapping[str, Any]) -> tuple[Intervent
                 campaign_policy=campaign_policy,
                 family_id=family.family_id,
             )
+            assert_smoke_permits(family, smoke_records=records)
         except InterventionFamilyRefusal:
             continue
         permitted.append(family)
@@ -598,17 +800,43 @@ def families_for_campaign(campaign_policy: Mapping[str, Any]) -> tuple[Intervent
 
 
 _EXTRA_FAMILIES: list[InterventionFamily] = []
+_EXTRA_SMOKE: dict[str, FamilySmokeRecord] = {}
 
 
-def register_family(family: InterventionFamily) -> None:
+def register_family(
+    family: InterventionFamily,
+    *,
+    smoke_record: FamilySmokeRecord | None = None,
+) -> None:
     """Add an operator/research-declared family to the registry.
 
     The shipped registry covers the families this branch knows; new ones
     (including REJECTED verdicts from measured evidence) enter through here,
     and the frozen dataclass's own checks keep an undocumented label out.
+
+    ``smoke_record`` is the family's runnability proof. Registration without
+    one is allowed -- a family can be declared before its mechanism is smoked
+    -- but every proposal path refuses such a family until the proof arrives,
+    exactly like a shipped family whose committed row is missing. A supplied
+    record is validated at registration: a family cannot enter carrying a
+    proof that does not bind it.
     """
     if any(existing.family_id == family.family_id for existing in (*_REGISTRY, *_EXTRA_FAMILIES)):
         raise InterventionFamilyRefusal(
             f"family {family.family_id!r} is already registered"
         )
+    if smoke_record is not None:
+        if smoke_record.family_id != family.family_id:
+            raise InterventionFamilyRefusal(
+                f"smoke record for {smoke_record.family_id!r} cannot back "
+                f"family {family.family_id!r}"
+            )
+        refusal = _smoke_refusal(family, {family.family_id: smoke_record})
+        if refusal is not None:
+            raise InterventionFamilyRefusal(
+                f"refusing to register a family with an unusable smoke "
+                f"record: {refusal}"
+            )
     _EXTRA_FAMILIES.append(family)
+    if smoke_record is not None:
+        _EXTRA_SMOKE[family.family_id] = smoke_record

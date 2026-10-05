@@ -25,12 +25,14 @@ from chowder.growth.hypotheses import (
     hypothesis_candidate_brief,
 )
 from chowder.growth.interventions import (
+    FamilySmokeRecord,
     InterventionFamily,
     InterventionFamilyRefusal,
     Maturity,
     families_for_campaign,
     family_from_id,
     family_registry,
+    family_smoke_declaration_digest,
     register_family,
 )
 
@@ -110,11 +112,20 @@ def test_a_rejected_family_only_returns_through_an_explicit_reopen(tmp_path) -> 
         name="Measured and rejected",
         target_failure_class="vram-footprint",
         parameters={"rank": {"type": "int", "range": [1, 2]}},
+        implementation=("src/chowder/growth/interventions.py",),
         maturity=Maturity.REJECTED,
         basis=("a measured rejection lives here",),
     )
+    smoke = FamilySmokeRecord(
+        family_id=rejected.family_id,
+        artifact="src/chowder/growth/interventions.py",
+        mechanism="registration-path smoke",
+        status="ran",
+        outcome="registered with a runnable smoke record",
+        declaration_digest=family_smoke_declaration_digest(rejected),
+    )
     try:
-        register_family(rejected)
+        register_family(rejected, smoke_record=smoke)
         assert all(
             f.family_id != "compression.test-rejected"
             for f in families_for_campaign({})
@@ -133,6 +144,7 @@ def test_a_rejected_family_only_returns_through_an_explicit_reopen(tmp_path) -> 
         from chowder.growth import interventions as interventions_module
 
         interventions_module._EXTRA_FAMILIES.clear()
+        interventions_module._EXTRA_SMOKE.clear()
 
 
 # --------------------------------------------------------------------------

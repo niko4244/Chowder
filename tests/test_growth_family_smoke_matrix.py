@@ -13,7 +13,10 @@ The matrix is a coverage contract, not a performance test: a family with no
 smoke row, a row pointing at an artifact its family does not declare, or a
 mechanism that raises all fail here. Rows whose mechanism needs torch are
 skipped -- and recorded as skipped -- where torch is not installed, so the
-light CI leg stays honest instead of silently green.
+light CI leg stays honest instead of silently green. The record is
+load-bearing: ``families_for_campaign`` and ``generate_hypotheses`` refuse
+any family whose row is missing, skipped, or stale, so this file is where
+the right to propose is earned.
 
 The REJECTED family is represented by the guard it ships: the confidence
 router's fail-closed margin-shift check must still run and still refuse. The
@@ -32,7 +35,11 @@ from typing import Callable
 
 import pytest
 
-from chowder.growth.interventions import family_registry
+from chowder.growth.interventions import (
+    FAMILY_SMOKE_RECORD_VERSION,
+    family_registry,
+    family_smoke_declaration_digest,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORD_PATH = ROOT / "evidence" / "family_smoke_matrix.json"
@@ -217,9 +224,11 @@ def _smoke_retrieval(tmp: Path) -> str:
         sparse_epochs=1,
         embed=lambda texts: np.eye(len(docs))[: len(texts)],
     )
-    picked, latency_ms = subsystem.retrieve("alpha", method="bm25", k=1)
+    picked, _latency_ms = subsystem.retrieve("alpha", method="bm25", k=1)
     assert [doc["doc_id"] for doc in picked] == ["d1"], picked
-    return f"bm25 top-1 over a 4-document corpus: d1 in {latency_ms:.3f} ms"
+    # No latency in the recorded outcome: the record is committed evidence
+    # and must be byte-reproducible, and a timing would churn it every run.
+    return "bm25 top-1 over a 4-document corpus: d1 ranked first"
 
 
 def _smoke_speculative(tmp: Path) -> str:
@@ -420,6 +429,15 @@ def test_the_smoke_matrix_writes_its_record() -> None:
     families = {family.family_id: family for family in family_registry()}
     missing = sorted(set(families) - set(RECORDED))
     assert not missing, f"families with no recorded smoke outcome: {missing}"
+    unrunnable = sorted(
+        family_id for family_id, row in RECORDED.items() if row["status"] != "ran"
+    )
+    if unrunnable:
+        pytest.skip(
+            f"this environment could not run {len(unrunnable)} smoke row(s) "
+            f"({', '.join(unrunnable)}); the committed record is left untouched "
+            "so a skipped row can never certify runnability"
+        )
     rows = [
         {
             "family_id": case.family_id,
@@ -428,17 +446,22 @@ def test_the_smoke_matrix_writes_its_record() -> None:
             "mechanism": case.mechanism,
             "status": RECORDED[case.family_id]["status"],
             "outcome": RECORDED[case.family_id]["outcome"],
+            "declaration_digest": family_smoke_declaration_digest(
+                families[case.family_id]
+            ),
         }
         for case in SMOKE_MATRIX
     ]
     RECORD_PATH.write_text(
         json.dumps(
             {
+                "record_version": FAMILY_SMOKE_RECORD_VERSION,
                 "note": (
                     "Written by tests/test_growth_family_smoke_matrix.py: the cheapest "
                     "declared mechanism of every registered intervention family, invoked "
-                    "once and recorded. Rows with status 'skipped' need an optional heavy "
-                    "dependency (torch) that this machine did not have."
+                    "once and recorded. The declaration_digest binds the row to the "
+                    "family declaration it proves; the proposal gates refuse a row "
+                    "that is missing, skipped or stale."
                 ),
                 "family_count": len(rows),
                 "rows": rows,

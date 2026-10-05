@@ -100,7 +100,17 @@ landed files are not any family's mechanism:
   recorded in `evidence/family_smoke_matrix.json`. A family with no row, or a
   row pointing at an artifact the family does not declare, fails. Rows whose
   mechanism needs torch are skipped and recorded as skipped where torch is not
-  installed, so the light CI leg cannot go silently green.
+  installed, so the light CI leg cannot go silently green -- and the writer
+  refuses to overwrite the committed record when any row could not run, so a
+  skipped row can never be committed as runnable.
+- `families_for_campaign` and `generate_hypotheses` consult that record before
+  proposing: a family whose row is missing, still `skipped`, stale (its
+  declaration digest no longer matches the live family), or pointing at an
+  artifact it no longer declares is refused. Runnability gates proposals
+  instead of documenting them. `register_family` takes an operator-declared
+  family's smoke record and validates it at registration; a record that
+  exists but cannot be read is a refusal, not an empty record; a missing
+  record refuses everything.
 
 Revert proof, measured: move `src/chowder/low_rank_vocab.py` and
 `evidence/exp_f_ptq_margin_qwen25_1p5b_int8sq_guided20_20260926.json` out of the
@@ -132,9 +142,20 @@ worker, and nothing in this mining pretends those hunks are current.
   `test_exp_d_hybrid_lm`).
 - Registry: 13 families, 74 declared artifacts, every path present.
 - Family smoke matrix: **13 of 13 rows ran** on this machine (torch present),
-  writing `evidence/family_smoke_matrix.json`; the file is **15 passed** with
-  its coverage and record guards. Under the light-CI import block (torch
-  refused): **10 passed, 5 skipped**, no collection errors.
+  writing `evidence/family_smoke_matrix.json` (schema v2: every row carries a
+  declaration digest); the file is **15 passed** with its coverage and record
+  guards. Under the light-CI import block (torch refused): **10 passed,
+  5 skipped**, no collection errors.
+- Runnability gate: `tests/test_growth_family_runnability_gate.py` **15
+  passed** -- missing, skipped, stale and undeclared-artifact rows all refuse,
+  the registration seam carries a record, and the committed record binds every
+  shipped family. The registry + hypothesis suites stay green
+  (`test_growth_interventions_evidence_hypotheses.py` **26 passed**).
+- Under the light-CI import block (torch refused), gate + smoke + registry
+  suites together: **50 passed, 6 skipped** -- the smoke writer skips rather
+  than overwriting the committed record, and the record's 13 rows remain
+  `ran`, so the gate reads a whole proof even where this machine could not
+  re-run it.
 - `ruff check src tests` (the CI gate, `select = [E9, F63, F7, F82]`): clean.
 - Light-CI import surface, measured by re-running the mined suites with
   `torch`/`transformers`/`peft`/`datasets`/`modelopt`/`safetensors` refused at
@@ -153,3 +174,25 @@ worker, and nothing in this mining pretends those hunks are current.
   plus the 7 new registry tests -- the mining changed no existing result.
 - Full suite with the smoke matrix: **2988 passed, 77 skipped, 0 failed** in
   718.88s (`FULL_EXIT=0`) -- the 2973 above plus the 15 smoke tests.
+- Full suite with the runnability gate and the compute-backend tests:
+  **3035 passed, 77 skipped, 0 failed** in 592.13s (`FULL_EXIT=0`) -- the
+  2988 above plus the 15 gate tests and the 32
+  `test_growth_kaggle_compute_backend.py` tests.
+- Full suite with the production transport and the failed-record route:
+  **3063 passed, 77 skipped, 0 failed** in 690.60s (`FULL_EXIT=0`) -- the
+  3035 above plus the 10 kernel-side tests, the 14 CLI-transport tests
+  (quota/status parsing, staging, push/poll/pull, the generated entry's
+  install-failure record, an install failure surfaced end to end) and 4
+  backend tests (2 transport-failure paths, 2 failed-record classifications).
+  The run also caught the new transport tripping the `test_worker_env.py`
+  launch guard -- its only `sys.executable` reference is inside the entry
+  script it generates for the *remote* kernel -- so the kaggle CLI joins the
+  documented non-worker exemptions rather than passing a `worker_env` that
+  would claim the CLI is Chowder.
+- Full suite with the campaign wiring and the declared-input upload:
+  **3095 passed, 77 skipped, 0 failed** in 639.47s (`FULL_EXIT=0`) -- the 3063
+  above plus the 12 declared-input publisher tests, the 17 campaign-wiring
+  tests, 2 candidate-mount resolution tests and the echoed-commit evidence
+  test, with the growth-envelope admission rule extracted into
+  `training_binding.check_growth_envelope` so the local and remote executors
+  admit exactly the same recipes.
