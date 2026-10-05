@@ -264,7 +264,115 @@ re-measured, not a carried quotation. No path, digest or measurement was
 invented; the two inputs that would have needed new GPU measurement already had
 their measurements on disk.
 
-Starting the run is still a separate decision, and two facts are unchanged: no
+Starting the run is still a separate decision, and one fact is unchanged: no
 Gen-2 candidate evaluation exists (the run refused at the `candidate_evaluation`
-phase), and the target instrument's diagnostic metadata -- the judge's T1-T10 --
-still lives only in the historical Gen-1 driver.
+phase).
+
+### The T1-T10 instrument gap is closed on the producer side (2026-10-05)
+
+The last line above -- the instrument's diagnostic metadata living only in the
+historical Gen-1 driver -- was true when this report was written and is now
+false. `chowder.growth.generation_diagnostics` is that instrument in `src/`, and
+`evaluation_binding` already writes its `to_metadata()` into **every** row it
+emits, so the declaration's target set
+(`generation-diagnostics@gen2-response-surface-v1`, the exact id the frozen judge
+hardcodes) is measured with the metadata T1-T10 read.
+
+What was missing was a proof that the two sides cannot drift, so
+`tests/test_growth_gen2_instrument_wiring.py` now measures it through the
+judge's *own* reader rather than by inspection:
+
+- the committed declaration's target set is the judge's `INSTRUMENT_ID`;
+- a candidate arm carrying exactly what `to_metadata()` emits drives all ten
+  thresholds to a **decided** state -- `UNKNOWN` appears nowhere. That is the
+  claim: a real arm can now be scored by the instrument gates;
+- per-prompt identities are unambiguous and align across arms, because T2/T3 are
+  paired rules and an unalignable parent is `UNKNOWN`, not a pass;
+- every diagnostics key T6-T10 names is emitted, read out of the frozen judge's
+  source so a new gate without a producer key fails here.
+
+Both directions were verified by mutation: pointing the declaration at another
+benchmark fails the first test, and dropping `unclosed_think_rate` from
+`to_metadata()` fails the last two.
+
+### Adversarial audit of the promotion and certification paths (2026-10-05)
+
+`tests/test_growth_promotion_adversarial.py` flips exactly one artifact at a
+time across three layers -- the rule, certification over real bytes, and the
+frozen judge over a run root the run actually wrote. It found two real defects.
+
+**1. The parent side of every comparative gate was unfiltered.** `evaluate_promotion`
+required `gate_eligible` of a candidate row and read *any* parent row, while
+`retention_values` -- the filter the frozen judge also calls -- requires
+`parent_measured`. Measured: a parent row with origin `CARRIED_REFERENCE` or
+`UNMEASURED` and score 0.0 made target, protected, broad, calibration and
+reliability all read "ok" and the campaign **PROMOTED**. Every one of those
+gates is `candidate - parent`, so the parent enters the pass condition with a
+plus sign; `MetricBinder`'s docstring argued legacy parent rows "cannot inflate a
+candidate's gates", which is exactly backwards for a difference. It was
+reachable in production because the binder refused `CARRIED_REFERENCE` on the
+parent side but deliberately allowed `UNMEASURED`.
+
+Fixed with one owner: `_baseline()` in `promotion.py` applies the same
+`parent_measured` predicate to all five gates, `PARENT_EVIDENCE_ORIGINS` is now
+public so the binder and the rule read the same set, and the binder refuses both
+unearned origins with a named reason. This is a real semantic change, so the six
+tests in `tests/test_growth_measurement_provenance.py` that pinned the old
+stance were updated -- including one that was **passing vacuously**, asserting
+only `is not None` where a `BindingRefusal` also satisfies it. The shipped Gen-2
+campaign is unaffected: its parent arm's three rows are all `MEASURED_PARENT`.
+
+**2. A declared check no production caller could trip.** `evaluate_promotion`
+checks `actual_device_gpu_hours` against the device ceiling, but
+`decide_promotion_from_runs` neither accepted nor forwarded the parameter and
+`_adjudicate` never supplied it, so a device overrun visible only at settlement
+would have passed the promotion rule. The cycle now takes and forwards it and the
+runner supplies the settled figure, still only when the budget declared device
+time measurable.
+
+Every fix was checked by revert: neutering `_baseline` fails 10 audit tests,
+removing the broad-battery filter fails 2, reverting the binder fails the
+provenance suite, and dropping the parameter fails the reachability test.
+
+### `campaign_runner` split into per-decision controllers (2026-10-05)
+
+The 2,490-line module is now a 1,235-line facade over `campaign_controllers`:
+eight modules, one per decision the runner defers, in a strict layering.
+
+```
+readiness      452   may this campaign start? (17 checks, fail-closed)
+certification  378   the judged evidence set + branch protection
+evaluation     237   declared inputs -> the objects that measure
+planning       225   curriculum, recipes, the cycle
+promotion      195   identity, adjudication, the vetoes
+training        95   what an attempt cost and whether to trust it
+declared        95   the inputs a phase may read, and the refusals for the rest
+contracts       86   what a declaration is for; CampaignRunRefusal
+```
+
+Two constraints shaped the split and are worth stating, because both are the
+kind of thing a refactor breaks silently:
+
+* **`build_evaluator` and `build_executor` stayed in the facade.** Tests
+  monkeypatch `campaign_runner.default_runner` and
+  `campaign_runner.default_evaluator_factory`; a controller reading its own copy
+  of those globals would ignore the patch and every seam test would keep passing
+  while testing nothing. The controllers that need `build_evaluator` import it
+  *inside the function body*, which closes the import cycle at import time while
+  still reading the facade attribute at call time.
+* **`campaign_runner` re-exports all 47 names it always exported.** `cli`,
+  `growth_loop`, `campaign_prepare` and the test suite import nothing new, so
+  the refactor's blast radius is one module's internals.
+
+The call graph came out clean and acyclic -- `readiness` depends on everything,
+nothing depends on `readiness` -- which is what makes this a layering rather than
+a reshuffle. It also corrected one placement by refusing to guess: `_preflight_arms`
+went into `training` on the first pass and came back out, because the undefined
+`_EVIDENCE_ARM_SOURCES` it produced said what it actually guards is the judged
+evidence set, so it belongs in `certification`.
+
+**What this did not do.** `run_campaign` is still 607 lines carrying all 17
+phases inline. Splitting the module around it is the easier half of the problem;
+the function is the harder half and belongs in its own change, with the audit as
+the net. Landing both at once would have meant a 607-line control-flow move that
+no test could distinguish from a behaviour change until CI was already red.

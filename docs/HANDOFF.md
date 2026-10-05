@@ -14,6 +14,59 @@ for it:
   [`TEACHER_FABRIC_BRIEF.md`](TEACHER_FABRIC_BRIEF.md) — read it before
   any Teacher Fabric slice; it is the source of the non-negotiable rules.
 
+## Current state (updated 2026-10-05) — READ THE HEADLINE FIRST
+
+**Two live defects in the promotion path are fixed, and the T1–T10 instrument
+gap is closed on the producer side.** PR #208 (the judge/run coupling, T21/T22)
+is merged on `main` at `1f3e06f` with all six CI jobs green.
+
+- *The parent side of every comparative gate was unfiltered.* `evaluate_promotion`
+  filtered the candidate on `gate_eligible` and read any parent row, while
+  `retention_values` requires `parent_measured`. A parent row that nothing
+  measured, pinned at 0.0, made all five comparative gates read "ok" and the
+  campaign **PROMOTED**. Reachable in production, because the binder refused
+  `CARRIED_REFERENCE` but allowed `UNMEASURED`. Fixed with one owner
+  (`_baseline()` + a now-public `PARENT_EVIDENCE_ORIGINS`); the binder refuses
+  both unearned origins. The shipped Gen-2 campaign is unaffected — its parent
+  arm's three rows are all `MEASURED_PARENT` — but this **changed the meaning
+  of a promotion rule**, so treat it as a deliberate contract change, not a
+  refactor.
+- *A declared check nobody could trip.* `actual_device_gpu_hours` was checked
+  against the device ceiling and accepted by no production caller. The cycle
+  forwards it now; `_adjudicate` supplies the settled figure.
+- *T1–T10 can now decide.* `evaluation_binding` already writes
+  `GenerationDiagnostics.to_metadata()` into every row it emits, and the Gen-2
+  declaration's target set is the exact id the frozen judge hardcodes — but
+  nothing proved the two could not drift. `tests/test_growth_gen2_instrument_wiring.py`
+  measures it through the judge's own reader: all ten thresholds reach a decided
+  state, with no `UNKNOWN`.
+
+The audit itself is `tests/test_growth_promotion_adversarial.py` (rule,
+certification, and the judge over a real run root). Every fix was verified by
+reverting it. Details and measurements in
+[`AUTONOMY_05_REPORT.md`](AUTONOMY_05_REPORT.md).
+
+## Current state (updated 2026-10-05, controller split) — READ THE HEADLINE FIRST
+
+**`campaign_runner` is now a facade over eight per-decision controllers.** 2,490
+lines became a 1,235-line orchestrator plus `campaign_controllers/{readiness,
+certification, evaluation, planning, promotion, training, declared, contracts}.py`.
+The audit (PR #209) is the safety net and passes unchanged over the new import
+graph, alongside 855 growth tests.
+
+Two things a follow-up refactor here must not undo:
+
+- `build_evaluator`/`build_executor` must stay in the facade. Tests monkeypatch
+  `campaign_runner.default_runner` and `.default_evaluator_factory`; a controller
+  reading its own copy would ignore the patch and the seam tests would keep
+  passing while testing nothing.
+- `campaign_runner` re-exports all 47 names it always exported, so `cli`,
+  `growth_loop` and `campaign_prepare` import nothing new.
+
+**`run_campaign` is still 607 lines with all 17 phases inline** — that is the
+remaining half of this refactor and wants its own change. Details and
+measurements in [`AUTONOMY_05_REPORT.md`](AUTONOMY_05_REPORT.md).
+
 ## Current state (updated 2026-09-17, integrity re-adjudication) — READ THE HEADLINE FIRST
 
 **Gen-1's effective verdict is now INCONCLUSIVE (target repair validated);
