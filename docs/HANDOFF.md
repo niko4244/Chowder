@@ -239,10 +239,14 @@ same production worker with no adapter loaded, writing the declared
 `baseline_eval_report_path` with `MEASURED_PARENT` / gen0 rows, per-item scores
 and digest-bound artifacts at zero incremental campaign cost. What is still
 *reported*, not papered over: the target instrument's diagnostic metadata (the
-judge's T1-T10) is not in any run output, and the frozen judge never reads the
-run's own promotion decision, so a declared-gate rejection is invisible to it
-(`docs/gen2/JUDGE_AMENDMENT_PROPOSAL_T21.md` proposes the minimal amendment;
-nothing is implemented). Starting the run itself is still a separate decision.
+judge's T1-T10) is not in any run output. The judge gap PR #207 measured is now
+closed by `GEN2_PREREG_AMENDMENT15_2026-10-04.md`: the judge reads the run's
+own record (`campaign-run.json`) and recomputes the declared retention profile
+through production's evaluator, so it cannot certify a candidate the run
+refused — and the coupling immediately caught a sign error in the declared
+`max-regression` value (amendment 14 wrote `+0.0625`, which demanded a
+one-sixteenth *improvement*; it is now `-0.0625`, the frozen tolerance's
+permitted dip). Starting the run itself is still a separate decision.
 
 Earlier state for the record (2026-09-17): the first real Model N → N+1
 cycle executed and was recorded PROMOTED at the time

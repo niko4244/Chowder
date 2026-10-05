@@ -21,8 +21,9 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping, Sequence
 
 import pytest
 
@@ -347,6 +348,118 @@ def _contamination(*, benchmarks: dict | None = None, training_sources: dict | N
     }
 
 
+def _declared_profile(**overrides: Any) -> Any:
+    """The retention profile the declaration names, as the domain type.
+
+    ``overrides`` reach the fixture declaration itself, so a test can judge a
+    root against a profile it declares -- the absolute-floor case the run's own
+    refusal needs, which the shipped max-regression profile cannot produce on
+    arms the judge's own gates accept.
+    """
+    document = json.loads(FROZEN_CAMPAIGN_MANIFEST.read_text(encoding="utf-8"))
+    document.update(overrides)
+    return CampaignManifest.from_mapping(document, source="<judge-test>").retention_profile
+
+
+def _scores(slices: Sequence[BenchmarkRun]) -> dict[str, float]:
+    return {
+        run.benchmark_qualified_id: float(run.score)
+        for run in slices
+        if run.score is not None
+    }
+
+
+def _decision_for_run(
+    *,
+    candidate_slices: Sequence[BenchmarkRun],
+    parent_slices: Sequence[BenchmarkRun],
+    verdict: str,
+    reasons: Sequence[str] | None = None,
+    profile: Any = None,
+) -> dict:
+    """The decision a run would record for these arms, computed by production.
+
+    The record is not a fixture constant: the declared gate is evaluated here
+    through the same two production functions the promotion path calls, so a
+    judged root carries the decision a real run of it would carry. Tests that
+    need a *wrong* record pass ``reasons`` or ``verdict`` explicitly.
+    """
+    from chowder.growth.cycle import retention_values
+    from chowder.growth.promotion import BenchmarkResult
+    from chowder.growth.retention import evaluate_retention
+
+    profile = _declared_profile() if profile is None else profile
+    if profile is None:  # pragma: no cover - the shipped declaration declares one
+        return {"verdict": verdict, "reasons": list(reasons or []), "checks": {}}
+
+    def results(slices: Sequence[BenchmarkRun], origin: str) -> dict[str, BenchmarkResult]:
+        return {
+            qualified_id: BenchmarkResult(
+                benchmark_qualified_id=qualified_id, score=score, measurement_origin=origin
+            )
+            for qualified_id, score in _scores(slices).items()
+        }
+
+    violations = evaluate_retention(
+        profile,
+        parent_values=retention_values(
+            profile, results(parent_slices, MEASURED_PARENT), candidate_side=False
+        ),
+        candidate_values=retention_values(
+            profile, results(candidate_slices, MEASURED_THIS_GENERATION), candidate_side=True
+        ),
+    )
+    return {
+        # A run that recorded breaches was not promoted: the verdict follows the
+        # gate rather than the caller's default, so a fixture root can never
+        # carry the self-contradicting record T21 refuses.
+        "verdict": "REJECTED" if violations else verdict,
+        "reasons": list(reasons) if reasons is not None else [v.reason for v in violations],
+        "checks": {},
+    }
+
+
+def _run_record(
+    *,
+    candidate_slices: Sequence[BenchmarkRun],
+    parent_slices: Sequence[BenchmarkRun],
+    verdict: str = "PROMOTED",
+    reasons: Sequence[str] | None = None,
+    cycle_id: str | None = None,
+    profile: Any = None,
+    **campaign_overrides: Any,
+) -> dict:
+    """The durable run record production writes beside the evidence it certifies."""
+    document = json.loads(FROZEN_CAMPAIGN_MANIFEST.read_text(encoding="utf-8"))
+    document.update(campaign_overrides)
+    decision = _decision_for_run(
+        candidate_slices=candidate_slices,
+        parent_slices=parent_slices,
+        verdict=verdict,
+        reasons=reasons,
+        profile=profile,
+    )
+    return {
+        "cycle_id": cycle_id or document["cycle_id"],
+        "parent_version": document["parent_version"],
+        "candidate_version": "gen2",
+        # Production records the decision's own verdict here
+        # (``CampaignRun.verdict`` is ``decision.verdict``), so the two can
+        # never contradict each other.
+        "verdict": decision["verdict"],
+        "phases": [],
+        "admission": [],
+        "cost": {},
+        "settlement": {},
+        "ceiling_enforcement": {},
+        "certification": {},
+        "selection": {},
+        "promotion": {"decision": decision},
+        "record_path": "",
+        "attempts": [],
+    }
+
+
 def _run_root(
     tmp_path: Path,
     *,
@@ -367,6 +480,12 @@ def _run_root(
     artifact_ref: str | None = None,
     chosen: bool = True,
     contamination_pin: Path | str | None = None,
+    run_record: dict | None = None,
+    write_run_record: bool = True,
+    run_verdict: str = "PROMOTED",
+    run_reasons: Sequence[str] | None = None,
+    record_cycle_id: str | None = None,
+    campaign_overrides: dict | None = None,
 ) -> Path:
     root = tmp_path / "run"
     root.mkdir(parents=True, exist_ok=True)
@@ -438,7 +557,25 @@ def _run_root(
     )
     # The judged contamination evidence is the artifact the campaign pins, so the
     # fixture declares the pin it used -- as the frozen manifest does in production.
-    _pin_campaign(tmp_path, root, contamination_pin or pinned)
+    _pin_campaign(tmp_path, root, contamination_pin or pinned, **(campaign_overrides or {}))
+
+    # The run's own record of its decision (amendment 15), written beside the
+    # evidence and carrying the decision production computes for these arms.
+    if write_run_record:
+        record = (
+            run_record
+            if run_record is not None
+            else _run_record(
+                candidate_slices=candidate_slices,
+                parent_slices=parent_slices if parent_arm else (),
+                verdict=run_verdict,
+                reasons=run_reasons,
+                cycle_id=record_cycle_id,
+                profile=_declared_profile(**(campaign_overrides or {})),
+                **(campaign_overrides or {}),
+            )
+        )
+        (root / "campaign-run.json").write_text(json.dumps(record), encoding="utf-8")
 
     return root
 
@@ -448,7 +585,9 @@ def _run_root(
 # --------------------------------------------------------------------------
 
 
-def _pin_campaign(tmp_path: Path, root: Path, contamination: Path | str) -> Path:
+def _pin_campaign(
+    tmp_path: Path, root: Path, contamination: Path | str, **overrides: Any
+) -> Path:
     """The frozen manifest, with its contamination pin pointed at this root.
 
     The judge reads the contamination artifact the *campaign* pins, so a fixture
@@ -458,10 +597,231 @@ def _pin_campaign(tmp_path: Path, root: Path, contamination: Path | str) -> Path
     """
     document = json.loads(FROZEN_CAMPAIGN_MANIFEST.read_text(encoding="utf-8"))
     document["contamination_manifest_path"] = str(contamination)
+    document.update(overrides)
     path = tmp_path / "judge-campaign.json"
     path.write_text(json.dumps(document), encoding="utf-8")
     judge_gen2.CAMPAIGN_MANIFEST = path
     return path
+
+
+# --------------------------------------------------------------------------
+# the judge is coupled to the run's own decision (prereg amendment 15)
+# --------------------------------------------------------------------------
+
+
+def test_the_judges_gate_vocabulary_is_productions_own():
+    """``RETENTION_CODES`` is read off ``RetentionViolation.code``, and pinned.
+
+    The coupling gate classifies a recorded reason by its production code
+    prefix. If a new violation shape were added to ``retention.py``, the
+    judge's set must grow with it -- otherwise a new code would classify as
+    "a declared gate" by prefix while never being recognised here.
+    """
+    from chowder.growth.retention import (
+        RetentionConstraint,
+        RetentionProfile,
+        RetentionViolation,
+        evaluate_retention,
+    )
+
+    assert judge_gen2.RETENTION_CODES == {
+        "RETENTION_UNMEASURED",
+        "RETENTION_FLOOR",
+        "RETENTION_REGRESSION",
+    }
+    # And the codes a real evaluation emits are inside that set.
+    constraint = RetentionConstraint(
+        dimension="d", kind="max-regression", value=0.0, benchmark=MATH
+    )
+    profile = RetentionProfile(profile_id="p", constraints=(constraint,))
+    emitted = {
+        evaluate_retention(profile, parent_values={}, candidate_values={})[0].code,
+        evaluate_retention(profile, parent_values={"d": 0.5}, candidate_values={})[0].code,
+        evaluate_retention(profile, parent_values={"d": 0.5}, candidate_values={"d": 0.4})[
+            0
+        ].code,
+        evaluate_retention(
+            RetentionProfile(
+                profile_id="p",
+                constraints=(
+                    RetentionConstraint(
+                        dimension="d", kind="absolute-floor", value=0.9, benchmark=MATH
+                    ),
+                ),
+            ),
+            parent_values={"d": 0.5},
+            candidate_values={"d": 0.4},
+        )[0].code,
+    }
+    assert emitted == judge_gen2.RETENTION_CODES
+    # The probe construction reads the same property, so it cannot drift either.
+    probe = RetentionViolation(
+        dimension="d", constraint=constraint, measured=float("nan"), detail=""
+    )
+    assert probe.code == "RETENTION_UNMEASURED"
+
+
+#: An absolute floor above the candidate's protected level: the one declared
+#: shape the *predeclared* rule has no check for (it is relative to the
+#: parent), which is what makes a refusal attributable to the declared profile
+#: alone -- the same profile the e2e agreement test runs a real campaign with.
+ABSOLUTE_FLOOR_PROFILE = {
+    "profile_id": "gen2-protection",
+    "constraints": [
+        {
+            "dimension": "math500",
+            "kind": "absolute-floor",
+            "value": 0.5625,
+            "benchmark": MATH,
+        }
+    ],
+}
+
+
+def test_a_run_refused_on_a_declared_gate_cannot_be_certified(tmp_path: Path) -> None:
+    """The split-brain closer: the run's refusal is the judge's business.
+
+    Every gate the judge owns passes on this root -- the protected slices, both
+    regressions, the identity chain, settlement, recipes. The declared profile
+    is an absolute floor the candidate is under, and the run refused on it. The
+    judge must refuse too, and the recomputation (T22) agrees with the record,
+    so this is a coupling failure rather than a disagreement.
+    """
+    root = _run_root(tmp_path, campaign_overrides={"retention_profile": ABSOLUTE_FLOOR_PROFILE})
+    code, output = _judge_output(root)
+
+    record = json.loads((root / "campaign-run.json").read_text(encoding="utf-8"))
+    assert record["verdict"] == "REJECTED"
+    assert any(
+        "RETENTION_FLOOR" in str(reason)
+        for reason in record["promotion"]["decision"]["reasons"]
+    ), record["promotion"]["decision"]["reasons"]
+    assert code == 1, f"a run-refused candidate was certified:\n{output}"
+    assert "VERDICT: REJECTED" in output
+    assert "DECLARED_GATE_REJECTED_RUN" in output
+    # The two authorities computed the same thing, so this is not a
+    # disagreement: T22 records the agreement while T21 refuses.
+    assert "recorded ['RETENTION_FLOOR'] == recomputed" in output
+
+    # The refusal is not thin evidence in disguise: this root's instrument
+    # gates are all decided, which is the case the original gap predicted
+    # would certify. Only T21 fails.
+    unknown_instruments = [
+        line.split()[0]
+        for line in output.splitlines()
+        if re.match(r"^T(?:[1-9]|10)\b", line) and " UNKNOWN " in line
+    ]
+    assert unknown_instruments == [], output
+    failed = [
+        line.split()[0]
+        for line in output.splitlines()
+        if re.match(r"^T\d+\b", line) and " FAIL " in line
+    ]
+    assert failed == ["T21"], output
+
+
+def test_a_declared_gate_the_declaration_does_not_name_refuses(tmp_path: Path) -> None:
+    """A gate outside the declaration cannot be what certified or refused a run."""
+    root = _run_root(
+        tmp_path,
+        run_record=_run_record(
+            candidate_slices=(),
+            parent_slices=(),
+            verdict="REJECTED",
+            reasons=["RETENTION_FLOOR: candidate 0.5 is below the absolute floor 0.5625"],
+        ),
+    )
+    # A declaration that names no profile at all: the run breached a gate the
+    # campaign never declared.
+    document = json.loads(FROZEN_CAMPAIGN_MANIFEST.read_text(encoding="utf-8"))
+    document.pop("retention_profile", None)
+    path = tmp_path / "no-profile.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    original = judge_gen2.CAMPAIGN_MANIFEST
+    judge_gen2.CAMPAIGN_MANIFEST = path
+    try:
+        code, output = _judge_output(root)
+    finally:
+        judge_gen2.CAMPAIGN_MANIFEST = original
+
+    assert code == 1, f"an undeclared gate certified:\n{output}"
+    assert "UNDECLARED_GATE_IN_RUN" in output
+
+
+def test_a_promoted_record_carrying_a_declared_gate_breach_refuses(tmp_path: Path) -> None:
+    """A record that promotes a candidate it also recorded breaching is refused."""
+    root = _run_root(tmp_path)
+    record_path = root / "campaign-run.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["verdict"] = "PROMOTED"
+    record["promotion"]["decision"]["reasons"] = [
+        "RETENTION_REGRESSION: regression -0.2 on 'math500' breaches the declared "
+        "max-regression -0.0625"
+    ]
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    code, output = _judge_output(root)
+
+    assert code == 1, f"a self-contradicting record certified:\n{output}"
+    assert "UNDECLARED_GATE_IN_RUN" in output
+
+
+def test_the_recomputation_and_the_record_must_agree(tmp_path: Path) -> None:
+    """The judge re-derives the declared gate and compares, never assumes.
+
+    This root's candidate regresses 0.25 on a protected slice, far past the
+    declared -0.0625 budget, and the record claims a clean promotion. The run's
+    own answer and the judge's recomputation through production's evaluator
+    disagree, so the gate refuses rather than picking a winner.
+    """
+    root = _run_root(
+        tmp_path,
+        candidate_slices=(_slice_run(MATH, "gen2", MEASURED_THIS_GENERATION, 0.0),),
+        run_record=_run_record(
+            candidate_slices=(_slice_run(MATH, "gen2", MEASURED_THIS_GENERATION, 0.0),),
+            parent_slices=(_slice_run(MATH, "gen1", MEASURED_PARENT, 0.25),),
+            verdict="PROMOTED",
+            reasons=[],
+        ),
+    )
+    code, output = _judge_output(root)
+
+    assert code == 1, f"a disagreement between the two authorities certified:\n{output}"
+    assert "RETENTION_RECOMPUTATION_DISAGREES" in output
+
+
+def test_a_run_root_without_the_runs_record_cannot_certify(tmp_path: Path) -> None:
+    """Fail-closed: no record is UNKNOWN, never an assumed pass."""
+    root = _run_root(tmp_path, write_run_record=False)
+    code, output = _judge_output(root)
+
+    assert code == 1, f"a root with no run record certified:\n{output}"
+    assert "RUN_RECORD_ABSENT" in output
+    assert "VERDICT: INCONCLUSIVE" in output
+
+
+def test_a_record_from_another_cycle_is_not_this_runs_decision(tmp_path: Path) -> None:
+    """A stale record left in the root is a different campaign's decision."""
+    root = _run_root(
+        tmp_path,
+        candidate_slices=(_slice_run(MATH, "gen2", MEASURED_THIS_GENERATION, 0.0),),
+        parent_slices=(_slice_run(MATH, "gen1", MEASURED_PARENT, 0.0),),
+        record_cycle_id="gen2-some-other-cycle",
+    )
+    code, output = _judge_output(root)
+
+    assert code == 1, f"another cycle's record was read as this run's:\n{output}"
+    assert "RUN_RECORD_WRONG_CYCLE" in output
+
+
+def test_a_clean_run_couples_too(tmp_path: Path) -> None:
+    """The ordinary case still certifies: coupling is not a blanket refusal."""
+    root = _run_root(tmp_path)
+    code, output = _judge_output(root)
+
+    assert code == 0, f"a clean run stopped certifying:\n{output}"
+    assert "DECLARED_GATE_REJECTED_RUN" not in output
+    assert "RETENTION_RECOMPUTATION_DISAGREES" not in output
 
 
 def _judge_output(root: Path) -> tuple[int, str]:
@@ -912,14 +1272,30 @@ def test_an_absent_parent_arm_stays_inconclusive_unless_the_ancestor_resolves_it
     )
     # Gen1's protected measurement is unresolved: the arm carries the target
     # instrument (so the paired rule is applicable) but no mini-slice rows.
-    # Resolved by the trusted ancestor: promotion stays possible.
+    # Resolved by the trusted ancestor: the judge''s own branch rule passes T17.
+    # The declared retention profile is a second authority over the same
+    # question, and it cannot read a gen1 measurement that does not exist, so
+    # the run this root records would have been refused with
+    # RETENTION_UNMEASURED. Both facts are asserted: T17 resolves through gen0
+    # (the judge rule under test), and the coupling gate refuses the overall
+    # verdict because the run refused the candidate (amendment 15).
     resolved = _run_root(
         tmp_path / "resolved",
         parent_slices=(),
         ancestor_slices=good_ancestor,
         candidate_slices=holding,
     )
-    assert judge_gen2.judge(resolved) == 0
+    code, output = _judge_output(resolved)
+    assert "T17" in output and "immediate-parent (gen1) protected regression" in output
+    assert "PASS" in output
+    assert code == 1
+    assert "VERDICT: REJECTED" in output
+    assert "DECLARED_GATE_REJECTED_RUN" in output
+    record = json.loads((resolved / "campaign-run.json").read_text(encoding="utf-8"))
+    assert any(
+        "RETENTION_UNMEASURED" in str(reason)
+        for reason in record["promotion"]["decision"]["reasons"]
+    ), record["promotion"]["decision"]["reasons"]
 
     # Not resolved: the candidate regressed against gen0 -> hard refusal.
     regressed = (
@@ -933,6 +1309,30 @@ def test_an_absent_parent_arm_stays_inconclusive_unless_the_ancestor_resolves_it
         candidate_slices=regressed,
     )
     assert judge_gen2.judge(unresolved) == 1
+
+
+def test_a_run_root_whose_run_refused_before_adjudication_stays_inconclusive(
+    tmp_path: Path,
+) -> None:
+    """A run that refused at readiness has no promotion decision to audit.
+
+    ``run_campaign`` writes a record with ``promotion: null`` when it refuses
+    before adjudicating (an unmeasured declared gate is refused, not assumed),
+    and the judge must read that as UNKNOWN -- not as an absent breach.
+    """
+    root = _run_root(tmp_path)
+    record_path = root / "campaign-run.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["verdict"] = "REFUSED"
+    record["promotion"] = None
+    record["refused_by"] = "candidate_evaluation"
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    code, output = _judge_output(root)
+
+    assert code == 1
+    assert "RUN_DECISION_ABSENT" in output
+    assert "VERDICT: INCONCLUSIVE" in output
 
 
 def test_a_missing_ancestor_arm_blocks_branch_protection(tmp_path: Path) -> None:

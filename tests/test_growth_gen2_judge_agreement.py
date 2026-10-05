@@ -2,34 +2,42 @@
 
 The stop-gate audit's open product question, measured instead of assumed: a
 campaign whose manifest declares a retention gate, whose candidate breaches
-it. The run REJECTS the promotion with the gate's machine code; the frozen
-``docs/gen2/judge_gen2.py`` then reads the same run root -- the runner writes
-exactly the artifacts the judge reads, so one run root is both the run's
-output and the judge's input.
+it. The run REJECTS the promotion with the gate's machine code; the judge then
+reads the same run root -- the runner writes exactly the artifacts the judge
+reads, so one run root is both the run's output and the judge's input.
 
-Attribution rule for this measurement: the judge is pointed at the same
-declaration the run used (the fixture manifest), which is the control the
-judge's own test file uses. Judged against the *real* frozen manifest
-instead, the root additionally fails bookkeeping the fixture cannot carry
-(the real base/adapter digests, the real recipe ids, the real contamination
-pin) -- that is fixture-vs-deployment mismatch, noted in
-``docs/AUTONOMY_05_REPORT.md``, not a fact about the judge's gates.
+This is the measurement that motivated prereg amendment 15, and it now pins the
+*coupled* behaviour. Before the amendment the judge returned INCONCLUSIVE on
+this root with every gate it owns PASSING -- a certification path over a
+candidate the run had refused -- because it read neither the run's decision nor
+the declared profile. After it, the same root returns REJECTED, and the refusal
+is attributable to a named gate rather than to an unknown instrument arm:
 
-The measured fact, refined by running it: the judge returns INCONCLUSIVE on
-the run-rejected root, but every protection, identity, settlement and recipe
-gate it owns PASSES on the very evidence the run rejected -- the declared
-gate the run enforced does not appear anywhere in the judge's record. The
-INCONCLUSIVE comes only from the instrument gates being UNKNOWN on a
-synthetic candidate arm.
+* the run REJECTED with `RETENTION_FLOOR: candidate 0.5 is below the absolute
+  floor 0.5625`, and that reason is in the record the judge reads;
+* T21 refuses: a candidate the run refused on a declared gate cannot be
+  certified here, because this judge audits no declared gate;
+* T22 passes: the judge recomputes the same declared constraint through
+  production's own `evaluate_retention` + `retention_values` and reaches the
+  same code, so the two authorities agree rather than merely being related;
+* the judge's own gates still PASS on the same evidence -- the protected slice,
+  both regressions, the trusted-ancestor protection, the identity chain,
+  settlement, recipes and the judged contamination evidence. The coupling is
+  what changed, not the branch rules.
 
-No judge changes: this test records the measured fact and pins the
-structural reason behind it.
+The attribution rule is unchanged: the judge is pointed at the same declaration
+the run used (the fixture manifest), which is the control the judge's own test
+file uses. Judged against the *real* declaration instead, the root additionally
+fails bookkeeping the fixture cannot carry (the real base/adapter digests, the
+real recipe ids, the real contamination pin) -- fixture-vs-deployment mismatch,
+noted in ``docs/AUTONOMY_05_REPORT.md``, not a fact about the judge's gates.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import re
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -67,7 +75,7 @@ RETENTION_PROFILE = {
 
 
 def _judge_rows_and_verdict(run_root: Path, manifest_path: Path) -> tuple[list[tuple], str, str, int]:
-    """Run the frozen judge and return (threshold rows, verdict, detail, exit).
+    """Run the judge and return (threshold rows, verdict, detail, exit).
 
     The judge's campaign global points at the declaration the run used, then
     is restored -- the same fixture control ``test_growth_gen2_judge.py``
@@ -102,15 +110,16 @@ def _judge_rows_and_verdict(run_root: Path, manifest_path: Path) -> tuple[list[t
     return rows, final, detail, exit_code
 
 
-def test_a_run_rejected_by_the_declared_gate_through_the_frozen_judge(
+def test_a_run_rejected_by_the_declared_gate_is_refused_by_the_judge_too(
     tmp_path, monkeypatch
 ) -> None:  # noqa: ANN001
-    """The measured fact, recorded.
+    """The measured fact, and the coupling that now enforces it.
 
     The fixture candidate holds 0.5 on the protected slice -- exactly the
-    parent's level and the trusted ancestor's, so every gate the frozen
-    judge owns passes on the same evidence -- while the declared floor
-    0.5625 is the only gate the run's promotion sees breached.
+    parent's level and the trusted ancestor's, so every gate the judge owns
+    passes on the same evidence -- while the declared floor 0.5625 is the only
+    gate the run's promotion sees breached. One run root, two authorities, one
+    verdict.
     """
     manifest, runner, _document = _campaign(tmp_path, retention_profile=RETENTION_PROFILE)
     _patch_seams(monkeypatch, runner)
@@ -128,19 +137,29 @@ def test_a_run_rejected_by_the_declared_gate_through_the_frozen_judge(
     assert retention_reasons, promotion["reasons"]
     assert "absolute floor 0.5625" in retention_reasons[0]
 
-    # Fact 2 -- the frozen judge reads the same run root, against the same
-    # declaration. Recorded as measured, then pinned so a judge change
-    # re-measures loudly.
+    run_root = Path(manifest.state_root)
+    # The record's *name* is production's (``CampaignRun`` writes
+    # ``campaign-run.json``); it is spelled out here rather than read from the
+    # judge, so that a judge without the coupling fails on behaviour instead of
+    # on a missing attribute.
+    record = json.loads((run_root / "campaign-run.json").read_text(encoding="utf-8"))
+    assert record["verdict"] == "REJECTED"
+    assert any(
+        "RETENTION_FLOOR" in str(reason)
+        for reason in record["promotion"]["decision"]["reasons"]
+    ), record["promotion"]["decision"]["reasons"]
+
+    # Fact 2 -- the judge reads the same run root, against the same declaration.
     rows, final, detail, exit_code = _judge_rows_and_verdict(
-        Path(manifest.state_root), tmp_path / "inputs" / "campaign.json"
+        run_root, tmp_path / "inputs" / "campaign.json"
     )
     print(f"MEASURED: run REJECTED via the declared gate; judge verdict {final} ({detail})")
     for row in rows:
         print(f"MEASURED row: {row}")
 
-    # The judge's own protection gates PASS on the very evidence the run
-    # rejected: the protected slice, the candidate-vs-parent regression, the
-    # trusted-ancestor protection, the identity chain, settlement, recipes.
+    # The judge's own branch rules still PASS on the very evidence the run
+    # rejected -- what changed is that a refusal by the other authority is now
+    # a refusal here too.
     passing_checks = (row[1] for row in rows if row[2] == "PASS")
     joined = " | ".join(passing_checks)
     assert "candidate math500@2024-04 measured + protocol-exact" in joined
@@ -151,28 +170,29 @@ def test_a_run_rejected_by_the_declared_gate_through_the_frozen_judge(
     assert "all recipes accounted" in joined
     assert "judged contamination evidence is the pinned artifact" in joined
 
-    # The gate the run enforced is absent from the judge's record: no row
-    # carries the retention vocabulary or any absolute-floor verdict.
-    assert not any("RETENTION_" in str(cell) for row in rows for cell in row)
-    assert not any("absolute floor" in str(row[3]) or "0.5625" in str(row[3]) for row in rows)
-
-    # The structural reason, pinned statically: the frozen judge never reads
-    # the run's decision or the declared profile.
-    judge_source = (GEN2 / "judge_gen2.py").read_text(encoding="utf-8")
-    assert "retention_profile" not in judge_source
-    assert "RETENTION_" not in judge_source
-
-    # Fact 3 -- the recorded verdict: INCONCLUSIVE solely because the
-    # instrument gates (T1-T10, plus the fixture's sourceless contamination
-    # T12 row) are UNKNOWN on the synthetic candidate -- every protection,
-    # identity, settlement and recipe gate the judge owns PASSES on the very
-    # evidence the run rejected. With a real Gen-2 candidate arm carrying the
-    # instrument metadata, certification would be reachable on this root.
-    assert final == "INCONCLUSIVE", (
-        f"the frozen judge's verdict on a run-rejected root changed: {final} ({detail})"
+    # Fact 3, asserted first and in the sharpest form: the verdict itself. On a
+    # judge without the coupling this is where the test fails, with the
+    # measured gap restated -- INCONCLUSIVE over a root the run refused.
+    assert final == "REJECTED", (
+        f"the judge's verdict on a run-rejected root changed: {final} ({detail})"
     )
     assert exit_code == 1
+
+    # The gate the run enforced is now in the judge's own record, named.
+    coupling = {row[0]: row for row in rows if row[0] in {"T21", "T22"}}
+    assert set(coupling) == {"T21", "T22"}, sorted(coupling)
+    assert coupling["T21"][2] == "FAIL"
+    assert "DECLARED_GATE_REJECTED_RUN" in coupling["T21"][3]
+    assert "RETENTION_FLOOR" in coupling["T21"][3]
+    # The recomputation agrees: production's own evaluator, on the arms the
+    # judge already audited, reaches the same code the run recorded.
+    assert coupling["T22"][2] == "PASS"
+    assert "== recomputed" in coupling["T22"][3]
+    assert "RETENTION_FLOOR" in coupling["T22"][3]
+
     unknown_rows = [row for row in rows if row[2] == "UNKNOWN"]
+    # Only this fixture's synthetic candidate arm leaves the instrument gates
+    # undecided; on a real Gen-2 arm they pass, and T21 is what refuses.
     assert unknown_rows and all(
         row[0] in {"T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T12"}
         for row in unknown_rows
