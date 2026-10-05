@@ -395,6 +395,13 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
     plan.add_argument("manifest", help="Path to the campaign manifest JSON")
     plan.set_defaults(func=_growth_campaign_plan)
 
+    preflight = campaign_targets.add_parser(
+        "preflight",
+        help="Show the declared backend's panel, estimates and refusals, no compute",
+    )
+    preflight.add_argument("manifest", help="Path to the campaign manifest JSON")
+    preflight.set_defaults(func=_growth_campaign_preflight)
+
     readiness = campaign_targets.add_parser(
         "readiness",
         help="Check every pre-compute prerequisite without starting compute",
@@ -646,6 +653,38 @@ def _growth_campaign_plan(args: argparse.Namespace) -> int:
             "plan": plan.to_dict(),
         }
     )
+
+
+def _growth_campaign_preflight(args: argparse.Namespace) -> int:
+    """Print what the declared backend can see, before anything is spent.
+
+    The declaration, the panel, the capability matrix, each planned recipe's
+    memory estimate and any refusal -- all without starting compute. A refusal
+    the runner enforces exits non-zero (``stops_the_run``); a hardware fact it
+    only reports still prints the full panel, so an operator can see *why* the
+    declaration would not run on this machine.
+    """
+    from .campaign import CampaignManifest
+    from .campaign_runner import CampaignRunRefusal, plan_campaign
+    from .candidate_search import CandidateSearchRefusal
+    from .training_backends import preflight_report
+
+    manifest = CampaignManifest.from_file(Path(args.manifest))
+    recipes: tuple[Any, ...] = ()
+    unavailable = ""
+    try:
+        plan = plan_campaign(manifest)
+    except (CampaignRunRefusal, CandidateSearchRefusal) as refusal:
+        # The panel and the backend's own refusals are still worth printing: an
+        # unplannable campaign is exactly when an operator needs to see why.
+        unavailable = str(refusal)
+    else:
+        recipes = tuple(plan.recipes)
+    report = preflight_report(
+        manifest, recipes=recipes, recipes_unavailable=unavailable
+    )
+    _print_json(report)
+    return 0 if report["status"] == "ADMITTED" else 1
 
 
 def _growth_campaign_readiness(args: argparse.Namespace) -> int:

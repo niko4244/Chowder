@@ -462,28 +462,37 @@ def run_campaign(
         }
     )
 
-    selection_record: Mapping[str, Any] | None = None
     if train_fn is not None:
         executor = train_fn
+        # A caller-supplied executor is recorded as such: the run still says
+        # what the manifest declared, and does not pretend the supplied
+        # executor was the declared provider's.
+        from .training_backends import backend_declaration
+
+        backend_record: Mapping[str, Any] = {
+            "cycle_id": manifest.cycle_id,
+            "declaration": backend_declaration(manifest).to_dict(),
+            "executor": "caller-supplied",
+            "provider": None,
+            "trainer": None,
+            "admitted": None,
+            "selection": None,
+        }
     else:
-        executor, selection_record = build_executor_with_selection(
+        executor, backend_record = build_executor_with_selection(
             manifest, state_root=root
         )
-    if selection_record is not None:
-        # The auto choice is recorded before any attempt starts: the campaign
-        # says which backend it will run on, and why, while that is still a
-        # declaration rather than a reconstruction.
-        phases.append(
-            {
-                "phase": "training-backend",
-                "verdict": "ok",
-                "detail": (
-                    f"auto selected {selection_record.get('provider', '<none>')}: "
-                    f"{selection_record.get('reason', '')}"
-                ),
-                "selection": selection_record,
-            }
-        )
+    # The declared backend is recorded before any attempt starts: the campaign
+    # says which backend it will run on, and why, while that is still a
+    # declaration rather than a reconstruction.
+    phases.append(
+        {
+            "phase": "training-backend",
+            "verdict": "ok",
+            "detail": _backend_detail(backend_record),
+            "backend": dict(backend_record),
+        }
+    )
     if not hasattr(executor, "admit"):
         raise CampaignRunRefusal(
             "the training executor exposes no admission seam (`admit(recipe)`), "
@@ -1618,6 +1627,49 @@ def build_local_training_fn(
     )
 
 
+class _BackendStampedTrainingFn:
+    """A ``TrainingFn`` that names its backend in every attempt's evidence.
+
+    Which backend produced an attempt is a fact *about that attempt*, so it
+    travels with the attempt's own evidence instead of being reconstructed from
+    the run record. Everything else is delegated untouched: this wrapper adds a
+    fact, it does not change what runs, what is admitted or what is measured.
+    """
+
+    def __init__(
+        self, inner: Any, *, declared: Mapping[str, Any], version: str
+    ) -> None:
+        self.__dict__["_inner"] = inner
+        self.__dict__["_declared"] = dict(declared)
+        self.__dict__["_version"] = str(version)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.__dict__["_inner"], name)
+
+    def admit(self, recipe: TrainingRecipe) -> tuple[str, str] | None:
+        return self.__dict__["_inner"].admit(recipe)
+
+    def __call__(
+        self, recipe: TrainingRecipe, items: Sequence[Any]
+    ) -> Mapping[str, Any]:
+        evidence = self.__dict__["_inner"](recipe, items)
+        if not isinstance(evidence, Mapping):
+            return evidence
+        stamped = dict(evidence)
+        stamped["backend"] = {
+            **self.__dict__["_declared"],
+            "version": self.__dict__["_version"],
+        }
+        return stamped
+
+
+def _declared_backend_version() -> str:
+    """The chowder version an attempt's evidence names as its backend version."""
+    from .training_backends import chowder_version
+
+    return chowder_version()
+
+
 def build_executor_with_selection(
     manifest: CampaignManifest,
     *,
@@ -1625,7 +1677,7 @@ def build_executor_with_selection(
     runner: Any = None,
     providers: Any = None,
     probes: Any = None,
-) -> tuple[Any, Mapping[str, Any] | None]:
+) -> tuple[Any, Mapping[str, Any]]:
     """Build the executor the manifest's declared training backend dispatches through.
 
     One branch point, at the backend boundary: the declared provider decides
@@ -1637,10 +1689,11 @@ def build_executor_with_selection(
     preflight panel reports it, and the executor's own admission plus the
     trainer's own config resolution are where it is enforced.
 
-    Returns the executor and, when ``auto`` chose the provider, the record of
-    that choice -- the provider, the reason, the full preflight and every
-    candidate it refused -- which the run writes as its own phase before any
-    attempt starts.
+    Returns the executor -- wrapped so every attempt's evidence names the
+    backend that produced it -- and the record of the choice: the declaration,
+    the provider and trainer, the full preflight, and, when ``auto`` chose, the
+    reason, the cost comparison and every candidate it refused. The run writes
+    that record as its own phase before any attempt starts.
 
     ``providers`` and ``probes`` are injectable exactly like ``runner``: the
     no-GPU harness supplies them, production never does.
@@ -1653,9 +1706,10 @@ def build_executor_with_selection(
         resolve_training_backend,
     )
 
+    declaration = backend_declaration(manifest)
     try:
         provider, selection = resolve_training_backend(
-            backend_declaration(manifest),
+            declaration,
             manifest,
             providers=providers,
             probes=probes,
@@ -1666,18 +1720,43 @@ def build_executor_with_selection(
     if not preflight.admitted and preflight.code in STRUCTURAL_PREFLIGHT_CODES:
         raise CampaignRunRefusal(f"{preflight.code}: {preflight.reason}")
     try:
-        executor = provider.build_training_fn(
+        inner = provider.build_training_fn(
             manifest, state_root=state_root, runner=runner
         )
     except (TrainingBackendRefusal, ComputeBackendRefusal) as refusal:
         # One refusal vocabulary at the runner boundary, whatever layer found
         # the problem; the machine-readable code travels in the message.
         raise CampaignRunRefusal(f"{refusal.code}: {refusal.reason}") from refusal
-    record: Mapping[str, Any] | None = None
-    if selection is not None:
-        record = dict(selection.to_dict())
-        record["preflight"] = preflight.to_dict()
-    return executor, record
+    record: dict[str, Any] = {
+        "cycle_id": manifest.cycle_id,
+        "declaration": declaration.to_dict(),
+        "provider": provider.provider,
+        "trainer": provider.trainer,
+        "strategy": preflight.strategy,
+        "admitted": preflight.admitted,
+        "refused_by": None if preflight.admitted else (preflight.code or ""),
+        "refusal_reason": preflight.reason,
+        # A declaration error stops the run before this point; what is recorded
+        # here is whether a *reported* hardware fact was the reason.
+        "stops_the_run": (
+            not preflight.admitted and preflight.code in STRUCTURAL_PREFLIGHT_CODES
+        ),
+        "panel": preflight.panel.to_dict(),
+        "overrides": list(preflight.overrides),
+        "selection": selection.to_dict() if selection is not None else None,
+    }
+    return (
+        _BackendStampedTrainingFn(
+            inner,
+            declared={
+                "provider": provider.provider,
+                "trainer": provider.trainer,
+                "declaration": declaration.to_dict(),
+            },
+            version=_declared_backend_version(),
+        ),
+        record,
+    )
 
 
 def build_executor(
@@ -2083,11 +2162,42 @@ def _refuse(
 CANDIDATE_ARTIFACT_DIGEST_STALE = "CANDIDATE_ARTIFACT_DIGEST_STALE"
 
 
+def _backend_detail(record: Mapping[str, Any]) -> str:
+    """One line naming the backend an attempt will run on, and its standing."""
+    provider = record.get("provider")
+    if provider is None:
+        declared = record.get("declaration")
+        declared_provider = (
+            declared.get("provider") if isinstance(declared, Mapping) else None
+        )
+        return (
+            f"declared {declared_provider or '<undeclared>'}; the executor was "
+            "supplied by the caller, so no provider preflight was run"
+        )
+    if record.get("admitted"):
+        return (
+            f"declared {provider} ({record.get('trainer')}), preflight admitted"
+            + (f": {record.get('strategy')}" if record.get("strategy") else "")
+        )
+    return (
+        f"declared {provider} ({record.get('trainer')}): preflight not admitted "
+        f"({record.get('refused_by')}: {record.get('refusal_reason')})"
+        + (
+            " -- a declaration error the run will refuse"
+            if record.get("stops_the_run")
+            else " -- a hardware fact, reported rather than enforced"
+        )
+    )
+
+
 def _attempt_summary(results: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
     """The durable facts about what each attempt produced, refusal included."""
     return tuple(
         {
             "recipe_id": evidence.get("recipe_id"),
+            # Which backend produced this attempt, from the attempt's own
+            # evidence (the runner stamps it; the executor is the one that ran).
+            "backend": evidence.get("backend"),
             "attempt": evidence.get("attempt"),
             "status": evidence.get("status"),
             "refused_by": evidence.get("refused_by"),

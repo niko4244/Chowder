@@ -30,11 +30,17 @@ manifest predating the field runs exactly as before):
 - `config` is provider-specific, and unknown keys refuse (an unsupported key
   would silently change what the backend is told to do):
   - `local` / `unsloth`: `device` (`auto | cuda | cpu`).
-  - `kaggle`: required `prepared_path`, `repository`, `commit_sha`, `entry_point`,
-    `mounts`, `attempts_root`, `timeout_seconds`, `accelerator`, `payload`
+  - `kaggle`: required `repository`, `commit_sha`, `entry_point`, `mounts`,
+    `attempts_root`, `timeout_seconds`, `accelerator`, `payload`
     (`{"kind": "corpus-training", ...}` or `{"kind": "command", "command": [...]}`),
     and optional `owner`, `input_paths`, `model_commit`, `pip_extras`,
-    `projection_tolerance`, `declared_quota_ceiling_gpu_hours`.
+    `projection_tolerance`, `declared_quota_ceiling_gpu_hours`, and
+    `prepared_path`. **`prepared_path` is optional**: without it the provider
+    assembles the prepared campaign from the manifest's *own* declared input
+    fields (the same ones `prepare_campaign` writes, and the same ones the run
+    phase requires), so a campaign can be dispatched to Kaggle from one
+    declaration instead of two documents that can disagree. A declared input
+    the manifest omits refuses, naming it.
   - `auto`: `candidates` (the ordered provider list to try; default
     `local, unsloth, kaggle`).
 - `TrainingBackendDeclaration.from_mapping` re-spoken as a
@@ -83,11 +89,33 @@ Two rules make the boundary safe:
   (no accelerator visible) is reported by the panel and enforced where the
   declaration demands it (`config.device: cuda`) or by `auto`, which only
   chooses providers whose preflight admitted.
-- **AUTO records its choice before compute.** An `auto` declaration resolves to
-  the first candidate whose preflight passes; the chosen provider, the reason,
-  the full preflight panel and every candidate it refused are written as the
-  run's own `training-backend` phase. `auto` with no passable candidate refuses
-  (`TRAINING_BACKEND_AUTO_UNRESOLVED`) rather than dispatching anything.
+- **AUTO records its choice before compute.** An `auto` declaration may choose
+  only among candidates whose preflight passes, and among those prefers the
+  **cheapest known attach overhead**, breaking ties by the declared candidate
+  order; when no passable candidate reports a measured overhead, the declared
+  order decides and the record says so. The chosen provider, the reason, the
+  full preflight panel, a `cost_comparison` (one entry per passable candidate:
+  its overhead and the basis for it), a `cost_basis` string stating that this is
+  *not* a measured end-to-end cost, and every candidate it refused are written
+  as the run's own `training-backend` phase. No provider is ranked as if its
+  overhead were free: `kaggle` reports its push/poll/attach cost as unmeasured,
+  while `local` and `unsloth` report the zero they can account for. `auto` with
+  no passable candidate refuses (`TRAINING_BACKEND_AUTO_UNRESOLVED`) rather than
+  dispatching anything.
+
+## Seeing it before spending it
+
+```bash
+chowder growth campaign preflight <manifest>
+```
+
+Prints one JSON document: the declaration, the `auto` record when auto chose,
+the panel, the capability matrix, the declared provider's attach overhead, each
+planned recipe's estimate, and any refusal -- with `stops_the_run` separating a
+declaration error the runner enforces from a hardware fact it only reports (and
+`recipes_unavailable` saying why the recipes could not be planned, rather than
+letting an empty estimate list read as "nothing to estimate"). Exit status is 0
+only when the declared backend admitted the campaign. No compute starts.
 
 ## Preflight panel and per-recipe estimate
 
@@ -143,8 +171,12 @@ capability matrix declares, in code, where each decision lives:
   lr_scheduler_type, warmup_steps, warmup_ratio, max_length, seed.
 - `data-layer`: replay_mix (declared through `backend.replay`).
 - `model-hardware-dependent`: full_finetune.
-- `verify`: checkpoint_resume (the executor's own
-  `chowder-unsloth-checkpoint-manifest.json` is the check).
+- `supported`: checkpoint_resume — `resume_from_checkpoint` is resolved into
+  `UnslothPeftRunSpec`, and the executor refuses a missing checkpoint, a changed
+  dataset or a changed environment against its own
+  `chowder-unsloth-checkpoint-manifest.json`. Its acceptance basis is named in
+  the matrix row itself: `tests/test_unsloth_peft.py`'s mocked-worker resume
+  suite, with real-CUDA acceptance still outstanding.
 - `capability-dependent`: custom_objective.
 - `refused`: activation_offload, optimizer_tiering, frozen_layer_streaming —
   mirroring `UnslothPeftRunSpec.from_resolved_config`, refused *before*
@@ -185,22 +217,41 @@ maps a `TrainingFn`'s evidence mapping onto it, classifying failures with
 failures differently. `to_evidence()` renders the whole thing in the vocabulary
 `cycle`, `attempt_failure` and `compute_cost` already read.
 
+## Where the backend is recorded
+
+The declared backend is written down twice, both before/with the work rather
+than reconstructed after it:
+
+- the campaign run record's own `training-backend` phase carries the
+  declaration, the provider, the trainer, the preflight panel, whether the
+  refusal (if any) was enforced, and the `auto` selection when auto chose; a
+  caller-supplied executor is recorded as `executor: "caller-supplied"` rather
+  than mislabelled as the declared provider's;
+- every attempt's evidence carries a `backend` block (provider, trainer,
+  declaration, version) stamped by the runner, which is what reaches the
+  `attempts` summary in `campaign-run.json`, and what
+  `UniformAttemptOutcome.to_evidence()` renders for a single attempt.
+
 ## What this cut does not do
 
 - No real golden-path campaign through each backend yet (needs real CUDA /
-  Kaggle quota).
+  Kaggle quota). Unsloth checkpoint-resume is `supported` on the strength of the
+  mocked-worker acceptance suite, not a real-CUDA run.
 - No UNSLOTH memory panel: `estimate()` reports it as unmeasured rather than
   guessing; the executor's own refusals remain the control.
-- No AUTO policy scoring beyond "the first preflight-passable candidate, in the
-  declared order".
+- No measured per-backend cost model: AUTO compares declared attach overhead
+  only, and says so in its record.
 
 ## Verification
 
-- `tests/test_growth_training_backends.py` (35 tests, no GPU, no network):
+- `tests/test_growth_training_backends.py` (49 tests, no GPU, no network):
   declaration parsing and refusals, panel shape and honesty, model-config-derived
-  estimates, capability matrix contents, envelope admission, AUTO selection and
-  refusal, uniform outcome mapping and classification, attempt evidence
-  collect/verify, resume semantics.
-- Existing growth suites (`test_growth_campaign_runner`, `test_growth_campaign`,
-  `test_growth_kaggle_*`, `test_growth_campaign_prepare`,
-  `test_growth_campaign_readiness`): 137 passed.
+  estimates, capability matrix contents *and* its drift guard (each supported
+  knob must reach the executor's spec; each refused knob must actually raise),
+  envelope admission, AUTO selection/refusal/cost comparison, uniform outcome
+  mapping and classification, attempt evidence collect/verify, resume semantics,
+  the preflight report, and the Kaggle built-from-the-manifest path.
+- Existing growth + worker-env suites: 940 passed.
+- `chowder growth campaign preflight <manifest>` exercised through the CLI on a
+  real manifest (admitted on this CUDA machine; `recipes_unavailable` reported
+  the two undeclared plan inputs rather than printing an empty estimate list).

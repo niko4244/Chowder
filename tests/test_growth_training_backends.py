@@ -24,9 +24,11 @@ from chowder.growth.campaign import (
     CampaignManifest,
     CampaignManifestError,
 )
+from chowder.backends.unsloth_peft import UnslothConfigError, UnslothPeftRunSpec
 from chowder.growth.campaign_runner import (
     FIELD_ENFORCEMENT,
     CampaignRunRefusal,
+    _attempt_summary,
     assert_every_field_enforced,
     build_executor_with_selection,
     envelope_for,
@@ -40,7 +42,6 @@ from chowder.growth.training_backends import (
     CAPABILITY_MODEL_HARDWARE_DEPENDENT,
     CAPABILITY_REFUSED,
     CAPABILITY_SUPPORTED,
-    CAPABILITY_VERIFY,
     KAGGLE_BACKEND_UNAVAILABLE,
     KAGGLE_CONFIG_INCOMPLETE,
     STRUCTURAL_PREFLIGHT_CODES,
@@ -58,7 +59,9 @@ from chowder.growth.training_backends import (
     PreflightPanel,
     PreflightResult,
     LocalTrainingBackend,
+    OverheadReport,
     TrainingBackendDeclaration,
+    preflight_report,
     TrainingBackendRefusal,
     UnslothTrainingBackend,
     choose_auto_backend,
@@ -543,7 +546,7 @@ def test_the_unsloth_matrix_names_where_each_decision_lives():
     assert capabilities.status("lora_rank") == CAPABILITY_SUPPORTED
     assert capabilities.status("replay_mix") == CAPABILITY_DATA_LAYER
     assert capabilities.status("full_finetune") == CAPABILITY_MODEL_HARDWARE_DEPENDENT
-    assert capabilities.status("checkpoint_resume") == CAPABILITY_VERIFY
+    assert capabilities.status("checkpoint_resume") == CAPABILITY_SUPPORTED
     assert capabilities.status("custom_objective") == CAPABILITY_CAPABILITY_DEPENDENT
     assert capabilities.status("not-a-capability") is None
     assert len(capabilities.refused_rows()) == len(backends.UNSLOTH_REFUSED_KNOBS)
@@ -688,7 +691,7 @@ def test_kaggle_resume_declares_a_remote_checkpoint_without_a_local_path(tmp_pat
 # --------------------------------------------------------------------------
 
 
-def test_auto_chooses_the_first_preflight_passable_provider_and_records_the_rest(tmp_path):
+def test_auto_chooses_a_preflight_passable_provider_and_records_every_refusal(tmp_path):
     declaration = TrainingBackendDeclaration.from_mapping({"provider": "auto"})
     manifest = _manifest(
         tmp_path, project_template_path=_template(tmp_path, engine="unsloth")
@@ -705,11 +708,54 @@ def test_auto_chooses_the_first_preflight_passable_provider_and_records_the_rest
     assert chosen.provider == "unsloth"
     assert selection.provider == "unsloth"
     assert "auto chose unsloth" in selection.reason
-    # Only the candidates considered before the choice was made are recorded:
-    # local refused, unsloth admitted, and kaggle was never reached.
     refused = {entry[0]: entry[1] for entry in selection.refused}
-    assert refused == {"local": TRAINING_BACKEND_NO_DEVICE}
+    # local refused on a hardware fact; kaggle was declared but not supplied.
+    assert refused == {
+        "local": TRAINING_BACKEND_NO_DEVICE,
+        "kaggle": TRAINING_BACKEND_UNKNOWN_PROVIDER,
+    }
     assert selection.to_dict()["refused"][0]["provider"] == "local"
+    assert selection.to_dict()["cost_basis"] == selection.cost_basis
+
+
+def test_auto_prefers_the_cheapest_known_overhead_over_the_declared_order(tmp_path):
+    declaration = TrainingBackendDeclaration.from_mapping(
+        {"provider": "auto", "config": {"candidates": ["unsloth", "kaggle"]}}
+    )
+    manifest = _manifest(tmp_path, training_backend=declaration)
+    expensive = _FakeProvider("unsloth", overhead_hours=5.0)
+    cheap = _FakeProvider("kaggle", overhead_hours=0.5)
+    chosen, selection = choose_auto_backend(
+        declaration, manifest, providers=[expensive, cheap]
+    )
+    assert chosen is cheap
+    assert selection.provider == "kaggle"
+    assert "cheapest known attach overhead" in selection.reason
+    assert [entry["provider"] for entry in selection.cost_comparison] == [
+        "unsloth",
+        "kaggle",
+    ]
+    assert selection.cost_comparison[1]["overhead_hours"] == 0.5
+    # And the record is explicit that this is not a measured end-to-end cost.
+    assert "not a measured end-to-end cost" in selection.cost_basis
+
+
+def test_auto_keeps_the_declared_order_when_no_overhead_is_measured(tmp_path):
+    declaration = TrainingBackendDeclaration.from_mapping(
+        {"provider": "auto", "config": {"candidates": ["unsloth", "kaggle"]}}
+    )
+    manifest = _manifest(tmp_path, training_backend=declaration)
+    first = _FakeProvider("unsloth", overhead_hours=None)
+    second = _FakeProvider("kaggle", overhead_hours=None)
+    chosen, selection = choose_auto_backend(
+        declaration, manifest, providers=[first, second]
+    )
+    assert chosen is first
+    assert selection.provider == "unsloth"
+    assert "no passable candidate reports a measured attach overhead" in selection.reason
+    assert all(
+        entry["overhead_hours"] is None for entry in selection.cost_comparison
+    )
 
 
 def test_auto_refuses_rather_than_dispatching_anything_when_no_candidate_passes(tmp_path):
@@ -743,10 +789,17 @@ def test_a_manual_declaration_is_returned_as_declared_with_no_selection(tmp_path
 class _FakeProvider:
     """A provider whose executor is a sentinel: nothing trains in this test."""
 
-    def __init__(self, provider: str, *, admitted: bool = True) -> None:
+    def __init__(
+        self,
+        provider: str,
+        *,
+        admitted: bool = True,
+        overhead_hours: float | None = 0.0,
+    ) -> None:
         self.provider = provider
         self.trainer = f"fake-{provider}"
         self.admitted = admitted
+        self.overhead_hours = overhead_hours
         self.executor = _RecordingExecutor()
         self.built = 0
 
@@ -761,6 +814,9 @@ class _FakeProvider:
             reason="fake preflight",
             panel=PreflightPanel(provider=self.provider),
         )
+
+    def projected_overhead(self, manifest: Any) -> OverheadReport:
+        return OverheadReport(hours=self.overhead_hours, basis="fake basis")
 
     def estimate(self, manifest: Any, recipe: Any):
         raise AssertionError("estimate is not asked for on this path")
@@ -777,8 +833,18 @@ class _FakeProvider:
 
 
 class _RecordingExecutor:
+    """A TrainingFn-shaped sentinel that returns the evidence it is given."""
+
+    def __init__(self, evidence: Mapping[str, Any] | None = None) -> None:
+        self.evidence = dict(evidence or {"status": "SUCCEEDED", "recipe_id": "recipe-01"})
+        self.calls = 0
+
     def admit(self, recipe: Any) -> None:
         return None
+
+    def __call__(self, recipe: Any, items: Any) -> Mapping[str, Any]:
+        self.calls += 1
+        return dict(self.evidence)
 
 
 def test_the_runner_dispatches_through_the_declared_provider_and_records_auto(tmp_path):
@@ -788,12 +854,20 @@ def test_the_runner_dispatches_through_the_declared_provider_and_records_auto(tm
     manifest = _manifest(tmp_path, training_backend=declaration)
     fake = _FakeProvider("unsloth")
     executor, record = build_executor_with_selection(manifest, providers=[fake])
-    assert executor is fake.executor
     assert fake.built == 1
-    assert record is not None
     assert record["provider"] == "unsloth"
-    assert "auto chose unsloth" in record["reason"]
-    assert record["preflight"]["admitted"] is True
+    assert record["trainer"] == "fake-unsloth"
+    assert record["admitted"] is True
+    assert record["selection"]["provider"] == "unsloth"
+    assert "auto chose unsloth" in record["selection"]["reason"]
+    # The executor names its backend in the evidence it returns, so the attempt
+    # record carries the fact rather than reconstructing it.
+    evidence = executor(_recipe(), ())
+    assert evidence["backend"]["provider"] == "unsloth"
+    assert evidence["backend"]["trainer"] == "fake-unsloth"
+    assert evidence["backend"]["version"]
+    assert fake.executor.calls == 1
+    assert _attempt_summary((evidence,))[0]["backend"] == evidence["backend"]
 
 
 def test_the_runner_refuses_a_structural_declaration_error_before_compute(tmp_path):
@@ -912,6 +986,273 @@ def test_an_evidence_document_with_no_status_cannot_become_an_outcome():
             backend_version="0.3.0",
         )
     assert refusal.value.code == TRAINING_BACKEND_EVIDENCE_STATUS_UNKNOWN
+
+
+# --------------------------------------------------------------------------
+# the preflight report (what the `campaign preflight` command prints)
+# --------------------------------------------------------------------------
+
+
+def test_the_preflight_report_names_the_backend_and_estimates_each_recipe(tmp_path):
+    manifest = _manifest(
+        tmp_path,
+        project_template_path=_template(tmp_path),
+        training_backend=TrainingBackendDeclaration.from_mapping(
+            {"provider": "local", "config": {"device": "cuda"}}
+        ),
+    )
+    recipe = _recipe()
+    report = preflight_report(
+        manifest,
+        recipes=[recipe],
+        probes={"local": _probe(_panel_with_device())},
+    )
+    assert report["status"] == "ADMITTED"
+    assert report["provider"] == "local"
+    assert report["declared"]["config"] == {"device": "cuda"}
+    assert report["stops_the_run"] is False
+    assert report["refused_by"] is None
+    assert report["panel"]["device_count"] == 1
+    assert [entry["recipe_id"] for entry in report["estimates"]] == ["recipe-01"]
+    assert report["estimates"][0]["available"] is True
+    assert report["capabilities"]["rows"]
+    assert report["overhead"]["hours"] == 0.0
+    assert report["recipes_unavailable"] is None
+
+
+def test_the_preflight_report_separates_a_reported_fact_from_an_enforced_refusal(tmp_path):
+    manifest = _manifest(tmp_path)
+    reported = preflight_report(
+        manifest, probes={"local": _probe(_panel_without_device())}
+    )
+    assert reported["status"] == "REFUSED"
+    assert reported["refused_by"] == TRAINING_BACKEND_NO_DEVICE
+    # A hardware fact is reported, not enforced: the runner still builds.
+    assert reported["stops_the_run"] is False
+    assert reported["panel"]["device_count"] == 0
+
+    mismatched = preflight_report(
+        _manifest(
+            tmp_path,
+            project_template_path=_template(tmp_path, engine="transformers"),
+            training_backend=TrainingBackendDeclaration.from_mapping(
+                {"provider": "unsloth"}
+            ),
+        )
+    )
+    assert mismatched["refused_by"] == TRAINING_BACKEND_TRAINER_MISMATCH
+    assert mismatched["stops_the_run"] is True
+
+
+def test_the_preflight_report_reports_an_unresolvable_auto_declaration(tmp_path):
+    declaration = TrainingBackendDeclaration.from_mapping(
+        {"provider": "auto", "config": {"candidates": ["local"]}}
+    )
+    manifest = _manifest(tmp_path, training_backend=declaration)
+    report = preflight_report(
+        manifest,
+        recipes_unavailable="no parent profile declared",
+        providers=[LocalTrainingBackend(probe=_probe(_panel_without_device()))],
+    )
+    assert report["status"] == "REFUSED"
+    assert report["refused_by"] == TRAINING_BACKEND_AUTO_UNRESOLVED
+    assert report["stops_the_run"] is True
+    assert report["estimate" if False else "estimates"] == []
+    assert report["recipes_unavailable"] == "no parent profile declared"
+
+
+# --------------------------------------------------------------------------
+# the Kaggle backend, from the declaration alone
+# --------------------------------------------------------------------------
+
+
+def _declared_input_paths(tmp_path: Path) -> dict[str, str]:
+    """Write one file per prepared input field, named exactly as the manifest fields."""
+    directory = tmp_path / "declared-inputs"
+    directory.mkdir(exist_ok=True)
+    paths: dict[str, str] = {}
+    for name in DECLARED_PREPARED_FIELDS:
+        document = directory / f"{name}.json"
+        document.write_text("{}\n", encoding="utf-8")
+        paths[name] = str(document)
+    return paths
+
+
+def _kaggle_config_without_prepared_document(
+    inputs: Mapping[str, str]
+) -> dict[str, Any]:
+    return {
+        "repository": "https://github.com/niko4244/Chowder",
+        "commit_sha": COMMIT,
+        "entry_point": "chowder.growth.kaggle_payload",
+        "mounts": ["owner/dataset"],
+        "attempts_root": "attempts",
+        "timeout_seconds": 3600.0,
+        "accelerator": "nvidia-tesla-p100",
+        # Kernel-side paths are absolute POSIX paths; the local files are what an
+        # attempt hashes before it pushes them.
+        "input_paths": {
+            name: f"/kaggle/input/prepared/{name}.json" for name in inputs
+        },
+        "payload": {"kind": "corpus-training", "project_gpu_hour_budget": 1.0},
+    }
+
+
+def test_the_kaggle_backend_builds_its_prepared_campaign_from_the_manifest(tmp_path):
+    inputs = _declared_input_paths(tmp_path)
+    declaration = TrainingBackendDeclaration.from_mapping(
+        {"provider": "kaggle", "config": _kaggle_config_without_prepared_document(inputs)}
+    )
+    manifest = _manifest(tmp_path, training_backend=declaration, **inputs)
+    backend = KaggleTrainingBackend(backend=_RecordingComputeBackend())
+    assert backend.preflight(manifest).admitted is True
+    training_fn = backend.build_training_fn(manifest)
+    # The prepared campaign was assembled from the manifest's own declared
+    # inputs: no hand-written prepared document was needed.
+    assert isinstance(training_fn, KaggleTrainingFn)
+    assert training_fn.prepared.inputs == inputs
+    assert training_fn.admit(_recipe()) is None
+
+
+def test_the_kaggle_backend_refuses_a_manifest_that_declares_no_inputs(tmp_path):
+    declaration = TrainingBackendDeclaration.from_mapping(
+        {
+            "provider": "kaggle",
+            "config": _kaggle_config_without_prepared_document({}),
+        }
+    )
+    manifest = _manifest(tmp_path, training_backend=declaration)
+    result = KaggleTrainingBackend(backend=_RecordingComputeBackend()).preflight(manifest)
+    assert result.admitted is False
+    assert result.code == KAGGLE_CONFIG_INCOMPLETE
+    assert "evaluation_material_path" in result.reason
+    assert result.code in STRUCTURAL_PREFLIGHT_CODES
+
+
+def test_the_kaggle_backend_refuses_input_paths_that_do_not_cover_the_inputs(tmp_path):
+    inputs = _declared_input_paths(tmp_path)
+    config = _kaggle_config_without_prepared_document(inputs)
+    config["input_paths"] = {
+        name: path for name, path in config["input_paths"].items() if name != "data_registry_path"
+    }
+    declaration = TrainingBackendDeclaration.from_mapping(
+        {"provider": "kaggle", "config": config}
+    )
+    manifest = _manifest(tmp_path, training_backend=declaration, **inputs)
+    result = KaggleTrainingBackend(backend=_RecordingComputeBackend()).preflight(manifest)
+    assert result.admitted is False
+    assert result.code == TRAINING_BACKEND_UNSUPPORTED_CONFIG
+    assert "data_registry_path" in result.reason
+
+
+# --------------------------------------------------------------------------
+# capability drift: the matrix must match the engine it claims to describe
+# --------------------------------------------------------------------------
+
+#: Every Unsloth capability the matrix calls ``supported`` and the declared
+#: value it must carry into the executor's own spec. If the executor renames a
+#: knob, the value stops arriving and this table fails -- which is the point.
+_UNSLOTH_SUPPORTED_VALUES: tuple[tuple[str, tuple[str, ...], str, Any], ...] = (
+    ("learning_rate", ("training", "learning_rate"), "learning_rate", 3e-4),
+    ("lora_rank", ("lora", "r"), "lora_r", 32),
+    ("lora_alpha", ("lora", "alpha"), "lora_alpha", 64),
+    (
+        "gradient_accumulation",
+        ("training", "gradient_accumulation_steps"),
+        "gradient_accumulation_steps",
+        7,
+    ),
+    ("max_steps", ("training", "max_steps"), "max_steps", 123),
+    ("batch_size", ("training", "batch_size"), "batch_size", 3),
+    (
+        "lr_scheduler_type",
+        ("training", "lr_scheduler_type"),
+        "lr_scheduler_type",
+        "cosine",
+    ),
+    ("warmup_steps", ("training", "warmup_steps"), "warmup_steps", 11),
+    ("warmup_ratio", ("training", "warmup_ratio"), "warmup_ratio", 0.05),
+    ("quantization", ("quantization",), "quantization", "4bit"),
+    ("max_length", ("max_length",), "max_length", 1024),
+)
+
+
+def _unsloth_config(tmp_path: Path, **backend: Any) -> dict[str, Any]:
+    dataset = tmp_path / "unsloth-train.jsonl"
+    if not dataset.exists():
+        dataset.write_text('{"text": "hello"}\n', encoding="utf-8")
+    return {
+        "backend": {
+            "base_model": "Fake/Model",
+            "dataset": str(dataset),
+            "training": dict(backend.pop("training", {})),
+            "lora": {"target_modules": ["q_proj", "v_proj"]},
+            **backend,
+        }
+    }
+
+
+def _unsloth_spec(tmp_path: Path, document: Mapping[str, Any]) -> UnslothPeftRunSpec:
+    return UnslothPeftRunSpec.from_resolved_config(
+        document, work_dir=tmp_path, output_dir=tmp_path / "out", seed=17
+    )
+
+
+def test_every_supported_unsloth_capability_reaches_the_executor_spec(tmp_path):
+    capabilities = UnslothTrainingBackend().capabilities()
+    document = _unsloth_config(tmp_path)
+    backend = document["backend"]
+    for _capability, path, _attribute, value in _UNSLOTH_SUPPORTED_VALUES:
+        section: dict[str, Any] = backend
+        for key in path[:-1]:
+            section = section.setdefault(key, {})
+        section[path[-1]] = value
+    spec = _unsloth_spec(tmp_path, document)
+    for capability, path, attribute, value in _UNSLOTH_SUPPORTED_VALUES:
+        assert capabilities.status(capability) == CAPABILITY_SUPPORTED, capability
+        assert getattr(spec, attribute) == value, (
+            f"{capability} (config {'/'.join(path)}) did not reach spec.{attribute}"
+        )
+    # target_modules and seed travel in their own namespaces.
+    assert capabilities.status("target_modules") == CAPABILITY_SUPPORTED
+    assert spec.target_modules == ("q_proj", "v_proj")
+    assert capabilities.status("seed") == CAPABILITY_SUPPORTED
+    assert spec.seed == 17
+
+
+def test_the_unsloth_matrix_refusals_match_what_the_engine_actually_refuses(tmp_path):
+    capabilities = UnslothTrainingBackend().capabilities()
+    # The vocabulary the guard covers: the knobs the matrix refuses, plus knobs
+    # the executor must accept, so a *new* refusal in the executor also fires.
+    accepted_knobs = ("gradient_checkpointing", "optimizer")
+    for knob in backends.UNSLOTH_REFUSED_KNOBS:
+        assert capabilities.status(knob) == CAPABILITY_REFUSED, knob
+        with pytest.raises(UnslothConfigError):
+            _unsloth_spec(tmp_path, _unsloth_config(tmp_path, training={knob: True}))
+    for knob in accepted_knobs:
+        assert capabilities.status(knob) != CAPABILITY_REFUSED
+        # A declared-but-supported knob must not be silently refused here.
+        _unsloth_spec(tmp_path, _unsloth_config(tmp_path, training={knob: True}))
+
+
+def test_checkpoint_resume_is_supported_and_its_basis_is_named(tmp_path):
+    capabilities = UnslothTrainingBackend().capabilities()
+    assert capabilities.status("checkpoint_resume") == CAPABILITY_SUPPORTED
+    reason = next(
+        row.reason
+        for row in capabilities.rows
+        if row.capability == "checkpoint_resume"
+    )
+    assert "chowder-unsloth-checkpoint-manifest.json" in reason
+    assert "tests/test_unsloth_peft.py" in reason
+    assert "real-CUDA acceptance" in reason
+    # And the declaration really does reach the executor's spec.
+    checkpoint = tmp_path / "checkpoint-50"
+    checkpoint.mkdir()
+    spec = _unsloth_spec(
+        tmp_path, _unsloth_config(tmp_path, resume_from_checkpoint=str(checkpoint))
+    )
+    assert spec.resume_from_checkpoint == str(checkpoint.resolve())
 
 
 def test_collect_and_verify_prove_an_attempts_evidence(tmp_path):

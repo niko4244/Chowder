@@ -13,7 +13,7 @@ These are distinct declarations, and neither is an alias for the other:
   "training_backend": {"provider": "local", "config": {"device": "auto"}}
   ```
 
-  `provider` is one of `local | unsloth | kaggle | auto`, with backend-specific settings under `config`. Unknown providers and unknown config keys refuse at load, and no backend is ever inferred from what happens to be installed. A campaign that trains through the isolated Unsloth engine declares `provider: unsloth` *and* a template with `engine: unsloth`; the provider refuses a mismatch before any compute. See [`docs/TRAINING_BACKENDS_UNIFIED_2026-10-05.md`](TRAINING_BACKENDS_UNIFIED_2026-10-05.md).
+  `provider` is one of `local | unsloth | kaggle | auto`, with backend-specific settings under `config`. Unknown providers and unknown config keys refuse at load, and no backend is ever inferred from what happens to be installed. A campaign that trains through the isolated Unsloth engine declares `provider: unsloth` *and* a template with `engine: unsloth`; the provider refuses a mismatch before any compute. `chowder growth campaign preflight <manifest>` prints the declared backend's panel, capability matrix, per-recipe estimates and any refusals without starting compute. See [`docs/TRAINING_BACKENDS_UNIFIED_2026-10-05.md`](TRAINING_BACKENDS_UNIFIED_2026-10-05.md).
 
 ## Engine selection
 

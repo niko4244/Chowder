@@ -111,6 +111,9 @@ __all__ = [
     "UnslothTrainingBackend",
     "KaggleTrainingBackend",
     "AutoSelection",
+    "OverheadReport",
+    "preflight_report",
+    "chowder_version",
     "backend_declaration",
     "backend_for_provider",
     "choose_auto_backend",
@@ -210,7 +213,6 @@ _UNSLOTH_CONFIG_KEYS = frozenset({"device"})
 _AUTO_CONFIG_KEYS = frozenset({"candidates"})
 
 KAGGLE_REQUIRED_CONFIG_KEYS = (
-    "prepared_path",
     "repository",
     "commit_sha",
     "entry_point",
@@ -223,6 +225,10 @@ KAGGLE_REQUIRED_CONFIG_KEYS = (
     "payload",
 )
 KAGGLE_OPTIONAL_CONFIG_KEYS = (
+    #: A hand-written prepared-campaign document. Optional: without it the
+    #: provider assembles the prepared campaign from the manifest's own declared
+    #: inputs, so a campaign can be dispatched from its declaration alone.
+    "prepared_path",
     "owner",
     "input_paths",
     "model_commit",
@@ -1291,6 +1297,24 @@ def _estimate_local(
 # --------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class OverheadReport:
+    """A provider's declared attach overhead, and what that number is worth.
+
+    ``hours`` is the launch/attach cost the provider itself can account for
+    (a local subprocess starts in place; a remote kernel has to be pushed,
+    installed, polled and pulled). ``None`` means *not measured* -- and an
+    unmeasured overhead is deliberately not ranked as if it were zero, because
+    that would make the cheapest-looking provider the one nobody measured.
+    """
+
+    hours: float | None
+    basis: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"hours": self.hours, "basis": self.basis}
+
+
 @runtime_checkable
 class TrainingBackend(Protocol):
     """The declared execution backend the campaign runner dispatches through.
@@ -1313,6 +1337,9 @@ class TrainingBackend(Protocol):
 
     def estimate(self, manifest: Any, recipe: TrainingRecipe) -> BackendEstimate:
         """What one recipe would need on this backend."""
+
+    def projected_overhead(self, manifest: Any) -> OverheadReport:
+        """This provider's declared attach overhead, with its basis."""
 
     def admit(self, manifest: Any, recipe: TrainingRecipe) -> tuple[str, str] | None:
         """``None`` when the recipe is admitted, else ``(kind, reason)``."""
@@ -1502,6 +1529,15 @@ class LocalTrainingBackend(_SharedAttemptLifecycle):
             manifest, recipe, panel, template=_load_template(manifest)
         )
 
+    def projected_overhead(self, manifest: Any) -> OverheadReport:
+        return OverheadReport(
+            hours=0.0,
+            basis=(
+                "the executor is a local subprocess that starts in place, so there "
+                "is no remote attach cost to pay"
+            ),
+        )
+
     def admit(self, manifest: Any, recipe: TrainingRecipe) -> tuple[str, str] | None:
         return check_growth_envelope(recipe, _envelope(manifest))
 
@@ -1581,10 +1617,13 @@ class UnslothTrainingBackend(_SharedAttemptLifecycle):
                 ),
                 CapabilityRow(
                     "checkpoint_resume",
-                    CAPABILITY_VERIFY,
-                    "the executor writes its own "
-                    "chowder-unsloth-checkpoint-manifest.json; the continuation "
-                    "slice is verified against it",
+                    CAPABILITY_SUPPORTED,
+                    "resume_from_checkpoint is resolved into UnslothPeftRunSpec and "
+                    "the executor refuses a missing checkpoint, a changed dataset or "
+                    "a changed environment against its own "
+                    "chowder-unsloth-checkpoint-manifest.json (acceptance covered by "
+                    "tests/test_unsloth_peft.py's mocked-worker resume suite; "
+                    "real-CUDA acceptance is still outstanding)",
                 ),
                 CapabilityRow(
                     "custom_objective",
@@ -1710,6 +1749,15 @@ class UnslothTrainingBackend(_SharedAttemptLifecycle):
             ),
         )
 
+    def projected_overhead(self, manifest: Any) -> OverheadReport:
+        return OverheadReport(
+            hours=0.0,
+            basis=(
+                "the executor is a local subprocess in an isolated environment, so "
+                "there is no remote attach cost to pay"
+            ),
+        )
+
     def admit(self, manifest: Any, recipe: TrainingRecipe) -> tuple[str, str] | None:
         return check_growth_envelope(recipe, _envelope(manifest))
 
@@ -1747,7 +1795,9 @@ def _normalize_kaggle_config(config: Mapping[str, Any]) -> dict[str, Any]:
             f"the declaration omits {missing}. A remote attempt ships exactly "
             "what the campaign declares",
         )
-    normalized: dict[str, Any] = {"prepared_path": _text(config["prepared_path"], "prepared_path")}
+    normalized: dict[str, Any] = {}
+    if "prepared_path" in config:
+        normalized["prepared_path"] = _text(config["prepared_path"], "prepared_path")
     normalized["repository"] = _text(config["repository"], "repository")
     commit = _text(config["commit_sha"], "commit_sha").strip().lower()
     if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
@@ -1801,6 +1851,57 @@ def _normalize_kaggle_config(config: Mapping[str, Any]) -> dict[str, Any]:
         )
     normalized["payload"] = _validate_kaggle_payload(config["payload"])
     return normalized
+
+
+def _declared_prepared_inputs(manifest: Any) -> tuple[dict[str, str], list[str]]:
+    """The prepared inputs this manifest already declares, and the ones it does not."""
+    from .kaggle_campaign import DECLARED_PREPARED_FIELDS
+
+    present: dict[str, str] = {}
+    missing: list[str] = []
+    for name in DECLARED_PREPARED_FIELDS:
+        value = str(getattr(manifest, name, "") or "").strip()
+        if value:
+            present[name] = value
+        else:
+            missing.append(name)
+    return present, missing
+
+
+def _prepared_campaign(manifest: Any, config: Mapping[str, Any]) -> Any:
+    """One attempt's prepared campaign: the declared document, or the manifest's own.
+
+    A campaign that declares ``config.prepared_path`` points at a prepared
+    document. Absent one, the prepared inputs are assembled from the manifest's
+    *own* declared input fields -- the same fields
+    :func:`chowder.growth.campaign_prepare.prepare_campaign` writes, and the same
+    ones the run phase already requires -- so dispatching to Kaggle is one
+    declaration rather than two documents that can disagree.
+    """
+    declared_path = str(config.get("prepared_path", "") or "").strip()
+    if declared_path:
+        return _load_prepared_campaign(declared_path)
+    from .campaign_prepare import PreparedCampaign
+
+    inputs, missing = _declared_prepared_inputs(manifest)
+    if missing:
+        raise TrainingBackendRefusal(
+            KAGGLE_CONFIG_INCOMPLETE,
+            f"the campaign declares no prepared document and no {missing}; a "
+            "remote attempt ships exactly the inputs the campaign declares, so "
+            "declare them on the manifest (chowder growth campaign prepare "
+            "writes them) or declare config.prepared_path",
+        )
+    return PreparedCampaign(
+        cycle_id=str(getattr(manifest, "cycle_id", "")),
+        directory=Path(str(getattr(manifest, "state_root", "."))),
+        inputs=inputs,
+        recipe_ids=tuple(str(entry) for entry in getattr(manifest, "recipe_ids", ())),
+        notes=(
+            "assembled from the manifest's declared inputs; the campaign declared "
+            "no prepared document",
+        ),
+    )
 
 
 def _validate_kaggle_payload(document: Any) -> dict[str, Any]:
@@ -1960,6 +2061,37 @@ class KaggleTrainingBackend(_SharedAttemptLifecycle):
                 panel=panel,
                 strategy="kernel-dispatch",
             )
+        if "prepared_path" not in config:
+            inputs, missing = _declared_prepared_inputs(manifest)
+            if missing:
+                return PreflightResult(
+                    provider=self.provider,
+                    admitted=False,
+                    code=KAGGLE_CONFIG_INCOMPLETE,
+                    reason=(
+                        f"the campaign declares no prepared document and no "
+                        f"{missing}; a remote attempt ships exactly the inputs the "
+                        "campaign declares, so declare them on the manifest "
+                        "(chowder growth campaign prepare writes them) or declare "
+                        "config.prepared_path"
+                    ),
+                    panel=panel,
+                    strategy="kernel-dispatch",
+                )
+            covered = {str(name) for name in (config.get("input_paths") or {})}
+            uncovered = sorted(name for name in inputs if name not in covered)
+            if uncovered:
+                return PreflightResult(
+                    provider=self.provider,
+                    admitted=False,
+                    code=TRAINING_BACKEND_UNSUPPORTED_CONFIG,
+                    reason=(
+                        f"config.input_paths does not cover {uncovered}; every "
+                        "declared input needs the kernel path it will be read from"
+                    ),
+                    panel=panel,
+                    strategy="kernel-dispatch",
+                )
         if self.backend is not None or self.transport is not None:
             return PreflightResult(
                 provider=self.provider,
@@ -2016,6 +2148,16 @@ class KaggleTrainingBackend(_SharedAttemptLifecycle):
             ),
         )
 
+    def projected_overhead(self, manifest: Any) -> OverheadReport:
+        return OverheadReport(
+            hours=None,
+            basis=(
+                "the kernel is pushed, installed, polled and pulled, and this build "
+                "measures none of that; ranking it as zero would make the provider "
+                "nobody measured look like the cheapest"
+            ),
+        )
+
     def admit(self, manifest: Any, recipe: TrainingRecipe) -> tuple[str, str] | None:
         return check_growth_envelope(recipe, _envelope(manifest))
 
@@ -2054,11 +2196,11 @@ class KaggleTrainingBackend(_SharedAttemptLifecycle):
             command = tuple(payload_config["command"])
         return KaggleTrainingFn(
             backend,
-            prepared=_load_prepared_campaign(config["prepared_path"]),
+            prepared=_prepared_campaign(manifest, config),
             envelope=_envelope(manifest),
             repository=str(config["repository"]),
             commit_sha=str(config["commit_sha"]),
-            chowder_version=_chowder_version(),
+            chowder_version=chowder_version(),
             entry_point=str(config["entry_point"]),
             command=command,
             input_paths=config.get("input_paths", {}),
@@ -2081,7 +2223,8 @@ class KaggleTrainingBackend(_SharedAttemptLifecycle):
         return _resume_recipe(manifest, recipe, checkpoint, paths_are_local=False)
 
 
-def _chowder_version() -> str:
+def chowder_version() -> str:
+    """The chowder version an attempt's evidence names as its backend version."""
     import importlib.metadata
 
     try:
@@ -2127,6 +2270,16 @@ def backend_for_provider(
     )
 
 
+#: What an auto comparison does and does not claim. No measured per-backend
+#: throughput exists in this build, so the comparison is over each provider's
+#: own declared attach overhead -- never over a fabricated cost model.
+_AUTO_COST_BASIS = (
+    "compared the declared attach overhead of every preflight-passable candidate; "
+    "this is not a measured end-to-end cost, and a provider that reports no "
+    "measured overhead is not ranked as if it reported zero"
+)
+
+
 @dataclass(frozen=True)
 class AutoSelection:
     """The record ``auto`` writes *before* compute: what it chose and why."""
@@ -2134,6 +2287,10 @@ class AutoSelection:
     provider: str
     reason: str
     refused: tuple[tuple[str, str, str], ...] = ()
+    #: One entry per preflight-passable candidate: its declared attach overhead
+    #: and the basis for it. Empty when nothing was passable.
+    cost_comparison: tuple[Mapping[str, Any], ...] = ()
+    cost_basis: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2143,6 +2300,8 @@ class AutoSelection:
                 {"provider": name, "code": code, "reason": reason}
                 for name, code, reason in self.refused
             ],
+            "cost_comparison": [dict(entry) for entry in self.cost_comparison],
+            "cost_basis": self.cost_basis,
         }
 
 
@@ -2162,6 +2321,7 @@ def choose_auto_backend(
     with its code and reason, so the choice is auditable before any compute.
     """
     candidates = declaration.candidate_order()
+    passable: list[tuple[str, TrainingBackend, PreflightResult]] = []
     available: dict[str, TrainingBackend] = {}
     if providers is None:
         for candidate in candidates:
@@ -2190,32 +2350,64 @@ def choose_auto_backend(
             continue
         panel = instance.preflight(manifest)
         if panel.admitted:
-            return instance, AutoSelection(
-                provider=candidate,
-                reason=(
-                    f"auto chose {candidate}: {panel.reason}"
-                    + (
-                        f" ({len(refused)} candidate(s) refused first)"
-                        if refused
-                        else ""
-                    )
-                ),
-                refused=tuple(refused),
+            passable.append((candidate, instance, panel))
+        else:
+            refused.append(
+                (candidate, panel.code or TRAINING_BACKEND_SCHEMA, panel.reason)
             )
-        refused.append(
-            (
-                candidate,
-                panel.code or TRAINING_BACKEND_SCHEMA,
-                panel.reason,
-            )
+    if not passable:
+        return None, AutoSelection(
+            provider="",
+            reason=(
+                "auto resolved to no provider: every declared candidate failed "
+                "preflight, so the campaign refuses rather than dispatching anything"
+            ),
+            refused=tuple(refused),
         )
-    return None, AutoSelection(
-        provider="",
-        reason=(
-            "auto resolved to no provider: every declared candidate failed "
-            "preflight, so the campaign refuses rather than dispatching anything"
-        ),
+
+    comparison: list[Mapping[str, Any]] = []
+    for candidate, instance, _panel in passable:
+        overhead = instance.projected_overhead(manifest)
+        comparison.append(
+            {
+                "provider": candidate,
+                "overhead_hours": overhead.hours,
+                "basis": overhead.basis,
+            }
+        )
+    measured = [entry for entry in comparison if entry["overhead_hours"] is not None]
+    if measured:
+        cheapest = min(
+            measured,
+            key=lambda entry: (
+                float(entry["overhead_hours"]),
+                candidates.index(str(entry["provider"])),
+            ),
+        )
+    else:
+        # Nothing measured: the declared order decides, and the record says so
+        # rather than presenting an unmeasured field as a comparison.
+        cheapest = comparison[0]
+    chosen_name = str(cheapest["provider"])
+    chosen = next(entry for entry in passable if entry[0] == chosen_name)
+    reason = (
+        f"auto chose {chosen_name}: {chosen[2].reason}"
+        + (
+            f"; cheapest known attach overhead of {len(passable)} passable "
+            f"candidate(s): {cheapest['overhead_hours']} h "
+            f"({cheapest['basis']})"
+            if measured
+            else "; no passable candidate reports a measured attach overhead, so "
+            "the declared candidate order decided"
+        )
+        + (f" ({len(refused)} candidate(s) refused)" if refused else "")
+    )
+    return chosen[1], AutoSelection(
+        provider=chosen_name,
+        reason=reason,
         refused=tuple(refused),
+        cost_comparison=tuple(comparison),
+        cost_basis=_AUTO_COST_BASIS,
     )
 
 
@@ -2260,3 +2452,98 @@ def resolve_training_backend(
         ),
         None,
     )
+
+
+def preflight_report(
+    manifest: Any,
+    *,
+    recipes: Sequence[TrainingRecipe] = (),
+    recipes_unavailable: str = "",
+    providers: Sequence[TrainingBackend] | None = None,
+    probes: Mapping[str, Callable[..., PreflightPanel]] | None = None,
+    kaggle_backend: Any = None,
+    kaggle_transport: Any = None,
+    kaggle_cli_probe: Callable[[str], str | None] | None = None,
+) -> dict[str, Any]:
+    """The declared backend's preflight, as one JSON-serializable document.
+
+    Everything an operator needs to decide *before* spending anything: the
+    declaration, the auto record when auto chose, the panel, the capability
+    matrix, each declared recipe's estimate, and any refusal -- with
+    ``stops_the_run`` saying whether the refusal is one the runner enforces
+    (a declaration error) or a hardware fact it only reports.
+
+    ``recipes`` are the planned recipes to estimate; the caller plans them (the
+    plan is the campaign runner's business, not the backend's), and
+    ``recipes_unavailable`` carries why they could not be planned rather than
+    pretending an empty estimate list meant "nothing to estimate".
+    """
+    declaration = backend_declaration(manifest)
+    report: dict[str, Any] = {
+        "cycle_id": str(getattr(manifest, "cycle_id", "")),
+        "declared": declaration.to_dict(),
+        "recipes": [recipe.recipe_id for recipe in recipes],
+        "recipes_unavailable": recipes_unavailable or None,
+    }
+    seams: dict[str, Any] = {
+        "providers": providers,
+        "probes": probes,
+        "kaggle_backend": kaggle_backend,
+        "kaggle_transport": kaggle_transport,
+        "kaggle_cli_probe": kaggle_cli_probe,
+    }
+    try:
+        provider, selection = resolve_training_backend(declaration, manifest, **seams)
+        preflight = provider.preflight(manifest)
+        capabilities = provider.capabilities().to_dict()
+        overhead = provider.projected_overhead(manifest).to_dict()
+    except TrainingBackendRefusal as refusal:
+        report.update(
+            {
+                "status": "REFUSED",
+                "provider": declaration.provider,
+                "trainer": "",
+                "strategy": "undeclared",
+                "refused_by": refusal.code,
+                "refusal_reason": refusal.reason,
+                "stops_the_run": True,
+                "panel": {
+                    "provider": declaration.provider,
+                    "measurement_method": (
+                        "not reached: the declaration did not resolve to a provider"
+                    ),
+                },
+                "capabilities": {},
+                "estimates": [],
+                "overrides": [],
+                "notes": [],
+                "auto_selection": None,
+                "overhead": None,
+            }
+        )
+        return report
+    estimates = [provider.estimate(manifest, recipe).to_dict() for recipe in recipes]
+    report.update(
+        {
+            "status": "ADMITTED" if preflight.admitted else "REFUSED",
+            "provider": provider.provider,
+            "trainer": provider.trainer,
+            "strategy": preflight.strategy,
+            "refused_by": preflight.code if not preflight.admitted else None,
+            "refusal_reason": preflight.reason,
+            # A declaration error stops the run; a hardware fact is reported
+            # here and enforced where the declaration demands it (or by auto).
+            "stops_the_run": (
+                not preflight.admitted
+                and preflight.code in STRUCTURAL_PREFLIGHT_CODES
+            ),
+            "panel": preflight.panel.to_dict(),
+            "capabilities": capabilities,
+            "estimates": estimates,
+            "overrides": list(preflight.overrides),
+            "notes": list(preflight.notes),
+            "auto_selection": selection.to_dict() if selection is not None else None,
+            "overhead": overhead,
+        }
+    )
+    return report
