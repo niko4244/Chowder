@@ -40,12 +40,15 @@ class _API:
         check_runs: int = 6,
         head_age_days: float = 0.0,
         issues: tuple[dict, ...] = (),
+        state_sequence: tuple[str, ...] = (),
     ) -> None:
         self.runs = list(runs)
         self.drops = list(drops)
         self.check_runs = check_runs
         self.head_age_days = head_age_days
         self.issues = list(issues)
+        self.state_sequence = list(state_sequence)
+        self.state_reads = 0
         self.mutations: list[tuple[str, str, dict | None]] = []
 
     def __call__(self, method: str, path: str, token: str, payload=None):
@@ -63,7 +66,15 @@ class _API:
             return self.drops
         if "/pulls/" in path:
             number = int(path.rsplit("/", 1)[1])
-            return next(drop for drop in self.drops if drop["number"] == number)
+            pull = dict(next(drop for drop in self.drops if drop["number"] == number))
+            if self.state_sequence:
+                # GitHub computes ``mergeable_state`` lazily; a sequence models a
+                # value that is unknown on the first read and settled later.
+                pull["mergeable_state"] = self.state_sequence[
+                    min(self.state_reads, len(self.state_sequence) - 1)
+                ]
+                self.state_reads += 1
+            return pull
         if path.endswith("/issues?state=open&per_page=100"):
             return self.issues
         raise AssertionError(f"unexpected call: {method} {path}")
@@ -195,3 +206,31 @@ def test_an_alert_updates_the_existing_issue_instead_of_opening_a_second(monkeyp
     _guard(monkeypatch, api)
     assert watchdog.main(_argv()) == 1
     assert api.mutations[0][:2] == ("PATCH", "/repos/niko4244/Chowder/issues/99")
+
+
+def test_a_lazy_merge_state_is_waited_for_instead_of_skipped(monkeypatch) -> None:
+    """Measured on the first live run: the state came back ``unknown`` for a drop
+    whose state was ``clean`` a minute earlier. Skipping the read would skip the
+    blocked-with-no-checks alarm for a whole week, so the read is retried."""
+    monkeypatch.setattr(watchdog, "MERGE_STATE_PAUSE_SECONDS", 0.0)
+    api = _API(
+        runs=(_run(),),
+        drops=(_drop(),),
+        state_sequence=("unknown", "blocked"),
+        check_runs=0,
+        head_age_days=3.0,
+    )
+    _guard(monkeypatch, api)
+    assert watchdog.main(_argv()) == 1
+    assert "required contexts never attached" in api.mutations[0][2]["body"]
+    assert api.state_reads == 2
+
+
+def test_a_state_that_stays_unknown_is_reported_and_never_alerts(monkeypatch) -> None:
+    """An uncomputable state must not fail a run -- and must not read as clean."""
+    monkeypatch.setattr(watchdog, "MERGE_STATE_PAUSE_SECONDS", 0.0)
+    api = _API(runs=(_run(),), drops=(_drop(),), state_sequence=("unknown",))
+    _guard(monkeypatch, api)
+    assert watchdog.main(_argv()) == 0
+    assert api.mutations == []
+    assert api.state_reads == watchdog.MERGE_STATE_ATTEMPTS

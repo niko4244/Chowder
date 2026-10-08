@@ -47,6 +47,7 @@ import datetime as dt
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -54,6 +55,12 @@ from typing import Any
 API = "https://api.github.com"
 ISSUE_TITLE = "[watchdog] the literature watch needs attention"
 DRY_RUN = False
+
+#: How long to wait between reads of a merge state GitHub has not computed yet,
+#: and how many times to read it. Kept as module constants so a test can set the
+#: pause to zero without touching the code under test.
+MERGE_STATE_PAUSE_SECONDS = 2.0
+MERGE_STATE_ATTEMPTS = 5
 
 
 class GitHubError(RuntimeError):
@@ -134,18 +141,38 @@ def check_watch_runs(repo: str, token: str, workflow: str, max_run_age_days: flo
 
 
 def _open_drops(repo: str, token: str, branch: str) -> list[dict[str, Any]]:
-    """Every open pull request on the machine-owned branch, with its merge state.
+    """Every open pull request on the machine-owned branch.
 
-    The list endpoint does not carry ``mergeable_state`` (measured: it is absent
-    from every row), so each drop is read individually. ``mergeable`` is left
-    None by GitHub while it recomputes, and an unknown state is never treated as
-    a failure here.
+    The list endpoint names the head branch but carries no merge state, so the
+    merge state is read per pull request in :func:`_merge_state`.
     """
     pulls = _request("GET", f"/repos/{repo}/pulls?state=open&per_page=100", token)
-    drops = [pull for pull in pulls if (pull.get("head") or {}).get("ref") == branch]
-    return [
-        _request("GET", f"/repos/{repo}/pulls/{pull['number']}", token) for pull in drops
-    ]
+    return [pull for pull in pulls if (pull.get("head") or {}).get("ref") == branch]
+
+
+def _merge_state(repo: str, token: str, number: int) -> tuple[str, bool | None]:
+    """One pull request's merge state, waited for when GitHub is still computing.
+
+    ``mergeable_state`` comes back ``unknown`` while GitHub recomputes it --
+    measured on the first live run of this workflow, which read ``unknown`` for a
+    drop whose state was ``clean`` a minute earlier. An alarm that skips the week
+    it is needed because a field was lazy is the failure mode this whole file
+    exists to prevent, so the read is retried a bounded number of times.
+
+    If it stays unknown that is reported as unknown and nothing is raised on it:
+    an uncomputable state must never fail a run, and must never be read as clean
+    either -- the detail says which it was.
+    """
+    state, mergeable = "unknown", None
+    for attempt in range(MERGE_STATE_ATTEMPTS):
+        pull = _request("GET", f"/repos/{repo}/pulls/{number}", token)
+        state = pull.get("mergeable_state") or "unknown"
+        mergeable = pull.get("mergeable")
+        if state != "unknown":
+            return state, mergeable
+        if attempt + 1 < MERGE_STATE_ATTEMPTS:
+            time.sleep(MERGE_STATE_PAUSE_SECONDS)
+    return state, mergeable
 
 
 def _head_commit_age(repo: str, token: str, sha: str) -> float | None:
@@ -183,7 +210,7 @@ def check_drops(
             "GET", f"/repos/{repo}/commits/{head_sha}/check-runs?per_page=100", token
         )
         reported = checks.get("total_count", 0)
-        state = pull.get("mergeable_state") or "unknown"
+        state, mergeable = _merge_state(repo, token, pull["number"])
         blocked = state == "blocked"
         head_age = _head_commit_age(repo, token, head_sha) if head_sha else None
         grace_passed = head_age is None or head_age * 24.0 > max_blocked_hours
@@ -191,7 +218,7 @@ def check_drops(
         # 2. Stuck with no required context attached: unmergeable for anyone.
         stuck = blocked and reported == 0 and grace_passed
         # 3. Conflicted with main: mergeable only after the next run rebuilds.
-        conflicted = state == "dirty" or pull.get("mergeable") is False
+        conflicted = state == "dirty" or mergeable is False
         # 4. Waiting on a human decision, past the window the design expects.
         waiting_age = _age_days(pull.get("created_at"))
         waiting = waiting_age is not None and waiting_age > max_drop_age_days
@@ -218,6 +245,12 @@ def check_drops(
             detail = (
                 f"#{pull['number']} open {(waiting_age or 0):.1f} days, "
                 f"{reported} check(s) reported, merge state {state}"
+                + (
+                    " (GitHub had not computed it; nothing is raised on an unknown "
+                    "state, and the next run reads it again)"
+                    if state == "unknown"
+                    else ""
+                )
             )
         results.append(
             {
