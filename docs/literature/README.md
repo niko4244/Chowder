@@ -12,7 +12,7 @@ back.
 | --- | --- | --- |
 | `watch.py` | nobody by hand | a stdlib-only fetcher that emits an **unvetted candidate pool** from the arXiv API, grouped by Chowder surface; `--append-log` screens it through the surface gates and drops what is new |
 | `.github/workflows/literature-watch.yml` | nobody by hand | the schedule: runs the pool weekly and opens a pull request carrying an **unvetted drop** into the log when something new matches |
-| `watchdog.py` | nobody by hand | a stdlib-only reader that answers "is the weekly loop still alive?" -- the schedule ran, a drop's checks reported, no drop is stuck -- and says so in one self-closing issue |
+| `watchdog.py` | nobody by hand | a stdlib-only reader that answers "is the loop still alive?" -- every scheduled workflow fired, a drop's checks reported, the drop's content follows the rules below, no drop is stuck -- and says so in one self-closing issue |
 | `.github/workflows/literature-watchdog.yml` | nobody by hand | the watchdog's schedule: Tuesdays, 06:00 UTC, the day after the watch, so a broken Monday is loud on Tuesday |
 | `WATCH_LOG.md` | a person/agent who read the paper | the **curated** record: what a paper establishes, mapped to a concrete Chowder surface, under the rules below -- plus explicitly-labelled automated drops, which are triage lists and not entries |
 | `src/chowder/growth/interventions.py` | a change with tests | the only place a finding becomes a *family the loop may propose* |
@@ -37,8 +37,10 @@ python docs/literature/watch.py --append-log docs/literature/WATCH_LOG.md \
 ```
 
 The tool only reads the public arXiv API. It needs no key, writes nothing by
-default, and is never imported by the package or the tests, so a build or CI
-run with no network is unaffected. arXiv asks for about one request every three
+default, and is never imported by the package; one test loads it for its drop
+format and issues no request of its own -- nothing but definitions and
+constants runs at import -- so a build or CI run with no network is
+unaffected. arXiv asks for about one request every three
 seconds; the fetcher spaces its calls accordingly. Re-run it as often as you
 like -- a rerun costs nothing and a stale watch is worse than no watch.
 
@@ -113,6 +115,20 @@ job never ran. `.github/workflows/literature-watchdog.yml` runs the day after
 the watch and checks what a reader would ask, in order:
 
 * **did the watch run** -- a successful run of the watch workflow within 8 days;
+* **did every scheduled workflow fire** -- every workflow file that declares
+  `on.schedule` is read, its cron is simulated forward to measure the cadence it
+  implies, and its newest run with `event=schedule` is compared against that
+  cadence plus a one-day grace. A schedule anywhere in the repository that
+  stops firing writes nothing anywhere, so this is the only check that can
+  notice it. A workflow too young for its first scheduled run is told apart
+  from one that has simply never fired by reading its registration date;
+* **does the drop follow the rules** -- the merged log and each open drop's own
+  copy (the text a merge would land) are checked against the invariants above: the
+  dated label, the unvetted disclosure, no quoted number, and every line being
+  one of the shapes a drop may carry. That last one is what *no abstract text*
+  means mechanically, and a number shaped like a result (`2.4x`, `40%`,
+  `3 times faster`) is refused wherever it appears, including in a title -- a
+  name like `YANchor-4B` is not a result;
 * **can the drop land** -- an open drop that is blocked with *no* check runs on
   its head commit (the required contexts never attached) or that conflicts with
   `main`;
@@ -126,8 +142,10 @@ alerting on it would train everyone to ignore the alert; the absence that
 matters -- the schedule itself -- is the first check.
 
 A failing check opens or updates one issue titled
-`[watchdog] the literature watch needs attention` and fails the run, so the alarm
-is both red in Actions and visible where issues are read. The issue closes
+`[watchdog] a scheduled workflow or the literature drop needs attention` and fails
+the run, so the alarm is both red in Actions and visible where issues are read.
+The watchdog still recognises the title it used before the check set widened, so
+renaming the alert did not orphan the open alert it was carrying. The issue closes
 itself on the next healthy check. The watchdog only reads: it never touches the
 log, the drop branch or a pull request.
 
