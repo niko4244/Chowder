@@ -192,8 +192,12 @@ def test_a_run_rejected_by_the_declared_gate_is_refused_by_the_judge_too(
 
     unknown_rows = [row for row in rows if row[2] == "UNKNOWN"]
     # Only this fixture's synthetic candidate arm leaves the instrument gates
-    # undecided; on a real Gen-2 arm they pass, and T21 is what refuses.
+    # undecided; on a real Gen-2 arm they pass, and T21 is what refuses. T24
+    # (amendment 17) is undecided for the same reason as T4/T5 -- the arm carries
+    # no instrument run, so there are no per-prompt rows to compare -- and it
+    # names that reason itself rather than joining a roster.
     assert unknown_rows and all(
-        row[0] in {"T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T12"}
+        row[0]
+        in {"T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T12", "T24"}
         for row in unknown_rows
     ), unknown_rows

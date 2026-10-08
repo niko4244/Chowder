@@ -445,6 +445,28 @@ settlement must agree with the record's. Fail-closed (an absent pin or absent
 settlement is UNKNOWN), no threshold moves, and the Gen-2 run is still not
 started: no candidate evaluation exists.
 
+**The judge's T5 count is now labelled by what it measures (2026-10-08).**
+`arXiv:2610.00054` (the literature watch's own next action) is about a judge
+whose verdict is read from the first-token logits. That mechanism is not in this
+repo — the Gen-2 judge generates under `PROTECTED_DECODING`, and the only logits
+here are router-gate tamper fingerprints — but its class, *the readout is not the
+conclusion*, was present in one row: T5 counts the expected string as **present**
+anywhere on the answer surface, and the row said "answer correctness". A mention
+(`There are 17 continents.` against `7`) passed that count and is 0.0 under
+every readout production declares (`evaluators/scoring.py`), and an unclosed
+` thinking` — which T10 tolerates at up to 25% — has no answer surface at all
+under production's rule while T5 reads one. Thirteen constructed mentions
+disagree thirteen times, always this way; that is reachability, not frequency,
+and no Gen-2 candidate evaluation exists to measure a rate. Prereg
+`GEN2_PREREG_AMENDMENT17_2026-10-08.md`
+(`docs/gen2/JUDGE_AMENDMENT_PROPOSAL_T24.md`) adds **T24**: it reads the rows T5
+reads, runs both declared production readouts through production's own `score`,
+and refuses only the irreducible case (presence accepts what *every* declared
+readout refuses); the reverse direction is disclosed and not gated. T5's label
+becomes the prereg's own words, its threshold does not move, and the bound
+(0 disagreements) was declared before the change. The unreachable-source proof is
+kept in the suite: unwire the gate and the mention certifies.
+
 **Fold mining (2026-10-05).** PR #203's rescued experiments are now registered
 intervention families: ten experiments landed by file-level extraction
 (byte-identical to the fold branch, 163 of their tests pass), and
@@ -887,7 +909,7 @@ still equals E, so there is zero compute saving yet. Router healing
     one-off Temp files (established pattern): `acquire_parent_c.py`,
     `acquire_parent_d.py`, `run_parent_c.py`, `run_parent_d.py`; both
     parents share `Chowder-Protected\tournament-cd.registry.db` and
-    `runs\cd-20260908\` so the #142 four-parent freeze pipeline can
+    `runs\cd-20260908` so the #142 four-parent freeze pipeline can
     consume all four parents' evidence from one registry.
   - Kaggle remains qualified-but-unused: the #143 toolkit is tested and
     merged, and the preflight refusal above is the honest, recorded
@@ -1326,7 +1348,7 @@ corpus must NOT be protected tournament content.
   bare `pytest`. CLI invocations need `PYTHONPATH=src` (this worktree's)
   because sys.path insertion does not propagate to subprocess workers.
 - Tooling gotcha: tools that address files cannot reach paths under
-  `.claude\worktrees\` (dot-directory). `read_files`/`str_replace` fail
+  `.claude\worktrees` (dot-directory). `read_files`/`str_replace` fail
   there; use `write_file` with the full path, or terminal reads
   (`sed -n`), or a python heredoc for in-place multi-edit with assertions.
 - Real-hardware tests: `CHOWDER_REAL_ML_SMOKE=1` etc.; torch imported
