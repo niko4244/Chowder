@@ -34,6 +34,10 @@ permissions:
   # run at `action_required` until someone approves it, so the required checks
   # never report; approving it is what puts them on the pull request.
   actions: write
+  # Read back the check runs the approval attaches, so the step verifies the
+  # outcome ("the checks report") instead of only the action ("a run was
+  # approved"). Read permission is all it needs and all it takes.
+  checks: read
 
 concurrency:
   group: literature-watch
@@ -119,8 +123,9 @@ jobs:
           # anything already merged. Do not commit to it by hand.
           git push --force origin "HEAD:refs/heads/$BRANCH"
 
-          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number -q '.[0].number')" ]; then
-            echo "Refreshed the open literature-watch pull request."
+          PR_NUMBER="$(gh pr list --head "$BRANCH" --state open --json number -q '.[0].number')"
+          if [ -n "$PR_NUMBER" ]; then
+            echo "Refreshed the open literature-watch pull request (#$PR_NUMBER)."
           else
             gh pr create --base main --head "$BRANCH" \
               --title 'docs(literature): weekly unvetted arXiv pool drop' \
@@ -149,6 +154,7 @@ jobs:
           artifact.
           EOF
           )"
+            PR_NUMBER="$(gh pr view "$BRANCH" --json number -q '.number')"
           fi
 
           # A pull request opened with the workflow token gets its own
@@ -162,23 +168,67 @@ jobs:
           # the gate stayed blocked. A check run only attaches to the pull
           # request when it comes from that pull request's own run.
           HEAD_SHA="$(git rev-parse HEAD)"
+          RUN_ID=""
           for attempt in 1 2 3 4 5 6; do
+            RUN_ID="$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=20" \
+              --jq '[.workflow_runs[]] | sort_by(.id) | last | .id // empty')"
             PARKED_ID="$(gh api \
               "repos/$GITHUB_REPOSITORY/actions/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=20" \
               --jq '[.workflow_runs[] | select(.conclusion == "action_required")] | .[0].id // empty')"
             if [ -n "$PARKED_ID" ]; then
               gh api --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$PARKED_ID/approve" >/dev/null
-              echo "Approved the parked check run on ${HEAD_SHA:0:7}; the required checks will report on the pull request."
-              exit 0
+              echo "Approved the parked check run on ${HEAD_SHA:0:7} (run $PARKED_ID)."
+              break
             fi
-            RUNS="$(gh api \
-              "repos/$GITHUB_REPOSITORY/actions/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=20" \
-              --jq '.total_count')"
-            if [ "$RUNS" != "0" ]; then
-              echo "The check run on ${HEAD_SHA:0:7} is already approved or running; nothing to approve."
-              exit 0
+            if [ -n "$RUN_ID" ]; then
+              echo "The check run on ${HEAD_SHA:0:7} is already approved or running (run $RUN_ID); nothing to approve."
+              break
             fi
             sleep 10
           done
-          echo "::error::no pull_request run appeared for ${HEAD_SHA:0:7} within 60s; the drop stays blocked until one push or an Update branch click from a person"
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::no pull_request run appeared for ${HEAD_SHA:0:7} within 60s; the drop stays blocked until one push or an Update branch click from a person"
+            exit 1
+          fi
+
+          # ... and then confirm the outcome this step claims. Approving a run is
+          # an action; the checks reporting on the pull request's commit is the
+          # result, and the two are not the same event -- that gap is exactly how
+          # the dispatch approach this replaced passed while leaving the rollup
+          # empty, and it is the one failure this step exists to make loud.
+          #
+          # The contexts to expect are read off the run that was approved rather
+          # than hardcoded: branch protection requires exactly the jobs of this
+          # workflow (6 of 6 names identical when this was measured, and
+          # `gh pr checks` lists the same names), so a change to the CI job set
+          # cannot make this check stale.
+          EXPECTED=""
+          MISSING=""
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            # Both sides are re-read every pass: a run that lists no jobs yet is
+            # "not verifiable", never a vacuous success, and the loop can only
+            # end in exit 0 when a non-empty expected set was fully matched.
+            EXPECTED="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs?per_page=100" \
+              --jq '.jobs[].name' | sort)"
+            REPORTED="$(gh api \
+              "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100" \
+              --jq '.check_runs[].name' | sort)"
+            MISSING=""
+            if [ -n "$EXPECTED" ]; then
+              while IFS= read -r name; do
+                [ -z "$name" ] && continue
+                if ! printf '%s\n' "$REPORTED" | grep -Fxq -- "$name"; then
+                  MISSING="${MISSING:+$MISSING, }$name"
+                fi
+              done <<< "$EXPECTED"
+              if [ -z "$MISSING" ]; then
+                echo "Every check of run $RUN_ID reports on ${HEAD_SHA:0:7}; pull request #$PR_NUMBER carries the required contexts."
+                exit 0
+              fi
+            fi
+            echo "Still waiting for checks to report on ${HEAD_SHA:0:7}: ${MISSING:-run $RUN_ID lists no jobs yet}"
+            sleep 10
+          done
+          echo "::error::checks never reported on ${HEAD_SHA:0:7} for run $RUN_ID (missing: ${MISSING:-the run lists no jobs}); pull request #$PR_NUMBER would stay blocked with no required context attached"
           exit 1
