@@ -333,3 +333,50 @@ time measurable.
 Every fix was checked by revert: neutering `_baseline` fails 10 audit tests,
 removing the broad-battery filter fails 2, reverting the binder fails the
 provenance suite, and dropping the parameter fails the reachability test.
+
+## The settlement audit (2026-10-04)
+
+The promotion matrix had no analogue for the resource envelope, so the audit now
+covers the settlement and compute-cost paths too:
+`tests/test_growth_settlement_adversarial.py` (25 tests) in the same
+three-layer shape as the promotion audit, one mutation at a time.
+
+**The rule (`settle_cost`).** An unmeasured device figure never settles a
+declared device ceiling while an *observed* zero does -- the attempts 07/08
+unit-confusion, one layer down; each ceiling is settled only in its own unit;
+every breach is reported and none is downgraded to a warning; a `0.0` ceiling is
+a ceiling and only `None` removes the control; the project budget is wall-charged
+and is its own control; the projection tolerance is directional, and a zero
+projection is an absent basis rather than a licence past a declared ceiling.
+
+**The campaign contract and its ledger.** The declared device ceiling settles
+only when the declaration says device time is measured, and the wall envelope is
+never demoted; `_ceiling_enforcement` must not name a device settlement the
+ledger cannot support; the total is the sum of its incremental entries, so one
+unmeasured contributor makes the whole total an estimate (and the declared
+device ceiling unsettleable) while a zero-cost reference neither costs nor
+demotes the measurement; and the ledger digest is recomputable from the bytes.
+Then whole `run_campaign` roots under the frozen judge.
+
+**What the audit found: the settlement analogue of the judge gap.** A run
+refused on its own frozen envelope (`ACTUAL_WALL_GPU_HOURS_EXCEEDED`, 0.5120
+wall against the declared 0.2000) is certified **PROMOTED** -- every row
+PASSing, exit code 0 -- after one file is edited:
+`cycle_compute_accounting.json`'s incremental totals set to zero. The run's
+record is untouched and still says `REJECTED`; T21 passes it under "refused
+without a declared-gate breach" (it collects only `RETENTION_` reasons) while
+T13 recomputes compliance from the edited bytes. The anchor existed and was
+unread: the ledger stamps `digest_sha256` and `CampaignRun.to_dict` pins it at
+`cost.accounting_digest`.
+
+**Amendment 16 (T23).** `docs/gen2/JUDGE_AMENDMENT_PROPOSAL_T23.md` plus prereg
+`GEN2_PREREG_AMENDMENT16_2026-10-04.md`. T23 reads the same two artifacts T13
+and T21 already read and emits one row: the artifact's digest, recomputed
+through production's `ledger_digest` (extracted from `CycleCostLedger.render`,
+so the writer keeps the canonical form), must equal the digest the record
+pinned, and the artifact's own settlement must agree with the recorded one. An
+absent pin, absent settlement, unreadable artifact or unreadable campaign is
+UNKNOWN; a moved artifact or a disagreement is FAIL. No threshold, no verdict
+class and no exit-code rule moves. Both revert proofs were measured: with the
+gate unwired the attack certifies, and with only the digest clause disabled the
+agreement clause refuses the same root.

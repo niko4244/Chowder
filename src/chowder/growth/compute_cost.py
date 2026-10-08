@@ -277,6 +277,24 @@ def settlement_refusal(evidence: Mapping[str, Any]) -> str | None:
     return None
 
 
+def ledger_digest(document: Mapping[str, Any]) -> str:
+    """The digest of a rendered ledger document, recomputable from its bytes.
+
+    :meth:`CycleCostLedger.write` stamps ``digest_sha256`` onto the document it
+    writes, and the run records that digest as the identity of the accounting
+    artifact it settled (``CampaignRun.cost['accounting_digest']``). This is the
+    one function that decides the number, so a consumer holding the written
+    bytes -- the Gen-2 judge's T23 -- recomputes the same value instead of
+    reimplementing the canonical form. A reader that re-derived the digest
+    itself could drift from the writer, and the whole point of the pin is that
+    one edit to the artifact moves a number the record already carries.
+    """
+    body = {key: value for key, value in document.items() if key != "digest_sha256"}
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 @dataclass
 class _LedgerEntry:
     label: str
@@ -380,10 +398,7 @@ class CycleCostLedger:
                 "per_recipe": per_recipe,
             },
         }
-        digest = hashlib.sha256(
-            json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-        document["digest_sha256"] = digest
+        document["digest_sha256"] = ledger_digest(document)
         return document
 
     def write(self, path) -> str:

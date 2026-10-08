@@ -430,6 +430,21 @@ shape-checked at 6.477B total / 3.306B active — a viable budget, NOT a
 trained model. It may simply be wrong for the
 program's purpose.
 
+**The settlement path now has its own adversarial audit (2026-10-04).**
+`tests/test_growth_settlement_adversarial.py` attacks `settle_cost`, the
+campaign ceiling contract, `CycleCostLedger` and whole `run_campaign` roots one
+artifact at a time. It found the settlement analogue of the amendment-15 gap: a
+run REFUSED on its own frozen envelope (`ACTUAL_WALL_GPU_HOURS_EXCEEDED`) was
+certified PROMOTED by the frozen judge with every row PASSing, after one file --
+`cycle_compute_accounting.json`'s incremental totals -- was edited; the run's
+own record still said REJECTED. The record already pins the ledger digest at
+`cost.accounting_digest`, so prereg `GEN2_PREREG_AMENDMENT16_2026-10-04.md`
+(`docs/gen2/JUDGE_AMENDMENT_PROPOSAL_T23.md`) adds T23: the artifact's digest,
+recomputed through production's `ledger_digest`, must be the pinned one, and its
+settlement must agree with the record's. Fail-closed (an absent pin or absent
+settlement is UNKNOWN), no threshold moves, and the Gen-2 run is still not
+started: no candidate evaluation exists.
+
 ---
 
 ## Prior entry (2026-09-10) — protocol-v3 A/B/C tournament,

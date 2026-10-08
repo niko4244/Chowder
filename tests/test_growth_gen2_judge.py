@@ -34,7 +34,7 @@ from chowder.evals.result import (
     EvalReport,
 )
 from chowder.growth.campaign import CampaignManifest, settle_campaign
-from chowder.growth.compute_cost import ComputeCost
+from chowder.growth.compute_cost import ComputeCost, ledger_digest
 from chowder.growth.statistics import compare
 from chowder.growth.training_binding import directory_digest
 
@@ -460,6 +460,36 @@ def _run_record(
     }
 
 
+def _attest_record(root: Path, record: dict) -> dict:
+    """Give a fixture record the two facts production always records (T23).
+
+    ``CampaignRun`` pins the ledger it settled (``cost.accounting_digest``) and
+    records the settlement verdict beside it, and prereg amendment 16 makes the
+    judge recompute both: the artifact's digest must be the pinned one, and its
+    settlement must agree with the record's. A fixture that wrote neither would
+    be a root the judge must treat as unattested (INCONCLUSIVE) -- which is not
+    what these cases exercise -- so the record claims production's own answer for
+    the artifact this root wrote.
+    """
+    path = root / "cycle_compute_accounting.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    totals = document["totals"]["incremental"]
+    settled = settle_campaign(
+        CampaignManifest.from_file(judge_gen2.CAMPAIGN_MANIFEST),
+        total=ComputeCost.from_dict(totals),
+    )
+    attested = dict(record)
+    attested["cost"] = {
+        "accounting_path": str(path),
+        "accounting_digest": ledger_digest(document),
+        "device_gpu_hours": float(totals["device_gpu_hours"]),
+        "wall_gpu_hours": float(totals["wall_gpu_hours"]),
+        "device_measured": bool(totals.get("device_measured", False)),
+    }
+    attested["settlement"] = settled.to_dict()
+    return attested
+
+
 def _run_root(
     tmp_path: Path,
     *,
@@ -559,8 +589,9 @@ def _run_root(
     # fixture declares the pin it used -- as the frozen manifest does in production.
     _pin_campaign(tmp_path, root, contamination_pin or pinned, **(campaign_overrides or {}))
 
-    # The run's own record of its decision (amendment 15), written beside the
-    # evidence and carrying the decision production computes for these arms.
+    # The run's own record of its decision (amendment 15) and of the ledger it
+    # settled (amendment 16), written beside the evidence and carrying the
+    # decision production computes for these arms.
     if write_run_record:
         record = (
             run_record
@@ -575,6 +606,7 @@ def _run_root(
                 **(campaign_overrides or {}),
             )
         )
+        record = _attest_record(root, record)
         (root / "campaign-run.json").write_text(json.dumps(record), encoding="utf-8")
 
     return root
