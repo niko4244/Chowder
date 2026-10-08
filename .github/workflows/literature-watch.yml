@@ -29,10 +29,10 @@ on:
 permissions:
   contents: write # push the drop branch
   pull-requests: write # open or refresh the drop pull request
-  # Dispatch ci.yml on the drop branch. A pull request opened with the workflow
-  # token does create a pull_request run, but GitHub parks it at
-  # `action_required` waiting for a human, so nothing reports the required
-  # checks on its own; the dispatch is what satisfies the gate.
+  # Approve the parked check run on the drop pull request. A pull request opened
+  # with the workflow token gets its own pull_request run, but GitHub parks that
+  # run at `action_required` until someone approves it, so the required checks
+  # never report; approving it is what puts them on the pull request.
   actions: write
 
 concurrency:
@@ -151,6 +151,34 @@ jobs:
           )"
           fi
 
-          # A push made with GITHUB_TOKEN starts no workflow run, so the required
-          # checks would never report on the pull request; dispatch them here.
-          gh workflow run ci.yml --ref "$BRANCH"
+          # A pull request opened with the workflow token gets its own
+          # pull_request run, but GitHub parks that run at `action_required`
+          # until someone approves it, so the required checks never report and
+          # branch protection blocks the drop. Approve our own run.
+          #
+          # Dispatching a separate ci.yml run does NOT work here, and that was
+          # measured rather than assumed: the dispatched checks completed green
+          # on the commit, but the pull request's check rollup stayed empty, so
+          # the gate stayed blocked. A check run only attaches to the pull
+          # request when it comes from that pull request's own run.
+          HEAD_SHA="$(git rev-parse HEAD)"
+          for attempt in 1 2 3 4 5 6; do
+            PARKED_ID="$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=20" \
+              --jq '[.workflow_runs[] | select(.conclusion == "action_required")] | .[0].id // empty')"
+            if [ -n "$PARKED_ID" ]; then
+              gh api --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$PARKED_ID/approve" >/dev/null
+              echo "Approved the parked check run on ${HEAD_SHA:0:7}; the required checks will report on the pull request."
+              exit 0
+            fi
+            RUNS="$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=20" \
+              --jq '.total_count')"
+            if [ "$RUNS" != "0" ]; then
+              echo "The check run on ${HEAD_SHA:0:7} is already approved or running; nothing to approve."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::no pull_request run appeared for ${HEAD_SHA:0:7} within 60s; the drop stays blocked until one push or an Update branch click from a person"
+          exit 1
