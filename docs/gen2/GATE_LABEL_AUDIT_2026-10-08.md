@@ -9,8 +9,9 @@ after the thresholds were frozen is the repo owner's call, exactly as amending
 the judge is, which is why the corrections went through a named amendment. Two
 of the wordings proposed below were shortened to fit the renderer's
 46-character name column; the applied strings are recorded in each finding.
-**F7 remains open**: it is a row-set question, not a rename, and the owner
-decides it.
+**F7 is resolved**, by `docs/quals/GEN2_PREREG_AMENDMENT19_2026-10-08.md`: it was
+a row-set question rather than a rename, so it took its own named amendment and
+its own revert proof.
 
 ## Why this audit exists
 
@@ -40,7 +41,7 @@ the code measures.
 
 | row | what the row name says | what the code measures | audit |
 | --- | --- | --- | --- |
-| T1 | ~~candidate instrument provenance~~ /**candidate instrument provenance + row identity** | a duplicate-free instrument run carrying `MEASURED_THIS_GENERATION`, plus its `measurement_origin` | name was narrower than the quantity (F6, **corrected by amendment 18**); the unreadable-arm pair is F7, **open** |
+| T1 | ~~candidate instrument provenance~~ /**candidate instrument provenance + row identity** | a duplicate-free instrument run carrying `MEASURED_THIS_GENERATION`, plus its `measurement_origin` | name was narrower than the quantity (F6, **corrected by amendment 18**); the duplicate row was F7, **corrected by amendment 19** |
 | T2 | answer-duplication target | share of completions whose post-think answer also appears in the reasoning, vs the parent, by the frozen paired-or-absolute rule | name matches; detail polarity was inverted (F2, **corrected by amendment 18**) |
 | T3 | template-echo target | share of continuations opening with the prompt tail + `assistant`, vs the parent, same rule | name matches; detail polarity was inverted (F2, **corrected by amendment 18**) |
 | T4 | constrained-prompt compliance == 8/8 | on the 8 declared prompts: answer surface non-empty, ≤ 40 chars, ≤ 1 newline | name matches the prereg's "format compliance" |
@@ -187,8 +188,8 @@ seeing "provenance PASS" cannot tell that identity was also checked.
 **Proposed correction.** `"candidate instrument provenance and row identity"`
 (the row's own detail already names which check it is reporting).
 
-### F7 — an unreadable candidate arm renders T1 twice (disclosure-only; left open)
-**Found while applying F6; not corrected by amendment 18.** When the candidate arm
+### F7 — an unreadable candidate arm renders T1 twice (disclosure-only; corrected by amendment 19)
+**Found while applying F6; corrected by amendment 19.** When the candidate arm
 cannot be read, T1 is emitted twice for the same missing artifact: once by the
 `ArmError` branch in `judge()` (whose name was `candidate measured evidence`) and
 once by `_instrument_gates`' UNKNOWN roster. The two rows are the same fact under
@@ -201,12 +202,18 @@ T1  candidate instrument provenance + row identity  UNKNOWN  candidate evaluatio
 ```
 
 T1 is not the only multi-fact threshold — T11, T12 and T19 also emit more than one
-row, and deliberately — so the duplicate is not obviously wrong. But collapsing the
-pair changes how many rows a root emits, and `branch_verdict` reads the row set:
-that is a behaviour change, not a rename, so it is recorded here and left to the
-owner rather than folded into amendment 18. The new
-`test_the_unreadable_candidate_arm_uses_one_t1_name` pins both facts (one name,
-still two rows) so neither the stale second name nor a silent merge can drift.
+row, and deliberately — so the duplicate was not obviously wrong. It is
+nonetheless one *check* split by which branch produced it, not two checks: T11's
+rows are a per-slice measurement, a bound and a substitution rule, each its own
+question, while answering "what does T1 say about this run" meant combining two
+rows by hand. The owner took the decision in amendment 19: T1 renders one row per
+run, carrying every finding, with FAIL outranking UNKNOWN outranking PASS. The
+row-set change is stated there rather than hidden, and the statuses a reader can
+see are the same set, so no verdict moves. Three tests pin the shapes —
+`test_an_unreadable_candidate_arm_renders_t1_once_with_its_own_refusal`,
+`test_an_open_arm_with_two_t1_findings_still_renders_one_row` and
+`test_a_clean_arm_renders_t1_exactly_once` — and both fixes were reverted in
+place to prove the pins catch the old shape.
 
 The name the rename drops, `candidate measured evidence`, was not arbitrary:
 production's certification carries exactly that requirement for the same
@@ -235,7 +242,8 @@ took the same treatment as any frozen-judge change: a named prereg amendment, a
 test that fails without each rename (revert-measured, eight cases), and the
 no-visible-candidate-results check that governs amendments 15-18 (`evidence/`
 holds zero `candidate_evaluation.json` and zero `chosen_candidate.json`, and the
-declared Gen-2 state root is not present in this checkout). F7 is left open and
-is the only finding this record still proposes rather than reports: merging the
-duplicate row is the owner's call, and the pin keeps it loud. None of these names
+declared Gen-2 state root is not present in this checkout). F7 was proposed here
+and decided in amendment 19, so this record now reports rather than proposes:
+every finding it raised is either corrected or explicitly out of its scope. None
+of these names
 can certify a candidate the code refuses.

@@ -6,8 +6,9 @@ Frozen with ``docs/quals/GEN2_PREREG_2026-09-17.md`` and its amendments
 ``GEN2_PREREG_AMENDMENT15_2026-10-04.md`` (the declared-gate coupling, T21/T22)
 and ``GEN2_PREREG_AMENDMENT16_2026-10-04.md`` (the settlement artifact pin, T23);
 amended by ``GEN2_PREREG_AMENDMENT17_2026-10-08.md`` (the answer readout disclosure, T24);
-amended by ``GEN2_PREREG_AMENDMENT18_2026-10-08.md`` (the row-label audit: F2-F7 applied, no
-decision moved).
+amended by ``GEN2_PREREG_AMENDMENT18_2026-10-08.md`` (the row-label audit: F2-F6 applied, F7
+recorded, no threshold moved) and ``GEN2_PREREG_AMENDMENT19_2026-10-08.md`` (F7: T1 renders
+one row per run, no decision moved).
 Thresholds may not change after candidate results are visible. Reads the run's
 durable artifacts read-only and emits one verdict table over the branch rules.
 
@@ -579,6 +580,7 @@ def judge(run_root: Path) -> int:
     )
     parent_version = campaign.parent_version if campaign is not None else ""
     arms: dict[str, Arm | None] = {}
+    candidate_refusal: str | None = None
     for key, filename, origin, label, generation in (
         ("candidate", "candidate_evaluation.json", MEASURED_THIS_GENERATION, "candidate", candidate_version),
         ("parent", "parent_evaluation.json", MEASURED_PARENT, "parent (gen1)", parent_version),
@@ -594,10 +596,14 @@ def judge(run_root: Path) -> int:
         except ArmError as error:
             arms[key] = None
             if key == "candidate":
-                verdict.add("T1", "candidate instrument provenance + row identity", UNKNOWN, str(error))
+                # The refusal is not a row here: T1 is one fact in two parts --
+                # a row identity and a pinned run -- and both parts belong in
+                # one row. Handing the reason to the roster keeps T1's row count
+                # independent of how the arm failed (amendment 19, finding F7).
+                candidate_refusal = str(error)
     candidate = arms["candidate"]
 
-    _instrument_gates(verdict, candidate, arms["parent"])
+    _instrument_gates(verdict, candidate, arms["parent"], refusal=candidate_refusal)
     _protected_gates(verdict, arms, campaign, run_root=run_root)
     _evidence_identity_gate(verdict, run_root, arms, campaign)
     _protection_agreement_gate(verdict, campaign)
@@ -622,7 +628,8 @@ def judge(run_root: Path) -> int:
         "+ GEN2_PREREG_AMENDMENT15_2026-10-04.md "
         "+ GEN2_PREREG_AMENDMENT16_2026-10-04.md "
         "+ GEN2_PREREG_AMENDMENT17_2026-10-08.md "
-        "+ GEN2_PREREG_AMENDMENT18_2026-10-08.md",
+        "+ GEN2_PREREG_AMENDMENT18_2026-10-08.md "
+        "+ GEN2_PREREG_AMENDMENT19_2026-10-08.md",
     )
 
     final = branch_verdict(verdict)
@@ -677,10 +684,38 @@ def branch_verdict(verdict: Verdict) -> str:
     return "PROMOTED"
 
 
-def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | None) -> None:
+T1_NAME = "candidate instrument provenance + row identity"
+
+
+def _instrument_gates(
+    verdict: Verdict,
+    candidate: Arm | None,
+    parent: Arm | None,
+    *,
+    refusal: str | None = None,
+) -> None:
+    """T1 through T10, with T1 rendered as exactly one row per run.
+
+    T1 is a conjunction -- a duplicate-free row identity *and* a pinned
+    instrument run -- and it used to be written as one row per conjunct: an
+    unreadable arm rendered it twice, and so did an arm that both duplicated
+    rows and carried no pinned run. That is not the shape the other multi-row
+    gates have: T11 and T19 report several *distinct* checks under one id on
+    purpose, while T1's rows were one check split in two, which forces a reader
+    to combine them by hand to answer T1. So the findings are collected and one
+    row carries all of them, with FAIL outranking UNKNOWN outranking PASS
+    (amendment 19, finding F7). No decision moves: the statuses a reader could
+    see are the same set, and ``refusal`` is the arm's own refusal message,
+    which used to sit in a separate row.
+    """
     if candidate is None:
+        verdict.add(
+            "T1",
+            T1_NAME,
+            UNKNOWN,
+            refusal or "candidate evaluation artifact unavailable",
+        )
         for threshold, name in (
-            ("T1", "candidate instrument provenance + row identity"),
             ("T2", "answer-duplication target"),
             ("T3", "template-echo target"),
             ("T4", "constrained-prompt format"),
@@ -698,28 +733,20 @@ def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | Non
         return
 
     duplicates = candidate.duplicate_ids()
-    if duplicates:
-        verdict.add(
-            "T1",
-            "candidate instrument provenance + row identity",
-            FAIL,
-            f"candidate arm duplicates rows for {list(duplicates)}",
-        )
     instrument_run = candidate.run_for(INSTRUMENT_ID)
+    findings: list[tuple[str, str]] = []
+    if duplicates:
+        findings.append((FAIL, f"candidate arm duplicates rows for {list(duplicates)}"))
     if instrument_run is None:
-        verdict.add(
-            "T1",
-            "candidate instrument provenance + row identity",
-            UNKNOWN,
-            f"no single {INSTRUMENT_ID} run carrying {MEASURED_THIS_GENERATION}",
+        findings.append(
+            (UNKNOWN, f"no single {INSTRUMENT_ID} run carrying {MEASURED_THIS_GENERATION}")
         )
-    else:
-        verdict.add(
-            "T1",
-            "candidate instrument provenance + row identity",
-            PASS,
-            f"measurement_origin={instrument_run.measurement_origin}",
-        )
+    if not findings:
+        findings.append((PASS, f"measurement_origin={instrument_run.measurement_origin}"))
+    status = FAIL if any(row_status == FAIL for row_status, _ in findings) else (
+        UNKNOWN if any(row_status == UNKNOWN for row_status, _ in findings) else PASS
+    )
+    verdict.add("T1", T1_NAME, status, "; ".join(detail for _, detail in findings))
 
     per_prompt = candidate.per_prompt()
     if instrument_run is None or not per_prompt:
