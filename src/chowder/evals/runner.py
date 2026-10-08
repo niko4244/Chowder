@@ -6,8 +6,15 @@ harness or modality is unavailable. The scoreboard renders the report:
 category tables, contamination markers, the raw-vs-harness distinction, and
 the arrow language for generation deltas:
 
-  ↑ improved   → statistically flat   ↓ regressed   ? unavailable
+  ↑ better   → statistically flat   ↓ worse   ? unavailable
   N/A unsupported   ⚠ contaminated/non-comparable
+
+The arrow names the direction the *registry declared better*, not the sign of the
+raw delta. Every declared metric is higher-is-better today, so the two agree on
+every current row; a metric declared ``lower_is_better`` arrows down when its raw
+value rises, and its row says ``(lower is better)`` so the mark cannot be read as
+the wrong direction. ``compare`` answers in a higher-is-better vocabulary, so the
+mapping is inverted from the declaration rather than borrowed from the verdict.
 """
 
 from __future__ import annotations
@@ -180,6 +187,18 @@ class Scoreboard:
             lines.append(f"| {run.benchmark_qualified_id} | {category} | {score} | {kind} | {status} |")
         return lines
 
+    def _better_direction(self, benchmark_qualified_id: str) -> str:
+        """The registry's declared polarity for this row's metric.
+
+        ``compare`` answers in a higher-is-better vocabulary, so an arrow has to
+        render from the declaration rather than from the raw sign: a row whose
+        metric is declared ``lower_is_better`` arrows down when its raw value
+        rises. An undeclared benchmark has no polarity to invert and reads as
+        higher-is-better, which is what every declared metric is today.
+        """
+        entry = self._registry.get(benchmark_qualified_id)
+        return entry.direction if entry is not None else "higher_is_better"
+
     def _render_deltas(
         self, report: EvalReport, parent_report: EvalReport
     ) -> list[str]:
@@ -196,15 +215,21 @@ class Scoreboard:
                 )
                 continue
             delta = run.score - parent_run.score
+            better_is_higher = (
+                self._better_direction(run.benchmark_qualified_id) != "lower_is_better"
+            )
+            note = "" if better_is_higher else "; lower is better"
             verdict = FLAT
             if run.per_sample_scores and parent_run.per_sample_scores:
                 comparison = compare(parent_run.per_sample_scores, run.per_sample_scores)
                 if comparison.verdict == "improved":
-                    verdict = UP
+                    verdict = UP if better_is_higher else DOWN
                 elif comparison.verdict == "regressed":
-                    verdict = DOWN
+                    verdict = DOWN if better_is_higher else UP
+                if not better_is_higher:
+                    verdict = f"{verdict} (lower is better)"
             else:
-                verdict = f"{FLAT} (no per-sample stats)"
+                verdict = f"{FLAT} (no per-sample stats{note})"
             lines.append(
                 f"| {run.benchmark_qualified_id} | {parent_run.score:.3f} | {run.score:.3f} "
                 f"| {delta:+.3f} | {verdict} |"
