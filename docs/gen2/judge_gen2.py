@@ -5,7 +5,9 @@ Frozen with ``docs/quals/GEN2_PREREG_2026-09-17.md`` and its amendments
 ``GEN2_PREREG_AMENDMENT1/2/3_2026-09-18.md``; amended by
 ``GEN2_PREREG_AMENDMENT15_2026-10-04.md`` (the declared-gate coupling, T21/T22)
 and ``GEN2_PREREG_AMENDMENT16_2026-10-04.md`` (the settlement artifact pin, T23);
-amended by ``GEN2_PREREG_AMENDMENT17_2026-10-08.md`` (the answer readout disclosure, T24).
+amended by ``GEN2_PREREG_AMENDMENT17_2026-10-08.md`` (the answer readout disclosure, T24);
+amended by ``GEN2_PREREG_AMENDMENT18_2026-10-08.md`` (the row-label audit: F2-F7 applied, no
+decision moved).
 Thresholds may not change after candidate results are visible. Reads the run's
 durable artifacts read-only and emits one verdict table over the branch rules.
 
@@ -480,8 +482,15 @@ def _target_gate(
     else:
         strict = sum(1 for p, c in zip(parent, candidate) if c > p)
     strict_ok = strict >= TARGET_STRICT_PROMPT_MIN
+    # These rates are lower-is-better and ``compare`` answers in a
+    # higher-is-better vocabulary, so production's word is kept -- a reader can
+    # trace it to the function that produced it -- and its polarity is named
+    # beside it. An unlabelled "improved" on a candidate that made the rate worse
+    # was amendment 18's finding: the detail said the opposite of the row.
     detail = (
-        f"paired={comparison.verdict} (delta {comparison.delta:+.4f}, "
+        f"paired {'better' if paired_improved else 'not better'} "
+        f"(production's compare() answers {comparison.verdict!r} in a "
+        f"higher-is-better vocabulary; delta {comparison.delta:+.4f}, "
         f"min_effect {TARGET_MIN_EFFECT}); candidate rate {candidate_rate:.3f} vs "
         f"parent {parent_rate:.3f}; absolute {'met' if absolute_met else 'not met'}; "
         f"strictly better on {strict}/{len(candidate)} (need {TARGET_STRICT_PROMPT_MIN})"
@@ -585,7 +594,7 @@ def judge(run_root: Path) -> int:
         except ArmError as error:
             arms[key] = None
             if key == "candidate":
-                verdict.add("T1", "candidate measured evidence", UNKNOWN, str(error))
+                verdict.add("T1", "candidate instrument provenance + row identity", UNKNOWN, str(error))
     candidate = arms["candidate"]
 
     _instrument_gates(verdict, candidate, arms["parent"])
@@ -612,7 +621,8 @@ def judge(run_root: Path) -> int:
         "docs/quals/GEN2_PREREG_2026-09-17.md + GEN2_PREREG_AMENDMENT1/2/3/4_2026-09-18.md "
         "+ GEN2_PREREG_AMENDMENT15_2026-10-04.md "
         "+ GEN2_PREREG_AMENDMENT16_2026-10-04.md "
-        "+ GEN2_PREREG_AMENDMENT17_2026-10-08.md",
+        "+ GEN2_PREREG_AMENDMENT17_2026-10-08.md "
+        "+ GEN2_PREREG_AMENDMENT18_2026-10-08.md",
     )
 
     final = branch_verdict(verdict)
@@ -670,7 +680,7 @@ def branch_verdict(verdict: Verdict) -> str:
 def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | None) -> None:
     if candidate is None:
         for threshold, name in (
-            ("T1", "candidate instrument provenance"),
+            ("T1", "candidate instrument provenance + row identity"),
             ("T2", "answer-duplication target"),
             ("T3", "template-echo target"),
             ("T4", "constrained-prompt format"),
@@ -678,7 +688,7 @@ def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | Non
             ("T6", "EOS termination"),
             ("T7", "max-token-cap rate"),
             ("T8", "obvious loops"),
-            ("T9", "distinct-trigram ratio"),
+            ("T9", "distinct-trigram ratio mean"),
             ("T10", "unclosed think rate"),
         ):
             verdict.add(threshold, name, UNKNOWN, "candidate evaluation artifact unavailable")
@@ -691,7 +701,7 @@ def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | Non
     if duplicates:
         verdict.add(
             "T1",
-            "candidate instrument provenance",
+            "candidate instrument provenance + row identity",
             FAIL,
             f"candidate arm duplicates rows for {list(duplicates)}",
         )
@@ -699,14 +709,14 @@ def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | Non
     if instrument_run is None:
         verdict.add(
             "T1",
-            "candidate instrument provenance",
+            "candidate instrument provenance + row identity",
             UNKNOWN,
             f"no single {INSTRUMENT_ID} run carrying {MEASURED_THIS_GENERATION}",
         )
     else:
         verdict.add(
             "T1",
-            "candidate instrument provenance",
+            "candidate instrument provenance + row identity",
             PASS,
             f"measurement_origin={instrument_run.measurement_origin}",
         )
@@ -793,7 +803,7 @@ def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | Non
          lambda v: v < PROTECTED_CAP_MAX, "0.000"),
         ("T8", f"obvious loops <= {PROTECTED_LOOP_MAX}", "obvious_loop_count",
          lambda v: v <= PROTECTED_LOOP_MAX, "0"),
-        ("T9", f"distinct-trigram >= {PROTECTED_TRIGRAM_MIN}", "distinct_trigram_ratio_mean",
+        ("T9", f"distinct-trigram ratio mean >= {PROTECTED_TRIGRAM_MIN}", "distinct_trigram_ratio_mean",
          lambda v: v >= PROTECTED_TRIGRAM_MIN, "0.973"),
         ("T10", f"unclosed think <= {PROTECTED_UNCLOSED_THINK_MAX}", "unclosed_think_rate",
          lambda v: v <= PROTECTED_UNCLOSED_THINK_MAX, "0.000"),
@@ -1307,7 +1317,7 @@ def _settlement_gates(
     document = _load_json(path)
     if not isinstance(document, Mapping):
         verdict.add(
-            "T13", "actual cost settled within the declared ceilings", UNKNOWN,
+            "T13", "cost settles within the declared ceilings", UNKNOWN,
             "cycle_compute_accounting.json missing or unreadable",
         )
         verdict.add("T14", "all recipes accounted", UNKNOWN, "accounting artifact unavailable")
@@ -1315,12 +1325,12 @@ def _settlement_gates(
     totals = (document.get("totals") or {}).get("incremental")
     if not isinstance(totals, Mapping):
         verdict.add(
-            "T13", "actual cost settled within the declared ceilings", UNKNOWN,
+            "T13", "cost settles within the declared ceilings", UNKNOWN,
             "accounting artifact declares no incremental totals",
         )
     elif campaign is None:
         verdict.add(
-            "T13", "actual cost settled within the declared ceilings", UNKNOWN,
+            "T13", "cost settles within the declared ceilings", UNKNOWN,
             "campaign manifest unavailable, so no ceilings can be settled against",
         )
     else:
@@ -1328,7 +1338,7 @@ def _settlement_gates(
             total = ComputeCost.from_dict(totals)
         except (KeyError, TypeError, ValueError) as error:
             verdict.add(
-                "T13", "actual cost settled within the declared ceilings", UNKNOWN,
+                "T13", "cost settles within the declared ceilings", UNKNOWN,
                 f"incremental totals are not a readable ComputeCost: {error}",
             )
         else:
@@ -1337,7 +1347,7 @@ def _settlement_gates(
             settlement = settle_campaign(campaign, total=total)
             verdict.add(
                 "T13",
-                "actual cost settled within the declared ceilings",
+                "cost settles within the declared ceilings",
                 PASS if settlement.compliant else FAIL,
                 (
                     f"device {total.device_gpu_hours:.4f} "
@@ -1570,7 +1580,7 @@ def _declared_gate_agreement(
       reimplemented: the policy, the threshold and the rows that count all come
       from production, and this judge only compares the two answers.
     """
-    requirement = "the run's promotion decision agrees with the declared profile"
+    requirement = "run decision on the declared retention profile"
     profile = campaign.retention_profile if campaign is not None else None
     record = _load_json(run_root / RUN_RECORD_NAME)
     if record is None:

@@ -166,7 +166,7 @@ def test_a_run_rejected_by_the_declared_gate_is_refused_by_the_judge_too(
     assert "math500@2024-04 candidate-vs-parent regression <= 0.0625" in joined
     assert "trusted-ancestor protection (vs gen0)" in joined
     assert "immediate-parent (gen1) protected regression" in joined
-    assert "actual cost settled within the declared ceilings" in joined
+    assert "cost settles within the declared ceilings" in joined
     assert "all recipes accounted" in joined
     assert "judged contamination evidence is the pinned artifact" in joined
 
