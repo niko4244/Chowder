@@ -713,6 +713,37 @@ def _candidate_report(tmp_path: Path) -> Path:
     return tmp_path / "inputs" / "candidate-eval-report.json"
 
 
+class _FakeDeviceProperties:
+    """Just enough of ``torch.cuda.get_device_properties`` for a panel."""
+
+    def __init__(self, name: str, total_memory: int) -> None:
+        self.name = name
+        self.total_memory = total_memory
+        self.major = 8
+        self.minor = 9
+
+
+class _FakeCuda:
+    def __init__(self, devices: Sequence[_FakeDeviceProperties]) -> None:
+        self._devices = list(devices)
+
+    def is_available(self) -> bool:
+        return bool(self._devices)
+
+    def device_count(self) -> int:
+        return len(self._devices)
+
+    def get_device_properties(self, index: int) -> _FakeDeviceProperties:
+        return self._devices[index]
+
+
+class _FakeTorch:
+    __version__ = "2.7.0+fake"
+
+    def __init__(self, devices: Sequence[_FakeDeviceProperties] = ()) -> None:
+        self.cuda = _FakeCuda(devices)
+
+
 def _patch_runner(monkeypatch: pytest.MonkeyPatch, runner: Any) -> None:
     """Install the executor's process seam (the recording trainer subprocess)."""
     monkeypatch.setattr(campaign_runner, "default_runner", runner)
@@ -2068,6 +2099,21 @@ def test_the_generation_ledger_entry_names_the_declared_backend_and_its_auto_cho
         },
     )
     _patch_seams(monkeypatch, runner)
+    # auto only chooses candidates whose preflight admits, and the local
+    # preflight asks the real framework what is visible -- so the panel seam
+    # is injected too: a device-backed panel, on every machine, no GPU needed.
+    import chowder.growth.training_backends as training_backends_module
+
+    panel = training_backends_module.probe_local_panel(
+        torch_module=_FakeTorch([_FakeDeviceProperties("Fake A100", 24 * 2**30)]),
+        memory_reader=lambda: (32 * 2**30, 16 * 2**30),
+        disk_reader=lambda path: (str(path or "."), 500 * 2**30),
+    )
+    monkeypatch.setattr(
+        training_backends_module,
+        "probe_local_panel",
+        lambda **_kwargs: panel,
+    )
 
     run = run_campaign(manifest)
     assert run.verdict == "PROMOTED"
