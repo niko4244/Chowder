@@ -2081,6 +2081,13 @@ def _adjudicate(
         # to refuse, so it is reported only when it was measured.
         device_gpu_hours=total.device_gpu_hours if device_settleable else 0.0,
         actual_wall_gpu_hours=total.wall_gpu_hours,
+        # Same rule for the device unit: the settled reading is the one the
+        # declared ceiling is actually enforced against, and it is forwarded
+        # only when the budget declared device time measurable. An unmeasured
+        # device figure stays absent rather than reported as a measured zero.
+        actual_device_gpu_hours=(
+            total.device_gpu_hours if device_settleable and total.device_measured else None
+        ),
         wall_gpu_hours_ceiling=budget.wall_gpu_hours_ceiling_campaign,
     )
 

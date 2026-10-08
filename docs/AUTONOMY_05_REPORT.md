@@ -264,10 +264,123 @@ re-measured, not a carried quotation. No path, digest or measurement was
 invented; the two inputs that would have needed new GPU measurement already had
 their measurements on disk.
 
-Starting the run is still a separate decision, and two facts are unchanged: no
+Starting the run is still a separate decision, and one fact is unchanged: no
 Gen-2 candidate evaluation exists (the run refused at the `candidate_evaluation`
-phase), and the target instrument's diagnostic metadata -- the judge's T1-T10 --
-still lives only in the historical Gen-1 driver.
+phase).
+
+### The T1-T10 instrument gap is closed on the producer side (2026-10-05)
+
+The last line above -- the instrument's diagnostic metadata living only in the
+historical Gen-1 driver -- was true when this report was written and is now
+false. `chowder.growth.generation_diagnostics` is that instrument in `src/`, and
+`evaluation_binding` already writes its `to_metadata()` into **every** row it
+emits, so the declaration's target set
+(`generation-diagnostics@gen2-response-surface-v1`, the exact id the frozen judge
+hardcodes) is measured with the metadata T1-T10 read.
+
+What was missing was a proof that the two sides cannot drift, so
+`tests/test_growth_gen2_instrument_wiring.py` now measures it through the
+judge's *own* reader rather than by inspection:
+
+- the committed declaration's target set is the judge's `INSTRUMENT_ID`;
+- a candidate arm carrying exactly what `to_metadata()` emits drives all ten
+  thresholds to a **decided** state -- `UNKNOWN` appears nowhere. That is the
+  claim: a real arm can now be scored by the instrument gates;
+- per-prompt identities are unambiguous and align across arms, because T2/T3 are
+  paired rules and an unalignable parent is `UNKNOWN`, not a pass;
+- every diagnostics key T6-T10 names is emitted, read out of the frozen judge's
+  source so a new gate without a producer key fails here.
+
+Both directions were verified by mutation: pointing the declaration at another
+benchmark fails the first test, and dropping `unclosed_think_rate` from
+`to_metadata()` fails the last two.
+
+### Adversarial audit of the promotion and certification paths (2026-10-05)
+
+`tests/test_growth_promotion_adversarial.py` flips exactly one artifact at a
+time across three layers -- the rule, certification over real bytes, and the
+frozen judge over a run root the run actually wrote. It found two real defects.
+
+**1. The parent side of every comparative gate was unfiltered.** `evaluate_promotion`
+required `gate_eligible` of a candidate row and read *any* parent row, while
+`retention_values` -- the filter the frozen judge also calls -- requires
+`parent_measured`. Measured: a parent row with origin `CARRIED_REFERENCE` or
+`UNMEASURED` and score 0.0 made target, protected, broad, calibration and
+reliability all read "ok" and the campaign **PROMOTED**. Every one of those
+gates is `candidate - parent`, so the parent enters the pass condition with a
+plus sign; `MetricBinder`'s docstring argued legacy parent rows "cannot inflate a
+candidate's gates", which is exactly backwards for a difference. It was
+reachable in production because the binder refused `CARRIED_REFERENCE` on the
+parent side but deliberately allowed `UNMEASURED`.
+
+Fixed with one owner: `_baseline()` in `promotion.py` applies the same
+`parent_measured` predicate to all five gates, `PARENT_EVIDENCE_ORIGINS` is now
+public so the binder and the rule read the same set, and the binder refuses both
+unearned origins with a named reason. This is a real semantic change, so the six
+tests in `tests/test_growth_measurement_provenance.py` that pinned the old
+stance were updated -- including one that was **passing vacuously**, asserting
+only `is not None` where a `BindingRefusal` also satisfies it. The shipped Gen-2
+campaign is unaffected: its parent arm's three rows are all `MEASURED_PARENT`.
+
+**2. A declared check no production caller could trip.** `evaluate_promotion`
+checks `actual_device_gpu_hours` against the device ceiling, but
+`decide_promotion_from_runs` neither accepted nor forwarded the parameter and
+`_adjudicate` never supplied it, so a device overrun visible only at settlement
+would have passed the promotion rule. The cycle now takes and forwards it and the
+runner supplies the settled figure, still only when the budget declared device
+time measurable.
+
+Every fix was checked by revert: neutering `_baseline` fails 10 audit tests,
+removing the broad-battery filter fails 2, reverting the binder fails the
+provenance suite, and dropping the parameter fails the reachability test.
+
+## The settlement audit (2026-10-04)
+
+The promotion matrix had no analogue for the resource envelope, so the audit now
+covers the settlement and compute-cost paths too:
+`tests/test_growth_settlement_adversarial.py` (25 tests) in the same
+three-layer shape as the promotion audit, one mutation at a time.
+
+**The rule (`settle_cost`).** An unmeasured device figure never settles a
+declared device ceiling while an *observed* zero does -- the attempts 07/08
+unit-confusion, one layer down; each ceiling is settled only in its own unit;
+every breach is reported and none is downgraded to a warning; a `0.0` ceiling is
+a ceiling and only `None` removes the control; the project budget is wall-charged
+and is its own control; the projection tolerance is directional, and a zero
+projection is an absent basis rather than a licence past a declared ceiling.
+
+**The campaign contract and its ledger.** The declared device ceiling settles
+only when the declaration says device time is measured, and the wall envelope is
+never demoted; `_ceiling_enforcement` must not name a device settlement the
+ledger cannot support; the total is the sum of its incremental entries, so one
+unmeasured contributor makes the whole total an estimate (and the declared
+device ceiling unsettleable) while a zero-cost reference neither costs nor
+demotes the measurement; and the ledger digest is recomputable from the bytes.
+Then whole `run_campaign` roots under the frozen judge.
+
+**What the audit found: the settlement analogue of the judge gap.** A run
+refused on its own frozen envelope (`ACTUAL_WALL_GPU_HOURS_EXCEEDED`, 0.5120
+wall against the declared 0.2000) is certified **PROMOTED** -- every row
+PASSing, exit code 0 -- after one file is edited:
+`cycle_compute_accounting.json`'s incremental totals set to zero. The run's
+record is untouched and still says `REJECTED`; T21 passes it under "refused
+without a declared-gate breach" (it collects only `RETENTION_` reasons) while
+T13 recomputes compliance from the edited bytes. The anchor existed and was
+unread: the ledger stamps `digest_sha256` and `CampaignRun.to_dict` pins it at
+`cost.accounting_digest`.
+
+**Amendment 16 (T23).** `docs/gen2/JUDGE_AMENDMENT_PROPOSAL_T23.md` plus prereg
+`GEN2_PREREG_AMENDMENT16_2026-10-04.md`. T23 reads the same two artifacts T13
+and T21 already read and emits one row: the artifact's digest, recomputed
+through production's `ledger_digest` (extracted from `CycleCostLedger.render`,
+so the writer keeps the canonical form), must equal the digest the record
+pinned, and the artifact's own settlement must agree with the recorded one. An
+absent pin, absent settlement, unreadable artifact or unreadable campaign is
+UNKNOWN; a moved artifact or a disagreement is FAIL. No threshold, no verdict
+class and no exit-code rule moves. Both revert proofs were measured: with the
+gate unwired the attack certifies, and with only the digest clause disabled the
+agreement clause refuses the same root.
+
 ## The fold mining (2026-10-05)
 
 The rescued main-clone experiment work (PR #203) is now where the growth loop

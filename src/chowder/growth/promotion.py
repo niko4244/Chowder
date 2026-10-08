@@ -7,6 +7,16 @@ resource envelope. Frontier context is recorded but NEVER decides
 promotion -- a candidate below GPT-class can still be a legitimate
 generation if it beats its parent without regressions.
 
+Both sides of every comparison are filtered by the same rule: a candidate
+row must be ``gate_eligible`` (measured on this generation) and a parent row
+must be ``parent_measured`` (earned evidence, not a quotation). The candidate
+wall alone was not enough -- a parent row pinned at 0.0 that nothing measured
+satisfies every comparative gate at once, because each gate is of the form
+``candidate - parent`` and the parent enters the pass condition with a plus
+sign. So the parent side is filtered too, with the very predicate
+:func:`chowder.growth.cycle.retention_values` applies to a declared constraint:
+one rule for what a baseline is, whichever gate asks.
+
 Verdicts: PROMOTED / REJECTED / INCONCLUSIVE / TAINTED.
 
 - TAINTED: the contamination firewall flags the evidence; a tainted run can
@@ -31,7 +41,14 @@ from .statistics import compare
 
 #: The measurement origins a promotion gate may anchor a parent side on.
 #: A baseline is earned evidence or it is not a baseline.
-_PARENT_EVIDENCE_ORIGINS = frozenset({MEASURED_PARENT, MEASURED_THIS_GENERATION})
+#:
+#: Public because three owners must agree on it by construction: the promotion
+#: rule (``BenchmarkResult.parent_measured``), the binder that decides whether a
+#: run may be *reported* as a parent arm, and the frozen Gen-2 judge through
+#: :func:`chowder.growth.cycle.retention_values`. Duplicating the set would make
+#: a future third origin a per-call-site decision; naming it once makes it a
+#: single declaration.
+PARENT_EVIDENCE_ORIGINS = frozenset({MEASURED_PARENT, MEASURED_THIS_GENERATION})
 
 
 @dataclass(frozen=True)
@@ -77,7 +94,7 @@ class BenchmarkResult:
         so the gate fails closed rather than comparing against a number
         nothing produced.
         """
-        return self.measurement_origin in _PARENT_EVIDENCE_ORIGINS
+        return self.measurement_origin in PARENT_EVIDENCE_ORIGINS
 
 
 @dataclass(frozen=True)
@@ -176,9 +193,26 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
     else:
         checks["evidence_integrity"] = "ok"
 
+    def _baseline(benchmark_id: str) -> BenchmarkResult | None:
+        """The parent row that may anchor a comparison, or None if there is none.
+
+        The symmetric wall to ``candidate.gate_eligible``. Every gate below
+        compares the candidate against its parent, so an unearned parent row
+        does not merely fail to prove anything -- it *subtracts from* the
+        candidate, and a parent pinned at 0.0 turns every regression gate into
+        a free pass and every target gate into a flat-to-ceiling improvement.
+        A carried reference is a quotation from history and a row predating
+        provenance is a number nothing produced; neither is a baseline, so the
+        gate reads as undecided rather than satisfied.
+        """
+        parent = data.parent_results.get(benchmark_id)
+        if parent is None or not parent.parent_measured:
+            return None
+        return parent
+
     def _paired(benchmark_id: str) -> tuple[Sequence[float], Sequence[float]] | None:
         candidate = data.candidate_results.get(benchmark_id)
-        parent = data.parent_results.get(benchmark_id)
+        parent = _baseline(benchmark_id)
         if (
             candidate is None
             or parent is None
@@ -210,6 +244,16 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
                 f"(origin {candidate.measurement_origin}): {benchmark_id}"
             )
             continue
+        baseline = _baseline(benchmark_id)
+        if baseline is None:
+            target_missing.append(benchmark_id)
+            unearned = data.parent_results.get(benchmark_id)
+            reasons.append(
+                f"target benchmark has no parent-measured baseline "
+                f"(origin {unearned.measurement_origin if unearned else 'absent'}): "
+                f"{benchmark_id}"
+            )
+            continue
         pair = _paired(benchmark_id)
         if pair is None:
             target_missing.append(benchmark_id)
@@ -217,7 +261,7 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
         before, after = pair
         result = compare(before, after, min_effect=data.min_target_improvement)
         candidate_score = data.candidate_results[benchmark_id].score
-        parent_score = data.parent_results[benchmark_id].score
+        parent_score = baseline.score
         target_deltas[benchmark_id] = candidate_score - parent_score
         checks[f"target:{benchmark_id}"] = result.verdict
         if result.verdict == "improved":
@@ -241,11 +285,20 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
     protected_inconclusive = 0
     for benchmark_id in data.protected_benchmarks:
         candidate = data.candidate_results.get(benchmark_id)
-        parent = data.parent_results.get(benchmark_id)
+        parent = _baseline(benchmark_id)
         if candidate is None or parent is None:
             checks[f"protected:{benchmark_id}"] = "inconclusive"
             protected_inconclusive += 1
-            reasons.append(f"protected benchmark unmeasured: {benchmark_id}")
+            unearned = data.parent_results.get(benchmark_id)
+            reasons.append(
+                f"protected benchmark has no {('candidate' if candidate is None else 'earned parent')} "
+                f"measurement: {benchmark_id}"
+                + (
+                    f" (parent origin {unearned.measurement_origin})"
+                    if parent is None and unearned is not None
+                    else ""
+                )
+            )
             continue
         if not candidate.gate_eligible:
             # The row exists but was not measured on the candidate (carried
@@ -303,8 +356,15 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
     # 4. Broad battery: aggregate must not materially deteriorate. Only
     #    candidate-measured rows feed the means -- carried parent values in
     #    the aggregate would compare the parent against itself.
+    # The candidate side is filtered by ``gate_eligible``; the parent mean is
+    # filtered by the same wall from the other side. Carried parent values in
+    # the aggregate would not merely flatter the candidate -- they would set the
+    # baseline, and a baseline is the thing the battery measures against.
     broad_before = [
-        data.parent_results[b].score for b in data.broad_battery_benchmarks if b in data.parent_results
+        data.parent_results[b].score
+        for b in data.broad_battery_benchmarks
+        if data.parent_results.get(b) is not None
+        and data.parent_results[b].parent_measured
     ]
     broad_after = [
         data.candidate_results[b].score
@@ -349,7 +409,7 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
     calibration_inconclusive = 0
     for benchmark_id in data.calibration_benchmarks:
         candidate = data.candidate_results.get(benchmark_id)
-        parent = data.parent_results.get(benchmark_id)
+        parent = _baseline(benchmark_id)
         if candidate is None or parent is None or not candidate.gate_eligible:
             checks[f"calibration:{benchmark_id}"] = "inconclusive"
             calibration_inconclusive += 1
@@ -382,7 +442,7 @@ def evaluate_promotion(data: PromotionInput) -> PromotionDecision:
     reliability_inconclusive = 0
     for benchmark_id in data.reliability_benchmarks:
         candidate = data.candidate_results.get(benchmark_id)
-        parent = data.parent_results.get(benchmark_id)
+        parent = _baseline(benchmark_id)
         if candidate is None or parent is None or not candidate.gate_eligible:
             checks[f"reliability:{benchmark_id}"] = "inconclusive"
             reliability_inconclusive += 1
