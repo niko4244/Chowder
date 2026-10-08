@@ -52,6 +52,7 @@ from chowder.growth.evaluation_binding import (
     CANDIDATE_EVALUATION_SLICE_TOO_SHORT,
     EvaluationMaterial,
     SubprocessEvaluationFn,
+    SuiteMaterial,
     digest_of,
 )
 from chowder.growth.generation_diagnostics import (
@@ -703,3 +704,50 @@ def _both_processes(trainer: Any, worker: Any) -> Any:
         return trainer(command, cwd, extra_environment, timeout_seconds)
 
     return runner
+
+
+# --------------------------------------------------------------------------
+# the readout and the label are two declarations of one fact (R3)
+# --------------------------------------------------------------------------
+
+
+def _material(**changes: object) -> SuiteMaterial:
+    document = {
+        "benchmark_qualified_id": "generation-diagnostics@gen1-eval-protocol-v1",
+        "dataset": "slice.jsonl",
+    }
+    document.update(changes)
+    return SuiteMaterial.from_mapping(document, source="measure")
+
+
+def test_a_material_cannot_label_an_observed_readout_as_an_answer_score():
+    """R3, measured before this rule: `eos_termination` / `accuracy` was accepted.
+
+    An observed readout scores what the *run* did, and its row names the rate it
+    reports. Labelling that row with an answer-score name puts a claim on a
+    quantity nobody measured.
+    """
+    with pytest.raises(CandidateEvaluationRefusal, match="observed readout"):
+        _material(scoring="eos_termination", metric="accuracy")
+
+    admissible = _material(scoring="eos_termination", metric="eos_termination_rate")
+    assert (admissible.scoring, admissible.metric) == (
+        "eos_termination",
+        "eos_termination_rate",
+    )
+
+
+def test_an_observation_rate_label_needs_the_observed_readout():
+    """The other direction: a rate name from a readout that computes a score."""
+    with pytest.raises(CandidateEvaluationRefusal, match="only the observed readout"):
+        _material(
+            benchmark_qualified_id="math500@2024-04",
+            scoring="normalized_exact_match",
+            metric="eos_termination_rate",
+        )
+
+
+def test_the_shipped_material_pairs_still_load():
+    """The control: the pairs the campaign prepares are admissible."""
+    material = _material(benchmark_qualified_id="math500@2024-04")
+    assert (material.scoring, material.metric) == ("normalized_exact_match", "accuracy")

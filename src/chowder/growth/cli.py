@@ -895,7 +895,12 @@ def _growth_campaign_settle(args: argparse.Namespace) -> int:
             "cycle_id": manifest.cycle_id,
             "budget_compliant": verdict.compliant,
             "budget_failure_reasons": list(verdict.failure_reasons),
-            "actual": total.to_dict(),
+            # "settled" rather than "actual": the device dimension may be an
+            # admission (``device_measured`` false) while wall is the post-run
+            # settlement, so the key names the operation the command performed
+            # instead of claiming the number is one (reported-metric audit R6;
+            # the judge's T13 row was corrected for the same wording).
+            "settled": total.to_dict(),
             "ceilings": {
                 "device_gpu_hours_ceiling_campaign": manifest.budget.device_gpu_hours_ceiling_campaign,
                 "wall_gpu_hours_ceiling_campaign": manifest.budget.wall_gpu_hours_ceiling_campaign,

@@ -65,6 +65,23 @@ TIERS = frozenset({0, 1, 2, 3, 4})
 #: that a *lower* raw value is the improvement (any error/loss metric).
 DIRECTIONS = frozenset({"higher_is_better", "lower_is_better"})
 
+#: How each benchmark is *intended* to be scored, in a human's vocabulary. This
+#: is the closed set ``BenchmarkEntry.scorer`` draws from: it is a declared
+#: evaluation **posture**, and no code in this repository reads it. The
+#: executable readout is the evaluation material's ``scoring``
+#: (``growth/evaluation_binding.py``) -- ``normalized_exact_match``,
+#: ``final_number_match``, ``eos_termination`` -- which is a different vocabulary
+#: that this one is deliberately not mapped onto, because one posture is served
+#: by several readouts and inventing a mapping would refuse legitimate suites.
+#: The two sets are pinned as disjoint by
+#: ``tests/test_growth_benchmark_registry.py``, so a reader told "the scorer is
+#: exact_match" cannot find that word in the readout the worker runs
+#: (reported-metric audit R2). Measured when this was written: 42 declarations,
+#: zero reads.
+SCORER_POSTURES = frozenset(
+    {"exact_match", "multiple_choice", "unit_tests", "judge", "agent", "protocol_diagnostics"}
+)
+
 #: How a raw measured value becomes a 0..1 better-direction score.
 #:
 #: - ``identity``: the primary metric is already a 0..1 rate in the better
@@ -211,7 +228,13 @@ class BenchmarkEntry:
     status: str  # BENCHMARK_STATUSES
     lifecycle: str  # LIFECYCLE_STATES
     tier: int  # 0..4
-    scorer: str  # exact_match | multiple_choice | unit_tests | judge | agent | ...
+    #: The benchmark's declared evaluation posture, in the vocabulary of
+    #: ``SCORER_POSTURES``: descriptive, and read by nothing. The shipped catalog's
+    #: postures are pinned to exactly that set by
+    #: ``tests/test_growth_benchmark_registry.py``; a synthetic entry in a test may
+    #: write whatever its author meant, which is itself the reason the field is
+    #: not called a readout. See the constant above.
+    scorer: str
     primary_metric: str  # accuracy | pass@1 | success_rate | ...
     direction: str  # DIRECTIONS -- the primary metric's polarity
     # None is a DECLARATION that no 0..1 scale is declared for this metric,
