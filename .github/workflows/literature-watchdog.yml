@@ -3,9 +3,10 @@ name: Literature watch watchdog
 # The other half of the watch's honesty. `literature-watch.yml` produces the
 # drop; this checks that the loop producing it is still alive, because every way
 # that loop can break is silent: a schedule that stops firing (any workflow's,
-# not only this one's), a drop whose content breaks the rules it was written
-# under, a drop whose required checks never attach, a drop that conflicts with
-# main. A quiet week looks exactly like a healthy one -- the watch writes nothing
+# not only this one's), a schedule that fires on the wrong cadence (one firing
+# daily while its file declares a weekly cron is alive, fresh and on time), a
+# drop whose content breaks the rules it was written under, a drop whose required
+# checks never attach, a drop that conflicts with main. A quiet week looks exactly like a healthy one -- the watch writes nothing
 # when nothing new matches (docs/literature/README.md, rule 5) -- so "no drop" is
 # deliberately *not* an alert here; "no successful run" is.
 #

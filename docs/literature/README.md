@@ -122,6 +122,14 @@ the watch and checks what a reader would ask, in order:
   stops firing writes nothing anywhere, so this is the only check that can
   notice it. A workflow too young for its first scheduled run is told apart
   from one that has simply never fired by reading its registration date;
+* **does each schedule fire as often as it says** -- the runs a workflow actually
+  produced are compared against the cadence its own cron implies: the widest gap
+  between consecutive fires on both sides, with the history starting at the
+  declaration's last update (so a cron that was deliberately changed resets its
+  own baseline instead of alarming until the old runs age out) and at least three
+  fires required before a cadence is measured at all. A workflow firing daily
+  while its file declares a weekly cron is alive, fresh and on time, and still
+  not the schedule the file describes -- a failure no other check here can see;
 * **does the drop follow the rules** -- the merged log and each open drop's own
   copy (the text a merge would land) are checked against the invariants above: the
   dated label, the unvetted disclosure, no quoted number, and every line being
