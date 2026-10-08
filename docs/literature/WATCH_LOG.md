@@ -134,3 +134,80 @@ code -- it is small and directly load-bearing; (b) if a `compression.ptq`
 upgrade is wanted, read `2610.09969` + `2610.09877` and propose it against the
 family's recorded negative basis; (c) keep the looped cluster on *watch* and
 re-check only if a looped architecture enters a campaign.
+
+---
+
+## 2026-10-08, second pass -- the full read of `2610.00054`, and the correction it forced
+
+**Method.** Read the paper in full (abstract page and the HTML full text), then
+read the two artifacts it would bear on: `docs/gen2/judge_gen2.py` (the frozen
+Gen-2 judge) and `src/chowder/evaluators/scoring.py` (production's scoring
+owner). Both readouts below were then *run* on both implementations, verbatim,
+rather than compared by eye.
+
+### The correction
+
+The first pass above recorded `2610.00054` as "directly load-bearing for the
+judge/settlement path". The full read shows that is **too strong, and the entry
+stands corrected here rather than quietly dropped** (rule 6):
+
+- the paper's mechanism is a verdict read from the **first generated token's
+  logits**. The Gen-2 judge does not do that -- it generates
+  (`PROTECTED_DECODING`: greedy, 512 tokens) and reads the post-reasoning
+  surface. The logits in this repo are router gate logits used as a tamper
+  fingerprint (`backends/router_healing_eval_worker.py`), and
+  `router_healing_run.judge_router_healing` is a pass-through to
+  `gate.evaluate_candidate`;
+- "settlement" in this repo means the run's decision and accounting artifacts
+  (T13/T21/T23), not a model readout. The paper touches nothing there.
+
+So the paper's numbers transfer nowhere, and its position-bias metric has no
+target in Chowder. **Class: not-applicable** for the judge and settlement paths
+as readouts.
+
+### What does transfer, and where it landed
+
+The transferable part is the *class* -- **the readout is not the conclusion** --
+and the disclosure discipline the paper asks for: say which readout produced the
+figure, and measure how often the readout is the conclusion instead of assuming
+it. That lands on one row, T5 in the frozen judge, which computes
+`expected.lower() in _answer_surface(completion).lower()`: **presence**, not
+correctness. The prereg is honest about the quantity ("expected string
+*present* after reasoning", "within-reasoning answer presence"); the judge's row
+label says "answer correctness" and its detail names no readout.
+
+| Finding (first-party, this repo) | Evidence |
+| --- | --- |
+| The judge's presence readout accepts a **mention** as the answer | `Canberra is not the capital of Australia; Sydney is.` scores correct against `Canberra`, while production's `final_answer` + `normalize` scores it 0 |
+| It accepts text production declares to be **no answer at all** | on a completion that opens reasoning and never closes it, `_answer_surface` returns the reasoning and presence scores `Canberra` correct, while `final_answer` returns `''` ("there is no answer yet"); T10 tolerates that shape at up to 25% |
+| The disagreement is systematic, not incidental | 13 constructed cases, 13 disagreements, every one in the same direction (presence correct, production wrong) |
+| The collision set of the digit expectations is large | 271 of the 999 integers in [1, 999] contain `2` (and `4`, `5`, `7` each), so a wrong answer drawn from that set scores correct for the four single-digit prompts |
+
+**What these numbers are.** They are ours, measured here by running both
+implementations -- but the completions were *constructed* to be mentions rather
+than conclusions, so they measure the **reachability** of the collision set, not
+its frequency. There are no recorded instrument completions to measure the
+frequency on (`evidence/` holds zero `(expected, completion)` pairs), and the
+paper's rates (0-5.5% at the token level; 89.7% against 47.5%) are its own,
+measured on its judges, prompts and formats. The frequency is exactly what the
+proposal below exists to make measurable on the next run.
+
+**Outcome.** `docs/gen2/JUDGE_AMENDMENT_PROPOSAL_T24.md` -- a proposed amendment
+17 to the frozen judge (gate T24): disclose the readout, measure where presence
+and production's declared scoring disagree, gate only the unsafe direction, and
+move no existing threshold. Proposed, **not applied**: amending a frozen
+instrument is the repo owner's call, and the no-visible-candidate-results rule
+was verified to hold before proposing it (zero candidate artifacts under
+`evidence/`). Next action (a) is closed.
+
+### What this pass does **not** do
+
+- It registers no family, changes no maturity label, promotes nothing, and
+  changes no line of `judge_gen2.py`.
+- It claims no rate for the collision set: the constructed cases demonstrate
+  reachability, and the paper's rates stay the paper's.
+- It does not claim position bias, or first-token readouts, exist anywhere in
+  Chowder -- the measured gap is between two readouts of the same recorded
+  completions, which is a different and narrower thing.
+
+
