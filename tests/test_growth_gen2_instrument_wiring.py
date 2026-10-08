@@ -185,7 +185,7 @@ def test_the_production_instrument_prompts_are_the_ones_the_judge_scores() -> No
     assert judge_gen2.PROTECTED_N_SAMPLES == len(INSTRUMENT_PROMPTS)
 
 
-def test_a_run_output_carrying_the_production_instrument_decides_all_ten_gates(
+def test_a_run_output_carrying_the_production_instrument_decides_every_instrument_gate(
     tmp_path: Path,
 ) -> None:
     """The measurement the gap was about: decided, not ``UNKNOWN``.
@@ -193,19 +193,22 @@ def test_a_run_output_carrying_the_production_instrument_decides_all_ten_gates(
     A row carrying ``to_metadata()`` must give the judge something to decide
     on. ``UNKNOWN`` is the failure this file exists to rule out: it is what an
     audit table looks like when the run's output never carried the instrument.
+    The instrument rows are T1-T10 plus T24, which prereg amendment 17 added
+    over the same per-prompt evidence (``answer readout disclosure``).
 
     ``PASS`` is expected of the gates a well-behaved candidate earns -- it
-    answers every prompt, terminates on EOS and hits no cap -- while T2/T3 are
-    *paired* comparisons against this fixture's deliberately duplication-prone
-    parent, and the improvement is too small to cross the frozen minimum
-    effect. Those two FAIL, which is a decision, and is exactly what a FAIL is
-    for.
+    answers every prompt, terminates on EOS and hits no cap, and production's
+    own readouts agree with the presence count -- while T2/T3 are *paired*
+    comparisons against this fixture's deliberately duplication-prone parent,
+    and the improvement is too small to cross the frozen minimum effect. Those
+    two FAIL, which is a decision, and is exactly what a FAIL is for.
     """
     statuses = _instrument_statuses(tmp_path)
-    assert set(statuses) == {f"T{index}" for index in range(1, 11)}, sorted(statuses)
+    instrument = {f"T{index}" for index in range(1, 11)} | {"T24"}
+    assert set(statuses) == instrument, sorted(statuses)
     undecided = {key: value for key, value in statuses.items() if value == "UNKNOWN"}
-    assert not undecided, f"T1-T10 cannot decide on the production metadata: {undecided}"
-    earned = {key for key in ("T1", "T4", "T5", "T6", "T7", "T8", "T9", "T10")}
+    assert not undecided, f"the instrument rows cannot decide on the production metadata: {undecided}"
+    earned = {"T1", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T24"}
     assert {key for key in earned if statuses[key] == "PASS"} == earned, statuses
     assert {key for key, value in statuses.items() if value == "FAIL"} <= {"T2", "T3"}, statuses
 
