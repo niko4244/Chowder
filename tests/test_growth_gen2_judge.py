@@ -1929,15 +1929,30 @@ def test_the_settlement_row_names_itself_the_same_way_when_it_cannot_decide(
     assert _row_name(output, "T13") == "cost settles within the declared ceilings"
 
 
-def test_the_unreadable_candidate_arm_uses_one_t1_name(tmp_path: Path) -> None:
-    """The third T1 name is gone -- and the duplicate row is recorded, not hidden.
+def _all_rows(output: str, threshold: str) -> list[str]:
+    """Every rendered row for one gate id, in render order.
 
-    An unreadable candidate arm used to render T1 twice under two different names
-    ("candidate measured evidence", then the roster's "candidate instrument
-    provenance"). Amendment 18 unifies the name; the row still appears twice,
-    which is amendment 18's finding F7 in the audit and is left as a behaviour
-    change for the owner rather than smuggled into a rename. This test pins both
-    facts so neither can drift silently.
+    ``_threshold_row`` answers with the first row, which is the right helper for
+    "what does this row say" and the wrong one for "how many rows does this gate
+    render". A duplicate row is a row-set fact, so it needs a helper that can
+    see one.
+    """
+    return [
+        line for line in output.splitlines() if re.match(rf"^{re.escape(threshold)}\b", line)
+    ]
+
+
+def test_an_unreadable_candidate_arm_renders_t1_once_with_its_own_refusal(
+    tmp_path: Path,
+) -> None:
+    """Amendment 19 (audit finding F7): one gate renders one row.
+
+    An unreadable candidate arm used to render T1 twice -- once with the arm's
+    refusal, once with the roster's generic sentence -- so answering "what does
+    T1 say about this run" meant combining two rows by hand. T1 is a
+    conjunction, and a conjunction is one row carrying every reason it has. The
+    refusal text is kept: it is the specific fact a reader needs, and the row
+    still renders under the single amendment-18 name.
     """
     root = tmp_path / "empty"
     root.mkdir()
@@ -1945,14 +1960,55 @@ def test_the_unreadable_candidate_arm_uses_one_t1_name(tmp_path: Path) -> None:
     code, output = _judge_output(root)
 
     assert code == 1
-    names = [
-        match.group(1).strip()
-        for match in re.finditer(
-            r"^T1\s+(.*?)\s+(?:PASS|FAIL|UNKNOWN|INFO)\b", output, re.MULTILINE
-        )
+    rows = _all_rows(output, "T1")
+    assert len(rows) == 1, rows
+    assert _row_name(output, "T1") == "candidate instrument provenance + row identity"
+    assert " UNKNOWN " in rows[0]
+    # The arm's own refusal, not the roster's generic sentence: the file it could
+    # not read is the fact that explains the row.
+    assert "candidate_evaluation.json" in rows[0]
+
+
+def test_an_open_arm_with_two_t1_findings_still_renders_one_row(tmp_path: Path) -> None:
+    """The same rule where the arm opens: two findings, one row, FAIL outranks.
+
+    An arm can open and still fail T1 twice over -- duplicated benchmark rows and
+    no pinned instrument run -- and that shape used to render two rows as well.
+    Both reasons are named in one row, and the row's status is the worst of them.
+    """
+    root = _run_root(tmp_path)
+    arm_path = root / "candidate_evaluation.json"
+    report = json.loads(arm_path.read_text(encoding="utf-8"))
+    runs = [
+        run
+        for run in report["runs"]
+        if run["benchmark_qualified_id"] != judge_gen2.INSTRUMENT_ID
     ]
-    assert names == ["candidate instrument provenance + row identity"] * len(names), names
-    assert len(names) == 2, names
+    runs.append(dict(runs[0]))  # the same benchmark row twice
+    report["runs"] = runs
+    arm_path.write_text(json.dumps(report), encoding="utf-8")
+
+    code, output = _judge_output(root)
+
+    assert code == 1
+    rows = _all_rows(output, "T1")
+    assert len(rows) == 1, rows
+    assert " FAIL " in rows[0]
+    assert "duplicates rows for" in rows[0]
+    assert f"no single {judge_gen2.INSTRUMENT_ID} run carrying" in rows[0]
+
+
+def test_a_clean_arm_renders_t1_exactly_once(tmp_path: Path) -> None:
+    """The control: the one-row rule is not a blanket UNKNOWN."""
+    root = _run_root(tmp_path)
+
+    code, output = _judge_output(root)
+
+    assert code == 0, output
+    rows = _all_rows(output, "T1")
+    assert len(rows) == 1, rows
+    assert " PASS " in rows[0]
+    assert "measurement_origin=" in rows[0]
 
 
 def test_the_target_detail_names_the_direction_in_the_rows_own_terms(
