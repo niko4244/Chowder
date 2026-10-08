@@ -1710,3 +1710,195 @@ def test_the_frozen_instrument_matches_the_gen1_driver_source() -> None:
     assert list(judge_gen2.INSTRUMENT_PROMPTS) == list(zip(prompts, expected))
     assert len(judge_gen2.INSTRUMENT_PROMPTS) == 16
     assert judge_gen2.CONSTRAINED_PROMPTS <= set(prompts)
+
+
+# --------------------------------------------------------------------------
+# the row that gates is named by the readout it measures (prereg amendment 17)
+# --------------------------------------------------------------------------
+
+
+def _threshold_row(output: str, threshold: str) -> str:
+    """One rendered row of the verdict table, by threshold id."""
+    for line in output.splitlines():
+        if re.match(rf"^{re.escape(threshold)}\b", line):
+            return line
+    raise AssertionError(f"no {threshold} row in:\n{output}")
+
+
+def _mentioning_entries(prompt: str, completion: str) -> list[dict]:
+    """The frozen instrument's rows, with one completion replaced."""
+    entries = _prompt_entries(dup=0, echo=0)
+    for entry in entries:
+        if str(entry.get("prompt")) == prompt:
+            entry["completion"] = completion
+    return entries
+
+
+#: A wrong answer of the shape T5 cannot tell from a right one: it *mentions* the
+#: expected answer instead of being it. The pinned fixtures' own wrong answer,
+#: ``"definitely-wrong"``, shares no substring with any expected answer, which is
+#: why no assertion written before amendment 17 could reach this channel.
+_MENTIONED_PROMPT = "How many continents are there?"
+_MENTION = "There are 17 continents."
+
+
+def test_a_mention_that_passes_presence_cannot_certify(tmp_path: Path) -> None:
+    """T24 refuses the one disagreement it gates: presence accepts, production does not.
+
+    T5 still reads 16/16 here -- presence is the quantity the prereg declares for
+    that row -- and T24 refuses on the same rows, so the table states both things
+    instead of letting the count be read as correctness.
+    """
+    root = _run_root(
+        tmp_path,
+        candidate_instrument_metadata={
+            "per_prompt": _mentioning_entries(_MENTIONED_PROMPT, _MENTION)
+        },
+    )
+    code, output = _judge_output(root)
+
+    assert code == 1, f"a mention certified as an answer:\n{output}"
+    assert judge_gen2.READOUT_DISAGREES_WITH_PRODUCTION in output
+    row = _threshold_row(output, "T24")
+    assert " FAIL " in row
+    # The detail names the item and both readouts, so a reader can re-derive it.
+    assert _MENTIONED_PROMPT in row
+    for mode in judge_gen2.PRODUCTION_READOUT_MODES:
+        assert mode in row
+    # The row it audits is unchanged: this is disclosure, not a re-score.
+    assert " PASS " in _threshold_row(output, "T5")
+
+
+def test_the_readout_gate_is_what_refuses_a_mention(tmp_path: Path, monkeypatch) -> None:
+    """The gate is load-bearing: unwire it and the same root certifies.
+
+    The unreachable-source proof, kept in the suite: with the gate replaced by a
+    no-op, every other row still passes and the judge returns PROMOTED, so the
+    disclosure row is the only thing standing between this root and exit 0.
+    """
+    root = _run_root(
+        tmp_path,
+        candidate_instrument_metadata={
+            "per_prompt": _mentioning_entries(_MENTIONED_PROMPT, _MENTION)
+        },
+    )
+    monkeypatch.setattr(judge_gen2, "_readout_disclosure_gate", lambda *args: None)
+
+    code, output = _judge_output(root)
+
+    assert code == 0, f"without the gate the root refused for another reason:\n{output}"
+    assert not [
+        line for line in output.splitlines() if re.match(r"^T24\b", line)
+    ], output
+
+
+def test_an_unclosed_reasoning_budget_is_not_an_answer_surface(tmp_path: Path) -> None:
+    """The sharpest case: T10 tolerates unclosed reasoning, and it holds no answer.
+
+    Production's ``final_answer`` returns "" for an unclosed `` thinking`` -- "the
+    budget was exhausted mid-reasoning, so there is no answer yet" -- and scores
+    it 0. Presence reads the reasoning text, where the expected string can sit.
+    The completion replaced here is not a constrained prompt, so T4 is untouched
+    and the only row that moves is the one this amendment added.
+    """
+    prompt = "Translate 'good morning' into French."
+    root = _run_root(
+        tmp_path,
+        candidate_instrument_metadata={
+            "per_prompt": _mentioning_entries(
+                prompt,
+                " thinking\nThe French for good morning is 'bonjour', I am fairly sure.",
+            )
+        },
+    )
+    code, output = _judge_output(root)
+
+    assert code == 1, f"an unclosed reasoning budget certified:\n{output}"
+    assert judge_gen2.READOUT_DISAGREES_WITH_PRODUCTION in output
+    row = _threshold_row(output, "T24")
+    assert " FAIL " in row and prompt in row
+    # Nothing else moved: the presence count and the format row are as they were.
+    assert " PASS " in _threshold_row(output, "T5")
+    assert " PASS " in _threshold_row(output, "T4")
+
+
+def test_a_run_without_per_prompt_evidence_is_unknown_not_a_pass(tmp_path: Path) -> None:
+    """Fail-closed: no rows to compare is UNKNOWN, never an assumed agreement."""
+    root = _run_root(tmp_path, candidate_instrument_metadata={"per_prompt": None})
+    code, output = _judge_output(root)
+
+    assert code == 1
+    row = _threshold_row(output, "T24")
+    assert " UNKNOWN " in row
+    assert judge_gen2.READOUT_UNMEASURED in row
+    assert "INCONCLUSIVE" in output
+
+
+def test_the_pinned_fixtures_wrong_answer_cannot_reach_the_channel(tmp_path: Path) -> None:
+    """Why amendment 17 needed a new fixture rather than a new assertion.
+
+    The suite's wrong answer is ``"definitely-wrong"``, which shares no substring
+    with any expected answer, so the channel T24 audits is unreachable by
+    construction: T5 fails on this root while T24 still passes.
+    """
+    root = _run_root(tmp_path, candidate_correct=False)
+    code, output = _judge_output(root)
+
+    assert code == 1
+    assert " FAIL " in _threshold_row(output, "T5")
+    assert " PASS " in _threshold_row(output, "T24")
+    assert judge_gen2.READOUT_DISAGREES_WITH_PRODUCTION not in output
+
+
+def test_a_genuine_answer_keeps_the_disclosure_row_passing(tmp_path: Path) -> None:
+    """The control: T24 is not a blanket refusal, and a clean run still certifies."""
+    root = _run_root(tmp_path)
+    code, output = _judge_output(root)
+
+    assert code == 0, output
+    row = _threshold_row(output, "T24")
+    assert " PASS " in row
+    assert "0 presence miss(es)" in row
+
+
+def test_a_presence_miss_production_accepts_is_disclosed_not_gated(
+    tmp_path: Path,
+) -> None:
+    """The other direction can only refuse more, so it is reported and not gated.
+
+    ``1,00`` is production's own readout accepting an answer presence cannot see
+    (``final_number`` strips the comma), and the run still certifies: gating this
+    direction would refuse runs whose answer readout is *more* permissive than
+    T5's sentinel.
+    """
+    prompt = "What is the boiling point of water in Celsius?"
+    root = _run_root(
+        tmp_path,
+        candidate_instrument_metadata={
+            "per_prompt": _mentioning_entries(prompt, "Water boils at 1,00 degrees Celsius.")
+        },
+    )
+    code, output = _judge_output(root)
+
+    assert code == 0, f"a disclosed presence miss refused a run:\n{output}"
+    assert judge_gen2.READOUT_DISAGREES_WITH_PRODUCTION not in output
+    row = _threshold_row(output, "T24")
+    assert " PASS " in row
+    assert "1 presence miss(es)" in row
+
+
+def test_an_unavailable_production_readout_is_unknown(tmp_path: Path, monkeypatch) -> None:
+    """Fail-closed: a readout that cannot be imported is UNKNOWN, never a pass."""
+
+    def _unavailable():
+        raise ImportError("no production tree")
+
+    monkeypatch.setattr(judge_gen2, "_production_scoring", _unavailable)
+    root = _run_root(tmp_path)
+    code, output = _judge_output(root)
+
+    assert code == 1
+    row = _threshold_row(output, "T24")
+    assert " UNKNOWN " in row
+    assert judge_gen2.READOUT_UNMEASURED in row
+    assert "INCONCLUSIVE" in output

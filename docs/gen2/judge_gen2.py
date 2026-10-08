@@ -4,7 +4,8 @@
 Frozen with ``docs/quals/GEN2_PREREG_2026-09-17.md`` and its amendments
 ``GEN2_PREREG_AMENDMENT1/2/3_2026-09-18.md``; amended by
 ``GEN2_PREREG_AMENDMENT15_2026-10-04.md`` (the declared-gate coupling, T21/T22)
-and ``GEN2_PREREG_AMENDMENT16_2026-10-04.md`` (the settlement artifact pin, T23).
+and ``GEN2_PREREG_AMENDMENT16_2026-10-04.md`` (the settlement artifact pin, T23);
+amended by ``GEN2_PREREG_AMENDMENT17_2026-10-08.md`` (the answer readout disclosure, T24).
 Thresholds may not change after candidate results are visible. Reads the run's
 durable artifacts read-only and emits one verdict table over the branch rules.
 
@@ -69,6 +70,21 @@ agree with the recorded one. Without it a run the branch refused on its frozen
 envelope could be certified PROMOTED by editing one file in the run root: T13
 would settle the edited bytes and find them compliant, and nothing compared
 that answer with the refusal the run had recorded.
+
+Amendment 17 adds T24, over the same ``metadata["per_prompt"]`` rows T5 counts.
+T5's row said "answer correctness" while the quantity it computes is *presence*:
+the expected string appears somewhere on the answer surface. Presence is what
+the prereg declares for that row ("answer-correct (expected string present after
+reasoning)"), and it is not the readout production owns -- ``evaluators.scoring``
+declares the scoring mode, extracts the answer after the last ``</think>``, and
+refuses an unclosed reasoning budget. A completion that mentions the expected
+string without answering it ("There are 17 continents." against "7") is present
+and is 0.0 under every readout production declares. T24 reads those rows, runs
+both declared production readouts over each completion through production's own
+``score``, and refuses only the irreducible disagreement -- an item presence
+accepts that every declared readout refuses. The row is labelled by the quantity
+it measures, and the gap between the two readouts is measured on the evidence
+the run already wrote instead of being argued about. No threshold moves.
 
 Usage:
     python docs/gen2/judge_gen2.py <run_root>
@@ -180,6 +196,14 @@ TARGET_DUPLICATION_MAX = 0.125  # parent 0.688
 TARGET_ECHO_MAX = 0.062  # parent 0.438
 TARGET_FORMAT_MIN = 8  # of the 8 declared constrained instrument prompts
 PROTECTED_ANSWER_CORRECT_MIN = 15  # of 16
+PROTECTED_READOUT_DISAGREEMENT_MAX = 0  # of the candidate's per-prompt rows (amendment 17)
+
+#: The readouts production declares for text scoring (``evaluators.scoring``).
+#: T24 compares presence against both and counts a disagreement only when *every*
+#: one of them refuses the item. ``exact_match`` is deliberately absent: it is
+#: strictly stricter than ``normalized_exact_match``, so it cannot accept anything
+#: these two refuse, and listing it would only restate one of them.
+PRODUCTION_READOUT_MODES = ("normalized_exact_match", "final_number_match")
 PROTECTED_EOS_MIN = 0.900
 PROTECTED_CAP_MAX = 0.100
 PROTECTED_UNCLOSED_THINK_MAX = 0.250
@@ -204,6 +228,13 @@ ACCOUNTING_ARTIFACT_MOVED = "ACCOUNTING_ARTIFACT_MOVED"
 ACCOUNTING_UNPINNED = "ACCOUNTING_UNPINNED"
 ACCOUNTING_UNSETTLED_BY_RUN = "ACCOUNTING_UNSETTLED_BY_RUN"
 SETTLEMENT_DISAGREES_WITH_RECORD = "SETTLEMENT_DISAGREES_WITH_RECORD"
+
+#: Why T5's presence readout could not be reconciled with production's declared
+#: scoring (T24, amendment 17). Presence is what the prereg declares for T5; T24
+#: asks only that a count labelled as an answer be reachable as an answer when
+#: production reads the same completion.
+READOUT_DISAGREES_WITH_PRODUCTION = "READOUT_DISAGREES_WITH_PRODUCTION"
+READOUT_UNMEASURED = "READOUT_UNMEASURED"
 
 #: Production's declared-gate vocabulary, read off its owner rather than restated
 #: here. ``RetentionViolation.code`` answers NaN -> ``RETENTION_UNMEASURED`` and
@@ -285,6 +316,16 @@ def _answer_surface(completion: str) -> str:
     if "</think>" in completion:
         return completion.split("</think>")[-1].strip()
     return completion.strip()
+
+
+def _answer_present(entry: Mapping[str, Any]) -> bool:
+    """T5's frozen rule, in one place: the expected string is on the answer surface.
+
+    Shared by T5 and T24 on purpose -- the row that counts and the row that audits
+    the count cannot be allowed to become two readings of the same evidence.
+    """
+    expected = str(entry.get("expected") or "").lower()
+    return expected in _answer_surface(str(entry.get("completion", ""))).lower()
 
 
 def _answer_duplicated(completion: str) -> bool:
@@ -570,7 +611,8 @@ def judge(run_root: Path) -> int:
         INFO,
         "docs/quals/GEN2_PREREG_2026-09-17.md + GEN2_PREREG_AMENDMENT1/2/3/4_2026-09-18.md "
         "+ GEN2_PREREG_AMENDMENT15_2026-10-04.md "
-        "+ GEN2_PREREG_AMENDMENT16_2026-10-04.md",
+        "+ GEN2_PREREG_AMENDMENT16_2026-10-04.md "
+        "+ GEN2_PREREG_AMENDMENT17_2026-10-08.md",
     )
 
     final = branch_verdict(verdict)
@@ -632,7 +674,7 @@ def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | Non
             ("T2", "answer-duplication target"),
             ("T3", "template-echo target"),
             ("T4", "constrained-prompt format"),
-            ("T5", "answer correctness"),
+            ("T5", "answer presence"),
             ("T6", "EOS termination"),
             ("T7", "max-token-cap rate"),
             ("T8", "obvious loops"),
@@ -640,6 +682,9 @@ def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | Non
             ("T10", "unclosed think rate"),
         ):
             verdict.add(threshold, name, UNKNOWN, "candidate evaluation artifact unavailable")
+        # T24 names its own reason in every branch: a disclosure row that could not
+        # be computed is UNKNOWN with the code, never a silent roster label.
+        _readout_disclosure_gate(verdict, None)
         return
 
     duplicates = candidate.duplicate_ids()
@@ -672,9 +717,10 @@ def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | Non
             ("T2", "answer-duplication target"),
             ("T3", "template-echo target"),
             ("T4", "constrained-prompt format"),
-            ("T5", "answer correctness"),
+            ("T5", "answer presence"),
         ):
             verdict.add(threshold, name, UNKNOWN, "no candidate per-prompt evidence")
+        _readout_disclosure_gate(verdict, candidate)
     else:
         dup_flags = candidate.flags(_duplication_flag)
         echo_flags = candidate.flags(_echo_flag)
@@ -726,18 +772,18 @@ def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | Non
                 f"compliant {ok}/{len(constrained)} constrained prompts",
             )
 
-        correct = sum(
-            1
-            for entry in per_prompt
-            if str(entry.get("expected") or "").lower()
-            in _answer_surface(str(entry.get("completion", ""))).lower()
-        )
+        correct = sum(1 for entry in per_prompt if _answer_present(entry))
         verdict.add(
             "T5",
-            f"answer correctness >= {PROTECTED_ANSWER_CORRECT_MIN}/16",
+            f"answer presence >= {PROTECTED_ANSWER_CORRECT_MIN}/16",
             PASS if correct >= PROTECTED_ANSWER_CORRECT_MIN else FAIL,
-            f"measured {correct}/{len(per_prompt)}; parent 16/16",
+            f"measured {correct}/{len(per_prompt)} present; parent 16/16 present "
+            "(readout: answer-surface presence; disclosure: T24)",
         )
+        # Amendment 17: the count T5 just made is audited against production's
+        # declared readouts over the same rows, and the row above is now named by
+        # the quantity it measures rather than one it does not.
+        _readout_disclosure_gate(verdict, candidate)
 
     metadata = (instrument_run.metadata or {}) if instrument_run is not None else {}
     diagnostics = (
@@ -763,6 +809,100 @@ def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | Non
                 PASS if predicate(value) else FAIL,
                 f"measured {value}; parent {parent_value}",
             )
+
+
+def _production_scoring() -> Any:
+    """Production's declared scoring module, imported where T24 needs it.
+
+    Reached through this one function so an unavailable readout is T24's UNKNOWN
+    rather than a judge that cannot run, and so a test can pin that branch.
+    """
+    from chowder.evaluators import scoring
+
+    return scoring
+
+
+def _readout_disclosure_gate(verdict: Verdict, candidate: Arm | None) -> None:
+    """T24 (amendment 17): T5's presence readout, reconciled with production's.
+
+    T5 counts an item as an answer when the expected string appears anywhere on
+    the answer surface -- the presence the prereg declares for that row. The label
+    used to call it "answer correctness", and correctness is a readout production
+    owns: ``evaluators.scoring`` declares the mode, extracts the answer after the
+    last ``</think>`` and refuses an unclosed reasoning budget. The two readouts
+    disagree on the same completion whenever a mention carries the expected
+    string: "There are 17 continents." against "7" is present, and 0.0 under
+    every readout production declares.
+
+    This gate re-scores nothing and moves no threshold. It reads the rows T5
+    already reads, runs both declared production readouts over each completion
+    through production's own ``score``, and refuses only the irreducible case --
+    an item presence accepts that *every* declared readout refuses. The reverse
+    direction (a presence miss production accepts) can only refuse more, so it is
+    disclosed in the detail and does not gate. A candidate whose completions
+    agree, and a candidate arm with no per-prompt evidence, keep the verdict they
+    had before.
+    """
+    name = f"answer-readout disagreements <= {PROTECTED_READOUT_DISAGREEMENT_MAX}"
+    if candidate is None:
+        verdict.add("T24", name, UNKNOWN, f"{READOUT_UNMEASURED}: no candidate arm")
+        return
+    per_prompt = candidate.per_prompt()
+    if not per_prompt:
+        verdict.add(
+            "T24",
+            name,
+            UNKNOWN,
+            f"{READOUT_UNMEASURED}: no candidate per-prompt evidence",
+        )
+        return
+    try:
+        scoring = _production_scoring()
+    except Exception as exc:  # noqa: BLE001 - an unreadable readout is UNKNOWN, not a crash
+        verdict.add(
+            "T24",
+            name,
+            UNKNOWN,
+            f"{READOUT_UNMEASURED}: production readouts unavailable ({type(exc).__name__})",
+        )
+        return
+
+    disagreements: list[str] = []
+    disclosed_misses = 0
+    for entry in per_prompt:
+        expected = str(entry.get("expected") or "")
+        completion = str(entry.get("completion", ""))
+        accepted = [
+            mode
+            for mode in PRODUCTION_READOUT_MODES
+            if scoring.score(completion, expected, mode) > 0
+        ]
+        if not accepted:
+            if _answer_present(entry):
+                disagreements.append(_prompt_key(entry) or "(unnamed item)")
+            continue
+        if not _answer_present(entry):
+            disclosed_misses += 1
+
+    if disagreements:
+        verdict.add(
+            "T24",
+            name,
+            FAIL,
+            f"{READOUT_DISAGREES_WITH_PRODUCTION}: {len(disagreements)} item(s) pass "
+            f"presence while {' and '.join(PRODUCTION_READOUT_MODES)} refuse them: "
+            f"{disagreements}; {disclosed_misses} presence miss(es) production "
+            "accepts (disclosed)",
+        )
+        return
+    verdict.add(
+        "T24",
+        name,
+        PASS,
+        f"presence agrees with every declared production readout on "
+        f"{len(per_prompt)} item(s); {disclosed_misses} presence miss(es) production "
+        "accepts (disclosed, not gated)",
+    )
 
 
 def _paired_target_gate(
