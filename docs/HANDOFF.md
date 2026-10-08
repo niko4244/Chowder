@@ -445,6 +445,20 @@ settlement must agree with the record's. Fail-closed (an absent pin or absent
 settlement is UNKNOWN), no threshold moves, and the Gen-2 run is still not
 started: no candidate evaluation exists.
 
+**Fold mining (2026-10-05).** PR #203's rescued experiments are now registered
+intervention families: ten experiments landed by file-level extraction
+(byte-identical to the fold branch, 163 of their tests pass), and
+`src/chowder/growth/interventions.py` grew from 9 families to 13, each declaring
+the in-repo `implementation` behind its maturity label and a basis that is
+either measured (the shipped exp_f record, the Experiment E phases) or
+explicitly a rescue. `inference.confidence-routing` enters REJECTED on its own
+measurement (confident-and-wrong 3 of 14). The fold's 12 modified files (worker
+/ evaluator / reward-training slices, the runtime safety gates) were
+deliberately not mined: `main` is 26 commits past the fold's base, and the
+reasons per file are recorded in `docs/FOLD_MINING_2026-10-05.md`, together with
+the drift guard that now refuses a family whose declared mechanism does not
+exist.
+
 ---
 
 ## Prior entry (2026-09-10) — protocol-v3 A/B/C tournament,

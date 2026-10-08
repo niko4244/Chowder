@@ -479,9 +479,15 @@ class GrowthCycle:
         evaluation_report_ref: str,
         frontier_snapshot_id: str | None = None,
         notes: str = "",
+        backend: Mapping[str, Any] | None = None,
     ) -> CycleOutcome:
         """Record the outcome in the lineage ledger (PROMOTED and REJECTED
-        both get recorded -- rejected candidates are evidence too)."""
+        both get recorded -- rejected candidates are evidence too).
+
+        ``backend`` names the declared training backend that produced this
+        generation, so a ledger reader sees which generator produced it
+        without joining the run record.
+        """
         phases = (CyclePhase(
             phase="promotion",
             verdict=decision.verdict,
@@ -504,6 +510,7 @@ class GrowthCycle:
                 required_probes=self.regression_memory.protected_benchmark_ids(),
                 frontier_snapshot_id=frontier_snapshot_id,
                 notes=notes,
+                backend=backend or {},
             )
         return CycleOutcome(
             cycle_id=self.config.cycle_id,

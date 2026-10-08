@@ -713,6 +713,37 @@ def _candidate_report(tmp_path: Path) -> Path:
     return tmp_path / "inputs" / "candidate-eval-report.json"
 
 
+class _FakeDeviceProperties:
+    """Just enough of ``torch.cuda.get_device_properties`` for a panel."""
+
+    def __init__(self, name: str, total_memory: int) -> None:
+        self.name = name
+        self.total_memory = total_memory
+        self.major = 8
+        self.minor = 9
+
+
+class _FakeCuda:
+    def __init__(self, devices: Sequence[_FakeDeviceProperties]) -> None:
+        self._devices = list(devices)
+
+    def is_available(self) -> bool:
+        return bool(self._devices)
+
+    def device_count(self) -> int:
+        return len(self._devices)
+
+    def get_device_properties(self, index: int) -> _FakeDeviceProperties:
+        return self._devices[index]
+
+
+class _FakeTorch:
+    __version__ = "2.7.0+fake"
+
+    def __init__(self, devices: Sequence[_FakeDeviceProperties] = ()) -> None:
+        self.cuda = _FakeCuda(devices)
+
+
 def _patch_runner(monkeypatch: pytest.MonkeyPatch, runner: Any) -> None:
     """Install the executor's process seam (the recording trainer subprocess)."""
     monkeypatch.setattr(campaign_runner, "default_runner", runner)
@@ -844,6 +875,13 @@ def test_a_certified_campaign_reaches_a_recorded_promotion(
     # cycle accounting artifact beside it.
     ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
     assert ledger.effective_verdict(CANDIDATE_VERSION) == "PROMOTED"
+    # The generation's ledger entry itself names the backend that produced it:
+    # readable without joining the run record.
+    generation = ledger.get(CANDIDATE_VERSION)
+    assert generation.backend["provider"] == "local"
+    assert generation.backend["trainer"] == "transformers-peft"
+    assert generation.backend["declared"]["provider"] == "local"
+    assert generation.backend["selection"] is None
     record = json.loads(Path(run.record_path).read_text(encoding="utf-8"))
     assert record["verdict"] == "PROMOTED"
     assert record["cycle_outcome"]["verdict"] == "PROMOTED"
@@ -2037,3 +2075,90 @@ def test_the_plan_command_prints_the_declared_search(
     assert payload["projected_wall_gpu_hours"] == pytest.approx(
         payload["plan"]["candidate_search"]["total_wall_gpu_hours"]
     )
+
+# --------------------------------------------------------------------------
+# lineage provenance: the ledger entry names the backend that produced it
+# --------------------------------------------------------------------------
+
+
+def test_the_generation_ledger_entry_names_the_declared_backend_and_its_auto_choice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The ledger entry is the generation-level backend provenance.
+
+    A reader sees which generator produced the generation -- provider,
+    trainer, the declaration as written, and, when auto chose, the selection
+    record -- without joining the run record. This run declares ``auto`` with
+    a single candidate, so the selection travels into the entry too.
+    """
+    manifest, runner, _document = _campaign(
+        tmp_path,
+        training_backend={
+            "provider": "auto",
+            "config": {"candidates": ["local"]},
+        },
+    )
+    _patch_seams(monkeypatch, runner)
+    # auto only chooses candidates whose preflight admits, and the local
+    # preflight asks the real framework what is visible -- so the panel seam
+    # is injected too: a device-backed panel, on every machine, no GPU needed.
+    import chowder.growth.training_backends as training_backends_module
+
+    panel = training_backends_module.probe_local_panel(
+        torch_module=_FakeTorch([_FakeDeviceProperties("Fake A100", 24 * 2**30)]),
+        memory_reader=lambda: (32 * 2**30, 16 * 2**30),
+        disk_reader=lambda path: (str(path or "."), 500 * 2**30),
+    )
+    monkeypatch.setattr(
+        training_backends_module,
+        "probe_local_panel",
+        lambda **_kwargs: panel,
+    )
+
+    run = run_campaign(manifest)
+    assert run.verdict == "PROMOTED"
+
+    ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
+    generation = ledger.get(CANDIDATE_VERSION)
+    assert generation.backend["provider"] == "local"
+    assert generation.backend["trainer"] == "transformers-peft"
+    assert generation.backend["declared"] == {
+        "provider": "auto",
+        "config": {"candidates": ["local"]},
+    }
+    selection = generation.backend["selection"]
+    assert selection is not None
+    assert selection["provider"] == "local"
+    assert selection["ranked_on"] in {"measured", "declared_overhead", "declared_order"}
+    assert isinstance(selection["cost_comparison"], list)
+
+
+def test_a_caller_supplied_executor_is_recorded_as_such_in_lineage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """``provider: 'caller-supplied'`` in the ledger entry: declared, but not
+    executed by a backend this build dispatched."""
+    manifest, runner, _document = _campaign(tmp_path)
+    _patch_seams(monkeypatch, runner)
+
+    class _SentinelExecutor:
+        firewall = campaign_runner.ContaminationFirewall()
+
+        def admit(self, recipe: Any) -> None:
+            return None
+
+        def __call__(self, recipe: Any, items: Any) -> Mapping[str, Any]:
+            return {
+                "recipe_id": recipe.recipe_id,
+                "attempt": "attempt-01",
+                "status": "FAILED",
+                "artifact_ref": None,
+                "measured_gpu_hours": 0.01,
+            }
+
+    run = run_campaign(manifest, train_fn=_SentinelExecutor())
+    ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
+    assert CANDIDATE_VERSION not in ledger.versions()  # FAILED attempt refuses
+    for phase in run.phases:
+        if phase.get("phase") == "training-backend":
+            assert phase["backend"]["provider"] is None

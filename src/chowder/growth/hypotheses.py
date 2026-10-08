@@ -12,14 +12,16 @@ extra steps; the generator refuses to produce one.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from .evidence import EvidenceStore, PriorAdjustment, prior_for_family
 from .interventions import (
+    FamilySmokeRecord,
     InterventionFamily,
     InterventionFamilyRefusal,
     assert_maturity_permits,
+    assert_smoke_permits,
     family_from_id,
 )
 
@@ -109,13 +111,16 @@ def generate_hypotheses(
     campaign_policy: Mapping[str, Any],
     family_ids: Sequence[str] | None = None,
     counter_start: int = 0,
+    smoke_records: Mapping[str, FamilySmokeRecord] | None = None,
 ) -> tuple[Hypothesis, ...]:
-    """One hypothesis per (observation, family) pairing the store permits.
+    """One hypothesis per (observation, family) pairing the gates permit.
 
     Every proposal cites its observation; every observation must be a measured
-    weakness (`is_weakness()`), not a vibe. Families the evidence store has
-    excluded in this scope produce no hypothesis at all -- not a lowered
-    prior, a refusal. The prior rides along on each hypothesis so the
+    weakness (`is_weakness()`), not a vibe. Three gates refuse a proposal --
+    maturity (who may propose the family), runnability (a smoke record proving
+    the declared mechanism has actually been invoked), and the evidence store
+    (a family excluded in this scope) -- and each one refuses outright rather
+    than lowering a prior. The prior rides along on each hypothesis so the
     candidate planner can size budgets honestly.
     """
     if not observations:
@@ -136,6 +141,7 @@ def generate_hypotheses(
                     campaign_policy=campaign_policy,
                     family_id=family.family_id,
                 )
+                assert_smoke_permits(family, smoke_records=smoke_records)
             except InterventionFamilyRefusal:
                 continue
             # Family applicability to the observed failure class: a retention
@@ -202,6 +208,15 @@ def _addresses(family: InterventionFamily, observation: Observation) -> bool:
         return metric.startswith(("vram", "latency", "throughput"))
     if failure == "long-context-efficiency":
         return "long" in metric or "latency" in metric
+    if failure == "agent-runtime-failure":
+        # Runtime metrics arrive under either separator convention
+        # (runtime_reward from the benchmark, runtime-reward in a profile).
+        normalized = metric.replace("-", "_")
+        return normalized.startswith(
+            ("runtime", "tool", "repair", "premature", "nonexistent")
+        )
+    if failure == "confidence-calibration":
+        return "confidence" in metric or "margin" in metric or "calibration" in metric
     return True
 
 

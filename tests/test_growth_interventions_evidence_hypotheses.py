@@ -25,12 +25,14 @@ from chowder.growth.hypotheses import (
     hypothesis_candidate_brief,
 )
 from chowder.growth.interventions import (
+    FamilySmokeRecord,
     InterventionFamily,
     InterventionFamilyRefusal,
     Maturity,
     families_for_campaign,
     family_from_id,
     family_registry,
+    family_smoke_declaration_digest,
     register_family,
 )
 
@@ -110,11 +112,20 @@ def test_a_rejected_family_only_returns_through_an_explicit_reopen(tmp_path) -> 
         name="Measured and rejected",
         target_failure_class="vram-footprint",
         parameters={"rank": {"type": "int", "range": [1, 2]}},
+        implementation=("src/chowder/growth/interventions.py",),
         maturity=Maturity.REJECTED,
         basis=("a measured rejection lives here",),
     )
+    smoke = FamilySmokeRecord(
+        family_id=rejected.family_id,
+        artifact="src/chowder/growth/interventions.py",
+        mechanism="registration-path smoke",
+        status="ran",
+        outcome="registered with a runnable smoke record",
+        declaration_digest=family_smoke_declaration_digest(rejected),
+    )
     try:
-        register_family(rejected)
+        register_family(rejected, smoke_record=smoke)
         assert all(
             f.family_id != "compression.test-rejected"
             for f in families_for_campaign({})
@@ -133,6 +144,7 @@ def test_a_rejected_family_only_returns_through_an_explicit_reopen(tmp_path) -> 
         from chowder.growth import interventions as interventions_module
 
         interventions_module._EXTRA_FAMILIES.clear()
+        interventions_module._EXTRA_SMOKE.clear()
 
 
 # --------------------------------------------------------------------------
@@ -426,3 +438,157 @@ def test_a_brief_refuses_a_family_the_hypothesis_is_not_about(tmp_path) -> None:
         hypothesis_candidate_brief(
             hypotheses[0], family=family_from_id("training.replay-balanced")
         )
+
+
+# --------------------------------------------------------------------------
+# the 2026-10-03 fold mining: a registered experiment ships its mechanism
+# --------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_every_family_declares_a_mechanism_that_exists() -> None:
+    """A maturity label is not a mechanism; the artifacts behind it must exist.
+
+    This is the drift guard the mined registry exists to satisfy: families
+    whose ``implementation`` named rescued modules that had never landed would
+    otherwise sit in the registry as claims nothing could check.
+    """
+    for family in family_registry():
+        assert family.implementation, (
+            f"{family.family_id} is registered without naming any in-repo "
+            "implementation; a registered experiment ships a mechanism"
+        )
+        for artifact in family.implementation:
+            assert (_REPO_ROOT / artifact).exists(), (
+                f"{family.family_id} declares implementation artifact "
+                f"{artifact!r}, which does not exist in the tree"
+            )
+
+
+def test_a_family_that_ships_a_mechanism_cannot_still_say_it_has_none() -> None:
+    """Honesty in both directions: prose and provenance have to agree."""
+    for family in family_registry():
+        prose = " ".join(family.basis).lower()
+        if family.implementation:
+            assert "no in-repo implementation" not in prose, (
+                f"{family.family_id} ships {len(family.implementation)} "
+                "artifacts but its basis still calls itself a proposal"
+            )
+        else:
+            assert "no in-repo implementation" in prose, (
+                f"{family.family_id} declares no implementation and does not "
+                "say so; an unqualified proposal is not a registered experiment"
+            )
+
+
+def test_an_implementation_path_cannot_point_outside_the_repo() -> None:
+    with pytest.raises(InterventionFamilyRefusal, match="repo-relative"):
+        InterventionFamily(
+            family_id="runtime.absolute-claim",
+            name="Absolute claim",
+            target_failure_class="agent-runtime-failure",
+            parameters={"mechanism": {"type": "enum-list", "range": ["state_aware"]}},
+            implementation=("/etc/passwd",),
+        )
+
+
+def test_the_mined_families_carry_the_artifacts_of_their_experiments() -> None:
+    """Every rescued experiment's registry entry cites the module it landed."""
+    mined = {
+        "architecture.conditional-ffn": "src/chowder/conditional_compute.py",
+        "architecture.hybrid-lm": "src/chowder/experimental_hybrid_lm.py",
+        "compression.low-rank-vocab": "src/chowder/low_rank_checkpoint.py",
+        "compression.ptq": "chowder_batch/exp_f_ptq_margin.py",
+        "inference.retrieval": "chowder_batch/exp_e_corpus.py",
+        "inference.speculative": "chowder_batch/exp_e_speculative.py",
+        "inference.confidence-routing": "chowder_batch/exp_e_confidence.py",
+        "runtime.harness-repair": "src/chowder/runtime_eval.py",
+        "runtime.harness-evolution": "src/chowder/harness_evolution.py",
+        "training.teacher-distillation": "chowder_batch/exp_b_teacher_data.py",
+    }
+    for family_id, artifact in mined.items():
+        family = family_from_id(family_id)
+        assert artifact in family.implementation, (
+            f"{family_id} does not name {artifact}; the mining is not traceable"
+        )
+        assert any("rescue" in entry for entry in family.basis), (
+            f"{family_id} cites no rescued provenance in its basis"
+        )
+
+
+def test_the_measured_ptq_record_underwrites_the_quantization_label() -> None:
+    """The registered note is a measured claim, so the measurement ships with it.
+
+    The family says margin statistics alone never qualify a quantization. The
+    shipped exp_f record is what that sentence was measured on: the margin
+    signal moved +0.0076 while the behavior collapsed.
+    """
+    family = family_from_id("compression.ptq")
+    assert "margin statistics alone never qualify" in family.notes.lower()
+    record = json.loads(
+        (
+            _REPO_ROOT / "evidence/exp_f_ptq_margin_qwen25_1p5b_int8sq_guided20_20260926.json"
+        ).read_text(encoding="utf-8")
+    )
+    comparison = record["margin_comparison"]
+    assert abs(comparison["mean_margin_shift"]) < 0.05, "the margin signal was not flat"
+    assert comparison["quant_accuracy"] < comparison["bf16_accuracy"], (
+        "the record must show the behavior loss the family gates on"
+    )
+    assert comparison["accuracy_delta"] < 0
+    assert record["quant"]["harness"]["green_rate"] < record["bf16"]["harness"]["green_rate"]
+
+
+def test_the_rejected_router_returns_only_through_an_explicit_reopen() -> None:
+    policy = {"experimental_interventions": True, "research_campaign": True}
+    permitted = {f.family_id for f in families_for_campaign(policy)}
+    assert "inference.confidence-routing" not in permitted
+    reopened = {
+        f.family_id
+        for f in families_for_campaign(
+            {"reopen": {"inference.confidence-routing": "hyp-777-better-signal"}}
+        )
+    }
+    assert "inference.confidence-routing" in reopened
+
+
+def test_a_runtime_weakness_proposes_the_runtime_families_not_retention_ones(
+    tmp_path,
+) -> None:
+    store = EvidenceStore(path=tmp_path / "evidence.jsonl")
+    policy = {"experimental_interventions": True, "research_campaign": True}
+    families = (
+        "runtime.harness-repair",
+        "runtime.harness-evolution",
+        "training.replay-balanced",
+    )
+    runtime_observation = _observation(
+        metric="runtime_nonexistent_read_rate",
+        value=0.4,
+        threshold=0.05,
+        direction="min",  # a rate: weakness means above the line
+    )
+    runtime_hypotheses = generate_hypotheses(
+        [runtime_observation],
+        evidence_store=store,
+        model_family="qwen3.8",
+        architecture="dense",
+        campaign_policy=policy,
+        family_ids=families,
+    )
+    assert {h.family_id for h in runtime_hypotheses} == {
+        "runtime.harness-repair",
+        "runtime.harness-evolution",
+    }
+    # Retention is the replay family's business: a runtime family must not be
+    # proposed for a failure it was never declared for.
+    retention_hypotheses = generate_hypotheses(
+        [_observation(metric="retention_math500", value=-0.2, threshold=-0.05)],
+        evidence_store=store,
+        model_family="qwen3.8",
+        architecture="dense",
+        campaign_policy=policy,
+        family_ids=families,
+    )
+    assert {h.family_id for h in retention_hypotheses} == {"training.replay-balanced"}

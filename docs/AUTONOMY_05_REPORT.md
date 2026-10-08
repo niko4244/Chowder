@@ -380,3 +380,30 @@ UNKNOWN; a moved artifact or a disagreement is FAIL. No threshold, no verdict
 class and no exit-code rule moves. Both revert proofs were measured: with the
 gate unwired the attack certifies, and with only the digest clause disabled the
 agreement clause refuses the same root.
+
+## The fold mining (2026-10-05)
+
+The rescued main-clone experiment work (PR #203) is now where the growth loop
+can propose it. The registry went from 9 families to 13, and every family
+declares `implementation`: the modules, drivers, tests and evidence records
+that are the mechanism behind the label. Four families had been citing rescued
+modules that did not exist on `main`; two had called themselves proposal-only
+while the fold shipped working implementations of both. A drift guard now
+refuses both states, and the measured claim travels with the code -- the exp_f
+record showing margins flat (+0.0076) while accuracy collapses (0.3 -> 0.0) is
+read by the test that asserts the `compression.ptq` note, so the label cannot
+outlive the measurement. A smoke matrix
+(`tests/test_growth_family_smoke_matrix.py`) invokes each family's cheapest
+declared mechanism -- no weights, no GPU -- and records the outcome in
+`evidence/family_smoke_matrix.json`, so a family whose mechanism cannot run is
+caught before a campaign can propose it.
+
+One rescued experiment registers as REJECTED rather than research:
+`inference.confidence-routing`, whose own phase-4 table (routed 0.55 / 0.57
+against an always-large control at 0.72, confident-and-wrong 3 of 14) is the
+reason. It returns only through an explicit reopen naming a new signal. The
+mining took files one experiment at a time by file-level extraction, byte-
+identical to the fold branch with 163 of the rescue's tests passing; the fold's
+12 modified files stay behind with their reasons recorded in
+[`FOLD_MINING_2026-10-05.md`](FOLD_MINING_2026-10-05.md), because they are diffs
+against a base 26 commits behind `main`.
