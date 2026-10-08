@@ -1,8 +1,15 @@
-"""Measurement provenance: candidate gates only candidate measurements.
+"""Measurement provenance: every gate reads the origin on *both* sides.
 
 The critical fabrication this suite pins shut: a parent row relabeled with
 the candidate's generation string. The generation label is caller-assigned;
 the measurement origin is evidence. Promotion must read the origin.
+
+Both sides, because a gate that is ``candidate - parent`` reads the origin on
+the candidate side only if it stops there: the parent enters the pass
+condition with a plus sign, so an unearned parent row is not a missing
+baseline but a manufactured one. The origin vocabulary is one declaration
+(``promotion.PARENT_EVIDENCE_ORIGINS``), read by the rule, by the binder and by
+``retention_values`` for the frozen judge.
 """
 
 from __future__ import annotations
@@ -147,14 +154,28 @@ def test_candidate_measured_row_binds_on_candidate_side() -> None:
     assert outcome.result.measurement_origin == MEASURED_THIS_GENERATION
 
 
-def test_parent_side_accepts_parent_measured_and_legacy_rows() -> None:
+def test_parent_side_accepts_earned_rows_and_refuses_unearned_ones() -> None:
+    """The parent side is filtered by the same origin vocabulary as the rule.
+
+    The old version of this test asserted only ``is not None``, which a
+    ``BindingRefusal`` satisfies -- it passed whether or not the binder
+    accepted anything. It now distinguishes the two outcomes, because the
+    difference is the whole point: an unearned baseline is the row that makes
+    every comparative gate pass.
+    """
+    from chowder.growth.metric_binding import BindingRefusal
+
     binder = MetricBinder(_registry())
-    legacy_parent = _run("math500@2024-04", "gen0", 0.0, origin=UNMEASURED)
-    assert binder.bind(legacy_parent, generation_version="gen0", role="parent") is not None
-    parent_row = _run(
-        "math500@2024-04", "gen0", 0.0, origin=MEASURED_THIS_GENERATION
-    )
-    assert binder.bind(parent_row, generation_version="gen0", role="parent") is not None
+
+    for origin in (MEASURED_THIS_GENERATION, MEASURED_PARENT):
+        parent_row = _run("math500@2024-04", "gen0", 0.0, origin=origin)
+        bound = binder.bind(parent_row, generation_version="gen0", role="parent")
+        assert not isinstance(bound, BindingRefusal), (origin, bound)
+
+    for origin in (UNMEASURED, CARRIED_REFERENCE):
+        unearned = _run("math500@2024-04", "gen0", 0.0, origin=origin)
+        refusal = binder.bind(unearned, generation_version="gen0", role="parent")
+        assert isinstance(refusal, BindingRefusal), (origin, refusal)
 
 
 # ---------------- gate-level semantics ----------------
@@ -220,7 +241,7 @@ def test_both_arms_actually_measured_at_floor_is_evaluable() -> None:
         },
         parent_results={
             "math500@2024-04": _result(
-                "math500@2024-04", 0.0, origin=UNMEASURED, samples=(0.0,) * 24
+                "math500@2024-04", 0.0, origin=MEASURED_PARENT, samples=(0.0,) * 24
             )
         },
         protected_benchmarks=("math500@2024-04",),
@@ -230,6 +251,41 @@ def test_both_arms_actually_measured_at_floor_is_evaluable() -> None:
     assert decision.checks["protected:math500@2024-04"] == "ok"
     assert decision.checks["protected_regression"] == "ok"
     assert decision.checks["broad_battery"] == "ok"
+
+
+def test_an_unearned_parent_row_is_never_a_passing_baseline() -> None:
+    """The parent wall, symmetric to the candidate wall.
+
+    Each gate here is ``candidate - parent``, so the parent enters the pass
+    condition with a plus sign: an unearned row pinned at 0.0 does not merely
+    fail to prove a regression, it *proves the absence of one*. With both arms
+    at 0.0 the only difference between "two measured arms at the floor" and
+    "one measured arm compared against a number nothing produced" was the
+    origin field, and the origin field used to be read on one side only.
+    """
+    for origin in (UNMEASURED, CARRIED_REFERENCE):
+        data = PromotionInput(
+            candidate_version="gen1",
+            parent_version="gen0",
+            target_benchmarks=(),
+            candidate_results={
+                "math500@2024-04": _result(
+                    "math500@2024-04", 0.0, samples=(0.0,) * 24
+                )
+            },
+            parent_results={
+                "math500@2024-04": _result(
+                    "math500@2024-04", 0.0, origin=origin, samples=(0.0,) * 24
+                )
+            },
+            protected_benchmarks=("math500@2024-04",),
+            broad_battery_benchmarks=("math500@2024-04",),
+        )
+        decision = evaluate_promotion(data)
+        assert decision.checks["protected:math500@2024-04"] == "inconclusive", origin
+        assert decision.checks["protected_regression"] == "inconclusive", origin
+        assert decision.checks["broad_battery"] == "inconclusive", origin
+        assert decision.verdict == "INCONCLUSIVE", origin
 
 
 def test_candidate_regression_beyond_tolerance_violates() -> None:
@@ -244,7 +300,7 @@ def test_candidate_regression_beyond_tolerance_violates() -> None:
         },
         parent_results={
             "math500@2024-04": _result(
-                "math500@2024-04", 0.10, origin=UNMEASURED, samples=(0.10,) * 24
+                "math500@2024-04", 0.10, origin=MEASURED_PARENT, samples=(0.10,) * 24
             )
         },
         protected_benchmarks=("math500@2024-04",),

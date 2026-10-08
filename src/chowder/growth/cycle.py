@@ -420,6 +420,7 @@ class GrowthCycle:
         parent_runs: Sequence[BenchmarkRun],
         device_gpu_hours: float = 0.0,
         actual_wall_gpu_hours: float | None = None,
+        actual_device_gpu_hours: float | None = None,
         wall_gpu_hours_ceiling: float | None = None,
     ) -> PromotionAssembly:
         """Phase: measured runs -> the single predeclared promotion rule.
@@ -432,6 +433,12 @@ class GrowthCycle:
         but the registry does not declare refuses rather than quietly
         disappearing from the comparison. The declared retention and
         isolation gates are applied to the bound decision before it returns.
+
+        ``actual_device_gpu_hours`` is forwarded because the declared rule
+        checks a *settled* device reading against the device ceiling
+        separately from the projected one. Without this parameter the check was
+        unreachable from this path -- a declared gate no production caller could
+        trip, which is the quietest kind of dead rule there is.
         """
         assembly = binder.promotion_input(
             candidate_version=self.config.candidate_version,
@@ -448,6 +455,7 @@ class GrowthCycle:
             device_gpu_hours=device_gpu_hours,
             device_gpu_hours_ceiling=self.config.device_gpu_hours_ceiling,
             actual_wall_gpu_hours=actual_wall_gpu_hours,
+            actual_device_gpu_hours=actual_device_gpu_hours,
             wall_gpu_hours_ceiling=wall_gpu_hours_ceiling,
         )
         decision = self._apply_promotion_gates(
