@@ -1026,6 +1026,10 @@ def run_campaign(
         # The report this run produced, at the path the judge reads: the lineage
         # names the measurement that decided it, not an input it was handed.
         evaluation_report_ref=str(root / CERTIFICATION_EVIDENCE["candidate"]),
+        # The ledger entry itself names the backend that produced the
+        # generation: a reader sees which generator produced it without
+        # joining this run record.
+        backend_record=backend_record,
     )
     run = CampaignRun(
         cycle_id=manifest.cycle_id,
@@ -2104,6 +2108,30 @@ def _with_resource_veto(decision: Any, settlement: Any) -> Any:
     )
 
 
+def _backend_lineage(backend_record: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The backend provenance a generation's ledger entry carries.
+
+    ``provider`` is the one whose executor actually ran; ``declared`` is the
+    declaration as written (for ``auto``, which candidate was chosen and why
+    is already inside the selection). A caller-supplied executor is recorded
+    as exactly that -- declared, but not executed by a backend this build
+    dispatched. The evidence stamp every attempt carries is the per-attempt
+    version of this same fact; this is the generation-level one.
+    """
+    if not backend_record:
+        return {"provider": "undeclared"}
+    declared = backend_record.get("declaration")
+    provider = backend_record.get("provider")
+    entry: dict[str, Any] = {"declared": dict(declared) if isinstance(declared, Mapping) else {}}
+    if provider is None:
+        entry["provider"] = "caller-supplied"
+        return entry
+    entry["provider"] = str(provider)
+    entry["trainer"] = str(backend_record.get("trainer") or "")
+    entry["selection"] = backend_record.get("selection")
+    return entry
+
+
 def _finalize(
     manifest: CampaignManifest,
     *,
@@ -2112,6 +2140,7 @@ def _finalize(
     selected: Mapping[str, Any] | None,
     root: Path,
     evaluation_report_ref: str,
+    backend_record: Mapping[str, Any] | None = None,
 ) -> CycleOutcome:
     return cycle.finalize(
         decision,
@@ -2125,6 +2154,7 @@ def _finalize(
         training_evidence_ref=selected.get("evidence_path", "") if selected else "",
         evaluation_report_ref=evaluation_report_ref,
         notes=f"campaign {manifest.cycle_id} (policy {PROMOTION_POLICY_VERSION})",
+        backend=_backend_lineage(backend_record),
     )
 
 

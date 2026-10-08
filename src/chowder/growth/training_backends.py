@@ -87,6 +87,7 @@ __all__ = [
     "TRAINING_BACKEND_ARTIFACT_DIGEST_MISMATCH",
     "TRAINING_BACKEND_RESUME_CHECKPOINT_MISSING",
     "TRAINING_BACKEND_RESUME_CHECKPOINT_UNDECLARED",
+    "TRAINING_BACKEND_EVIDENCE_UNMEASURED",
     "KAGGLE_BACKEND_UNAVAILABLE",
     "KAGGLE_CONFIG_INCOMPLETE",
     "CAPABILITY_SUPPORTED",
@@ -110,14 +111,16 @@ __all__ = [
     "LocalTrainingBackend",
     "UnslothTrainingBackend",
     "KaggleTrainingBackend",
-    "AutoSelection",
     "OverheadReport",
+    "AutoSelection",
     "preflight_report",
+    "compare_backends_report",
     "chowder_version",
     "backend_declaration",
     "backend_for_provider",
     "choose_auto_backend",
     "resolve_training_backend",
+    "measured_overhead_from_attempts",
     "probe_local_panel",
     "collect_attempt_evidence",
     "verify_attempt_evidence",
@@ -159,6 +162,10 @@ TRAINING_BACKEND_RESUME_CHECKPOINT_MISSING = "TRAINING_BACKEND_RESUME_CHECKPOINT
 TRAINING_BACKEND_RESUME_CHECKPOINT_UNDECLARED = (
     "TRAINING_BACKEND_RESUME_CHECKPOINT_UNDECLARED"
 )
+#: An attempt directory an operator declared as measured-cost evidence carries
+#: no per-attempt measured cost (its evidence names neither ``wall_seconds``
+#: nor ``measured_gpu_hours``). Reported, never guessed around.
+TRAINING_BACKEND_EVIDENCE_UNMEASURED = "TRAINING_BACKEND_EVIDENCE_UNMEASURED"
 KAGGLE_BACKEND_UNAVAILABLE = "KAGGLE_BACKEND_UNAVAILABLE"
 KAGGLE_CONFIG_INCOMPLETE = "KAGGLE_CONFIG_INCOMPLETE"
 
@@ -208,8 +215,8 @@ UNSLOTH_REFUSED_KNOBS = (
     "frozen_layer_streaming",
 )
 
-_LOCAL_CONFIG_KEYS = frozenset({"device"})
-_UNSLOTH_CONFIG_KEYS = frozenset({"device"})
+_LOCAL_CONFIG_KEYS = frozenset({"device", "measured_evidence"})
+_UNSLOTH_CONFIG_KEYS = frozenset({"device", "measured_evidence"})
 _AUTO_CONFIG_KEYS = frozenset({"candidates"})
 
 KAGGLE_REQUIRED_CONFIG_KEYS = (
@@ -236,7 +243,11 @@ KAGGLE_OPTIONAL_CONFIG_KEYS = (
     "projection_tolerance",
     "declared_quota_ceiling_gpu_hours",
 )
-_KAGGLE_CONFIG_KEYS = frozenset(KAGGLE_REQUIRED_CONFIG_KEYS + KAGGLE_OPTIONAL_CONFIG_KEYS)
+_KAGGLE_CONFIG_KEYS = frozenset(
+    KAGGLE_REQUIRED_CONFIG_KEYS
+    + KAGGLE_OPTIONAL_CONFIG_KEYS
+    + ("measured_evidence",)
+)
 
 _CONFIG_KEYS_BY_PROVIDER: Mapping[str, frozenset[str]] = {
     PROVIDER_LOCAL: _LOCAL_CONFIG_KEYS,
@@ -404,6 +415,38 @@ def backend_declaration(manifest: Any) -> TrainingBackendDeclaration:
             f"{type(declaration).__name__}",
         )
     return declaration
+
+
+def _declared_evidence_dirs(declaration: TrainingBackendDeclaration) -> tuple[str, ...]:
+    """The declared ``measured_evidence`` attempt directories, normalized.
+
+    Accepted shapes: a single path string, a list of path strings, or absent.
+    Anything else refuses: a mistyped declaration must not silently read as
+    "no measured evidence".
+    """
+    raw = declaration.config.get("measured_evidence")
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        entries: list[Any] = [raw]
+    elif isinstance(raw, (list, tuple)):
+        entries = list(raw)
+    else:
+        raise TrainingBackendRefusal(
+            TRAINING_BACKEND_SCHEMA,
+            "training_backend.config.measured_evidence must be a path or a list "
+            f"of paths, got {raw!r}",
+        )
+    dirs: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str) or not entry.strip():
+            raise TrainingBackendRefusal(
+                TRAINING_BACKEND_SCHEMA,
+                "training_backend.config.measured_evidence entries must be "
+                f"non-empty path strings, got {entry!r}",
+            )
+        dirs.append(entry.strip())
+    return tuple(dirs)
 
 
 # --------------------------------------------------------------------------
@@ -968,6 +1011,131 @@ def uniform_outcome_from_evidence(
 
 
 # --------------------------------------------------------------------------
+# measured cost: the seam a real run feeds, before auto may rank on it
+# --------------------------------------------------------------------------
+
+
+def measured_overhead_from_attempts(
+    manifest: Any,
+    attempt_dirs: Sequence[str | Path],
+    *,
+    provider: str,
+) -> OverheadReport:
+    """A provider's measured attach overhead, from attempts that actually ran.
+
+    This is the honest seam behind any measured auto ranking: per-attempt
+    evidence names what the backend really spent (``wall_seconds`` -- the
+    wrapper every dispatched attempt carries -- or ``measured_gpu_hours``
+    from an executor that measures device time), and the cheapest-meaningful
+    per-attempt cost is the overhead the provider proved it can run for. A
+    provider with no measured attempt on disk reports ``None`` and stays out
+    of any measured ranking -- it is never ranked as if it cost zero, and
+    nothing here projects, models or fabricates a number no run produced.
+
+    ``attempt_dirs`` come from the operator or the caller: the directories of
+    attempts whose evidence is worth reading. A declared directory that does
+    not exist, or whose evidence is missing or unreadable, refuses with the
+    shared evidence vocabulary rather than being silently skipped -- a wrong
+    path must not look like "no measurements". An attempt that exists but
+    carries no cost field is reported through its ``basis`` entry with hours
+    ``None`` (code ``TRAINING_BACKEND_EVIDENCE_UNMEASURED``), never averaged
+    in as zero.
+    """
+    if not attempt_dirs:
+        return OverheadReport(
+            hours=None,
+            basis=(
+                f"no {provider} attempt evidence was declared, so no measured "
+                "per-attempt cost exists for this provider"
+            ),
+        )
+    cheapest: tuple[float, str, str] | None = None
+    unmeasured: list[tuple[str, str]] = []
+    for raw in attempt_dirs:
+        directory = Path(str(raw))
+        if not directory.is_dir():
+            raise TrainingBackendRefusal(
+                TRAINING_BACKEND_EVIDENCE_MISSING,
+                f"declared measured-evidence directory {directory} does not "
+                "exist; a wrong path must not read as 'no measurements'",
+            )
+        try:
+            evidence = collect_attempt_evidence(manifest, directory)
+        except TrainingBackendRefusal as refusal:
+            raise TrainingBackendRefusal(
+                refusal.code,
+                f"declared measured-evidence directory {directory}: {refusal.reason}",
+            ) from refusal
+        stamp = evidence.get("backend")
+        if isinstance(stamp, Mapping) and str(stamp.get("provider") or "") not in (
+            "",
+            provider,
+        ):
+            raise TrainingBackendRefusal(
+                TRAINING_BACKEND_EVIDENCE_INVALID,
+                f"attempt {directory} was stamped by provider "
+                f"{stamp.get('provider')!r}, but its measured cost was declared "
+                f"for {provider!r}; ranking one provider on another's attempts "
+                "would fabricate the comparison",
+            )
+        hours = _attempt_cost_hours(evidence)
+        if hours is None:
+            unmeasured.append(
+                (
+                    str(directory),
+                    "the attempt's evidence names no measured cost "
+                    f"({TRAINING_BACKEND_EVIDENCE_UNMEASURED})",
+                )
+            )
+            continue
+        reference = str(evidence.get("artifact_ref") or directory.name)
+        basis = (
+            f"measured per-attempt cost of attempt {directory} "
+            f"({reference}): the evidence the run itself wrote"
+        )
+        if cheapest is None or hours < cheapest[0]:
+            cheapest = (hours, basis, reference)
+    if cheapest is None:
+        detail = "; ".join(f"{path}: {reason}" for path, reason in unmeasured) or (
+            "no attempt directories were readable"
+        )
+        return OverheadReport(
+            hours=None,
+            basis=(
+                f"the declared {provider} attempt evidence carries no measured "
+                f"cost ({detail})"
+            ),
+        )
+    note = (
+        f"; {len(unmeasured)} of {len(list(attempt_dirs))} declared attempt(s) "
+        "carried no measured cost and were excluded rather than counted as zero"
+        if unmeasured
+        else ""
+    )
+    return OverheadReport(
+        hours=cheapest[0],
+        basis=(cheapest[1] + note + "; this is not an end-to-end attach cost"),
+    )
+
+
+def _attempt_cost_hours(evidence: Mapping[str, Any]) -> float | None:
+    """The one measured cost an attempt's evidence carries, if any.
+
+    ``wall_seconds`` is what the dispatched-attempt wrapper writes for every
+    real run; ``measured_gpu_hours`` is the executor-measured device figure.
+    Both are read only when actually present and numeric -- an absent or
+    non-numeric field is unmeasured, never zero.
+    """
+    wall = evidence.get("wall_seconds")
+    if isinstance(wall, (int, float)) and not isinstance(wall, bool):
+        return float(wall) / 3600.0
+    measured = evidence.get("measured_gpu_hours")
+    if isinstance(measured, (int, float)) and not isinstance(measured, bool):
+        return float(measured)
+    return None
+
+
+# --------------------------------------------------------------------------
 # shared attempt-lifecycle helpers
 # --------------------------------------------------------------------------
 
@@ -1299,13 +1467,15 @@ def _estimate_local(
 
 @dataclass(frozen=True)
 class OverheadReport:
-    """A provider's declared attach overhead, and what that number is worth.
+    """A provider's cost figure, and what that number is worth.
 
-    ``hours`` is the launch/attach cost the provider itself can account for
-    (a local subprocess starts in place; a remote kernel has to be pushed,
-    installed, polled and pulled). ``None`` means *not measured* -- and an
-    unmeasured overhead is deliberately not ranked as if it were zero, because
-    that would make the cheapest-looking provider the one nobody measured.
+    ``hours`` is a cost the provider can account for. Two bases exist:
+    *declared* attach overhead (a local subprocess starts in place; a remote
+    kernel has to be pushed, installed, polled and pulled) and -- once a real
+    run exists -- a *measured* per-attempt cost read from the attempt's own
+    evidence. ``None`` means *not measured* -- and an unmeasured cost is
+    deliberately not ranked as if it were zero, because that would make the
+    cheapest-looking provider the one nobody measured.
     """
 
     hours: float | None
@@ -1354,6 +1524,15 @@ class TrainingBackend(Protocol):
     ) -> TrainingRecipe:
         """The recipe that continues from ``checkpoint``, or a named refusal."""
 
+    def measured_evidence_dirs(self, manifest: Any) -> tuple[str, ...]:
+        """The attempt directories this provider's declared measured evidence
+        names -- empty when the declaration declares none."""
+
+    def measured_overhead(self, manifest: Any) -> OverheadReport:
+        """This provider's measured per-attempt cost, from real attempt
+        evidence the declaration names. ``hours=None`` when none is declared
+        or none of it carries a measured cost -- never a fabricated figure."""
+
     def collect(self, manifest: Any, attempt_dir: str | Path) -> Mapping[str, Any]:
         """One attempt's evidence document."""
 
@@ -1395,6 +1574,25 @@ class LocalTrainingBackend(_SharedAttemptLifecycle):
         #: The panel probe is injectable so admission on a machine with no
         #: accelerator is provable without one.
         self.probe = probe or probe_local_panel
+
+    def measured_evidence_dirs(self, manifest: Any) -> tuple[str, ...]:
+        return _declared_evidence_dirs(backend_declaration(manifest))
+
+    def measured_overhead(self, manifest: Any) -> OverheadReport:
+        """The declared attempt evidence's measured cost, or ``None`` hours.
+
+        Without a declaration the report is simply unmeasured; with one, a bad
+        path or unreadable evidence refuses rather than reading as nothing.
+        """
+        dirs = _declared_evidence_dirs(backend_declaration(manifest))
+        if not dirs:
+            return OverheadReport(
+                hours=None,
+                basis="no measured attempt evidence is declared for this provider",
+            )
+        return measured_overhead_from_attempts(
+            manifest, dirs, provider=self.provider
+        )
 
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -1774,6 +1972,20 @@ class UnslothTrainingBackend(_SharedAttemptLifecycle):
         self, manifest: Any, recipe: TrainingRecipe, checkpoint: str | Path
     ) -> TrainingRecipe:
         return _resume_recipe(manifest, recipe, checkpoint, paths_are_local=True)
+
+    def measured_evidence_dirs(self, manifest: Any) -> tuple[str, ...]:
+        return _declared_evidence_dirs(backend_declaration(manifest))
+
+    def measured_overhead(self, manifest: Any) -> OverheadReport:
+        dirs = _declared_evidence_dirs(backend_declaration(manifest))
+        if not dirs:
+            return OverheadReport(
+                hours=None,
+                basis="no measured attempt evidence is declared for this provider",
+            )
+        return measured_overhead_from_attempts(
+            manifest, dirs, provider=self.provider
+        )
 
 
 # --------------------------------------------------------------------------
@@ -2222,6 +2434,20 @@ class KaggleTrainingBackend(_SharedAttemptLifecycle):
         # verified remotely; only its declaration is checked here.
         return _resume_recipe(manifest, recipe, checkpoint, paths_are_local=False)
 
+    def measured_evidence_dirs(self, manifest: Any) -> tuple[str, ...]:
+        return _declared_evidence_dirs(backend_declaration(manifest))
+
+    def measured_overhead(self, manifest: Any) -> OverheadReport:
+        dirs = _declared_evidence_dirs(backend_declaration(manifest))
+        if not dirs:
+            return OverheadReport(
+                hours=None,
+                basis="no measured attempt evidence is declared for this provider",
+            )
+        return measured_overhead_from_attempts(
+            manifest, dirs, provider=self.provider
+        )
+
 
 def chowder_version() -> str:
     """The chowder version an attempt's evidence names as its backend version."""
@@ -2270,14 +2496,34 @@ def backend_for_provider(
     )
 
 
-#: What an auto comparison does and does not claim. No measured per-backend
-#: throughput exists in this build, so the comparison is over each provider's
-#: own declared attach overhead -- never over a fabricated cost model.
+#: What an auto comparison does and does not claim. When no real run exists,
+#: the comparison is over each provider's own declared attach overhead --
+#: never over a fabricated cost model. When measured attempt evidence exists
+#: for a provider, that measured cost is what the ranking uses, and the
+#: record names the basis it ranked on.
 _AUTO_COST_BASIS = (
-    "compared the declared attach overhead of every preflight-passable candidate; "
-    "this is not a measured end-to-end cost, and a provider that reports no "
-    "measured overhead is not ranked as if it reported zero"
+    "compared every preflight-passable candidate, ranking on measured "
+    "per-attempt costs where real attempt evidence exists and on the declared "
+    "attach overhead otherwise; no figure is fabricated, a provider that "
+    "reports no measured cost is not ranked as if it reported zero, and this "
+    "is not a measured end-to-end cost"
 )
+
+#: What each auto ranking basis claims, in one honest line.
+_RANK_BASIS = {
+    "measured": (
+        "ranked on measured per-attempt costs read from real attempt evidence; "
+        "this is a per-attempt figure, not a modeled end-to-end cost"
+    ),
+    "declared_overhead": (
+        "ranked on declared attach overhead because no passable candidate has "
+        "measured attempt evidence; this is not a measured end-to-end cost"
+    ),
+    "declared_order": (
+        "the declared candidate order decided because no passable candidate "
+        "reports any cost figure"
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -2287,10 +2533,15 @@ class AutoSelection:
     provider: str
     reason: str
     refused: tuple[tuple[str, str, str], ...] = ()
-    #: One entry per preflight-passable candidate: its declared attach overhead
-    #: and the basis for it. Empty when nothing was passable.
+    #: One entry per preflight-passable candidate: its declared attach overhead,
+    #: its measured per-attempt cost when real attempt evidence exists, and the
+    #: basis for each. Empty when nothing was passable.
     cost_comparison: tuple[Mapping[str, Any], ...] = ()
     cost_basis: str = ""
+    #: Which figure the choice actually ranked on: ``measured`` (real attempt
+    #: evidence existed), ``declared_overhead`` (nothing measured, declared
+    #: figures compared) or ``declared_order`` (nothing to compare).
+    ranked_on: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2302,6 +2553,7 @@ class AutoSelection:
             ],
             "cost_comparison": [dict(entry) for entry in self.cost_comparison],
             "cost_basis": self.cost_basis,
+            "ranked_on": self.ranked_on,
         }
 
 
@@ -2365,41 +2617,69 @@ def choose_auto_backend(
             refused=tuple(refused),
         )
 
-    comparison: list[Mapping[str, Any]] = []
+    comparison: list[dict[str, Any]] = []
     for candidate, instance, _panel in passable:
-        overhead = instance.projected_overhead(manifest)
+        declared_overhead = instance.projected_overhead(manifest)
+        measured = instance.measured_overhead(manifest)
         comparison.append(
             {
                 "provider": candidate,
-                "overhead_hours": overhead.hours,
-                "basis": overhead.basis,
+                "overhead_hours": declared_overhead.hours,
+                "basis": declared_overhead.basis,
+                "measured_hours": measured.hours,
+                "measured_basis": measured.basis,
             }
         )
-    measured = [entry for entry in comparison if entry["overhead_hours"] is not None]
-    if measured:
-        cheapest = min(
-            measured,
-            key=lambda entry: (
-                float(entry["overhead_hours"]),
-                candidates.index(str(entry["provider"])),
-            ),
-        )
+
+    def _rank_key(entry: Mapping[str, Any]) -> tuple[int, float, int]:
+        # Measured evidence and declared claims are different instruments, so
+        # they rank in separate tiers: a measured cost -- whatever its size --
+        # says what a run actually spent; a declared overhead is a structural
+        # claim. Comparing the two numbers directly would let the smaller
+        # claim beat the larger measurement, which is how a fabricated-looking
+        # ranking happens. Within a tier, cheapest first, declared order as
+        # the tiebreak; an unmeasured-and-undeclared candidate cannot rank at
+        # all and is never presented as a measured zero.
+        position = candidates.index(str(entry["provider"]))
+        measured_hours = entry["measured_hours"]
+        if measured_hours is not None:
+            return (0, float(measured_hours), position)
+        declared_hours = entry["overhead_hours"]
+        if declared_hours is not None:
+            return (1, float(declared_hours), position)
+        return (2, math.inf, position)
+
+    ranked = [entry for entry in comparison if _rank_key(entry)[0] < 2]
+    if ranked:
+        cheapest = min(ranked, key=_rank_key)
+        if cheapest["measured_hours"] is not None:
+            ranked_on = "measured"
+            detail = (
+                f"cheapest measured per-attempt cost of {len(passable)} passable "
+                f"candidate(s): {cheapest['measured_hours']} h "
+                f"({cheapest['measured_basis']})"
+            )
+        else:
+            ranked_on = "declared_overhead"
+            detail = (
+                f"cheapest known attach overhead of {len(passable)} passable "
+                f"candidate(s): {cheapest['overhead_hours']} h "
+                f"({cheapest['basis']})"
+            )
     else:
-        # Nothing measured: the declared order decides, and the record says so
+        # Nothing measurable: the declared order decides, and the record says so
         # rather than presenting an unmeasured field as a comparison.
         cheapest = comparison[0]
+        ranked_on = "declared_order"
+        detail = (
+            "no passable candidate reports a measured per-attempt cost or a "
+            "declared attach overhead, so the declared candidate order decided"
+        )
     chosen_name = str(cheapest["provider"])
     chosen = next(entry for entry in passable if entry[0] == chosen_name)
     reason = (
         f"auto chose {chosen_name}: {chosen[2].reason}"
-        + (
-            f"; cheapest known attach overhead of {len(passable)} passable "
-            f"candidate(s): {cheapest['overhead_hours']} h "
-            f"({cheapest['basis']})"
-            if measured
-            else "; no passable candidate reports a measured attach overhead, so "
-            "the declared candidate order decided"
-        )
+        + f"; {detail}"
         + (f" ({len(refused)} candidate(s) refused)" if refused else "")
     )
     return chosen[1], AutoSelection(
@@ -2408,6 +2688,7 @@ def choose_auto_backend(
         refused=tuple(refused),
         cost_comparison=tuple(comparison),
         cost_basis=_AUTO_COST_BASIS,
+        ranked_on=ranked_on,
     )
 
 
@@ -2547,3 +2828,166 @@ def preflight_report(
         }
     )
     return report
+
+
+# --------------------------------------------------------------------------
+# compare-all: every executable backend, side by side, before anything runs
+# --------------------------------------------------------------------------
+
+
+def compare_backends_report(
+    manifest: Any,
+    *,
+    recipes: Sequence[TrainingRecipe] = (),
+    recipes_unavailable: str = "",
+    probes: Mapping[str, Callable[..., PreflightPanel]] | None = None,
+    kaggle_backend: Any = None,
+    kaggle_transport: Any = None,
+    kaggle_cli_probe: Callable[[str], str | None] | None = None,
+) -> dict[str, Any]:
+    """Every executable backend's preflight, side by side, before any compute.
+
+    Where :func:`preflight_report` answers "what does the *declared* backend
+    see", this answers the operator's other question: "what could I choose
+    instead?" Each provider is instantiated in isolation, evaluated under its
+    own declaration (the declared one, plus an auto fallback per provider for
+    a declaration naming another provider), and reported independently: one
+    provider's refusal is a row in the comparison, never a crash of the
+    whole report. Nothing here is a recommendation -- choosing remains the
+    operator's, or ``auto``'s, declared decision.
+    """
+    providers: list[dict[str, Any]] = []
+    for name in (PROVIDER_LOCAL, PROVIDER_UNSLOTH, PROVIDER_KAGGLE):
+        declared = backend_declaration(manifest)
+        if declared.provider == name:
+            instance_declaration = declared
+        else:
+            # Evaluate each provider under a declaration that actually names
+            # it, so a campaign declaring (say) kaggle still shows what local
+            # and unsloth would say. Provider-specific config keys are only
+            # valid for their own provider, so only the measured-evidence
+            # directory (which every provider reads the same way) carries
+            # over.
+            instance_declaration = TrainingBackendDeclaration(
+                provider=name,
+                config={"measured_evidence": list(_declared_evidence_dirs(declared))}
+                if _declared_evidence_dirs(declared)
+                else {},
+            )
+        instance_manifest = _WithTrainingBackend(manifest, instance_declaration)
+        seams: dict[str, Any] = {
+            "probes": probes,
+            "kaggle_backend": kaggle_backend,
+            "kaggle_transport": kaggle_transport,
+            "kaggle_cli_probe": kaggle_cli_probe,
+        }
+        entry: dict[str, Any] = {
+            "provider": name,
+            "declared": instance_declaration.to_dict(),
+            "is_declared_choice": declared.provider == name,
+        }
+        try:
+            instance = backend_for_provider(name, **seams)
+            try:
+                preflight = instance.preflight(instance_manifest)
+            except TrainingBackendRefusal as refusal:
+                preflight = PreflightResult(
+                    provider=name,
+                    admitted=False,
+                    code=refusal.code,
+                    reason=refusal.reason,
+                    panel=PreflightPanel(provider=name),
+                )
+            capabilities = instance.capabilities().to_dict()
+            try:
+                overhead = instance.projected_overhead(instance_manifest).to_dict()
+            except TrainingBackendRefusal as refusal:
+                overhead = {"hours": None, "basis": f"{refusal.code}: {refusal.reason}"}
+            try:
+                measured = instance.measured_overhead(instance_manifest).to_dict()
+            except TrainingBackendRefusal as refusal:
+                measured = {"hours": None, "basis": f"{refusal.code}: {refusal.reason}"}
+            estimates: list[dict[str, Any]] = []
+            for recipe in recipes:
+                try:
+                    estimates.append(
+                        instance.estimate(instance_manifest, recipe).to_dict()
+                    )
+                except TrainingBackendRefusal as refusal:
+                    estimates.append(
+                        {
+                            "provider": name,
+                            "recipe_id": recipe.recipe_id,
+                            "available": False,
+                            "reason": f"{refusal.code}: {refusal.reason}",
+                        }
+                    )
+            entry.update(
+                {
+                    "status": "ADMITTED" if preflight.admitted else "REFUSED",
+                    "trainer": instance.trainer,
+                    "strategy": preflight.strategy,
+                    "refused_by": preflight.code if not preflight.admitted else None,
+                    "refusal_reason": preflight.reason,
+                    "stops_the_run": (
+                        declared.provider == name
+                        and not preflight.admitted
+                        and preflight.code in STRUCTURAL_PREFLIGHT_CODES
+                    ),
+                    "panel": preflight.panel.to_dict(),
+                    "capabilities": capabilities,
+                    "estimates": estimates,
+                    "overrides": list(preflight.overrides),
+                    "notes": list(preflight.notes),
+                    "overhead": overhead,
+                    "measured_overhead": measured,
+                }
+            )
+        except TrainingBackendRefusal as refusal:
+            # Construction or capability discovery itself refused: the row
+            # still reports, with the code an operator can branch on.
+            entry.update(
+                {
+                    "status": "REFUSED",
+                    "trainer": "",
+                    "strategy": "undeclared",
+                    "refused_by": refusal.code,
+                    "refusal_reason": refusal.reason,
+                    "stops_the_run": declared.provider == name,
+                    "panel": {"provider": name},
+                    "capabilities": {},
+                    "estimates": [],
+                    "overrides": [],
+                    "notes": [],
+                    "overhead": None,
+                    "measured_overhead": None,
+                }
+            )
+        providers.append(entry)
+    return {
+        "cycle_id": str(getattr(manifest, "cycle_id", "")),
+        "declared": backend_declaration(manifest).to_dict(),
+        "recipes": [recipe.recipe_id for recipe in recipes],
+        "recipes_unavailable": recipes_unavailable or None,
+        "providers": providers,
+    }
+
+
+class _WithTrainingBackend:
+    """The manifest, viewed under a different ``training_backend`` declaration.
+
+    Compare-all must evaluate each provider under a declaration that names it
+    without mutating the manifest (frozen or shared) -- so this wraps and
+    delegates every attribute, substituting only the declaration.
+    """
+
+    def __init__(self, manifest: Any, declaration: TrainingBackendDeclaration) -> None:
+        self._manifest = manifest
+        self._declaration = declaration
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._manifest, name)
+
+    @property
+    def training_backend(self) -> TrainingBackendDeclaration:
+        return self._declaration

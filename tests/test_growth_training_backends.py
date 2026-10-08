@@ -46,6 +46,7 @@ from chowder.growth.training_backends import (
     KAGGLE_CONFIG_INCOMPLETE,
     STRUCTURAL_PREFLIGHT_CODES,
     TRAINING_BACKEND_AUTO_UNRESOLVED,
+    TRAINING_BACKEND_EVIDENCE_INVALID,
     TRAINING_BACKEND_EVIDENCE_MISSING,
     TRAINING_BACKEND_EVIDENCE_STATUS_UNKNOWN,
     TRAINING_BACKEND_NO_DEVICE,
@@ -752,7 +753,10 @@ def test_auto_keeps_the_declared_order_when_no_overhead_is_measured(tmp_path):
     )
     assert chosen is first
     assert selection.provider == "unsloth"
-    assert "no passable candidate reports a measured attach overhead" in selection.reason
+    assert (
+        "no passable candidate reports a measured per-attempt cost or a "
+        "declared attach overhead" in selection.reason
+    )
     assert all(
         entry["overhead_hours"] is None for entry in selection.cost_comparison
     )
@@ -795,11 +799,13 @@ class _FakeProvider:
         *,
         admitted: bool = True,
         overhead_hours: float | None = 0.0,
+        measured_hours: float | None = None,
     ) -> None:
         self.provider = provider
         self.trainer = f"fake-{provider}"
         self.admitted = admitted
         self.overhead_hours = overhead_hours
+        self.measured_hours = measured_hours
         self.executor = _RecordingExecutor()
         self.built = 0
 
@@ -817,6 +823,22 @@ class _FakeProvider:
 
     def projected_overhead(self, manifest: Any) -> OverheadReport:
         return OverheadReport(hours=self.overhead_hours, basis="fake basis")
+
+    def measured_evidence_dirs(self, manifest: Any) -> tuple[str, ...]:
+        return ()
+
+    def measured_overhead(self, manifest: Any) -> OverheadReport:
+        if self.measured_hours is None:
+            return OverheadReport(
+                hours=None, basis="fake basis: no measured attempt evidence"
+            )
+        return OverheadReport(
+            hours=self.measured_hours,
+            basis=(
+                "measured per-attempt cost from real attempt evidence "
+                "(wall_seconds)"
+            ),
+        )
 
     def estimate(self, manifest: Any, recipe: Any):
         raise AssertionError("estimate is not asked for on this path")
@@ -1288,3 +1310,725 @@ def test_collect_and_verify_prove_an_attempts_evidence(tmp_path):
     refusal = backend.verify(manifest, attempt)
     assert refusal is not None
     assert refusal[0] == backends.TRAINING_BACKEND_ARTIFACT_DIGEST_MISMATCH
+
+
+# --------------------------------------------------------------------------
+# measured cost: auto ranks on what a real run measured, never on invention
+# --------------------------------------------------------------------------
+
+
+def _evidence_attempt(
+    tmp_path: Path, name: str, document: Mapping[str, Any]
+) -> Path:
+    attempt = tmp_path / "attempts" / name
+    attempt.mkdir(parents=True, exist_ok=True)
+    (attempt / "training-evidence.json").write_text(
+        json.dumps(dict(document)), encoding="utf-8"
+    )
+    return attempt
+
+
+def _measured_declaration(tmp_path: Path, provider: str, *attempts: Path):
+    return TrainingBackendDeclaration.from_mapping(
+        {
+            "provider": provider,
+            "config": {
+                "measured_evidence": [str(attempt) for attempt in attempts],
+            },
+        }
+    )
+
+
+def test_measured_evidence_config_key_is_accepted_for_every_provider():
+    for provider in ("local", "unsloth", "kaggle"):
+        declaration = TrainingBackendDeclaration.from_mapping(
+            {"provider": provider, "config": {"measured_evidence": "attempts/a"}}
+        )
+        assert declaration.config["measured_evidence"] == "attempts/a"
+
+
+def test_measured_overhead_reads_the_cost_the_attempt_itself_wrote(tmp_path):
+    attempt = _evidence_attempt(
+        tmp_path,
+        "attempt-01",
+        {
+            "status": "SUCCEEDED",
+            "backend": {"provider": "unsloth"},
+            "wall_seconds": 7200.0,
+        },
+    )
+    manifest = _manifest(
+        tmp_path,
+        training_backend=_measured_declaration(tmp_path, "unsloth", attempt),
+    )
+    report = UnslothTrainingBackend().measured_overhead(manifest)
+    assert report.hours == 2.0
+    assert "attempt" in report.basis
+    assert "not an end-to-end attach cost" in report.basis
+
+
+def test_measured_overhead_prefers_the_cheapest_attempt_and_names_the_excluded(
+    tmp_path,
+):
+    cheap = _evidence_attempt(
+        tmp_path, "cheap", {"status": "SUCCEEDED", "wall_seconds": 1800.0}
+    )
+    expensive = _evidence_attempt(
+        tmp_path, "expensive", {"status": "SUCCEEDED", "wall_seconds": 36000.0}
+    )
+    empty = _evidence_attempt(tmp_path, "empty", {"status": "SUCCEEDED"})
+    manifest = _manifest(
+        tmp_path,
+        training_backend=_measured_declaration(
+            tmp_path, "local", expensive, cheap, empty
+        ),
+    )
+    report = LocalTrainingBackend(probe=_probe(_panel_with_device())).measured_overhead(
+        manifest
+    )
+    assert report.hours == 0.5
+    assert "1 of 3 declared attempt(s)" in report.basis
+    assert "excluded rather than counted as zero" in report.basis
+
+
+def test_measured_overhead_without_a_declaration_is_none_not_zero(tmp_path):
+    manifest = _manifest(tmp_path)
+    report = LocalTrainingBackend(probe=_probe(_panel_with_device())).measured_overhead(
+        manifest
+    )
+    assert report.hours is None
+
+
+def test_measured_overhead_with_no_cost_in_the_evidence_is_none_not_zero(tmp_path):
+    attempt = _evidence_attempt(
+        tmp_path, "attempt-01", {"status": "SUCCEEDED", "artifact_ref": "x.bin"}
+    )
+    manifest = _manifest(
+        tmp_path,
+        training_backend=_measured_declaration(tmp_path, "kaggle", attempt),
+    )
+    report = KaggleTrainingBackend(backend=_RecordingComputeBackend()).measured_overhead(
+        manifest
+    )
+    assert report.hours is None
+    assert backends.TRAINING_BACKEND_EVIDENCE_UNMEASURED in report.basis
+
+
+def test_measured_overhead_refuses_a_declared_path_that_does_not_exist(tmp_path):
+    manifest = _manifest(
+        tmp_path,
+        training_backend=_measured_declaration(tmp_path, "local", tmp_path / "nope"),
+    )
+    with pytest.raises(TrainingBackendRefusal) as refusal:
+        LocalTrainingBackend(probe=_probe(_panel_with_device())).measured_overhead(
+            manifest
+        )
+    assert refusal.value.code == TRAINING_BACKEND_EVIDENCE_MISSING
+    assert "must not read as 'no measurements'" in refusal.value.reason
+
+
+def test_measured_overhead_refuses_attempts_stamped_by_another_provider(tmp_path):
+    attempt = _evidence_attempt(
+        tmp_path,
+        "attempt-01",
+        {"status": "SUCCEEDED", "backend": {"provider": "kaggle"}, "wall_seconds": 60.0},
+    )
+    manifest = _manifest(
+        tmp_path,
+        training_backend=_measured_declaration(tmp_path, "unsloth", attempt),
+    )
+    with pytest.raises(TrainingBackendRefusal) as refusal:
+        UnslothTrainingBackend().measured_overhead(manifest)
+    assert refusal.value.code == TRAINING_BACKEND_EVIDENCE_INVALID
+    assert "would fabricate the comparison" in refusal.value.reason
+
+
+def test_measured_overhead_accepts_unstamped_evidence_but_records_the_basis(
+    tmp_path,
+):
+    attempt = _evidence_attempt(
+        tmp_path, "attempt-01", {"status": "SUCCEEDED", "wall_seconds": 3600.0}
+    )
+    manifest = _manifest(
+        tmp_path,
+        training_backend=_measured_declaration(tmp_path, "local", attempt),
+    )
+    report = LocalTrainingBackend(probe=_probe(_panel_with_device())).measured_overhead(
+        manifest
+    )
+    assert report.hours == 1.0
+
+
+def test_measured_evidence_falls_back_to_measured_gpu_hours(tmp_path):
+    attempt = _evidence_attempt(
+        tmp_path,
+        "attempt-01",
+        {"status": "SUCCEEDED", "measured_gpu_hours": 1.5},
+    )
+    manifest = _manifest(
+        tmp_path,
+        training_backend=_measured_declaration(tmp_path, "local", attempt),
+    )
+    report = LocalTrainingBackend(probe=_probe(_panel_with_device())).measured_overhead(
+        manifest
+    )
+    assert report.hours == 1.5
+
+
+def test_auto_prefers_measured_costs_over_declared_overhead(tmp_path):
+    declaration = TrainingBackendDeclaration.from_mapping(
+        {"provider": "auto", "config": {"candidates": ["unsloth", "kaggle"]}}
+    )
+    manifest = _manifest(tmp_path, training_backend=declaration)
+    slow_but_measured = _FakeProvider(
+        "unsloth", overhead_hours=0.0, measured_hours=4.0
+    )
+    cheap_but_unmeasured = _FakeProvider(
+        "kaggle", overhead_hours=0.5, measured_hours=None
+    )
+    chosen, selection = choose_auto_backend(
+        declaration, manifest, providers=[slow_but_measured, cheap_but_unmeasured]
+    )
+    # The provider with a real measured cost wins even though its declared
+    # overhead is worse: a measured 4h is evidence, a declared 0.5h is a claim.
+    assert chosen is slow_but_measured
+    assert selection.ranked_on == "measured"
+    assert "measured per-attempt cost" in selection.reason
+    entries = {entry["provider"]: entry for entry in selection.cost_comparison}
+    assert entries["unsloth"]["measured_hours"] == 4.0
+    assert "wall_seconds" in entries["unsloth"]["measured_basis"]
+    assert entries["kaggle"]["measured_hours"] is None
+    assert "measured attempt evidence" in entries["kaggle"]["measured_basis"]
+    assert "ranking on measured per-attempt costs" in selection.cost_basis
+
+
+def test_auto_falls_back_to_declared_overhead_when_nothing_is_measured(tmp_path):
+    declaration = TrainingBackendDeclaration.from_mapping(
+        {"provider": "auto", "config": {"candidates": ["unsloth", "kaggle"]}}
+    )
+    manifest = _manifest(tmp_path, training_backend=declaration)
+    first = _FakeProvider("unsloth", overhead_hours=5.0, measured_hours=None)
+    second = _FakeProvider("kaggle", overhead_hours=0.5, measured_hours=None)
+    chosen, selection = choose_auto_backend(
+        declaration, manifest, providers=[first, second]
+    )
+    assert chosen is second
+    assert selection.ranked_on == "declared_overhead"
+    assert "cheapest known attach overhead" in selection.reason
+    assert "declared attach overhead" in selection.cost_basis
+
+
+def test_auto_records_declared_order_when_no_cost_figure_exists(tmp_path):
+    declaration = TrainingBackendDeclaration.from_mapping(
+        {"provider": "auto", "config": {"candidates": ["unsloth", "kaggle"]}}
+    )
+    manifest = _manifest(tmp_path, training_backend=declaration)
+    first = _FakeProvider("unsloth", overhead_hours=None, measured_hours=None)
+    second = _FakeProvider("kaggle", overhead_hours=None, measured_hours=None)
+    chosen, selection = choose_auto_backend(
+        declaration, manifest, providers=[first, second]
+    )
+    assert chosen is first
+    assert selection.ranked_on == "declared_order"
+    assert all(
+        entry["overhead_hours"] is None and entry["measured_hours"] is None
+        for entry in selection.cost_comparison
+    )
+
+
+def test_auto_prefers_the_cheapest_measured_cost_among_mixed_candidates(tmp_path):
+    declaration = TrainingBackendDeclaration.from_mapping(
+        {"provider": "auto", "config": {"candidates": ["local", "unsloth", "kaggle"]}}
+    )
+    manifest = _manifest(tmp_path, training_backend=declaration)
+    a = _FakeProvider("local", overhead_hours=0.0, measured_hours=10.0)
+    b = _FakeProvider("unsloth", overhead_hours=99.0, measured_hours=2.0)
+    c = _FakeProvider("kaggle", overhead_hours=0.1, measured_hours=None)
+    chosen, selection = choose_auto_backend(declaration, manifest, providers=[a, b, c])
+    assert chosen is b
+    assert selection.ranked_on == "measured"
+    entries = {entry["provider"]: entry for entry in selection.cost_comparison}
+    assert entries["local"]["measured_hours"] == 10.0
+    assert entries["unsloth"]["measured_hours"] == 2.0
+    assert entries["kaggle"]["measured_hours"] is None
+
+# --------------------------------------------------------------------------
+# compare-all: every executable backend, side by side, before anything runs
+# --------------------------------------------------------------------------
+
+
+def test_compare_all_reports_every_provider_as_a_row_and_never_crashes(tmp_path):
+    from chowder.growth.training_backends import compare_backends_report
+
+    manifest = _manifest(tmp_path)
+    report = compare_backends_report(
+        manifest,
+        probes={"local": _probe(_panel_with_device())},
+        kaggle_backend=_RecordingComputeBackend(),
+    )
+    assert report["cycle_id"] == "gen2"
+    assert report["declared"] == {"provider": "local", "config": {}}
+    assert [row["provider"] for row in report["providers"]] == [
+        "local",
+        "unsloth",
+        "kaggle",
+    ]
+    by_provider = {row["provider"]: row for row in report["providers"]}
+    # The declared choice is marked; local was admitted on the injected device.
+    assert by_provider["local"]["is_declared_choice"] is True
+    assert by_provider["local"]["status"] == "ADMITTED"
+    assert by_provider["local"]["trainer"] == "transformers-peft"
+    assert by_provider["local"]["overhead"]["hours"] == 0.0
+    assert by_provider["local"]["measured_overhead"]["hours"] is None
+    assert by_provider["local"]["capabilities"]["rows"]
+    assert by_provider["unsloth"]["is_declared_choice"] is False
+    # No template is declared, so unsloth's row is a refusal -- a row in the
+    # report, not a crash.
+    assert by_provider["unsloth"]["status"] == "REFUSED"
+    assert by_provider["unsloth"]["refused_by"] == TRAINING_BACKEND_TEMPLATE_UNDECLARED
+    assert by_provider["unsloth"]["stops_the_run"] is False
+    # The manifest declares no Kaggle wiring, so that row reports exactly the
+    # refusal a run would hit -- reconnaissance, not a recommendation.
+    assert by_provider["kaggle"]["status"] == "REFUSED"
+    assert by_provider["kaggle"]["refused_by"] == KAGGLE_CONFIG_INCOMPLETE
+    assert by_provider["kaggle"]["stops_the_run"] is False
+
+
+def test_compare_all_reports_estimates_per_provider(tmp_path):
+    from chowder.growth.training_backends import compare_backends_report
+
+    manifest = _manifest(
+        tmp_path,
+        project_template_path=_template(tmp_path, quantization="4bit"),
+    )
+    report = compare_backends_report(
+        manifest,
+        recipes=(_recipe(),),
+        probes={"local": _probe(_panel_with_device())},
+    )
+    by_provider = {row["provider"]: row for row in report["providers"]}
+    # Every provider reports one estimate row per declared recipe -- what it
+    # can measure it measures, what it cannot it says so.
+    assert all(len(row["estimates"]) == 1 for row in report["providers"])
+    local_estimate = by_provider["local"]["estimates"][0]
+    assert local_estimate["available"] is True
+    unsloth_estimate = by_provider["unsloth"]["estimates"][0]
+    assert unsloth_estimate["available"] is False
+    assert "no Unsloth panel" in unsloth_estimate["reason"]
+
+
+def test_compare_all_marks_only_the_declared_provider_as_stopping(tmp_path):
+    from chowder.growth.training_backends import compare_backends_report
+
+    declaration = TrainingBackendDeclaration.from_mapping(
+        {"provider": "kaggle", "config": _kaggle_config_without_prepared_document({})}
+    )
+    manifest = _manifest(tmp_path, training_backend=declaration)
+    report = compare_backends_report(manifest)
+    by_provider = {row["provider"]: row for row in report["providers"]}
+    assert by_provider["kaggle"]["status"] == "REFUSED"
+    assert by_provider["kaggle"]["refused_by"] == KAGGLE_CONFIG_INCOMPLETE
+    # The declaration error stops the run only for the provider the campaign
+    # actually declared; the other rows are reconnaissance.
+    assert by_provider["kaggle"]["stops_the_run"] is True
+    assert by_provider["local"]["stops_the_run"] is False
+    assert by_provider["unsloth"]["stops_the_run"] is False
+
+
+def test_compare_all_carries_measured_evidence_over_to_each_row(tmp_path):
+    from chowder.growth.training_backends import compare_backends_report
+
+    attempt = _evidence_attempt(
+        tmp_path, "attempt-01", {"status": "SUCCEEDED", "wall_seconds": 3600.0}
+    )
+    declaration = TrainingBackendDeclaration.from_mapping(
+        {"provider": "local", "config": {"measured_evidence": str(attempt)}}
+    )
+    manifest = _manifest(tmp_path, training_backend=declaration)
+    report = compare_backends_report(
+        manifest, probes={"local": _probe(_panel_with_device())}
+    )
+    for row in report["providers"]:
+        raw = row["declared"]["config"].get("measured_evidence")
+        # The declared row keeps its original shape; derived rows normalize to
+        # a list. Either way, every row names the same evidence directory.
+        assert ([raw] if isinstance(raw, str) else raw) == [str(attempt)], (
+            "every row evaluated under a declaration naming the same evidence"
+        )
+    local_row = next(row for row in report["providers"] if row["provider"] == "local")
+    assert local_row["measured_overhead"]["hours"] == 1.0
+
+
+def test_the_cli_preflight_all_flag_prints_the_compare_report_and_always_exits_zero(
+    tmp_path, capsys
+):
+    """End to end: a manifest file on disk, parsed by the real argparse tree,
+    compared across every executable backend -- reconnaissance that never
+    gates, even for a manifest the planner would refuse."""
+    from chowder.cli import build_parser
+
+    document = {
+        "cycle_id": "gen2",
+        "parent_version": "gen1",
+        "base_model_path": str(tmp_path / "model"),
+        "base_model_digest": "b" * 64,
+        "state_root": str(tmp_path / "state"),
+        "target_benchmarks": ["small-bench@1"],
+        "protected_benchmarks": [],
+        "broad_benchmarks": [],
+        "calibration_benchmarks": [],
+        "reliability_benchmarks": [],
+        "budget": {
+            "device_gpu_hours_ceiling_per_recipe": 10.0,
+            "wall_gpu_hours_ceiling_per_recipe": 10.0,
+            "device_gpu_hours_ceiling_campaign": 20.0,
+            "wall_gpu_hours_ceiling_campaign": 20.0,
+        },
+        "recipes": ["recipe-01"],
+        "candidate_selection_policy": "first_successful",
+    }
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    parser = build_parser()
+    args = parser.parse_args(
+        ["growth", "campaign", "preflight", str(path), "--all"]
+    )
+    exit_code = args.func(args)
+
+    # Reconnaissance: an unplannable manifest is a reported fact, not a gate.
+    assert exit_code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["cycle_id"] == "gen2"
+    assert [row["provider"] for row in report["providers"]] == [
+        "local",
+        "unsloth",
+        "kaggle",
+    ]
+    by_provider = {row["provider"]: row for row in report["providers"]}
+    # An undeclared manifest defaults to local, so local is the declared
+    # choice; nothing here stops the run -- every refusal is just a row.
+    assert by_provider["local"]["is_declared_choice"] is True
+    assert all(
+        row["is_declared_choice"] is False
+        for row in report["providers"]
+        if row["provider"] != "local"
+    )
+    assert all(row["stops_the_run"] is False for row in report["providers"])
+    assert by_provider["local"]["capabilities"]["rows"]
+
+# --------------------------------------------------------------------------
+# capability drift: the local matrix must match the executor it names
+# --------------------------------------------------------------------------
+
+#: Every local capability the matrix calls ``supported``, the config path the
+#: transformers-peft executor reads it from, the spec attribute it lands on,
+#: and the declared value it must carry. The local matrix names *mechanisms*
+#: (lora, qlora, precision, accumulation), so the table binds each mechanism
+#: to the knob that carries it. If the executor renames a knob, the value
+#: stops arriving and this table fails -- which is the point.
+_LOCAL_SUPPORTED_VALUES: tuple[tuple[str, tuple[str, ...], str, Any], ...] = (
+    ("lora", ("lora", "r"), "lora_r", 32),
+    ("qlora", ("quantization",), "quantization", "4bit"),
+    ("bf16_fp16", ("precision",), "precision", "bf16"),
+    (
+        "gradient_accumulation",
+        ("training", "gradient_accumulation_steps"),
+        "gradient_accumulation_steps",
+        7,
+    ),
+    (
+        "gradient_checkpointing",
+        ("training", "gradient_checkpointing"),
+        "gradient_checkpointing",
+        True,
+    ),
+)
+
+
+def _local_config(tmp_path: Path, **backend: Any) -> dict[str, Any]:
+    dataset = tmp_path / "local-train.jsonl"
+    if not dataset.exists():
+        dataset.write_text('{"text": "hello"}\n', encoding="utf-8")
+    return {
+        "backend": {
+            "base_model": "Fake/Model",
+            "dataset": str(dataset),
+            "training": dict(backend.pop("training", {})),
+            "lora": {"target_modules": ["q_proj", "v_proj"]},
+            **backend,
+        }
+    }
+
+
+def _local_spec(tmp_path: Path, document: Mapping[str, Any]) -> Any:
+    from chowder.backends.transformers_peft import TransformersPeftRunSpec
+
+    return TransformersPeftRunSpec.from_resolved_config(
+        document, work_dir=tmp_path, output_dir=tmp_path / "out", seed=19
+    )
+
+
+def test_every_supported_local_capability_reaches_the_executor_spec(tmp_path):
+    from chowder.backends.transformers_peft import TransformersPeftRunSpec
+
+    capabilities = LocalTrainingBackend().capabilities()
+    document = _local_config(tmp_path)
+    backend = document["backend"]
+    for _capability, path, _attribute, value in _LOCAL_SUPPORTED_VALUES:
+        section: dict[str, Any] = backend
+        for key in path[:-1]:
+            section = section.setdefault(key, {})
+        section[path[-1]] = value
+    spec = _local_spec(tmp_path, document)
+    for capability, path, attribute, value in _LOCAL_SUPPORTED_VALUES:
+        assert capabilities.status(capability) == CAPABILITY_SUPPORTED, capability
+        assert attribute in TransformersPeftRunSpec.__dataclass_fields__, attribute
+        assert getattr(spec, attribute) == value, (
+            f"{capability} (config {'/'.join(path)}) did not reach spec.{attribute}"
+        )
+
+
+def test_the_local_matrix_knobs_land_where_the_patch_emits_them(tmp_path):
+    """The capability matrix, the recipe patch and the spec must agree.
+
+    The drift guard for the declared backend: for every knob the local matrix
+    calls ``supported`` and the recipe patch emits, the transformers-peft spec
+    must actually read it back. If a rename breaks the chain -- patch emits a
+    path the spec no longer reads -- the value silently stops driving the run,
+    and this test fails instead.
+    """
+    from chowder.growth.recipe_planner import TrainingRecipe
+
+    recipe = TrainingRecipe(
+        recipe_id="drift",
+        curriculum_item_ids=("item",),
+        mixture={"target": 1.0},
+        learning_rate=3e-4,
+        scheduler="cosine",
+        warmup_steps=11,
+        lora_rank=32,
+        lora_alpha=64,
+        target_modules=("q_proj", "v_proj"),
+        seq_len=1024,
+        batch_size=3,
+        gradient_accumulation=7,
+        max_steps=123,
+        objective="sft",
+        replay_rate=0.1,
+        dataset_manifest={},
+        projected_device_gpu_hours=1.0,
+        projected_wall_gpu_hours=3.5,
+    )
+    patch = recipe.to_config_patch(backend_type="transformers-peft")["backend"]
+    document = _local_config(tmp_path)
+    document["backend"] = _deep_merge(document["backend"], patch)
+    spec = _local_spec(tmp_path, document)
+    assert spec.learning_rate == 3e-4
+    assert spec.lr_scheduler_type == "cosine"
+    assert spec.warmup_steps == 11
+    assert spec.max_steps == 123
+    assert spec.batch_size == 3
+    assert spec.gradient_accumulation_steps == 7
+    assert spec.lora_r == 32
+    assert spec.lora_alpha == 64
+    assert spec.max_length == 1024
+    assert spec.target_modules == ("q_proj", "v_proj")
+    # ... and the matrix declares the same mechanisms supported.
+    capabilities = LocalTrainingBackend().capabilities()
+    for capability in (
+        "lora",
+        "gradient_accumulation",
+        "bf16_fp16",
+        "checkpoint_resume",
+        "activation_offload",
+        "optimizer_tiering",
+        "frozen_layer_streaming",
+    ):
+        assert capabilities.status(capability) == CAPABILITY_SUPPORTED, capability
+
+
+def _deep_merge(base: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = dict(base)
+    for key, value in patch.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def test_local_offload_tiering_and_streaming_flags_are_read_by_the_executor(
+    tmp_path,
+):
+    """The three chowder mechanisms the matrix names as executor-resolved are
+    exactly the config keys the transformers-peft spec parses."""
+    capabilities = LocalTrainingBackend().capabilities()
+    for capability, key in (
+        ("activation_offload", "activation_offload"),
+        ("optimizer_tiering", "optimizer_tiering"),
+        ("frozen_layer_streaming", "frozen_layer_streaming"),
+    ):
+        assert capabilities.status(capability) == CAPABILITY_SUPPORTED, capability
+        # "always" resolves True through the executor's own parser...
+        spec = _local_spec(tmp_path, _local_config(tmp_path, training={key: "always"}))
+        assert getattr(spec, key) is True, capability
+        # ...and "off" resolves False through the same parser.
+        spec = _local_spec(tmp_path, _local_config(tmp_path, training={key: "off"}))
+        assert getattr(spec, key) is False, capability
+
+
+def test_local_checkpoint_resume_reaches_the_executor_spec(tmp_path):
+    capabilities = LocalTrainingBackend().capabilities()
+    assert capabilities.status("checkpoint_resume") == CAPABILITY_SUPPORTED
+    checkpoint = tmp_path / "checkpoint-50"
+    checkpoint.mkdir()
+    spec = _local_spec(
+        tmp_path, _local_config(tmp_path, resume_from_checkpoint=str(checkpoint))
+    )
+    assert spec.resume_from_checkpoint == str(checkpoint.resolve())
+
+
+def test_local_resume_recipe_travels_through_the_same_config_path(tmp_path):
+    """resume_from_checkpoint is not a matrix-only claim: the backend's own
+    resume() writes the key the executor reads."""
+    manifest = _manifest(tmp_path, project_template_path=_template(tmp_path))
+    backend = LocalTrainingBackend(probe=_probe(_panel_with_device()))
+    checkpoint = tmp_path / "checkpoint-100"
+    checkpoint.mkdir()
+    resumed = backend.resume(manifest, _recipe(), checkpoint)
+    assert resumed.resume_from_checkpoint == str(checkpoint)
+    document = _local_config(tmp_path, resume_from_checkpoint=resumed.resume_from_checkpoint)
+    spec = _local_spec(tmp_path, document)
+    assert spec.resume_from_checkpoint == str(checkpoint.resolve())
+
+
+# --------------------------------------------------------------------------
+# capability drift: the transformers mapping the patch emits, the spec reads
+# --------------------------------------------------------------------------
+
+
+def test_the_transformers_patch_emits_only_paths_the_spec_reads(tmp_path):
+    """Every config path ``to_config_patch(transformers-peft)`` emits must be
+    consumed by ``TransformersPeftRunSpec.from_resolved_config``.
+
+    This is the drift guard for the transformers matrix: the patch is the
+    declared route from recipe to executor, so an emitted-but-unread path is
+    a capability the matrix would be claiming without the executor honoring
+    it. One check per emitted leaf, asserted against the spec itself.
+    """
+    from chowder.growth.recipe_planner import TrainingRecipe
+
+    recipe = TrainingRecipe(
+        recipe_id="drift",
+        curriculum_item_ids=("item",),
+        mixture={"target": 1.0},
+        learning_rate=3e-4,
+        scheduler="cosine",
+        warmup_steps=11,
+        lora_rank=32,
+        lora_alpha=64,
+        target_modules=("q_proj", "v_proj"),
+        seq_len=1024,
+        batch_size=3,
+        gradient_accumulation=7,
+        max_steps=123,
+        objective="sft",
+        replay_rate=0.1,
+        dataset_manifest={},
+        projected_device_gpu_hours=1.0,
+        projected_wall_gpu_hours=3.5,
+    )
+    patch = recipe.to_config_patch(backend_type="transformers-peft")["backend"]
+    document = _local_config(tmp_path)
+    document["backend"] = _deep_merge(document["backend"], patch)
+    spec = _local_spec(tmp_path, document)
+    assert spec.learning_rate == patch["training"]["learning_rate"]
+    assert spec.lr_scheduler_type == patch["training"]["lr_scheduler_type"]
+    assert spec.warmup_steps == patch["training"]["warmup_steps"]
+    assert spec.max_steps == patch["training"]["max_steps"]
+    assert spec.batch_size == patch["training"]["batch_size"]
+    assert spec.gradient_accumulation_steps == patch["training"]["gradient_accumulation_steps"]
+    assert spec.lora_r == patch["lora"]["r"]
+    assert spec.lora_alpha == patch["lora"]["alpha"]
+    assert spec.target_modules == tuple(patch["lora"]["target_modules"])
+    assert spec.max_length == patch["max_length"]
+
+
+def test_transformers_resume_from_checkpoint_reaches_the_spec(tmp_path):
+    from chowder.growth.recipe_planner import TrainingRecipe
+
+    recipe = TrainingRecipe(
+        recipe_id="drift",
+        curriculum_item_ids=("item",),
+        mixture={"target": 1.0},
+        learning_rate=1e-4,
+        scheduler="linear",
+        warmup_steps=0,
+        lora_rank=16,
+        lora_alpha=32,
+        target_modules=("q_proj",),
+        seq_len=512,
+        batch_size=2,
+        gradient_accumulation=4,
+        max_steps=10,
+        objective="sft",
+        replay_rate=0.1,
+        dataset_manifest={},
+        projected_device_gpu_hours=1.0,
+        projected_wall_gpu_hours=3.5,
+        resume_from_checkpoint=str(tmp_path / "checkpoint-20"),
+    )
+    patch = recipe.to_config_patch(backend_type="transformers-peft")["backend"]
+    assert patch["resume_from_checkpoint"] == str(tmp_path / "checkpoint-20")
+    document = _local_config(tmp_path)
+    document["backend"] = _deep_merge(document["backend"], patch)
+    spec = _local_spec(tmp_path, document)
+    assert spec.resume_from_checkpoint == str((tmp_path / "checkpoint-20").resolve())
+
+
+def test_search_axes_flow_through_the_transformers_patch(tmp_path):
+    """The one search axis (learning_rate) is consumed by the transformers
+    patch and read back by the spec -- the chain successive halving rides on."""
+    from chowder.growth.recipe_planner import SEARCH_AXES
+
+    assert SEARCH_AXES == ("learning_rate",)
+    patch = _recipe().to_config_patch(backend_type="transformers-peft")["backend"]
+    assert "learning_rate" in patch["training"]
+
+
+# --------------------------------------------------------------------------
+# capability drift: the runner-level capabilities are runner-executed
+# --------------------------------------------------------------------------
+
+
+def test_successive_halving_and_search_are_runner_level_capabilities():
+    """The two matrix rows that name the campaign runner name real symbols.
+
+    The executor spec cannot prove these (they are not executor knobs), so
+    the guard binds them to the runner machinery that actually executes them:
+    successive halving's schedule and the runner's own search driver.
+    """
+    from chowder.growth import campaign_runner as runner_module
+    from chowder.growth.candidate_search import run_search
+    from chowder.successive_halving import HalvingSchedule
+
+    capabilities = LocalTrainingBackend().capabilities()
+    for capability in ("successive_halving", "search"):
+        assert capabilities.status(capability) == CAPABILITY_SUPPORTED, capability
+    # The runner really drives a declared search through run_search...
+    assert callable(runner_module.run_search)
+    assert run_search is runner_module.run_search
+    # ...whose rounds are cut by the successive-halving schedule.
+    assert callable(HalvingSchedule)
+
+
+def test_the_local_matrix_refusals_match_the_executor_vocabulary(tmp_path):
+    """A capability the local matrix does not declare is not one the executor
+    is known to refuse -- the guard names the vocabulary it protects."""
+    capabilities = LocalTrainingBackend().capabilities()
+    # No local row is a refusal today: every declared mechanism runs. If an
+    # executor refusal is ever added to this matrix, this test is where the
+    # executor-side proof belongs (as the Unsloth guard does).
+    for row in capabilities.rows:
+        assert row.status != CAPABILITY_REFUSED, row.capability

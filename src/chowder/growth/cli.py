@@ -400,6 +400,15 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
         help="Show the declared backend's panel, estimates and refusals, no compute",
     )
     preflight.add_argument("manifest", help="Path to the campaign manifest JSON")
+    preflight.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Report every executable backend side by side (panel, estimates, "
+            "declared and measured costs, refusals) so one can be chosen "
+            "manually; always exits 0"
+        ),
+    )
     preflight.set_defaults(func=_growth_campaign_preflight)
 
     readiness = campaign_targets.add_parser(
@@ -663,11 +672,17 @@ def _growth_campaign_preflight(args: argparse.Namespace) -> int:
     the runner enforces exits non-zero (``stops_the_run``); a hardware fact it
     only reports still prints the full panel, so an operator can see *why* the
     declaration would not run on this machine.
+
+    With ``--all``, every executable backend is reported side by side -- each
+    provider's panel, estimates, declared and measured costs, and refusals --
+    so an operator can choose one manually. The comparison is read-only
+    reconnaissance: it always exits 0, because a provider that would refuse is
+    a row in the report, not an error in it.
     """
     from .campaign import CampaignManifest
     from .campaign_runner import CampaignRunRefusal, plan_campaign
     from .candidate_search import CandidateSearchRefusal
-    from .training_backends import preflight_report
+    from .training_backends import compare_backends_report, preflight_report
 
     manifest = CampaignManifest.from_file(Path(args.manifest))
     recipes: tuple[Any, ...] = ()
@@ -680,6 +695,13 @@ def _growth_campaign_preflight(args: argparse.Namespace) -> int:
         unavailable = str(refusal)
     else:
         recipes = tuple(plan.recipes)
+    if getattr(args, "all", False):
+        _print_json(
+            compare_backends_report(
+                manifest, recipes=recipes, recipes_unavailable=unavailable
+            )
+        )
+        return 0
     report = preflight_report(
         manifest, recipes=recipes, recipes_unavailable=unavailable
     )
