@@ -27,8 +27,13 @@ on:
         required: false
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: write # push the drop branch
+  pull-requests: write # open or refresh the drop pull request
+  # Dispatch ci.yml on the drop branch. A pull request opened with the workflow
+  # token does create a pull_request run, but GitHub parks it at
+  # `action_required` waiting for a human, so nothing reports the required
+  # checks on its own; the dispatch is what satisfies the gate.
+  actions: write
 
 concurrency:
   group: literature-watch
