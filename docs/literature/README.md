@@ -89,11 +89,14 @@ window can honestly be listed again next week. Pruning by hand faster than the
 horizon is the only way to see a paper twice; the schedule never does it.
 
 **Operator note.** The pull request is opened with the workflow's own
-`GITHUB_TOKEN`, and GitHub does not start workflows for events that token
-creates, so the schedule dispatches `ci.yml` on the branch itself to put the
-required checks on the pull request. If that ever leaves a pull request waiting
-on a check, one push or an *Update branch* click from a person covers it; the
-drop itself is unaffected.
+`GITHUB_TOKEN`, and GitHub parks the `pull_request` run that token creates at
+`action_required` until someone approves it, so the required checks never report
+on their own. The schedule therefore approves that run itself, which is why the
+workflow asks for `actions: write`. Dispatching `ci.yml` separately does **not**
+work, and that was measured rather than assumed: the dispatched checks completed
+green on the commit while the pull request's check rollup stayed empty, so the
+gate stayed blocked. If a run is ever left waiting anyway, one push or an
+*Update branch* click from a person covers it; the drop itself is unaffected.
 
 ## The rules an entry must follow
 
