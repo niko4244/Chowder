@@ -12,6 +12,8 @@ back.
 | --- | --- | --- |
 | `watch.py` | nobody by hand | a stdlib-only fetcher that emits an **unvetted candidate pool** from the arXiv API, grouped by Chowder surface; `--append-log` screens it through the surface gates and drops what is new |
 | `.github/workflows/literature-watch.yml` | nobody by hand | the schedule: runs the pool weekly and opens a pull request carrying an **unvetted drop** into the log when something new matches |
+| `watchdog.py` | nobody by hand | a stdlib-only reader that answers "is the weekly loop still alive?" -- the schedule ran, a drop's checks reported, no drop is stuck -- and says so in one self-closing issue |
+| `.github/workflows/literature-watchdog.yml` | nobody by hand | the watchdog's schedule: Tuesdays, 06:00 UTC, the day after the watch, so a broken Monday is loud on Tuesday |
 | `WATCH_LOG.md` | a person/agent who read the paper | the **curated** record: what a paper establishes, mapped to a concrete Chowder surface, under the rules below -- plus explicitly-labelled automated drops, which are triage lists and not entries |
 | `src/chowder/growth/interventions.py` | a change with tests | the only place a finding becomes a *family the loop may propose* |
 
@@ -95,8 +97,39 @@ on their own. The schedule therefore approves that run itself, which is why the
 workflow asks for `actions: write`. Dispatching `ci.yml` separately does **not**
 work, and that was measured rather than assumed: the dispatched checks completed
 green on the commit while the pull request's check rollup stayed empty, so the
-gate stayed blocked. If a run is ever left waiting anyway, one push or an
+gate stayed blocked. Approving is an action and the checks reporting is the result, so the
+step does not stop there: it waits for every job of the run it approved to
+attach a check run to the drop's commit and **fails the run** if they never do.
+That is the outcome, not the attempt, and it is why the workflow also asks for
+`checks: read`. If a run is ever left waiting anyway, one push or an
 *Update branch* click from a person covers it; the drop itself is unaffected.
+
+## The watchdog
+
+The watch's failure modes are all quiet: a schedule that stops firing writes
+nothing, a drop whose required checks never attach sits blocked and looks like
+it is only waiting, and a week with no new hits looks identical to a week the
+job never ran. `.github/workflows/literature-watchdog.yml` runs the day after
+the watch and checks what a reader would ask, in order:
+
+* **did the watch run** -- a successful run of the watch workflow within 8 days;
+* **can the drop land** -- an open drop that is blocked with *no* check runs on
+  its head commit (the required contexts never attached) or that conflicts with
+  `main`;
+* **has the drop been waiting** -- an open drop older than 7 days. This one is a
+  nudge, not a verdict: rule 5 tolerates a drop up to the 30-day prune horizon,
+  and the nudge says how long it has waited and the two ways out.
+
+What it deliberately does **not** alert on is *no drop at all*. The watch writes
+nothing when nothing new matches, so an empty week is a legitimate outcome and
+alerting on it would train everyone to ignore the alert; the absence that
+matters -- the schedule itself -- is the first check.
+
+A failing check opens or updates one issue titled
+`[watchdog] the literature watch needs attention` and fails the run, so the alarm
+is both red in Actions and visible where issues are read. The issue closes
+itself on the next healthy check. The watchdog only reads: it never touches the
+log, the drop branch or a pull request.
 
 ## The rules an entry must follow
 
