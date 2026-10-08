@@ -1,0 +1,151 @@
+name: Literature watch
+
+# The recurring half of docs/literature/README.md. Fetch the arXiv candidate
+# pool, screen it against the surface terms in watch.py, and -- only when a new
+# hit matches -- append an *unvetted* drop to docs/literature/WATCH_LOG.md on a
+# machine-owned branch and open/refresh a pull request for a person to merge.
+#
+# A drop carries no number and registers nothing: it is a triage list, never a
+# finding (README rules 5 and 7). A run with no new match writes nothing at all,
+# so an empty week shows up in this run's summary instead of as log churn.
+
+on:
+  schedule:
+    # Mondays, 06:00 UTC. A week the schedule misses is still covered: because
+    # the log dedups on id, a wider window re-surfaces a paper only when it was
+    # never listed, so nothing is lost to a skipped or failed run.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: Submission window in days (0 disables the window)
+        default: '14'
+        required: false
+      max:
+        description: Max results fetched per profile
+        default: '20'
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: literature-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: weekly pool -> watch log drop
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DAYS: ${{ inputs.days || '14' }}
+      MAX: ${{ inputs.max || '20' }}
+      LOG: docs/literature/WATCH_LOG.md
+      BRANCH: automation/literature-watch
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      # No install step: the watch is stdlib-only by design, so the schedule
+      # cannot be broken by the dependency graph.
+      - name: Fetch, screen, and drop what is new
+        run: |
+          # --append-limit 120 is the pool's own bound (6 profiles x the 20 result
+          # ceiling): the scheduled drop carries every surface-matched hit rather
+          # than truncating one. --prune-drops 30 keeps the log from growing
+          # without bound, and the horizon is longer than the fetch window on
+          # purpose -- an id inside a pruned drop is already too old to be
+          # fetched again, so pruning can never resurrect a listing.
+          python docs/literature/watch.py \
+            --profile all \
+            --days "$DAYS" \
+            --max "$MAX" \
+            --append-log "$LOG" \
+            --append-limit 120 \
+            --prune-drops 30 \
+            --json "$RUNNER_TEMP/pool.json" \
+            -o "$RUNNER_TEMP/pool.md" 2>&1 | tee "$RUNNER_TEMP/watch-output.txt"
+
+      # The screen is coarse and a miss is possible, so the whole unfiltered
+      # pool is published: nothing the run saw is silently discarded.
+      - name: Publish the unfiltered pool
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arxiv-candidate-pool
+          path: |
+            ${{ runner.temp }}/pool.json
+            ${{ runner.temp }}/pool.md
+            ${{ runner.temp }}/watch-output.txt
+          if-no-files-found: warn
+
+      - name: Record the run in the summary
+        if: always()
+        run: |
+          {
+            echo '## Literature watch'
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/watch-output.txt" 2>/dev/null || echo '(no output captured)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open or refresh the pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- "$LOG"; then
+            echo "Nothing new matched this run; the log is unchanged and no pull request is opened."
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$BRANCH"
+          git add "$LOG"
+          git commit -m 'docs(literature): weekly unvetted arXiv pool drop'
+          # The branch is machine-owned: every run rebuilds it from the ref it
+          # checked out, and dedup against that ref's log keeps the drop free of
+          # anything already merged. Do not commit to it by hand.
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+
+          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number -q '.[0].number')" ]; then
+            echo "Refreshed the open literature-watch pull request."
+          else
+            gh pr create --base main --head "$BRANCH" \
+              --title 'docs(literature): weekly unvetted arXiv pool drop' \
+              --body "$(cat <<'EOF'
+          ### Automated arXiv pool drop (unvetted)
+
+          The weekly [literature watch](docs/literature/README.md) found arXiv hits
+          that matched a surface term in `docs/literature/watch.py`, so it appended
+          an **unvetted** section to `docs/literature/WATCH_LOG.md` on this
+          machine-owned branch.
+
+          **This is a triage list, not a finding.** Nothing in the drop has been
+          read, no result is quoted, the section carries no abstract text and no
+          number, and no intervention family, maturity label, or gate is touched
+          (README rules 5 and 7). It is labelled `Automated pool drop` so it can
+          never be mistaken for a curated entry.
+
+          **To land it:** read the new hits, promote anything real into a dated
+          curated section in the same file under the rules, then merge. Or close
+          this pull request and delete the drop if nothing is worth keeping -- the
+          next run rebuilds from `main`. Merging stays a human decision by design:
+          `main` is protected, and the watch never writes the curated log itself.
+
+          The whole unfiltered pool for this run, including anything the
+          surface-term screen missed, is attached as the `arxiv-candidate-pool`
+          artifact.
+          EOF
+          )"
+          fi
+
+          # A push made with GITHUB_TOKEN starts no workflow run, so the required
+          # checks would never report on the pull request; dispatch them here.
+          gh workflow run ci.yml --ref "$BRANCH"

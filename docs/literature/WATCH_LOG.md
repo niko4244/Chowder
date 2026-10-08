@@ -1,11 +1,22 @@
 # Literature watch log
 
-The curated record produced by the watch described in `README.md`. One dated
-section per pass. A pass with nothing relevant says so. Every entry cites its
-`arXiv:<id>`, names the mechanism, and maps to a concrete Chowder surface -- an
-existing intervention family, a named backend, or `candidate -- unregistered`.
-Numbers quoted here are the *papers'* numbers, on their models and protocols;
-none of them is a Chowder measurement.
+The record produced by the watch described in `README.md`. Two kinds of dated
+section live here, and they are not the same thing:
+
+- **Curated sections** -- written by whoever read the papers. Every entry cites
+  its `arXiv:<id>`, names the mechanism, and maps to a concrete Chowder surface
+  (an existing intervention family, a named backend, or
+  `candidate -- unregistered`). Numbers quoted are the *papers'* numbers, on
+  their models and protocols; none of them is a Chowder measurement.
+- **Automated pool drops** (`## Automated pool drop -- <date>`) -- appended by
+  the scheduled run in `.github/workflows/literature-watch.yml`. A drop is a
+  *triage list*: unvetted, unread, and carrying only ids, dates, and the surface
+  term that matched -- deliberately no abstract text and no number, so it cannot
+  carry a claim into this log. A drop is not a finding and registers nothing
+  (rule 7). When one of its hits is worth keeping, promote it into a curated
+  section; delete the drop if it adds nothing. Drops are transient by design:
+  the scheduled run prunes those older than 30 days, and that horizon is longer
+  than its fetch window, so a prune can never bring a paper back around.
 
 ---
 
