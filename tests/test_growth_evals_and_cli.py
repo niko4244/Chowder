@@ -329,3 +329,87 @@ def test_cli_growth_status_summarizes_ledger(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["verdict"] == "PROMOTED"
     assert payload["checks"]["target_improvement"] == "met"
+
+
+# ---------------- scoreboard polarity (reported-metric audit R1) ----------------
+
+
+def _lower_is_better_entry():
+    """One benchmark whose declared metric improves as its raw value falls.
+
+    ``default_registry()`` refuses a row that redeclares a metric name's
+    polarity, so a hand-built entry plus a hand-built registry is the only way to
+    put the registry's own ``lower_is_better`` vocabulary in front of the
+    renderer -- which is exactly what the vocabulary declares and no shipped row
+    exercises yet.
+    """
+    from chowder.growth.benchmark_registry import (
+        BenchmarkEntry,
+        BenchmarkRegistry,
+        Normalization,
+    )
+
+    entry = BenchmarkEntry(
+        benchmark_id="latency_probe",
+        version="2026-01",
+        name="Latency probe",
+        category="reasoning",
+        subcategory="serving latency",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=2,
+        scorer="exact_match",
+        primary_metric="token_latency_ms",
+        direction="lower_is_better",
+        normalization=Normalization(kind="identity"),
+        skills=("reasoning.abstract",),
+        dataset_source="internal",
+        implementation_source="internal",
+        source="internal",
+        license="internal",
+        release_date="2026-01-01",
+        adapter="chowder_custom",
+    )
+    return BenchmarkRegistry((entry,))
+
+
+LATENCY = "latency_probe@2026-01"
+
+
+def _delta_section(markdown: str) -> str:
+    assert "## vs previous generation" in markdown, markdown
+    return markdown.split("## vs previous generation", 1)[1]
+
+
+def test_scoreboard_arrows_follow_the_declared_lower_is_better_polarity():
+    # Raw value rises (5.0 -> 9.0): worse for a lower-is-better metric, so the
+    # arrow must point down even though ``compare`` calls a rise "improved".
+    parent = _report(
+        [_run(LATENCY, 5.0, SUPPORTED, per_sample_scores=(5.0, 5.0, 5.0, 5.0))]
+    )
+    candidate = _report(
+        [_run(LATENCY, 9.0, SUPPORTED, per_sample_scores=(9.0, 9.0, 9.0, 9.0))]
+    )
+
+    section = _delta_section(Scoreboard(_lower_is_better_entry()).render(candidate, parent_report=parent))
+
+    row = next(line for line in section.splitlines() if line.startswith(f"| {LATENCY}"))
+    assert "| +4.000 |" in row, row
+    assert "↓" in row and "↑" not in row, row
+    assert "(lower is better)" in row, row
+
+
+def test_scoreboard_arrows_are_unchanged_for_the_shipped_higher_is_better_rows():
+    parent = _report(
+        [_run(LIVECODE, 0.40, SUPPORTED, per_sample_scores=(0.4, 0.4, 0.4, 0.4))]
+    )
+    candidate = _report(
+        [_run(LIVECODE, 0.46, SUPPORTED, per_sample_scores=(0.46, 0.46, 0.46, 0.46))]
+    )
+
+    section = _delta_section(Scoreboard(default_registry()).render(candidate, parent_report=parent))
+
+    row = next(line for line in section.splitlines() if line.startswith(f"| {LIVECODE}"))
+    assert "| +0.060 |" in row, row
+    assert "↑" in row and "↓" not in row, row
+    assert "lower is better" not in row, row
