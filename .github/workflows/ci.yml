@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual runs exist so the scheduled literature watch can put the required
+  # checks on the pull request it opens with the workflow token, which starts
+  # no workflow of its own.
+  workflow_dispatch:
 
 jobs:
   test-linux:
