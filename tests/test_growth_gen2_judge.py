@@ -1850,6 +1850,135 @@ def test_the_pinned_fixtures_wrong_answer_cannot_reach_the_channel(tmp_path: Pat
     assert judge_gen2.READOUT_DISAGREES_WITH_PRODUCTION not in output
 
 
+# --------------------------------------------------------------------------
+# the row names say what the rows measure (prereg amendment 18)
+# --------------------------------------------------------------------------
+
+
+def _row_name(output: str, threshold: str) -> str:
+    """The check name exactly as an operator reads it in the rendered table."""
+    match = re.match(
+        rf"^{re.escape(threshold)}\s+(.*?)\s+(?:PASS|FAIL|UNKNOWN|INFO)\b",
+        _threshold_row(output, threshold),
+    )
+    assert match, _threshold_row(output, threshold)
+    return match.group(1).strip()
+
+
+@pytest.mark.parametrize(
+    "threshold, name",
+    (
+        ("T1", "candidate instrument provenance + row identity"),
+        ("T9", f"distinct-trigram ratio mean >= {judge_gen2.PROTECTED_TRIGRAM_MIN}"),
+        ("T13", "cost settles within the declared ceilings"),
+        ("T21", "run decision on the declared retention profile"),
+    ),
+)
+def test_the_row_names_say_what_the_rows_measure(
+    tmp_path: Path, threshold: str, name: str
+) -> None:
+    """Amendment 18 applies the label audit's F2-F6 to the rows that carried them.
+
+    Each of these names described something the row does not do: T1 said
+    provenance while the row also refuses a duplicated prompt identity, T9 said
+    "distinct-trigram" for a mean over prompts, T13 said "actual cost" for a
+    number the run may not have measured, and T21 said "the declared profile" for
+    a check that reads only ``RETENTION_``-prefixed reasons. Asserting the
+    rendered name is what fails without the rename: the row id and its status are
+    identical either way.
+    """
+    code, output = _judge_output(_run_root(tmp_path))
+
+    assert code == 0, output
+    assert _row_name(output, threshold) == name
+
+
+def test_the_renames_moved_no_decision(tmp_path: Path) -> None:
+    """Amendment 18 changes names and one detail string. Nothing else moves.
+
+    The clean root still certifies with those rows PASSing, and the gen1-shaped
+    defect still refuses on the target rows -- the same statuses the audit
+    measured before the renames.
+    """
+    code, output = _judge_output(_run_root(tmp_path / "clean"))
+    assert code == 0, output
+    for threshold in ("T1", "T2", "T3", "T9", "T13", "T21"):
+        assert " PASS " in _threshold_row(output, threshold), output
+
+    code, output = _judge_output(_run_root(tmp_path / "defect", candidate_dup=11, candidate_echo=7))
+    assert code == 1, output
+    assert " FAIL " in _threshold_row(output, "T2")
+    assert " FAIL " in _threshold_row(output, "T3")
+
+
+def test_the_settlement_row_names_itself_the_same_way_when_it_cannot_decide(
+    tmp_path: Path,
+) -> None:
+    """T13's name lived in five places, four of them UNKNOWN branches.
+
+    The rename has to reach the branches a reader only sees when something is
+    missing, which is precisely when a stale name misleads most.
+    """
+    root = _run_root(tmp_path / "no-accounting")
+    (root / "cycle_compute_accounting.json").unlink()
+
+    code, output = _judge_output(root)
+
+    assert code == 1
+    assert " UNKNOWN " in _threshold_row(output, "T13")
+    assert _row_name(output, "T13") == "cost settles within the declared ceilings"
+
+
+def test_the_unreadable_candidate_arm_uses_one_t1_name(tmp_path: Path) -> None:
+    """The third T1 name is gone -- and the duplicate row is recorded, not hidden.
+
+    An unreadable candidate arm used to render T1 twice under two different names
+    ("candidate measured evidence", then the roster's "candidate instrument
+    provenance"). Amendment 18 unifies the name; the row still appears twice,
+    which is amendment 18's finding F7 in the audit and is left as a behaviour
+    change for the owner rather than smuggled into a rename. This test pins both
+    facts so neither can drift silently.
+    """
+    root = tmp_path / "empty"
+    root.mkdir()
+
+    code, output = _judge_output(root)
+
+    assert code == 1
+    names = [
+        match.group(1).strip()
+        for match in re.finditer(
+            r"^T1\s+(.*?)\s+(?:PASS|FAIL|UNKNOWN|INFO)\b", output, re.MULTILINE
+        )
+    ]
+    assert names == ["candidate instrument provenance + row identity"] * len(names), names
+    assert len(names) == 2, names
+
+
+def test_the_target_detail_names_the_direction_in_the_rows_own_terms(
+    tmp_path: Path,
+) -> None:
+    """Amendment 18 applies the audit's F2: the polarity word was inverted.
+
+    T2/T3 are lower-is-better rates and the detail printed production's
+    higher-is-better verdict verbatim, so a candidate that made duplication worse
+    read ``paired=improved``. Production's word is kept for traceability and its
+    polarity is named beside it.
+    """
+    code, output = _judge_output(
+        _run_root(tmp_path / "worse", candidate_dup=11, candidate_echo=7, parent_dup=0, parent_echo=0)
+    )
+    assert code == 1, output
+    detail = _threshold_row(output, "T2")
+    assert "paired not better" in detail
+    assert "paired=improved" not in detail
+    assert "higher-is-better" in detail
+
+    code, output = _judge_output(_run_root(tmp_path / "better"))
+    assert code == 0, output
+    assert "paired better" in _threshold_row(output, "T2")
+
+
 def test_a_genuine_answer_keeps_the_disclosure_row_passing(tmp_path: Path) -> None:
     """The control: T24 is not a blanket refusal, and a clean run still certifies."""
     root = _run_root(tmp_path)

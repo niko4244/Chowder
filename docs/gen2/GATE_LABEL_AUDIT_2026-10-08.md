@@ -1,10 +1,16 @@
 # Gate-label audit — 2026-10-08: every judge row name against the quantity its code computes
 
-**Status: audit record. Corrections are proposed, not applied.** The only row
-this audit changes is the one amendment 17 already changed (T5); every other
-finding is a proposal, because renaming a frozen gate row after the run's
-thresholds were frozen is the repo owner's call, exactly as amending the judge
-is (`JUDGE_AMENDMENT_PROPOSAL_T23.md`, `JUDGE_AMENDMENT_PROPOSAL_T24.md`).
+**Status: audit record, applied.** F1 was fixed by amendment 17 before this
+audit landed. F2-F6 were applied by
+`docs/quals/GEN2_PREREG_AMENDMENT18_2026-10-08.md`, each with a test that
+fails without the rename, and no decision moved -- proven by reverting every
+rename and re-running the judge's decision tests. Renaming a frozen gate row
+after the thresholds were frozen is the repo owner's call, exactly as amending
+the judge is, which is why the corrections went through a named amendment. Two
+of the wordings proposed below were shortened to fit the renderer's
+46-character name column; the applied strings are recorded in each finding.
+**F7 remains open**: it is a row-set question, not a rename, and the owner
+decides it.
 
 ## Why this audit exists
 
@@ -34,19 +40,19 @@ the code measures.
 
 | row | what the row name says | what the code measures | audit |
 | --- | --- | --- | --- |
-| T1 | candidate instrument provenance | a duplicate-free instrument run carrying `MEASURED_THIS_GENERATION`, plus its `measurement_origin` | name is narrower than the quantity (F6) |
-| T2 | answer-duplication target | share of completions whose post-think answer also appears in the reasoning, vs the parent, by the frozen paired-or-absolute rule | name matches; detail polarity is inverted (F2) |
-| T3 | template-echo target | share of continuations opening with the prompt tail + `assistant`, vs the parent, same rule | name matches; detail polarity is inverted (F2) |
+| T1 | ~~candidate instrument provenance~~ /**candidate instrument provenance + row identity** | a duplicate-free instrument run carrying `MEASURED_THIS_GENERATION`, plus its `measurement_origin` | name was narrower than the quantity (F6, **corrected by amendment 18**); the unreadable-arm pair is F7, **open** |
+| T2 | answer-duplication target | share of completions whose post-think answer also appears in the reasoning, vs the parent, by the frozen paired-or-absolute rule | name matches; detail polarity was inverted (F2, **corrected by amendment 18**) |
+| T3 | template-echo target | share of continuations opening with the prompt tail + `assistant`, vs the parent, same rule | name matches; detail polarity was inverted (F2, **corrected by amendment 18**) |
 | T4 | constrained-prompt compliance == 8/8 | on the 8 declared prompts: answer surface non-empty, ≤ 40 chars, ≤ 1 newline | name matches the prereg's "format compliance" |
 | T5 | ~~answer correctness~~ → **answer presence** | expected string present anywhere on the answer surface | **corrected by amendment 17** (F1) |
 | T6 | EOS termination >= 0.9 | the run's recorded `eos_termination_rate` | matches |
 | T7 | cap-hit < 0.1 | `max_token_cap_rate` | matches |
 | T8 | obvious loops <= 0 | `obvious_loop_count` | matches |
-| T9 | distinct-trigram >= 0.9 | `distinct_trigram_ratio_mean` — a **mean over prompts** | name drops "mean" (F5) |
+| T9 | ~~distinct-trigram >= 0.9~~ /**distinct-trigram ratio mean >= 0.9** | `distinct_trigram_ratio_mean` — a **mean over prompts** | name dropped "mean" (F5, **corrected by amendment 18**) |
 | T10 | unclosed think <= 0.25 | `unclosed_think_rate` | matches |
 | T11 | candidate {slice} measured + protocol-exact / {slice} candidate-vs-parent regression <= 0.0625 / no undeclared protected row substitutes | slice presence, protocol exactness, digest, and the score delta against the parent arm | matches |
 | T12 | contamination CLEAN on the frozen evaluated set / training-source contamination CLEAN | the pinned manifest's statuses for the required benchmarks and for every training source | matches |
-| T13 | **actual** cost settled within the declared ceilings | production's `settle_campaign` over `ComputeCost.from_dict(totals.incremental)`; the device dimension is settled from a number the run may have *not measured* | "actual" is too broad for the device dimension (F4) |
+| T13 | ~~**actual** cost settled within the declared ceilings~~ /**cost settles within the declared ceilings** | production's `settle_campaign` over `ComputeCost.from_dict(totals.incremental)`; the device dimension is settled from a number the run may have *not measured* | "actual" was too broad for the device dimension (F4, **corrected by amendment 18**) |
 | T14 | all recipes accounted | the accounting artifact's recipe ids against the declared set, exactly (missing and extra both fail) | matches |
 | T15 | candidate artifact identity (digest recomputed) | recorded digest vs recomputed digest of the selected artifact | matches |
 | T16 | trusted-ancestor protection (vs gen0) | per-slice deltas against the ancestor arm | matches |
@@ -54,7 +60,7 @@ the code measures.
 | T18 | judged contamination evidence is the pinned artifact | the pin exists, lives in the run root, and is byte-identical to the copy judged | matches |
 | T19 | {arm} report is labelled for the generation it claims / {arm} evidence names the declared artifact | the report's generation label and the digest of the bytes each arm measured | matches |
 | T20 | the campaign declares the policy this judge enforces | the declared protection tuple vs the judge's frozen one | matches |
-| T21 | the run's promotion decision **agrees with the declared profile** | only `RETENTION_`-prefixed recorded breaches against the run's verdict; a refusal on any other declared rule (the wall envelope) passes, by design | name is broader than the quantity (F3) |
+| T21 | ~~the run's promotion decision **agrees with the declared profile**~~ /**run decision on the declared retention profile** | only `RETENTION_`-prefixed recorded breaches against the run's verdict; a refusal on any other declared rule (the wall envelope) passes, by design | name was broader than the quantity (F3, **corrected by amendment 18**) |
 | T22 | the judge recomputes the declared profile as the run did | recorded breach codes vs the codes recomputed through production's `evaluate_retention` | matches |
 | T23 | the run's recorded settlement is the settlement of the artifact it pinned | pinned digest vs recomputed, and the recorded settlement vs the artifact's | matches |
 | T24 | answer-readout disagreements <= 0 | items presence accepts that every declared production readout refuses | matches (new; amendment 17) |
@@ -72,6 +78,12 @@ own quantity (`answer presence >= 15/16`), names the readout and its disclosure
 row in the detail, and moves no threshold.
 
 ### F2 — the target rows' detail is inverted for lower-is-better rates (disclosure-only)
+
+**Corrected by amendment 18** — the detail now leads with the row's own direction
+(`paired better` / `paired not better`) and keeps production's word beside it, with
+the vocabulary named: `paired not better (production's compare() answers 'improved'
+in a higher-is-better vocabulary; ...)`. The decision expression is untouched; the
+revert proof is in the amendment.
 
 T2 and T3 are rates where **lower is better**, and their details print
 production's `compare(...).verdict` verbatim
@@ -99,6 +111,10 @@ a detail string in two rows.
 
 ### F3 — T21's name says "the declared profile", the code reads only retention codes (disclosure-only)
 
+**Corrected by amendment 18** — the row now reads `run decision on the declared
+retention profile`. (The wording proposed below, 59 characters, does not fit the
+renderer's 46-character name column; the applied form is 43.)
+
 T21's requirement string is `"the run's promotion decision agrees with the
 declared profile"`, and what the code collects is
 `reasons starting with RETENTION_REASON_PREFIX`. A run refused on its own
@@ -122,6 +138,10 @@ keeps its own gate (T13) and its own pin (T23).
 
 ### F4 — T13's "actual cost" is one word too broad while `device_measured=false` (disclosure-only)
 
+**Corrected by amendment 18** — all five sites of the name (the decision row and
+its four UNKNOWN branches) now read `cost settles within the declared ceilings`, and
+the dimension-by-dimension truth stays in the detail, where it already was.
+
 T13's name is `"actual cost settled within the declared ceilings"`; the detail
 it prints is honest — `device 0.4000 (unmeasured) / wall 1.1000 against the
 campaign envelope` — and amendment 1 declares that with
@@ -138,6 +158,10 @@ already is.
 
 ### F5 — T9's name drops the "mean" (disclosure-only)
 
+**Corrected by amendment 18** — the name is now `distinct-trigram ratio mean >=
+0.9`, matching the `distinct_trigram_ratio_mean` key it reads, in both the decision
+row and the roster that fills it when no candidate arm exists.
+
 T9 reads `distinct_trigram_ratio_mean` — a mean over the instrument's prompts —
 and the name says `distinct-trigram >= 0.9`, which reads as a per-prompt
 property. The value in the detail (`measured 0.97; parent 0.973`) is the mean.
@@ -146,6 +170,12 @@ property. The value in the detail (`measured 0.97; parent 0.973`) is the mean.
 the name the constant's own key uses.
 
 ### F6 — T1's name covers provenance, the code also enforces row identity (disclosure-only)
+
+**Corrected by amendment 18** — all five sites now read `candidate instrument
+provenance + row identity`. (The wording proposed below is 48 characters and would
+shift the renderer's status column; the applied form is exactly 46, the column
+width, and `test_the_row_names_say_what_the_rows_measure` reads the name back out
+of the rendered table so the fit is tested, not assumed.)
 
 T1 reports three different facts under "candidate instrument provenance":
 duplicate prompt identities in the candidate arm
@@ -156,6 +186,35 @@ seeing "provenance PASS" cannot tell that identity was also checked.
 
 **Proposed correction.** `"candidate instrument provenance and row identity"`
 (the row's own detail already names which check it is reporting).
+
+### F7 — an unreadable candidate arm renders T1 twice (disclosure-only; left open)
+**Found while applying F6; not corrected by amendment 18.** When the candidate arm
+cannot be read, T1 is emitted twice for the same missing artifact: once by the
+`ArmError` branch in `judge()` (whose name was `candidate measured evidence`) and
+once by `_instrument_gates`' UNKNOWN roster. The two rows are the same fact under
+two different names, and amendment 18's rename made them the same fact under one
+name exactly:
+
+```text
+T1  candidate instrument provenance + row identity  UNKNOWN  candidate artifact candidate_evaluation.json is missing
+T1  candidate instrument provenance + row identity  UNKNOWN  candidate evaluation artifact unavailable
+```
+
+T1 is not the only multi-fact threshold — T11, T12 and T19 also emit more than one
+row, and deliberately — so the duplicate is not obviously wrong. But collapsing the
+pair changes how many rows a root emits, and `branch_verdict` reads the row set:
+that is a behaviour change, not a rename, so it is recorded here and left to the
+owner rather than folded into amendment 18. The new
+`test_the_unreadable_candidate_arm_uses_one_t1_name` pins both facts (one name,
+still two rows) so neither the stale second name nor a silent merge can drift.
+
+The name the rename drops, `candidate measured evidence`, was not arbitrary:
+production's certification carries exactly that requirement for the same
+condition (`certify_protection`, `src/chowder/growth/certification.py`). The
+unified name drops that mirror deliberately — T1 also decides row identity, and
+its own detail names the specific missing artifact — and the certification
+artifact is a different artifact with its own reader. No test couples the two
+wordings, so this is recorded rather than enforced.
 
 ## What the audit did not find
 
@@ -171,10 +230,12 @@ seeing "provenance PASS" cannot tell that identity was also checked.
 
 ## Governance
 
-Each proposal above is a rename or a detail string, so each needs the same
-treatment as any frozen-judge change: a named prereg amendment, and the
-no-visible-candidate-results check that governs amendments 15-17 (`evidence/`
+F2-F6 are applied by `docs/quals/GEN2_PREREG_AMENDMENT18_2026-10-08.md`, which
+took the same treatment as any frozen-judge change: a named prereg amendment, a
+test that fails without each rename (revert-measured, eight cases), and the
+no-visible-candidate-results check that governs amendments 15-18 (`evidence/`
 holds zero `candidate_evaluation.json` and zero `chosen_candidate.json`, and the
-declared Gen-2 state root is not present in this checkout). Nothing here is
-applied, and nothing here is urgent in the way F1 was: none of these names can
-certify a candidate the code refuses.
+declared Gen-2 state root is not present in this checkout). F7 is left open and
+is the only finding this record still proposes rather than reports: merging the
+duplicate row is the owner's call, and the pin keeps it loud. None of these names
+can certify a candidate the code refuses.
