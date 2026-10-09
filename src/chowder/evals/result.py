@@ -62,7 +62,14 @@ class BenchmarkRun:
     measurement_kind: str = RAW_MODEL
     n_samples: int = 0
     per_sample_scores: tuple[float, ...] = ()
-    metric: str = "accuracy"
+    #: The declared name of the quantity this row measures. Empty means the row
+    #: declares none, and an undeclared metric stays undeclared: it is not a
+    #: metric name and never becomes one by default (reported-metric audit R5).
+    #: Downstream, :class:`~chowder.growth.metric_binding.MetricBinder` refuses a
+    #: row that names no metric rather than comparing an empty name against the
+    #: registry -- the same rule ``measurement_origin`` follows by defaulting to
+    #: UNMEASURED instead of to a measured origin.
+    metric: str = ""
     tool_setting: str = "none"
     reasoning_setting: str = "direct"
     raw_artifact_ref: str = ""  # on-disk raw output, preserved as evidence
@@ -152,7 +159,10 @@ class EvalReport:
                     measurement_kind=run.get("measurement_kind", RAW_MODEL),
                     n_samples=run.get("n_samples", 0),
                     per_sample_scores=tuple(run.get("per_sample_scores", ())),
-                    metric=run.get("metric", "accuracy"),
+                    # Absent reads back absent. A report row that declares no
+                    # metric used to become "accuracy" on load, which turned an
+                    # undeclared name into a claim about what was measured.
+                    metric=run.get("metric", ""),
                     tool_setting=run.get("tool_setting", "none"),
                     reasoning_setting=run.get("reasoning_setting", "direct"),
                     raw_artifact_ref=run.get("raw_artifact_ref", ""),

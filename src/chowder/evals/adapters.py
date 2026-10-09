@@ -31,6 +31,25 @@ from .result import (
 )
 
 
+#: Harness metric keys mapped onto the canonical name a registry entry declares.
+#:
+#: A harness names its own number (lm-eval emits ``acc``, ``acc_norm``,
+#: ``exact_match``); the registry names the *quantity* a promotion input may
+#: carry, and the binder compares the two strings for equality. Before this
+#: table the two vocabularies met nowhere, so an lm-eval row labelled ``acc``
+#: could not bind to a benchmark whose declared metric is ``accuracy`` even
+#: though both name the same measurement (reported-metric audit R4). This is the
+#: single declared place the vocabularies meet: a key listed here is relabelled
+#: to the canonical name and the harness's own key is kept in the run's metadata
+#: so nothing is hidden, while a key that is *not* listed keeps the harness's
+#: name and is refused loudly by the binder -- the table never guesses.
+HARNESS_METRIC_ALIASES: Mapping[str, str] = {
+    "acc": "accuracy",
+    "acc_norm": "accuracy",
+    "exact_match": "accuracy",
+}
+
+
 class AdapterUnavailable(RuntimeError):
     """The external harness package or CLI is not importable on this host."""
 
@@ -119,15 +138,19 @@ class LMEvalAdapter:
             batch_size=batch_size,
         )
         task_results = results.get("results", {}).get(task, {})
-        # lm_eval reports metrics like "acc,none"; take the first metric.
+        # lm_eval reports metrics like "acc,none"; take the first metric. The
+        # harness's own key is kept beside the canonical name so a reader can
+        # always see which number was relabelled and why.
         metric_value: float | None = None
         metric_name = ""
+        harness_metric = ""
         for key, value in task_results.items():
             if key in {"alias", "alias "}:
                 continue
             if isinstance(value, (int, float)):
                 metric_value = float(value)
-                metric_name = key.split(",")[0]
+                harness_metric = key.split(",")[0]
+                metric_name = HARNESS_METRIC_ALIASES.get(harness_metric, harness_metric)
                 break
         artifact = ""
         if self._output_dir:
@@ -143,8 +166,11 @@ class LMEvalAdapter:
             support=SUPPORTED,
             measurement_kind=RAW_MODEL,
             n_samples=1,
-            metric=metric_name or "acc",
+            # No numeric key found means no metric was read: the row names none
+            # and carries no score, rather than claiming "acc" by default.
+            metric=metric_name,
             raw_artifact_ref=artifact,
+            metadata={"harness_metric": harness_metric},
         )
 
 
@@ -265,6 +291,7 @@ ADAPTERS = {
 
 __all__ = [
     "ADAPTERS",
+    "HARNESS_METRIC_ALIASES",
     "AdapterUnavailable",
     "ChowderCustomEvalAdapter",
     "InspectAdapter",

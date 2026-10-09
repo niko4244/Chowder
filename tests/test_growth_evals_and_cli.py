@@ -9,10 +9,11 @@ data path that registers as QUARANTINE.
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
-from chowder.evals.adapters import ADAPTERS, AdapterUnavailable, unavailable_run
+from chowder.evals.adapters import ADAPTERS, AdapterUnavailable, LMEvalAdapter, unavailable_run
 from chowder.evals.result import (
     NOT_APPLICABLE_MODALITY,
     SUPPORTED,
@@ -413,3 +414,122 @@ def test_scoreboard_arrows_are_unchanged_for_the_shipped_higher_is_better_rows()
     assert "| +0.060 |" in row, row
     assert "↑" in row and "↓" not in row, row
     assert "lower is better" not in row, row
+
+
+# --------------------------------------------------------------------------
+# the reported-metric audit's decisions (R4-R6)
+# --------------------------------------------------------------------------
+
+
+class _FakeLMEval:
+    """The one harness call the lm-eval adapter makes, with a chosen table."""
+
+    def __init__(self, task_results: dict) -> None:
+        self._task_results = task_results
+
+    def simple_validate(self, **kwargs):
+        return {"results": {kwargs["tasks"][0]: self._task_results}}
+
+
+def _lm_eval_row(monkeypatch, task_results: dict):
+    monkeypatch.setitem(sys.modules, "lm_eval", _FakeLMEval(task_results))
+    return LMEvalAdapter().run("gsm8k@2024-06", "gen2", task="gsm8k", model="hf")
+
+
+def test_an_lm_eval_row_uses_the_declared_alias_and_keeps_the_harness_key(monkeypatch):
+    """R4: the two metric vocabularies meet in one declared table, never a guess.
+
+    The registry names the quantity ("accuracy") and the harness names its own
+    number ("acc"); before this table nothing related them, so a correctly
+    measured lm-eval row could not bind at all.
+    """
+    row = _lm_eval_row(monkeypatch, {"acc,none": 0.5, "alias": "gsm8k"})
+
+    assert row.metric == "accuracy"
+    assert row.metadata["harness_metric"] == "acc", "the harness's own key is kept"
+    assert row.score == 0.5
+
+
+def test_an_undeclared_harness_key_is_not_guessed(monkeypatch):
+    """Only declared keys are relabelled; the binder stays the loud refusal."""
+    row = _lm_eval_row(monkeypatch, {"bleu,none": 0.25})
+
+    assert row.metric == "bleu"
+    assert row.metadata["harness_metric"] == "bleu"
+
+
+def test_a_harness_row_with_no_numeric_metric_names_none(monkeypatch):
+    """No numeric key means no measurement, so the row claims no metric either."""
+    row = _lm_eval_row(monkeypatch, {"alias": "gsm8k"})
+
+    assert row.metric == ""
+    assert row.score is None
+
+
+def test_a_report_row_that_declares_no_metric_reads_back_undeclared(tmp_path):
+    """R5: the load default turned an absent name into ``"accuracy"``."""
+    path = tmp_path / "report.json"
+    path.write_text(
+        json.dumps(
+            {
+                "generation_version": "v1",
+                "runs": [
+                    {
+                        "benchmark_qualified_id": LIVECODE,
+                        "adapter": "inspect",
+                        "generation_version": "v1",
+                        "score": 0.5,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert EvalReport.load(path).runs[0].metric == ""
+    assert _run(LIVECODE, 0.5, SUPPORTED).metric == "", "the constructor default too"
+
+
+def test_the_settle_payload_names_the_settled_cost(tmp_path):
+    """R6: the key said "actual" for a device figure that may be unmeasured.
+
+    ``device_measured`` travels inside the settled object, so the disclosure was
+    there; the key's wording was not. It now names the operation the command
+    performed, which is the wording amendment 18 applied to the judge's T13 row.
+    """
+    import argparse
+    import io
+    from contextlib import redirect_stdout
+
+    import test_growth_campaign_runner as campaign_fixture
+    from chowder.growth.cli import _growth_campaign_settle
+
+    campaign_fixture._campaign(tmp_path)
+    accounting = tmp_path / "cycle_compute_accounting.json"
+    accounting.write_text(
+        json.dumps(
+            {
+                "totals": {
+                    "incremental": {
+                        "device_gpu_hours": 0.4,
+                        "wall_gpu_hours": 1.1,
+                        "device_measured": False,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        _growth_campaign_settle(
+            argparse.Namespace(
+                manifest=str(tmp_path / "inputs" / "campaign.json"),
+                accounting=str(accounting),
+            )
+        )
+
+    payload = json.loads(buffer.getvalue())
+    assert "settled" in payload, payload
+    assert "actual" not in payload, payload
+    assert payload["settled"]["device_measured"] is False

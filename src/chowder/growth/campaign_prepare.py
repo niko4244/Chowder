@@ -43,6 +43,7 @@ from chowder.evals.result import (
     BenchmarkRun,
     EvalReport,
 )
+from chowder.evaluators.scoring import OBSERVED_SCORINGS
 
 # --------------------------------------------------------------------------
 # named refusals
@@ -521,7 +522,9 @@ def _write_evaluation_material(
                 "benchmark_qualified_id": qualified_id,
                 "name": qualified_id.split("@", 1)[0],
                 "dataset": str(slice_path),
-                "scoring": wire.get("scoring", "normalized_exact_match"),
+                "scoring": _scoring_for(
+                    qualified_id, wire.get("scoring", "normalized_exact_match")
+                ),
                 "prompt_field": "prompt",
                 "expected_field": "expected",
                 "metric": _metric_for(qualified_id),
@@ -549,6 +552,27 @@ def _metric_for(qualified_id: str) -> str:
     if qualified_id.startswith("generation-diagnostics"):
         return "eos_termination_rate"
     return "accuracy"
+
+
+def _scoring_for(qualified_id: str, declared: str) -> str:
+    """The readout that produces a row labelled with ``_metric_for``'s metric.
+
+    The material declares two things about one fact -- the readout that scores the
+    item (``scoring``) and the name the produced row carries (``metric``) -- and
+    they used to be read from two different tables: the pinned slice's scoring and
+    ``_metric_for``. For a benchmark the slice table does not carry (the
+    generation-diagnostics instrument) that produced a pair that cannot both be
+    true: ``scoring="normalized_exact_match"`` with
+    ``metric="eos_termination_rate"`` -- the same defect the reported-metric audit
+    measured as R3. The metric names what the row measures, so it is the authority
+    the readout follows: an observation-rate metric is produced by its observed
+    readout, and ``growth/evaluation_binding.py`` refuses the pair otherwise.
+    """
+    metric = _metric_for(qualified_id)
+    for observed in OBSERVED_SCORINGS:
+        if metric == f"{observed}_rate":
+            return observed
+    return declared
 
 
 def _slug(qualified_id: str) -> str:
