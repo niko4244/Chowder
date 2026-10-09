@@ -80,12 +80,14 @@ class _API:
         log_text: str = DROP_LOG,
         workflow_runs: dict[str, tuple[dict, ...]] | None = None,
         workflow_age_days: float = 400.0,
+        workflow_updated_days: float = 400.0,
         contents_error: bool = False,
     ) -> None:
         self.runs = list(runs)
         self.log_text = log_text
         self.workflow_runs = workflow_runs
         self.workflow_age_days = workflow_age_days
+        self.workflow_updated_days = workflow_updated_days
         self.contents_error = contents_error
         self.drops = list(drops)
         self.check_runs = check_runs
@@ -105,9 +107,13 @@ class _API:
             runs = (self.workflow_runs or {}).get(name, self.runs)
             return {"workflow_runs": list(runs)}
         if "/actions/workflows/" in path:
-            # The workflow object itself: read for its registration date, which
-            # separates "added this morning" from "never fired".
-            return {"created_at": _workflow_stamp(self.workflow_age_days)}
+            # The workflow object itself: read for its registration date (which
+            # separates "added this morning" from "never fired") and for its own
+            # update time, which is where the drift check's history begins.
+            return {
+                "created_at": _workflow_stamp(self.workflow_age_days),
+                "updated_at": _workflow_stamp(self.workflow_updated_days),
+            }
         if "/contents/" in path:
             if self.contents_error:
                 raise watchdog.GitHubError("GET contents -> 404: Not Found")
@@ -571,3 +577,123 @@ def test_the_watch_writers_own_drop_satisfies_the_checker() -> None:
     )
 
     assert result["healthy"], result["detail"]
+
+
+# ---------------- does the schedule fire *this* often? ----------------
+#: One workflow file of our own, so the declared cadence under test is the only
+#: one in the run: the repository's own two workflows are weekly, and a test that
+#: wants a daily history against a weekly declaration has to say which is which.
+
+
+def _one_workflow(tmp_path, cron: str = "0 6 * * 1") -> str:
+    (tmp_path / "scheduled.yml").write_text(
+        f"on:\n  schedule:\n    - cron: '{cron}'\n", encoding="utf-8"
+    )
+    return str(tmp_path)
+
+
+def _spaced(step_days: float, count: int, *, first_id: int = 100) -> tuple[dict, ...]:
+    """``count`` runs, ``step_days`` apart, newest first by id."""
+    return tuple(
+        _run(days_ago=step_days * index, run_id=first_id - index) for index in range(count)
+    )
+
+
+def test_a_history_that_does_not_match_the_declared_cadence_is_loud(monkeypatch, tmp_path) -> None:
+    """The drift the liveness checks cannot see: alive, fresh, and not this schedule.
+
+    A workflow firing every day while its file declares a weekly cron passes every
+    other check in this script -- a successful run inside the window, a schedule
+    that fires on time. The declaration is the only place that says otherwise, so
+    the run it drives is not the run the file describes.
+    """
+    api = _API(
+        runs=(_run(),),
+        drops=(),
+        workflow_runs={"scheduled.yml": _spaced(1.0, 6)},
+    )
+    _guard(monkeypatch, api)
+
+    assert watchdog.main(_argv("--workflows-dir", _one_workflow(tmp_path))) == 1
+
+    body = api.mutations[0][2]["body"]
+    assert "describe different schedules" in body
+    assert "1.00 days apart" in body
+    # Only the drift row is unhappy: the same runs keep the liveness check green,
+    # which is exactly why the drift check has to exist.
+    assert body.count("| ATTENTION |") == 1
+
+
+def test_a_history_that_matches_the_declaration_is_silent(monkeypatch, tmp_path, capsys) -> None:
+    """The control, and the row a healthy run still prints."""
+    api = _API(
+        runs=(_run(),),
+        drops=(),
+        workflow_runs={"scheduled.yml": _spaced(7.0, 6, first_id=200)},
+    )
+    _guard(monkeypatch, api)
+
+    assert watchdog.main(_argv("--workflows-dir", _one_workflow(tmp_path))) == 0
+    assert api.mutations == []
+
+    printed = capsys.readouterr().out
+    assert "scheduled workflow scheduled.yml fires on the cadence it declares" in printed
+    assert "implies 7.00 days between fires" in printed
+    assert "days apart (median" in printed
+
+
+def test_a_declaration_change_resets_the_drift_baseline(monkeypatch, tmp_path) -> None:
+    """The old history belongs to the old cron, so the change is not an alarm.
+
+    The runs below are three weekly fires since the declaration changed and three
+    monthly ones from before it. Without the truncation the widest gap is 30 days
+    against a declared 7, and a schedule that was deliberately changed would alarm
+    until the old runs aged out of the window.
+    """
+    runs = (
+        _run(days_ago=0.1, run_id=6),
+        _run(days_ago=7.1, run_id=5),
+        _run(days_ago=14.1, run_id=4),
+        _run(days_ago=44.0, run_id=3),
+        _run(days_ago=74.0, run_id=2),
+        _run(days_ago=104.0, run_id=1),
+    )
+    api = _API(
+        runs=(_run(),),
+        drops=(),
+        workflow_runs={"scheduled.yml": runs},
+        workflow_updated_days=20.0,
+    )
+    _guard(monkeypatch, api)
+
+    assert watchdog.main(_argv("--workflows-dir", _one_workflow(tmp_path))) == 0
+    assert api.mutations == []
+
+
+def test_too_little_history_is_not_a_drift_finding(monkeypatch, tmp_path) -> None:
+    """Two fires cannot measure a cadence, so they are not asked to."""
+    api = _API(
+        runs=(_run(),),
+        drops=(),
+        workflow_runs={"scheduled.yml": _spaced(1.0, 2)},
+    )
+    _guard(monkeypatch, api)
+
+    assert watchdog.main(_argv("--workflows-dir", _one_workflow(tmp_path))) == 0
+    assert api.mutations == []
+
+
+def test_a_history_that_spans_much_longer_than_declared_is_loud(monkeypatch, tmp_path) -> None:
+    """The other direction: a weekly declaration whose runs are a month apart."""
+    api = _API(
+        runs=(_run(),),
+        drops=(),
+        workflow_runs={"scheduled.yml": _spaced(30.0, 5, first_id=300)},
+    )
+    _guard(monkeypatch, api)
+
+    assert watchdog.main(_argv("--workflows-dir", _one_workflow(tmp_path))) == 1
+
+    body = api.mutations[0][2]["body"]
+    assert "describe different schedules" in body
+    assert "30.00 days apart" in body

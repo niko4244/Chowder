@@ -11,11 +11,23 @@ from pathlib import Path
 
 _GIB = 1024 ** 3
 
+# The ``*_gb`` names in this module hold **GiB** (bytes / 2**30): the parsing and
+# the detection below divide by ``_GIB``, and ``tests/test_hardware.py`` pins the
+# arithmetic (a 16384 MiB pool reads 16.0). The name says GB while the number is
+# GiB, which is the divergence `docs/REPORTED_METRIC_AUDIT_2026-10-08.md` records
+# as R7 and is *not* fixed here: the rename touches 578 call sites across ~90
+# files (memory preflight, every backend, the TUI, the unsloth environment), so
+# it is recorded with its blast radius and left as a deliberate rename rather
+# than smuggled into a measurement fix. The one place it was contained --
+# ``calibration.py``'s reported throughput and capacity payload -- is renamed to
+# GiB, and the statistic those fields report (a median) is named there too.
+
 
 @dataclass(frozen=True)
 class AcceleratorProfile:
     vendor: str
     name: str
+    #: Device capacity in GiB (see the module note above).
     memory_gb: float
     bus_id: str | None = None
     index: int | None = None
@@ -49,6 +61,11 @@ class AcceleratorLink:
     source_index: int
     target_index: int
     kind: str = "unknown"
+    #: Caller-declared link bandwidth. No code in this repository writes this
+    #: field (measured when the R7 finding was written), so its unit is whatever
+    #: the caller meant: it is **not** comparable with ``calibration.py``'s GiB/s
+    #: figures, which is why it is not renamed with them. A link measurement that
+    #: wants to be comparable belongs in the calibration payload.
     measured_bandwidth_gbps: float | None = None
 
     def __post_init__(self) -> None:
@@ -75,6 +92,7 @@ class HardwareTopology:
 
     @property
     def memory_pools_gb(self) -> tuple[float, ...]:
+        """Per-accelerator capacity in GiB (see the module note above)."""
         return tuple(float(accelerator.memory_gb) for accelerator in self.accelerators)
 
     @property
@@ -97,6 +115,7 @@ class HardwareTopology:
 class HardwareSnapshot:
     platform: str
     cpu_count: int
+    #: RAM and disk capacities in GiB (see the module note above).
     ram_gb: float
     storage_total_gb: float
     storage_free_gb: float

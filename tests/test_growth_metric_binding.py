@@ -1056,3 +1056,17 @@ def test_from_manifest_accepts_whole_manifest() -> None:
     }
     binder = MetricBinder.from_manifest(_registry(), manifest)
     assert binder.contamination_status("math500@2024-04") == "CLEAN"
+
+
+def test_a_run_that_declares_no_metric_is_refused_as_an_absence():
+    """R5: an undeclared metric is the absence of a name, not a wrong name.
+
+    ``EvalReport.load`` used to read an absent metric back as ``"accuracy"``, so a
+    row that named nothing arrived at the binder wearing a name. It now arrives
+    empty and is refused by a message that says what is missing.
+    """
+    binder = _binder()
+    outcome = binder.bind(_run(TARGET_ID, score=0.31, metric=""))
+    assert isinstance(outcome, BindingRefusal)
+    assert "declares no metric" in outcome.reason
+    assert "holdout_loss" in outcome.reason

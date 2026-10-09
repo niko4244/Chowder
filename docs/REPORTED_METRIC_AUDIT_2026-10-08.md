@@ -1,7 +1,12 @@
 # Reported-metric audit — 2026-10-08: every reported metric name against the quantity its code computes
 
-**Status: audit record. R1 is applied in this change, with a test and a revert
-proof. R2–R7 are recorded findings, each naming the decision it needs.** This is
+**Status: audit record, decided.** R1–R6 are applied, each with a test and a
+revert proof, and R7 is applied where it was contained: the calibration report an
+operator reads is GiB-named, while the repo-wide `*_gb` capacity API is left
+named as it is and recorded as an open rename with its measured blast radius
+(578 sites across ~90 files). R3's decision also reached the source it was
+about: `campaign_prepare` prepared a real material with the contradictory pair
+this audit measured, and now derives the readout from the metric. This is
 the sweep the T5 defect asks for: amendment 17 found one row whose *label* named
 a quantity its code did not compute, `docs/gen2/GATE_LABEL_AUDIT_2026-10-08.md`
 audited the frozen judge's own 24 rows, and
@@ -59,12 +64,12 @@ who is deciding whether to trust a model.
 | id | surface | what the name says | what the code computes | severity |
 | --- | --- | --- | --- | --- |
 | R1 | eval scoreboard delta table | ↑ improved / ↓ regressed | `compare()`'s higher-is-better verdict mapped without the registry's declared polarity | latent, **applied** |
-| R2 | benchmark registry | `scorer` per benchmark ("judge", "unit_tests", "agent", …) | nothing: 42 declarations, 0 reads | disclosure-only |
-| R3 | evaluation material | `metric` names the measurement | the readout that produces the score is `scoring`, a separate declaration nothing compares it with | latent |
-| R4 | eval adapters | the row's `metric` | the harness's own first metric key (or a default), checked only for *equality* against the registry | refusing |
-| R5 | `EvalReport.load` | a row's `metric` | `"accuracy"` when the row declares none | disclosure-only |
-| R6 | `chowder growth campaign settle` | `"actual"` | the settled cost, whose device dimension may be unmeasured (`device_measured=false`) | disclosure-only |
-| R7 | `chowder hardware-calibrate` / `hardware-detect` | `*_gbps`, `*_gb` | GiB-based throughput and capacity (bytes ÷ 1024³), and a median of the timed passes | disclosure-only |
+| R2 | benchmark registry | `scorer` per benchmark ("judge", "unit_tests", "agent", …) | nothing: 42 declarations, 0 reads | disclosure-only, **declared** |
+| R3 | evaluation material | `metric` names the measurement | the readout that produces the score is `scoring`, a separate declaration nothing compares it with | latent, **applied** |
+| R4 | eval adapters | the row's `metric` | the harness's own first metric key (or a default), checked only for *equality* against the registry | refusing, **applied** |
+| R5 | `EvalReport.load` | a row's `metric` | `"accuracy"` when the row declares none | disclosure-only, **applied** |
+| R6 | `chowder growth campaign settle` | `"actual"` | the settled cost, whose device dimension may be unmeasured (`device_measured=false`) | disclosure-only, **applied** |
+| R7 | `chowder hardware-calibrate` / `hardware-detect` | `*_gbps`, `*_gb` | GiB-based throughput and capacity (bytes ÷ 1024³), and a median of the timed passes | disclosure-only, **calibration applied, capacity API open** |
 
 ## Findings in detail
 
@@ -112,9 +117,15 @@ vocabulary: `normalized_exact_match`, `final_number_match`, `eos_termination`),
 and `docs/EVALUATION_MATRIX.md` reports the scorer as part of a benchmark's
 evaluation posture. This is not a lie in either direction, and the registry marks
 each entry's `implementation_source`, but a reader can reasonably believe the
-scorer field is enforced. **Decision needed:** either consume it (map the two
-vocabularies and refuse a disagreement) or say in the field's comment that it
-describes an intended posture rather than the executable readout.
+scorer field is enforced. **Decision (applied): declare the posture, and pin the
+separation.** `SCORER_POSTURES` is now the declared closed vocabulary, the field's
+comment says it is descriptive and read by nothing, and a test pins the constant
+to the set the catalog actually uses (so the two move together) as well as the
+overlap between the two vocabularies -- which turned out to be exactly one word.
+`exact_match` is a posture *and* a readout, and it means a different thing in
+each, so the test states that rather than claiming a separation that does not
+exist. Consuming the field was rejected: one posture is served by several
+readouts, and inventing the mapping would refuse legitimate suites.
 
 ### R3 — the material declares the readout and the label separately
 
@@ -141,9 +152,19 @@ text-scoring benchmark but an observed readout — or the reverse — is refused
 when the *names* happen to disagree. `campaign_prepare.py` builds the two from
 different tables (`_SLICE_DATASETS[...]["scoring"]` and `_metric_for(qualified_id)`,
 which returns `"accuracy"` for every id that is not `generation-diagnostics@…`),
-so the pair is coupled by convention, not by construction. **Decision needed:**
-declare the readout per metric (one table) or refuse a pair whose readout and
-metric name cannot both be true.
+so the pair is coupled by convention, not by construction. **Decision (applied):
+refuse a pair that cannot both be true, and fix the source that produced one.**
+The observed vocabulary has one owner (`evaluators.scoring.OBSERVED_SCORINGS`),
+and `SuiteMaterial.from_mapping` now refuses both directions: an observed readout
+must be labelled with the rate it reports (`eos_termination` ->
+`eos_termination_rate`), and that rate name must come from an observed readout.
+Building that rule surfaced the finding's real cost -- production itself was
+preparing the contradictory pair, because `campaign_prepare` filled `scoring`
+from the pinned slice table (defaulting to `normalized_exact_match`) and `metric`
+from `_metric_for` (returning `eos_termination_rate` for the diagnostics
+instrument). The metric is the authority for what the row measures, so the
+readout now follows it (`_scoring_for`), and the campaign fixture that mirrored
+the old shape was corrected with it.
 
 ### R4 — the adapters discover the metric name instead of declaring it
 
@@ -168,9 +189,14 @@ correctly — the refusal is loud and correct, and it means the lm-eval path can
 contribute until the key is mapped onto the registry's name. Second, when the
 harness's guess happens to equal the registry's name, the row binds whatever it
 actually measured: nothing here checks that the adapter's number *is* the
-registry's quantity, only that the two strings match. **Decision needed:** map
-harness keys onto registry metric names explicitly (a declared mapping), or have
-each adapter take the metric name from the registry rather than from the payload.
+registry's quantity, only that the two strings match. **Decision (applied): the
+declared mapping, in one place.** `HARNESS_METRIC_ALIASES` maps the harness keys
+that name the registry's quantity (`acc`, `acc_norm`, `exact_match`) onto
+`accuracy`, the harness's own key is kept in `metadata["harness_metric"]` so the
+relabelling is visible, and a key that is not declared is left exactly as the
+harness reported it -- the binder still refuses it loudly, and the table never
+guesses. A harness result with no numeric metric now names no metric and carries
+no score, instead of claiming `acc` by default.
 
 ### R5 — an absent metric reads back as `"accuracy"`
 
@@ -181,8 +207,13 @@ this shape elsewhere — `generation_diagnostics._observed_bool` refuses an abse
 unmeasured generation into a termination failure". Here an undeclared metric
 becomes a *named* measurement. It is fail-closed downstream (the binder compares
 names and refuses a mismatch), so the exposure is a wrong label on a row that
-cannot bind, not a silent pass. **Decision needed:** default to an explicit
-unknown (and refuse at bind time) rather than to a metric name that may be false.
+cannot bind, not a silent pass. **Decision (applied): an undeclared metric stays
+undeclared, and the binder says so by name.** `BenchmarkRun.metric` defaults to
+empty and `EvalReport.load` reads an absent metric back absent -- the rule
+`measurement_origin` already follows by defaulting to `UNMEASURED`. The binder
+refuses such a row with a message that names the absence and the quantity the
+registry requires, rather than comparing an empty string against a name the row
+never carried.
 
 ### R6 — the settle payload calls a possibly-unmeasured cost "actual"
 
@@ -192,8 +223,11 @@ dimension is an admission (projected) constraint while wall is the post-run
 settlement — and `device_measured` travels inside the same object, so the reader
 can see which dimension is which. The key name still says "actual" for a number
 that may not be one; the judge's T13 row was corrected for exactly this wording
-in amendment 18 (F4). **Decision needed:** rename the key or name the flag in it;
-this audit does not change a printed payload key on its own.
+in amendment 18 (F4). **Decision (applied): rename the key.** The payload now
+carries `"settled"` -- the word the command and the audit's own finding use --
+with `device_measured` still travelling inside the settled object, so the
+disclosure is unchanged and the key no longer claims the number is one. The
+handler's docstring says "settled" too.
 
 ### R7 — throughput and capacity are GiB-based and named GB, and medians named as rates
 
@@ -207,9 +241,18 @@ own documented convention is the opposite: "Decimal GB uses 10^9 bytes; GiB uses
 2^30" (`docs/EXPERIMENT_D_LOW_ACTIVE_HYBRID_LM.md`), which is the convention the
 comparison tables in that document use. A reader mixing a model card's decimal GB
 with these GiB readings overstates capacity and throughput by ~7.4%.
-**Decision needed:** rename to `_gib`/`_gib_per_s` (and `_median_…`) or state the
-unit in the field docs; renaming touches the printed payload, so it is the owner's
-call.
+**Decision (applied where it was contained, open where it was not):**
+`calibration.py` -- the payload `chowder hardware-calibrate` prints -- is renamed
+to `*_gib_per_s_median` and `*_vram_gib`, so the reported number says both its
+unit and its statistic, and a test pins the GiB arithmetic (10^9 bytes in a
+second is 0.93 GiB/s, not 1.0). The repo-wide `*_gb` capacity API in
+`hardware.py` (and `training_backends.py`'s `vram_gb`) is **not** renamed here:
+that is 578 call sites across ~90 files -- memory preflight, every backend, the
+TUI, the unsloth environment -- so it is recorded as a deliberate rename rather
+than folded into a measurement fix. The unit is now stated at the definitions,
+`AcceleratorLink.measured_bandwidth_gbps` is documented as written by nothing in
+the repo (so its unit is whatever a caller meant), and the GiB arithmetic stays
+pinned by `tests/test_hardware.py`.
 
 ## Checked and clean
 
@@ -262,8 +305,24 @@ form available.
 
 ## Governance
 
-R1 is applied in this change with a pin and a revert proof, because it is a
-rendering bug in a reported surface and it changes no shipped row. R2–R7 are
-recorded, not applied: each needs a decision that changes a declaration's
-meaning, a serialized key, or an adapter's contract, and the audit's job is to
-make the decision visible with its evidence rather than to take it.
+R1 was applied with the audit, because it is a rendering bug in a reported
+surface and it changes no shipped row. R2–R6 are applied in the follow-up change,
+each with a test that fails without it and each revert-proven in place (ten
+mutations, every pin caught, every file restored byte-for-byte):
+
+| finding | change | pin |
+| --- | --- | --- |
+| R2 | `SCORER_POSTURES` declared; the field documented as a posture | constant == catalog's set, overlap with the readout vocabulary pinned to `exact_match` |
+| R3 | two-way readout/label rule in `SuiteMaterial`; `_scoring_for` at the source | the measured contradiction refused, the admissible pair loads, the prepared readout follows the metric |
+| R4 | `HARNESS_METRIC_ALIASES` + `metadata["harness_metric"]` | `acc` -> `accuracy` with the key kept; an undeclared key untouched; no numeric key names nothing |
+| R5 | empty metric default, at construction and on load; binder refusal | the loaded row is empty and the binder names the absence |
+| R6 | `"settled"` replaces `"actual"` | the payload key and the `device_measured` flag beside it |
+| R7 | calibration renamed to GiB + median; unit documented elsewhere | the payload keys, and 10^9 bytes in a second is 0.93 GiB/s |
+
+Two of the decisions changed more than a name. R3's rule exposed that production
+prepared the contradictory pair it refused, so the source was fixed; and R2's
+disjointness claim was wrong -- `exact_match` is in both vocabularies -- so the
+claim was restated as the measured overlap instead of the assumption. What is
+*not* applied is recorded too: the repo-wide `*_gb` rename (578 sites) and the
+consumption of `scorer` (rejected on purpose). Nothing in this change moves a
+threshold, a normalization, a comparison or a gate, and no verdict changes.
