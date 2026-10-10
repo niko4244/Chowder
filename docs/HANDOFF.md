@@ -14,6 +14,38 @@ for it:
   [`TEACHER_FABRIC_BRIEF.md`](TEACHER_FABRIC_BRIEF.md) — read it before
   any Teacher Fabric slice; it is the source of the non-negotiable rules.
 
+## Current state (updated 2026-10-05) — READ THE HEADLINE FIRST
+
+**Two live defects in the promotion path are fixed, and the T1–T10 instrument
+gap is closed on the producer side.** PR #208 (the judge/run coupling, T21/T22)
+is merged on `main` at `1f3e06f` with all six CI jobs green.
+
+- *The parent side of every comparative gate was unfiltered.* `evaluate_promotion`
+  filtered the candidate on `gate_eligible` and read any parent row, while
+  `retention_values` requires `parent_measured`. A parent row that nothing
+  measured, pinned at 0.0, made all five comparative gates read "ok" and the
+  campaign **PROMOTED**. Reachable in production, because the binder refused
+  `CARRIED_REFERENCE` but allowed `UNMEASURED`. Fixed with one owner
+  (`_baseline()` + a now-public `PARENT_EVIDENCE_ORIGINS`); the binder refuses
+  both unearned origins. The shipped Gen-2 campaign is unaffected — its parent
+  arm's three rows are all `MEASURED_PARENT` — but this **changed the meaning
+  of a promotion rule**, so treat it as a deliberate contract change, not a
+  refactor.
+- *A declared check nobody could trip.* `actual_device_gpu_hours` was checked
+  against the device ceiling and accepted by no production caller. The cycle
+  forwards it now; `_adjudicate` supplies the settled figure.
+- *T1–T10 can now decide.* `evaluation_binding` already writes
+  `GenerationDiagnostics.to_metadata()` into every row it emits, and the Gen-2
+  declaration's target set is the exact id the frozen judge hardcodes — but
+  nothing proved the two could not drift. `tests/test_growth_gen2_instrument_wiring.py`
+  measures it through the judge's own reader: all ten thresholds reach a decided
+  state, with no `UNKNOWN`.
+
+The audit itself is `tests/test_growth_promotion_adversarial.py` (rule,
+certification, and the judge over a real run root). Every fix was verified by
+reverting it. Details and measurements in
+[`AUTONOMY_05_REPORT.md`](AUTONOMY_05_REPORT.md).
+
 ## Current state (updated 2026-09-17, integrity re-adjudication) — READ THE HEADLINE FIRST
 
 **Gen-1's effective verdict is now INCONCLUSIVE (target repair validated);
@@ -202,14 +234,15 @@ the judge pins is registered in the benchmark catalog now too; until this
 transfer it was an id no registry knew, so a campaign could not even plan against
 its declared target.
 
-One thing is deliberately **not** done here: the checked-in
-`docs/gen2/gen2_campaign.json` still
-provides none of the seven inputs a run reads from disk — the Gen-1 driver
-composed four of them in process, gen1 has no measured parent profile, the
-contamination manifest is produced by the run itself, and the evaluation material
-the evaluator measures with does not exist yet. Both entry points refuse before
+One thing was deliberately **not** done here, and is now done (2026-10-04,
+`GEN2_PREREG_AMENDMENT14_2026-10-04.md`): the checked-in
+`docs/gen2/gen2_campaign.json` used to
+provide none of the seven inputs a run reads from disk — the Gen-1 driver
+composed four of them in process, gen1 had no measured parent profile, the
+contamination manifest was produced by the run itself, and the evaluation material
+the evaluator measures with did not exist. Both entry points refused before
 compute, naming **every** missing input at once
-(`require_declared_inputs`), and the declaration's own `notes` say so.
+(`require_declared_inputs`), and the declaration's own `notes` said so.
 `GEN2_PREREG_AMENDMENT11_2026-09-18.md` then produces those documents from
 production code. `chowder growth campaign prepare <manifest> --out-dir DIR
 --parent-evidence ROOT` emits every declared input from durable evidence: a real
@@ -222,16 +255,30 @@ declared benchmark; a carried slice is `UNMEASURED`), while the **profile** keep
 whatever the parent durably measured — arm and profile are different questions.
 `--write-declaration` also fills `recipes` with the ids production proposes.
 `prepare` against the committed declaration produced every input, so readiness no
-longer reports `READINESS_DECLARED_INPUT`. And `chowder growth campaign
+longer reports `READINESS_DECLARED_INPUT`: the declaration now names all eight,
+at the paths `prepared_input_paths` predicts for one prepared directory, and
+`chowder growth campaign readiness` reports **READY** with all seventeen checks
+`ok` and no reason code (321 s on 2026-10-04, mostly the base model-content
+digest over ten payload files). Nothing was invented to get there: the hardware
+budget is a real CUDA device probe, the evaluation material is the pinned
+offline dataset caches, the corpus/registry/template come from production
+planning, and the parent arm is the preserved 2026-09-19 Gen-1 measurement
+carried forward unchanged (three `MEASURED_PARENT` rows, same artifact and slice
+digests) — `prepared-v10` in the Gen-2 state root, never over `prepared-v2`,
+which holds that measurement. And `chowder growth campaign
 measure-ancestor <manifest>` measures the untouched dense Gen-0 base through the
 same production worker with no adapter loaded, writing the declared
 `baseline_eval_report_path` with `MEASURED_PARENT` / gen0 rows, per-item scores
-and digest-bound artifacts at zero incremental campaign cost. One pre-compute
-blocker is *reported*, not papered over: the parent arm has no measurement under
-the Gen-2 target instrument, so the target comparison still lacks a parent row
-and Gen-2 can only reach `INCONCLUSIVE` on target until that is resolved. The
-remaining pre-compute
-build; nothing is invented to make the declaration look runnable.
+and digest-bound artifacts at zero incremental campaign cost. What is still
+*reported*, not papered over: the target instrument's diagnostic metadata (the
+judge's T1-T10) is not in any run output. The judge gap PR #207 measured is now
+closed by `GEN2_PREREG_AMENDMENT15_2026-10-04.md`: the judge reads the run's
+own record (`campaign-run.json`) and recomputes the declared retention profile
+through production's evaluator, so it cannot certify a candidate the run
+refused — and the coupling immediately caught a sign error in the declared
+`max-regression` value (amendment 14 wrote `+0.0625`, which demanded a
+one-sixteenth *improvement*; it is now `-0.0625`, the frozen tolerance's
+permitted dip). Starting the run itself is still a separate decision.
 
 Earlier state for the record (2026-09-17): the first real Model N → N+1
 cycle executed and was recorded PROMOTED at the time
@@ -382,6 +429,63 @@ axis** beside init/granularity/routing. A candidate shape that does fit
 shape-checked at 6.477B total / 3.306B active — a viable budget, NOT a
 trained model. It may simply be wrong for the
 program's purpose.
+
+**The settlement path now has its own adversarial audit (2026-10-04).**
+`tests/test_growth_settlement_adversarial.py` attacks `settle_cost`, the
+campaign ceiling contract, `CycleCostLedger` and whole `run_campaign` roots one
+artifact at a time. It found the settlement analogue of the amendment-15 gap: a
+run REFUSED on its own frozen envelope (`ACTUAL_WALL_GPU_HOURS_EXCEEDED`) was
+certified PROMOTED by the frozen judge with every row PASSing, after one file --
+`cycle_compute_accounting.json`'s incremental totals -- was edited; the run's
+own record still said REJECTED. The record already pins the ledger digest at
+`cost.accounting_digest`, so prereg `GEN2_PREREG_AMENDMENT16_2026-10-04.md`
+(`docs/gen2/JUDGE_AMENDMENT_PROPOSAL_T23.md`) adds T23: the artifact's digest,
+recomputed through production's `ledger_digest`, must be the pinned one, and its
+settlement must agree with the record's. Fail-closed (an absent pin or absent
+settlement is UNKNOWN), no threshold moves, and the Gen-2 run is still not
+started: no candidate evaluation exists.
+
+**The judge's T5 count is now labelled by what it measures (2026-10-08).**
+`arXiv:2610.00054` (the literature watch's own next action) is about a judge
+whose verdict is read from the first-token logits. That mechanism is not in this
+repo — the Gen-2 judge generates under `PROTECTED_DECODING`, and the only logits
+here are router-gate tamper fingerprints — but its class, *the readout is not the
+conclusion*, was present in one row: T5 counts the expected string as **present**
+anywhere on the answer surface, and the row said "answer correctness". A mention
+(`There are 17 continents.` against `7`) passed that count and is 0.0 under
+every readout production declares (`evaluators/scoring.py`), and an unclosed
+` thinking` — which T10 tolerates at up to 25% — has no answer surface at all
+under production's rule while T5 reads one. Thirteen constructed mentions
+disagree thirteen times, always this way; that is reachability, not frequency,
+and no Gen-2 candidate evaluation exists to measure a rate. Prereg
+`GEN2_PREREG_AMENDMENT17_2026-10-08.md`
+(`docs/gen2/JUDGE_AMENDMENT_PROPOSAL_T24.md`) adds **T24**: it reads the rows T5
+reads, runs both declared production readouts through production's own `score`,
+and refuses only the irreducible case (presence accepts what *every* declared
+readout refuses); the reverse direction is disclosed and not gated. T5's label
+becomes the prereg's own words, its threshold does not move, and the bound
+(0 disagreements) was declared before the change. The unreachable-source proof is
+kept in the suite: unwire the gate and the mention certifies.
+
+**The judge's row names were audited against the code, and the corrections are in (2026-10-08; prereg amendment 18).** `docs/gen2/GATE_LABEL_AUDIT_2026-10-08.md` read all 24 gating rows off the judge's own table and compared each name with the quantity its code computes, the way amendment 17 compared T5's. Five disclosure-only label defects (F2-F6) are applied under the named amendment, each with a test that fails without the rename, and nothing about the decisions moved -- measured, not asserted: reverting every rename leaves the clean root certifying and the gen1-shaped defect refusing on T2/T3. The one worth knowing is F2: T2/T3 are lower-is-better rates and the detail printed production's higher-is-better verdict verbatim, so a candidate that made duplication worse read `paired=improved`; the row now says `paired not better` and keeps production's word beside it with its vocabulary named. F7 -- a candidate arm that cannot be read rendered T1 twice, and so did an open arm carrying two T1 findings -- is decided in `docs/quals/GEN2_PREREG_AMENDMENT19_2026-10-08.md`: T1 renders one row per run carrying every finding it has, FAIL outranking UNKNOWN outranking PASS, revert-proven in both shapes. That change is a row-set change and says so: the statuses a reader can see are the same set, so no verdict moves, and the row an unreadable arm renders carries the arm's own refusal (`candidate artifact candidate_evaluation.json is missing`) instead of the roster's generic sentence. Corrected rows: T1 `candidate instrument provenance + row identity`, T9 `distinct-trigram ratio mean >= 0.9`, T13 `cost settles within the declared ceilings`, T21 `run decision on the declared retention profile`.
+
+**The repo's reported metric names were audited against the code, and the eval scoreboard's arrows are fixed (2026-10-08).** `docs/REPORTED_METRIC_AUDIT_2026-10-08.md` sweeps the rest of the repo for the class amendment 17 found in the judge: every named value the code reports to a reader, checked against the quantity its code computes. One finding is applied: the eval scoreboard's ↑/↓ marks mapped `compare()`'s higher-is-better verdict without consulting the registry's declared polarity, so a metric declared `lower_is_better` would arrow up when it got worse -- latent today (all 8 declared metrics and all 42 registry entries are `higher_is_better`), now rendered from the declaration with the row saying so, pinned by a revert-measured test. Six findings are recorded rather than applied, each naming its decision: the registry's per-benchmark `scorer` is declared 42 times and read zero times (R2); the evaluation material's readout (`scoring`) and its label (`metric`) are independent declarations that nothing relates, measured accepted as `eos_termination` / `accuracy` (R3); the adapters *discover* the row's metric name from the harness (R4 -- an lm-eval row labelled `acc` is refused by the binder against the registry's `accuracy`, so the refusal is loud while the name is arbitrary); an absent metric loads as `"accuracy"` (R5); the settle payload's `"actual"` key repeats F4's wording (R6); and `hardware-calibrate`'s `_gbps`/`_gb` fields hold GiB and medians while the repo's own docs define GB as 10⁹ (R7). The generation-diagnostics instrument, parameter accounting, the public-benchmark scoreboard, the conditional-compute profiler, production's certification rows and the TUI panels were read and are clean; the audit states what it did not read.
+
+**The watchdog now checks every schedule in the repository, and the drop's own content rules (2026-10-08).** `docs/literature/watchdog.py` asked one question -- did the weekly watch succeed inside a fixed window -- and a second question rode on it: the drop is written under rules nobody verified. Both are answered now. Every workflow file that declares `on.schedule` is read, the cadence its own cron implies is **measured** by walking the horizon a minute at a time (`0 6 * * 1` -> 7.0 days / 9 fires, `*/15 * * * *` -> 0.25, `0 0 1 * *` -> 30.0), and the newest run of that workflow with `event=schedule` is compared against that cadence plus `--schedule-grace-days`; a manual dispatch cannot stand in for a schedule that died, a too-young registration is told apart from one that never fired by reading the workflow's own `created_at`, and a cron the scanner cannot parse fails closed as a named error rather than being skipped as "not scheduled". The drop's rules are verified on both copies of the log this run can read -- the merged one, and each open drop's head commit through the contents API, which is the text a merge would land: the dated label, the unvetted disclosure, no result-shaped number (`2.4x`, `40%`, `3 times faster`), no line outside the shapes the writer emits (which is what "no abstract text" means mechanically -- a pasted paragraph has nowhere to stand), a cap on title and matched-terms cells, and each entry followed by its own url line. An unreadable copy is an alert, never a pass. The writer is pinned to the checker by construction: a test runs `watch.py`'s own renderer output through the checker (loading it issues no request), and eight mutations of the live drop #214 -- a number in the matched terms, a result-shaped number in a body line and in a title, the disclosure removed, a url id mismatch, a pasted abstract, the label removed, no drop at all -- are each caught. The alert's issue title widened and the previous title is still recognised as *the* tracking issue, so the open alert was not orphaned. Live: the first dry run against the real repository found a real bug in this change -- `_age_days` parsed one clock format, and the workflow object answers `created_at` as `2026-10-08T11:11:42.000-05:00` where runs answer `...Z`, so the registration read raised instead of reporting the age it had already been handed; both formats are parsed and both are pinned by a test that fails on the old parser. With that fixed the dry run is 6/6 checks ok (watch run, both schedules, the drop landable, and the drop's content in the merged log and in its own head copy). 30 stubbed tests; the schedules themselves have been exercised by hand only, and their first real firing is Monday (watch) and Tuesday (watchdog) 06:00 UTC.
+
+**Fold mining (2026-10-05).** PR #203's rescued experiments are now registered
+intervention families: ten experiments landed by file-level extraction
+(byte-identical to the fold branch, 163 of their tests pass), and
+`src/chowder/growth/interventions.py` grew from 9 families to 13, each declaring
+the in-repo `implementation` behind its maturity label and a basis that is
+either measured (the shipped exp_f record, the Experiment E phases) or
+explicitly a rescue. `inference.confidence-routing` enters REJECTED on its own
+measurement (confident-and-wrong 3 of 14). The fold's 12 modified files (worker
+/ evaluator / reward-training slices, the runtime safety gates) were
+deliberately not mined: `main` is 26 commits past the fold's base, and the
+reasons per file are recorded in `docs/FOLD_MINING_2026-10-05.md`, together with
+the drift guard that now refuses a family whose declared mechanism does not
+exist.
 
 ---
 
@@ -811,7 +915,7 @@ still equals E, so there is zero compute saving yet. Router healing
     one-off Temp files (established pattern): `acquire_parent_c.py`,
     `acquire_parent_d.py`, `run_parent_c.py`, `run_parent_d.py`; both
     parents share `Chowder-Protected\tournament-cd.registry.db` and
-    `runs\cd-20260908\` so the #142 four-parent freeze pipeline can
+    `runs\cd-20260908` so the #142 four-parent freeze pipeline can
     consume all four parents' evidence from one registry.
   - Kaggle remains qualified-but-unused: the #143 toolkit is tested and
     merged, and the preflight refusal above is the honest, recorded
@@ -1250,7 +1354,7 @@ corpus must NOT be protected tournament content.
   bare `pytest`. CLI invocations need `PYTHONPATH=src` (this worktree's)
   because sys.path insertion does not propagate to subprocess workers.
 - Tooling gotcha: tools that address files cannot reach paths under
-  `.claude\worktrees\` (dot-directory). `read_files`/`str_replace` fail
+  `.claude\worktrees` (dot-directory). `read_files`/`str_replace` fail
   there; use `write_file` with the full path, or terminal reads
   (`sed -n`), or a python heredoc for in-place multi-edit with assertions.
 - Real-hardware tests: `CHOWDER_REAL_ML_SMOKE=1` etc.; torch imported
@@ -1391,9 +1495,34 @@ instrument, and `campaign_prepare` emits a `CapabilityProfile` where the loop
 consumes a `SkillProfile`, so the loop refuses with `NO_MEASURED_CAPABILITY`
 rather than reading a mean as a capability.
 
-**Gen-2 readiness is READY** as of `prepared-v2` (`chowder growth campaign
-prepare docs/gen2/gen2_campaign.json --out-dir <prepared-v2> --parent-evidence
-<gen1 run root>`): every pre-compute prerequisite passes, both arms included,
+**A prepared bundle is code output, and it goes stale against its producer.**
+`prepared-v2` was READY when it was written and stopped being READY without
+anyone touching it, because this branch then changed two things it had baked in:
+the parent profile's schema (`campaign_prepare` now writes `build_skill_profile`'s
+`estimates`; `_load_profile` refuses anything else by name) and the recipe id
+format (the LR x rank x replay grid became an LR-only axis, so
+`recipe-00-lr0.0001-r16-replay0.1` is no longer an id the planner proposes).
+Regenerating it cleared both. Do not read a bundle's existence, or its age, as
+readiness -- re-run `prepare` and let the readiness verdict say so.
+
+Regenerating it also surfaced two real gaps, because a *re-measured* parent could
+not be handed to `prepare` at all: `--parent-measurement` was documented on
+`prepare_campaign` but never exposed by the CLI or passed through, and the row
+matcher behind it only understood the run root's `candidate_evaluation.json`
+(a `diagnostics` aggregate). The report `measure-parent` writes is an
+`EvalReport` with `runs[]` and no `diagnostics` key, so every row of a fresh
+62-minute measurement silently became `UNMEASURED` and the curriculum planned
+from nothing. `_eval_report_measured_row` now reads that shape, admitting a row
+only on the exact declared benchmark id, the declared metric, a numeric score,
+`MEASURED_PARENT` origin, and a matching generation -- the same strictness the
+diagnostics path already had.
+
+**Gen-2 readiness is READY** as of `prepared-v3` (`chowder growth campaign
+prepare docs/gen2/gen2_campaign.json --out-dir <prepared-v3> --parent-evidence
+<gen1 campaign run root> --parent-measurement <prepared-v2/parent-eval-report.json>`),
+recipes `recipe-00-lr5e-05` / `recipe-01-lr0.0001`, corpus 10,340 examples,
+contamination CLEAN, verifier pass rate 1.0, no check skipped or refused. The
+same was true of `prepared-v2` when it was written:
 and the declaration now declares the recipe ids the planner actually proposes
 (declaring hand-written ids was the last refusal, `READINESS_RECIPE_SET`).
 Readiness is not an outcome, but both sides of every comparison are now
@@ -1456,11 +1585,41 @@ and machine reason codes rather than one red state. Start is enabled only by the
 service's readiness verdict, and a programmatic click on a refused campaign
 spends nothing.
 
-Still **not** built, and not claimed: bounded production candidate search
-(successive halving) -- the library controller drives `ExperimentCycleRunner`
-rounds while the growth path trains through `training_binding`, and
-`run_project` has no `search` section to read, so wiring it is a pass of its own.
-No real Gen-2 candidate training has been run.
+**Bounded candidate search is now wired.** It is one decision made in three
+places that cannot disagree. The audit is code: `recipe_planner`
+`CONSUMED_RECIPE_FIELDS` names, per backend, the recipe fields the backend's
+config reader actually consumes, `recorded_only_recipe_fields` names the rest,
+and `SEARCH_AXES` is the intersection -- the learning rate -- with
+`assert_search_axes_consumed()` refusing an inert axis before a candidate set is
+proposed. The step budget is deliberately not a search axis: successive halving
+owns it. The schedule is declared once, on the loop policy or the campaign
+(`candidate_search`: rounds, starting step budget, multiplier, survival rule and
+its own device/wall envelope) and frozen with the rest of the preregistration.
+`candidate_search.plan_search` projects the whole schedule before any compute --
+worst case, every candidate surviving every round -- and refuses a round that
+would exceed the per-recipe ceilings, a total over the search's own envelope, or
+a total over the campaign's ceilings. `candidate_search.run_search` then runs
+those rounds over the campaign's own attempts: cheap round first, the survivors
+(attempt succeeded and produced an artifact -- the same fields
+`cycle.select_candidate` reads, so no protected score can choose a winner) earn
+`step_multiplier` x the budget, and only the final round's results are offered to
+selection. `successive_halving.HalvingSchedule` is the single owner of the
+per-round budget and survivor count, so this path and the EvolutionEngine
+controller cannot drift. Readiness reports it as its own check
+(`READINESS_CANDIDATE_SEARCH`), every round's attempts stay in the record and in
+its ledger, and an undeclared search is one pass over the declared recipes,
+exactly as before. Two boundedness holes in `run_search` are closed: a tripped
+ceiling now ends the round it fires in rather than finishing that round's
+remaining candidates (the single pass always broke immediately; the search must
+not be the looser path), and round 0 is seeded from the *plan's* projected
+candidates rather than whatever recipe set the call was handed, so a caller
+cannot spend a round on candidates no ceiling was checked against. Both were
+reproduced before they were fixed, and both carry a regression test; the
+pre-existing stop test asserted the whole round's spend and was corrected, since
+it encoded the defect. Known limitation, not claimed otherwise: each round
+re-trains the same proposal rather than resuming a survivor's checkpoint. The
+checked-in Gen-2 declaration declares no search, so it single-passes. No real
+Gen-2 candidate training has been run.
 
 **The corpus is now provider-attributed and quality-gated.** `data_providers`
 dispatches each curriculum item to the provider that serves its declared skill

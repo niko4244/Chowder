@@ -2,9 +2,15 @@
 """Frozen mechanical judge for the gen2 response-surface-compliance cycle.
 
 Frozen with ``docs/quals/GEN2_PREREG_2026-09-17.md`` and its amendments
-``GEN2_PREREG_AMENDMENT1/2/3_2026-09-18.md``. Thresholds may not change after
-candidate results are visible. Reads the run's durable artifacts read-only and
-emits one verdict table over the branch rules.
+``GEN2_PREREG_AMENDMENT1/2/3_2026-09-18.md``; amended by
+``GEN2_PREREG_AMENDMENT15_2026-10-04.md`` (the declared-gate coupling, T21/T22)
+and ``GEN2_PREREG_AMENDMENT16_2026-10-04.md`` (the settlement artifact pin, T23);
+amended by ``GEN2_PREREG_AMENDMENT17_2026-10-08.md`` (the answer readout disclosure, T24);
+amended by ``GEN2_PREREG_AMENDMENT18_2026-10-08.md`` (the row-label audit: F2-F6 applied, F7
+recorded, no threshold moved) and ``GEN2_PREREG_AMENDMENT19_2026-10-08.md`` (F7: T1 renders
+one row per run, no decision moved).
+Thresholds may not change after candidate results are visible. Reads the run's
+durable artifacts read-only and emits one verdict table over the branch rules.
 
 Evidence is verified, never assumed. Two rules follow from that, and both are
 fail-closed:
@@ -48,6 +54,41 @@ plus one run per protected mini-slice carrying its protocol metadata. The
 judge never reads a parent score out of the candidate's own file: the parent
 arm is its own provenance-bound artifact.
 
+With amendment 15 the judge reads one more artifact from the same directory:
+``campaign-run.json``, the run's own record of what it decided
+(``CampaignRun.to_dict``). It is read, never written, and it is what lets the
+judge stop certifying a candidate the run already refused: T21 audits the
+recorded decision and T22 recomputes the declared ``retention_profile`` through
+production's own evaluator (``evaluate_retention`` plus the promotion path's
+``retention_values``) and compares the two answers. Neither row re-derives the
+policy -- the declaration owns the constraint, production owns the comparison,
+and this judge owns only the agreement between the two authorities. A run root
+with no such record is UNKNOWN, never a pass.
+
+Amendment 16 adds T23, over the same record and the accounting artifact T13
+already settles. The record pins the ledger digest of the artifact it settled
+(``CampaignRun.cost['accounting_digest']``), so T23 recomputes that digest with
+production's ``ledger_digest`` and requires the artifact's own settlement to
+agree with the recorded one. Without it a run the branch refused on its frozen
+envelope could be certified PROMOTED by editing one file in the run root: T13
+would settle the edited bytes and find them compliant, and nothing compared
+that answer with the refusal the run had recorded.
+
+Amendment 17 adds T24, over the same ``metadata["per_prompt"]`` rows T5 counts.
+T5's row said "answer correctness" while the quantity it computes is *presence*:
+the expected string appears somewhere on the answer surface. Presence is what
+the prereg declares for that row ("answer-correct (expected string present after
+reasoning)"), and it is not the readout production owns -- ``evaluators.scoring``
+declares the scoring mode, extracts the answer after the last ``</think>``, and
+refuses an unclosed reasoning budget. A completion that mentions the expected
+string without answering it ("There are 17 continents." against "7") is present
+and is 0.0 under every readout production declares. T24 reads those rows, runs
+both declared production readouts over each completion through production's own
+``score``, and refuses only the irreducible disagreement -- an item presence
+accepts that every declared readout refuses. The row is labelled by the quantity
+it measures, and the gap between the two readouts is measured on the evidence
+the run already wrote instead of being argued about. No threshold moves.
+
 Usage:
     python docs/gen2/judge_gen2.py <run_root>
 
@@ -85,10 +126,17 @@ from chowder.evals.result import (  # noqa: E402
     EvalReport,
 )
 from chowder.growth.campaign import CampaignManifest, settle_campaign  # noqa: E402
+from chowder.growth.cycle import retention_values  # noqa: E402
+from chowder.growth.promotion import BenchmarkResult  # noqa: E402
+from chowder.growth.retention import (  # noqa: E402
+    RetentionConstraint,
+    RetentionViolation,
+    evaluate_retention,
+)
 from chowder.growth import certification as _certification  # noqa: E402
 from chowder.growth.certification import ArmError, MeasuredArm  # noqa: E402
 from chowder.growth.catalog import default_registry  # noqa: E402
-from chowder.growth.compute_cost import ComputeCost  # noqa: E402
+from chowder.growth.compute_cost import ComputeCost, ledger_digest  # noqa: E402
 from chowder.growth.metric_binding import MetricBinder  # noqa: E402
 from chowder.growth.statistics import compare  # noqa: E402
 from chowder.growth.training_binding import directory_digest  # noqa: E402
@@ -123,6 +171,21 @@ CONTAMINATION_PIN_ABSENT = "CONTAMINATION_PIN_ABSENT"
 CONTAMINATION_PIN_MISSING = "CONTAMINATION_PIN_MISSING"
 CONTAMINATION_EVIDENCE_NOT_IN_RUN_ROOT = "CONTAMINATION_EVIDENCE_NOT_IN_RUN_ROOT"
 CONTAMINATION_EVIDENCE_NOT_PINNED = "CONTAMINATION_EVIDENCE_NOT_PINNED"
+#: Why the run's own promotion decision could not be audited (GEN2 prereg
+#: amendment 15). Absence is UNKNOWN, never an assumed pass -- the same rule
+#: every other gate here follows.
+RUN_RECORD_ABSENT = "RUN_RECORD_ABSENT"
+RUN_RECORD_WRONG_CYCLE = "RUN_RECORD_WRONG_CYCLE"
+RUN_DECISION_ABSENT = "RUN_DECISION_ABSENT"
+#: A candidate the run refused on a declared gate cannot be certified here: this
+#: judge audits no declared gate, so its own table cannot overturn that refusal.
+DECLARED_GATE_REJECTED_RUN = "DECLARED_GATE_REJECTED_RUN"
+#: A run record that contradicts itself, or a gate the declaration does not name.
+UNDECLARED_GATE_IN_RUN = "UNDECLARED_GATE_IN_RUN"
+#: The run's recorded breaches and this judge's own recomputation, through the
+#: production evaluator, do not match: the two authorities disagree about the
+#: same candidate, and neither may be assumed right.
+RETENTION_RECOMPUTATION_DISAGREES = "RETENTION_RECOMPUTATION_DISAGREES"
 #: The measurement reason codes are production's (see the verification block
 #: below): the judge re-exports them so a refusal is named identically wherever
 #: it is raised.
@@ -136,6 +199,14 @@ TARGET_DUPLICATION_MAX = 0.125  # parent 0.688
 TARGET_ECHO_MAX = 0.062  # parent 0.438
 TARGET_FORMAT_MIN = 8  # of the 8 declared constrained instrument prompts
 PROTECTED_ANSWER_CORRECT_MIN = 15  # of 16
+PROTECTED_READOUT_DISAGREEMENT_MAX = 0  # of the candidate's per-prompt rows (amendment 17)
+
+#: The readouts production declares for text scoring (``evaluators.scoring``).
+#: T24 compares presence against both and counts a disagreement only when *every*
+#: one of them refuses the item. ``exact_match`` is deliberately absent: it is
+#: strictly stricter than ``normalized_exact_match``, so it cannot accept anything
+#: these two refuse, and listing it would only restate one of them.
+PRODUCTION_READOUT_MODES = ("normalized_exact_match", "final_number_match")
 PROTECTED_EOS_MIN = 0.900
 PROTECTED_CAP_MAX = 0.100
 PROTECTED_UNCLOSED_THINK_MAX = 0.250
@@ -145,6 +216,54 @@ SLICE_REGRESSION_MAX = 0.0625
 
 REQUIRED_RECIPES_MIN = 2
 CONTAMINATED = {"KNOWN_CONTAMINATION", "POSSIBLE"}
+
+#: The durable record the run writes beside the evidence it certifies:
+#: ``CampaignRun.to_dict`` at ``<state_root>/campaign-run.json``, the same
+#: directory this judge reads the arms from.
+RUN_RECORD_NAME = "campaign-run.json"
+
+#: Why the run's settlement could not be audited against the artifact it names
+#: (T23). All of these are one class of finding -- the record and the
+#: accounting artifact disagree, or one of the two is not there to compare --
+#: and each fails closed rather than certifying the half that happens to be
+#: readable.
+ACCOUNTING_ARTIFACT_MOVED = "ACCOUNTING_ARTIFACT_MOVED"
+ACCOUNTING_UNPINNED = "ACCOUNTING_UNPINNED"
+ACCOUNTING_UNSETTLED_BY_RUN = "ACCOUNTING_UNSETTLED_BY_RUN"
+SETTLEMENT_DISAGREES_WITH_RECORD = "SETTLEMENT_DISAGREES_WITH_RECORD"
+
+#: Why T5's presence readout could not be reconciled with production's declared
+#: scoring (T24, amendment 17). Presence is what the prereg declares for T5; T24
+#: asks only that a count labelled as an answer be reachable as an answer when
+#: production reads the same completion.
+READOUT_DISAGREES_WITH_PRODUCTION = "READOUT_DISAGREES_WITH_PRODUCTION"
+READOUT_UNMEASURED = "READOUT_UNMEASURED"
+
+#: Production's declared-gate vocabulary, read off its owner rather than restated
+#: here. ``RetentionViolation.code`` answers NaN -> ``RETENTION_UNMEASURED`` and
+#: otherwise selects by constraint kind, so one violation per reachable shape is
+#: the whole vocabulary;
+#: ``test_growth_gen2_judge.py`` asserts this set equals the codes the promotion
+#: gate actually emits, so a new shape cannot slip past a prefix match here.
+RETENTION_CODES: frozenset[str] = frozenset(
+    RetentionViolation(
+        dimension="code-probe",
+        constraint=RetentionConstraint(
+            dimension="code-probe",
+            kind=kind,
+            value=0.0,
+            benchmark="code-probe@2026-01",
+        ),
+        measured=measured,
+        detail="",
+    ).code
+    for kind, measured in (
+        ("max-regression", 0.0),           # RETENTION_REGRESSION
+        ("absolute-floor", 0.0),           # RETENTION_FLOOR
+        ("max-regression", float("nan")),  # RETENTION_UNMEASURED
+    )
+)
+RETENTION_REASON_PREFIX = "RETENTION_"
 
 #: The frozen 16-prompt instrument, in order, with the expected answer the
 #: correctness check looks for on the answer surface (the same pairs the gen1
@@ -200,6 +319,16 @@ def _answer_surface(completion: str) -> str:
     if "</think>" in completion:
         return completion.split("</think>")[-1].strip()
     return completion.strip()
+
+
+def _answer_present(entry: Mapping[str, Any]) -> bool:
+    """T5's frozen rule, in one place: the expected string is on the answer surface.
+
+    Shared by T5 and T24 on purpose -- the row that counts and the row that audits
+    the count cannot be allowed to become two readings of the same evidence.
+    """
+    expected = str(entry.get("expected") or "").lower()
+    return expected in _answer_surface(str(entry.get("completion", ""))).lower()
 
 
 def _answer_duplicated(completion: str) -> bool:
@@ -354,8 +483,15 @@ def _target_gate(
     else:
         strict = sum(1 for p, c in zip(parent, candidate) if c > p)
     strict_ok = strict >= TARGET_STRICT_PROMPT_MIN
+    # These rates are lower-is-better and ``compare`` answers in a
+    # higher-is-better vocabulary, so production's word is kept -- a reader can
+    # trace it to the function that produced it -- and its polarity is named
+    # beside it. An unlabelled "improved" on a candidate that made the rate worse
+    # was amendment 18's finding: the detail said the opposite of the row.
     detail = (
-        f"paired={comparison.verdict} (delta {comparison.delta:+.4f}, "
+        f"paired {'better' if paired_improved else 'not better'} "
+        f"(production's compare() answers {comparison.verdict!r} in a "
+        f"higher-is-better vocabulary; delta {comparison.delta:+.4f}, "
         f"min_effect {TARGET_MIN_EFFECT}); candidate rate {candidate_rate:.3f} vs "
         f"parent {parent_rate:.3f}; absolute {'met' if absolute_met else 'not met'}; "
         f"strictly better on {strict}/{len(candidate)} (need {TARGET_STRICT_PROMPT_MIN})"
@@ -444,6 +580,7 @@ def judge(run_root: Path) -> int:
     )
     parent_version = campaign.parent_version if campaign is not None else ""
     arms: dict[str, Arm | None] = {}
+    candidate_refusal: str | None = None
     for key, filename, origin, label, generation in (
         ("candidate", "candidate_evaluation.json", MEASURED_THIS_GENERATION, "candidate", candidate_version),
         ("parent", "parent_evaluation.json", MEASURED_PARENT, "parent (gen1)", parent_version),
@@ -459,15 +596,21 @@ def judge(run_root: Path) -> int:
         except ArmError as error:
             arms[key] = None
             if key == "candidate":
-                verdict.add("T1", "candidate measured evidence", UNKNOWN, str(error))
+                # The refusal is not a row here: T1 is one fact in two parts --
+                # a row identity and a pinned run -- and both parts belong in
+                # one row. Handing the reason to the roster keeps T1's row count
+                # independent of how the arm failed (amendment 19, finding F7).
+                candidate_refusal = str(error)
     candidate = arms["candidate"]
 
-    _instrument_gates(verdict, candidate, arms["parent"])
+    _instrument_gates(verdict, candidate, arms["parent"], refusal=candidate_refusal)
     _protected_gates(verdict, arms, campaign, run_root=run_root)
     _evidence_identity_gate(verdict, run_root, arms, campaign)
     _protection_agreement_gate(verdict, campaign)
+    _declared_gate_agreement(verdict, arms, campaign, run_root=run_root)
     _contamination_gate(verdict, run_root, campaign)
     _settlement_gates(verdict, run_root, campaign)
+    _settlement_artifact_gate(verdict, run_root, campaign)
     _identity_gate(verdict, run_root)
 
     # Context that does not gate certification.
@@ -481,7 +624,12 @@ def judge(run_root: Path) -> int:
         INFO,
         "frozen policy",
         INFO,
-        "docs/quals/GEN2_PREREG_2026-09-17.md + GEN2_PREREG_AMENDMENT1/2/3/4_2026-09-18.md",
+        "docs/quals/GEN2_PREREG_2026-09-17.md + GEN2_PREREG_AMENDMENT1/2/3/4_2026-09-18.md "
+        "+ GEN2_PREREG_AMENDMENT15_2026-10-04.md "
+        "+ GEN2_PREREG_AMENDMENT16_2026-10-04.md "
+        "+ GEN2_PREREG_AMENDMENT17_2026-10-08.md "
+        "+ GEN2_PREREG_AMENDMENT18_2026-10-08.md "
+        "+ GEN2_PREREG_AMENDMENT19_2026-10-08.md",
     )
 
     final = branch_verdict(verdict)
@@ -536,46 +684,69 @@ def branch_verdict(verdict: Verdict) -> str:
     return "PROMOTED"
 
 
-def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | None) -> None:
+T1_NAME = "candidate instrument provenance + row identity"
+
+
+def _instrument_gates(
+    verdict: Verdict,
+    candidate: Arm | None,
+    parent: Arm | None,
+    *,
+    refusal: str | None = None,
+) -> None:
+    """T1 through T10, with T1 rendered as exactly one row per run.
+
+    T1 is a conjunction -- a duplicate-free row identity *and* a pinned
+    instrument run -- and it used to be written as one row per conjunct: an
+    unreadable arm rendered it twice, and so did an arm that both duplicated
+    rows and carried no pinned run. That is not the shape the other multi-row
+    gates have: T11 and T19 report several *distinct* checks under one id on
+    purpose, while T1's rows were one check split in two, which forces a reader
+    to combine them by hand to answer T1. So the findings are collected and one
+    row carries all of them, with FAIL outranking UNKNOWN outranking PASS
+    (amendment 19, finding F7). No decision moves: the statuses a reader could
+    see are the same set, and ``refusal`` is the arm's own refusal message,
+    which used to sit in a separate row.
+    """
     if candidate is None:
+        verdict.add(
+            "T1",
+            T1_NAME,
+            UNKNOWN,
+            refusal or "candidate evaluation artifact unavailable",
+        )
         for threshold, name in (
-            ("T1", "candidate instrument provenance"),
             ("T2", "answer-duplication target"),
             ("T3", "template-echo target"),
             ("T4", "constrained-prompt format"),
-            ("T5", "answer correctness"),
+            ("T5", "answer presence"),
             ("T6", "EOS termination"),
             ("T7", "max-token-cap rate"),
             ("T8", "obvious loops"),
-            ("T9", "distinct-trigram ratio"),
+            ("T9", "distinct-trigram ratio mean"),
             ("T10", "unclosed think rate"),
         ):
             verdict.add(threshold, name, UNKNOWN, "candidate evaluation artifact unavailable")
+        # T24 names its own reason in every branch: a disclosure row that could not
+        # be computed is UNKNOWN with the code, never a silent roster label.
+        _readout_disclosure_gate(verdict, None)
         return
 
     duplicates = candidate.duplicate_ids()
-    if duplicates:
-        verdict.add(
-            "T1",
-            "candidate instrument provenance",
-            FAIL,
-            f"candidate arm duplicates rows for {list(duplicates)}",
-        )
     instrument_run = candidate.run_for(INSTRUMENT_ID)
+    findings: list[tuple[str, str]] = []
+    if duplicates:
+        findings.append((FAIL, f"candidate arm duplicates rows for {list(duplicates)}"))
     if instrument_run is None:
-        verdict.add(
-            "T1",
-            "candidate instrument provenance",
-            UNKNOWN,
-            f"no single {INSTRUMENT_ID} run carrying {MEASURED_THIS_GENERATION}",
+        findings.append(
+            (UNKNOWN, f"no single {INSTRUMENT_ID} run carrying {MEASURED_THIS_GENERATION}")
         )
-    else:
-        verdict.add(
-            "T1",
-            "candidate instrument provenance",
-            PASS,
-            f"measurement_origin={instrument_run.measurement_origin}",
-        )
+    if not findings:
+        findings.append((PASS, f"measurement_origin={instrument_run.measurement_origin}"))
+    status = FAIL if any(row_status == FAIL for row_status, _ in findings) else (
+        UNKNOWN if any(row_status == UNKNOWN for row_status, _ in findings) else PASS
+    )
+    verdict.add("T1", T1_NAME, status, "; ".join(detail for _, detail in findings))
 
     per_prompt = candidate.per_prompt()
     if instrument_run is None or not per_prompt:
@@ -583,9 +754,10 @@ def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | Non
             ("T2", "answer-duplication target"),
             ("T3", "template-echo target"),
             ("T4", "constrained-prompt format"),
-            ("T5", "answer correctness"),
+            ("T5", "answer presence"),
         ):
             verdict.add(threshold, name, UNKNOWN, "no candidate per-prompt evidence")
+        _readout_disclosure_gate(verdict, candidate)
     else:
         dup_flags = candidate.flags(_duplication_flag)
         echo_flags = candidate.flags(_echo_flag)
@@ -637,18 +809,18 @@ def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | Non
                 f"compliant {ok}/{len(constrained)} constrained prompts",
             )
 
-        correct = sum(
-            1
-            for entry in per_prompt
-            if str(entry.get("expected") or "").lower()
-            in _answer_surface(str(entry.get("completion", ""))).lower()
-        )
+        correct = sum(1 for entry in per_prompt if _answer_present(entry))
         verdict.add(
             "T5",
-            f"answer correctness >= {PROTECTED_ANSWER_CORRECT_MIN}/16",
+            f"answer presence >= {PROTECTED_ANSWER_CORRECT_MIN}/16",
             PASS if correct >= PROTECTED_ANSWER_CORRECT_MIN else FAIL,
-            f"measured {correct}/{len(per_prompt)}; parent 16/16",
+            f"measured {correct}/{len(per_prompt)} present; parent 16/16 present "
+            "(readout: answer-surface presence; disclosure: T24)",
         )
+        # Amendment 17: the count T5 just made is audited against production's
+        # declared readouts over the same rows, and the row above is now named by
+        # the quantity it measures rather than one it does not.
+        _readout_disclosure_gate(verdict, candidate)
 
     metadata = (instrument_run.metadata or {}) if instrument_run is not None else {}
     diagnostics = (
@@ -658,7 +830,7 @@ def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | Non
          lambda v: v < PROTECTED_CAP_MAX, "0.000"),
         ("T8", f"obvious loops <= {PROTECTED_LOOP_MAX}", "obvious_loop_count",
          lambda v: v <= PROTECTED_LOOP_MAX, "0"),
-        ("T9", f"distinct-trigram >= {PROTECTED_TRIGRAM_MIN}", "distinct_trigram_ratio_mean",
+        ("T9", f"distinct-trigram ratio mean >= {PROTECTED_TRIGRAM_MIN}", "distinct_trigram_ratio_mean",
          lambda v: v >= PROTECTED_TRIGRAM_MIN, "0.973"),
         ("T10", f"unclosed think <= {PROTECTED_UNCLOSED_THINK_MAX}", "unclosed_think_rate",
          lambda v: v <= PROTECTED_UNCLOSED_THINK_MAX, "0.000"),
@@ -674,6 +846,100 @@ def _instrument_gates(verdict: Verdict, candidate: Arm | None, parent: Arm | Non
                 PASS if predicate(value) else FAIL,
                 f"measured {value}; parent {parent_value}",
             )
+
+
+def _production_scoring() -> Any:
+    """Production's declared scoring module, imported where T24 needs it.
+
+    Reached through this one function so an unavailable readout is T24's UNKNOWN
+    rather than a judge that cannot run, and so a test can pin that branch.
+    """
+    from chowder.evaluators import scoring
+
+    return scoring
+
+
+def _readout_disclosure_gate(verdict: Verdict, candidate: Arm | None) -> None:
+    """T24 (amendment 17): T5's presence readout, reconciled with production's.
+
+    T5 counts an item as an answer when the expected string appears anywhere on
+    the answer surface -- the presence the prereg declares for that row. The label
+    used to call it "answer correctness", and correctness is a readout production
+    owns: ``evaluators.scoring`` declares the mode, extracts the answer after the
+    last ``</think>`` and refuses an unclosed reasoning budget. The two readouts
+    disagree on the same completion whenever a mention carries the expected
+    string: "There are 17 continents." against "7" is present, and 0.0 under
+    every readout production declares.
+
+    This gate re-scores nothing and moves no threshold. It reads the rows T5
+    already reads, runs both declared production readouts over each completion
+    through production's own ``score``, and refuses only the irreducible case --
+    an item presence accepts that *every* declared readout refuses. The reverse
+    direction (a presence miss production accepts) can only refuse more, so it is
+    disclosed in the detail and does not gate. A candidate whose completions
+    agree, and a candidate arm with no per-prompt evidence, keep the verdict they
+    had before.
+    """
+    name = f"answer-readout disagreements <= {PROTECTED_READOUT_DISAGREEMENT_MAX}"
+    if candidate is None:
+        verdict.add("T24", name, UNKNOWN, f"{READOUT_UNMEASURED}: no candidate arm")
+        return
+    per_prompt = candidate.per_prompt()
+    if not per_prompt:
+        verdict.add(
+            "T24",
+            name,
+            UNKNOWN,
+            f"{READOUT_UNMEASURED}: no candidate per-prompt evidence",
+        )
+        return
+    try:
+        scoring = _production_scoring()
+    except Exception as exc:  # noqa: BLE001 - an unreadable readout is UNKNOWN, not a crash
+        verdict.add(
+            "T24",
+            name,
+            UNKNOWN,
+            f"{READOUT_UNMEASURED}: production readouts unavailable ({type(exc).__name__})",
+        )
+        return
+
+    disagreements: list[str] = []
+    disclosed_misses = 0
+    for entry in per_prompt:
+        expected = str(entry.get("expected") or "")
+        completion = str(entry.get("completion", ""))
+        accepted = [
+            mode
+            for mode in PRODUCTION_READOUT_MODES
+            if scoring.score(completion, expected, mode) > 0
+        ]
+        if not accepted:
+            if _answer_present(entry):
+                disagreements.append(_prompt_key(entry) or "(unnamed item)")
+            continue
+        if not _answer_present(entry):
+            disclosed_misses += 1
+
+    if disagreements:
+        verdict.add(
+            "T24",
+            name,
+            FAIL,
+            f"{READOUT_DISAGREES_WITH_PRODUCTION}: {len(disagreements)} item(s) pass "
+            f"presence while {' and '.join(PRODUCTION_READOUT_MODES)} refuse them: "
+            f"{disagreements}; {disclosed_misses} presence miss(es) production "
+            "accepts (disclosed)",
+        )
+        return
+    verdict.add(
+        "T24",
+        name,
+        PASS,
+        f"presence agrees with every declared production readout on "
+        f"{len(per_prompt)} item(s); {disclosed_misses} presence miss(es) production "
+        "accepts (disclosed, not gated)",
+    )
 
 
 def _paired_target_gate(
@@ -1078,7 +1344,7 @@ def _settlement_gates(
     document = _load_json(path)
     if not isinstance(document, Mapping):
         verdict.add(
-            "T13", "actual cost settled within the declared ceilings", UNKNOWN,
+            "T13", "cost settles within the declared ceilings", UNKNOWN,
             "cycle_compute_accounting.json missing or unreadable",
         )
         verdict.add("T14", "all recipes accounted", UNKNOWN, "accounting artifact unavailable")
@@ -1086,12 +1352,12 @@ def _settlement_gates(
     totals = (document.get("totals") or {}).get("incremental")
     if not isinstance(totals, Mapping):
         verdict.add(
-            "T13", "actual cost settled within the declared ceilings", UNKNOWN,
+            "T13", "cost settles within the declared ceilings", UNKNOWN,
             "accounting artifact declares no incremental totals",
         )
     elif campaign is None:
         verdict.add(
-            "T13", "actual cost settled within the declared ceilings", UNKNOWN,
+            "T13", "cost settles within the declared ceilings", UNKNOWN,
             "campaign manifest unavailable, so no ceilings can be settled against",
         )
     else:
@@ -1099,7 +1365,7 @@ def _settlement_gates(
             total = ComputeCost.from_dict(totals)
         except (KeyError, TypeError, ValueError) as error:
             verdict.add(
-                "T13", "actual cost settled within the declared ceilings", UNKNOWN,
+                "T13", "cost settles within the declared ceilings", UNKNOWN,
                 f"incremental totals are not a readable ComputeCost: {error}",
             )
         else:
@@ -1108,7 +1374,7 @@ def _settlement_gates(
             settlement = settle_campaign(campaign, total=total)
             verdict.add(
                 "T13",
-                "actual cost settled within the declared ceilings",
+                "cost settles within the declared ceilings",
                 PASS if settlement.compliant else FAIL,
                 (
                     f"device {total.device_gpu_hours:.4f} "
@@ -1152,6 +1418,112 @@ def _settlement_gates(
             if not missing and not extra
             else f"declared but unaccounted: {missing}; accounted but undeclared: {extra}"
         ),
+    )
+
+
+def _settlement_artifact_gate(
+    verdict: Verdict, run_root: Path, campaign: CampaignManifest | None
+) -> None:
+    """The run's recorded settlement must be the settlement of the artifact it pinned.
+
+    T13 settles the accounting artifact against the declared ceilings, from
+    whatever bytes are in the run root. This gate closes the other half: that
+    the artifact *is* the one the run settled. ``CycleCostLedger.write``
+    (``chowder.growth.compute_cost``) stamps a digest over the document it
+    writes and ``CampaignRun.to_dict`` pins that digest in
+    ``cost.accounting_digest``, so an edit to the artifact -- a total, an entry,
+    a measurement flag -- moves a number the record already carries. Without
+    this gate a run the branch refused on its frozen envelope could be
+    certified PROMOTED by editing one file: the refusal lives in the record,
+    and T13 would recompute the settlement from the edited bytes and find them
+    compliant.
+
+    Fail-closed in every branch: an absent record, an absent pin, an absent
+    recorded settlement, an unreadable artifact or an unreadable campaign is
+    UNKNOWN (INCONCLUSIVE), and any disagreement between the record and the
+    artifact's own settlement is a FAIL. Nothing is reimplemented: the digest
+    is production's ``ledger_digest`` and the settlement is production's
+    ``settle_campaign`` -- the same two functions the run itself called.
+    """
+    requirement = (
+        "the run's recorded settlement is the settlement of the artifact it pinned"
+    )
+    record = _load_json(run_root / RUN_RECORD_NAME)
+    if record is None:
+        verdict.add(
+            "T23", requirement, UNKNOWN,
+            f"{RUN_RECORD_ABSENT}: {run_root / RUN_RECORD_NAME} is absent or "
+            "unreadable, so the artifact it settled cannot be identified",
+        )
+        return
+    document = _load_json(run_root / "cycle_compute_accounting.json")
+    if not isinstance(document, Mapping):
+        verdict.add(
+            "T23", requirement, UNKNOWN,
+            "cycle_compute_accounting.json missing or unreadable, so there is no "
+            "artifact to settle",
+        )
+        return
+    pinned = str((record.get("cost") or {}).get("accounting_digest") or "")
+    if not pinned:
+        verdict.add(
+            "T23", requirement, UNKNOWN,
+            f"{ACCOUNTING_UNPINNED}: the run recorded no accounting digest at all "
+            "(a run refused before settlement pins none), so no artifact can be "
+            "settled here",
+        )
+        return
+    recomputed = ledger_digest(document)
+    if recomputed != pinned:
+        verdict.add(
+            "T23", requirement, FAIL,
+            f"{ACCOUNTING_ARTIFACT_MOVED}: the accounting artifact hashes to "
+            f"{recomputed[:12]}, but the run pinned {pinned[:12]}; these are not the "
+            "bytes the run settled, so no settlement may be read out of them",
+        )
+        return
+    recorded = record.get("settlement")
+    if not isinstance(recorded, Mapping) or "budget_compliant" not in recorded:
+        verdict.add(
+            "T23", requirement, UNKNOWN,
+            f"{ACCOUNTING_UNSETTLED_BY_RUN}: the run pinned this artifact but "
+            "recorded no settlement verdict for it",
+        )
+        return
+    if campaign is None:
+        verdict.add(
+            "T23", requirement, UNKNOWN,
+            "the campaign manifest is unreadable, so the recorded settlement cannot "
+            "be recomputed",
+        )
+        return
+    totals = (document.get("totals") or {}).get("incremental")
+    try:
+        total = ComputeCost.from_dict(totals)
+    except (KeyError, TypeError, ValueError) as error:
+        verdict.add(
+            "T23", requirement, UNKNOWN,
+            f"incremental totals are not a readable ComputeCost: {error}",
+        )
+        return
+    settlement = settle_campaign(campaign, total=total)
+    if bool(recorded["budget_compliant"]) != settlement.compliant:
+        verdict.add(
+            "T23", requirement, FAIL,
+            f"{SETTLEMENT_DISAGREES_WITH_RECORD}: the run recorded "
+            f"budget_compliant={recorded['budget_compliant']!r} while the artifact "
+            "it pinned settles "
+            + (
+                "compliant"
+                if settlement.compliant
+                else "non-compliant; " + "; ".join(settlement.failure_reasons)
+            ),
+        )
+        return
+    verdict.add(
+        "T23", requirement, PASS,
+        f"the artifact is the one the run pinned ({pinned[:12]}) and it settles as "
+        f"the record says ({'compliant' if settlement.compliant else 'non-compliant'})",
     )
 
 
@@ -1204,6 +1576,176 @@ def _protection_agreement_gate(verdict: Verdict, campaign: CampaignManifest | No
             else f"the campaign declares {declared}, this judge enforces {frozen}"
         ),
     )
+
+
+def _declared_gate_agreement(
+    verdict: Verdict,
+    arms: Mapping[str, "Arm | None"],
+    campaign: CampaignManifest | None,
+    *,
+    run_root: Path,
+) -> None:
+    """The run's recorded decision and the declared retention profile must agree.
+
+    The run enforces ``retention_profile`` on both promotion paths
+    (``GrowthCycle._apply_promotion_gates``), and records what it decided in
+    ``campaign-run.json`` beside the arms this judge reads. Before amendment 15
+    this judge never opened that record and never read a declared profile, so a
+    candidate the run had already refused could reach a table in which every
+    audited gate passed -- a certification of something the branch rejected.
+    Two rows close that, and both fail closed:
+
+    * the *recorded* decision: a run refused on a declared gate is FAIL here,
+      because this judge audits no declared gate and its own table cannot
+      overturn that refusal; a record that is absent, belongs to another cycle,
+      or carries no decision is UNKNOWN;
+    * the *recomputed* decision: the declared profile is evaluated again here,
+      through production's own evaluator and production's own provenance filter
+      (``evaluate_retention`` + ``retention_values``, the same two functions the
+      promotion path calls), on the arms this judge already audited. A
+      disagreement with the run's recorded breaches is FAIL. Nothing is
+      reimplemented: the policy, the threshold and the rows that count all come
+      from production, and this judge only compares the two answers.
+    """
+    requirement = "run decision on the declared retention profile"
+    profile = campaign.retention_profile if campaign is not None else None
+    record = _load_json(run_root / RUN_RECORD_NAME)
+    if record is None:
+        verdict.add(
+            "T21", requirement, UNKNOWN,
+            f"{RUN_RECORD_ABSENT}: {run_root / RUN_RECORD_NAME} is absent or "
+            "unreadable, so the run's own decision cannot be audited here",
+        )
+        return
+    if campaign is not None and str(record.get("cycle_id", "")) != str(campaign.cycle_id):
+        verdict.add(
+            "T21", requirement, UNKNOWN,
+            f"{RUN_RECORD_WRONG_CYCLE}: the record in this run root belongs to "
+            f"cycle {record.get('cycle_id')!r}, not {campaign.cycle_id!r}",
+        )
+        return
+    decision = (record.get("promotion") or {}).get("decision") or {}
+    if not decision:
+        verdict.add(
+            "T21", requirement, UNKNOWN,
+            f"{RUN_DECISION_ABSENT}: the run record carries no promotion decision "
+            "(a run refused before adjudication records none)",
+        )
+        return
+
+    run_verdict = str(record.get("verdict", ""))
+    reasons = [str(reason) for reason in decision.get("reasons", ()) or ()]
+    recorded = {
+        (reason.split(":", 1)[0].strip(), reason)
+        for reason in reasons
+        if reason.startswith(RETENTION_REASON_PREFIX)
+    }
+    breach_list = [reason for _code, reason in sorted(recorded)]
+    recomputed = _recomputed_retention(arms, profile)
+
+    # T21: the recorded decision. Decided once, recorded once, and never as a
+    # silent skip -- every branch below states what it found.
+    if recorded and profile is None:
+        verdict.add(
+            "T21", requirement, FAIL,
+            f"{UNDECLARED_GATE_IN_RUN}: the run recorded declared-gate breaches "
+            f"{breach_list} while the declaration names no retention profile",
+        )
+    elif run_verdict == "PROMOTED" and recorded:
+        verdict.add(
+            "T21", requirement, FAIL,
+            f"{UNDECLARED_GATE_IN_RUN}: the run recorded PROMOTED together with "
+            f"declared-gate breaches {breach_list}",
+        )
+    elif run_verdict in {"REJECTED", "TAINTED"} and recorded:
+        verdict.add(
+            "T21", requirement, FAIL,
+            f"{DECLARED_GATE_REJECTED_RUN}: the run refused this candidate on the "
+            f"declared gate(s) {breach_list}; this judge audits no declared gate, "
+            "so its table cannot overturn that refusal",
+        )
+    elif run_verdict in {"REJECTED", "TAINTED"}:
+        # Refused on the predeclared rule alone: T11/T16/T17 audit that rule
+        # against the arms, and the run's own reasons belong in the record here
+        # so a reader sees which refusal is being certified.
+        verdict.add(
+            "T21", requirement, PASS,
+            "the run refused this candidate without a declared-gate breach: "
+            f"{'; '.join(reasons) or 'no reasons recorded'}",
+        )
+    else:
+        verdict.add(
+            "T21", requirement, PASS,
+            f"run verdict {run_verdict or 'unrecorded'}; declared-gate breaches "
+            f"{breach_list or 'none'}",
+        )
+
+    # T22: the recomputation, always reported -- whether the run was refused or
+    # not, a reader needs to know whether the two authorities agreed.
+    recomputed_codes = sorted({code for code, _reason in recomputed})
+    recorded_codes = sorted({code for code, _reason in recorded})
+    if recomputed_codes == recorded_codes:
+        verdict.add(
+            "T22", "the judge recomputes the declared profile as the run did",
+            PASS,
+            f"recorded {recorded_codes or 'no breach'} == recomputed through "
+            "production's evaluator "
+            f"({profile.profile_id if profile is not None else 'no profile'})",
+        )
+        return
+    verdict.add(
+        "T22", "the judge recomputes the declared profile as the run did",
+        FAIL,
+        f"{RETENTION_RECOMPUTATION_DISAGREES}: the run recorded "
+        f"{recorded_codes or 'no breach'} and this judge's recomputation through "
+        f"production's evaluator gives {recomputed_codes or 'no breach'}; the two "
+        "authorities disagree about the same candidate and neither may be assumed right",
+    )
+
+
+def _recomputed_retention(
+    arms: Mapping[str, "Arm | None"],
+    profile: Any,
+) -> set[tuple[str, str]]:
+    """``{(code, reason)}`` this judge computes for the declared profile.
+
+    The arms are read through ``Arm.run_for``, so a row only counts when
+    production has already accepted its provenance and generation, and the
+    provenance filter that decides which rows may anchor a constraint is the
+    promotion path's own ``retention_values``. With no declared profile the
+    recomputation is empty, which is not a pass -- T21 refuses that case above.
+    """
+    if profile is None:
+        return set()
+    candidate = arms.get("candidate")
+    parent = arms.get("parent")
+
+    def results(arm: "Arm | None") -> dict[str, BenchmarkResult]:
+        rows: dict[str, BenchmarkResult] = {}
+        if arm is None:
+            return rows
+        for constraint in profile.constraints:
+            run = arm.run_for(constraint.benchmark)
+            if run is None or run.score is None:
+                continue
+            rows[constraint.benchmark] = BenchmarkResult(
+                benchmark_qualified_id=constraint.benchmark,
+                score=float(run.score),
+                samples=tuple(float(value) for value in run.per_sample_scores),
+                measurement_origin=str(run.measurement_origin),
+            )
+        return rows
+
+    violations = evaluate_retention(
+        profile,
+        parent_values=retention_values(
+            profile, results(parent), candidate_side=False
+        ),
+        candidate_values=retention_values(
+            profile, results(candidate), candidate_side=True
+        ),
+    )
+    return {(violation.code, violation.reason) for violation in violations}
 
 
 def _evidence_identity_gate(

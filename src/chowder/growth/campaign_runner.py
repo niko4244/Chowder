@@ -62,6 +62,13 @@ from .candidate_evaluation import (
     write_candidate_evaluation,
 )
 
+from .candidate_search import (
+    CandidateSearchRefusal,
+    CandidateSearchDeclaration,
+    SearchPlan,
+    plan_search,
+    run_search,
+)
 from .campaign import (
     PROMOTION_POLICY_VERSION,
     CampaignManifest,
@@ -136,6 +143,10 @@ FIELD_ENFORCEMENT: Mapping[str, str] = {
     "baseline_eval_report_path": "the trusted-ancestor (gen0) arm of the judged evidence set: branch protection is judged against it, never against an unresolved parent",
     "protection": "the declared branch-protection policy (trusted ancestor version + slice regression tolerance) the certification gate applies before any lineage record is written",
     "evaluation_execution": "how many rows one generate call decodes, for every arm and for the candidate: the candidate evaluator and both arm measurements read this one value, and each records it in its own evidence; batching changes generated tokens (measured: 14/16 rows agree with a single-row pass), so the arms and the candidate must share it and never be chosen per path",
+    "candidate_search": "the declared bounded candidate search: its rounds, starting step budget, multiplier and survival rule are preregistered here, its worst-case cost is projected before any compute and must fit its own declared device/wall envelope *and* the campaign's ceilings, and the runner refuses a declared search that does not. Absent (rounds=0) means one pass over the declared recipes, which is what every manifest predating it does",
+    "retention_profile": "the campaign's preregistered promotion gates: the cycle evaluates every constraint fail-closed before anything promotes (a target win over a constrained regression is REJECTED, an unmeasured constraint is a violation), and a constraint naming a benchmark the declared sets never measure refuses at load",
+    "eval_tier_policy": "the declared trust classification of the campaign's benchmarks: a retention constraint measured on search-readable evidence refuses — at load when both are declared, and again at promotion",
+    "training_backend": "the declared execution backend: the runner builds the campaign's executor through the provider it names (absent means local, the historical subprocess path). A declaration error — an unknown provider, an unsupported config key, a template whose trainer is not the declared one, an Unsloth knob the isolated engine refuses — stops the campaign before any compute, and an auto declaration records the provider it chose and why (with every candidate it refused) as the run's own phase",
     "notes": "documentation only: it drives no behavior and gates nothing",
 }
 
@@ -231,14 +242,28 @@ class CampaignPlan:
     ``recipe_ids`` select them: ``chowder growth campaign plan`` prints these
     ids so a preregistration can name the recipes it will actually run, and
     the runner refuses a declared id the planner did not propose.
+
+    ``search`` is the declared bounded candidate search projected over those
+    same recipes -- the rounds, their step budgets and the worst-case total. It
+    is planned here, once, so the plan a command prints, the readiness check
+    that admits it and the run that executes it are the same arithmetic.
     """
 
     items: tuple[CurriculumItem, ...]
     recipes: tuple[TrainingRecipe, ...]
+    search: SearchPlan = SearchPlan(declared=False)
+    #: Why the declared search could not be projected, when it could not. The
+    #: *plan* still exists -- the curriculum and the recipe proposal are what
+    #: this object answers for -- and the search's own refusal is carried here
+    #: so the check that owns it can report it, rather than every reader of a
+    #: plan inheriting a refusal that belongs to one of its parts.
+    search_refusal: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "curriculum_items": [item.item_id for item in self.items],
+            "candidate_search": self.search.to_dict(),
+            "candidate_search_refusal": self.search_refusal,
             "recipes": [
                 {
                     "recipe_id": recipe.recipe_id,
@@ -286,7 +311,25 @@ def plan_campaign(manifest: CampaignManifest) -> CampaignPlan:
         root=root,
     )
     items = cycle.plan_curriculum(_load_profile(manifest))
-    return CampaignPlan(items=items, recipes=cycle.plan_recipes(items))
+    recipes = cycle.plan_recipes(items)
+    # The declared search is projected over the recipes this campaign will run
+    # (the declared ids), never over the planner's whole grid: a search over
+    # candidates nobody declared is not this campaign's search. While the ids
+    # are still placeholders -- which is how an author learns them, and why
+    # planning must work before they are written down -- it is projected over
+    # the planner's own proposal instead, and the ``recipe_set`` check is what
+    # refuses a declared id the planner never proposed. No *run* is planned
+    # this way: ``run_campaign`` selects the declared recipes (raising on an
+    # unproposed id) before it asks for this plan.
+    by_id = {recipe.recipe_id: recipe for recipe in recipes}
+    declared = tuple(
+        by_id[recipe_id] for recipe_id in manifest.recipe_ids if recipe_id in by_id
+    )
+    try:
+        search = search_plan_for(manifest, cycle=cycle, recipes=declared or recipes)
+    except CandidateSearchRefusal as refusal:
+        return CampaignPlan(items=items, recipes=recipes, search_refusal=str(refusal))
+    return CampaignPlan(items=items, recipes=recipes, search=search)
 
 
 @dataclass(frozen=True)
@@ -419,7 +462,37 @@ def run_campaign(
         }
     )
 
-    executor = train_fn if train_fn is not None else build_executor(manifest, state_root=root)
+    if train_fn is not None:
+        executor = train_fn
+        # A caller-supplied executor is recorded as such: the run still says
+        # what the manifest declared, and does not pretend the supplied
+        # executor was the declared provider's.
+        from .training_backends import backend_declaration
+
+        backend_record: Mapping[str, Any] = {
+            "cycle_id": manifest.cycle_id,
+            "declaration": backend_declaration(manifest).to_dict(),
+            "executor": "caller-supplied",
+            "provider": None,
+            "trainer": None,
+            "admitted": None,
+            "selection": None,
+        }
+    else:
+        executor, backend_record = build_executor_with_selection(
+            manifest, state_root=root
+        )
+    # The declared backend is recorded before any attempt starts: the campaign
+    # says which backend it will run on, and why, while that is still a
+    # declaration rather than a reconstruction.
+    phases.append(
+        {
+            "phase": "training-backend",
+            "verdict": "ok",
+            "detail": _backend_detail(backend_record),
+            "backend": dict(backend_record),
+        }
+    )
     if not hasattr(executor, "admit"):
         raise CampaignRunRefusal(
             "the training executor exposes no admission seam (`admit(recipe)`), "
@@ -486,14 +559,56 @@ def run_campaign(
         }
     )
 
+    # The declared bounded candidate search, projected before anything is spent.
+    # A search that cannot fit its own envelope, or a round the executor would
+    # refuse to admit, refuses here -- the same rule the single pass applies to
+    # its recipes. Undeclared, this is an undeclared plan and the loop below is
+    # exactly the single pass it always was.
+    try:
+        search = search_plan_for(manifest, cycle=cycle, recipes=recipes)
+    except CandidateSearchRefusal as refusal:
+        phases.append(
+            {"phase": "candidate_search", "verdict": "refused", "detail": str(refusal)}
+        )
+        return _refuse(manifest, root, candidate_version, phases, admission)
+    if search.declared:
+        phases.append(
+            {
+                "phase": "candidate_search",
+                "verdict": "ok",
+                "detail": (
+                    f"{len(search.rounds)} declared round(s) over "
+                    f"{len(recipes)} candidate(s), worst case "
+                    f"{search.total_device_gpu_hours:.6f} device / "
+                    f"{search.total_wall_gpu_hours:.6f} wall GPU-h within the "
+                    "declared search envelope"
+                ),
+            }
+        )
+
     # Campaign admission: the per-recipe ceilings bound what the executor may
     # start, and these bound what the campaign as a whole plans to spend. A
     # campaign whose own plan does not fit its declared envelope refuses here,
     # before compute, rather than discovering it only when the actuals land.
+    # A declared search spends its rounds, so it is the search's total -- not a
+    # single pass -- that the campaign ceiling has to cover.
     projected = ComputeCost(
-        device_gpu_hours=sum(recipe.projected_device_gpu_hours for recipe in recipes),
-        wall_gpu_hours=sum(recipe.projected_wall_gpu_hours for recipe in recipes),
-        source=f"campaign projection ({len(recipes)} admitted recipes)",
+        device_gpu_hours=(
+            search.total_device_gpu_hours
+            if search.declared
+            else sum(recipe.projected_device_gpu_hours for recipe in recipes)
+        ),
+        wall_gpu_hours=(
+            search.total_wall_gpu_hours
+            if search.declared
+            else sum(recipe.projected_wall_gpu_hours for recipe in recipes)
+        ),
+        source=(
+            f"campaign projection ({len(search.rounds)} search rounds over "
+            f"{len(recipes)} recipes)"
+            if search.declared
+            else f"campaign projection ({len(recipes)} admitted recipes)"
+        ),
     )
     projection = settle_campaign_projection(manifest, projected=projected)
     if not projection.compliant:
@@ -585,23 +700,84 @@ def run_campaign(
     ledger = CycleCostLedger(cycle_id=manifest.cycle_id)
     results: list[Mapping[str, Any]] = []
     stopped_by: str | None = None
-    for recipe in recipes:
-        evidence = dict(executor(recipe, plan.items))
-        evidence["recipe_id"] = recipe.recipe_id
-        results.append(evidence)
-        cost = _attempt_cost(evidence)
+
+    def charge(evidence: Mapping[str, Any]) -> None:
+        """Charge one attempt to the campaign's own ledger as it happens."""
         ledger.add(
-            f"{recipe.recipe_id} attempt",
+            f"{evidence.get('recipe_id')} attempt",
             "failed_attempt" if evidence.get("status") != STATUS_SUCCEEDED else "training",
-            cost,
-            recipe_id=recipe.recipe_id,
-            notes=f"status={evidence.get('status')}",
+            _attempt_cost(evidence),
+            recipe_id=str(evidence.get("recipe_id", "")),
+            notes=(
+                f"status={evidence.get('status')}"
+                + (
+                    f" round={evidence.get('search_round')}"
+                    if evidence.get("search_round") is not None
+                    else ""
+                )
+            ),
         )
-        if stops_on_campaign_overrun(manifest.stopping_rules):
-            running = settle_campaign(manifest, total=ledger.total())
-            if not running.compliant:
-                stopped_by = "campaign ceiling reached before the remaining recipes"
+
+    def overrun() -> str | None:
+        if not stops_on_campaign_overrun(manifest.stopping_rules):
+            return None
+        running = settle_campaign(manifest, total=ledger.total())
+        if running.compliant:
+            return None
+        return "campaign ceiling reached before the remaining candidates"
+
+    search_run = None
+    if search.declared:
+        # Bounded candidate search: cheap rounds first, only the final round's
+        # survivors offered to selection. Every attempt is charged and recorded
+        # exactly as a single-pass recipe is, so a stopped round still leaves
+        # its spend in the accounting.
+        search_run = run_search(
+            search,
+            declaration=manifest.candidate_search,
+            recipes=recipes,
+            project_cost=cycle.planner.project_cost,
+            run_attempt=lambda recipe: executor(recipe, plan.items),
+            on_attempt=lambda evidence, row: charge(evidence),  # noqa: ARG005
+            should_stop=lambda _device, _wall: overrun(),  # noqa: ARG005
+        )
+        results = list(search_run.final_results)
+        stopped_by = search_run.stopped_by
+        phases.append(
+            {
+                "phase": "candidate_search_run",
+                "verdict": "stopped" if stopped_by else "ok",
+                "detail": (
+                    stopped_by
+                    or (
+                        f"{len(search_run.rounds)} round(s) ran; "
+                        f"{len(search_run.survivors)} survivor(s) from the last "
+                        f"round, whose results alone selection may read"
+                    )
+                ),
+            }
+        )
+    else:
+        for recipe in recipes:
+            evidence = dict(executor(recipe, plan.items))
+            evidence["recipe_id"] = recipe.recipe_id
+            results.append(evidence)
+            charge(evidence)
+            stopped_by = overrun()
+            if stopped_by:
                 break
+    # Every attempt, from every round: a search's earlier, cheaper rounds are
+    # real compute and real evidence, so they stay in the record even though
+    # selection may only read the final round's results.
+    attempted: tuple[Mapping[str, Any], ...] = (
+        tuple(
+            evidence
+            for round_attempts in search_run.round_attempts
+            for evidence in round_attempts
+        )
+        if search_run is not None
+        else tuple(results)
+    )
     accounting_path = root / "cycle_compute_accounting.json"
     total = ledger.total()
 
@@ -623,6 +799,13 @@ def run_campaign(
         # Nothing was produced to evaluate. The accounting is still written --
         # the compute was really spent -- and the run records its refusal.
         accounting_digest = ledger.write(accounting_path)
+        # A run that stopped mid-flight must say so even when the stop left it
+        # nothing to select: the stop is part of what happened, not a detail
+        # only successful runs report.
+        if stopped_by:
+            phases.append(
+                {"phase": "stopping", "verdict": "stopped", "detail": stopped_by}
+            )
         phases.append(
             {
                 "phase": "candidate_evaluation",
@@ -663,6 +846,10 @@ def run_campaign(
     except CampaignRunRefusal as refusal:
         accounting_digest = ledger.write(accounting_path)
         total = ledger.total()
+        if stopped_by:
+            phases.append(
+                {"phase": "stopping", "verdict": "stopped", "detail": stopped_by}
+            )
         phases.append(
             {
                 "phase": "candidate_evaluation",
@@ -682,7 +869,7 @@ def run_campaign(
                 "accounting_path": str(accounting_path),
                 "accounting_digest": accounting_digest,
             },
-            attempts=_attempt_summary(results),
+            attempts=_attempt_summary(attempted),
             selection=selected,
         )
     # ``validate_candidate_report`` has already refused an evaluation that
@@ -749,7 +936,7 @@ def run_campaign(
                 "accounting_path": str(accounting_path),
                 "accounting_digest": accounting_digest,
             },
-            attempts=_attempt_summary(results),
+            attempts=_attempt_summary(attempted),
             selection=selected,
         )
     phases.append(
@@ -839,6 +1026,10 @@ def run_campaign(
         # The report this run produced, at the path the judge reads: the lineage
         # names the measurement that decided it, not an input it was handed.
         evaluation_report_ref=str(root / CERTIFICATION_EVIDENCE["candidate"]),
+        # The ledger entry itself names the backend that produced the
+        # generation: a reader sees which generator produced it without
+        # joining this run record.
+        backend_record=backend_record,
     )
     run = CampaignRun(
         cycle_id=manifest.cycle_id,
@@ -858,6 +1049,10 @@ def run_campaign(
         ceiling_enforcement=ceiling_enforcement,
         certification=certification.to_dict(),
         selection=dict(selected) if selected else {},
+        # Every attempt the run made, including a declared search's earlier,
+        # cheaper rounds: they are real compute and real evidence even though
+        # selection may only read the final round's results.
+        attempts=_attempt_summary(attempted),
         promotion=assembly.to_dict(),
         record_path="",
     )
@@ -1393,13 +1588,19 @@ def build_evaluator(
     )
 
 
-def build_executor(
+def build_local_training_fn(
     manifest: CampaignManifest,
     *,
     state_root: str | Path | None = None,
     runner: Any = None,
 ) -> SubprocessTrainingFn:
-    """Build the production executor from the manifest's declared inputs."""
+    """Build the production subprocess executor from the declared inputs.
+
+    The single execution path behind every backend that runs training in
+    process (``local`` and ``unsloth``): the declared project template decides
+    the trainer engine, and this binding materializes, validates, trains and
+    settles against one envelope.
+    """
     root = Path(state_root or manifest.state_root)
     template_path = _require_path(
         manifest.project_template_path,
@@ -1420,7 +1621,165 @@ def build_executor(
         sources=sources,
         material=material,
         runner=runner or default_runner,
+        # One attempt's process holds training *and* the in-run evaluation, so
+        # the default 3600 s could not cover both: attempt-09 trained in 1766 s
+        # and came within 34 s of this bound while its evaluation was still
+        # running. The declared suites measure in 3706 s (the parent arm), so an
+        # attempt needs ~5500 s. 7200 s is the worker timeout the arm
+        # measurements already run under, with margin over that sum.
+        timeout_seconds=7200.0,
     )
+
+
+class _BackendStampedTrainingFn:
+    """A ``TrainingFn`` that names its backend in every attempt's evidence.
+
+    Which backend produced an attempt is a fact *about that attempt*, so it
+    travels with the attempt's own evidence instead of being reconstructed from
+    the run record. Everything else is delegated untouched: this wrapper adds a
+    fact, it does not change what runs, what is admitted or what is measured.
+    """
+
+    def __init__(
+        self, inner: Any, *, declared: Mapping[str, Any], version: str
+    ) -> None:
+        self.__dict__["_inner"] = inner
+        self.__dict__["_declared"] = dict(declared)
+        self.__dict__["_version"] = str(version)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.__dict__["_inner"], name)
+
+    def admit(self, recipe: TrainingRecipe) -> tuple[str, str] | None:
+        return self.__dict__["_inner"].admit(recipe)
+
+    def __call__(
+        self, recipe: TrainingRecipe, items: Sequence[Any]
+    ) -> Mapping[str, Any]:
+        evidence = self.__dict__["_inner"](recipe, items)
+        if not isinstance(evidence, Mapping):
+            return evidence
+        stamped = dict(evidence)
+        stamped["backend"] = {
+            **self.__dict__["_declared"],
+            "version": self.__dict__["_version"],
+        }
+        return stamped
+
+
+def _declared_backend_version() -> str:
+    """The chowder version an attempt's evidence names as its backend version."""
+    from .training_backends import chowder_version
+
+    return chowder_version()
+
+
+def build_executor_with_selection(
+    manifest: CampaignManifest,
+    *,
+    state_root: str | Path | None = None,
+    runner: Any = None,
+    providers: Any = None,
+    probes: Any = None,
+) -> tuple[Any, Mapping[str, Any]]:
+    """Build the executor the manifest's declared training backend dispatches through.
+
+    One branch point, at the backend boundary: the declared provider decides
+    which executor is built and how, so nothing downstream needs to know which
+    one it was. A *declaration* error -- an unknown provider, an unsupported
+    config key, a template whose trainer is not the declared one, an Unsloth
+    knob the isolated engine refuses, an incomplete remote wiring -- stops the
+    campaign here, before any compute. A hardware fact is not decided here: the
+    preflight panel reports it, and the executor's own admission plus the
+    trainer's own config resolution are where it is enforced.
+
+    Returns the executor -- wrapped so every attempt's evidence names the
+    backend that produced it -- and the record of the choice: the declaration,
+    the provider and trainer, the full preflight, and, when ``auto`` chose, the
+    reason, the cost comparison and every candidate it refused. The run writes
+    that record as its own phase before any attempt starts.
+
+    ``providers`` and ``probes`` are injectable exactly like ``runner``: the
+    no-GPU harness supplies them, production never does.
+    """
+    from .compute_backend import ComputeBackendRefusal
+    from .training_backends import (
+        STRUCTURAL_PREFLIGHT_CODES,
+        TrainingBackendRefusal,
+        backend_declaration,
+        resolve_training_backend,
+    )
+
+    declaration = backend_declaration(manifest)
+    try:
+        provider, selection = resolve_training_backend(
+            declaration,
+            manifest,
+            providers=providers,
+            probes=probes,
+        )
+        preflight = provider.preflight(manifest)
+    except TrainingBackendRefusal as refusal:
+        raise CampaignRunRefusal(f"{refusal.code}: {refusal.reason}") from refusal
+    if not preflight.admitted and preflight.code in STRUCTURAL_PREFLIGHT_CODES:
+        raise CampaignRunRefusal(f"{preflight.code}: {preflight.reason}")
+    try:
+        inner = provider.build_training_fn(
+            manifest, state_root=state_root, runner=runner
+        )
+    except (TrainingBackendRefusal, ComputeBackendRefusal) as refusal:
+        # One refusal vocabulary at the runner boundary, whatever layer found
+        # the problem; the machine-readable code travels in the message.
+        raise CampaignRunRefusal(f"{refusal.code}: {refusal.reason}") from refusal
+    record: dict[str, Any] = {
+        "cycle_id": manifest.cycle_id,
+        "declaration": declaration.to_dict(),
+        "provider": provider.provider,
+        "trainer": provider.trainer,
+        "strategy": preflight.strategy,
+        "admitted": preflight.admitted,
+        "refused_by": None if preflight.admitted else (preflight.code or ""),
+        "refusal_reason": preflight.reason,
+        # A declaration error stops the run before this point; what is recorded
+        # here is whether a *reported* hardware fact was the reason.
+        "stops_the_run": (
+            not preflight.admitted and preflight.code in STRUCTURAL_PREFLIGHT_CODES
+        ),
+        "panel": preflight.panel.to_dict(),
+        "overrides": list(preflight.overrides),
+        "selection": selection.to_dict() if selection is not None else None,
+    }
+    return (
+        _BackendStampedTrainingFn(
+            inner,
+            declared={
+                "provider": provider.provider,
+                "trainer": provider.trainer,
+                "declaration": declaration.to_dict(),
+            },
+            version=_declared_backend_version(),
+        ),
+        record,
+    )
+
+
+def build_executor(
+    manifest: CampaignManifest,
+    *,
+    state_root: str | Path | None = None,
+    runner: Any = None,
+    providers: Any = None,
+    probes: Any = None,
+) -> Any:
+    """Build the executor the declared training backend dispatches through."""
+    executor, _selection = build_executor_with_selection(
+        manifest,
+        state_root=state_root,
+        runner=runner,
+        providers=providers,
+        probes=probes,
+    )
+    return executor
 
 
 # --------------------------------------------------------------------------
@@ -1450,6 +1809,13 @@ def _build_cycle(
         # exactly what the campaign plans to run, and an id it cannot propose
         # refuses below.
         recipe_count=len(manifest.recipe_ids),
+        # The promotion gates bind from the declaration, not from who built
+        # the cycle: a manifest that declares them gets the same objects, the
+        # same enforcement, and the same load-time refusals a programmatic
+        # construction gets. Absent (every manifest predating them) means no
+        # gates — the historical behavior, unchanged.
+        retention_profile=manifest.retention_profile,
+        eval_tier_policy=manifest.eval_tier_policy,
     )
     return GrowthCycle(
         config,
@@ -1465,6 +1831,30 @@ def _build_cycle(
         regression_memory=RegressionMemory(root / "ledger"),
         snapshots=SnapshotStore(root / "ledger"),
         train_fn=executor,
+    )
+
+
+def search_plan_for(
+    manifest: CampaignManifest, *, cycle: Any, recipes: Sequence[TrainingRecipe]
+) -> SearchPlan:
+    """The declared search's own bound, projected through the planner's costs.
+
+    One owner of the arithmetic: the plan command prints this, readiness admits
+    it and the run executes it, all calling here. An undeclared search returns
+    an undeclared plan -- no rounds, no spend, exactly the single pass every
+    manifest predating the field runs.
+    """
+    declaration = manifest.candidate_search
+    if not declaration.declared:
+        return SearchPlan(declared=False, schedule=declaration.to_dict())
+    return plan_search(
+        declaration,
+        recipes=recipes,
+        project_cost=cycle.planner.project_cost,
+        per_recipe_device_ceiling=manifest.budget.device_gpu_hours_ceiling_per_recipe,
+        per_recipe_wall_ceiling=manifest.budget.wall_gpu_hours_ceiling_per_recipe,
+        campaign_device_ceiling=manifest.budget.device_gpu_hours_ceiling_campaign,
+        campaign_wall_ceiling=manifest.budget.wall_gpu_hours_ceiling_campaign,
     )
 
 
@@ -1691,6 +2081,13 @@ def _adjudicate(
         # to refuse, so it is reported only when it was measured.
         device_gpu_hours=total.device_gpu_hours if device_settleable else 0.0,
         actual_wall_gpu_hours=total.wall_gpu_hours,
+        # Same rule for the device unit: the settled reading is the one the
+        # declared ceiling is actually enforced against, and it is forwarded
+        # only when the budget declared device time measurable. An unmeasured
+        # device figure stays absent rather than reported as a measured zero.
+        actual_device_gpu_hours=(
+            total.device_gpu_hours if device_settleable and total.device_measured else None
+        ),
         wall_gpu_hours_ceiling=budget.wall_gpu_hours_ceiling_campaign,
     )
 
@@ -1718,6 +2115,30 @@ def _with_resource_veto(decision: Any, settlement: Any) -> Any:
     )
 
 
+def _backend_lineage(backend_record: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The backend provenance a generation's ledger entry carries.
+
+    ``provider`` is the one whose executor actually ran; ``declared`` is the
+    declaration as written (for ``auto``, which candidate was chosen and why
+    is already inside the selection). A caller-supplied executor is recorded
+    as exactly that -- declared, but not executed by a backend this build
+    dispatched. The evidence stamp every attempt carries is the per-attempt
+    version of this same fact; this is the generation-level one.
+    """
+    if not backend_record:
+        return {"provider": "undeclared"}
+    declared = backend_record.get("declaration")
+    provider = backend_record.get("provider")
+    entry: dict[str, Any] = {"declared": dict(declared) if isinstance(declared, Mapping) else {}}
+    if provider is None:
+        entry["provider"] = "caller-supplied"
+        return entry
+    entry["provider"] = str(provider)
+    entry["trainer"] = str(backend_record.get("trainer") or "")
+    entry["selection"] = backend_record.get("selection")
+    return entry
+
+
 def _finalize(
     manifest: CampaignManifest,
     *,
@@ -1726,6 +2147,7 @@ def _finalize(
     selected: Mapping[str, Any] | None,
     root: Path,
     evaluation_report_ref: str,
+    backend_record: Mapping[str, Any] | None = None,
 ) -> CycleOutcome:
     return cycle.finalize(
         decision,
@@ -1739,6 +2161,7 @@ def _finalize(
         training_evidence_ref=selected.get("evidence_path", "") if selected else "",
         evaluation_report_ref=evaluation_report_ref,
         notes=f"campaign {manifest.cycle_id} (policy {PROMOTION_POLICY_VERSION})",
+        backend=_backend_lineage(backend_record),
     )
 
 
@@ -1776,11 +2199,42 @@ def _refuse(
 CANDIDATE_ARTIFACT_DIGEST_STALE = "CANDIDATE_ARTIFACT_DIGEST_STALE"
 
 
+def _backend_detail(record: Mapping[str, Any]) -> str:
+    """One line naming the backend an attempt will run on, and its standing."""
+    provider = record.get("provider")
+    if provider is None:
+        declared = record.get("declaration")
+        declared_provider = (
+            declared.get("provider") if isinstance(declared, Mapping) else None
+        )
+        return (
+            f"declared {declared_provider or '<undeclared>'}; the executor was "
+            "supplied by the caller, so no provider preflight was run"
+        )
+    if record.get("admitted"):
+        return (
+            f"declared {provider} ({record.get('trainer')}), preflight admitted"
+            + (f": {record.get('strategy')}" if record.get("strategy") else "")
+        )
+    return (
+        f"declared {provider} ({record.get('trainer')}): preflight not admitted "
+        f"({record.get('refused_by')}: {record.get('refusal_reason')})"
+        + (
+            " -- a declaration error the run will refuse"
+            if record.get("stops_the_run")
+            else " -- a hardware fact, reported rather than enforced"
+        )
+    )
+
+
 def _attempt_summary(results: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
     """The durable facts about what each attempt produced, refusal included."""
     return tuple(
         {
             "recipe_id": evidence.get("recipe_id"),
+            # Which backend produced this attempt, from the attempt's own
+            # evidence (the runner stamps it; the executor is the one that ran).
+            "backend": evidence.get("backend"),
             "attempt": evidence.get("attempt"),
             "status": evidence.get("status"),
             "refused_by": evidence.get("refused_by"),
@@ -1789,6 +2243,10 @@ def _attempt_summary(results: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str,
             "artifact_ref": evidence.get("artifact_ref"),
             "artifact_sha256": evidence.get("artifact_sha256"),
             "measured_gpu_hours": evidence.get("measured_gpu_hours"),
+            # Absent for a single-pass campaign; the round an attempt belonged
+            # to when a declared search ran it.
+            "search_round": evidence.get("search_round"),
+            "search_max_steps": evidence.get("search_max_steps"),
         }
         for evidence in results
     )
@@ -1894,6 +2352,7 @@ READINESS_ANCESTOR_ARM = "READINESS_ANCESTOR_ARM"
 READINESS_PROTECTION_POLICY = "READINESS_PROTECTION_POLICY"
 READINESS_PLAN = "READINESS_PLAN"
 READINESS_RECIPE_SET = "READINESS_RECIPE_SET"
+READINESS_CANDIDATE_SEARCH = "READINESS_CANDIDATE_SEARCH"
 READINESS_CAMPAIGN_PROJECTION = "READINESS_CAMPAIGN_PROJECTION"
 READINESS_EVALUATOR = "READINESS_EVALUATOR"
 READINESS_EVALUATOR_COVERAGE = "READINESS_EVALUATOR_COVERAGE"
@@ -2150,12 +2609,49 @@ def check_campaign_readiness(
         f"{len(recipes_of())} declared recipe(s) proposed by the planner"
     ))
 
+    def search_detail() -> str:
+        plan = plan_of()
+        if plan.search_refusal:
+            raise CampaignRunRefusal(plan.search_refusal)
+        if not plan.search.declared:
+            return (
+                "no candidate search declared: the declared recipes run once "
+                "each"
+            )
+        return (
+            f"{len(plan.search.rounds)} declared round(s), worst case "
+            f"{plan.search.total_device_gpu_hours:.6f} device / "
+            f"{plan.search.total_wall_gpu_hours:.6f} wall GPU-h within the "
+            "declared search envelope"
+        )
+
+    check(
+        "candidate_search",
+        READINESS_CANDIDATE_SEARCH,
+        ("recipe_set",),
+        search_detail,
+    )
+
     def projection_detail() -> str:
+        plan = plan_of()
         recipes = recipes_of()
-        projected = ComputeCost(
-            device_gpu_hours=sum(r.projected_device_gpu_hours for r in recipes),
-            wall_gpu_hours=sum(r.projected_wall_gpu_hours for r in recipes),
-            source=f"campaign projection ({len(recipes)} recipes)",
+        # A declared search spends its rounds, so the ceiling has to cover the
+        # search's worst-case total rather than a single pass over the recipes.
+        projected = (
+            ComputeCost(
+                device_gpu_hours=plan.search.total_device_gpu_hours,
+                wall_gpu_hours=plan.search.total_wall_gpu_hours,
+                source=(
+                    f"campaign projection ({len(plan.search.rounds)} search "
+                    f"rounds over {len(recipes)} recipes)"
+                ),
+            )
+            if plan.search.declared
+            else ComputeCost(
+                device_gpu_hours=sum(r.projected_device_gpu_hours for r in recipes),
+                wall_gpu_hours=sum(r.projected_wall_gpu_hours for r in recipes),
+                source=f"campaign projection ({len(recipes)} recipes)",
+            )
         )
         verdict = settle_campaign_projection(manifest, projected=projected)
         if not verdict.compliant:
@@ -2171,7 +2667,7 @@ def check_campaign_readiness(
     check(
         "campaign_projection",
         READINESS_CAMPAIGN_PROJECTION,
-        ("recipe_set",),
+        ("recipe_set", "candidate_search"),
         projection_detail,
     )
 

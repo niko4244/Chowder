@@ -43,6 +43,11 @@ class GenerationRecord:
     required_probes: tuple[str, ...] = ()  # anti-forgetting probes this gen must hold
     frontier_snapshot_id: str | None = None
     notes: str = ""
+    #: Which declared training backend produced this generation (provider,
+    #: trainer, the declaration as written). Empty for every record written
+    #: before the backend was recorded in lineage: an absent field reads as
+    #: "predates backend provenance", never as "local by default".
+    backend: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +66,7 @@ class GenerationRecord:
             "required_probes": list(self.required_probes),
             "frontier_snapshot_id": self.frontier_snapshot_id,
             "notes": self.notes,
+            "backend": dict(self.backend),
         }
 
 
@@ -133,6 +139,7 @@ class GenerationLedger:
                     required_probes=tuple(item.get("required_probes", ())),
                     frontier_snapshot_id=item.get("frontier_snapshot_id"),
                     notes=item.get("notes", ""),
+                    backend=item.get("backend", {}),
                 )
                 self._records[record.version] = record
         if self._revisions_path.exists():
@@ -170,6 +177,7 @@ class GenerationLedger:
         required_probes: tuple[str, ...] = (),
         frontier_snapshot_id: str | None = None,
         notes: str = "",
+        backend: Mapping[str, Any] | None = None,
     ) -> GenerationRecord:
         if version in self._records:
             raise ValueError(f"generation {version} already recorded")
@@ -189,6 +197,7 @@ class GenerationLedger:
             required_probes=tuple(required_probes),
             frontier_snapshot_id=frontier_snapshot_id,
             notes=notes,
+            backend=dict(backend or {}),
         )
         self._records[version] = record
         self._flush()

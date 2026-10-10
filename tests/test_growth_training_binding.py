@@ -375,6 +375,13 @@ class _RecordingRunner:
             (artifact / "router_payload.json").write_text(
                 json.dumps({"steps_completed": 4}), encoding="utf-8"
             )
+            # The real trainer checkpoints under artifact/trainer; the search's
+            # continuation resolution (latest_checkpoint_dir) reads that layout,
+            # so the fake writes the same shape its production counterpart does.
+            (artifact / "trainer" / "checkpoint-4").mkdir(parents=True, exist_ok=True)
+            (artifact / "trainer" / "checkpoint-4" / "optimizer.pt").write_bytes(
+                b"optimizer-state"
+            )
         if self.write_identity:
             (work_dir / "chowder-identity.json").write_text(
                 json.dumps(_identity_of_this_process()), encoding="utf-8"
@@ -790,8 +797,9 @@ def _seed_registry(path: Path, experiment_id: str) -> None:
 
 def test_the_composed_project_carries_the_recipe_and_never_a_search_section(tmp_path: Path):
     """Property 1 and the plan's honesty rule: the recipe's knobs reach the
-    validated config, and no `search` section is invented for a controller that
-    has no production caller."""
+    validated config, and no `search` section is invented -- bounded candidate
+    search is declared on the campaign and driven above the project, not
+    smuggled into the config a backend validates."""
     runner = _RecordingRunner()
     binding = _binding(tmp_path, runner=runner)
     items = _items()

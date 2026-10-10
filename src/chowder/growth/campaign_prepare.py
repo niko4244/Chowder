@@ -390,7 +390,10 @@ def prepare_campaign(
         )
     )
     project_template_path = _write_project_template(
-        manifest, root, evaluation_material_path=evaluation_material_path
+        manifest,
+        root,
+        evaluation_material_path=evaluation_material_path,
+        parent_eval_path=parent_eval_path,
     )
 
     # 5. the contamination manifest the binder loads before any row binds.
@@ -717,17 +720,84 @@ def _parent_durable_scores(document: Mapping[str, Any]) -> dict[str, float]:
     return scores
 
 
+def _eval_report_measured_row(
+    document: Mapping[str, Any], qualified_id: str, *, parent_version: str
+) -> BenchmarkRun | None:
+    """This benchmark's row in an ``EvalReport``, when it is a real measurement.
+
+    The admission rule is deliberately narrow, because this is the seam a fresh
+    ``measure-parent`` report enters the profile through: everything the row
+    claims must match what was declared, or the row is not this parent's
+    measurement of this benchmark and the caller falls through to the honest
+    unmeasured path.
+    """
+    runs = document.get("runs")
+    if not isinstance(runs, Sequence) or isinstance(runs, (str, bytes)):
+        return None
+    for entry in runs:
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("benchmark_qualified_id", "")) != qualified_id:
+            continue
+        if str(entry.get("measurement_origin", "")) != MEASURED_PARENT:
+            continue
+        if str(entry.get("generation_version", "")) != parent_version:
+            continue
+        metric = str(entry.get("metric", ""))
+        if metric != _metric_for(qualified_id):
+            continue
+        score = entry.get("score")
+        if not isinstance(score, (int, float)) or isinstance(score, bool):
+            continue
+        per_sample = entry.get("per_sample_scores") or ()
+        return BenchmarkRun(
+            benchmark_qualified_id=qualified_id,
+            adapter=str(entry.get("adapter", "chowder_custom")),
+            generation_version=parent_version,
+            score=float(score),
+            n_samples=int(entry.get("n_samples", 0) or 0),
+            per_sample_scores=tuple(per_sample),
+            metric=metric,
+            measurement_origin=MEASURED_PARENT,
+            raw_artifact_ref=str(entry.get("raw_artifact_ref", "")),
+            metadata={
+                **{
+                    key: value
+                    for key, value in (entry.get("metadata") or {}).items()
+                },
+                "source": "declared parent measurement report",
+            },
+        )
+    return None
+
+
 def _parent_measured_row(
     document: Mapping[str, Any], qualified_id: str, *, parent_version: str
 ) -> BenchmarkRun | None:
     """A real parent measurement of this exact benchmark, or ``None``.
 
-    The only durable per-benchmark shape the parent run root holds today is the
+    Two durable shapes carry a parent measurement, and both are read here.
+
+    An ``EvalReport`` (``runs``) is what ``chowder growth campaign
+    measure-parent`` writes when the parent is re-measured under *this*
+    campaign's instrument; it is the document ``--parent-measurement`` names.
+    A row of one counts only when it is a real measurement of this exact
+    benchmark, of this parent: the declared id, the declared metric, a numeric
+    score, and ``MEASURED_PARENT`` origin for this ``parent_version``.  An
+    ``UNMEASURED`` row, a carried row, a row of another generation or a row of
+    another benchmark is not a measurement and is left to the unmeasured path.
+
+    Otherwise the run root's own ``candidate_evaluation.json`` holds the
     diagnostics instrument's aggregate, recorded under the parent's own
     instrument version.  It is used only when it matches the declared benchmark
     id: a measurement of a *different* instrument version is not a measurement
     of this one.
     """
+    row = _eval_report_measured_row(
+        document, qualified_id, parent_version=parent_version
+    )
+    if row is not None:
+        return row
     durable = _diagnostics_instrument(document)
     if durable is None:
         return None
@@ -1111,14 +1181,73 @@ def _load_protected_fingerprints(
     return fingerprints
 
 
+def _suite_name(qualified_id: str) -> str:
+    """The suite name a declared benchmark id is evaluated under."""
+    return qualified_id.split("@", 1)[0]
+
+
+def _baseline_metrics(parent_eval_path: Path, suite_names: Sequence[str]) -> dict[str, float]:
+    """The parent's measured scores, as the project's fixed baseline.
+
+    The preregistration is explicit about which baseline a growth attempt runs
+    against: "the parent's instrument + slice measurement is referenced at zero
+    incremental cost (``baseline.mode: fixed``), never re-paid per recipe."
+    That rules out ``auto``, which evaluates the untouched base once per attempt
+    -- the re-payment the declaration forbids -- and it names the numbers: the
+    parent arm's own measurements, which preparation has already written.
+
+    Keyed by suite name, because ``ProjectSpec`` requires the goal metrics, the
+    evaluation suites and therefore the baseline to be the same set of names.
+    An empty ``metrics`` under ``fixed`` is not a baseline at all: ``project.py``
+    refuses it, so every attempt was refused before compute by
+    ``project-validate``.
+    """
+    report = _read_json_object(parent_eval_path) or {}
+    measured: dict[str, float] = {}
+    for entry in report.get("runs", ()) or ():
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("measurement_origin", "")) != MEASURED_PARENT:
+            continue
+        name = _suite_name(str(entry.get("benchmark_qualified_id", "")))
+        score = entry.get("score")
+        if name in suite_names and isinstance(score, (int, float)) and not isinstance(score, bool):
+            measured[name] = float(score)
+    if not measured:
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: the parent arm holds no measured score for any "
+            f"declared benchmark {sorted(suite_names)}, so the fixed baseline "
+            "the preregistration references does not exist; measure the parent "
+            "under this campaign's instrument rather than running against an "
+            "empty bar"
+        )
+    # A benchmark the parent never measured carries no baseline entry. Writing a
+    # zero for it would assert a score nobody took -- the substitution this
+    # whole path exists to refuse -- so the bar is what was measured and the
+    # rest is simply ungated here, as the parent arm's UNMEASURED rows record.
+    return measured
+
+
+#: What the cycle reserves for a candidate's in-run evaluation when the
+#: evaluator cannot profile itself (``cycle._declared_evaluation_reserve``).
+#: The training reservation must leave this much of the per-recipe ceiling
+#: free, or ``engine.resize_reservation`` refuses the lifecycle estimate.
+EVALUATION_GPU_HOUR_RESERVE = 0.05
+
+
 def _write_project_template(
-    manifest: Any, root: Path, *, evaluation_material_path: Path
+    manifest: Any,
+    root: Path,
+    *,
+    evaluation_material_path: Path,
+    parent_eval_path: Path,
 ) -> Path:
     """The executor's project template, derived from the declaration.
 
-    Not a docs-script reconstruction: the base model, the budget and the
-    evaluation suites all come from the manifest and the material this
-    preparation produced, so a change to the declaration moves the template.
+    Not a docs-script reconstruction: the base model, the budget, the evaluation
+    suites and the fixed baseline all come from the manifest and the evidence
+    this preparation produced, so a change to the declaration moves the
+    template.
     """
     budget = manifest.budget
     material = _read_json_object(evaluation_material_path) or {}
@@ -1139,21 +1268,43 @@ def _write_project_template(
                 "use_chat_template": True,
             }
         )
+    suite_names = [str(suite["name"]) for suite in suites]
     template = {
         "schema_version": 1,
         "name": str(manifest.cycle_id),
         "seed": 7,
         "goal": {
-            "metrics": [{"name": "quality", "direction": "maximize"}],
+            # ProjectSpec requires the goal metrics and the evaluation suites to
+            # be the same set of names, so the goal is the declared benchmarks
+            # themselves rather than a "quality" aggregate nothing measures.
+            "metrics": [
+                {"name": name, "direction": "maximize"} for name in suite_names
+            ],
             "gpu_hour_budget": float(budget.wall_gpu_hours_ceiling_per_recipe),
             "max_parallel_candidates": 1,
             "minimum_promotion_gain": 0.0,
             "require_protocol_match": False,
         },
-        "baseline": {"mode": "fixed", "experiment_id": "baseline", "metrics": {}, "gpu_hours": 0.0},
+        # Referenced at zero incremental cost, never re-paid per recipe: the
+        # parent's own measurement of the declared target benchmark.
+        "baseline": {
+            "mode": "fixed",
+            "experiment_id": "baseline",
+            "metrics": _baseline_metrics(parent_eval_path, suite_names),
+            "gpu_hours": 0.0,
+        },
         "experiment": {
             "experiment_id": str(manifest.cycle_id),
-            "estimated_gpu_hours": float(budget.wall_gpu_hours_ceiling_per_recipe),
+            # The training reservation is the ceiling *less* what evaluation
+            # reserves, so the two together fit the declared per-recipe ceiling
+            # exactly. Reserving the whole ceiling here left no remaining budget
+            # for the lifecycle resize to grow into, so the engine's preflight
+            # refused every attempt -- at any ceiling -- before a single step.
+            "estimated_gpu_hours": max(
+                0.0,
+                float(budget.wall_gpu_hours_ceiling_per_recipe)
+                - EVALUATION_GPU_HOUR_RESERVE,
+            ),
             "hypothesis": {
                 "observation": "the parent generation's remaining measured weaknesses",
                 "suspected_cause": "declared by the gen2 preregistration",
@@ -1201,13 +1352,22 @@ def _write_project_template(
             },
             "evaluation": {
                 "type": "transformers-text",
-                "estimated_gpu_hours": 0.05,
+                "estimated_gpu_hours": EVALUATION_GPU_HOUR_RESERVE,
                 "precision": "bf16",
                 "quantization": "none",
                 "placement": "offload",
                 "device": "cuda",
                 "trust_remote_code": False,
-                "runtime": {"timeout_seconds": 1800.0},
+                # The in-run evaluation measures exactly what an arm measures:
+                # the declared suites at the declared batch size. The parent arm
+                # took 3706 s over these three suites x 16 rows, so 1800 s could
+                # never finish -- both gen2 attempts trained their full horizon
+                # and were then killed here, 1800 s into the evaluation. This
+                # must also leave room inside the attempt's own process budget
+                # (``SubprocessTrainingFn.timeout_seconds``), which holds
+                # training *and* this evaluation: ~1766 s of training plus 5400 s
+                # here fits the 7200 s that budget now allows.
+                "runtime": {"timeout_seconds": 5400.0},
                 "suites": suites,
             },
         },

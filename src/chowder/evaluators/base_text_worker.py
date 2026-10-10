@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..contamination import write_holdout_fingerprint_index
-from ..hf_resilience import cache_status, with_hub_retries
+from ..hf_resilience import cache_status, resolve_model_commit, with_hub_retries
 from ..local_model_compat import patch_transformers5_custom_model
 from ..lifecycle import (
     PhaseTimer,
@@ -153,7 +153,15 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
         lambda: AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs),
         label=f"model download for {spec.base_model}",
     )
-    resolved_commit = getattr(model.config, "_commit_hash", None)
+    # Provenance must survive transformers versions that stopped populating
+    # ``config._commit_hash`` (5.18+): resolve the loaded commit through the
+    # cache/Hub when the attribute is absent, exactly as the trainer side does,
+    # so a baseline and its candidate stay one bound identity.
+    resolved_commit = resolve_model_commit(
+        spec.base_model,
+        spec.revision,
+        config_commit=getattr(model.config, "_commit_hash", None),
+    )
     if spec.quantization == "none":
         if spec.placement == "offload":
             if spec.quantization == "4bit":

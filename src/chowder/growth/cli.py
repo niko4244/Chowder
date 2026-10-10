@@ -395,6 +395,22 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
     plan.add_argument("manifest", help="Path to the campaign manifest JSON")
     plan.set_defaults(func=_growth_campaign_plan)
 
+    preflight = campaign_targets.add_parser(
+        "preflight",
+        help="Show the declared backend's panel, estimates and refusals, no compute",
+    )
+    preflight.add_argument("manifest", help="Path to the campaign manifest JSON")
+    preflight.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Report every executable backend side by side (panel, estimates, "
+            "declared and measured costs, refusals) so one can be chosen "
+            "manually; always exits 0"
+        ),
+    )
+    preflight.set_defaults(func=_growth_campaign_preflight)
+
     readiness = campaign_targets.add_parser(
         "readiness",
         help="Check every pre-compute prerequisite without starting compute",
@@ -416,6 +432,18 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
         "--parent-evidence",
         default="",
         help="The parent generation's durable run root (its candidate_evaluation.json)",
+    )
+    prepare.add_argument(
+        "--parent-measurement",
+        default="",
+        help=(
+            "The report whose rows are the parent's measurements under THIS "
+            "campaign's declared protocol. Defaults to the run root's own "
+            "candidate_evaluation.json; a parent re-measured under a newer "
+            "instrument (chowder growth campaign measure-parent) names that "
+            "report here, so the curriculum is planned from the fresh "
+            "measurement rather than an older instrument version"
+        ),
     )
     prepare.add_argument(
         "--write-declaration",
@@ -579,11 +607,12 @@ def _growth_campaign_plan(args: argparse.Namespace) -> int:
     """
     from .campaign import CampaignManifest
     from .campaign_runner import CampaignRunRefusal, plan_campaign
+    from .candidate_search import CandidateSearchRefusal
 
     manifest = CampaignManifest.from_file(Path(args.manifest))
     try:
         plan = plan_campaign(manifest)
-    except CampaignRunRefusal as refusal:
+    except (CampaignRunRefusal, CandidateSearchRefusal) as refusal:
         return _print_json(
             {
                 "cycle_id": manifest.cycle_id,
@@ -592,8 +621,28 @@ def _growth_campaign_plan(args: argparse.Namespace) -> int:
                 "refusal_reason": str(refusal),
             }
         ) or 1
-    projected = sum(
-        recipe.projected_wall_gpu_hours for recipe in plan.recipes
+    if plan.search_refusal:
+        # A declared search that cannot be projected is not a plan an author may
+        # freeze: say so here rather than printing it as if it were planned.
+        return _print_json(
+            {
+                "cycle_id": manifest.cycle_id,
+                "status": "REFUSED",
+                "refused_by": "candidate-search",
+                "refusal_reason": plan.search_refusal,
+            }
+        ) or 1
+    # A declared search spends its rounds, so the projection a reader is shown
+    # is the search's worst-case total -- not a single pass that understates it.
+    projected_device = (
+        plan.search.total_device_gpu_hours
+        if plan.search.declared
+        else sum(recipe.projected_device_gpu_hours for recipe in plan.recipes)
+    )
+    projected = (
+        plan.search.total_wall_gpu_hours
+        if plan.search.declared
+        else sum(recipe.projected_wall_gpu_hours for recipe in plan.recipes)
     )
     declared = set(manifest.recipe_ids)
     proposed = {recipe.recipe_id for recipe in plan.recipes}
@@ -605,11 +654,59 @@ def _growth_campaign_plan(args: argparse.Namespace) -> int:
             "recipes": [recipe.recipe_id for recipe in plan.recipes],
             "declared_recipes": sorted(declared),
             "recipes_declared": sorted(declared) == sorted(proposed),
+            "projected_device_gpu_hours": projected_device,
             "projected_wall_gpu_hours": projected,
+            "candidate_search_declared": plan.search.declared,
+            "candidate_search_rounds": len(plan.search.rounds),
             "wall_gpu_hours_ceiling_campaign": manifest.budget.wall_gpu_hours_ceiling_campaign,
             "plan": plan.to_dict(),
         }
     )
+
+
+def _growth_campaign_preflight(args: argparse.Namespace) -> int:
+    """Print what the declared backend can see, before anything is spent.
+
+    The declaration, the panel, the capability matrix, each planned recipe's
+    memory estimate and any refusal -- all without starting compute. A refusal
+    the runner enforces exits non-zero (``stops_the_run``); a hardware fact it
+    only reports still prints the full panel, so an operator can see *why* the
+    declaration would not run on this machine.
+
+    With ``--all``, every executable backend is reported side by side -- each
+    provider's panel, estimates, declared and measured costs, and refusals --
+    so an operator can choose one manually. The comparison is read-only
+    reconnaissance: it always exits 0, because a provider that would refuse is
+    a row in the report, not an error in it.
+    """
+    from .campaign import CampaignManifest
+    from .campaign_runner import CampaignRunRefusal, plan_campaign
+    from .candidate_search import CandidateSearchRefusal
+    from .training_backends import compare_backends_report, preflight_report
+
+    manifest = CampaignManifest.from_file(Path(args.manifest))
+    recipes: tuple[Any, ...] = ()
+    unavailable = ""
+    try:
+        plan = plan_campaign(manifest)
+    except (CampaignRunRefusal, CandidateSearchRefusal) as refusal:
+        # The panel and the backend's own refusals are still worth printing: an
+        # unplannable campaign is exactly when an operator needs to see why.
+        unavailable = str(refusal)
+    else:
+        recipes = tuple(plan.recipes)
+    if getattr(args, "all", False):
+        _print_json(
+            compare_backends_report(
+                manifest, recipes=recipes, recipes_unavailable=unavailable
+            )
+        )
+        return 0
+    report = preflight_report(
+        manifest, recipes=recipes, recipes_unavailable=unavailable
+    )
+    _print_json(report)
+    return 0 if report["status"] == "ADMITTED" else 1
 
 
 def _growth_campaign_readiness(args: argparse.Namespace) -> int:
@@ -648,6 +745,7 @@ def _growth_campaign_prepare(args: argparse.Namespace) -> int:
             manifest,
             out_dir=args.out_dir,
             parent_evidence=args.parent_evidence or None,
+            parent_measurement=args.parent_measurement or None,
         )
     except CampaignPrepareRefusal as refusal:
         return _print_json(

@@ -1,0 +1,10 @@
+{"prompt": "Answer with only the number: what is 15 + 27?", "expected": "42"}
+{"prompt": "Answer with only the city name: what is the capital of Japan?", "expected": "Tokyo"}
+{"prompt": "Answer with only the number: what is 8 * 9?", "expected": "72"}
+{"prompt": "Answer with only the chemical symbol: what is oxygen's chemical symbol?", "expected": "O"}
+{"prompt": "Respond with a single word: what is the opposite of up?", "expected": "Down"}
+{"prompt": "Write only the Python expression, no explanation: the length of a list called items.", "expected": "len(items)"}
+{"prompt": "Answer with only yes or no: is Earth a planet?", "expected": "Yes"}
+{"prompt": "Answer with only the number: how many days are in a leap year?", "expected": "366"}
+{"prompt": "Answer with only the planet name: which planet do humans live on?", "expected": "Earth"}
+{"prompt": "Answer with only the keyword: what Python keyword defines a class?", "expected": "class"}

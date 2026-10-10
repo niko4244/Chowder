@@ -1,0 +1,70 @@
+name: Literature watch watchdog
+
+# The other half of the watch's honesty. `literature-watch.yml` produces the
+# drop; this checks that the loop producing it is still alive, because every way
+# that loop can break is silent: a schedule that stops firing (any workflow's,
+# not only this one's), a drop whose content breaks the rules it was written
+# under, a drop whose required checks never attach, a drop that conflicts with
+# main. A quiet week looks exactly like a healthy one -- the watch writes nothing
+# when nothing new matches (docs/literature/README.md, rule 5) -- so "no drop" is
+# deliberately *not* an alert here; "no successful run" is.
+#
+# It alerts twice over: the scheduled run fails, and one tracking issue is opened
+# or updated. The issue closes itself as soon as a check is healthy, so it cannot
+# become furniture.
+
+on:
+  schedule:
+    # Tuesdays, 06:00 UTC: the day after the Monday watch, with the whole day for
+    # a delayed or retried run to have finished.
+    - cron: '0 6 * * 2'
+  workflow_dispatch:
+    inputs:
+      max_run_age_days:
+        description: Days a successful watch run may be old before this alerts
+        default: '8'
+        required: false
+      max_drop_age_days:
+        description: Days an open drop may wait for a decision before this nudges
+        default: '7'
+        required: false
+
+permissions:
+  contents: read # read this workflow's own source, nothing else
+  actions: read # the watch's run history
+  checks: read # the check runs attached to a drop's head commit
+  pull-requests: read # the drop pull request and its merge state
+  issues: write # open, update and close the single tracking issue
+
+concurrency:
+  group: literature-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    name: is the weekly loop still alive
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      # No install step: like the watch itself, the watchdog is stdlib-only, so
+      # the thing that reports a broken dependency graph cannot be broken by one.
+      # The thresholds live here rather than in the script, so widening one is a
+      # visible edit to this file instead of a default nobody reads.
+      - name: Check the loop, the schedules and the drop
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python docs/literature/watchdog.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --watch-workflow literature-watch.yml \
+            --branch automation/literature-watch \
+            --max-run-age-days "${{ inputs.max_run_age_days || '8' }}" \
+            --max-drop-age-days "${{ inputs.max_drop_age_days || '7' }}" \
+            --schedule-grace-days "1" \
+            --run-url "$RUN_URL"

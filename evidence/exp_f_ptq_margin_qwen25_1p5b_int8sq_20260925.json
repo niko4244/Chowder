@@ -1,0 +1,156 @@
+{
+  "experiment": "exp_f_ptq_margin",
+  "model_path": "Qwen/Qwen2.5-1.5B-Instruct",
+  "ptq_config": "int8_smoothquant",
+  "n_calibration_texts": 12,
+  "bf16": {
+    "arm": "bf16",
+    "harness": {
+      "harness": "state_aware",
+      "max_turns": 4,
+      "max_new_tokens": 160,
+      "green_rate": 0.0,
+      "mean_runtime_reward": -21.0,
+      "total_tokens": 0
+    }
+  },
+  "quant": {
+    "arm": "int8_smoothquant",
+    "harness": {
+      "harness": "state_aware",
+      "max_turns": 4,
+      "max_new_tokens": 160,
+      "green_rate": 0.0,
+      "mean_runtime_reward": -21.0,
+      "total_tokens": 0
+    }
+  },
+  "margin_comparison": {
+    "quant_config": "int8_smoothquant",
+    "n_tasks": 12,
+    "bf16_mean_margin": 4.5039828803499455,
+    "quant_mean_margin": 4.541875882654768,
+    "mean_margin_shift": 0.03789300230482251,
+    "bf16_margin_nulls": 0,
+    "quant_margin_nulls": 0,
+    "bf16_accuracy": 0.0,
+    "quant_accuracy": 0.0,
+    "accuracy_delta": 0.0,
+    "per_task": [
+      {
+        "task": "exp_f_repair_0",
+        "bf16_margin": 7.098787890762842,
+        "quant_margin": 3.3030207441260777,
+        "margin_shift": -3.795767146636764,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_1",
+        "bf16_margin": 4.464876360513947,
+        "quant_margin": 5.383066902043288,
+        "margin_shift": 0.9181905415293414,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_10",
+        "bf16_margin": 3.370793442886609,
+        "quant_margin": 4.752666107883537,
+        "margin_shift": 1.3818726649969282,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_11",
+        "bf16_margin": 3.8078017450295962,
+        "quant_margin": 4.018862039827909,
+        "margin_shift": 0.21106029479831312,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_2",
+        "bf16_margin": 3.7358445050675395,
+        "quant_margin": 5.848304892750457,
+        "margin_shift": 2.1124603876829178,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_3",
+        "bf16_margin": 7.098647778942471,
+        "quant_margin": 2.939358473198969,
+        "margin_shift": -4.159289305743503,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_4",
+        "bf16_margin": 4.4501455043043405,
+        "quant_margin": 4.967777075209657,
+        "margin_shift": 0.5176315709053165,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_5",
+        "bf16_margin": 3.134106877581168,
+        "quant_margin": 6.440523286188324,
+        "margin_shift": 3.3064164086071566,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_6",
+        "bf16_margin": 3.743354609492811,
+        "quant_margin": 5.410644997470081,
+        "margin_shift": 1.6672903879772702,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_7",
+        "bf16_margin": 2.708461925808319,
+        "quant_margin": 3.67794711449567,
+        "margin_shift": 0.9694851886873508,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_8",
+        "bf16_margin": 7.184375635286172,
+        "quant_margin": 3.802645898424089,
+        "margin_shift": -3.3817297368620833,
+        "bf16_correct": false,
+        "quant_correct": false
+      },
+      {
+        "task": "exp_f_repair_9",
+        "bf16_margin": 3.2505982885235234,
+        "quant_margin": 3.9576930602391562,
+        "margin_shift": 0.7070947717156328,
+        "bf16_correct": false,
+        "quant_correct": false
+      }
+    ]
+  },
+  "provenance": {
+    "nvidia_modelopt_version": "0.47.0",
+    "torch_version": "2.11.0+cu128",
+    "device": "NVIDIA GeForce RTX 5060 Ti",
+    "ptq_config_names": {
+      "bf16": null,
+      "int8_smoothquant": "INT8_SMOOTHQUANT_CFG",
+      "int8_weight_only": "INT8_WEIGHT_ONLY_CFG",
+      "int4_awq": "INT4_AWQ_CFG",
+      "nvfp4_default": "NVFP4_DEFAULT_CFG"
+    }
+  },
+  "transfer_scope": {
+    "measured_on": "Qwen/Qwen2.5-1.5B-Instruct",
+    "ptq_config": "int8_smoothquant",
+    "claim": "mean margin shift for this model under this PTQ config only",
+    "transfers_to_other_architectures": false
+  }
+}

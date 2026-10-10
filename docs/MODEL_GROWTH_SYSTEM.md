@@ -365,6 +365,10 @@ current status. Not built at that point, and not claimed then: automatic
 campaign construction and preregistration, loop/session budget aggregation,
 plateau and stop/review policy, task-specific training-data providers, bounded
 candidate search, and the `GrowthLoop` controller with resume/recovery and a
-fake-compute simulator. Since then, everything in that list except bounded
-candidate search has been delivered -- including the provider framework and
-corpus quality gate, which live in `chowder.growth.data_providers`.
+fake-compute simulator. Everything in that list has since been delivered: the
+provider framework and corpus quality gate live in `chowder.growth.data_providers`,
+and the bounded candidate search lives in `chowder.growth.candidate_search`
+(declared per campaign or per loop policy, projected worst-case and refused
+before compute, driven over the campaign's own attempts by
+`successive_halving.HalvingSchedule`'s budget and survivor rule, screened on
+training-side evidence only).
