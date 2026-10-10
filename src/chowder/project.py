@@ -115,6 +115,7 @@ class ProjectSpec:
     experiment: Experiment
     config: Mapping[str, Any]
     repair: RepairSpec | None = None
+    objective_version: str = "project"
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -594,6 +595,9 @@ def project_from_mapping(
     config.setdefault("seed", seed_raw)
 
     repair = _repair_from_mapping(raw.get("repair"), base=work_dir)
+    objective_version = str(raw.get("objective_version", "project")).strip()
+    if not objective_version:
+        raise ProjectValidationError("project.objective_version must be non-empty")
 
     return ProjectSpec(
         name=str(raw.get("name", "Chowder Project")),
@@ -606,6 +610,7 @@ def project_from_mapping(
         experiment=experiment,
         config=config,
         repair=repair,
+        objective_version=objective_version,
     )
 
 

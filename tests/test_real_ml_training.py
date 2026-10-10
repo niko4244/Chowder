@@ -59,7 +59,6 @@ def test_real_tiny_llama_train_evaluate_and_persist(tmp_path: Path):
                 "metrics": [
                     {
                         "name": "quality",
-                        "minimum": 0.0,
                         "direction": "maximize",
                         "regression_tolerance": 1.0,
                     }
@@ -75,6 +74,10 @@ def test_real_tiny_llama_train_evaluate_and_persist(tmp_path: Path):
                 "experiment_id": "baseline",
                 "metrics": {"quality": 0.0},
                 "gpu_hours": 0.0,
+                # The goal lifecycle refuses a fixed baseline with no declared
+                # protocol identity. This smoke never compares protocols
+                # (legacy_unbounded), so a fixed placeholder digest suffices.
+                "evaluation_protocol_sha256": "0" * 64,
             },
             "experiment": {
                 "experiment_id": "real-sft",
@@ -90,6 +93,10 @@ def test_real_tiny_llama_train_evaluate_and_persist(tmp_path: Path):
             },
             "config": {
                 "seed": 123,
+                # Plumbing smoke, not a goal test: an unbounded metric under the
+                # documented legacy mode keeps the parent's MET assessment from
+                # stopping the objective before any candidate trains.
+                "goal_lifecycle": {"mode": "legacy_unbounded"},
                 "backend": {
                     "schema_version": 1,
                     "type": "transformers-peft",
@@ -233,7 +240,6 @@ def test_real_tiny_llama_automatic_baseline_binds_revision_and_matches_protocol(
                 "metrics": [
                     {
                         "name": "quality",
-                        "minimum": 0.0,
                         "direction": "maximize",
                         "regression_tolerance": 1.0,
                     }
@@ -261,6 +267,10 @@ def test_real_tiny_llama_automatic_baseline_binds_revision_and_matches_protocol(
             },
             "config": {
                 "seed": 123,
+                # Plumbing smoke, not a goal test: an unbounded metric under the
+                # documented legacy mode keeps the parent's MET assessment from
+                # stopping the objective before any candidate trains.
+                "goal_lifecycle": {"mode": "legacy_unbounded"},
                 "backend": {
                     "schema_version": 1,
                     "type": "transformers-peft",
@@ -390,7 +400,7 @@ def test_real_cancellation_terminates_an_in_flight_training_subprocess(tmp_path:
             "registry_path": ".chowder/runs.db",
             "seed": 123,
             "goal": {
-                "metrics": [{"name": "quality", "minimum": 0.0, "direction": "maximize"}],
+                "metrics": [{"name": "quality", "direction": "maximize"}],
                 "gpu_hour_budget": 2.0,
                 "max_parallel_candidates": 1,
                 "minimum_promotion_gain": 0.0,
@@ -400,6 +410,10 @@ def test_real_cancellation_terminates_an_in_flight_training_subprocess(tmp_path:
                 "experiment_id": "baseline",
                 "metrics": {"quality": 0.0},
                 "gpu_hours": 0.0,
+                # The goal lifecycle refuses a fixed baseline with no declared
+                # protocol identity. This smoke never compares protocols
+                # (legacy_unbounded), so a fixed placeholder digest suffices.
+                "evaluation_protocol_sha256": "0" * 64,
             },
             "experiment": {
                 "experiment_id": "real-sft",
@@ -415,6 +429,10 @@ def test_real_cancellation_terminates_an_in_flight_training_subprocess(tmp_path:
             },
             "config": {
                 "seed": 123,
+                # Plumbing smoke, not a goal test: an unbounded metric under the
+                # documented legacy mode keeps the parent's MET assessment from
+                # stopping the objective before any candidate trains.
+                "goal_lifecycle": {"mode": "legacy_unbounded"},
                 "backend": {
                     "schema_version": 1,
                     "type": "transformers-peft",
@@ -530,7 +548,7 @@ def test_real_training_reports_live_progress_events(tmp_path: Path):
             "registry_path": ".chowder/runs.db",
             "seed": 123,
             "goal": {
-                "metrics": [{"name": "quality", "minimum": 0.0, "direction": "maximize"}],
+                "metrics": [{"name": "quality", "direction": "maximize"}],
                 "gpu_hour_budget": 2.0,
                 "max_parallel_candidates": 1,
                 "minimum_promotion_gain": 0.0,
@@ -540,6 +558,10 @@ def test_real_training_reports_live_progress_events(tmp_path: Path):
                 "experiment_id": "baseline",
                 "metrics": {"quality": 0.0},
                 "gpu_hours": 0.0,
+                # The goal lifecycle refuses a fixed baseline with no declared
+                # protocol identity. This smoke never compares protocols
+                # (legacy_unbounded), so a fixed placeholder digest suffices.
+                "evaluation_protocol_sha256": "0" * 64,
             },
             "experiment": {
                 "experiment_id": "real-sft",
@@ -555,6 +577,10 @@ def test_real_training_reports_live_progress_events(tmp_path: Path):
             },
             "config": {
                 "seed": 123,
+                # Plumbing smoke, not a goal test: an unbounded metric under the
+                # documented legacy mode keeps the parent's MET assessment from
+                # stopping the objective before any candidate trains.
+                "goal_lifecycle": {"mode": "legacy_unbounded"},
                 "backend": {
                     "schema_version": 1,
                     "type": "transformers-peft",

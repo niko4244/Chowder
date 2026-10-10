@@ -27,6 +27,7 @@ from chowder.backends.transformers_worker import (
     _build_chat_example,
     _replay_sample_count,
     _resolve_target_modules,
+    _save_adapter_with_retry,
     _validate_chat_messages,
 )
 from chowder.executors import ExecutionContext
@@ -4326,3 +4327,53 @@ def test_real_offline_mode_fails_fast_with_zero_retries_for_an_uncached_model(tm
         transformers_worker.train(spec)
     elapsed = time.perf_counter() - started
     assert elapsed < 5.0  # would be 1.0s+ into backoff alone if it retried even once
+
+
+class _LockingModel:
+    """Stands in for a PEFT model whose first save_pretrained hits the Windows
+    file-lock failure safetensors actually raises: SafetensorError (os error
+    32), which is NOT an OSError subclass."""
+
+    def __init__(self, errors: list[Exception]) -> None:
+        self._errors = errors
+        self.save_calls = 0
+
+    def save_pretrained(self, output_dir: str, safe_serialization: bool) -> None:
+        self.save_calls += 1
+        if self._errors:
+            raise self._errors.pop(0)
+        (Path(output_dir) / "adapter_model.safetensors").write_bytes(b"x")
+
+
+def test_adapter_save_retries_safetensor_file_lock(tmp_path, monkeypatch):
+    SafetensorError = pytest.importorskip("safetensors").SafetensorError
+
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    model = _LockingModel(
+        [SafetensorError(
+            "Error while serializing: I/O error: The process cannot access "
+            "the file because it is being used by another process. (os error 32)"
+        )]
+    )
+    _save_adapter_with_retry(model, tmp_path)
+    assert model.save_calls == 2
+    assert (tmp_path / "adapter_model.safetensors").exists()
+
+
+def test_adapter_save_retry_is_bounded_and_reraises_other_errors(tmp_path, monkeypatch):
+    SafetensorError = pytest.importorskip("safetensors").SafetensorError
+
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    # A non-lock I/O failure must propagate on the first attempt.
+    other = _LockingModel([OSError(13, "Permission denied")])
+    with pytest.raises(OSError):
+        _save_adapter_with_retry(other, tmp_path)
+    assert other.save_calls == 1
+    # A lock that persists past the single retry must propagate on the second.
+    locked = _LockingModel([
+        SafetensorError("Error while serializing: I/O error: (os error 32)"),
+        SafetensorError("Error while serializing: I/O error: (os error 32)"),
+    ])
+    with pytest.raises(SafetensorError):
+        _save_adapter_with_retry(locked, tmp_path)
+    assert locked.save_calls == 2

@@ -10,4 +10,5 @@ artifacts/
 runs/
 *.safetensors
 *.gguf
+.chowder-spark-calib/
 unsloth_compiled_cache/

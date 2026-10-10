@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..local_model_compat import patch_transformers5_custom_model
 from .transformers_peft import TransformersPeftRunSpec
 from .transformers_worker import _resolve_dtype, _resolve_target_modules
 
@@ -52,6 +53,8 @@ def load_dry_run_model(spec: TransformersPeftRunSpec) -> tuple[Any, Any, Any, in
 
     if spec.trust_remote_code:
         raise RuntimeError("trust_remote_code is disabled")
+    if spec.local_custom_code_digests is not None:
+        patch_transformers5_custom_model(spec.base_model, spec.local_custom_code_digests)
 
     dtype = _resolve_dtype(torch, spec.precision)
     device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
@@ -59,7 +62,7 @@ def load_dry_run_model(spec: TransformersPeftRunSpec) -> tuple[Any, Any, Any, in
     tokenizer = AutoTokenizer.from_pretrained(
         spec.base_model,
         revision=spec.revision,
-        trust_remote_code=False,
+        trust_remote_code=spec.local_custom_code_digests is not None,
         local_files_only=spec.offline,
     )
     if tokenizer.pad_token_id is None:
@@ -70,7 +73,7 @@ def load_dry_run_model(spec: TransformersPeftRunSpec) -> tuple[Any, Any, Any, in
         tokenizer.pad_token = tokenizer.eos_token
 
     model_kwargs: dict[str, Any] = {
-        "trust_remote_code": False,
+        "trust_remote_code": spec.local_custom_code_digests is not None,
         "dtype": dtype,
         "local_files_only": spec.offline,
     }

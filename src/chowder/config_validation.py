@@ -73,6 +73,7 @@ def validate_transformers_backend_config(config: Mapping[str, Any]) -> None:
             "quantization",
             "precision",
             "trust_remote_code",
+            "local_custom_code_digests",
             "offline",
             "training",
             "lora",

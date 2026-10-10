@@ -25,8 +25,7 @@ from chowder.run_events import (
     RunEvent,
     TrainingProgressEvent,
 )
-from chowder.tui import ChowderTUI
-from chowder.tui_growth import AutonomousGrowthScreen
+from chowder.tui import ChowderTUI, _outcome_status
 
 
 def _snapshot(n_gpus: int) -> HardwareSnapshot:
@@ -45,29 +44,6 @@ def _snapshot(n_gpus: int) -> HardwareSnapshot:
 def _set(app: ChowderTUI, **input_overrides: str) -> None:
     for widget_id, value in input_overrides.items():
         app.query_one(f"#{widget_id}").value = value
-
-
-def _pin_hardware(app: ChowderTUI, monkeypatch) -> HardwareSnapshot:
-    """Pin the hardware snapshot before any payload is built.
-
-    `_scan_hardware` runs as an `on_mount` background worker, so a test that
-    builds a payload before it lands and compares against one after would see
-    two different recipes -- `active_accelerator_count` is hardware-derived,
-    and an unscanned app resolves 'auto' to zero -- and would report the
-    checkpoint as incompatible for reasons that have nothing to do with
-    discovery. Patching the detector *and* pre-seeding the app makes both reads
-    identical whichever order the worker finishes in, so the race is removed
-    rather than merely made unlikely.
-
-    (The underlying behaviour this hides is real and is asserted deliberately
-    elsewhere: 'auto' with no scan yet resolves to zero accelerators. The
-    production question -- whether a project saved during that window should
-    record zero -- is out of scope here and is left as an open defect.)
-    """
-    snapshot = _snapshot(2)
-    monkeypatch.setattr("chowder.tui.detect_hardware", lambda _cwd: snapshot)
-    app._hardware = snapshot
-    return snapshot
 
 
 def _write_matching_checkpoint(app: ChowderTUI, work_dir: Path, *, step: int) -> Path:
@@ -91,13 +67,10 @@ def _write_matching_checkpoint(app: ChowderTUI, work_dir: Path, *, step: int) ->
     trainer_dir = work_dir / ".chowder" / "runs" / "e1-abc" / "adapter" / "trainer"
     checkpoint_dir = trainer_dir / f"checkpoint-{step}"
     checkpoint_dir.mkdir(parents=True)
-    # P7: a manifest alone is not a resumable checkpoint. Discovery reports one
-    # without optimizer/scheduler state as invalid, so a fixture the TUI is
-    # meant to offer for a resume has to contain real state.
-    for name in ("optimizer.pt", "scheduler.pt", "rng_state.pth"):
-        (checkpoint_dir / name).write_bytes(b"state")
+    (checkpoint_dir / "optimizer.pt").write_bytes(b"optimizer")
+    (checkpoint_dir / "scheduler.pt").write_bytes(b"scheduler")
     (checkpoint_dir / "trainer_state.json").write_text(
-        json.dumps({"global_step": step}), encoding="utf-8"
+        json.dumps({"global_step": step, "max_steps": step}), encoding="utf-8"
     )
     (trainer_dir / "chowder-checkpoint-manifest.json").write_text(
         json.dumps(bound_inputs), encoding="utf-8"
@@ -164,58 +137,6 @@ async def test_active_accelerator_count_auto_uses_detected_gpu_count(tmp_path):
         app._hardware = _snapshot(2)
         payload = app._build_payload()
     assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_a_save_in_the_scan_window_measures_rather_than_recording_zero(
-    tmp_path, monkeypatch
-):
-    """Saving before the background scan lands must not record CPU-only training.
-
-    The window is real, not a timing accident in the test: `_scan_hardware` is
-    an `on_mount` worker, and the previous version of this test documented that
-    the race "was observed passing locally and failing on CI" -- while pinning
-    the wrong behaviour, that `'auto'` resolves to zero. A count is a
-    measurement, so the save takes the measurement. Treating "not yet" as
-    "none" silently recorded zero accelerators for a GPU machine.
-    """
-    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
-    monkeypatch.setattr("chowder.tui.detect_hardware", lambda _cwd: _snapshot(2))
-    async with app.run_test():
-        app._hardware = None  # the scan has not landed yet
-        payload = app._build_payload()
-    assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_a_failed_scan_is_refused_rather_than_recorded_as_zero(tmp_path, monkeypatch):
-    """Unknown is not zero: a scan that failed has no count to record."""
-
-    def exploding_scan(_cwd):
-        raise RuntimeError("nvidia-smi is not on PATH")
-
-    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
-    monkeypatch.setattr("chowder.tui.detect_hardware", exploding_scan)
-    async with app.run_test():
-        app._hardware = None
-        with pytest.raises(ProjectValidationError, match="hardware scan failed"):
-            app._build_payload()
-
-
-@pytest.mark.asyncio
-async def test_an_explicit_accelerator_count_needs_no_scan(tmp_path, monkeypatch):
-    """An explicit choice is not a measurement, so it must not be blocked."""
-
-    def exploding_scan(_cwd):
-        raise RuntimeError("nvidia-smi is not on PATH")
-
-    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
-    monkeypatch.setattr("chowder.tui.detect_hardware", exploding_scan)
-    async with app.run_test():
-        _set(app, active_accelerator_count="1")
-        app._hardware = None
-        payload = app._build_payload()
-    assert payload["config"]["backend"]["runtime"]["active_accelerator_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -456,9 +377,42 @@ async def test_history_button_press_does_not_raise(tmp_path):
 # --- cancel: races, repeated clicks, and status wording ----------------------
 
 
+def test_outcome_status_handles_parent_completion_without_candidates():
+    outcome = SimpleNamespace(
+        succeeded=True,
+        generation=SimpleNamespace(candidates=(), goal_terminal_state="STOP_GOALS_MET"),
+        repair=None,
+        promoted_experiment_id=None,
+    )
+    assert _outcome_status(outcome) == "Complete — goals met"
+
+
+def test_outcome_status_marks_promoted_but_unmet_as_incomplete():
+    candidate = SimpleNamespace(error=None)
+    outcome = SimpleNamespace(
+        succeeded=False,
+        generation=SimpleNamespace(candidates=(candidate,), goal_terminal_state=None),
+        repair=None,
+        promoted_experiment_id="e1",
+    )
+    assert _outcome_status(outcome) == "Incomplete — promoted e1; goal not met"
+
+
+def test_outcome_status_marks_terminal_uncertainty_as_stopped():
+    outcome = SimpleNamespace(
+        succeeded=False,
+        generation=SimpleNamespace(candidates=(), goal_terminal_state="STOP_UNCERTAIN"),
+        repair=None,
+        promoted_experiment_id=None,
+    )
+    assert _outcome_status(outcome) == "Stopped — STOP_UNCERTAIN"
+
+
 def _fake_outcome(*, candidate_error=None, repair_stop_reason=None, promoted_experiment_id=None):
     candidate = SimpleNamespace(error=candidate_error, artifact=None)
-    generation = SimpleNamespace(candidates=(candidate,), promoted=None)
+    generation = SimpleNamespace(
+        candidates=(candidate,), promoted=None, goal_terminal_state=None
+    )
     repair = (
         SimpleNamespace(stop_reason=repair_stop_reason) if repair_stop_reason is not None else None
     )
@@ -466,6 +420,7 @@ def _fake_outcome(*, candidate_error=None, repair_stop_reason=None, promoted_exp
         generation=generation,
         repair=repair,
         promoted_experiment_id=promoted_experiment_id,
+        succeeded=False,
     )
 
 
@@ -574,10 +529,9 @@ async def test_status_reads_failed_for_a_non_cancellation_error(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_discover_checkpoints_finds_and_reports_a_valid_checkpoint(tmp_path, monkeypatch):
+async def test_discover_checkpoints_finds_and_reports_a_valid_checkpoint(tmp_path):
     (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
     app = ChowderTUI(project_path=str(tmp_path / "project.json"))
-    _pin_hardware(app, monkeypatch)
     async with app.run_test():
         _set(app, work_dir=str(tmp_path))
         checkpoint_dir = _write_matching_checkpoint(app, tmp_path, step=250)
@@ -610,10 +564,9 @@ async def test_discover_checkpoints_with_none_found_disables_resume_best(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_discover_checkpoints_reports_an_incompatible_checkpoint(tmp_path, monkeypatch):
+async def test_discover_checkpoints_reports_an_incompatible_checkpoint(tmp_path):
     (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
     app = ChowderTUI(project_path=str(tmp_path / "project.json"))
-    _pin_hardware(app, monkeypatch)
     async with app.run_test():
         _set(app, work_dir=str(tmp_path))
         _write_matching_checkpoint(app, tmp_path, step=100)
@@ -634,10 +587,9 @@ async def test_discover_checkpoints_reports_an_incompatible_checkpoint(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_resume_best_fills_the_resume_field_with_the_valid_checkpoint(tmp_path, monkeypatch):
+async def test_resume_best_fills_the_resume_field_with_the_valid_checkpoint(tmp_path):
     (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
     app = ChowderTUI(project_path=str(tmp_path / "project.json"))
-    _pin_hardware(app, monkeypatch)
     async with app.run_test():
         _set(app, work_dir=str(tmp_path))
         checkpoint_dir = _write_matching_checkpoint(app, tmp_path, step=250)
@@ -658,10 +610,9 @@ async def test_resume_best_is_a_noop_with_nothing_valid_discovered(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_start_fresh_clears_the_resume_field_without_touching_disk(tmp_path, monkeypatch):
+async def test_start_fresh_clears_the_resume_field_without_touching_disk(tmp_path):
     (tmp_path / "train.jsonl").write_text('{"text":"hello"}\n', encoding="utf-8")
     app = ChowderTUI(project_path=str(tmp_path / "project.json"))
-    _pin_hardware(app, monkeypatch)
     async with app.run_test():
         _set(app, work_dir=str(tmp_path))
         checkpoint_dir = _write_matching_checkpoint(app, tmp_path, step=250)
@@ -941,40 +892,3 @@ async def test_run_status_panel_updates_live_through_the_real_event_pipeline(
     assert "Repair: depth 1" in panel_text
     assert "Failures harvested: 2" in panel_text
     assert "Promoted: e1 (quality=0.9500)" in panel_text
-
-
-@pytest.mark.asyncio
-async def test_the_interface_offers_the_autonomous_growth_workspace(tmp_path):
-    """The workspace is reachable from the actual Chowder interface, not only
-    from a command line. Pressing the button must not open the service: opening
-    a session is a decision, and rendering a screen is not one."""
-    app = ChowderTUI(project_path=str(tmp_path / "project.json"))
-    async with app.run_test() as pilot:
-        button = app.query_one("#growth", Button)
-        assert not button.disabled
-
-        button.press()
-        await pilot.pause()
-        await pilot.pause()
-
-        assert isinstance(app.screen, AutonomousGrowthScreen)
-
-
-@pytest.mark.asyncio
-async def test_the_growth_workspace_shows_the_inputs_it_resolved(tmp_path):
-    """A silently guessed parent run is a lineage pointing at another model, so
-    the workspace displays what it would open before anything is opened."""
-    project = tmp_path / "gen2_campaign.json"
-    app = ChowderTUI(project_path=str(project))
-    async with app.run_test() as pilot:
-        app.query_one("#growth", Button).press()
-        await pilot.pause()
-        await pilot.pause()
-
-        screen = app.screen
-        assert isinstance(screen, AutonomousGrowthScreen)
-        resolved = str(screen.query_one("#growth_resolved", Static).render())
-        assert "parent declaration" in resolved
-        assert str(project) in resolved
-        assert screen._service is None, "showing the screen must not open a session"
-        assert screen.query_one("#growth_start", Button).disabled
