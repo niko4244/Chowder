@@ -1,9 +1,7 @@
 # GEN2 prereg amendment 20 — 2026-10-17: the candidate's in-run evaluation runs at the declared throughput
 
-> **Status: DRAFT — not yet applied.** This document is the amendment
-> together with its execution steps. Apply it only after PR #229 (the code fix)
-> merges. Nothing in §D has been run, and `docs/gen2/gen2_campaign.json` still
-> names `prepared-v10`.
+> **Status: APPLIED 2026-10-17.** PR #229 merged as `7cf99ea`, and steps D2–D6
+> ran. The evidence is in §F. The Gen-2 run itself has not started (§E).
 
 This adds to the 2026-09-17 prereg and its amendments 1–19 and supersedes none
 of them.
@@ -141,3 +139,41 @@ tag to `notes`. Commit with the D4 evidence.
 - It does not address a11's access violation. If it recurs, it is a failed
   attempt under the campaign's own rules and should be investigated on its own.
 - It changes no judge code, and it is not evidence about a candidate.
+
+## F. Applied — evidence (2026-10-17)
+
+- **D1.** PR #229 merged (`7cf99ea`) with all six CI jobs green: Linux py3.10,
+  3.11 and 3.12, Windows py3.12, the real transformers PEFT CPU smoke, and
+  lint/build.
+- **D2.** `campaign-run.json` (sha256 `9160efd72ded…`) and
+  `cycle_compute_accounting.json` (`b5479f03d7f9…`) were moved, hashes
+  unchanged, to `<state_root>/superseded-2026-09-20/`. `_reserve_attempt`
+  takes the smallest unused `attempt-NN`, so the next run starts at
+  `attempt-13` and never reuses a01–a12.
+- **D6 (accepted).** `base_model_path` is now
+  `C:/llm-models/Qwen3.8-9B-abliterated-25-bf16`.
+  `model_content_digest` = `59e767aab1dabceef098ceb367d872ef735114412383ae8e622a95c64297555f`,
+  and all four shard sha256s equal their Hugging Face etags.
+- **D3.** `prepare` wrote `prepared-v11` in 24 s. The corpus is unchanged
+  (10,340 examples, 79,904 tokens, CLEAN, verifier pass 1.0).
+- **D4.**
+  - Every `project-template.json` suite has `batch_size: 16`.
+  - The `slices/` hashes are identical to `prepared-v10`.
+  - These files are identical once directory names are normalised:
+    `contamination`, `corpus-quality`, `data-registry`,
+    `evaluation-material`, `parent-profile`, `training-material`.
+  - Every remaining difference is explained:
+    - `project-template`: only the three `batch_size` fields.
+    - `parent-eval-report`: only the `date` stamp. Rows, scores and digests
+      are carried forward.
+    - `hardware-budget`: a fresh device probe, so timings differ.
+    - The prepared declaration: `base_model_path` (D6), `notes`, and
+      `retention_profile` values `-0.0625`. The last is amendment 15's sign
+      fix; `prepared-v10`'s prepared declaration predates it, while the repo
+      declaration already carried it.
+  - Readiness on both `prepared-v11/gen2_campaign.prepared.json` and
+    `docs/gen2/gen2_campaign.json`: **READY**, nineteen of nineteen checks
+    `ok`, no reason codes. The base digest took 43 s from NVMe; it took
+    321 s from F: in amendment 14.
+- **D5.** `docs/gen2/gen2_campaign.json` names `prepared-v11` for all eight
+  run-phase inputs, and its `notes` carry this amendment's tag.
