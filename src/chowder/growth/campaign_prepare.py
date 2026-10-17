@@ -1266,6 +1266,10 @@ def _write_project_template(
                     getattr(manifest.protection, "decoding", {}).get("max_new_tokens", 512)
                 ),
                 "use_chat_template": True,
+                # The arms were measured at the declared throughput, so the
+                # candidate's in-run evaluation must be too; omitted, the worker
+                # decodes one row per call (different tokens, ~16x slower).
+                "batch_size": int(manifest.evaluation_execution.batch_size),
             }
         )
     suite_names = [str(suite["name"]) for suite in suites]
