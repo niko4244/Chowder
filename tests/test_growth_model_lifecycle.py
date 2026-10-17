@@ -101,6 +101,44 @@ def test_a_calibrated_projection_charges_measured_training_and_the_in_run_evalua
     assert actual <= wall * 1.25
 
 
+def test_a_calibrated_projection_scales_with_the_recipes_effective_batch(tmp_path: Path) -> None:
+    """Gen-2 a15 trained 2 x 4 examples per step against a 1 x 1 calibration and
+    measured 33.3 s/step where the unscaled projection said 3.83: the recipe's
+    effective batch must scale the measured step."""
+    from chowder.growth.recipe_planner import RecipePlanner
+
+    lifecycle = calibrate_model_lifecycle(_training_result(tmp_path), _evaluation_result(tmp_path))
+    planner = RecipePlanner(budget=_budget(lifecycle), max_device_gpu_hours=9.0, max_wall_gpu_hours=9.0)
+    _, one = planner.project_cost(seq_len=2048, max_steps=100, examples_per_step=1)
+    _, eight = planner.project_cost(seq_len=2048, max_steps=100, examples_per_step=8)
+    eval_hours = lifecycle["in_run_eval_seconds"] / 3600.0
+    assert (eight - eval_hours) == pytest.approx(8 * (one - eval_hours))
+    # a15's measured 100 steps (3,332 s) sit within the 25% settlement tolerance.
+    assert 3332.32 / 3600.0 <= (eight - eval_hours) * 1.25
+
+
+def test_the_planner_fits_its_steps_to_the_ceiling_at_the_effective_batch(tmp_path: Path) -> None:
+    from chowder.growth.recipe_planner import RecipePlanner
+
+    lifecycle = calibrate_model_lifecycle(_training_result(tmp_path), _evaluation_result(tmp_path))
+    planner = RecipePlanner(budget=_budget(lifecycle), max_device_gpu_hours=2.0, max_wall_gpu_hours=2.0)
+
+    from chowder.growth.curriculum import CurriculumItem
+
+    item = CurriculumItem(
+        item_id="cur-1", skill="math.arithmetic", role="TARGET", priority=0.8, confidence=0.7,
+        weakness_evidence="measured", desired_improvement=0.1, preservation_risks=(),
+        source_strategy="verified_synthesis", example_count=10340, token_target=80_000,
+        difficulty_band="medium", verification_method="exact_match", training_type="sft",
+        evaluation_set="tier1", protected_regression_set=(),
+    )
+    recipes = planner.propose([item], count=1)
+    recipe = recipes[0]
+    assert recipe.batch_size * recipe.gradient_accumulation == 8
+    assert recipe.projected_wall_gpu_hours <= 2.0
+    assert recipe.max_steps < 344  # shrunk to fit, not silently overrun
+
+
 def test_without_a_calibration_the_synthetic_projection_is_unchanged() -> None:
     from chowder.growth.recipe_planner import RecipePlanner
 

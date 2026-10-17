@@ -36,7 +36,7 @@ LOAD_SECONDS = 5.0
 WALL_MULTIPLIER = 3.5
 
 
-def _project_cost(*, seq_len: int, max_steps: int) -> tuple[float, float]:
+def _project_cost(*, seq_len: int, max_steps: int, examples_per_step: int = 1) -> tuple[float, float]:
     device = (max_steps * STEP_COST + LOAD_SECONDS) / 3600.0
     return (device, device * WALL_MULTIPLIER)
 
