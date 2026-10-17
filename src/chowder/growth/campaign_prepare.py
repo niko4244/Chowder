@@ -1447,7 +1447,9 @@ def _write_project_template(
             },
             "evaluation": {
                 "type": "transformers-text",
-                "estimated_gpu_hours": round(evaluation_gpu_hours, 6),
+                # Unrounded: the cycle sums this with the training reservation
+                # and the engine refuses a lifecycle even 1e-7 over the budget.
+                "estimated_gpu_hours": evaluation_gpu_hours,
                 "precision": "bf16",
                 "quantization": "none",
                 "placement": "offload",
