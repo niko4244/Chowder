@@ -96,7 +96,8 @@ class Scenario:
         default_factory=lambda: DEFAULT_SKILL_SCORES
     )
     maximum_generations: int = 3
-    maximum_total_wall_gpu_hours: float = 6.0
+    #: `None` means room for four campaigns at the parent's declared ceiling.
+    maximum_total_wall_gpu_hours: float | None = None
     maximum_consecutive_non_promotions: int = 2
     maximum_same_target_attempts: int = 2
     structural_skills: tuple[str, ...] = ()
@@ -288,7 +289,11 @@ def policy_document(scenario: Scenario, parent: CampaignManifest) -> dict[str, A
     """A loop policy built from the parent declaration plus the scenario's limits."""
     return {
         "maximum_generations": scenario.maximum_generations,
-        "maximum_total_wall_gpu_hours": scenario.maximum_total_wall_gpu_hours,
+        "maximum_total_wall_gpu_hours": (
+            scenario.maximum_total_wall_gpu_hours
+            if scenario.maximum_total_wall_gpu_hours is not None
+            else 4 * parent.budget.wall_gpu_hours_ceiling_campaign
+        ),
         "maximum_consecutive_non_promotions": scenario.maximum_consecutive_non_promotions,
         "maximum_same_target_attempts": scenario.maximum_same_target_attempts,
         "maximum_candidates": len(parent.recipe_ids),
