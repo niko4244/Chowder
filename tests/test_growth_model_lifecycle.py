@@ -139,6 +139,22 @@ def test_the_planner_fits_its_steps_to_the_ceiling_at_the_effective_batch(tmp_pa
     assert recipe.max_steps < 344  # shrunk to fit, not silently overrun
 
 
+@pytest.mark.parametrize("ceiling, expected", [(0.75, 7200.0), (2.0, 9000.0), (2.5, 11250.0)])
+def test_the_attempt_timeout_never_kills_an_attempt_that_would_settle(
+    tmp_path: Path, ceiling: float, expected: float
+) -> None:
+    import dataclasses
+
+    from chowder.growth.campaign import CampaignManifest
+    from chowder.growth.campaign_runner import attempt_timeout_seconds
+
+    manifest = CampaignManifest.from_file(Path(__file__).resolve().parents[1] / "docs" / "gen2" / "gen2_campaign.json")
+    manifest = dataclasses.replace(
+        manifest, budget=dataclasses.replace(manifest.budget, wall_gpu_hours_ceiling_per_recipe=ceiling)
+    )
+    assert attempt_timeout_seconds(manifest) == pytest.approx(expected)
+
+
 def test_without_a_calibration_the_synthetic_projection_is_unchanged() -> None:
     from chowder.growth.recipe_planner import RecipePlanner
 
