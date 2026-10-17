@@ -104,6 +104,16 @@ def _render_chat_ids(
     return list(encoded["input_ids"] if hasattr(encoded, "keys") else encoded)
 
 
+#: Some templates (Qwen3) render an assistant turn at FINAL position with a
+#: leading generation-prompt-equivalent block -- an empty ``<think>\n\n</think>\n\n``
+#: -- that the same turn does not get when it is mid-conversation, so the
+#: through-render of a mid-conversation turn carries a bounded lead-in the
+#: full sequence does not have. The mask builder aligns by dropping the
+#: smallest such lead-in; the bound keeps a shifted accidental match
+#: implausible while covering real reasoning-model scaffolding blocks.
+_MAX_INJECTED_LEAD = 32
+
+
 def _build_chat_example(
     tokenizer: Any, messages: list[dict[str, str]], *, max_length: int, row_index: int
 ) -> dict[str, list[int]]:
@@ -118,6 +128,15 @@ def _build_chat_example(
     generated span, verified to be a real prefix of the full sequence before
     being trusted -- a template that isn't prefix-consistent raises rather
     than silently mislabeling.
+
+    Prefix-consistency is demanded exactly at the span start (the generation
+    prompt must be a real prefix of the full render). At the span end, a
+    bounded lead-in that some templates inject between the generation prompt
+    and a final-position assistant turn (Qwen3's empty think block) is
+    tolerated: the through-render is aligned by dropping the smallest such
+    lead-in after the prefix boundary so the remaining span becomes an exact,
+    in-bounds slice of the full render. Any larger disagreement still raises,
+    so a genuinely inconsistent template cannot silently mislabel.
     """
     full_ids = _render_chat_ids(tokenizer, messages, add_generation_prompt=False)
     labels = [-100] * len(full_ids)
@@ -128,17 +147,28 @@ def _build_chat_example(
         through_ids = _render_chat_ids(
             tokenizer, messages[: index + 1], add_generation_prompt=False
         )
-        if (
-            len(prefix_ids) > len(full_ids)
-            or len(through_ids) > len(full_ids)
-            or full_ids[: len(prefix_ids)] != prefix_ids
-            or full_ids[: len(through_ids)] != through_ids
-        ):
+        if len(prefix_ids) > len(full_ids) or full_ids[: len(prefix_ids)] != prefix_ids:
             raise RuntimeError(
                 f"chat dataset row {row_index}: chat template is not prefix-consistent "
                 "across turns; cannot compute a reliable completion-only loss mask"
             )
-        labels[len(prefix_ids) : len(through_ids)] = full_ids[len(prefix_ids) : len(through_ids)]
+        span: int | None = None
+        room = len(through_ids) - len(prefix_ids)
+        for lead in range(min(_MAX_INJECTED_LEAD, max(room - 1, 0)) + 1):
+            tail = through_ids[len(prefix_ids) + lead :]
+            end = len(prefix_ids) + len(tail)
+            if end > len(full_ids):
+                continue
+            if full_ids[len(prefix_ids) : end] == tail:
+                span = len(tail)
+                break
+        if span is None:
+            raise RuntimeError(
+                f"chat dataset row {row_index}: chat template is not prefix-consistent "
+                "across turns; cannot compute a reliable completion-only loss mask"
+            )
+        start = len(prefix_ids)
+        labels[start : start + span] = full_ids[start : start + span]
 
     full_ids = full_ids[:max_length]
     labels = labels[:max_length]

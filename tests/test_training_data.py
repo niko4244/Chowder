@@ -314,3 +314,63 @@ def test_build_chat_example_raises_when_truncation_removes_all_assistant_tokens(
     )
     with pytest.raises(RuntimeError, match="no assistant tokens remain after truncating"):
         _build_chat_example(tokenizer, messages, max_length=1, row_index=0)
+
+
+class _FinalTurnThinkTokenizer(_FakeTokenizer):
+    """Qwen3-shaped template: an assistant turn at FINAL position is rendered
+    with an injected empty-think block between the role marker and the turn's
+    content, while the same turn mid-conversation is not. Observed live on
+    Qwen/Qwen3-1.7B with multi-turn repair rows: the through-render of a
+    mid-conversation assistant turn carries `<think>\n\n</think>\n\n` that the
+    full render does not, so a strict exact-prefix check rejects the template
+    for data it actually renders consistently at the span start.
+    """
+
+    _THINK = [900, 901]
+
+    def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+        assert tokenize is True
+        ids: list[int] = []
+        for i, message in enumerate(messages):
+            marker = self._ROLE_MARKERS[message["role"]]
+            ids.append(marker)
+            if i == len(messages) - 1 and message["role"] == "assistant":
+                ids.extend(self._THINK)
+            ids.extend(ord(char) % 50 + 10 for char in message["content"])
+            ids.append(marker + 1)
+        if add_generation_prompt:
+            ids.append(self._ROLE_MARKERS["assistant"])
+        return ids
+
+
+def test_build_chat_example_masks_multi_turn_despite_final_turn_think_injection():
+    """Qwen3-style final-position think injection must not poison the mask.
+    The masked span is always exactly the assistant's own tokens *as the full
+    render contains them*: for a mid-conversation assistant turn the injected
+    block exists only in the through-render (where the turn would be final)
+    and is aligned away; for the genuinely final turn the block IS part of
+    the training sequence, so it is masked in. Either way nothing is trained
+    on that the full render does not contain, and nothing the render contains
+    inside the span is left masked out."""
+    tokenizer = _FinalTurnThinkTokenizer()
+    messages = _validate_chat_messages(
+        [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+            {"role": "user", "content": "c"},
+            {"role": "assistant", "content": "d"},
+        ],
+        row_index=0,
+    )
+    example = _build_chat_example(tokenizer, messages, max_length=100, row_index=0)
+    full_ids = _render_chat_ids(tokenizer, messages, add_generation_prompt=False)
+    assert example["input_ids"] == full_ids
+    unmasked = [tid for tid, label in zip(example["input_ids"], example["labels"])
+                if label != -100]
+    # turn 1 (mid): content char + end marker -- the injected block is absent
+    # from the full render, so it is excluded.
+    # turn 3 (final): the full render itself carries the think block there.
+    assert unmasked == [
+        ord("b") % 50 + 10, 301,
+        *_FinalTurnThinkTokenizer._THINK, ord("d") % 50 + 10, 301,
+    ]
