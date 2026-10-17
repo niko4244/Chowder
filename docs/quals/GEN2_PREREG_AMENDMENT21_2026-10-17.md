@@ -92,3 +92,43 @@ The declaration now names `prepared-v13`, produced the same way. Its
 reservations are 0.9755711111 + 1.0244288889 = 2.0 exactly. The refusal
 record is archived to `<state_root>/superseded-2026-10-17-a13/`. No ceiling
 or gate changed.
+
+## F. Final envelope (supersedes the 2.0 / 5.0 figures above)
+
+The second run (attempt-15) trained the planner's actual recipe shape:
+batch 2 × gradient accumulation 4, i.e. 8 examples per step. The a12
+calibration was measured at 1 × 1. At 8 examples per step it measured
+**33.3 s/step**: 100 steps in 3,332 s, including load. The unscaled projection
+was 3.83.
+
+At 344 steps the attempt would have taken ~3.2 h, past the 7,200 s attempt
+timeout, so it was **stopped at step ~100** before it could waste the window.
+No campaign record was written, and attempt-15 keeps its evidence.
+
+Two code fixes in PR #231:
+- `e32c4d5`: `project_cost` scales the calibrated step by the recipe's
+  effective batch.
+- The attempt timeout is derived from the per-recipe ceiling,
+  `max(7200, ceiling × 3600 × 1.25)`, so it can never kill an attempt that
+  would have settled.
+
+With the batch-scaled projection, the planner fits its steps to the ceiling.
+A 2.0 ceiling left no headroom for the 9% gap between the scaled calibration
+and a15's measured rate (2.06 h > 2.0), so the final envelope is:
+
+| ceiling | prereg | final |
+|---|---:|---:|
+| per-recipe device / wall | 0.30 / 0.75 | **2.5 / 2.5** |
+| campaign device / wall | 0.60 / 1.50 | **7.0 / 7.0** |
+
+`prepared-v15`:
+- the planner fits **140 steps × 8 examples = 1,120 examples** per recipe
+  (a12 trained 344 × 1);
+- projected 2.217 GPU-h, about 2.32 at a15's measured rate, which is below
+  the 2.5 ceiling and the ×1.25 settlement tolerance;
+- attempt timeout 11,250 s;
+- campaign projection 4.433 GPU-h, plus the candidate arm, against 7.0;
+- readiness **READY 19/19**.
+
+The declaration names `prepared-v15`. Again, no slice, threshold, retention
+bound or decoding parameter moves.
