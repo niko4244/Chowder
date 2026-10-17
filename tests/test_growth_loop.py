@@ -200,7 +200,7 @@ def test_session_spend_is_the_sum_of_the_measured_campaign_costs(tmp_path: Path)
 
     assert len(executor.calls) == 2
     assert report.budget["spent_wall_gpu_hours"] == pytest.approx(0.42 + 0.37)
-    assert report.budget["remaining_wall_gpu_hours"] == pytest.approx(6.0 - 0.79)
+    assert report.budget["remaining_wall_gpu_hours"] == pytest.approx(4 * parent_manifest(tmp_path).budget.wall_gpu_hours_ceiling_campaign - 0.79)
 
 
 def test_the_loop_never_exceeds_the_policy_generation_limit(tmp_path: Path) -> None:

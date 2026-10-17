@@ -195,7 +195,7 @@ def test_run_reaches_a_terminal_refusal_without_launching_training(
     assert payload["decision_ok"] is False
     assert payload["generations"] == [], "no campaign may be recorded as run"
     assert payload["budget"]["spent_wall_gpu_hours"] == 0.0
-    assert payload["budget"]["remaining_wall_gpu_hours"] == 6.0
+    assert payload["budget"]["remaining_wall_gpu_hours"] == json.loads(policy_path.read_text(encoding="utf-8"))["maximum_total_wall_gpu_hours"]
 
     # The next generation was composed from evidence -- one attempt directory,
     # named by the builder's one owner of cycle identity -- and nothing in it is

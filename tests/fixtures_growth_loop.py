@@ -42,7 +42,8 @@ def policy_from(parent: CampaignManifest, **overrides: Any) -> LoopPolicy:
     """An immutable loop policy that agrees with ``parent`` unless overridden."""
     document: dict[str, Any] = {
         "maximum_generations": 3,
-        "maximum_total_wall_gpu_hours": 6.0,
+        # Room for four campaigns at the parent's declared ceiling (was the literal 6.0 = 4 x 1.5).
+        "maximum_total_wall_gpu_hours": 4 * parent.budget.wall_gpu_hours_ceiling_campaign,
         "maximum_consecutive_non_promotions": 2,
         "maximum_same_target_attempts": 2,
         "maximum_candidates": len(parent.recipe_ids),
