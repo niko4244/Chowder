@@ -61,6 +61,7 @@ from chowder.evals.result import (
     BenchmarkRun,
     EvalReport,
 )
+from chowder.evaluators.scoring import OBSERVED_SCORINGS
 from chowder.evaluators.transformers_text import (
     EvalSuiteSpec,
     TransformersTextEvalSpec,
@@ -112,6 +113,17 @@ _PROMPT_POLICIES: Mapping[str, bool] = {
 }
 
 
+#: The metric a readout that *observes* the run reports, derived from the
+#: readout's own name (``eos_termination`` reports ``eos_termination_rate``).
+#: The observed vocabulary has one owner -- ``evaluators.scoring.OBSERVED_SCORINGS``
+#: -- and the rule below is the only thing relating it to a row's label, so
+#: neither declaration can be changed without the other being checked
+#: (reported-metric audit R3).
+
+def _observed_metric(scoring: str) -> str:
+    return f"{scoring}_rate"
+
+
 @dataclass(frozen=True)
 class SuiteMaterial:
     """How one declared benchmark is measured: the dataset and how to score it."""
@@ -144,6 +156,33 @@ class SuiteMaterial:
             raise CandidateEvaluationRefusal(
                 f"{source}: evaluation suite {qualified_id!r} declares an empty name"
             )
+        scoring = str(document.get("scoring", "normalized_exact_match"))
+        metric = str(document.get("metric", "accuracy"))
+        # The readout and the label are two declarations of one fact, and nothing
+        # used to relate them: a suite could declare an *observed* readout (which
+        # scores what the run did, not how well it answered) and label its row
+        # with an answer-score name, and both declarations were accepted. The
+        # two directions are refused here -- an observed readout must be labelled
+        # with the rate it reports, and a rate name must come from an observed
+        # readout -- because a row whose name disagrees with its readout is a
+        # measurement of a quantity nobody measured (reported-metric audit R3).
+        observed_metrics = {_observed_metric(observed) for observed in OBSERVED_SCORINGS}
+        if scoring in OBSERVED_SCORINGS and metric != _observed_metric(scoring):
+            raise CandidateEvaluationRefusal(
+                f"{source}: evaluation suite {qualified_id!r} declares the observed "
+                f"readout {scoring!r}, which reports {_observed_metric(scoring)!r}, "
+                f"but labels its row {metric!r}; an observation of the run is not "
+                "an answer score, and a row must be named for what was measured"
+            )
+        if scoring not in OBSERVED_SCORINGS and metric in observed_metrics:
+            raise CandidateEvaluationRefusal(
+                f"{source}: evaluation suite {qualified_id!r} labels its row "
+                f"{metric!r}, which only the observed readout "
+                f"{[observed for observed in OBSERVED_SCORINGS if _observed_metric(observed) == metric][0]!r} "
+                f"reports, but declares the answer-scoring readout {scoring!r}; "
+                "declaring one and labelling the other would put a name on a "
+                "quantity this readout does not compute"
+            )
         return cls(
             benchmark_qualified_id=qualified_id,
             # The suite name is what the worker names its predictions file
@@ -151,10 +190,10 @@ class SuiteMaterial:
             # one suite never has to be described twice.
             name=name or qualified_id.split("@", 1)[0],
             dataset=Path(dataset),
-            scoring=str(document.get("scoring", "normalized_exact_match")),
+            scoring=scoring,
             prompt_field=str(document.get("prompt_field", "prompt")),
             expected_field=str(document.get("expected_field", "expected")),
-            metric=str(document.get("metric", "accuracy")),
+            metric=metric,
         )
 
 
