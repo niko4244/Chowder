@@ -1528,7 +1528,25 @@ def _load_hardware_budget(manifest: CampaignManifest) -> HardwareBudget:
         },
         measured_load_seconds=float(document.get("measured_load_seconds", 0.0)),
         wall_multiplier=float(document.get("wall_multiplier", 3.5)),
+        model_lifecycle=_model_lifecycle(document.get("model_lifecycle"), path),
     )
+
+
+def _model_lifecycle(value: Any, path: Path) -> Mapping[str, Any] | None:
+    """The hardware budget's measured model lifecycle, refused if malformed."""
+    if value is None:
+        return None
+    required = ("train_seconds_per_step", "measured_seq_len", "in_run_eval_seconds")
+    if not isinstance(value, Mapping) or any(
+        not isinstance(value.get(key), (int, float)) or isinstance(value.get(key), bool)
+        or value.get(key) <= 0
+        for key in required
+    ):
+        raise CampaignRunRefusal(
+            f"hardware budget {path} declares a model_lifecycle without positive "
+            f"{', '.join(required)}"
+        )
+    return dict(value)
 
 
 def envelope_for(manifest: CampaignManifest) -> GrowthEnvelope:
@@ -1626,9 +1644,19 @@ def build_local_training_fn(
         # and came within 34 s of this bound while its evaluation was still
         # running. The declared suites measure in 3706 s (the parent arm), so an
         # attempt needs ~5500 s. 7200 s is the worker timeout the arm
-        # measurements already run under, with margin over that sum.
-        timeout_seconds=7200.0,
+        # measurements already run under, with margin over that sum. A larger
+        # declared envelope raises it: settlement refuses anything over the
+        # per-recipe wall ceiling anyway, so the timeout only has to stop a
+        # runaway, never an attempt that would settle (ceiling x 1.25, the
+        # settlement tolerance).
+        timeout_seconds=attempt_timeout_seconds(manifest),
     )
+
+
+def attempt_timeout_seconds(manifest: CampaignManifest) -> float:
+    """One attempt's process timeout: never below 7200 s, and never below the
+    declared per-recipe wall ceiling at the settlement tolerance."""
+    return max(7200.0, float(manifest.budget.wall_gpu_hours_ceiling_per_recipe) * 3600.0 * 1.25)
 
 
 class _BackendStampedTrainingFn:
