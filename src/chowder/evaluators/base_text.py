@@ -19,6 +19,7 @@ from .scorer_identity import scorer_identity
 from ..executors import EvaluationOutcome, ExecutionContext
 from ..protocol import protocol_fingerprint
 from ..provenance import sha256_file
+from ..local_model_compat import verify_local_custom_code
 from .transformers_text import EvalSuiteSpec
 
 
@@ -39,13 +40,29 @@ class BaseTextEvalSpec:
     seed: int = 1
     timeout_seconds: float | None = None
     trust_remote_code: bool = False
+    local_custom_code_digests: dict[str, str] | None = None
     offline: bool = False
+    # Parent-adapter continuation projects must be baselined against the
+    # adapter they continue from, not the dense base: a candidate that
+    # regresses its parent must not "promote" against a weaker reference
+    # (the RFT-2 finding -- parent 0.73, candidate 0.54, still promoted
+    # because the auto-baseline measured the base model at 0.39). None =
+    # legacy behavior (measure the untouched base); a path = attach that
+    # adapter before scoring. Like the candidate evaluator, the adapter is
+    # the *treatment* being measured, so it is deliberately excluded from
+    # the protocol fingerprint.
+    adapter_dir: str | None = None
 
     def __post_init__(self) -> None:
         if not self.base_model.strip():
             raise ValueError("baseline evaluation base_model is required")
         if not self.suites:
             raise ValueError("baseline evaluation requires at least one suite")
+        if self.adapter_dir is not None and not self.adapter_dir.strip():
+            raise ValueError(
+                "baseline evaluation adapter_dir must be None or a non-empty path; "
+                "an empty string would silently request nothing"
+            )
         if len({suite.name for suite in self.suites}) != len(self.suites):
             raise ValueError("baseline evaluation suite names must be unique")
         if self.precision not in {"auto", "bf16", "fp16", "fp32"}:
@@ -57,6 +74,8 @@ class BaseTextEvalSpec:
             raise ValueError("baseline timeout_seconds must be positive")
         if self.trust_remote_code:
             raise ValueError("trust_remote_code is disabled for baseline evaluation")
+        if self.local_custom_code_digests is not None:
+            verify_local_custom_code(self.base_model, self.local_custom_code_digests)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -145,8 +164,37 @@ class BaseTextEvalSpec:
                 else None
             ),
             trust_remote_code=bool(evaluation.get("trust_remote_code", False)),
+            local_custom_code_digests=(
+                dict(evaluation["local_custom_code_digests"])
+                if evaluation.get("local_custom_code_digests") is not None
+                else None
+            ),
             offline=bool(evaluation.get("offline", backend.get("offline", False))),
+            adapter_dir=cls._parent_adapter_dir(backend),
         )
+
+    @staticmethod
+    def _parent_adapter_dir(backend: Mapping[str, Any]) -> str | None:
+        """Resolve ``backend.parent_adapter.path`` when the config declares one.
+
+        A continuation project trains *from* an existing adapter, so its honest
+        baseline is that adapter re-measured under this exact protocol -- not
+        the dense base underneath it. The digest key (``sha256``) is validated
+        for shape here; the worker verifies the directory itself via the
+        adapter liveness guard before scoring.
+        """
+        parent = backend.get("parent_adapter")
+        if not isinstance(parent, Mapping):
+            return None
+        path = parent.get("path")
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("backend.parent_adapter.path must be a non-empty string when present")
+        sha = parent.get("sha256")
+        if not isinstance(sha, str) or len(sha) != 64:
+            raise ValueError(
+                "backend.parent_adapter.sha256 must be a 64-char digest when a parent_adapter path is declared"
+            )
+        return str(Path(path).resolve())
 
 
 class BaseModelTextEvaluator:
@@ -315,6 +363,7 @@ class BaseModelTextEvaluator:
             "placement": spec.placement,
             "device": runtime.get("device"),
             "seed": spec.seed,
+            "local_custom_code_digests": spec.local_custom_code_digests,
             "versions": dict(versions),
             "suites": [
                 {

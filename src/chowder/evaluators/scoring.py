@@ -46,10 +46,14 @@ from typing import Any, Mapping
 
 __all__ = [
     "OBSERVED_SCORINGS",
+    "SAMPLE_SEPARATOR",
     "final_answer",
     "final_number",
+    "majority_vote_final_number",
     "normalize",
     "observed_score",
+    "reasoning_answer",
+    "reasoning_final_number",
     "score",
 ]
 
@@ -112,8 +116,96 @@ def final_number(text: str) -> str | None:
     return raw or None
 
 
+def reasoning_answer(prediction: str) -> str:
+    """Extract the answer span for templates that open ``<think>`` themselves.
+
+    Spark-X2.5-style chat templates end the generation prompt with ``<think>``
+    already emitted, so the model's generation begins by CLOSING thinking:
+    ``</think>answer`` (sometimes followed by a trailing ``</think>`` as its
+    end-of-turn marker). For that shape the answer span is between the FIRST
+    ``</think>`` and the NEXT one (or end of generation) -- taking everything
+    after the LAST marker, as :func:`final_answer` does, reads the empty tail
+    after the trailing marker and scores a correct answer as a miss.
+
+    The strict budget rule is unchanged: a prediction with no ``</think>`` at
+    all but an unclosed ``<think>`` means the generation was exhausted
+    mid-reasoning, so there is no answer span and this extraction is empty.
+    A prediction with neither marker is answered whole (non-thinking output).
+    """
+    if "</think>" in prediction:
+        after = prediction.split("</think>", 1)[1]
+        if "</think>" in after:
+            return after.split("</think>", 1)[0]
+        return after
+    if "<think>" in prediction:
+        return ""
+    return prediction
+
+
+def reasoning_final_number(prediction: str) -> str | None:
+    """Final number within the reasoning answer span.
+
+    Same answer-span extraction as :func:`reasoning_answer`, then the
+    :func:`final_number` comparison rule. Exists because ``final_number_match``
+    builds on :func:`final_answer`, which takes everything after the LAST
+    ``</think>`` -- and on templates that emit a trailing ``</think>``
+    end-of-turn marker after the answer (Spark-X2.5), that tail is empty, so a
+    correct answer scores as a miss. Here the number is read from the span
+    between the first and next ``</think>``, which is where the answer lives
+    for that template shape.
+    """
+    return final_number(reasoning_answer(prediction))
+
+
+#: Joins the K sampled chains of one self-consistency row in its prediction
+#: text. It must not collide with real model output: a literal "\n<sample>\n"
+#: is not a string a GSM8K-style answer emits, and the worker's
+#: ``skip_special_tokens`` decode never produces it.
+SAMPLE_SEPARATOR = "\n<sample>\n"
+
+
+def majority_vote_final_number(prediction: str, expected: str) -> float:
+    """Score one self-consistency row: majority vote over K sampled chains.
+
+    The row's ``prediction`` is K chains joined by :data:`SAMPLE_SEPARATOR`;
+    each chain's final number is extracted with the same reasoning-span rule
+    as :func:`reasoning_final_number` (per chain, so a chain that overruns
+    its own budget scores as its own miss rather than poisoning the others).
+    The row is correct when a strict majority of chains -- ``> K / 2`` --
+    extracted the expected number. A tie (only possible when fewer than half
+    the chains produced the answer) is a miss, and a row with no majority is
+    scored against the single-shot rule, not the vote.
+    """
+    chains = prediction.split(SAMPLE_SEPARATOR)
+    votes: dict[str, int] = {}
+    for chain in chains:
+        got = final_number(reasoning_answer(chain))
+        if got is not None:
+            votes[got] = votes.get(got, 0) + 1
+    want = final_number(expected)
+    if want is None or not votes:
+        return 0.0
+    top, count = max(votes.items(), key=lambda kv: (kv[1], kv[0] == want))
+    if count * 2 <= len(chains):
+        return 0.0
+    return float(top == want)
+
+
 def score(prediction: str, expected: str, scoring: str) -> float:
     """Score one prediction. Thinking-aware extraction applies to every mode."""
+    if scoring == "reasoning_answer_match":
+        return float(normalize(reasoning_answer(prediction)) == normalize(expected))
+    if scoring == "reasoning_final_number_match":
+        # Same reasoning-span rule as reasoning_answer_match, with the
+        # final-number comparison for arithmetic tasks: a model that shows
+        # its work cannot exact-match a bare number.
+        got = reasoning_final_number(prediction)
+        want = final_number(expected)
+        if got is None or want is None:
+            return 0.0
+        return float(got == want)
+    if scoring == "self_consistency_final_number_match":
+        return majority_vote_final_number(prediction, expected)
     answer = final_answer(prediction)
     if scoring == "exact_match":
         return float(answer.strip() == expected.strip())

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 6
 # SQLite application_id is a 32-bit marker stored in the database header.
 # 0x43484F57 == ASCII "CHOW".
 CHOWDER_APPLICATION_ID = 0x43484F57
@@ -56,39 +56,6 @@ def _migration_2_execution_incidents(connection: sqlite3.Connection) -> None:
     )
 
 
-def _migration_4_teacher_signals(connection: sqlite3.Connection) -> None:
-    """Append-only ledger of teacher signals (Teacher Fabric Slice B).
-
-    One row per *distinct* stored signal, keyed by the store's content
-    address (digest over request_digest + payload content hash). This is
-    the evidence record, not the cache: payload bytes live in the
-    TeacherSignalStore's content-addressed files, and this table records
-    what was stored, immutably (rows go in once via `_insert_immutable`;
-    cache eviction never rewrites or removes them).
-    """
-    connection.execute(
-        """CREATE TABLE IF NOT EXISTS teacher_signals (
-               entry_key TEXT PRIMARY KEY,
-               artifact_digest TEXT NOT NULL,
-               request_digest TEXT NOT NULL,
-               payload_file_sha256 TEXT NOT NULL,
-               signal_kind TEXT NOT NULL,
-               teacher_id TEXT NOT NULL,
-               model_revision TEXT NOT NULL,
-               tokenizer_identity_sha256 TEXT,
-               signal_id TEXT NOT NULL,
-               stored_at TEXT NOT NULL,
-               metadata_json TEXT NOT NULL
-           )"""
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_teacher_signals_request ON teacher_signals(request_digest)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_teacher_signals_teacher ON teacher_signals(teacher_id)"
-    )
-
-
 def _migration_3_recursive_recovery_claims(connection: sqlite3.Connection) -> None:
     """Fence recursive-repair recovery so only one controller may resume."""
 
@@ -114,11 +81,74 @@ def _migration_3_recursive_recovery_claims(connection: sqlite3.Connection) -> No
     )
 
 
+def _migration_4_goal_lifecycle(connection: sqlite3.Connection) -> None:
+    """Persist frozen objective identity, assessments, and terminal decisions."""
+
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS goal_objectives (
+               objective_version TEXT PRIMARY KEY,
+               identity_json TEXT NOT NULL,
+               goal_json TEXT NOT NULL,
+               created_at TEXT NOT NULL
+           )"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS goal_assessments (
+               assessment_id TEXT PRIMARY KEY,
+               objective_version TEXT NOT NULL,
+               artifact_identity TEXT NOT NULL,
+               status TEXT NOT NULL,
+               assessment_json TEXT NOT NULL,
+               recorded_at TEXT NOT NULL,
+               FOREIGN KEY(objective_version) REFERENCES goal_objectives(objective_version)
+           )"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS goal_terminal_events (
+               event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+               objective_version TEXT NOT NULL,
+               terminal_state TEXT NOT NULL,
+               artifact_identity TEXT NOT NULL,
+               recorded_at TEXT NOT NULL,
+               FOREIGN KEY(objective_version) REFERENCES goal_objectives(objective_version)
+           )"""
+    )
+
+
+def _migration_5_goal_protocol_migrations(connection: sqlite3.Connection) -> None:
+    """Persist explicit human-approved legacy protocol-contract migrations."""
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS goal_objective_migrations (
+               migration_id TEXT PRIMARY KEY,
+               source_objective_version TEXT NOT NULL,
+               target_objective_version TEXT NOT NULL UNIQUE,
+               source_identity_json TEXT NOT NULL,
+               target_identity_json TEXT NOT NULL,
+               protocol_contract_digest TEXT NOT NULL,
+               approval_json TEXT NOT NULL,
+               provenance_json TEXT NOT NULL,
+               recorded_at TEXT NOT NULL,
+               FOREIGN KEY(source_objective_version) REFERENCES goal_objectives(objective_version),
+               FOREIGN KEY(target_objective_version) REFERENCES goal_objectives(objective_version)
+           )"""
+    )
+
+
+def _migration_6_timestamp_bound_migration_hashes(connection: sqlite3.Connection) -> None:
+    """Version migration hashes so legacy records remain verifiable."""
+    connection.execute(
+        "ALTER TABLE goal_objective_migrations "
+        "ADD COLUMN migration_hash_version INTEGER NOT NULL DEFAULT 1"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "baseline-version-marker", _migration_1_baseline),
     Migration(2, "execution-incidents", _migration_2_execution_incidents),
     Migration(3, "recursive-recovery-claims", _migration_3_recursive_recovery_claims),
-    Migration(4, "teacher-signals", _migration_4_teacher_signals),
+    Migration(4, "goal-lifecycle", _migration_4_goal_lifecycle),
+    Migration(5, "goal-protocol-contract-migrations", _migration_5_goal_protocol_migrations),
+    Migration(6, "timestamp-bound-migration-hashes", _migration_6_timestamp_bound_migration_hashes),
 )
 
 

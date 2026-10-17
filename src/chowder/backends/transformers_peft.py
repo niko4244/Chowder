@@ -32,6 +32,7 @@ from ..executors import CostEstimate, ExecutionContext, TrainingArtifact
 from ..memory import HardwareProfile
 from ..models import Experiment
 from ..provenance import sha256_directory, sha256_file
+from ..local_model_compat import verify_local_custom_code
 from ..resume_state import (
     CheckpointInventory,
     assert_resumable,
@@ -268,6 +269,7 @@ class TransformersPeftRunSpec:
     seed: int = 1
     timeout_seconds: float | None = None
     trust_remote_code: bool = False
+    local_custom_code_digests: dict[str, str] | None = None
     offline: bool = False
     save_strategy: str = "no"
     save_steps: int = 0
@@ -358,6 +360,8 @@ class TransformersPeftRunSpec:
             raise ValueError("timeout_seconds must be positive")
         if self.trust_remote_code:
             raise ValueError("trust_remote_code is disabled for autonomous Chowder execution")
+        if self.local_custom_code_digests is not None:
+            verify_local_custom_code(self.base_model, self.local_custom_code_digests)
         if self.save_strategy not in {"no", "steps", "epoch"}:
             raise ValueError(f"unsupported save_strategy: {self.save_strategy}")
         if self.save_strategy == "steps" and self.save_steps <= 0:
@@ -565,6 +569,11 @@ class TransformersPeftRunSpec:
                 else None
             ),
             trust_remote_code=bool(backend.get("trust_remote_code", False)),
+            local_custom_code_digests=(
+                dict(backend["local_custom_code_digests"])
+                if backend.get("local_custom_code_digests") is not None
+                else None
+            ),
             offline=bool(backend.get("offline", False)),
             save_strategy=str(training.get("save_strategy", "no")),
             save_steps=int(training.get("save_steps", 0)),

@@ -122,6 +122,7 @@ def _project_payload(root: Path, *, base: Path, train: Path, holdout: Path, **kn
                 "router_healing": knobs,
             },
             "evaluation": {"type": ROUTER_HEALING_ENGINE, "eval_batches": 2},
+            "goal_lifecycle": {"mode": "legacy_unbounded"},
         },
     }
 
