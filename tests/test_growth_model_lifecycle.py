@@ -151,11 +151,28 @@ def test_the_template_reserves_the_measured_in_run_evaluation(tmp_path: Path) ->
     material.write_text(json.dumps({"suites": [{"name": "math500", "dataset": "m.jsonl"}]}), encoding="utf-8")
     path = _write_project_template(
         manifest, tmp_path, evaluation_material_path=material, parent_eval_path=parent_eval,
-        evaluation_gpu_hours=1.0244,
+        evaluation_gpu_hours=3687.944 / 3600.0,  # the measured in-run evaluation
     )
     template = json.loads(path.read_text(encoding="utf-8"))
-    assert template["config"]["evaluation"]["estimated_gpu_hours"] == pytest.approx(1.0244)
-    assert template["experiment"]["estimated_gpu_hours"] == pytest.approx(2.0 - 1.0244)
+    evaluation = template["config"]["evaluation"]["estimated_gpu_hours"]
+    training = template["experiment"]["estimated_gpu_hours"]
+    assert evaluation == pytest.approx(3687.944 / 3600.0)
+    assert training == pytest.approx(2.0 - 3687.944 / 3600.0)
+
+
+def test_the_two_reservations_fit_the_engine_budget_exactly(tmp_path: Path) -> None:
+    """Gen-2 attempt-13: a 6-decimal rounded evaluation reserve made training +
+    evaluation sum to 2.0000001 against a 2.0 budget, and the engine refused the
+    lifecycle before a single step. Reserve and engine must agree to the bit."""
+    test_the_template_reserves_the_measured_in_run_evaluation(tmp_path)
+    template = json.loads((tmp_path / "project-template.json").read_text(encoding="utf-8"))
+    training = template["experiment"]["estimated_gpu_hours"]
+    evaluation = template["config"]["evaluation"]["estimated_gpu_hours"]
+    budget = template["goal"]["gpu_hour_budget"]
+    # The engine's own rule (engine.resize_reservation): delta over the old
+    # reservation may not exceed the remaining budget by more than 1e-12.
+    remaining = budget - training
+    assert (training + evaluation) - training <= remaining + 1e-12
 
 
 def test_the_runner_refuses_a_malformed_lifecycle(tmp_path: Path) -> None:
