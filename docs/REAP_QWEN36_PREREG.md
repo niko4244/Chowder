@@ -137,3 +137,18 @@ threshold changes.
 Storage: `dense` Q8_0 on C:, `reap128` Q8_0 on I:, `random128` Q8_0 on G:.
 G: is USB, which only affects load time, because weights are resident while
 serving.
+
+## Amendment 3 (2026-10-17, before any arm GGUF was written): back to the §2 route
+
+Amendment 1's direct `--outtype q8_0` route quantizes in single-threaded
+Python, and measured ~2.8 MB/s, about 3.7 h for one arm. G: now has room for
+BF16 intermediates, so every arm follows the original §2 route:
+
+1. `convert_hf_to_gguf.py --no-mtp --outtype bf16` to G:;
+2. `llama-quantize <bf16> Q8_0` for the quality gates;
+3. `llama-quantize <bf16> Q4_K_M` for the fit/speed gate, for `dense` and
+   `reap128`.
+
+Step 3 quantizes from BF16 rather than requantizing from Q8_0 as amendment 2
+said, which is strictly less rounding. It is applied identically to both
+arms. No gate or threshold changes.
