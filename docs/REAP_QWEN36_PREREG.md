@@ -105,3 +105,14 @@ Reported only, not gated:
 - The dense arm needs `--n-cpu-moe` offload on 16 GB, so its speed number
   includes PCIe/CPU expert traffic. That is the configuration a user would
   actually run, which is why the gate compares against it.
+
+## Amendment 1 (2026-10-17, before any arm was converted): Q8_0 is written by the converter
+
+§2 said `convert_hf_to_gguf.py --no-mtp` followed by `llama-quantize Q8_0`.
+That route needs a full BF16 GGUF intermediate (~70 GB for `dense`), which the
+free disk cannot hold. Every arm is therefore written by
+`convert_hf_to_gguf.py --no-mtp --outtype q8_0`.
+
+This produces the same deterministic Q8_0 block quantization, with no
+imatrix, and is applied identically to every arm. No gate, threshold or arm
+changes.
