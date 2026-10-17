@@ -431,10 +431,17 @@ class RecipePlanner:
         self.max_device = max_device_gpu_hours
         self.max_wall = max_wall_gpu_hours
 
-    def project_cost(self, *, seq_len: int, max_steps: int) -> tuple[float, float]:
+    def project_cost(
+        self, *, seq_len: int, max_steps: int, examples_per_step: int = 1
+    ) -> tuple[float, float]:
         """(device GPU-h, wall GPU-h) from measured step/load costs.
         Load cost is counted once per recipe (the paired/eval amortization
-        is applied downstream); wall projection uses the measured multiplier."""
+        is applied downstream); wall projection uses the measured multiplier.
+
+        ``examples_per_step`` (batch x gradient accumulation) scales a model-
+        lifecycle measurement taken at a different effective batch: Gen-2's
+        a15 ran 2 x 4 against a calibration measured at 1 x 1 and measured
+        33.3 s/step against a projected 3.83."""
         step_seconds = self.budget.step_seconds(seq_len)
         lifecycle = self.budget.model_lifecycle
         if lifecycle is not None:
@@ -443,6 +450,11 @@ class RecipePlanner:
             # charged to the same attempt by settlement, so it is projected
             # here too. Both are wall measurements, so no multiplier applies;
             # device time is not separated, so device projects as wall.
+            conditions = lifecycle.get("conditions") or {}
+            measured_examples = int(conditions.get("batch_size") or 1) * int(
+                conditions.get("gradient_accumulation_steps") or 1
+            )
+            step_seconds *= max(1, int(examples_per_step)) / measured_examples
             seconds = max_steps * step_seconds + float(lifecycle["in_run_eval_seconds"])
             return (seconds / 3600.0, seconds / 3600.0)
         device_seconds = max_steps * step_seconds + self.budget.measured_load_seconds
@@ -489,14 +501,21 @@ class RecipePlanner:
         # LR grid over SEARCH_AXES, truncated to `count`.
         grid = [(lr,) for lr in (5e-5, 1e-4, 2e-4, 4e-4)]
         recipes: list[TrainingRecipe] = []
+        batch_size, gradient_accumulation = 2, 4
         for index, (lr,) in enumerate(grid[:count]):
             seq_len = 2048
-            device, wall = self.project_cost(seq_len=seq_len, max_steps=steps_estimate)
+            device, wall = self.project_cost(
+                seq_len=seq_len, max_steps=steps_estimate,
+                examples_per_step=batch_size * gradient_accumulation,
+            )
             if device > self.max_device or wall > self.max_wall:
                 # Scale steps down to fit, floor at a minimum useful run.
                 while steps_estimate > 12:
                     steps_estimate = max(12, int(steps_estimate * 0.8))
-                    device, wall = self.project_cost(seq_len=seq_len, max_steps=steps_estimate)
+                    device, wall = self.project_cost(
+                        seq_len=seq_len, max_steps=steps_estimate,
+                        examples_per_step=batch_size * gradient_accumulation,
+                    )
                     if device <= self.max_device and wall <= self.max_wall:
                         break
                 if device > self.max_device or wall > self.max_wall:
@@ -519,8 +538,8 @@ class RecipePlanner:
                     lora_alpha=rank * 2,
                     target_modules=("router.gate",) if any("router" in i.skill for i in items) else ("q_proj", "v_proj"),
                     seq_len=seq_len,
-                    batch_size=2,
-                    gradient_accumulation=4,
+                    batch_size=batch_size,
+                    gradient_accumulation=gradient_accumulation,
                     max_steps=steps_estimate,
                     objective="sft",
                     replay_rate=0.1,
