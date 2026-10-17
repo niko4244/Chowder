@@ -116,3 +116,24 @@ free disk cannot hold. Every arm is therefore written by
 This produces the same deterministic Q8_0 block quantization, with no
 imatrix, and is applied identically to every arm. No gate, threshold or arm
 changes.
+
+## Amendment 2 (2026-10-17, before any arm was built): the fit and speed gate uses a deployable quant
+
+A 128-expert model has ~19.5B parameters, about 21 GB at Q8_0, which cannot be
+GPU-resident on a 16 GB card at any setting. The §4 speed/fit gate as written
+could not be passed by construction. Gates 0, 1 and 2 and the control gate stay
+at **Q8_0**, so they measure the pruning, not the quantization.
+
+The speed/fit gate is measured on **Q4_K_M**, requantized from each arm's Q8_0
+with `llama-quantize --allow-requantize`. It is applied identically to `dense`
+and `reap128`, with the same `--fit on -np 4 -c 16384` flags:
+- `reap128-Q4_K_M` must load with no experts offloaded;
+- it must decode at ≥ 1.3× `dense-Q4_K_M`.
+
+Requantizing from Q8_0 adds a second rounding. That is acceptable for a speed
+and fit measurement, and no quality gate is read from the Q4_K_M files. No
+threshold changes.
+
+Storage: `dense` Q8_0 on C:, `reap128` Q8_0 on I:, `random128` Q8_0 on G:.
+G: is USB, which only affects load time, because weights are resident while
+serving.
