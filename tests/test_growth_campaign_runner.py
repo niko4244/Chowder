@@ -464,16 +464,20 @@ def _write_evaluation_material(inputs: Path, document: Mapping[str, Any]) -> Pat
             ),
             encoding="utf-8",
         )
+        metric = TARGET_METRIC if qualified_id == TARGET_ID else "accuracy"
         suites.append(
             {
                 "benchmark_qualified_id": qualified_id,
                 "name": qualified_id.split("@", 1)[0],
                 "dataset": str(dataset),
-                "scoring": "normalized_exact_match",
                 # The registry declares each benchmark's primary metric, and the
                 # binder refuses a row that reports another one, so the material
-                # says which metric it is producing.
-                "metric": TARGET_METRIC if qualified_id == TARGET_ID else "accuracy",
+                # says which metric it is producing -- and the readout has to
+                # follow it: the observation rate is produced by the observed
+                # readout, and the material refuses a pair that cannot both be
+                # true (reported-metric audit R3).
+                "scoring": "eos_termination" if metric == TARGET_METRIC else "normalized_exact_match",
+                "metric": metric,
             }
         )
     path = inputs / "evaluation-material.json"

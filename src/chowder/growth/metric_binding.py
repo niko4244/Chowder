@@ -369,6 +369,18 @@ class MetricBinder:
                 generation_version=run.generation_version,
             )
 
+        if not run.metric.strip():
+            # An undeclared metric is not a metric name: it is the absence of one,
+            # and the equality check below would report it as a mismatch against a
+            # name the row never carried (reported-metric audit R5).
+            return BindingRefusal(
+                qualified_id,
+                f"{qualified_id}: the run declares no metric, so nothing states "
+                f"which quantity it measured; the registry requires "
+                f"{entry.primary_metric!r} and an undeclared name is never bound",
+                generation_version=run.generation_version,
+            )
+
         if run.metric != entry.primary_metric:
             return BindingRefusal(
                 qualified_id,

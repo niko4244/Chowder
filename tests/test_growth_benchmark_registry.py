@@ -12,6 +12,7 @@ import pytest
 from chowder.growth.benchmark_registry import (
     BENCHMARK_STATUSES,
     LIFECYCLE_STATES,
+    SCORER_POSTURES,
     TIERS,
     BenchmarkEntry,
     Normalization,
@@ -180,3 +181,34 @@ def test_registry_lookups_by_tier_category_and_lifecycle(registry):
 def test_lookup_miss_is_explicit(registry):
     with pytest.raises(KeyError, match="not in registry"):
         registry.require("nonexistent_bench@9999")
+
+
+def test_the_declared_scorer_is_a_posture_and_not_the_readout_that_runs(registry):
+    """R2: 42 declarations, zero reads -- so the claim is closed and separated.
+
+    ``BenchmarkEntry.scorer`` is a human's word for how a benchmark is meant to be
+    judged ("exact_match", "judge"). The executable readout is the evaluation
+    material's ``scoring``, a different vocabulary the worker validates. Nothing
+    maps one onto the other on purpose -- one posture is served by several
+    readouts -- so the two sets must not overlap: a reader who takes "the scorer
+    is exact_match" for the readout that ran would be reading a posture as a
+    measurement.
+    """
+    from chowder.evaluators.scoring import OBSERVED_SCORINGS
+    from chowder.evaluators.transformers_text import _ALLOWED_SCORING
+
+    postures = {entry.scorer for entry in registry}
+    # Equality, not membership: the constant and the catalog have to move
+    # together, so a new posture in the catalog cannot appear without being
+    # declared here (and this test saying so).
+    assert postures == SCORER_POSTURES, sorted(postures ^ SCORER_POSTURES)
+    readouts = set(_ALLOWED_SCORING) | set(OBSERVED_SCORINGS)
+    assert readouts, "an empty readout vocabulary would make this check meaningless"
+    # One word is in both vocabularies -- ``exact_match`` is a posture a reader is
+    # told *and* a readout the worker runs -- and it means a different thing in
+    # each: "this benchmark is judged by exact match" vs "score these items with
+    # the exact_match rule". It is pinned exactly, so neither vocabulary can grow
+    # toward the other without this test failing and the overlap being restated.
+    assert postures & readouts == {"exact_match"}, sorted(postures & readouts)
+    # The audit measured 42 declarations across the six postures.
+    assert len(registry) >= 40

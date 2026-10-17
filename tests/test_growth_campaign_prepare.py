@@ -605,3 +605,34 @@ def test_no_protected_slice_text_enters_the_prepared_corpus(tmp_path: Path) -> N
     assert protected_prompts, "the fixture must have real protected slices to leak"
     for prompt in protected_prompts:
         assert prompt not in corpus_text
+
+
+def test_the_prepared_readout_follows_the_metric_it_labels():
+    """R3 at the source: the two declarations can no longer disagree.
+
+    The material's ``scoring`` and ``metric`` were filled from two different
+    tables, so a benchmark the slice table does not carry (the
+    generation-diagnostics instrument) was prepared as
+    ``scoring="normalized_exact_match"`` with ``metric="eos_termination_rate"`` --
+    a pair that cannot both be true. The metric names what the row measures, so
+    the readout follows it, and ``SuiteMaterial`` refuses anything else.
+    """
+    from chowder.growth.campaign_prepare import _scoring_for
+    from chowder.growth.evaluation_binding import SuiteMaterial
+
+    declared = "normalized_exact_match"
+    observed = _scoring_for("generation-diagnostics@gen1-eval-protocol-v1", declared)
+    assert observed == "eos_termination"
+    assert _scoring_for("math500@2024-04", declared) == declared
+
+    # And the prepared pair loads, which is the property the tables have to keep.
+    material = SuiteMaterial.from_mapping(
+        {
+            "benchmark_qualified_id": "generation-diagnostics@gen1-eval-protocol-v1",
+            "dataset": "slice.jsonl",
+            "scoring": observed,
+            "metric": "eos_termination_rate",
+        },
+        source="prepare",
+    )
+    assert (material.scoring, material.metric) == ("eos_termination", "eos_termination_rate")

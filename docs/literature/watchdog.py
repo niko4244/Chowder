@@ -58,6 +58,7 @@ import json
 import os
 from pathlib import Path
 import re
+import statistics
 import sys
 import time
 import urllib.error
@@ -95,6 +96,17 @@ SCHEDULE_GRACE_DAYS = 1.0
 #: inside a single horizon; an expression that fires fewer than twice inside it
 #: is reported with the horizon as its cadence rather than guessed at.
 CRON_HORIZON_DAYS = 62
+
+#: How much history the drift check needs before it will compare the runs a
+#: workflow produced against the cadence its declaration implies, and how far the
+#: two may differ before the declaration and the history are called inconsistent.
+#: The statistic compared is the same on both sides -- the widest gap between two
+#: consecutive fires, which is what :func:`cron_cadence_days` measures from the
+#: expression -- so a workflow that declares two crons (whose typical gap is much
+#: smaller than its widest) cannot look wrong for that reason alone.
+DRIFT_MIN_RUNS = 3
+DRIFT_SHORT_FACTOR = 0.5
+DRIFT_LONG_FACTOR = 2.0
 
 _MONTH_NAMES = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 _WEEKDAY_NAMES = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
@@ -164,27 +176,31 @@ def _request(method: str, path: str, token: str, payload: dict[str, Any] | None 
     return json.loads(body) if body else None
 
 
-def _age_days(timestamp: str | None) -> float | None:
-    """How long ago a GitHub timestamp was, in days.
+def _timestamp(value: str | None) -> dt.datetime | None:
+    """One GitHub timestamp as an aware datetime, or None when there is none.
 
     GitHub is not one clock format: run and commit timestamps end in ``Z``, while
-    the workflow object's ``created_at`` comes back with a UTC offset
+    the workflow object's ``created_at``/``updated_at`` come back with a UTC offset
     (``2026-10-08T11:11:42.000-05:00`` -- measured on the first live dry run of
     this script, where a single-format parse raised instead of reading the age it
     had already been handed). Both are ISO-8601, so both are parsed as such, and a
-    stamp that is neither raises naming itself rather than being reported as an
-    age of zero or as "never fired".
+    stamp that is neither raises naming itself rather than being read as an age of
+    zero or as "never fired". A naive stamp is stamped UTC.
     """
-    if not timestamp:
+    if not value:
         return None
     try:
-        parsed = dt.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as error:
-        raise GitHubError(
-            f"the timestamp {timestamp!r} is in no format this script can read"
-        ) from error
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        raise GitHubError(f"the timestamp {value!r} is in no format this script can read") from error
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+
+
+def _age_days(timestamp: str | None) -> float | None:
+    """How long ago a GitHub timestamp was, in days."""
+    parsed = _timestamp(timestamp)
+    if parsed is None:
+        return None
     return (dt.datetime.now(dt.timezone.utc) - parsed).total_seconds() / 86400.0
 
 
@@ -401,9 +417,18 @@ def check_scheduled_workflows(
         window = cadence + grace_days
         runs = _request(
             "GET",
-            f"/repos/{repo}/actions/workflows/{name}/runs?event=schedule&per_page=20",
+            f"/repos/{repo}/actions/workflows/{name}/runs?event=schedule&per_page=30",
             token,
         )["workflow_runs"]
+        registration: dict[str, Any] | None = None
+
+        def workflow_object() -> dict[str, Any]:
+            """The workflow itself, read at most once per run of this script."""
+            nonlocal registration
+            if registration is None:
+                registration = _request("GET", f"/repos/{repo}/actions/workflows/{name}", token)
+            return registration
+
         newest = max(runs, key=lambda run: run["id"], default=None)
         age = _age_days(newest["created_at"]) if newest else None
         if age is not None and age <= window:
@@ -418,8 +443,7 @@ def check_scheduled_workflows(
                 "schedule that stopped firing writes nothing anywhere"
             )
         else:
-            registration = _request("GET", f"/repos/{repo}/actions/workflows/{name}", token)
-            registered_age = _age_days(registration.get("created_at"))
+            registered_age = _age_days(workflow_object().get("created_at"))
             if registered_age is not None and registered_age <= window:
                 healthy, detail = True, (
                     f"registered {registered_age:.1f} days ago with cron {crons}; no "
@@ -434,7 +458,97 @@ def check_scheduled_workflows(
         results.append(
             {"name": f"scheduled workflow {name} still fires", "healthy": healthy, "detail": detail}
         )
+        if runs:
+            # The second question about the same schedule: not "is it firing" but
+            # "is it firing *this* often". Only asked when there is a history to
+            # measure, so a workflow with no scheduled run keeps one row.
+            results.append(
+                _drift_result(
+                    name,
+                    crons,
+                    cadence,
+                    runs,
+                    updated_at=workflow_object().get("updated_at"),
+                )
+            )
     return results
+
+
+def _drift_result(
+    name: str,
+    crons: str,
+    cadence: float,
+    runs: list[dict[str, Any]],
+    *,
+    updated_at: str | None,
+) -> dict[str, Any]:
+    """Do the runs this workflow produced describe the cadence it declares?
+
+    A declared cron *is* the schedule, so the two can only disagree if the history
+    was produced under a different declaration: a cron that was edited, a workflow
+    re-created under the same name, a schedule that lives somewhere else and only
+    shares the name. That is a class of failure the liveness check cannot see -- a
+    workflow firing *daily* while it declares a weekly cadence is perfectly
+    healthy by every other measure here, and the reader who trusts the declaration
+    is reading a schedule nobody runs.
+
+    Two details keep it from crying wolf. The history is truncated at the
+    workflow's own ``updated_at``: a declaration that was deliberately changed
+    resets its own baseline instead of alarming until the old runs age out. And
+    the statistic compared is the widest gap between two consecutive fires, the
+    same statistic :func:`cron_cadence_days` measures, so a workflow declaring two
+    crons is not reported as mis-spaced merely because its typical gap is narrow.
+    An unreadable ``updated_at`` is not guessed at: the whole history is used and
+    the detail says so.
+    """
+    label = f"scheduled workflow {name} fires on the cadence it declares"
+    since = _timestamp(updated_at)
+    moments = sorted(
+        moment
+        for moment in (_timestamp(run.get("created_at")) for run in runs)
+        if moment is not None and (since is None or moment >= since)
+    )
+    window = (
+        "since the declaration last changed"
+        if since is not None
+        else "on record (the workflow object declares no readable update time)"
+    )
+    if len(moments) < DRIFT_MIN_RUNS:
+        return {
+            "name": label,
+            "healthy": True,
+            "detail": (
+                f"only {len(moments)} scheduled run(s) {window}; a cadence cannot be "
+                f"measured from fewer than {DRIFT_MIN_RUNS} fires"
+            ),
+        }
+    gaps = [
+        (later - earlier).total_seconds() / 86400.0
+        for earlier, later in zip(moments, moments[1:])
+    ]
+    widest = max(gaps)
+    typical = statistics.median(gaps)
+    low, high = cadence * DRIFT_SHORT_FACTOR, cadence * DRIFT_LONG_FACTOR
+    measured = (
+        f"the {len(moments)} scheduled runs {window} are spaced at most "
+        f"{widest:.2f} days apart (median {typical:.2f})"
+    )
+    if low <= widest <= high:
+        return {
+            "name": label,
+            "healthy": True,
+            "detail": f"cron {crons} implies {cadence:.2f} days between fires; {measured}",
+        }
+    return {
+        "name": label,
+        "healthy": False,
+        "detail": (
+            f"cron {crons} implies {cadence:.2f} days between fires, but {measured} -- "
+            "the declaration and the history describe different schedules; nothing "
+            "else in this script can see that, because a schedule firing more often "
+            "than it declares looks perfectly alive"
+        ),
+    }
 
 
 def check_watch_runs(repo: str, token: str, workflow: str, max_run_age_days: float) -> dict[str, Any]:

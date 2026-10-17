@@ -11,11 +11,21 @@ from typing import Any
 _GIB = 1024 ** 3
 _MIB = 1024 ** 2
 
+# Every figure below is reported in **GiB**, not decimal GB: throughput is bytes
+# divided by 2**30 and capacity is bytes divided by 2**30. The repo's own
+# convention is explicit -- "Decimal GB uses 10^9 bytes; GiB uses 2^30"
+# (``docs/EXPERIMENT_D_LOW_ACTIVE_HYBRID_LM.md``) -- and a reader mixing a model
+# card's decimal GB with a GiB reading overstates capacity by ~7.4%, so the
+# fields say GiB and the rate fields also name the statistic they report (the
+# median of the timed passes), which the old ``_gbps`` names dropped
+# (reported-metric audit R7).
+
 
 @dataclass(frozen=True)
 class StorageCalibration:
-    read_gbps: float
-    write_gbps: float
+    #: Median of the timed passes, GiB/s (2**30 bytes per second).
+    read_gib_per_s_median: float
+    write_gib_per_s_median: float
     sample_mib: int
     passes: int
     read_cache_sensitive: bool = True
@@ -24,7 +34,8 @@ class StorageCalibration:
 
 @dataclass(frozen=True)
 class HostMemoryCalibration:
-    copy_gbps: float
+    #: Median of the timed passes, GiB/s.
+    copy_gib_per_s_median: float
     sample_mib: int
     passes: int
 
@@ -32,12 +43,14 @@ class HostMemoryCalibration:
 @dataclass(frozen=True)
 class CudaTransferCalibration:
     device_index: int
-    host_to_device_gbps: float
-    device_to_host_gbps: float
+    #: Median of the timed passes, GiB/s.
+    host_to_device_gib_per_s_median: float
+    device_to_host_gib_per_s_median: float
     sample_mib: int
     passes: int
-    total_vram_gb: float
-    free_vram_gb: float
+    #: Device capacity in GiB (bytes / 2**30).
+    total_vram_gib: float
+    free_vram_gib: float
 
 
 @dataclass(frozen=True)
@@ -51,7 +64,8 @@ class HardwareCalibration:
         return asdict(self)
 
 
-def _median_gbps(byte_count: int, durations: list[float]) -> float:
+def _median_gib_per_s(byte_count: int, durations: list[float]) -> float:
+    """GiB/s at the median of the timed passes -- the unit and the statistic."""
     valid = [duration for duration in durations if duration > 0]
     if not valid:
         return 0.0
@@ -113,8 +127,8 @@ def calibrate_storage(
         temp_path.unlink(missing_ok=True)
 
     return StorageCalibration(
-        read_gbps=_median_gbps(size, read_times),
-        write_gbps=_median_gbps(size, write_times),
+        read_gib_per_s_median=_median_gib_per_s(size, read_times),
+        write_gib_per_s_median=_median_gib_per_s(size, write_times),
         sample_mib=sample_mib,
         passes=passes,
     )
@@ -143,7 +157,7 @@ def calibrate_host_memory(*, sample_mib: int = 128, passes: int = 5) -> HostMemo
         durations.append(time.perf_counter() - start)
 
     return HostMemoryCalibration(
-        copy_gbps=_median_gbps(size, durations),
+        copy_gib_per_s_median=_median_gib_per_s(size, durations),
         sample_mib=sample_mib,
         passes=passes,
     )
@@ -189,12 +203,12 @@ def calibrate_cuda_transfer(
 
     return CudaTransferCalibration(
         device_index=device_index,
-        host_to_device_gbps=_median_gbps(size, h2d),
-        device_to_host_gbps=_median_gbps(size, d2h),
+        host_to_device_gib_per_s_median=_median_gib_per_s(size, h2d),
+        device_to_host_gib_per_s_median=_median_gib_per_s(size, d2h),
         sample_mib=sample_mib,
         passes=passes,
-        total_vram_gb=total_bytes / _GIB,
-        free_vram_gb=free_bytes / _GIB,
+        total_vram_gib=total_bytes / _GIB,
+        free_vram_gib=free_bytes / _GIB,
     )
 
 
