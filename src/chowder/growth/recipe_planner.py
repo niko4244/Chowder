@@ -261,8 +261,15 @@ class HardwareBudget:
     measured_step_seconds_at_seq: Mapping[int, float]  # seq_len -> s/step
     measured_load_seconds: float
     wall_multiplier: float = 3.5  # M = wall/device, measured rung-3c value
+    #: The campaign's own model, measured (``campaign_prepare.calibrate_model_
+    #: lifecycle``). When present it supersedes the synthetic device step.
+    model_lifecycle: Mapping[str, Any] | None = None
 
     def step_seconds(self, seq_len: int) -> float:
+        if self.model_lifecycle is not None:
+            measured = int(self.model_lifecycle["measured_seq_len"])
+            per_step = float(self.model_lifecycle["train_seconds_per_step"])
+            return per_step if seq_len == measured else per_step * (seq_len / measured) ** 1.2
         if seq_len in self.measured_step_seconds_at_seq:
             return self.measured_step_seconds_at_seq[seq_len]
         known = sorted(self.measured_step_seconds_at_seq)
@@ -429,6 +436,15 @@ class RecipePlanner:
         Load cost is counted once per recipe (the paired/eval amortization
         is applied downstream); wall projection uses the measured multiplier."""
         step_seconds = self.budget.step_seconds(seq_len)
+        lifecycle = self.budget.model_lifecycle
+        if lifecycle is not None:
+            # Measured wall on the campaign's own model: the per-step figure
+            # already includes load, and the recipe's in-run evaluation is
+            # charged to the same attempt by settlement, so it is projected
+            # here too. Both are wall measurements, so no multiplier applies;
+            # device time is not separated, so device projects as wall.
+            seconds = max_steps * step_seconds + float(lifecycle["in_run_eval_seconds"])
+            return (seconds / 3600.0, seconds / 3600.0)
         device_seconds = max_steps * step_seconds + self.budget.measured_load_seconds
         device_gpu_hours = device_seconds / 3600.0
         wall_gpu_hours = device_gpu_hours * self.budget.wall_multiplier

@@ -228,6 +228,82 @@ def probe_hardware() -> Mapping[str, Any]:
     }
 
 
+MODEL_LIFECYCLE_BASIS = "chowder.model-lifecycle.v1"
+
+
+def calibrate_model_lifecycle(
+    training_result: str | Path, evaluation_result: str | Path
+) -> dict[str, Any]:
+    """The campaign's own model, measured: training s/step and in-run evaluation s.
+
+    The device probe times a synthetic step (~0.002 s), so recipes projected from
+    it alone came out ~1000x below a real attempt, which settlement then refused
+    as ACTUAL_EXCEEDS_PROJECTION. This is the "separate pre-compute job" the
+    probe's docstring defers to, built from evidence already on disk:
+
+    * ``training_result``: a completed run's ``worker-result.json``. Its
+      ``telemetry.lifecycle.measured_seconds`` over ``telemetry.global_step``
+      steps gives seconds/step with model load included, and the sibling
+      ``run-spec.json`` names the conditions it was measured under;
+    * ``evaluation_result``: an arm's evaluation result at the declared
+      instrument. Its ``runtime.lifecycle.measured_seconds`` is the in-run
+      evaluation's cost.
+
+    Both are digested, so a projection can always name what it rests on.
+    """
+    training_path, evaluation_path = Path(training_result), Path(evaluation_result)
+    training = _read_json_object(training_path)
+    evaluation = _read_json_object(evaluation_path)
+    if training is None or evaluation is None:
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: model-lifecycle calibration needs two readable JSON "
+            f"results, got {training_path} and {evaluation_path}"
+        )
+    telemetry = training.get("telemetry") or {}
+    steps = telemetry.get("global_step")
+    train_seconds = (telemetry.get("lifecycle") or {}).get("measured_seconds")
+    eval_seconds = ((evaluation.get("runtime") or {}).get("lifecycle") or {}).get(
+        "measured_seconds"
+    )
+    if not isinstance(steps, int) or steps <= 0 or not isinstance(train_seconds, (int, float)):
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: {training_path} holds no measured training lifecycle "
+            "(telemetry.global_step and telemetry.lifecycle.measured_seconds)"
+        )
+    if not isinstance(eval_seconds, (int, float)) or eval_seconds <= 0:
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: {evaluation_path} holds no measured evaluation "
+            "lifecycle (runtime.lifecycle.measured_seconds)"
+        )
+    spec = _read_json_object(training_path.parent / "run-spec.json") or {}
+    seq_len = spec.get("max_length")
+    if not isinstance(seq_len, int) or seq_len <= 0:
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: {training_path.parent / 'run-spec.json'} names no "
+            "max_length, so the measured step has no stated sequence length"
+        )
+
+    def digest(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    return {
+        "basis": MODEL_LIFECYCLE_BASIS,
+        "train_seconds_per_step": round(float(train_seconds) / steps, 6),
+        "measured_seq_len": seq_len,
+        "measured_steps": steps,
+        "in_run_eval_seconds": round(float(eval_seconds), 3),
+        "conditions": {
+            key: spec.get(key)
+            for key in ("batch_size", "gradient_accumulation_steps", "precision",
+                        "quantization", "gradient_checkpointing")
+        },
+        "sources": [
+            {"role": "training", "path": str(training_path), "sha256": digest(training_path)},
+            {"role": "evaluation", "path": str(evaluation_path), "sha256": digest(evaluation_path)},
+        ],
+    }
+
+
 def _measure_step_seconds(seq_len: int) -> float:  # pragma: no cover - needs CUDA
     """Time a bounded synthetic fwd+bwd step at one sequence length."""
     import time
@@ -321,6 +397,7 @@ def prepare_campaign(
     slice_source: SliceSource | None = None,
     material: Mapping[str, Sequence[str]] | None = None,
     source_id: str = "gen2-response-surface-curriculum",
+    model_lifecycle: Mapping[str, Any] | None = None,
 ) -> PreparedCampaign:
     """Produce the manifest's declared inputs from durable evidence.
 
@@ -347,6 +424,10 @@ def prepare_campaign(
     # 1. measured hardware: the recipes are projected against real hardware.
     hardware = dict((probe or probe_hardware)())
     _require_hardware_fields(hardware)
+    if model_lifecycle is not None:
+        # The campaign's own model, measured (calibrate_model_lifecycle); the
+        # planner projects from it instead of the synthetic device step.
+        hardware["model_lifecycle"] = dict(model_lifecycle)
     hardware_path = _write_json(root / "hardware-budget.json", hardware)
 
     # 2. the frozen mini-slices, read from the pinned caches.
@@ -394,6 +475,11 @@ def prepare_campaign(
         root,
         evaluation_material_path=evaluation_material_path,
         parent_eval_path=parent_eval_path,
+        evaluation_gpu_hours=(
+            float(model_lifecycle["in_run_eval_seconds"]) / 3600.0
+            if model_lifecycle is not None
+            else EVALUATION_GPU_HOUR_RESERVE
+        ),
     )
 
     # 5. the contamination manifest the binder loads before any row binds.
@@ -1241,8 +1327,13 @@ def _write_project_template(
     *,
     evaluation_material_path: Path,
     parent_eval_path: Path,
+    evaluation_gpu_hours: float = EVALUATION_GPU_HOUR_RESERVE,
 ) -> Path:
     """The executor's project template, derived from the declaration.
+
+    ``evaluation_gpu_hours`` is what the in-run evaluation reserves: the
+    measured in-run evaluation cost when the hardware budget carries a model
+    lifecycle, else the fixed placeholder reserve.
 
     Not a docs-script reconstruction: the base model, the budget, the evaluation
     suites and the fixed baseline all come from the manifest and the evidence
@@ -1307,7 +1398,7 @@ def _write_project_template(
             "estimated_gpu_hours": max(
                 0.0,
                 float(budget.wall_gpu_hours_ceiling_per_recipe)
-                - EVALUATION_GPU_HOUR_RESERVE,
+                - evaluation_gpu_hours,
             ),
             "hypothesis": {
                 "observation": "the parent generation's remaining measured weaknesses",
@@ -1356,7 +1447,7 @@ def _write_project_template(
             },
             "evaluation": {
                 "type": "transformers-text",
-                "estimated_gpu_hours": EVALUATION_GPU_HOUR_RESERVE,
+                "estimated_gpu_hours": round(evaluation_gpu_hours, 6),
                 "precision": "bf16",
                 "quantization": "none",
                 "placement": "offload",
