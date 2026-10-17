@@ -125,7 +125,8 @@ def _score(suite: str, item: dict, out: dict) -> dict:
         correct = terminated and _humaneval_pass(item, final_answer(text))
     return {"id": item["id"], "correct": bool(correct), "terminated": terminated,
             "trigram_ratio": round(_trigram_ratio(text), 4), "completion_tokens": out["completion_tokens"],
-            "seconds": round(out["seconds"], 2), "text": text}
+            "seconds": round(out["seconds"], 2),
+            "predicted_per_second": (out.get("timings") or {}).get("predicted_per_second"), "text": text}
 
 
 def main() -> None:
