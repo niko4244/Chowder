@@ -40,7 +40,7 @@ fix was necessary, but on its own it could not produce a measured candidate.
   hardware budget as `model_lifecycle`. `project_cost` now charges
   `steps × measured s/step + measured in-run eval`, and the executor template
   reserves the measured evaluation cost (1.0244 GPU-h) instead of 0.05.
-- **Declaration (this amendment):** the inputs name `prepared-v12`, produced
+- **Declaration (this amendment):** the inputs name `prepared-v13`, produced
   with `--calibrate-training <a12 worker-result.json> --calibrate-eval <parent-arm ancestor-eval-result.json>`.
   The ceilings are re-derived from the calibrated projection:
 
@@ -56,7 +56,7 @@ confirmed.
 
 ## C. Evidence
 
-- `prepare` → `prepared-v12` with recipe ids unchanged (`recipe-00-lr5e-05`,
+- `prepare` → `prepared-v13` with recipe ids unchanged (`recipe-00-lr5e-05`,
   `recipe-01-lr0.0001`). `model_lifecycle`: 3.832186 s/step at seq 2048,
   in-run evaluation 3,687.944 s. Source digests: `364d2e1b…` (training) and
   `3827dd30…` (evaluation).
@@ -65,7 +65,7 @@ confirmed.
   - evaluation reserves 1.024429 GPU-h, training reserves 0.975571, budget 2.0;
   - the 7,200 s attempt process timeout covers training + evaluation
     (5,006 s), and the 5,400 s in-run timeout covers 3,688 s with ×1.46 margin.
-- Readiness on `prepared-v12/gen2_campaign.prepared.json`: **READY**,
+- Readiness on `prepared-v13/gen2_campaign.prepared.json`: **READY**,
   nineteen of nineteen checks `ok`, `campaign_projection` 2.781231 device /
   2.781231 wall GPU-h within the declared ceilings.
 
@@ -76,3 +76,19 @@ confirmed.
 - It does not claim the calibration transfers to other hardware or another
   base model. A new campaign calibrates its own.
 - It does not change the a11 access-violation finding (amendment 20 §E).
+
+## E. Re-preparation (same day)
+
+The first run on this budget (attempts 13–14, 2026-10-17 08:27) refused
+**before any compute**. The engine preflight reported "profiled lifecycle cost
+2 GPU-hours does not fit remaining budget".
+
+The cause was the template's evaluation reserve, which was rounded to 6
+decimals. Training (`ceiling − unrounded`) plus evaluation (rounded) summed to
+2.0000001 against the 2.0 budget. The fix is PR #231 commit `b966cf5`, whose
+pin is revert-proven.
+
+The declaration now names `prepared-v13`, produced the same way. Its
+reservations are 0.9755711111 + 1.0244288889 = 2.0 exactly. The refusal
+record is archived to `<state_root>/superseded-2026-10-17-a13/`. No ceiling
+or gate changed.
