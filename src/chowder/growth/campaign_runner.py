@@ -1600,6 +1600,12 @@ def build_evaluator(
         # The declared execution throughput, so the candidate arm is measured
         # the same way the parent and ancestor arms were declared to be.
         batch_size=manifest.evaluation_execution.batch_size,
+        # The same bound an attempt gets. The binding's 3600 s default is below
+        # what the declared suites cost: the parent arm itself measured 3688 s,
+        # and Gen-2 run 7's candidate arm (2026-10-18) was killed at 3600 s with
+        # one of three suites written, after both recipes had trained, evaluated
+        # and settled.
+        timeout_seconds=attempt_timeout_seconds(manifest),
         # Resolved here, in this module's namespace, so one patch point covers
         # every process this campaign starts (trainer and evaluator alike).
         runner=runner or default_runner,
