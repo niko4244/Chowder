@@ -174,6 +174,17 @@ _ATTENTION_AND_MLP_MODULES_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # dense preset must not silently half-cover an MoE stack.
     "qwen3_5_text": _QWEN3_5_TARGET_MODULES,
 }
+# The opt-in MoE preset, `moe_frozen_experts`. `attention_and_mlp` keeps
+# refusing an MoE stack so no run half-covers one by accident; choosing this
+# preset states the coverage instead: the same leaf names reach attention,
+# Gated DeltaNet and the *shared* expert, while the routed experts -- 3-D
+# parameters (experts.gate_up_proj / experts.down_proj), never Linear modules --
+# stay frozen by design (moe_transient_grad). tests/test_moe_transient_grad.py
+# pins that no matched module sits under mlp.experts.
+_MOE_FROZEN_EXPERTS_MODULES_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
+    "qwen3_5_moe": _QWEN3_5_TARGET_MODULES,
+    "qwen3_5_moe_text": _QWEN3_5_TARGET_MODULES,
+}
 
 
 def _resolve_target_modules(
@@ -195,6 +206,16 @@ def _resolve_target_modules(
                 f"model_type {model_type!r}; supported: "
                 f"{sorted(_ATTENTION_AND_MLP_MODULES_BY_MODEL_TYPE)}. "
                 "Specify backend.lora.target_modules explicitly instead."
+            )
+        return list(curated)
+    if preset == "moe_frozen_experts":
+        model_type = getattr(model.config, "model_type", None)
+        curated = _MOE_FROZEN_EXPERTS_MODULES_BY_MODEL_TYPE.get(model_type)
+        if curated is None:
+            raise RuntimeError(
+                f"lora.target_preset='moe_frozen_experts' has no curated module list for "
+                f"model_type {model_type!r}; supported: "
+                f"{sorted(_MOE_FROZEN_EXPERTS_MODULES_BY_MODEL_TYPE)}"
             )
         return list(curated)
     return None
