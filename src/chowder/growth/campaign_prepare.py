@@ -30,6 +30,7 @@ exist, the refusal *is* the honest readiness answer.
 from __future__ import annotations
 
 import hashlib
+import shutil
 import json
 import os
 from dataclasses import dataclass, field
@@ -398,6 +399,7 @@ def prepare_campaign(
     material: Mapping[str, Sequence[str]] | None = None,
     source_id: str = "gen2-response-surface-curriculum",
     model_lifecycle: Mapping[str, Any] | None = None,
+    parent_artifacts: Sequence[str | Path] | None = None,
 ) -> PreparedCampaign:
     """Produce the manifest's declared inputs from durable evidence.
 
@@ -441,6 +443,7 @@ def prepare_campaign(
         root,
         parent_evidence=parent_evidence,
         measurement=parent_measurement,
+        parent_artifacts=parent_artifacts,
     )
     notes.extend(parent_notes)
 
@@ -650,6 +653,7 @@ def _write_parent_evidence(
     *,
     parent_evidence: str | Path | None,
     measurement: str | Path | None = None,
+    parent_artifacts: Sequence[str | Path] | None = None,
 ) -> tuple[Path, Path, list[str]]:
     """Derive the parent arm and profile from the parent generation's evidence.
 
@@ -723,6 +727,37 @@ def _write_parent_evidence(
             _unmeasured_row(qualified_id, parent_version=parent_version, reason=reason)
         )
         notes.append(f"parent arm: {qualified_id} unmeasured ({reason})")
+
+    # A measured row names its raw predictions relative to the report that holds
+    # it, and certification resolves that name next to the declared report. The
+    # rows are carried here, so their raw files must be too: Gen-2 run 8
+    # (2026-10-18) trained, measured and settled a candidate and was then
+    # refused because no prepared directory had ever held the parent's raw
+    # files. Refuse now, before any compute, if one cannot be found.
+    search = [
+        *([Path(measurement).parent] if measurement is not None and str(measurement).strip() else [source]),
+        *(Path(d) for d in (parent_artifacts or ())),
+    ]
+    for run in runs:
+        reference = str(getattr(run, "raw_artifact_ref", "") or "")
+        if not reference or Path(reference).is_absolute():
+            continue
+        found = next((d / reference for d in search if (d / reference).is_file()), None)
+        if found is None and (getattr(run, "metadata", None) or {}).get("aggregate_only"):
+            # Legacy diagnostics rows reuse the adapter ref as their raw ref and
+            # promise no per-sample file, so there is nothing to carry.
+            continue
+        if found is None:
+            raise CampaignPrepareRefusal(
+                f"{PREPARE_PARENT_EVIDENCE_INVALID}: the parent row for "
+                f"{run.benchmark_qualified_id} names raw artifact {reference!r}, which "
+                f"is in none of {[str(d) for d in search]}; certification would refuse "
+                "the run after its compute (pass --parent-artifacts <dir>)"
+            )
+        target = root / reference
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(found, target)
+        notes.append(f"parent arm: carried raw artifact {reference} from {found.parent}")
 
     parent_eval_path = root / "parent-eval-report.json"
     EvalReport(

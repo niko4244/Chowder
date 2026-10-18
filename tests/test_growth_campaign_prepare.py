@@ -605,3 +605,60 @@ def test_no_protected_slice_text_enters_the_prepared_corpus(tmp_path: Path) -> N
     assert protected_prompts, "the fixture must have real protected slices to leak"
     for prompt in protected_prompts:
         assert prompt not in corpus_text
+
+
+def _measurement_with_raw_artifact(tmp_path: Path, manifest: CampaignManifest) -> tuple[Path, Path]:
+    """A parent measurement report whose target row names a raw file kept elsewhere."""
+    first = prepare_campaign(
+        manifest,
+        out_dir=tmp_path / "first",
+        parent_evidence=_parent_evidence(tmp_path / "gen1"),
+        probe=_probe,
+        slice_source=_slice_source(),
+    )
+    report = json.loads(Path(first.inputs["parent_eval_report_path"]).read_text(encoding="utf-8"))
+    for run in report["runs"]:
+        if run["benchmark_qualified_id"] == TARGET_ID:
+            run["raw_artifact_ref"] = "predictions-target.jsonl"
+            run["metadata"] = {}
+    measured = tmp_path / "measured"
+    measured.mkdir()
+    (measured / "parent-eval-report.json").write_text(json.dumps(report), encoding="utf-8")
+    raw_dir = tmp_path / "parent-arm"
+    raw_dir.mkdir()
+    (raw_dir / "predictions-target.jsonl").write_text('{"prediction": "7"}\n', encoding="utf-8")
+    return measured / "parent-eval-report.json", raw_dir
+
+
+def test_prepare_refuses_a_parent_row_whose_raw_artifact_cannot_be_carried(tmp_path: Path) -> None:
+    """Gen-2 run 8 (2026-10-18) trained, measured and settled a candidate, then was
+    refused at certification: no prepared directory had ever held the parent's raw
+    predictions. That must surface at prepare time, before any compute."""
+    manifest = _load_manifest(tmp_path, _manifest_document(tmp_path))
+    measurement, _ = _measurement_with_raw_artifact(tmp_path, manifest)
+    with pytest.raises(CampaignPrepareRefusal) as error:
+        prepare_campaign(
+            manifest,
+            out_dir=tmp_path / "prepared",
+            parent_evidence=tmp_path / "gen1",
+            parent_measurement=measurement,
+            probe=_probe,
+            slice_source=_slice_source(),
+        )
+    assert "predictions-target.jsonl" in str(error.value)
+
+
+def test_prepare_carries_the_parent_raw_artifact_next_to_the_report(tmp_path: Path) -> None:
+    manifest = _load_manifest(tmp_path, _manifest_document(tmp_path))
+    measurement, raw_dir = _measurement_with_raw_artifact(tmp_path, manifest)
+    prepared = prepare_campaign(
+        manifest,
+        out_dir=tmp_path / "prepared",
+        parent_evidence=tmp_path / "gen1",
+        parent_measurement=measurement,
+        parent_artifacts=[raw_dir],
+        probe=_probe,
+        slice_source=_slice_source(),
+    )
+    carried = Path(prepared.inputs["parent_eval_report_path"]).parent / "predictions-target.jsonl"
+    assert carried.read_bytes() == (raw_dir / "predictions-target.jsonl").read_bytes()
