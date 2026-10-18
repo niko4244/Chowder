@@ -113,3 +113,34 @@ def test_an_offloaded_adapter_load_gives_peft_an_offload_folder(
     assert ("offload_folder" in kwargs) is expects_folder
     if expects_folder:
         assert Path(kwargs["offload_folder"]).is_dir()
+
+
+@pytest.mark.parametrize(
+    ("placement", "adapter_dir", "expect_dispatch", "expect_to"),
+    [
+        ("offload", "adapter", False, False),  # deferred: dispatched once, after the adapter
+        ("offload", None, True, False),       # bare base: dispatched now
+        ("resident", "adapter", False, True),
+        ("resident", None, False, True),
+    ],
+)
+def test_an_offloaded_base_is_not_dispatched_before_its_adapter(
+    monkeypatch: pytest.MonkeyPatch, placement, adapter_dir, expect_dispatch, expect_to
+) -> None:
+    """Gen-2 attempt-22: a pre-dispatched base let PEFT re-plan onto disk, and the
+    declared re-dispatch then failed on a meta (disk-offloaded) parameter."""
+    dispatched: list[object] = []
+    monkeypatch.setattr(worker, "dispatch_offloaded", lambda m, d: dispatched.append(m) or m)
+
+    class _Base:
+        moved_to = None
+
+        def to(self, device):
+            self.moved_to = device
+            return self
+
+    base = _Base()
+    spec = SimpleNamespace(quantization="none", placement=placement, adapter_dir=adapter_dir)
+    assert worker.place_before_adapter(base, spec=spec, device_name="cuda:0") is base
+    assert (dispatched == [base]) is expect_dispatch
+    assert (base.moved_to == "cuda:0") is expect_to
