@@ -646,11 +646,10 @@ def test_unknown_verification_refuses_through_materialise(tmp_path: Path) -> Non
 # --------------------------------------------------------------------------- #
 
 
-def test_worker_chat_path_rejects_tool_turns() -> None:
-    """The ``dataset_format="chat"`` worker validator accepts only
-    system/user/assistant and keeps only ``role``/``content``.  Agentic rows
-    carry ``tool`` turns and native ``tool_calls``, so they are served as
-    messages for a tools-aware renderer (or as text), not through that path."""
+def test_worker_chat_path_keeps_agentic_turns() -> None:
+    """The ``dataset_format="chat"`` worker validator now keeps ``tool`` turns
+    and native ``tool_calls`` (#248), so these providers' rows train through the
+    worker's chat path; plain rows still normalise to ``role``/``content``."""
     from chowder.backends.training_data import _validate_chat_messages
 
     agentic = [
@@ -663,11 +662,13 @@ def test_worker_chat_path_rejects_tool_turns() -> None:
         {"role": "tool", "content": "print(1)"},
         {"role": "assistant", "content": "It prints 1."},
     ]
-    with pytest.raises(RuntimeError, match="unsupported message role 'tool'"):
-        _validate_chat_messages(agentic, row_index=0)
+    kept = _validate_chat_messages(agentic, row_index=0)
+    assert [turn["role"] for turn in kept] == ["user", "assistant", "tool", "assistant"]
+    assert kept[1]["tool_calls"][0]["function"]["arguments"] == {"file_path": "a.py"}
     without_tool_turn = [m for m in agentic if m["role"] != "tool"]
     normalized = _validate_chat_messages(without_tool_turn, row_index=0)
-    assert all(set(turn) == {"role", "content"} for turn in normalized)
+    # The assistant turn keeps its tool call; the plain turns stay role/content.
+    assert set(normalized[0]) == {"role", "content"} and set(normalized[2]) == {"role", "content"}
 
 
 # --------------------------------------------------------------------------- #

@@ -41,6 +41,7 @@ from .training_data import (
     _validate_chat_messages,
     _verify_bound_adapter,
     _verify_bound_input,
+    parse_tools,
 )
 from .transformers_peft import TransformersPeftRunSpec
 
@@ -598,11 +599,15 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         )
 
     if spec.parent_adapter is not None:
-        model = PeftModel.from_pretrained(
-            base_model,
-            spec.parent_adapter,
-            is_trainable=True,
-        )
+        def attach(base: Any) -> Any:
+            return PeftModel.from_pretrained(base, spec.parent_adapter, is_trainable=True)
+
+        if expert_placement == "cpu-transient-grad":
+            from .moe_transient_grad import attach_preserving_split
+
+            model = attach_preserving_split(base_model, attach)
+        else:
+            model = attach(base_model)
         # A parent adapter that silently fails to load would make a
         # 'continued' run a fresh one, with provenance claiming otherwise.
         assert_adapter_is_live(model, spec.parent_adapter)
@@ -650,13 +655,17 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     is_chat = spec.dataset_format == "chat"
     field = spec.messages_field if is_chat else spec.text_field
     kind = "messages" if is_chat else "text"
+    tools_field = getattr(spec, "tools_field", "") if is_chat else ""
+    columns = [field, tools_field] if tools_field else [field]
 
     primary = load_dataset("json", data_files=spec.dataset, split="train")
-    if field not in primary.column_names:
-        raise RuntimeError(
-            f"dataset is missing {kind} field {field!r}; columns={primary.column_names}"
-        )
-    primary = primary.select_columns([field])
+    for column in columns:
+        if column not in primary.column_names:
+            raise RuntimeError(
+                f"dataset is missing {kind if column == field else 'tools'} field "
+                f"{column!r}; columns={primary.column_names}"
+            )
+    primary = primary.select_columns(columns)
     primary_rows = len(primary)
     if primary_rows == 0:
         raise RuntimeError("training dataset contains no rows")
@@ -666,11 +675,12 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     dataset = primary
     if spec.replay_dataset is not None:
         replay = load_dataset("json", data_files=spec.replay_dataset, split="train")
-        if field not in replay.column_names:
-            raise RuntimeError(
-                f"replay dataset is missing {kind} field {field!r}; columns={replay.column_names}"
-            )
-        replay = replay.select_columns([field])
+        for column in columns:
+            if column not in replay.column_names:
+                raise RuntimeError(
+                    f"replay dataset is missing field {column!r}; columns={replay.column_names}"
+                )
+        replay = replay.select_columns(columns)
         replay_available_rows = len(replay)
         replay_selected_rows = _replay_sample_count(
             primary_rows, replay_available_rows, spec.replay_ratio
@@ -684,12 +694,16 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     assistant_token_count: int | None = None
     total_token_count: int | None = None
     if is_chat:
-        mixed_text_sha = _chat_digest(dataset, field)
+        mixed_text_sha = _chat_digest(dataset, field, tools_field)
 
         def tokenize_chat(example, index):
             messages = _validate_chat_messages(example[field], row_index=index)
             return _build_chat_example(
-                tokenizer, messages, max_length=spec.max_length, row_index=index
+                tokenizer,
+                messages,
+                max_length=spec.max_length,
+                row_index=index,
+                tools=parse_tools(example[tools_field], row_index=index) if tools_field else None,
             )
 
         tokenized = dataset.map(
