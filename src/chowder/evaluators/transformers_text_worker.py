@@ -163,10 +163,7 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         config_commit=getattr(base.config, "_commit_hash", None),
     )
     if spec.quantization == "none":
-        if spec.placement == "offload":
-            base = dispatch_offloaded(base, device_name)
-        else:
-            base = base.to(device_name)
+        base = place_before_adapter(base, spec=spec, device_name=device_name)
     adapter_liveness: dict[str, Any] | None = None
     if spec.adapter_dir is None:
         model = base
@@ -357,6 +354,24 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
             "bitsandbytes": _package_version("bitsandbytes"),
         },
     }
+
+
+def place_before_adapter(base: Any, *, spec: Any, device_name: str) -> Any:
+    """Place the bare base, deferring an offload dispatch until the adapter is in.
+
+    A dispatched base carries a CPU device map, which makes PEFT's load_adapter
+    re-infer and re-dispatch its own map from the RAM free at that moment. On a
+    tight host that map sends modules to "disk"; the declared re-dispatch that
+    follows cannot bring disk-offloaded parameters back (Gen-2 attempt-22,
+    2026-10-17: "dt_bias is on the meta device"). Attaching the adapter to the
+    undispatched CPU model leaves PEFT nothing to re-plan, and
+    ``placement_after_adapter`` then dispatches exactly once.
+    """
+    if spec.placement == "offload":
+        if spec.adapter_dir is None:
+            return dispatch_offloaded(base, device_name)
+        return base
+    return base.to(device_name)
 
 
 def load_adapter(base: Any, spec: Any) -> Any:
