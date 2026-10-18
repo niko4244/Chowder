@@ -47,7 +47,8 @@ _ALLOWED_OPTIMIZER_TIERING_MODES = {"auto", "always", "off"}
 _ALLOWED_FROZEN_LAYER_STREAMING_MODES = {"auto", "always", "off"}
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
 _ALLOWED_DATASET_FORMATS = {"text", "chat"}
-_ALLOWED_TARGET_PRESETS = {"auto", "attention_and_mlp"}
+_ALLOWED_EXPERT_PLACEMENTS = {"resident", "cpu-transient-grad"}
+_ALLOWED_TARGET_PRESETS = {"auto", "attention_and_mlp", "moe_frozen_experts"}
 _ALLOWED_LR_SCHEDULER_TYPES = {
     "linear",
     "cosine",
@@ -264,6 +265,10 @@ class TransformersPeftRunSpec:
     activation_offload: bool = False
     optimizer_tiering: bool = False
     frozen_layer_streaming: bool = False
+    #: Where an MoE base's routed experts live while training: "resident"
+    #: (default) or "cpu-transient-grad" (frozen experts on the CPU, copied per
+    #: forward and backward; chowder.backends.moe_transient_grad).
+    expert_placement: str = "resident"
     detailed_timing_telemetry: bool = False
     seed: int = 1
     timeout_seconds: float | None = None
@@ -354,6 +359,18 @@ class TransformersPeftRunSpec:
             raise ValueError(f"unsupported quantization: {self.quantization}")
         if self.precision not in _ALLOWED_PRECISION:
             raise ValueError(f"unsupported precision: {self.precision}")
+        if self.expert_placement not in _ALLOWED_EXPERT_PLACEMENTS:
+            raise ValueError(f"unsupported expert_placement: {self.expert_placement}")
+        if self.expert_placement == "cpu-transient-grad":
+            # Frozen experts are the placement's premise, so the coverage must say so,
+            # and bitsandbytes cannot quantise the 3-D expert parameters it moves.
+            if self.target_preset != "moe_frozen_experts" or self.target_modules:
+                raise ValueError(
+                    "expert_placement='cpu-transient-grad' requires lora.target_preset="
+                    "'moe_frozen_experts' and no explicit target_modules"
+                )
+            if self.quantization != "none":
+                raise ValueError("expert_placement='cpu-transient-grad' requires quantization='none'")
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         if self.trust_remote_code:
@@ -432,6 +449,9 @@ class TransformersPeftRunSpec:
         recipe.pop("resume_from_checkpoint", None)
         recipe.pop("activation_offload", None)
         recipe.pop("frozen_layer_streaming", None)
+        # expert_placement too: tests/test_moe_transient_grad.py pins that the
+        # transient-grad experts give the resident loss and every gradient.
+        recipe.pop("expert_placement", None)
         recipe.pop("detailed_timing_telemetry", None)
         payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -557,6 +577,7 @@ class TransformersPeftRunSpec:
             activation_offload=_resolve_activation_offload_flag(training),
             optimizer_tiering=_resolve_optimizer_tiering_flag(training),
             frozen_layer_streaming=_resolve_frozen_layer_streaming_flag(training),
+            expert_placement=str(backend.get("expert_placement", "resident")).lower(),
             detailed_timing_telemetry=_resolve_detailed_timing_telemetry_flag(training),
             seed=int(config.get("seed", seed)),
             timeout_seconds=(
@@ -719,6 +740,7 @@ class TransformersPeftExecutor:
             "max_steps",
             "activation_offload",
             "frozen_layer_streaming",
+            "expert_placement",  # value-transparent, like frozen_layer_streaming
             "detailed_timing_telemetry",
         ):
             recipe.pop(key, None)

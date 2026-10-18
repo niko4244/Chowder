@@ -138,3 +138,77 @@ def test_cpu_resident_experts_train_on_cuda_like_the_resident_model():
     assert abs(float(loss_r) - float(loss_s)) < 1e-5
     for name in grads_r:
         assert torch.allclose(grads_r[name], grads_s[name].cpu(), atol=1e-5), name
+
+
+# --- the worker's expert_placement ------------------------------------------------
+
+from chowder.backends.transformers_peft import TransformersPeftRunSpec  # noqa: E402
+
+
+def _spec(**overrides):
+    fields = {"base_model": "base", "dataset": "data.jsonl", "output_dir": "out"}
+    fields.update(overrides)
+    return TransformersPeftRunSpec(**fields)
+
+
+def test_cpu_transient_grad_placement_requires_the_frozen_experts_coverage():
+    with pytest.raises(ValueError, match="moe_frozen_experts"):
+        _spec(expert_placement="cpu-transient-grad")
+    with pytest.raises(ValueError, match="moe_frozen_experts"):
+        _spec(expert_placement="cpu-transient-grad", target_preset="moe_frozen_experts", target_modules=("q_proj",))
+    with pytest.raises(ValueError, match="quantization='none'"):
+        _spec(expert_placement="cpu-transient-grad", target_preset="moe_frozen_experts", quantization="4bit")
+    with pytest.raises(ValueError, match="unsupported expert_placement"):
+        _spec(expert_placement="gpu-magic")
+    ok = _spec(expert_placement="cpu-transient-grad", target_preset="moe_frozen_experts")
+    # Value-transparent: placement changes where experts live, never the recipe.
+    assert ok.recipe_digest() == _spec(target_preset="moe_frozen_experts").recipe_digest()
+
+
+def _saved_tiny_moe(tmp_path):
+    path = tmp_path / "tiny-moe"
+    _tiny_moe().save_pretrained(path)
+    return str(path)
+
+
+def test_split_device_map_puts_only_experts_on_the_cpu(tmp_path):
+    from chowder.backends.moe_transient_grad import split_device_map
+
+    device_map = split_device_map(_saved_tiny_moe(tmp_path), revision=None, local_files_only=True)
+    experts = {n: d for n, d in device_map.items() if ".mlp.experts." in n}
+    assert experts and set(experts.values()) == {"cpu"}
+    assert {d for n, d in device_map.items() if n not in experts} == {0}
+
+
+def test_the_placement_census_refuses_a_model_that_was_not_split():
+    from chowder.backends.moe_transient_grad import prepare_split_model
+
+    with pytest.raises(RuntimeError, match="census failed"):
+        prepare_split_model(_tiny_moe(), device_type="cuda")
+
+
+def test_split_load_trains_lora_through_cpu_resident_experts(tmp_path):
+    """The worker's real path: from_pretrained with the split map, the census,
+    the moe_frozen_experts LoRA, one backward."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA device")
+    from peft import LoraConfig, TaskType, get_peft_model
+    from transformers import AutoModelForCausalLM
+
+    from chowder.backends.moe_transient_grad import prepare_split_model, split_device_map
+
+    base_dir = _saved_tiny_moe(tmp_path)
+    model = AutoModelForCausalLM.from_pretrained(
+        base_dir, dtype=torch.float32, device_map=split_device_map(base_dir, revision=None, local_files_only=True)
+    )
+    evidence = prepare_split_model(model)
+    assert evidence["expert_params_on_cpu"] == evidence["expert_params"] > 0
+    assert evidence["patched_expert_modules"] == LAYERS
+    targets = _resolve_target_modules(model, explicit=(), preset="moe_frozen_experts")
+    model = get_peft_model(model, LoraConfig(r=4, lora_alpha=8, target_modules=targets, task_type=TaskType.CAUSAL_LM))
+    ids = torch.randint(0, 64, (2, 16), device="cuda")
+    model(input_ids=ids, labels=ids).loss.backward()
+    lora = [(n, p) for n, p in model.named_parameters() if "lora_" in n]
+    assert lora and all(p.grad is not None and torch.isfinite(p.grad).all() for _, p in lora)
+    # Gradient reached the bottom layer, through every frozen-expert layer above it.
+    assert any("layers.0." in n and float(p.grad.abs().sum()) > 0 for n, p in lora)
