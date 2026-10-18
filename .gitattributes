@@ -1,0 +1,5 @@
+# Content-addressed artifacts. The instrument's manifest pins the sha256 of the
+# exact bytes, and `load_items()` refuses when they differ, so checkout must
+# never rewrite their line endings (`core.autocrlf` would otherwise turn LF into
+# CRLF and make a clean clone look corrupt).
+src/chowder/growth/instruments/* -text

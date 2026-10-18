@@ -34,6 +34,9 @@ _ALLOWED_SCORING = {
     "exact_match",
     "normalized_exact_match",
     "final_number_match",
+    # tool-use: the next turn must pick the expected tool with the exact
+    # arguments. Its owner is `chowder.evaluators.scoring`, like final_number_match.
+    "tool_call_exact",
     *OBSERVED_SCORINGS,
 }
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
