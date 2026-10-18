@@ -311,7 +311,8 @@ class _RecordingRunner:
     def __init__(self, *, validate_returncode: int = 0, print_summary: bool = True,
                  create_registry_rows: bool = True, write_identity: bool = True,
                  artifact: bool = True, gpu_hours: float = 0.02,
-                 device_gpu_hours: float | None = None) -> None:
+                 device_gpu_hours: float | None = None,
+                 evaluation_gpu_hours: float | None = None) -> None:
         self.commands: list[tuple[str, ...]] = []
         self.validate_returncode = validate_returncode
         self.print_summary = print_summary
@@ -323,6 +324,9 @@ class _RecordingRunner:
         #: Device time, reported only when a run actually separates it. None
         #: models the trainer's ordinary summary, which reports wall only.
         self.device_gpu_hours = device_gpu_hours
+        #: An in-run evaluation leg recorded in the registry. The trainer's summary
+        #: then reports the lifecycle total (training + evaluation), as cycle.py does.
+        self.evaluation_gpu_hours = evaluation_gpu_hours
 
     def __call__(self, command, cwd, environment, timeout):  # noqa: ANN001, ARG002
         self.commands.append(tuple(command))
@@ -348,7 +352,7 @@ class _RecordingRunner:
                 "promoted_experiment_id": None,
                 "artifact_ref": artifact_ref,
                 "metrics": {"holdout_loss": 0.5},
-                "gpu_hours": self.gpu_hours,
+                "gpu_hours": self.gpu_hours + (self.evaluation_gpu_hours or 0.0),
                 "error": None,
             }
             if self.device_gpu_hours is not None:
@@ -412,6 +416,18 @@ class _RecordingRunner:
                     ),
                 )
             )
+            if self.evaluation_gpu_hours is not None:
+                from chowder.executors import EvaluationOutcome
+
+                registry.record_evaluation_outcome(
+                    EvaluationOutcome(
+                        run_id=f"{experiment_id}-eval",
+                        experiment_id=experiment_id,
+                        source_artifact_ref=str(artifact),
+                        metrics={"holdout_loss": 0.5},
+                        gpu_hours=self.evaluation_gpu_hours,
+                    )
+                )
             registry.update_experiment_status(experiment_id, "passed")
         finally:
             registry.close()
@@ -691,6 +707,28 @@ def test_a_successful_train_that_overruns_its_wall_ceiling_settles_as_refused(tm
     assert (artifact / "payload.safetensors").exists()
     assert Path(evidence["evidence_path"]).exists()
     assert evidence["attempt_row_status"]
+
+
+def test_the_in_run_evaluation_is_charged_once_not_twice(tmp_path: Path):
+    """The trainer's summary already reports the lifecycle total.
+
+    cycle.py reports ``artifact.gpu_hours + evaluation.gpu_hours``, so the
+    summary's ``gpu_hours`` already contains the in-run evaluation recorded in
+    the registry. Gen-2 attempt-20 (2026-10-17): summary 2.472 GPU-h, wall clock
+    2.507 h, evaluation leg 1.293 -- settled as 3.766 and refused, although the
+    attempt cost 2.47 against a 2.5 ceiling.
+    """
+    runner = _RecordingRunner(gpu_hours=0.02, evaluation_gpu_hours=0.02)
+    binding = _binding(tmp_path, runner=runner, envelope=_envelope(wall_gpu_hours_ceiling=0.05))
+    items = _items()
+
+    evidence = binding(_recipe(item_ids=[i.item_id for i in items]), items)
+
+    assert evidence["evaluation"]["gpu_hours"] == pytest.approx(0.02)
+    assert evidence["measured_gpu_hours"] == pytest.approx(0.04)
+    assert evidence["actual_cost"]["wall_gpu_hours"] == pytest.approx(0.04)
+    assert evidence["budget_settlement"]["budget_compliant"] is True
+    assert evidence["status"] != STATUS_REFUSED
 
 
 def test_a_declared_device_ceiling_is_not_settled_against_an_unmeasured_figure(tmp_path: Path):

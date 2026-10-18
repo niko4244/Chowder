@@ -889,6 +889,12 @@ class SubprocessTrainingFn:
         )
         from .compute_cost import ComputeCost, settle_cost
 
+        # The trainer's summary is the lifecycle total: cycle.py reports
+        # artifact.gpu_hours + evaluation.gpu_hours, so the in-run evaluation
+        # the registry records is already inside it. Adding it again charged
+        # Gen-2 attempt-20 3.77 GPU-h for a 2.47 h attempt. The evaluation
+        # leg is charged on its own only when the summary reports no cost.
+        wall_total = actual_wall if actual_wall is not None else (actual_eval or 0.0)
         cost_source = f"attempt:{evidence.get('experiment_id', 'unknown')}"
         if device_measured:
             device_total = summary_device or 0.0
@@ -896,13 +902,13 @@ class SubprocessTrainingFn:
                 device_total += evaluation_device or 0.0
             actual_cost = ComputeCost.measured(
                 device_gpu_hours=device_total,
-                wall_gpu_hours=(actual_wall or 0.0) + (actual_eval or 0.0),
+                wall_gpu_hours=wall_total,
                 source=cost_source,
                 measurement_method="trainer-reported device time",
             )
         else:
             actual_cost = ComputeCost.from_wall_only(
-                (actual_wall or 0.0) + (actual_eval or 0.0),
+                wall_total,
                 source=cost_source,
             )
         evidence["actual_cost"] = actual_cost.to_dict()
