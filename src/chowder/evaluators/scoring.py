@@ -41,16 +41,22 @@ here so the two workers cannot implement it two ways.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Mapping
 
 __all__ = [
     "OBSERVED_SCORINGS",
+    "TOOL_CALL_REASONS",
+    "explain_tool_call",
     "final_answer",
     "final_number",
     "normalize",
     "observed_score",
+    "parse_tool_calls",
     "score",
+    "tool_schema_for",
+    "validate_arguments",
 ]
 
 #: Scorings defined over the recorded observation instead of the decoded text.
@@ -112,9 +118,258 @@ def final_number(text: str) -> str | None:
     return raw or None
 
 
+# --------------------------------------------------------------------------
+# tool-use scoring: does the next turn pick the right tool with valid,
+# correct arguments?  Pure parsing and comparison -- no model, no dependency.
+# --------------------------------------------------------------------------
+
+#: The reason codes ``tool_call_exact`` distinguishes, in decision order.  The
+#: scorer returns only the float every other scorer returns; the *reason* is
+#: exposed by :func:`explain_tool_call` so a caller that can only pass the two
+#: strings (:func:`score`) is not the only way to see why an item missed.
+TOOL_CALL_REASONS: tuple[str, ...] = (
+    "ok",
+    "no_call",
+    "multiple_calls",
+    "wrong_name",
+    "schema_invalid",
+    "args_mismatch",
+)
+
+#: Qwen's native tool-call block.  Qwen2.5/3 wrap the call in
+#: ``<tool_call>...</tool_call>``; the JSON form (``{"name": ..., "arguments":
+#: {...}}``) and the XML form the Qwen3.5/3.6 chat template emits
+#: (``<function=name><parameter=k>v</parameter></function>``) both appear here.
+_TOOL_CALL_BLOCK = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+_XML_FUNCTION = re.compile(r"<function=([^>\s]+)>(.*?)</function>", re.DOTALL)
+_XML_PARAMETER = re.compile(r"<parameter=([^>\s]+)>(.*?)</parameter>", re.DOTALL)
+
+
+def _coerce_xml_value(raw: str) -> Any:
+    """One ``<parameter=...>`` value: JSON when it decodes, else the raw text.
+
+    The template emits a string argument raw and a non-string one through
+    ``tojson`` (chat_template.jinja line 122), so ``5``/``true``/``[...]`` are
+    reconstructed while ``2024-06-01`` stays a string.  The one ambiguity this
+    format cannot resolve -- a *string* whose text looks like JSON -- is
+    documented rather than hidden; the JSON form has no such case.
+    """
+    text = raw.strip()
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
+def _parse_json_tool_call(block: str) -> dict[str, Any] | None:
+    try:
+        document = json.loads(block)
+    except ValueError:
+        return None
+    if not isinstance(document, Mapping) or "name" not in document:
+        return None
+    arguments = document.get("arguments", {})
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            return None
+    if not isinstance(arguments, Mapping):
+        return None
+    return {"name": str(document["name"]), "arguments": dict(arguments)}
+
+
+def _parse_xml_tool_call(block: str) -> dict[str, Any] | None:
+    match = _XML_FUNCTION.search(block)
+    if match is None:
+        return None
+    arguments = {
+        key: _coerce_xml_value(raw)
+        for key, raw in _XML_PARAMETER.findall(match.group(2))
+    }
+    return {"name": match.group(1), "arguments": arguments}
+
+
+def parse_tool_calls(completion: str) -> list[dict[str, Any]]:
+    """Every tool call in one completion, in the order it appears.
+
+    A block that is neither the JSON form nor the XML form contributes no call:
+    a malformed emission must read as "the model did not make a usable call",
+    never as a call with guessed arguments.
+    """
+    calls: list[dict[str, Any]] = []
+    for block in _TOOL_CALL_BLOCK.findall(completion or ""):
+        parsed = _parse_json_tool_call(block.strip()) or _parse_xml_tool_call(block)
+        if parsed is not None:
+            calls.append(parsed)
+    return calls
+
+
+#: JSON-schema ``type`` predicates.  ``bool`` is excluded from the numeric
+#: types on purpose: Python makes ``True == 1``, and a JSON boolean is not a
+#: number in any schema that declares one.  An integral float (``3.0``) is an
+#: integer -- the scorer already compares ``3`` and ``3.0`` as equal, and a
+#: model that renders a count with a decimal point made the same call.
+_TYPE_CHECKS: Mapping[str, Any] = {
+    "string": lambda value: isinstance(value, str),
+    "integer": lambda value: (
+        (isinstance(value, int) and not isinstance(value, bool))
+        or (isinstance(value, float) and value.is_integer())
+    ),
+    "number": lambda value: isinstance(value, (int, float)) and not isinstance(value, bool),
+    "boolean": lambda value: isinstance(value, bool),
+    "null": lambda value: value is None,
+    "object": lambda value: isinstance(value, Mapping),
+    "array": lambda value: isinstance(value, list),
+}
+
+
+def _schema_error(value: Any, schema: Any) -> str | None:
+    """``None`` if ``value`` satisfies ``schema``, else a short reason.
+
+    The subset the instrument's tool schemas use: ``type``, ``properties``,
+    ``required``, ``items``, ``enum``.  A schema with ``properties``/``required``
+    is treated as an object even when it omits ``type`` (the Nemotron
+    ``place_order`` schema does), so a non-object there is a type error.
+    """
+    if not isinstance(schema, Mapping):
+        return None
+    enum = schema.get("enum")
+    if enum is not None and value not in enum:
+        return "enum"
+    declared = schema.get("type")
+    types = [declared] if isinstance(declared, str) else list(declared or [])
+    if ("properties" in schema or "required" in schema) and "object" not in types:
+        types.append("object")
+    if "items" in schema and "array" not in types:
+        types.append("array")
+    if types and not any(
+        _TYPE_CHECKS.get(name, lambda _value: False)(value) for name in types
+    ):
+        return "type"
+    if isinstance(value, Mapping):
+        for key in schema.get("required") or []:
+            if key not in value:
+                return "required"
+        for key, sub_schema in (schema.get("properties") or {}).items():
+            if key in value:
+                error = _schema_error(value[key], sub_schema)
+                if error is not None:
+                    return error
+    if isinstance(value, list) and isinstance(schema.get("items"), Mapping):
+        for element in value:
+            error = _schema_error(element, schema["items"])
+            if error is not None:
+                return error
+    return None
+
+
+def validate_arguments(arguments: Any, schema: Any) -> bool:
+    """Whether ``arguments`` satisfies ``schema`` (see :func:`_schema_error`)."""
+    return _schema_error(arguments, schema) is None
+
+
+def tool_schema_for(tools: Any, name: str) -> Mapping[str, Any] | None:
+    """The ``parameters`` schema of the named tool, or ``None`` if not declared."""
+    for tool in tools or ():
+        function = tool.get("function") if isinstance(tool, Mapping) else None
+        if isinstance(function, Mapping) and function.get("name") == name:
+            parameters = function.get("parameters")
+            return parameters if isinstance(parameters, Mapping) else {}
+    return None
+
+
+def _canonical(value: Any) -> Any:
+    """A comparison form: strings stripped, numbers numeric, key order ignored.
+
+    ``"5"`` and ``5`` differ (a string is not a number); ``5`` and ``5.0`` do
+    not; ``{"a": 1, "b": 2}`` and ``{"b": 2, "a": 1}`` do not.
+    """
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, str):
+        return ("str", value.strip())
+    if value is None:
+        return ("null",)
+    if isinstance(value, (int, float)):
+        return ("num", value)
+    if isinstance(value, Mapping):
+        return ("obj", tuple(sorted((str(key), _canonical(item)) for key, item in value.items())))
+    if isinstance(value, (list, tuple)):
+        return ("arr", tuple(_canonical(item) for item in value))
+    return ("other", repr(value))
+
+
+def _tool_call_reason(
+    completion: str, name: str, arguments: Any, schema: Any
+) -> str:
+    """The reason code for one expected call against one completion."""
+    calls = parse_tool_calls(completion)
+    if not calls:
+        return "no_call"
+    if len(calls) != 1:
+        return "multiple_calls"
+    call = calls[0]
+    if call["name"] != name:
+        return "wrong_name"
+    if not validate_arguments(call["arguments"], schema):
+        return "schema_invalid"
+    if _canonical(call["arguments"]) != _canonical(arguments):
+        return "args_mismatch"
+    return "ok"
+
+
+def explain_tool_call(completion: str, item: Mapping[str, Any]) -> str:
+    """Why one instrument item's completion did or did not score (see
+
+    :data:`TOOL_CALL_REASONS`).  ``item`` is one item from the committed
+    instrument -- it carries the tool schemas beside the expected call -- or one
+    row from the slice, whose ``expected`` already carries the schema.
+    """
+    expected = item.get("expected", {}) if isinstance(item, Mapping) else {}
+    if not isinstance(expected, Mapping):
+        expected = {}
+    name = str(expected.get("name", ""))
+    schema = expected.get("parameters")
+    if not isinstance(schema, Mapping):
+        schema = tool_schema_for(item.get("tools", ()), name)
+    return _tool_call_reason(
+        final_answer(completion),
+        name,
+        expected.get("arguments", {}),
+        schema if schema is not None else {},
+    )
+
+
+def _tool_call_exact(prediction: str, expected: str) -> float:
+    """Score ``tool_call_exact``: 1.0 iff the one call matches exactly.
+
+    ``expected`` is the item's expected call as JSON.  It carries the tool's
+    ``parameters`` schema beside ``name``/``arguments`` because the two-argument
+    :func:`score` signature has no other way to reach the schema; the committed
+    item file keeps ``expected`` as the bare call and the slice adds the schema.
+    """
+    try:
+        document = json.loads(expected)
+    except ValueError:
+        return 0.0
+    if not isinstance(document, Mapping) or "name" not in document or "arguments" not in document:
+        return 0.0
+    schema = document.get("parameters")
+    reason = _tool_call_reason(
+        prediction,
+        str(document["name"]),
+        document["arguments"],
+        schema if isinstance(schema, Mapping) else {},
+    )
+    return 1.0 if reason == "ok" else 0.0
+
+
 def score(prediction: str, expected: str, scoring: str) -> float:
     """Score one prediction. Thinking-aware extraction applies to every mode."""
     answer = final_answer(prediction)
+    if scoring == "tool_call_exact":
+        return _tool_call_exact(answer, expected)
     if scoring == "exact_match":
         return float(answer.strip() == expected.strip())
     if scoring == "normalized_exact_match":
