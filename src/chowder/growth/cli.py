@@ -446,6 +446,16 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
         ),
     )
     prepare.add_argument(
+        "--parent-artifacts",
+        action="append",
+        default=[],
+        help=(
+            "A directory holding the raw prediction files the parent measurement's "
+            "rows name; they are carried next to the prepared parent report so "
+            "certification can verify them (repeatable)"
+        ),
+    )
+    prepare.add_argument(
         "--calibrate-training",
         default="",
         help=(
@@ -778,6 +788,7 @@ def _growth_campaign_prepare(args: argparse.Namespace) -> int:
             parent_evidence=args.parent_evidence or None,
             parent_measurement=args.parent_measurement or None,
             model_lifecycle=lifecycle,
+            parent_artifacts=args.parent_artifacts or None,
         )
     except CampaignPrepareRefusal as refusal:
         return _print_json(
