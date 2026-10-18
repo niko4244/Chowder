@@ -95,6 +95,17 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
         raise RuntimeError("baseline dependencies are missing; install chowder-ai[train]") from exc
 
     device_name = _device(torch, spec.device)
+    if spec.placement == "experts-cpu":
+        # Refused rather than quietly ignored: the split load lives in the
+        # candidate worker (``transformers_text_worker``), which is the arm a
+        # candidate -- and, in a growth campaign, the ancestor and parent arms --
+        # is measured through. This worker would load the base resident and then
+        # *report* "experts-cpu", which is the silent lie the placement census
+        # exists to prevent.
+        raise RuntimeError(
+            "the baseline worker does not implement the 'experts-cpu' placement; "
+            "it is implemented by the transformers-text worker"
+        )
     if spec.quantization == "4bit" and not device_name.startswith("cuda"):
         raise RuntimeError("4-bit baseline evaluation requires CUDA")
     dtype = _dtype(torch, spec.precision)

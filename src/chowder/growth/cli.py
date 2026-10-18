@@ -492,7 +492,7 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
     ancestor.add_argument(
         "--placement",
         default="offload",
-        help="Worker placement: resident or offload (default: offload)",
+        help="Worker placement: resident, offload or experts-cpu (default: offload)",
     )
     ancestor.set_defaults(func=_growth_campaign_measure_ancestor)
 
@@ -509,7 +509,7 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
     parent_arm.add_argument(
         "--placement",
         default="offload",
-        help="Worker placement: resident or offload (default: offload)",
+        help="Worker placement: resident, offload or experts-cpu (default: offload)",
     )
     parent_arm.set_defaults(func=_growth_campaign_measure_parent)
 
