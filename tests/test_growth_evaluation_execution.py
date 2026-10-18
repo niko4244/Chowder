@@ -261,6 +261,58 @@ def test_the_candidate_evaluator_uses_the_same_declared_throughput(tmp_path: Pat
         assert evaluator.batch_size == batch_size
 
 
+@pytest.mark.parametrize("batch_size", [1, 16])
+def test_the_in_run_evaluation_uses_the_same_declared_throughput(
+    tmp_path: Path, batch_size: int
+) -> None:
+    """The training project's own evaluation is measured like the arms.
+
+    Gen-2 (2026-09-20): the template's suites carried no batch size, so the
+    in-run evaluation decoded one row per call against arms measured at 16. It
+    took 79 minutes on the first suite and timed out before math500 -- three
+    attempts trained and were then killed, and none produced a candidate.
+    """
+    from chowder.growth.campaign_prepare import MEASURED_PARENT, _write_project_template
+
+    parent_eval = tmp_path / "parent-eval-report.json"
+    parent_eval.write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "measurement_origin": MEASURED_PARENT,
+                        "benchmark_qualified_id": PROTECTED_ID,
+                        "score": 0.0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    material = tmp_path / "evaluation-material.json"
+    material.write_text(
+        json.dumps(
+            {
+                "suites": [
+                    {"name": "math500", "dataset": str(tmp_path / "m.jsonl")},
+                    {"name": "mgsm", "dataset": str(tmp_path / "g.jsonl")},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    path = _write_project_template(
+        _manifest(tmp_path, batch_size=batch_size),
+        tmp_path,
+        evaluation_material_path=material,
+        parent_eval_path=parent_eval,
+    )
+    template = json.loads(path.read_text(encoding="utf-8"))
+    suites = template["config"]["evaluation"]["suites"]
+    assert len(suites) == 2
+    assert {suite["batch_size"] for suite in suites} == {batch_size}
+
+
 def test_the_declared_throughput_is_the_only_owner_of_the_batching_decision() -> None:
     """No path may take a batch size from anywhere else."""
     import inspect

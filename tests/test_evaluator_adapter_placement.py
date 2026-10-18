@@ -15,6 +15,7 @@ using the real functions rather than a restatement of them.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -80,3 +81,66 @@ def test_a_resident_adapter_run_is_not_re_placed(monkeypatch: pytest.MonkeyPatch
 
     assert worker.placement_after_adapter(base, spec=spec, device_name="cuda:0") is base
     assert placed == []
+
+
+class _RecordingPeft:
+    calls: list[tuple[object, object, dict]] = []
+
+    @classmethod
+    def from_pretrained(cls, base, adapter_dir, **kwargs):  # noqa: ANN001
+        cls.calls.append((base, adapter_dir, kwargs))
+        return "peft-model"
+
+
+@pytest.mark.parametrize(("placement", "expects_folder"), [("offload", True), ("resident", False)])
+def test_an_offloaded_adapter_load_gives_peft_an_offload_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, placement: str, expects_folder: bool
+) -> None:
+    """Gen-2 attempt-16: PEFT re-inferred a device map from the RAM free at load
+    time, sent tail modules to "disk", and raised for want of an offload folder,
+    after the attempt had trained all 140 steps."""
+    import sys
+    import types
+
+    _RecordingPeft.calls = []
+    monkeypatch.setitem(sys.modules, "peft", types.SimpleNamespace(PeftModel=_RecordingPeft))
+    monkeypatch.setenv("CHOWDER_EVAL_OFFLOAD_DIR", str(tmp_path / "offload"))
+    spec = SimpleNamespace(placement=placement, adapter_dir="adapter")
+
+    assert worker.load_adapter("base", spec) == "peft-model"
+    (base, adapter_dir, kwargs), = _RecordingPeft.calls
+    assert (base, adapter_dir, kwargs["is_trainable"]) == ("base", "adapter", False)
+    assert ("offload_folder" in kwargs) is expects_folder
+    if expects_folder:
+        assert Path(kwargs["offload_folder"]).is_dir()
+
+
+@pytest.mark.parametrize(
+    ("placement", "adapter_dir", "expect_dispatch", "expect_to"),
+    [
+        ("offload", "adapter", False, False),  # deferred: dispatched once, after the adapter
+        ("offload", None, True, False),       # bare base: dispatched now
+        ("resident", "adapter", False, True),
+        ("resident", None, False, True),
+    ],
+)
+def test_an_offloaded_base_is_not_dispatched_before_its_adapter(
+    monkeypatch: pytest.MonkeyPatch, placement, adapter_dir, expect_dispatch, expect_to
+) -> None:
+    """Gen-2 attempt-22: a pre-dispatched base let PEFT re-plan onto disk, and the
+    declared re-dispatch then failed on a meta (disk-offloaded) parameter."""
+    dispatched: list[object] = []
+    monkeypatch.setattr(worker, "dispatch_offloaded", lambda m, d: dispatched.append(m) or m)
+
+    class _Base:
+        moved_to = None
+
+        def to(self, device):
+            self.moved_to = device
+            return self
+
+    base = _Base()
+    spec = SimpleNamespace(quantization="none", placement=placement, adapter_dir=adapter_dir)
+    assert worker.place_before_adapter(base, spec=spec, device_name="cuda:0") is base
+    assert (dispatched == [base]) is expect_dispatch
+    assert (base.moved_to == "cuda:0") is expect_to

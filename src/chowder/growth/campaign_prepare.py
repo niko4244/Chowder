@@ -30,6 +30,7 @@ exist, the refusal *is* the honest readiness answer.
 from __future__ import annotations
 
 import hashlib
+import shutil
 import json
 import os
 from dataclasses import dataclass, field
@@ -141,6 +142,21 @@ def load_pinned_slices(benchmark_qualified_id: str) -> tuple[Mapping[str, str], 
     :mod:`chowder.growth.generation_diagnostics`, so the target slice is pinned
     exactly as the judge's instrument is.
     """
+    if benchmark_qualified_id.startswith("tool-use@"):
+        from .tool_use_instrument import (
+            ToolUseInstrumentRefusal,
+            load_tool_use_slice,
+        )
+
+        try:
+            return load_tool_use_slice()
+        except ToolUseInstrumentRefusal as error:
+            # The instrument has its own refusal (a missing or digest-mismatched
+            # committed file); preparation surfaces it as the slice refusal so a
+            # caller sees one vocabulary.
+            raise CampaignPrepareRefusal(
+                f"{PREPARE_SLICE_UNAVAILABLE}: {benchmark_qualified_id}: {error}"
+            ) from error
     if benchmark_qualified_id.startswith("generation-diagnostics@"):
         from .generation_diagnostics import INSTRUMENT_PROMPTS
 
@@ -225,6 +241,82 @@ def probe_hardware() -> Mapping[str, Any]:
             "timings from a bounded synthetic forward+backward at each declared "
             "sequence length; not a measurement of the campaign's model"
         ),
+    }
+
+
+MODEL_LIFECYCLE_BASIS = "chowder.model-lifecycle.v1"
+
+
+def calibrate_model_lifecycle(
+    training_result: str | Path, evaluation_result: str | Path
+) -> dict[str, Any]:
+    """The campaign's own model, measured: training s/step and in-run evaluation s.
+
+    The device probe times a synthetic step (~0.002 s), so recipes projected from
+    it alone came out ~1000x below a real attempt, which settlement then refused
+    as ACTUAL_EXCEEDS_PROJECTION. This is the "separate pre-compute job" the
+    probe's docstring defers to, built from evidence already on disk:
+
+    * ``training_result``: a completed run's ``worker-result.json``. Its
+      ``telemetry.lifecycle.measured_seconds`` over ``telemetry.global_step``
+      steps gives seconds/step with model load included, and the sibling
+      ``run-spec.json`` names the conditions it was measured under;
+    * ``evaluation_result``: an arm's evaluation result at the declared
+      instrument. Its ``runtime.lifecycle.measured_seconds`` is the in-run
+      evaluation's cost.
+
+    Both are digested, so a projection can always name what it rests on.
+    """
+    training_path, evaluation_path = Path(training_result), Path(evaluation_result)
+    training = _read_json_object(training_path)
+    evaluation = _read_json_object(evaluation_path)
+    if training is None or evaluation is None:
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: model-lifecycle calibration needs two readable JSON "
+            f"results, got {training_path} and {evaluation_path}"
+        )
+    telemetry = training.get("telemetry") or {}
+    steps = telemetry.get("global_step")
+    train_seconds = (telemetry.get("lifecycle") or {}).get("measured_seconds")
+    eval_seconds = ((evaluation.get("runtime") or {}).get("lifecycle") or {}).get(
+        "measured_seconds"
+    )
+    if not isinstance(steps, int) or steps <= 0 or not isinstance(train_seconds, (int, float)):
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: {training_path} holds no measured training lifecycle "
+            "(telemetry.global_step and telemetry.lifecycle.measured_seconds)"
+        )
+    if not isinstance(eval_seconds, (int, float)) or eval_seconds <= 0:
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: {evaluation_path} holds no measured evaluation "
+            "lifecycle (runtime.lifecycle.measured_seconds)"
+        )
+    spec = _read_json_object(training_path.parent / "run-spec.json") or {}
+    seq_len = spec.get("max_length")
+    if not isinstance(seq_len, int) or seq_len <= 0:
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: {training_path.parent / 'run-spec.json'} names no "
+            "max_length, so the measured step has no stated sequence length"
+        )
+
+    def digest(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    return {
+        "basis": MODEL_LIFECYCLE_BASIS,
+        "train_seconds_per_step": round(float(train_seconds) / steps, 6),
+        "measured_seq_len": seq_len,
+        "measured_steps": steps,
+        "in_run_eval_seconds": round(float(eval_seconds), 3),
+        "conditions": {
+            key: spec.get(key)
+            for key in ("batch_size", "gradient_accumulation_steps", "precision",
+                        "quantization", "gradient_checkpointing")
+        },
+        "sources": [
+            {"role": "training", "path": str(training_path), "sha256": digest(training_path)},
+            {"role": "evaluation", "path": str(evaluation_path), "sha256": digest(evaluation_path)},
+        ],
     }
 
 
@@ -321,6 +413,8 @@ def prepare_campaign(
     slice_source: SliceSource | None = None,
     material: Mapping[str, Sequence[str]] | None = None,
     source_id: str = "gen2-response-surface-curriculum",
+    model_lifecycle: Mapping[str, Any] | None = None,
+    parent_artifacts: Sequence[str | Path] | None = None,
 ) -> PreparedCampaign:
     """Produce the manifest's declared inputs from durable evidence.
 
@@ -347,6 +441,10 @@ def prepare_campaign(
     # 1. measured hardware: the recipes are projected against real hardware.
     hardware = dict((probe or probe_hardware)())
     _require_hardware_fields(hardware)
+    if model_lifecycle is not None:
+        # The campaign's own model, measured (calibrate_model_lifecycle); the
+        # planner projects from it instead of the synthetic device step.
+        hardware["model_lifecycle"] = dict(model_lifecycle)
     hardware_path = _write_json(root / "hardware-budget.json", hardware)
 
     # 2. the frozen mini-slices, read from the pinned caches.
@@ -360,6 +458,7 @@ def prepare_campaign(
         root,
         parent_evidence=parent_evidence,
         measurement=parent_measurement,
+        parent_artifacts=parent_artifacts,
     )
     notes.extend(parent_notes)
 
@@ -394,6 +493,11 @@ def prepare_campaign(
         root,
         evaluation_material_path=evaluation_material_path,
         parent_eval_path=parent_eval_path,
+        evaluation_gpu_hours=(
+            float(model_lifecycle["in_run_eval_seconds"]) / 3600.0
+            if model_lifecycle is not None
+            else EVALUATION_GPU_HOUR_RESERVE
+        ),
     )
 
     # 5. the contamination manifest the binder loads before any row binds.
@@ -515,13 +619,12 @@ def _write_evaluation_material(
             ),
             encoding="utf-8",
         )
-        wire = _SLICE_DATASETS.get(qualified_id, {})
         suites.append(
             {
                 "benchmark_qualified_id": qualified_id,
                 "name": qualified_id.split("@", 1)[0],
                 "dataset": str(slice_path),
-                "scoring": wire.get("scoring", "normalized_exact_match"),
+                "scoring": _scoring_for(qualified_id),
                 "prompt_field": "prompt",
                 "expected_field": "expected",
                 "metric": _metric_for(qualified_id),
@@ -551,6 +654,25 @@ def _metric_for(qualified_id: str) -> str:
     return "accuracy"
 
 
+#: Scorings for the in-repo instruments that are not cache-backed, so no
+#: ``_SLICE_DATASETS`` entry carries their ``scoring``.  The generation-
+#: diagnostics instrument is deliberately absent: its items are scored like any
+#: text item, and its distinct metric is named by :func:`_metric_for`.
+_INSTRUMENT_SCORINGS: Mapping[str, str] = {
+    "tool-use": "tool_call_exact",
+}
+
+
+def _scoring_for(qualified_id: str) -> str:
+    """The scoring a declared benchmark's items are measured with."""
+    wire = _SLICE_DATASETS.get(qualified_id)
+    if wire is not None:
+        return wire.get("scoring", "normalized_exact_match")
+    return _INSTRUMENT_SCORINGS.get(
+        qualified_id.split("@", 1)[0], "normalized_exact_match"
+    )
+
+
 def _slug(qualified_id: str) -> str:
     return qualified_id.replace("@", "_").replace("/", "_")
 
@@ -564,6 +686,7 @@ def _write_parent_evidence(
     *,
     parent_evidence: str | Path | None,
     measurement: str | Path | None = None,
+    parent_artifacts: Sequence[str | Path] | None = None,
 ) -> tuple[Path, Path, list[str]]:
     """Derive the parent arm and profile from the parent generation's evidence.
 
@@ -638,6 +761,38 @@ def _write_parent_evidence(
         )
         notes.append(f"parent arm: {qualified_id} unmeasured ({reason})")
 
+    # A measured row names its raw predictions relative to the report that holds
+    # it, and certification resolves that name next to the declared report. The
+    # rows are carried here, so their raw files must be too: Gen-2 run 8
+    # (2026-10-18) trained, measured and settled a candidate and was then
+    # refused because no prepared directory had ever held the parent's raw
+    # files. Refuse now, before any compute, if one cannot be found.
+    search = [
+        *([Path(measurement).parent] if measurement is not None and str(measurement).strip() else [source]),
+        *(Path(d) for d in (parent_artifacts or ())),
+    ]
+    carried: list[str] = []
+    for run in runs:
+        reference = str(getattr(run, "raw_artifact_ref", "") or "")
+        if not reference or Path(reference).is_absolute():
+            continue
+        found = next((d / reference for d in search if (d / reference).is_file()), None)
+        if found is None and (getattr(run, "metadata", None) or {}).get("aggregate_only"):
+            # Legacy diagnostics rows reuse the adapter ref as their raw ref and
+            # promise no per-sample file, so there is nothing to carry.
+            continue
+        if found is None:
+            raise CampaignPrepareRefusal(
+                f"{PREPARE_PARENT_EVIDENCE_INVALID}: the parent row for "
+                f"{run.benchmark_qualified_id} names raw artifact {reference!r}, which "
+                f"is in none of {[str(d) for d in search]}; certification would refuse "
+                "the run after its compute (pass --parent-artifacts <dir>)"
+            )
+        target = root / reference
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(found, target)
+        carried.append(f"parent arm: carried raw artifact {reference} from {found.parent}")
+
     parent_eval_path = root / "parent-eval-report.json"
     EvalReport(
         generation_version=parent_version,
@@ -650,8 +805,9 @@ def _write_parent_evidence(
         ),
     ).save(parent_eval_path)
 
+    # The profile's notes are its ``unmeasured`` list, so carried files stay out.
     profile_path = _write_parent_profile(manifest, root, runs=tuple(runs), notes=notes)
-    return parent_eval_path, profile_path, notes
+    return parent_eval_path, profile_path, [*notes, *carried]
 
 
 def _read_json_object(path: Path) -> Mapping[str, Any] | None:
@@ -1241,8 +1397,13 @@ def _write_project_template(
     *,
     evaluation_material_path: Path,
     parent_eval_path: Path,
+    evaluation_gpu_hours: float = EVALUATION_GPU_HOUR_RESERVE,
 ) -> Path:
     """The executor's project template, derived from the declaration.
+
+    ``evaluation_gpu_hours`` is what the in-run evaluation reserves: the
+    measured in-run evaluation cost when the hardware budget carries a model
+    lifecycle, else the fixed placeholder reserve.
 
     Not a docs-script reconstruction: the base model, the budget, the evaluation
     suites and the fixed baseline all come from the manifest and the evidence
@@ -1266,6 +1427,10 @@ def _write_project_template(
                     getattr(manifest.protection, "decoding", {}).get("max_new_tokens", 512)
                 ),
                 "use_chat_template": True,
+                # The arms were measured at the declared throughput, so the
+                # candidate's in-run evaluation must be too; omitted, the worker
+                # decodes one row per call (different tokens, ~16x slower).
+                "batch_size": int(manifest.evaluation_execution.batch_size),
             }
         )
     suite_names = [str(suite["name"]) for suite in suites]
@@ -1303,7 +1468,7 @@ def _write_project_template(
             "estimated_gpu_hours": max(
                 0.0,
                 float(budget.wall_gpu_hours_ceiling_per_recipe)
-                - EVALUATION_GPU_HOUR_RESERVE,
+                - evaluation_gpu_hours,
             ),
             "hypothesis": {
                 "observation": "the parent generation's remaining measured weaknesses",
@@ -1352,7 +1517,9 @@ def _write_project_template(
             },
             "evaluation": {
                 "type": "transformers-text",
-                "estimated_gpu_hours": EVALUATION_GPU_HOUR_RESERVE,
+                # Unrounded: the cycle sums this with the training reservation
+                # and the engine refuses a lifecycle even 1e-7 over the budget.
+                "estimated_gpu_hours": evaluation_gpu_hours,
                 "precision": "bf16",
                 "quantization": "none",
                 "placement": "offload",

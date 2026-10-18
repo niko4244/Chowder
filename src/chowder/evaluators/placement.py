@@ -1,4 +1,4 @@
-"""Evaluation-side placement: full-resident vs offload-resident generation.
+"""Evaluation-side placement: resident, offload-resident, experts-on-CPU.
 
 The production text evaluators historically loaded the base model fully
 onto the accelerator (``model.to("cuda:0")``) or quantized it onto it
@@ -7,6 +7,14 @@ an honest OOM: the evaluator could not evaluate the exact model class this
 program improves. Training is unaffected (the Memory Fabric streams frozen
 LoRA base weights), so a trained candidate could exist with no production
 way to score it.
+
+``placement: "experts-cpu"`` is the sparse analogue, and the mirror of the
+training backend that already judges it: the base loads under
+``backends.moe_transient_grad.split_device_map`` (routed experts on the host,
+everything else on the device), the experts are then frozen and their forward
+patched to copy one expert's slice per forward, and the adapter attaches on
+top of that. It is the only placement that can evaluate an MoE whose experts
+do not fit, which is exactly the model class the router work targets.
 
 ``placement: "offload"`` mirrors the probe-qualified Generation-0 freeze
 policy (3.94 GiB steady-state peak, measured 2026-09-17): bf16 weights
@@ -26,7 +34,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-PLACEMENT_MODES = frozenset({"resident", "offload"})
+PLACEMENT_MODES = frozenset({"resident", "offload", "experts-cpu"})
 
 #: Where transient weight copies land. Configurable so a machine can keep
 #: the streamed shards off a full system drive; never silently defaults to
@@ -114,6 +122,16 @@ def needs_redispatch_after_adapter(
 
     This is the one place that decides it, so the worker cannot quietly decide
     otherwise.
+
+    ``"experts-cpu"`` is False by the same measurement: its placement is what
+    the load itself applied, and the attach is made to preserve it rather than
+    re-plan around it (see
+    :func:`chowder.evaluators.transformers_text_worker.load_adapter`), so there
+    is nothing to re-assert -- and nothing that *could* re-assert it, since
+    accelerate's ``dispatch_model`` reads a ``"cpu"`` entry as *offload* (the
+    weights become meta and are re-materialised on the card per forward) while
+    the split load keeps them as real host tensors, which is what the transient
+    expert forward reads.
     """
     return bool(adapter) and quantization == "none" and placement == "offload"
 

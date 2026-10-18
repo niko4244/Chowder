@@ -60,7 +60,9 @@ __all__ = [
 class ProjectCost(Protocol):
     """The recipe planner's own projection, reused so costs cannot diverge."""
 
-    def __call__(self, *, seq_len: int, max_steps: int) -> tuple[float, float]: ...
+    def __call__(
+        self, *, seq_len: int, max_steps: int, examples_per_step: int = 1
+    ) -> tuple[float, float]: ...
 
 #: Refusal code for everything this module refuses.
 SEARCH_SCHEMA = "CANDIDATE_SEARCH"
@@ -309,7 +311,8 @@ def plan_search(
             if recipe.recipe_id not in candidate_ids:
                 continue
             device, wall = project_cost(
-                seq_len=recipe.seq_len, max_steps=incremental_steps
+                seq_len=recipe.seq_len, max_steps=incremental_steps,
+                examples_per_step=recipe.batch_size * recipe.gradient_accumulation,
             )
             if device > per_recipe_device_ceiling or wall > per_recipe_wall_ceiling:
                 raise CandidateSearchRefusal(
@@ -646,7 +649,10 @@ def run_search(
             # same delta), never the full round budget again.
             previous_steps = plan.rounds[row.round_index - 1].max_steps if row.round_index > 0 else 0
             incremental_steps = max(1, row.max_steps - previous_steps)
-            device, wall = project_cost(seq_len=recipe.seq_len, max_steps=incremental_steps)
+            device, wall = project_cost(
+                seq_len=recipe.seq_len, max_steps=incremental_steps,
+                examples_per_step=recipe.batch_size * recipe.gradient_accumulation,
+            )
             evidence = dict(
                 run_attempt(
                     round_recipe(

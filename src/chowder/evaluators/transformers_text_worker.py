@@ -30,6 +30,7 @@ from .scoring import (
 )
 from .vram import MemorySampler, peak_vram as _peak_vram
 from .placement import (
+    _offload_dir,
     dispatch_offloaded,
     needs_redispatch_after_adapter,
     placement_note,
@@ -123,6 +124,22 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
     if spec.local_custom_code_digests is not None:
         patch_transformers5_custom_model(spec.base_model, spec.local_custom_code_digests)
     device_name = _resolve_device(torch, spec.device)
+    if spec.placement == "experts-cpu":
+        # Refused before a single weight is touched. Either of these would
+        # otherwise leave the run reporting a placement it did not apply.
+        if spec.quantization != "none":
+            raise RuntimeError(
+                "evaluation placement 'experts-cpu' requires quantization 'none', "
+                f"got {spec.quantization!r}: the routed experts are copied to the "
+                "device in the declared precision, and a quantized base has no "
+                "such expert slice to copy"
+            )
+        if not device_name.startswith("cuda"):
+            raise RuntimeError(
+                "evaluation placement 'experts-cpu' requires a CUDA device: the "
+                "routed experts are copied from the host to the device per "
+                "forward, and there is nothing to copy them to here"
+            )
     if spec.quantization == "4bit" and not device_name.startswith("cuda"):
         raise RuntimeError("4-bit evaluation requires a CUDA device")
 
@@ -164,6 +181,18 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         )
         device_index = int(device_name.split(":", 1)[1]) if ":" in device_name else 0
         model_kwargs["device_map"] = {"": device_index}
+    if spec.placement == "experts-cpu":
+        # The split *is* the placement, so it has to be the load's device map:
+        # the routed experts come out of this load as real host tensors, and
+        # nothing after it may move them (``place_before_adapter`` leaves this
+        # load alone). ``split_device_map`` raises with its own reason for a
+        # base with no expert parameters, which is also this placement's
+        # refusal for a dense model.
+        from ..backends.moe_transient_grad import split_device_map
+
+        model_kwargs["device_map"] = split_device_map(
+            spec.base_model, revision=spec.revision, local_files_only=spec.offline
+        )
 
     base = with_hub_retries(
         lambda: AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs),
@@ -178,15 +207,21 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         config_commit=getattr(base.config, "_commit_hash", None),
     )
     if spec.quantization == "none":
-        if spec.placement == "offload":
-            base = dispatch_offloaded(base, device_name)
-        else:
-            base = base.to(device_name)
+        base = place_before_adapter(base, spec=spec, device_name=device_name)
+    placement_census: dict[str, Any] | None = None
+    if spec.placement == "experts-cpu":
+        # Before the adapter is attached, as the training backend does: this
+        # freezes the experts and patches their forward, and it is also the
+        # run's evidence that the placement happened -- it raises rather than
+        # returning a census that is not one.
+        from ..backends.moe_transient_grad import prepare_split_model
+
+        placement_census = prepare_split_model(base)
     adapter_liveness: dict[str, Any] | None = None
     if spec.adapter_dir is None:
         model = base
     else:
-        model = PeftModel.from_pretrained(base, spec.adapter_dir, is_trainable=False)
+        model = load_adapter(base, spec)
         # Refuse to score an adapter that cannot change the model. PEFT only
         # warns when no saved key matches, leaving every LoRA B at zero.
         adapter_liveness = assert_adapter_is_live(model, spec.adapter_dir)
@@ -196,6 +231,11 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         # Reported per run: "offload" means nothing unless the dense weights
         # demonstrably live on the CPU while generation runs.
         print(f"placement: offload active ({placement_note(model)})", flush=True)
+    if spec.placement == "experts-cpu":
+        # Same evidence, measured after the attach: the census is what the load
+        # claimed, this is where the parameters are on the model that will
+        # actually generate.
+        print(f"placement: experts-cpu active ({placement_note(model)})", flush=True)
     device = next(model.parameters()).device
     resolved_eos_token_id = resolve_eos_token_ids(tokenizer, model)
     load_timer.__exit__()
@@ -380,6 +420,10 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
             "device": device_name,
             "gpu_count": 1 if device_name.startswith("cuda") else 0,
             "placement": spec.placement,
+            # Measured, not declared: the census ``prepare_split_model``
+            # returned for this load (None for every other placement). A run
+            # whose experts did not land on the host never gets this far.
+            "placement_census": placement_census,
             "lifecycle": lifecycle_data,
             "memory_sampling": memory_sampling,
             # The training workers have always reported this; the evaluators did
@@ -410,6 +454,83 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
             "bitsandbytes": _package_version("bitsandbytes"),
         },
     }
+
+
+#: Sentinel for "this model has no device map to withhold" -- distinct from a
+#: map that is present but empty.
+_NO_DEVICE_MAP = object()
+
+
+def place_before_adapter(base: Any, *, spec: Any, device_name: str) -> Any:
+    """Place the bare base, deferring an offload dispatch until the adapter is in.
+
+    A dispatched base carries a CPU device map, which makes PEFT's load_adapter
+    re-infer and re-dispatch its own map from the RAM free at that moment. On a
+    tight host that map sends modules to "disk"; the declared re-dispatch that
+    follows cannot bring disk-offloaded parameters back (Gen-2 attempt-22,
+    2026-10-17: "dt_bias is on the meta device"). Attaching the adapter to the
+    undispatched CPU model leaves PEFT nothing to re-plan, and
+    ``placement_after_adapter`` then dispatches exactly once.
+    """
+    if spec.placement == "offload":
+        if spec.adapter_dir is None:
+            return dispatch_offloaded(base, device_name)
+        return base
+    if spec.placement == "experts-cpu":
+        # Placed by the load itself, through ``split_device_map``: the experts
+        # are host tensors from that moment on, and ``.to()`` here would pull
+        # them (and the census) back onto the card.
+        return base
+    return base.to(device_name)
+
+
+def load_adapter(base: Any, spec: Any) -> Any:
+    """Attach the candidate adapter, giving PEFT somewhere to offload.
+
+    On an offloaded base, ``PeftModel.load_adapter`` re-infers its own device map
+    from the memory free *at that moment* and dispatches to it. When host RAM is
+    tight that map sends tail modules to "disk", and without an offload folder
+    PEFT raises -- Gen-2 attempt-16 (2026-10-17) trained all 140 steps and then
+    lost its in-run evaluation to exactly that ValueError. The folder only has to
+    exist for PEFT's interim dispatch: ``placement_after_adapter`` re-asserts the
+    declared placement immediately afterwards.
+
+    On an ``"experts-cpu"`` base the opposite is needed: the attach must not
+    re-place anything at all. The split left the routed experts as real host
+    tensors and the transient forward reads the per-token expert slice from
+    there, so PEFT's re-plan is not a slower measurement but a different model --
+    measured on the tiny-MoE fixture (2026-10-18), the re-plan moved all 8 host
+    expert tensors onto the card (``cuda=85 cpu=0``). Re-dispatching them back is
+    not available either: accelerate's ``dispatch_model`` reads a ``"cpu"`` entry
+    as *offload*, so the experts would return as meta tensors that the patch
+    cannot read. The placement therefore has to survive the attach itself, and
+    PEFT's re-plan is triggered by the device map it finds on the model: for this
+    placement the attach happens with that map withheld, and it is restored the
+    moment the wrapper exists.
+    """
+    from peft import PeftModel
+
+    kwargs: dict[str, Any] = {"is_trainable": False}
+    if spec.placement == "offload":
+        kwargs["offload_folder"] = _offload_dir()
+    if spec.placement != "experts-cpu":
+        return PeftModel.from_pretrained(base, spec.adapter_dir, **kwargs)
+    # ``pop`` from the instance dict, not ``del``: a version that declares
+    # ``hf_device_map`` on the class would make ``del`` raise where the pop is a
+    # silent no-op, and a silent no-op here is the failure this exists to
+    # prevent -- hence the check, which refuses rather than misplacing.
+    withheld = base.__dict__.pop("hf_device_map", _NO_DEVICE_MAP)
+    if withheld is _NO_DEVICE_MAP and getattr(base, "hf_device_map", None) is not None:
+        raise RuntimeError(
+            "evaluation placement 'experts-cpu' cannot withhold the split device "
+            "map: hf_device_map is not an instance attribute of this model, so "
+            "PEFT would re-plan the routed experts back onto the device"
+        )
+    try:
+        return PeftModel.from_pretrained(base, spec.adapter_dir, **kwargs)
+    finally:
+        if withheld is not _NO_DEVICE_MAP:
+            base.hf_device_map = withheld
 
 
 def placement_after_adapter(base: Any, *, spec: Any, device_name: str) -> Any:

@@ -1,0 +1,153 @@
+"""Frozen CPU-resident experts that still pass gradients: the 16 GB MoE training path.
+
+``router_healing_load`` keeps expert weights on the CPU and copies one expert's
+slice to the training device per forward. That is enough to train the router,
+but autograd then *saves* every copied slice for backward: across a whole
+forward pass that is every expert of every layer resident on the card at once
+(32 GB for the REAP-128 Qwen3.6 MoE), which is the memory the policy exists to
+avoid.
+
+``TransientExpertFFN`` saves only the expert's *input*. Backward copies the same
+CPU slice again and recomputes, so gradients reach the hidden states (and so
+every LoRA leaf below the layer) and the routing weights (and so the router),
+while no expert weight is ever held for backward. The experts themselves stay
+frozen: a trainable expert would need a weight gradient this path cannot give,
+so it is refused rather than silently zeroed.
+
+Design: docs/DESIGN-MOE-16GB-TRAINING-BACKEND-2026-10-18.md (option A). This
+module is the mechanism only; registering it as a runnable load policy waits on
+that design's acceptance gates.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+#: The experts classes this forward replaces (transformers 5.x, 3-D expert params).
+EXPERTS_CLASSES = ("Qwen3MoeExperts", "Qwen3_5MoeExperts")
+
+#: The worker's expert placements. ``cpu-transient-grad`` is pre-registered in
+#: docs/quals/MOE_TRANSIENT_GRAD_PLACEMENT_PREREG_2026-10-18.md: no campaign may
+#: use it until that note's gates are measured on the real artifact.
+EXPERT_PLACEMENTS = ("resident", "cpu-transient-grad")
+EXPERT_PARAM_INFIX = ".mlp.experts."
+
+
+def split_device_map(base_model: str, *, revision: str | None, local_files_only: bool, device: int = 0) -> dict[str, Any]:
+    """Experts on the CPU, every other parameter on ``device`` -- from a meta
+    enumeration, never by materialising the model on the CPU first."""
+    import torch
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    config = AutoConfig.from_pretrained(base_model, revision=revision, local_files_only=local_files_only)
+    with torch.device("meta"):
+        names = [name for name, _ in AutoModelForCausalLM.from_config(config).named_parameters()]
+    if not any(EXPERT_PARAM_INFIX in name for name in names):
+        raise RuntimeError(
+            "expert_placement='cpu-transient-grad' was requested for a base with no "
+            f"{EXPERT_PARAM_INFIX!r} parameters; there is nothing to place on the CPU"
+        )
+    return {name: ("cpu" if EXPERT_PARAM_INFIX in name else device) for name in names}
+
+
+def prepare_split_model(model: Any, *, device_type: str = "cuda") -> dict[str, Any]:
+    """Census the live placement, freeze the experts, install the transient-grad
+    forward. Returns the evidence; raises when the placement did not happen."""
+    experts = [(n, p) for n, p in model.named_parameters() if EXPERT_PARAM_INFIX in n]
+    others = [(n, p) for n, p in model.named_parameters() if EXPERT_PARAM_INFIX not in n]
+    census = {
+        "expert_params": len(experts),
+        "expert_params_on_cpu": sum(p.device.type == "cpu" for _, p in experts),
+        "other_params": len(others),
+        "other_params_on_device": sum(p.device.type == device_type for _, p in others),
+    }
+    if not experts or census["expert_params_on_cpu"] != len(experts) or census["other_params_on_device"] != len(others):
+        raise RuntimeError(
+            f"the cpu-transient-grad placement census failed on the live model: {census}; "
+            "a placement that did not happen must not be believed because it was requested"
+        )
+    for _, param in experts:
+        param.requires_grad_(False)
+    census["patched_expert_modules"] = install_transient_grad_expert_forward(model)
+    if census["patched_expert_modules"] == 0:
+        raise RuntimeError("expert parameters exist but no experts module was patched")
+    return census
+
+
+def _expert_ffn(x: Any, w_gate_up: Any, w_down: Any, act_fn: Any) -> Any:
+    import torch.nn.functional as F
+
+    gate, up = F.linear(x, w_gate_up).chunk(2, dim=-1)
+    return F.linear(act_fn(gate) * up, w_down)
+
+
+def _transient_function() -> Any:
+    import torch
+
+    class TransientExpertFFN(torch.autograd.Function):
+        """One frozen expert's FFN whose weights are copied in, never saved."""
+
+        @staticmethod
+        def forward(ctx: Any, x: Any, w_gate_up: Any, w_down: Any, act_fn: Any) -> Any:
+            ctx.save_for_backward(x)
+            ctx.weights = (w_gate_up, w_down)  # the CPU-resident slices: views, no copy
+            ctx.act_fn = act_fn
+            dev = x.device
+            with torch.no_grad():
+                return _expert_ffn(x, w_gate_up.to(dev, non_blocking=True), w_down.to(dev, non_blocking=True), act_fn)
+
+        @staticmethod
+        def backward(ctx: Any, grad_out: Any) -> Any:
+            (x,) = ctx.saved_tensors
+            w_gate_up, w_down = ctx.weights
+            dev = x.device
+            with torch.enable_grad():
+                x = x.detach().requires_grad_(True)
+                y = _expert_ffn(x, w_gate_up.to(dev, non_blocking=True), w_down.to(dev, non_blocking=True), ctx.act_fn)
+                (grad_x,) = torch.autograd.grad(y, x, grad_out)
+            return grad_x, None, None, None
+
+    return TransientExpertFFN
+
+
+def install_transient_grad_expert_forward(model: Any) -> int:
+    """Patch every experts module with the gradient-carrying transient forward.
+
+    Returns the number of patched modules. Refuses a model whose expert weights
+    are trainable: this path gives them no gradient, so training them would be
+    a silent no-op.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    function = _transient_function()
+
+    def forward(self: Any, hidden_states: Any, top_k_index: Any, top_k_weights: Any) -> Any:
+        final = torch.zeros_like(hidden_states)
+        with torch.no_grad():
+            mask = F.one_hot(top_k_index, num_classes=self.num_experts).permute(2, 1, 0)
+            hit = torch.greater(mask.sum(dim=(-1, -2)), 0).nonzero()
+        for row in hit:
+            e = int(row[0])
+            if e == self.num_experts:
+                continue
+            top_k_pos, token_idx = torch.where(mask[e])
+            out = function.apply(hidden_states[token_idx], self.gate_up_proj[e], self.down_proj[e], self.act_fn)
+            out = out * top_k_weights[token_idx, top_k_pos, None]
+            final.index_add_(0, token_idx, out.to(final.dtype))
+        return final
+
+    patched = 0
+    for name, module in model.named_modules():
+        if type(module).__name__ not in EXPERTS_CLASSES:
+            continue
+        trainable = [p for p in (module.gate_up_proj, module.down_proj) if p.requires_grad]
+        if trainable:
+            raise RuntimeError(
+                f"{name} has trainable expert weights; the transient-grad path keeps "
+                "experts frozen and gives them no gradient, so freeze them "
+                "(requires_grad=False) rather than train them to no effect"
+            )
+        module.forward = forward.__get__(module)
+        patched += 1
+    return patched

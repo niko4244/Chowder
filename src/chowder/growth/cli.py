@@ -446,6 +446,33 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
         ),
     )
     prepare.add_argument(
+        "--parent-artifacts",
+        action="append",
+        default=[],
+        help=(
+            "A directory holding the raw prediction files the parent measurement's "
+            "rows name; they are carried next to the prepared parent report so "
+            "certification can verify them (repeatable)"
+        ),
+    )
+    prepare.add_argument(
+        "--calibrate-training",
+        default="",
+        help=(
+            "A completed run's worker-result.json on this campaign's own model; "
+            "with --calibrate-eval, recipes are projected from its measured "
+            "seconds/step instead of the synthetic device probe"
+        ),
+    )
+    prepare.add_argument(
+        "--calibrate-eval",
+        default="",
+        help=(
+            "An arm's evaluation result at the declared instrument; its measured "
+            "lifecycle is the in-run evaluation cost each recipe is projected to pay"
+        ),
+    )
+    prepare.add_argument(
         "--write-declaration",
         default="",
         help="Write the declaration with the prepared inputs filled in to this path",
@@ -465,7 +492,7 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
     ancestor.add_argument(
         "--placement",
         default="offload",
-        help="Worker placement: resident or offload (default: offload)",
+        help="Worker placement: resident, offload or experts-cpu (default: offload)",
     )
     ancestor.set_defaults(func=_growth_campaign_measure_ancestor)
 
@@ -482,7 +509,7 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
     parent_arm.add_argument(
         "--placement",
         default="offload",
-        help="Worker placement: resident or offload (default: offload)",
+        help="Worker placement: resident, offload or experts-cpu (default: offload)",
     )
     parent_arm.set_defaults(func=_growth_campaign_measure_parent)
 
@@ -737,15 +764,31 @@ def _growth_campaign_prepare(args: argparse.Namespace) -> int:
     from pathlib import Path as _Path
 
     from .campaign import CampaignManifest
-    from .campaign_prepare import CampaignPrepareRefusal, prepare_campaign
+    from .campaign_prepare import (
+        CampaignPrepareRefusal,
+        calibrate_model_lifecycle,
+        prepare_campaign,
+    )
 
     manifest = CampaignManifest.from_file(_Path(args.manifest))
     try:
+        if bool(args.calibrate_training) != bool(args.calibrate_eval):
+            raise CampaignPrepareRefusal(
+                "PREPARE_SCHEMA: --calibrate-training and --calibrate-eval are a "
+                "pair; a projection needs both the training and the evaluation cost"
+            )
+        lifecycle = (
+            calibrate_model_lifecycle(args.calibrate_training, args.calibrate_eval)
+            if args.calibrate_training
+            else None
+        )
         prepared = prepare_campaign(
             manifest,
             out_dir=args.out_dir,
             parent_evidence=args.parent_evidence or None,
             parent_measurement=args.parent_measurement or None,
+            model_lifecycle=lifecycle,
+            parent_artifacts=args.parent_artifacts or None,
         )
     except CampaignPrepareRefusal as refusal:
         return _print_json(

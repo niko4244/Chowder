@@ -1395,7 +1395,10 @@ def test_the_judge_and_production_settlement_agree(tmp_path: Path) -> None:
 
 
 def test_a_wall_overrun_is_a_hard_failure_not_an_unknown(tmp_path: Path) -> None:
-    root = _run_root(tmp_path, accounting=_accounting(wall=2.5))
+    # One GPU-hour over whatever the declaration's campaign ceiling is, so the
+    # pin follows a re-derived envelope (amendment 21) instead of a literal.
+    ceiling = CampaignManifest.from_file(judge_gen2.CAMPAIGN_MANIFEST).budget.wall_gpu_hours_ceiling_campaign
+    root = _run_root(tmp_path, accounting=_accounting(wall=ceiling + 1.0))
     assert judge_gen2.judge(root) == 1
 
 
