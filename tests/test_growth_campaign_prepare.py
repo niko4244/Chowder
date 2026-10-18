@@ -662,3 +662,7 @@ def test_prepare_carries_the_parent_raw_artifact_next_to_the_report(tmp_path: Pa
     )
     carried = Path(prepared.inputs["parent_eval_report_path"]).parent / "predictions-target.jsonl"
     assert carried.read_bytes() == (raw_dir / "predictions-target.jsonl").read_bytes()
+    # Carrying a file is not an unmeasured benchmark: the profile must not say so.
+    profile = json.loads(Path(prepared.inputs["parent_profile_path"]).read_text(encoding="utf-8"))
+    assert not any("carried" in note for note in profile["unmeasured"])
+    assert any("carried raw artifact" in note for note in prepared.notes)

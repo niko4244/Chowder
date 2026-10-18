@@ -738,6 +738,7 @@ def _write_parent_evidence(
         *([Path(measurement).parent] if measurement is not None and str(measurement).strip() else [source]),
         *(Path(d) for d in (parent_artifacts or ())),
     ]
+    carried: list[str] = []
     for run in runs:
         reference = str(getattr(run, "raw_artifact_ref", "") or "")
         if not reference or Path(reference).is_absolute():
@@ -757,7 +758,7 @@ def _write_parent_evidence(
         target = root / reference
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(found, target)
-        notes.append(f"parent arm: carried raw artifact {reference} from {found.parent}")
+        carried.append(f"parent arm: carried raw artifact {reference} from {found.parent}")
 
     parent_eval_path = root / "parent-eval-report.json"
     EvalReport(
@@ -771,8 +772,9 @@ def _write_parent_evidence(
         ),
     ).save(parent_eval_path)
 
+    # The profile's notes are its ``unmeasured`` list, so carried files stay out.
     profile_path = _write_parent_profile(manifest, root, runs=tuple(runs), notes=notes)
-    return parent_eval_path, profile_path, notes
+    return parent_eval_path, profile_path, [*notes, *carried]
 
 
 def _read_json_object(path: Path) -> Mapping[str, Any] | None:
