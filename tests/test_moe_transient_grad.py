@@ -212,3 +212,34 @@ def test_split_load_trains_lora_through_cpu_resident_experts(tmp_path):
     assert lora and all(p.grad is not None and torch.isfinite(p.grad).all() for _, p in lora)
     # Gradient reached the bottom layer, through every frozen-expert layer above it.
     assert any("layers.0." in n and float(p.grad.abs().sum()) > 0 for n, p in lora)
+
+
+def test_parent_adapter_attach_keeps_experts_on_the_cpu(tmp_path):
+    """A continued run attaches its parent with PeftModel.from_pretrained, which
+    re-plans a model carrying hf_device_map onto the device (#247 measured all
+    host experts moving). attach_preserving_split must keep them on the CPU."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA device")
+    from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+    from transformers import AutoModelForCausalLM
+
+    from chowder.backends.moe_transient_grad import attach_preserving_split, prepare_split_model, split_device_map
+
+    base_dir = _saved_tiny_moe(tmp_path)
+    adapter_dir = tmp_path / "parent"
+    targets = list(_QWEN3_5_TARGET_MODULES)
+    get_peft_model(_tiny_moe(), LoraConfig(r=4, lora_alpha=8, target_modules=targets,
+                                           task_type=TaskType.CAUSAL_LM)).save_pretrained(adapter_dir)
+
+    def load():
+        model = AutoModelForCausalLM.from_pretrained(
+            base_dir, dtype=torch.float32, device_map=split_device_map(base_dir, revision=None, local_files_only=True))
+        prepare_split_model(model)
+        return model
+
+    model = attach_preserving_split(
+        load(), lambda b: PeftModel.from_pretrained(b, str(adapter_dir), is_trainable=True))
+    assert {p.device.type for n, p in model.named_parameters() if ".mlp.experts." in n} == {"cpu"}
+    ids = torch.randint(0, 64, (1, 12), device="cuda")
+    model(input_ids=ids, labels=ids).loss.backward()
+    assert any(p.grad is not None for n, p in model.named_parameters() if "lora_" in n)

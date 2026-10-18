@@ -64,15 +64,21 @@ def _text_digest(dataset: Any, text_field: str) -> str:
     return digest.hexdigest()
 
 
-_CHAT_ROLES = {"system", "user", "assistant"}
+_CHAT_ROLES = {"system", "user", "assistant", "tool"}
+#: Trailing generation-prompt tokens allowed to re-tokenise when the assistant
+#: turn is appended (see _build_chat_example).
+_MAX_BOUNDARY_RETOKENIZATION = 2
+#: Agentic turn fields the chat template renders and the trainer must keep:
+#: an assistant's tool calls and reasoning, a tool turn's call id and name.
+_CHAT_EXTRA_FIELDS = ("tool_calls", "reasoning_content", "tool_call_id", "name")
 
 
-def _validate_chat_messages(raw: Any, *, row_index: int) -> list[dict[str, str]]:
+def _validate_chat_messages(raw: Any, *, row_index: int) -> list[dict[str, Any]]:
     if not isinstance(raw, list) or not raw:
         raise RuntimeError(
             f"chat dataset row {row_index} has an empty or invalid messages list"
         )
-    normalized: list[dict[str, str]] = []
+    normalized: list[dict[str, Any]] = []
     has_assistant = False
     for turn in raw:
         if not isinstance(turn, dict) or "role" not in turn or "content" not in turn:
@@ -87,7 +93,14 @@ def _validate_chat_messages(raw: Any, *, row_index: int) -> list[dict[str, str]]
             )
         if role == "assistant":
             has_assistant = True
-        normalized.append({"role": role, "content": str(turn["content"])})
+        content = turn["content"]
+        message: dict[str, Any] = {"role": role, "content": "" if content is None else str(content)}
+        for key in _CHAT_EXTRA_FIELDS:
+            if turn.get(key) not in (None, "", []):
+                message[key] = turn[key]
+        if "tool_calls" in message:
+            message["tool_calls"] = _parse_tool_calls(message["tool_calls"], row_index=row_index)
+        normalized.append(message)
     if not has_assistant:
         raise RuntimeError(
             f"chat dataset row {row_index} has no assistant turn -- nothing to train on"
@@ -95,17 +108,65 @@ def _validate_chat_messages(raw: Any, *, row_index: int) -> list[dict[str, str]]
     return normalized
 
 
+def _parse_tool_calls(raw: Any, *, row_index: int) -> list[dict[str, Any]]:
+    """Tool calls with dict arguments, the shape chat templates iterate.
+
+    Arguments may arrive as JSON strings, and should: ``datasets`` loads JSONL
+    through Arrow, which unifies nested dicts across rows and would add every
+    other row's argument keys to this one as nulls.
+    """
+    if not isinstance(raw, list):
+        raise RuntimeError(f"chat dataset row {row_index} has a non-list tool_calls")
+    calls = []
+    for call in raw:
+        function = dict((call or {}).get("function") or {})
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                function["arguments"] = json.loads(arguments)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"chat dataset row {row_index} has tool-call arguments that are not JSON"
+                ) from exc
+        calls.append({**call, "function": function})
+    return calls
+
+
+def parse_tools(raw: Any, *, row_index: int) -> list[Any] | None:
+    """A row's tool schemas: a list, or a JSON string of one (Arrow-safe), or empty."""
+    if raw in (None, "", []):
+        return None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"chat dataset row {row_index} has a tools value that is not JSON") from exc
+    if not isinstance(raw, list):
+        raise RuntimeError(f"chat dataset row {row_index} has tools that are not a list")
+    return raw
+
+
 def _render_chat_ids(
-    tokenizer: Any, messages: list[dict[str, str]], *, add_generation_prompt: bool
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    *,
+    add_generation_prompt: bool,
+    tools: list[Any] | None = None,
 ) -> list[int]:
+    kwargs: dict[str, Any] = {"tools": tools} if tools else {}
     encoded = tokenizer.apply_chat_template(
-        messages, tokenize=True, add_generation_prompt=add_generation_prompt
+        messages, tokenize=True, add_generation_prompt=add_generation_prompt, **kwargs
     )
     return list(encoded["input_ids"] if hasattr(encoded, "keys") else encoded)
 
 
 def _build_chat_example(
-    tokenizer: Any, messages: list[dict[str, str]], *, max_length: int, row_index: int
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    *,
+    max_length: int,
+    row_index: int,
+    tools: list[Any] | None = None,
 ) -> dict[str, list[int]]:
     """Tokenize one conversation with completion-only (assistant-turn) labels.
 
@@ -119,26 +180,38 @@ def _build_chat_example(
     being trusted -- a template that isn't prefix-consistent raises rather
     than silently mislabeling.
     """
-    full_ids = _render_chat_ids(tokenizer, messages, add_generation_prompt=False)
+    full_ids = _render_chat_ids(tokenizer, messages, add_generation_prompt=False, tools=tools)
     labels = [-100] * len(full_ids)
     for index, turn in enumerate(messages):
+        # Only assistant turns are trained on; tool results stay unlabelled.
         if turn["role"] != "assistant":
             continue
-        prefix_ids = _render_chat_ids(tokenizer, messages[:index], add_generation_prompt=True)
-        through_ids = _render_chat_ids(
-            tokenizer, messages[: index + 1], add_generation_prompt=False
+        prefix_ids = _render_chat_ids(
+            tokenizer, messages[:index], add_generation_prompt=True, tools=tools
         )
+        through_ids = _render_chat_ids(
+            tokenizer, messages[: index + 1], add_generation_prompt=False, tools=tools
+        )
+        # The generation prompt may end mid-merge: Qwen3.5/3.6 opens the turn with
+        # "<think>" + "\n" while the finished turn reads "<think>" + "\n\n" +
+        # "</think>", and BPE merges the newlines differently. The span starts at
+        # the longest common token prefix, tolerating at most this many trailing
+        # boundary tokens; an exact-prefix template is unaffected.
+        start = 0
+        limit = min(len(prefix_ids), len(full_ids))
+        while start < limit and full_ids[start] == prefix_ids[start]:
+            start += 1
         if (
-            len(prefix_ids) > len(full_ids)
+            len(prefix_ids) - start > _MAX_BOUNDARY_RETOKENIZATION
             or len(through_ids) > len(full_ids)
-            or full_ids[: len(prefix_ids)] != prefix_ids
             or full_ids[: len(through_ids)] != through_ids
+            or start > len(through_ids)
         ):
             raise RuntimeError(
                 f"chat dataset row {row_index}: chat template is not prefix-consistent "
                 "across turns; cannot compute a reliable completion-only loss mask"
             )
-        labels[len(prefix_ids) : len(through_ids)] = full_ids[len(prefix_ids) : len(through_ids)]
+        labels[start : len(through_ids)] = full_ids[start : len(through_ids)]
 
     full_ids = full_ids[:max_length]
     labels = labels[:max_length]
@@ -154,12 +227,14 @@ def _build_chat_example(
     }
 
 
-def _chat_digest(dataset: Any, messages_field: str) -> str:
+def _chat_digest(dataset: Any, messages_field: str, tools_field: str = "") -> str:
     digest = hashlib.sha256()
     for index in range(len(dataset)):
-        payload = json.dumps(
-            dataset[index][messages_field], sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        row = dataset[index][messages_field]
+        # The tools render into the training text, so they are part of it; with no
+        # tools field the digest is exactly what it always was.
+        value = {"messages": row, "tools": dataset[index][tools_field]} if tools_field else row
+        payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
         digest.update(len(payload).to_bytes(8, "big"))
         digest.update(payload)
     return digest.hexdigest()
