@@ -206,3 +206,14 @@ def test_not_registered_in_default_providers() -> None:
     assert not any(
         type(p).__name__ == "OrnithCurriculumProvider" for p in DEFAULT_PROVIDERS
     )
+
+
+def test_fable_rows_serve_only_when_explicitly_allowed_and_are_marked(tmp_path: Path) -> None:
+    """``allow_fable`` is the licence decision (Fable output is AGPL); the rows it
+    admits stay traceable through ``fable_derived`` in their provenance."""
+    path, sha = _write(tmp_path, [_row("t1"), _row("t2", source="fable-distill-v2")])
+    provider = _provider(path, sha, allow_fable=True)
+    corpus = materialise([_request()], providers=(provider,), contamination_check=_clean)
+    assert len(corpus.material["ornith-item"]) == 2
+    marks = sorted((p["task_id"], p["fable_derived"]) for p in provider.provenance.values())
+    assert marks == [("t1", False), ("t2", True)]

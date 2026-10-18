@@ -13,7 +13,9 @@ Fail-closed rules:
 * the file's sha256 must equal the pinned digest, at construction and again on
   every ``produce`` (a file edited in between refuses);
 * any row whose provenance (every field except the task text itself) mentions
-  Fable refuses the whole file -- Fable-derived text is never training material;
+  Fable refuses the whole file unless the caller passes ``allow_fable=True``
+  (an explicit licence decision: Fable output is AGPL), in which case each
+  served Fable row is marked ``fable_derived`` in its provenance;
 * only admitted, valid, SFT-lane rows are served; ``executable_tests`` also
   requires the row's ``verification_code``;
 * a row is served at most once, so two items never train on the same task.
@@ -84,6 +86,7 @@ class OrnithCurriculumProvider:
         *,
         skill: str,
         verification: str,
+        allow_fable: bool = False,
     ) -> None:
         if verification not in SUPPORTED_VERIFICATIONS:
             raise TrainingDataRefusal(
@@ -95,6 +98,7 @@ class OrnithCurriculumProvider:
         self._check_digest()
         self.skill = str(skill)
         self.verification = verification
+        self.allow_fable = bool(allow_fable)
         self.source_id = f"ornith-admitted:{self._sha[:16]}"
         self._rows = self._load()
         self._cursor = 0
@@ -130,7 +134,7 @@ class OrnithCurriculumProvider:
                     f"{ORNITH_SCHEMA}: {self._path}:{number} is not a JSON object"
                 )
             provenance = {k: v for k, v in row.items() if k not in _TASK_TEXT_FIELDS}
-            if _mentions_fable(provenance):
+            if _mentions_fable(provenance) and not self.allow_fable:
                 raise TrainingDataRefusal(
                     f"{ORNITH_SCHEMA}: {self._path}:{number} (task "
                     f"{_field(row, 'task_id')!r}) has Fable in its provenance; "
@@ -187,6 +191,9 @@ class OrnithCurriculumProvider:
                 "admitted_at": row.get("_admitted_at"),
                 "admitted_path": str(self._path),
                 "admitted_sha256": self._sha,
+                "fable_derived": _mentions_fable(
+                    {k: v for k, v in row.items() if k not in _TASK_TEXT_FIELDS}
+                ),
                 "verification": self.verification,
             }
             lines.append(line)
