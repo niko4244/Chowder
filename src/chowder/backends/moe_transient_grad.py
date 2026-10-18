@@ -26,6 +26,53 @@ from typing import Any
 #: The experts classes this forward replaces (transformers 5.x, 3-D expert params).
 EXPERTS_CLASSES = ("Qwen3MoeExperts", "Qwen3_5MoeExperts")
 
+#: The worker's expert placements. ``cpu-transient-grad`` is pre-registered in
+#: docs/quals/MOE_TRANSIENT_GRAD_PLACEMENT_PREREG_2026-10-18.md: no campaign may
+#: use it until that note's gates are measured on the real artifact.
+EXPERT_PLACEMENTS = ("resident", "cpu-transient-grad")
+EXPERT_PARAM_INFIX = ".mlp.experts."
+
+
+def split_device_map(base_model: str, *, revision: str | None, local_files_only: bool, device: int = 0) -> dict[str, Any]:
+    """Experts on the CPU, every other parameter on ``device`` -- from a meta
+    enumeration, never by materialising the model on the CPU first."""
+    import torch
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    config = AutoConfig.from_pretrained(base_model, revision=revision, local_files_only=local_files_only)
+    with torch.device("meta"):
+        names = [name for name, _ in AutoModelForCausalLM.from_config(config).named_parameters()]
+    if not any(EXPERT_PARAM_INFIX in name for name in names):
+        raise RuntimeError(
+            "expert_placement='cpu-transient-grad' was requested for a base with no "
+            f"{EXPERT_PARAM_INFIX!r} parameters; there is nothing to place on the CPU"
+        )
+    return {name: ("cpu" if EXPERT_PARAM_INFIX in name else device) for name in names}
+
+
+def prepare_split_model(model: Any, *, device_type: str = "cuda") -> dict[str, Any]:
+    """Census the live placement, freeze the experts, install the transient-grad
+    forward. Returns the evidence; raises when the placement did not happen."""
+    experts = [(n, p) for n, p in model.named_parameters() if EXPERT_PARAM_INFIX in n]
+    others = [(n, p) for n, p in model.named_parameters() if EXPERT_PARAM_INFIX not in n]
+    census = {
+        "expert_params": len(experts),
+        "expert_params_on_cpu": sum(p.device.type == "cpu" for _, p in experts),
+        "other_params": len(others),
+        "other_params_on_device": sum(p.device.type == device_type for _, p in others),
+    }
+    if not experts or census["expert_params_on_cpu"] != len(experts) or census["other_params_on_device"] != len(others):
+        raise RuntimeError(
+            f"the cpu-transient-grad placement census failed on the live model: {census}; "
+            "a placement that did not happen must not be believed because it was requested"
+        )
+    for _, param in experts:
+        param.requires_grad_(False)
+    census["patched_expert_modules"] = install_transient_grad_expert_forward(model)
+    if census["patched_expert_modules"] == 0:
+        raise RuntimeError("expert parameters exist but no experts module was patched")
+    return census
+
 
 def _expert_ffn(x: Any, w_gate_up: Any, w_down: Any, act_fn: Any) -> Any:
     import torch.nn.functional as F
