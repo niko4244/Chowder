@@ -142,6 +142,21 @@ def load_pinned_slices(benchmark_qualified_id: str) -> tuple[Mapping[str, str], 
     :mod:`chowder.growth.generation_diagnostics`, so the target slice is pinned
     exactly as the judge's instrument is.
     """
+    if benchmark_qualified_id.startswith("tool-use@"):
+        from .tool_use_instrument import (
+            ToolUseInstrumentRefusal,
+            load_tool_use_slice,
+        )
+
+        try:
+            return load_tool_use_slice()
+        except ToolUseInstrumentRefusal as error:
+            # The instrument has its own refusal (a missing or digest-mismatched
+            # committed file); preparation surfaces it as the slice refusal so a
+            # caller sees one vocabulary.
+            raise CampaignPrepareRefusal(
+                f"{PREPARE_SLICE_UNAVAILABLE}: {benchmark_qualified_id}: {error}"
+            ) from error
     if benchmark_qualified_id.startswith("generation-diagnostics@"):
         from .generation_diagnostics import INSTRUMENT_PROMPTS
 
@@ -604,13 +619,12 @@ def _write_evaluation_material(
             ),
             encoding="utf-8",
         )
-        wire = _SLICE_DATASETS.get(qualified_id, {})
         suites.append(
             {
                 "benchmark_qualified_id": qualified_id,
                 "name": qualified_id.split("@", 1)[0],
                 "dataset": str(slice_path),
-                "scoring": wire.get("scoring", "normalized_exact_match"),
+                "scoring": _scoring_for(qualified_id),
                 "prompt_field": "prompt",
                 "expected_field": "expected",
                 "metric": _metric_for(qualified_id),
@@ -638,6 +652,25 @@ def _metric_for(qualified_id: str) -> str:
     if qualified_id.startswith("generation-diagnostics"):
         return "eos_termination_rate"
     return "accuracy"
+
+
+#: Scorings for the in-repo instruments that are not cache-backed, so no
+#: ``_SLICE_DATASETS`` entry carries their ``scoring``.  The generation-
+#: diagnostics instrument is deliberately absent: its items are scored like any
+#: text item, and its distinct metric is named by :func:`_metric_for`.
+_INSTRUMENT_SCORINGS: Mapping[str, str] = {
+    "tool-use": "tool_call_exact",
+}
+
+
+def _scoring_for(qualified_id: str) -> str:
+    """The scoring a declared benchmark's items are measured with."""
+    wire = _SLICE_DATASETS.get(qualified_id)
+    if wire is not None:
+        return wire.get("scoring", "normalized_exact_match")
+    return _INSTRUMENT_SCORINGS.get(
+        qualified_id.split("@", 1)[0], "normalized_exact_match"
+    )
 
 
 def _slug(qualified_id: str) -> str:
