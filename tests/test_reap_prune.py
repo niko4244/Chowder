@@ -7,8 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-import torch
-from safetensors.torch import load_file, save_file
+import pytest
+
+torch = pytest.importorskip("torch")
+safetensors_torch = pytest.importorskip("safetensors.torch")
+load_file, save_file = safetensors_torch.load_file, safetensors_torch.save_file
 
 ROOT = Path(__file__).resolve().parents[1]
 E, H, I, LAYERS, TOPK = 8, 4, 3, 2, 2
