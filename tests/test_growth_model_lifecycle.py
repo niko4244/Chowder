@@ -155,6 +155,28 @@ def test_the_attempt_timeout_never_kills_an_attempt_that_would_settle(
     assert attempt_timeout_seconds(manifest) == pytest.approx(expected)
 
 
+def test_the_candidate_evaluator_gets_the_attempt_bound_not_3600(tmp_path: Path) -> None:
+    """Gen-2 run 7: the candidate arm was killed at the binding's 3600 s default
+    while the declared suites cost ~3700-5400 s (the parent arm: 3688 s)."""
+    import dataclasses
+
+    from chowder.growth.campaign import CampaignManifest
+    from chowder.growth.campaign_runner import attempt_timeout_seconds, build_evaluator
+
+    manifest = CampaignManifest.from_file(
+        Path(__file__).resolve().parents[1] / "docs" / "gen2" / "gen2_campaign.json"
+    )
+    material = tmp_path / "evaluation-material.json"
+    material.write_text(
+        json.dumps({"suites": [{"benchmark_qualified_id": "math500@2024-04", "dataset": str(tmp_path / "d.jsonl")}]}),
+        encoding="utf-8",
+    )
+    manifest = dataclasses.replace(manifest, evaluation_material_path=str(material))
+    evaluator = build_evaluator(manifest, state_root=tmp_path / "state")
+    assert evaluator.timeout_seconds == pytest.approx(attempt_timeout_seconds(manifest))
+    assert evaluator.timeout_seconds > 3688.0
+
+
 def test_without_a_calibration_the_synthetic_projection_is_unchanged() -> None:
     from chowder.growth.recipe_planner import RecipePlanner
 
