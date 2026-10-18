@@ -12,6 +12,16 @@
 > remain below as historical evidence. No distillation in the primary
 > lineage — ever.
 
+> **Second sanctioned program (2026-10-18, owner decision N1): the REAP-MoE
+> lineage.** A REAP-pruned Qwen3.6-35B-A3B (128 of 256 routed experts,
+> ~18.5B parameters, served at 16 GB) is a *separately named* lineage with
+> its own Gen-0, state root and trusted ancestor. It is never spliced into
+> the primary lineage, and the primary lineage's no-distillation rule above
+> is unchanged. Within this lineage only, Fable-derived SFT data is
+> permitted as a **declared** input of each campaign's pre-registration;
+> it is never silent. Rules, gates and what stays open:
+> [`docs/REAP_MOE_LINEAGE.md`](REAP_MOE_LINEAGE.md).
+
 > **Active-parameter target revised (2026-09-14):** the former hard
 > successor gate of ≤10B total / ≤3.5B active parameters is **removed by
 > decision** — the program aim is now the *lowest per-model active
