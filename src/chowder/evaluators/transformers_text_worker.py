@@ -21,6 +21,7 @@ from .rendering import render_prompt
 from .scoring import final_answer, final_number, normalize, observed_score, score
 from .vram import MemorySampler, peak_vram as _peak_vram
 from .placement import (
+    _offload_dir,
     dispatch_offloaded,
     needs_redispatch_after_adapter,
     placement_note,
@@ -162,15 +163,12 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
         config_commit=getattr(base.config, "_commit_hash", None),
     )
     if spec.quantization == "none":
-        if spec.placement == "offload":
-            base = dispatch_offloaded(base, device_name)
-        else:
-            base = base.to(device_name)
+        base = place_before_adapter(base, spec=spec, device_name=device_name)
     adapter_liveness: dict[str, Any] | None = None
     if spec.adapter_dir is None:
         model = base
     else:
-        model = PeftModel.from_pretrained(base, spec.adapter_dir, is_trainable=False)
+        model = load_adapter(base, spec)
         # Refuse to score an adapter that cannot change the model. PEFT only
         # warns when no saved key matches, leaving every LoRA B at zero.
         adapter_liveness = assert_adapter_is_live(model, spec.adapter_dir)
@@ -356,6 +354,43 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
             "bitsandbytes": _package_version("bitsandbytes"),
         },
     }
+
+
+def place_before_adapter(base: Any, *, spec: Any, device_name: str) -> Any:
+    """Place the bare base, deferring an offload dispatch until the adapter is in.
+
+    A dispatched base carries a CPU device map, which makes PEFT's load_adapter
+    re-infer and re-dispatch its own map from the RAM free at that moment. On a
+    tight host that map sends modules to "disk"; the declared re-dispatch that
+    follows cannot bring disk-offloaded parameters back (Gen-2 attempt-22,
+    2026-10-17: "dt_bias is on the meta device"). Attaching the adapter to the
+    undispatched CPU model leaves PEFT nothing to re-plan, and
+    ``placement_after_adapter`` then dispatches exactly once.
+    """
+    if spec.placement == "offload":
+        if spec.adapter_dir is None:
+            return dispatch_offloaded(base, device_name)
+        return base
+    return base.to(device_name)
+
+
+def load_adapter(base: Any, spec: Any) -> Any:
+    """Attach the candidate adapter, giving PEFT somewhere to offload.
+
+    On an offloaded base, ``PeftModel.load_adapter`` re-infers its own device map
+    from the memory free *at that moment* and dispatches to it. When host RAM is
+    tight that map sends tail modules to "disk", and without an offload folder
+    PEFT raises -- Gen-2 attempt-16 (2026-10-17) trained all 140 steps and then
+    lost its in-run evaluation to exactly that ValueError. The folder only has to
+    exist for PEFT's interim dispatch: ``placement_after_adapter`` re-asserts the
+    declared placement immediately afterwards.
+    """
+    from peft import PeftModel
+
+    kwargs: dict[str, Any] = {"is_trainable": False}
+    if spec.placement == "offload":
+        kwargs["offload_folder"] = _offload_dir()
+    return PeftModel.from_pretrained(base, spec.adapter_dir, **kwargs)
 
 
 def placement_after_adapter(base: Any, *, spec: Any, device_name: str) -> Any:
