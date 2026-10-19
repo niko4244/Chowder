@@ -1,0 +1,87 @@
+{
+  "cycle_id": "gen1-reap-moe-tool-use",
+  "parent_version": "gen0",
+  "base_model_path": "<TODO: absolute path to the expert-pruned REAP MoE base checkpoint>",
+  "base_model_digest": "<TODO: 64-hex model-content digest of that base>",
+  "state_root": "<TODO: absolute campaign run root outside this checkout>",
+  "target_benchmarks": [
+    "tool-use@reap-moe-v1"
+  ],
+  "protected_benchmarks": [
+    "math500@2024-04",
+    "mgsm@2022-11"
+  ],
+  "broad_benchmarks": [
+    "math500@2024-04",
+    "mgsm@2022-11"
+  ],
+  "calibration_benchmarks": [],
+  "reliability_benchmarks": [],
+  "budget": {
+    "device_gpu_hours_ceiling_per_recipe": "<TODO: device ceiling per recipe, in GPU-hours>",
+    "wall_gpu_hours_ceiling_per_recipe": "<TODO: wall ceiling per recipe, in GPU-hours>",
+    "device_gpu_hours_ceiling_campaign": "<TODO: device ceiling for the campaign, in GPU-hours>",
+    "wall_gpu_hours_ceiling_campaign": "<TODO: wall ceiling for the campaign, in GPU-hours>",
+    "device_time_measured": false
+  },
+  "recipes": [
+    "recipe-00-lr5e-05",
+    "recipe-01-lr0.0001"
+  ],
+  "candidate_selection_policy": "first_successful",
+  "promotion_policy_version": "promotion-policy-v2-provenance-settlement",
+  "stopping_rules": [
+    "stop before compute on admission refusal",
+    "stop on contamination refusal (KNOWN/POSSIBLE on any declared source)",
+    "stop on campaign settlement overrun (artifact preserved)",
+    "never enlarge a frozen threshold after candidate results are visible"
+  ],
+  "protection": {
+    "trusted_ancestor_version": "gen0",
+    "slice_regression_max": 0.0625,
+    "n_samples": 16,
+    "seed": 1234,
+    "shuffle": false,
+    "decoding": { "temperature": 0.0, "do_sample": false, "max_new_tokens": 512 },
+    "prompt_policy": "chat_template"
+  },
+  "retention_profile": {
+    "profile_id": "moe-gen1-protection",
+    "constraints": [
+      {
+        "dimension": "math500",
+        "kind": "max-regression",
+        "value": -0.0625,
+        "benchmark": "math500@2024-04"
+      },
+      {
+        "dimension": "mgsm",
+        "kind": "max-regression",
+        "value": -0.0625,
+        "benchmark": "mgsm@2022-11"
+      }
+    ]
+  },
+  "eval_tier_policy": {
+    "classification": {
+      "math500@2024-04": "promotion-evidence",
+      "mgsm@2022-11": "promotion-evidence"
+    }
+  },
+  "evaluation_execution": {
+    "batch_size": 16,
+    "placement": "experts-cpu"
+  },
+  "training_backend": {
+    "provider": "local",
+    "config": {
+      "expert_placement": "cpu-transient-grad",
+      "target_preset": "moe_frozen_experts",
+      "dataset_format": "chat",
+      "messages_field": "messages",
+      "tools_field": "tools"
+    }
+  },
+  "baseline_eval_report_path": "<TODO: the trusted-ancestor (gen0) 16-item mini-slice measurement; run measure-parent before this campaign>",
+  "notes": "The first MoE generation: does an expert-pruned base keep making the right tool call after LoRA tuning? The four MoE settings are declared once here and flow through preparation into the project template the training worker admits and the candidate evaluator measures with -- expert_placement=cpu-transient-grad (routed experts frozen on the host, copied per forward/backward), target_preset=moe_frozen_experts (the only coverage that preset allows), dataset_format=chat with messages_field=messages and tools_field=tools (agentic rows carry their own tool schemas), and evaluation_execution.placement=experts-cpu (the candidate is measured under the same split placement its experts trained under). The base is the REAP-pruned MoE, so the dense-base identity is that model's own content digest; no parent adapter is applied. Prereg: docs/quals/TOOL_USE_REAP_MOE_V1_PREREG_2026-10-18.md and docs/quals/MOE_TRANSIENT_GRAD_PLACEMENT_PREREG_2026-10-18.md. Judge: <TODO: path to the frozen judge for this campaign>. Substitute every TODO before the campaign is loaded: a TODO is a placeholder, never a value."
+}

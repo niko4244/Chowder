@@ -215,7 +215,20 @@ UNSLOTH_REFUSED_KNOBS = (
     "frozen_layer_streaming",
 )
 
-_LOCAL_CONFIG_KEYS = frozenset({"device", "measured_evidence"})
+_LOCAL_CONFIG_KEYS = frozenset(
+    {
+        "device",
+        "measured_evidence",
+        # MoE training knobs a declaration may pass to the project template the
+        # local executor trains from. Absent, every one keeps the template's
+        # historical value, so no existing declaration moves.
+        "dataset_format",
+        "messages_field",
+        "tools_field",
+        "target_preset",
+        "expert_placement",
+    }
+)
 _UNSLOTH_CONFIG_KEYS = frozenset({"device", "measured_evidence"})
 _AUTO_CONFIG_KEYS = frozenset({"candidates"})
 
