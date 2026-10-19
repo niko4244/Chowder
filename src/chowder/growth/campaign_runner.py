@@ -1597,6 +1597,11 @@ def build_evaluator(
         protocol=protocol,
         base_model_path=manifest.base_model_path,
         base_model_digest=manifest.base_model_digest,
+        # The declared evaluation placement, or the evaluator's own historical
+        # default (resident) when the campaign declares none: an MoE whose
+        # experts do not fit declares ``experts-cpu`` here and the candidate is
+        # measured under the same placement the declaration asked for.
+        placement=str(manifest.evaluation_execution.placement).strip() or "resident",
         # The declared execution throughput, so the candidate arm is measured
         # the same way the parent and ancestor arms were declared to be.
         batch_size=manifest.evaluation_execution.batch_size,
@@ -2543,6 +2548,11 @@ def check_campaign_readiness(
     ))
 
     def load_template() -> str:
+        # Imported here, not at module scope: ``campaign_prepare`` calls back
+        # into this module at *call* time, so the dependency is already one-way
+        # at import time.
+        from .campaign_prepare import CampaignPrepareRefusal, trainer_spec_refusal
+
         path = _require_path(
             manifest.project_template_path,
             "project_template_path",
@@ -2551,6 +2561,13 @@ def check_campaign_readiness(
         document = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(document, Mapping):
             raise CampaignRunRefusal(f"project template {path} is not a JSON object")
+        # The worker's own admission, asked before compute: a declared template
+        # whose MoE settings contradict each other cannot train, and readiness
+        # is the phase whose job is to say so without spending the run.
+        try:
+            trainer_spec_refusal(document, where=f"project template {path.name}", work_dir=path.parent)
+        except CampaignPrepareRefusal as refusal:
+            raise CampaignRunRefusal(str(refusal)) from refusal
         return f"project template {path.name} parses"
 
     check("project_template", READINESS_PROJECT_TEMPLATE, ("declared_inputs",), load_template)
