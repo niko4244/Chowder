@@ -108,6 +108,14 @@ def scratch_dir() -> Path:
     raise RuntimeError("no writable scratch directory")
 
 
+def cuda_driver_stub() -> str:
+    for candidate in ("/usr/local/cuda/lib64/stubs/libcuda.so",
+                      "/usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so"):
+        if Path(candidate).exists():
+            return candidate
+    raise RuntimeError("no libcuda.so stub in the CUDA toolkit; cannot link ggml-cuda")
+
+
 def build_llama_server(scratch: Path) -> Path:
     source = scratch / "llama.cpp"
     server = source / "build" / "bin" / "llama-server"
@@ -136,7 +144,10 @@ def build_llama_server(scratch: Path) -> Path:
     log(f"llama.cpp at {head.stdout.strip()} (requested {LLAMA_COMMIT})")
 
     run("cmake-configure", ["cmake", "-S", str(source), "-B", str(source / "build"),
-                            "-DGGML_CUDA=ON", "-DCMAKE_CUDA_ARCHITECTURES=75", "-DLLAMA_CURL=OFF"])
+                            "-DGGML_CUDA=ON", "-DCMAKE_CUDA_ARCHITECTURES=75", "-DLLAMA_CURL=OFF",
+                            # Kaggle's image has no libcuda.so at build time; link the
+                            # toolkit stub (the real driver is loaded at runtime).
+                            f"-DCUDA_cuda_driver_LIBRARY={cuda_driver_stub()}"])
     run("cmake-build", ["cmake", "--build", str(source / "build"), "--target", "llama-server",
                         "-j", str(os.cpu_count() or 4)])
     if not server.exists():
