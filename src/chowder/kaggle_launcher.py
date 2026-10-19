@@ -118,7 +118,15 @@ PRECISION_DIVERGENCE_REASON = (
     "do not support bf16 tensor cores; torch.cuda.is_bf16_supported() is False "
     "there, and evaluators.base_text_worker._dtype raises RuntimeError on a bf16 "
     "request in that case. fp16 is the closest technically possible substitute; "
-    "no other spec field is changed for Kaggle."
+    "no other spec field is changed for Kaggle. Caveat for TRAINING runs (not "
+    "inference): fp16 params get fp16 optimiser state, because torch's AdamW "
+    "allocates with zeros_like(param), so grad^2 below fp16's smallest subnormal "
+    "(5.96e-08, i.e. |grad| < ~2.4e-04) flushes to zero, sqrt(v) collapses, the "
+    "denominator becomes eps alone and the update stops being an Adam step. "
+    "Measured: 3 steps of 1e-5 gradients at lr 1e-3 reach inf, and a diverged "
+    "payload is non-zero so it passes an all-zero check. bf16 does not have this "
+    "problem -- it shares fp32's exponent range. Upcast trainable params to fp32 "
+    "(prepare_model_for_kbit_training does this) before training on Kaggle."
 )
 
 

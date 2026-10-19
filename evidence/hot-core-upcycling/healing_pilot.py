@@ -187,6 +187,24 @@ def main() -> int:
     log("attribution: re-evaluating with each group reset to its zero init")
     router_state = {n: p.detach().clone() for n, p in router_params.items()}
     gate_state = {n: p.detach().clone() for n, p in gate_params.items()}
+
+    # --- persist the trained tensors BEFORE any attribution reset -----------------
+    # Added 2026-10-08. Without this the run keeps only pilot-result.json and the
+    # trained router/gate are unrecoverable: `router_state`/`gate_state` are clones
+    # that die with main(). That is not hypothetical -- it is why both staged
+    # HotCore checkpoints still hold the zero initialiser, and why "the trained
+    # router" could never be measured (C:	raining\measure_router_leak.py reports
+    # `init-only` on them, correctly). The 2026-09-11 run trained a router to norm
+    # 9.5768, evaluated it three ways, and lost it the moment main() returned.
+    # Consumed by C:	raining\save_trained_router.py, which expects exactly these
+    # 64 tensors (bf16, 2,228,224 params == summary.trainable_param_count).
+    from safetensors.torch import save_file as _save_safetensors
+    _trained_artifacts = {**router_state, **gate_state}
+    _payload_path = OUT / "trained-router-gate.safetensors"
+    _save_safetensors({n: t.to("cpu", torch.bfloat16).contiguous()
+                       for n, t in _trained_artifacts.items()}, str(_payload_path))
+    log(f"persisted {len(_trained_artifacts)} trained tensors -> {_payload_path}")
+    # -----------------------------------------------------------------------------
     with torch.no_grad():
         for n, p in gate_params.items():
             p.zero_()
