@@ -230,6 +230,7 @@ def write_provenance(started: str, status: str, error: str | None) -> None:
         "llama_cpp_requested_commit": LLAMA_COMMIT,
         "llama_cpp_checkout": FACTS.get("llama_cpp_checkout"),
         "llama_cpp_commit": FACTS.get("llama_cpp_commit"),
+        "cuda_driver_link": FACTS.get("cuda_driver_link"),
         "server_flags": "frozen in reap_serve.py: --fit on -np 4 -c 16384 --jinja",
         "suites": SUITES,
         "port": PORT,
