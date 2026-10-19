@@ -51,8 +51,8 @@ def test_ornith_serves_only_admitted_valid_sft_rows(tmp_path: Path) -> None:
          "task": {"prompt": "nested?", "expected_answer": "yes"}},
     ])
     assert calib.ornith_rows(path, sha) == [
-        {"prompt": "2*21?", "answer": "42"},
-        {"prompt": "nested?", "answer": "yes"},
+        {"prompt": "2*21?", "answer": "42", "code": "", "proposal_sha256": ""},
+        {"prompt": "nested?", "answer": "yes", "code": "", "proposal_sha256": ""},
     ]
 
 

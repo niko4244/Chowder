@@ -10,6 +10,11 @@ weights. Rules, all enforced here rather than by convention:
   the owner's explicit licence decision of 2026-10-18 (Fable output is AGPL)
   -- plus admitted Ornith curriculum when a digest-pinned ``admitted.jsonl``
   is given;
+* Ornith assistant turns render ``bare`` -- the answer alone, short enough that
+  the 256-token floor drops every row -- or ``worked`` (``--ornith-render
+  worked``): the verified solution, then the answer. The same worked text is
+  what ``ornith_sft_export.py`` writes for MoE SFT, so calibration and training
+  see one string;
 * 13-gram dedupe against every protected evaluation text (GSM8K test, MATH-500,
   MGSM, HumanEval) -- a calibration row sharing any 13-gram is dropped;
 * deterministic (fixed seed, sorted inputs) with a sha256 manifest.
@@ -45,6 +50,8 @@ V2_DOWNLOADED = {
     "nemotron_agentic": (r"C:\llm-work\data\nvidia__Nemotron-Agentic-v1\data\interactive_agent.jsonl", 64),
 }
 ORNITH_QUOTA = 64
+#: How an Ornith row's assistant turn is rendered; ``bare`` is the pre-registered v2 text.
+ORNITH_RENDERS = ("bare", "worked")
 FORBIDDEN_SOURCE = re.compile(r"fable", re.IGNORECASE)
 NGRAM = 13
 SEED = 20261017
@@ -219,7 +226,11 @@ def dedupe(rows: list[tuple[list[dict], list | None]], seen: set[str], *, extend
 
 
 def ornith_rows(path: str, sha256: str) -> list[dict]:
-    """Admitted, valid SFT-lane Ornith rows from a digest-pinned file, else refuse."""
+    """Admitted, valid SFT-lane Ornith rows from a digest-pinned file, else refuse.
+
+    ``code`` is the row's ``verification_code`` (empty when the row carries none):
+    the worked render and the SFT export both need it, and neither may re-derive it.
+    """
     data = Path(path).read_bytes()
     actual = hashlib.sha256(data).hexdigest()
     if actual != sha256.strip().lower():
@@ -232,10 +243,33 @@ def ornith_rows(path: str, sha256: str) -> list[dict]:
         task = row.get("task") if isinstance(row.get("task"), dict) else {}
         prompt = row.get("prompt", task.get("prompt"))
         answer = row.get("expected_answer", task.get("expected_answer"))
+        code = row.get("verification_code", task.get("verification_code"))
         if (row.get("admitted") is True and row.get("lane") == "sft"
                 and (row.get("validity") or {}).get("valid") is True and prompt and answer):
-            rows.append({"prompt": str(prompt), "answer": str(answer)})
+            rows.append({"prompt": str(prompt), "answer": str(answer),
+                         "code": "" if code is None else str(code),
+                         "proposal_sha256": str(row.get("proposal_sha256", task.get("proposal_sha256")) or "")})
     return rows
+
+
+def worked_answer(code: str, answer: str) -> str:
+    """The assistant turn for a worked Ornith row: the verified solution, then the answer.
+
+    Shared with ``ornith_sft_export.py`` so the text REAP calibrates on is the text
+    the MoE is trained on -- one builder, no drift.
+    """
+    return f"Let me solve this step by step in Python.\n\n```python\n{code}\n```\n\nFinal answer: {answer}"
+
+
+def ornith_assistant(row: dict, render: str = "bare") -> str:
+    """One Ornith row's assistant turn: the bare answer (pre-registered) or the worked one."""
+    return worked_answer(row.get("code") or "", row["answer"]) if render == "worked" else row["answer"]
+
+
+def ornith_text(tokenizer, row: dict, render: str = "bare") -> str:
+    """One Ornith row as chat text for the packing loop, under ``render``."""
+    return _render(tokenizer, [{"role": "user", "content": row["prompt"]},
+                               {"role": "assistant", "content": ornith_assistant(row, render)}])
 
 
 def _texts(name: str, path: str, tokenizer):
@@ -273,7 +307,7 @@ def _texts(name: str, path: str, tokenizer):
                 yield row["text"]
 
 
-def main() -> None:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tokenizer", required=True)
     parser.add_argument("--out", required=True)
@@ -281,6 +315,14 @@ def main() -> None:
     parser.add_argument("--mix", choices=("v1", "v2"), default="v1")
     parser.add_argument("--ornith-admitted", help="v2: a frozen Ornith admitted.jsonl")
     parser.add_argument("--ornith-sha256", help="v2: the pinned sha256 of --ornith-admitted")
+    parser.add_argument("--ornith-render", choices=ORNITH_RENDERS, default="bare",
+                        help="v2: Ornith assistant turns -- 'bare' is the pre-registered v2 text, "
+                             "'worked' adds the verified solution")
+    return parser
+
+
+def main() -> None:
+    parser = _parser()
     args = parser.parse_args()
     if args.mix == "v1" and args.ornith_admitted:
         parser.error("--ornith-admitted belongs to --mix v2")
@@ -318,9 +360,9 @@ def main() -> None:
                     continue  # the template refuses it (e.g. no user turn); never flatten
             plan.append((name, path, quota, lambda r=rendered: r))
     if args.ornith_admitted:
+        render = args.ornith_render
         plan.append(("ornith_curriculum", args.ornith_admitted, ORNITH_QUOTA, lambda: (
-            _render(tokenizer, [{"role": "user", "content": r["prompt"]},
-                                {"role": "assistant", "content": r["answer"]}])
+            ornith_text(tokenizer, r, render)
             for r in ornith_rows(args.ornith_admitted, args.ornith_sha256))))
 
     rows, stats = [], {}
@@ -372,7 +414,8 @@ def main() -> None:
             "nemotron_agentic": "nvidia/Nemotron-Agentic-v1 interactive_agent, Qwen3-generated, CC BY 4.0",
             "decision": "all included by the owner's explicit decision of 2026-10-18 for the custom-MoE track",
         }
-        manifest["ornith"] = ({"path": args.ornith_admitted, "sha256": args.ornith_sha256.lower()}
+        manifest["ornith"] = ({"path": args.ornith_admitted, "sha256": args.ornith_sha256.lower(),
+                               "render": args.ornith_render}
                               if args.ornith_admitted else "absent: no admitted Ornith curriculum supplied")
     (out / "calibration-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(json.dumps({k: manifest[k] for k in ("rows", "tokens", "calibration_sha256")}, indent=2))
