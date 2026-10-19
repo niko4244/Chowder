@@ -196,6 +196,38 @@ class CampaignBudget:
 
 
 @dataclass(frozen=True)
+class TargetThreshold:
+    """How much the declared target benchmark must improve to count.
+
+    The bar belongs to the campaign, not to the judge that audits it: a judge
+    that hard-coded ``min_delta`` would be inventing the standard after the
+    candidate's number is visible, and a campaign that never declared one has
+    not pre-registered what "improved" means. Keyword construction is the
+    intended spelling (``TargetThreshold(benchmark=..., min_delta=...)``).
+    """
+
+    benchmark: str
+    min_delta: float
+
+    def __post_init__(self) -> None:
+        _require_pinned(self.benchmark, "target_threshold.benchmark")
+        if isinstance(self.min_delta, bool) or not isinstance(self.min_delta, (int, float)):
+            raise CampaignManifestError(
+                f"target_threshold.min_delta must be a number, got {self.min_delta!r}"
+            )
+        if not math.isfinite(float(self.min_delta)):
+            raise CampaignManifestError("target_threshold.min_delta must be finite")
+        if float(self.min_delta) <= 0:
+            raise CampaignManifestError(
+                "target_threshold.min_delta must be positive; a threshold at or "
+                "below zero would let an unchanged candidate clear it"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"benchmark": self.benchmark, "min_delta": float(self.min_delta)}
+
+
+@dataclass(frozen=True)
 class ProtectionDeclaration:
     """The branch-protection policy a campaign declares, and nothing assumed.
 
@@ -461,6 +493,35 @@ def _eval_tier_policy_from_mapping(
         raise CampaignManifestError(f"{source}: {error}") from error
 
 
+def _target_threshold_from_mapping(
+    document: Mapping[str, Any], *, source: str
+) -> TargetThreshold:
+    """Parse the declared target-side bar, fail-closed.
+
+    One benchmark and one delta, both named: a threshold that does not say
+    which benchmark it is about, or which is not a number, is not a
+    pre-registration and refuses here rather than being guessed at audit time.
+    """
+    if not isinstance(document, Mapping):
+        raise CampaignManifestError(f"{source}: target_threshold must be an object")
+    unknown = sorted(set(document) - {"benchmark", "min_delta"})
+    if unknown:
+        raise CampaignManifestError(
+            f"{source}: unknown target_threshold fields {unknown}; a threshold "
+            "nothing reads is not a threshold"
+        )
+    benchmark = document.get("benchmark")
+    if not isinstance(benchmark, str) or not benchmark.strip():
+        raise CampaignManifestError(
+            f"{source}: target_threshold must name the benchmark it improves"
+        )
+    if "min_delta" not in document:
+        raise CampaignManifestError(
+            f"{source}: target_threshold must declare min_delta"
+        )
+    return TargetThreshold(benchmark=benchmark, min_delta=document["min_delta"])
+
+
 def _training_backend_from_mapping(
     document: Mapping[str, Any], *, source: str
 ) -> TrainingBackendDeclaration:
@@ -562,6 +623,10 @@ class CampaignManifest:
     #: evaluates them before anything promotes — the same objects, the same
     #: enforcement, as a programmatically constructed cycle.
     retention_profile: RetentionProfile | None = None
+    #: The preregistered target-side bar: which declared target benchmark must
+    #: improve, and by how much. Absent means the campaign never said what
+    #: "improved" means, so no judge may invent it (the target row is UNKNOWN).
+    target_threshold: TargetThreshold | None = None
     #: The declared trust classification of the campaign's benchmarks. With a
     #: retention profile, a constraint measured on search-readable evidence
     #: refuses — at load when both are declared, and again at promotion.
@@ -618,7 +683,7 @@ class CampaignManifest:
             "project_template_path", "training_material_path", "data_registry_path",
             "hardware_budget_path", "parent_profile_path", "parent_eval_report_path",
             "baseline_eval_report_path", "protection",            "evaluation_material_path", "evaluation_execution", "candidate_search", "retention_profile",
-            "eval_tier_policy", "training_backend",
+            "eval_tier_policy", "training_backend", "target_threshold",
         }
         retired = sorted(set(document) & set(RETIRED_FIELDS))
         if retired:
@@ -742,6 +807,23 @@ class CampaignManifest:
             if "eval_tier_policy" in document
             else None
         )
+        # The bar is declared over a benchmark the campaign actually measures
+        # as a target; a threshold on a protected or undeclared benchmark would
+        # gate on evidence the campaign never said was the goal.
+        target_threshold = (
+            _target_threshold_from_mapping(document["target_threshold"], source=source)
+            if "target_threshold" in document
+            else None
+        )
+        if (
+            target_threshold is not None
+            and target_threshold.benchmark not in document["target_benchmarks"]
+        ):
+            raise CampaignManifestError(
+                f"{source}: target_threshold names {target_threshold.benchmark!r}, "
+                f"which is not one of the declared target_benchmarks "
+                f"{list(document['target_benchmarks'])}"
+            )
         # Both declared: the tier wall is checked at load as well as at
         # promotion. A gate the search could see is malformed wiring, and
         # wiring errors surface when the campaign is declared, not after the
@@ -813,6 +895,7 @@ class CampaignManifest:
             # never silently drops.
             retention_profile=retention_profile,
             eval_tier_policy=eval_tier_policy,
+            target_threshold=target_threshold,
             # Absent means the historical local path; declared, it is parsed
             # fail-closed here, so a provider or config key nothing can honor
             # refuses at load rather than at the first attempt.

@@ -123,6 +123,7 @@ FIELD_ENFORCEMENT: Mapping[str, str] = {
     "parent_adapter_digest": "must equal the parent adapter tree's directory digest, else the run refuses",
     "state_root": "attempts, registry, ledger, accounting, the judged evidence set and campaign-run.json live here",
     "target_benchmarks": "the cycle's target set: the improvement gate",
+    "target_threshold": "the declared improvement bar (one target benchmark and a positive min_delta): validated at load against the declared target set, so a bar on an unmeasured benchmark refuses before any compute; the promotion judge reads it as the delta that must be cleared, so the standard is never a judge-side constant",
     "protected_benchmarks": "the cycle's protected set: the regression gate",
     "broad_benchmarks": "the cycle's broad battery: no material deterioration",
     "calibration_benchmarks": "the cycle's calibration set: hard gate when declared",
