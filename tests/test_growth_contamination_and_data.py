@@ -11,7 +11,12 @@ import hashlib
 
 import pytest
 
-from chowder.growth.contamination import ContaminationFirewall, MinHashIndex, _shingles
+from chowder.growth.contamination import (
+    ContaminationFirewall,
+    MinHashIndex,
+    ProtectedMaterial,
+    _shingles,
+)
 from chowder.growth.data_registry import (
     DataSource,
     admit,
@@ -87,6 +92,40 @@ def test_shingle_fingerprints_do_not_depend_on_the_process_salt():
         "big",
     )
     assert expected in _shingles("alpha beta gamma delta epsilon zeta eta theta")
+
+
+def test_shingle_index_scores_identically_to_a_full_scan():
+    """The indexed ``best_jaccard`` must equal the brute-force maximum.
+
+    The index skips only samples with zero shingle intersection, whose Jaccard
+    is exactly 0. If it ever diverges, a real near-duplicate could slip through
+    as CLEAN.
+    """
+    material = ProtectedMaterial(benchmark_qualified_id="index-check@2026-01")
+    samples = [*PROTECTED_TEXTS, PARAPHRASED, "an ordinary sentence about gardening in spring."]
+    for number, text in enumerate(samples):
+        key = f"sample:{number}"
+        shingles = frozenset(_shingles(text))
+        material.sample_shingles[key] = shingles
+        for shingle in shingles:
+            material.shingle_index.setdefault(shingle, set()).add(key)
+    probes = [
+        *samples,
+        "  ".join(PROTECTED_TEXTS[0].upper().split()),
+        "totally unrelated prose about alpine botany",
+        "Compute the third order correction to the anomalous magnetic moment.",
+    ]
+    for probe in probes:
+        shingles = set(_shingles(probe))
+        brute = max(
+            (
+                len(sample & shingles) / len(sample | shingles)
+                for sample in material.sample_shingles.values()
+                if sample | shingles
+            ),
+            default=0.0,
+        )
+        assert material.best_jaccard(shingles) == pytest.approx(brute)
 
 
 def test_a_banding_miss_cannot_silently_pass_benchmark_derived_text(monkeypatch):
