@@ -108,12 +108,29 @@ def scratch_dir() -> Path:
     raise RuntimeError("no writable scratch directory")
 
 
-def cuda_driver_stub() -> str:
-    for candidate in ("/usr/local/cuda/lib64/stubs/libcuda.so",
-                      "/usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so"):
-        if Path(candidate).exists():
-            return candidate
-    raise RuntimeError("no libcuda.so stub in the CUDA toolkit; cannot link ggml-cuda")
+def cuda_driver_flags() -> list[str]:
+    """CMake flags that let ggml-cuda link the CUDA driver on Kaggle's image.
+
+    The image ships no libcuda.so stub, so: the driver ldconfig knows, else any libcuda
+    under the usual roots, else GGML_CUDA_NO_VMM=ON (drops the direct driver link; it
+    changes only the GPU memory pool, not the arithmetic). The choice goes to provenance.
+    """
+    found: list[str] = []
+    try:
+        out = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True, timeout=30).stdout
+        found += [line.split("=>")[-1].strip() for line in out.splitlines() if "libcuda.so" in line]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for root in ("/usr/local/cuda", "/usr/local/nvidia", "/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib64-nvidia"):
+        if Path(root).exists():
+            found += [str(p) for p in Path(root).rglob("libcuda.so*")]
+    found = [f for f in found if Path(f).exists()]
+    if found:
+        lib = sorted(found, key=lambda f: ("stubs" not in f, len(f)))[0]
+        FACTS["cuda_driver_link"] = lib
+        return [f"-DCUDA_cuda_driver_LIBRARY={lib}"]
+    FACTS["cuda_driver_link"] = "none found: GGML_CUDA_NO_VMM=ON"
+    return ["-DGGML_CUDA_NO_VMM=ON"]
 
 
 def build_llama_server(scratch: Path) -> Path:
@@ -145,9 +162,7 @@ def build_llama_server(scratch: Path) -> Path:
 
     run("cmake-configure", ["cmake", "-S", str(source), "-B", str(source / "build"),
                             "-DGGML_CUDA=ON", "-DCMAKE_CUDA_ARCHITECTURES=75", "-DLLAMA_CURL=OFF",
-                            # Kaggle's image has no libcuda.so at build time; link the
-                            # toolkit stub (the real driver is loaded at runtime).
-                            f"-DCUDA_cuda_driver_LIBRARY={cuda_driver_stub()}"])
+                            *cuda_driver_flags()])
     run("cmake-build", ["cmake", "--build", str(source / "build"), "--target", "llama-server",
                         "-j", str(os.cpu_count() or 4)])
     if not server.exists():
