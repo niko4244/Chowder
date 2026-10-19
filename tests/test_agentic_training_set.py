@@ -329,3 +329,29 @@ def test_the_default_protected_set_names_the_four_benchmarks_and_the_instrument(
     benchmarks = {qualified_id for qualified_id, *_ in builder._PROTECTED_SPECS}
     assert benchmarks == {"gsm8k@2021-09", "math500@2024-04", "mgsm@2022-11", "humaneval@2021-07"}
     assert builder.INSTRUMENT_ID == INSTRUMENT_ID == "tool_use@reap-moe-v1"
+
+
+def test_the_instrument_fingerprint_keeps_the_content_and_drops_the_shared_schema() -> None:
+    """Only the item's conversation and answer are fingerprint, never its tools.
+
+    The tool schemas are the API surface every row in this family offers; folding
+    them into the fingerprint marks every row that offers the same tools as a
+    near-duplicate (392 of 401 real Nemotron rows), which is boilerplate, not a
+    leak.  The conversation and the expected call must both stay checked.
+    """
+    content_marker = "BOOK-TO-THE-AIRPORT-4f7c"
+    schema_marker = "SCHEMA-ONLY-MARKER-91ab"
+    item = {
+        "messages": [{"role": "user", "content": content_marker}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "book_ride", "description": schema_marker},
+            }
+        ],
+        "expected": {"name": "book_ride", "arguments": {"destination": "airport"}},
+    }
+    text = builder._instrument_text(item)
+    assert content_marker in text
+    assert "airport" in text
+    assert schema_marker not in text

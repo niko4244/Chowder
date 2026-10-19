@@ -51,6 +51,9 @@ tools argument, exactly as the worker's chat path renders it.
 Protected evaluation items (GSM8K, MATH-500, MGSM, HumanEval test splits and the
 `tool-use@reap-moe-v1` items) and every Nemotron row the evaluation split
 reserves (`is_reserved_for_evaluation`) are dropped **and counted**, never
-silently. Drop reasons per source: `reserved_uuid`, `duplicate`, `contaminated`,
+silently. The instrument is fingerprinted by its conversation and its expected
+call, not by its `tools` schema: the schema is the shared API surface every row
+offers, and folding it in flags ~98% of the corpus as a near-duplicate. Drop
+reasons per source: `reserved_uuid`, `duplicate`, `contaminated`,
 `validation_error`, `no_assistant_turn`, `template_error`, `empty_label_span`,
 `over_cap`.

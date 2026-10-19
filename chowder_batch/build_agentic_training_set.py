@@ -127,9 +127,17 @@ def _count_rows(path: Path) -> int:
 
 
 def _instrument_text(item: Mapping[str, Any]) -> str:
-    """One instrument item as the text a leaking training row would contain."""
+    """One instrument item as the text a leaking training row would contain.
+
+    The item's *content* -- its conversation and its expected call -- and not its
+    ``tools`` schema.  The tool schemas are the shared API surface every row in
+    this family is given; fingerprinting them marks every row that offers the
+    same tools as a near-duplicate (measured: 392 of 401 Nemotron rows, versus 0
+    of 401 once the schema is excluded).  The conversation and the answer are what
+    a leak actually reproduces, and both stay checked.
+    """
     return json.dumps(
-        {key: item.get(key) for key in ("messages", "tools", "expected")},
+        {"messages": item.get("messages"), "expected": item.get("expected")},
         ensure_ascii=False,
         sort_keys=True,
     )
