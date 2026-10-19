@@ -62,13 +62,36 @@ change to any rule here is a dated amendment, not an edit in place.
    readiness READY, settlement, independent candidate arm and judge. Gen-2
    of the primary lineage is the reference implementation.
 
+## The promotion judge (owner decision N3, 2026-10-18)
+The lineage's promotion judge is a **frozen local judge panel**. No Fable
+judge is required: Fable 5 is reportedly suspended, and an external model
+can neither be pinned nor replayed.
+
+- **Frozen code judge.** It is a versioned script, modelled on
+  `docs/gen2/judge_gen2.py`, written and pre-registered before the first
+  promotion campaign. It re-checks, from the run's own evidence:
+  - settlement and compute accounting;
+  - provenance and adapter identity;
+  - the declared retention profile;
+  - certification evidence.
+
+  Once a campaign's prereg names a judge version, that version is frozen
+  for the campaign.
+- **Quality evidence is execution-verified only.** It comes from:
+  - `tool-use@reap-moe-v1` (`tool_call_exact`: name, schema, arguments);
+  - math by final-answer extraction (GSM8K, MATH-500, MGSM mini-slices);
+  - code by executing tests (HumanEval);
+  - Gate 0 termination and degeneracy.
+- **No model judges a promotion.** Local models (e.g. Qwythos-27B, Ornith)
+  may write *descriptive* reports beside a verdict, but they never gate.
+  The same goes for a Fable judge, if one becomes available again: optional
+  descriptive evidence, never a requirement.
+- **N5 unchanged:** every promotion still needs Nik's approval after the
+  judge certifies.
+
 ## Still open (owner decisions)
 - **N2:** Fable / Anthropic usage terms. Until it is recorded, the control
   arm above is mandatory.
-- **N3:** the promotion judge. The old plan required a "full Fable judge",
-  but Fable 5 is reportedly suspended. The proposal is a frozen local judge
-  panel plus execution-verified scoring. This needs a decision before the
-  first promotion in this lineage.
 - **N5:** promotion approval stays human for every generation.
 
 The roadmap for this lineage lives in the owner's hub:
