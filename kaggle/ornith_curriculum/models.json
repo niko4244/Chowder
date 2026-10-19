@@ -1,0 +1,18 @@
+[
+  {
+    "role": "proposer",
+    "alias": "ornith-1.5-9b",
+    "hf_repo": "ornith-ai/Ornith-1.5-9B-GGUF",
+    "revision": "03d062d8b65f6aa724105f45281d58059b14444f",
+    "file": "Ornith-1.5-9B-Q4_K_M.gguf",
+    "sha256": "7d791afcb31812acc88cd5aafc675391df28c6fc3d8eae002bb4e6cc3d8cfd8d"
+  },
+  {
+    "role": "crosschecker",
+    "alias": "qwythos-27b",
+    "hf_repo": "empero-ai/Qwythos-27B-v1-GGUF",
+    "revision": "1bcb678570dc1dd12a775d865952f437a7dd1b80",
+    "file": "Qwythos-27B-Q4_K_M.gguf",
+    "sha256": "817aa895cd3b6e0680c7aa8da62ec393f3125ff0ab676f8f06a8fc759d20e3d5"
+  }
+]
