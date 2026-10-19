@@ -7,6 +7,7 @@ from chowder.cycle import ExperimentCycleRunner
 from chowder.engine import EvolutionEngine
 from chowder.executors import EvaluationOutcome, ExecutionContext, TrainingArtifact
 from chowder.failures import FailureRecord, FailureSourceRole
+from chowder.goal_lifecycle import GoalLifecycle, GoalTerminalState
 from chowder.memory import HardwareProfile
 from chowder.models import Experiment, ExperimentResult, ExperimentStatus, Goal, Hypothesis, MetricTarget
 from chowder.registry import RunRegistry
@@ -51,6 +52,41 @@ class Evaluator:
 
     def cancel(self, run_id):
         pass
+
+
+def test_goal_lifecycle_stops_before_training_when_parent_already_meets_goal(tmp_path):
+    goal = Goal((MetricTarget("quality", minimum=0.8),), gpu_hour_budget=10)
+    baseline = ExperimentResult(
+        "base",
+        {"quality": 0.9},
+        0,
+        evidence={"evaluation_protocol_sha256": "a" * 64},
+    )
+    engine = EvolutionEngine(goal, baseline)
+    exp = _experiment()
+    assert engine.propose([exp]) == (exp,)
+    with RunRegistry(tmp_path / "runs.db") as registry:
+        lifecycle = GoalLifecycle.open(
+            registry,
+            objective_version="objective-1",
+            goal=goal,
+            benchmark_digest="b" * 64,
+            evaluation_protocol_digest="a" * 64,
+        )
+        runner = ExperimentCycleRunner(
+            engine,
+            Trainer(),
+            Evaluator(),
+            _context(tmp_path),
+            goal_lifecycle=lifecycle,
+        )
+        outcome = runner.run_generation([exp])
+
+    assert outcome.candidates == ()
+    assert outcome.goal_terminal_state == GoalTerminalState.STOP_GOALS_MET.value
+    assert outcome.promoted is None
+    assert engine.outstanding_candidates == 0
+    assert engine.remaining_budget == 10
 
 
 def test_generation_combines_training_and_evaluation_cost_before_adjudication(tmp_path):
