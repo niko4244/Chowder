@@ -1,0 +1,23 @@
+[
+  {
+    "arm": "qwen38_27b",
+    "hf_repo": "unsloth/Qwen3.8-27B-GGUF",
+    "revision": "fdd03b8bbd279c1694563650e79d85a2373d9934",
+    "file": "Qwen3.8-27B-Q4_K_M.gguf",
+    "sha256": "7e78da5d7e3ae28d178121f58646953305f3e5bd3cb46f4a75584e8b6c6fe169"
+  },
+  {
+    "arm": "qwythos_27b",
+    "hf_repo": "empero-ai/Qwythos-27B-v1-GGUF",
+    "revision": "main",
+    "file": "Qwythos-27B-Q4_K_M.gguf",
+    "sha256": "817aa895cd3b6e0680c7aa8da62ec393f3125ff0ab676f8f06a8fc759d20e3d5"
+  },
+  {
+    "arm": "ornith15_35b",
+    "hf_repo": "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
+    "revision": "fbbaed45c2f0e200276ffa51701a24d45dc7f57e",
+    "file": "Ornith-1.5-35B-Q4_K_M.gguf",
+    "sha256": "ca6ea26329c88b78ffd90a85163be2e746c2fafd1024f56db47e499f117f9a7f"
+  }
+]
