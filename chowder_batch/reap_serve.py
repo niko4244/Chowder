@@ -15,6 +15,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -30,6 +31,11 @@ _KEEP = re.compile(r"llama_params_fit|common_fit|n_cpu_moe|overflowing|offloaded
 _CPU_MOE = re.compile(r"n_cpu_moe\s*[=:]?\s*(\d+)", re.I)
 _OVERFLOW = re.compile(r"\((\d+) overflowing\)")
 _OVERRIDE = re.compile(r"blk\.(\d+)\..*exps.*CPU", re.I)
+_ALL_LAYERS = re.compile(r"offloaded (\d+)/(\d+) layers to GPU", re.I)
+# llama-server logs neither the fit decision nor layer placement at its default
+# verbosity (3); 4 does, at ~30 lines per request. Set through the environment so
+# the pre-registered FLAGS (and inference) stay unchanged.
+LOG_VERBOSITY = "4"
 
 
 def parse_offload(text: str) -> tuple[list[str], int | None]:
@@ -41,7 +47,15 @@ def parse_offload(text: str) -> tuple[list[str], int | None]:
     if over:
         return lines, sum(over)
     layers = {m.group(1) for l in lines if (m := _OVERRIDE.search(l))}
-    return lines, len(layers) if layers else None
+    if layers:
+        return lines, len(layers)
+    # A clean fit with every layer on the GPU and no expert tensor overridden to CPU
+    # is a measured zero, not an unknown (reap160_q4 read UNKNOWN for this reason).
+    full = [m for l in lines if (m := _ALL_LAYERS.search(l))]
+    fitted = any("successfully fit" in l for l in lines)
+    if fitted and full and full[-1].group(1) == full[-1].group(2):
+        return lines, 0
+    return lines, None
 
 
 def _sha256(path: Path) -> str:
@@ -105,13 +119,15 @@ def main(argv: list[str] | None = None) -> int:
     started = dt.datetime.now(dt.timezone.utc).isoformat()
     t0 = time.time()
     with log_path.open("wb") as log:
-        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                env={**os.environ, "LLAMA_ARG_LOG_VERBOSITY": LOG_VERBOSITY})
         try:
             _wait_health(proc, args.port, args.timeout)
             ready = round(time.time() - t0, 1)
             lines, n = parse_offload(log_path.read_text(encoding="utf-8", errors="replace"))
             (arm_dir / "serve.json").write_text(json.dumps({
                 "gguf": str(gguf), "gguf_sha256": _sha256(gguf), "flags": FLAGS,
+                "log_verbosity": LOG_VERBOSITY,
                 "experts_offloaded": n, "offload_log_lines": lines,
                 "vram_used_mib": _vram_used_mib(), "started": started, "ready_seconds": ready,
             }, indent=2), encoding="utf-8")
