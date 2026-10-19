@@ -630,9 +630,24 @@ class SubprocessTrainingFn:
                 "than in the project -- so this binding will not pretend to "
                 "drive one from here",
             )
-        template["config"] = merged_config
-
         goal = template.get("goal")
+        metrics = goal.get("metrics", ()) if isinstance(goal, Mapping) else ()
+        if metrics and all(
+            isinstance(metric, Mapping)
+            and metric.get("minimum") is None
+            and metric.get("maximum") is None
+            for metric in metrics
+        ):
+            # An attempt's goal is direction-only by construction: pass/fail is
+            # the campaign's certification, not the attempt's. The candidate's
+            # measured protocol fingerprint (versions, device, base identity)
+            # never equals the declared baseline's config fingerprint, so the
+            # lifecycle contract's opt-in for unbounded goals is the honest mode
+            # here; an explicitly declared mode in the template wins.
+            lifecycle = merged_config.get("goal_lifecycle")
+            if not isinstance(lifecycle, Mapping) or "mode" not in lifecycle:
+                merged_config = {**merged_config, "goal_lifecycle": {"mode": "legacy_unbounded"}}
+        template["config"] = merged_config
         if not isinstance(goal, Mapping) or "gpu_hour_budget" not in goal:
             return template, (
                 "template-contract",
