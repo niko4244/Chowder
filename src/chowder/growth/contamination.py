@@ -168,19 +168,29 @@ class ProtectedMaterial:
     # Retained so the near-duplicate test below is exact instead of dependent
     # on whether LSH banding happened to retrieve a candidate.
     sample_shingles: dict[str, frozenset[int]] = field(default_factory=dict)
+    #: shingle hash -> sample keys containing it. The exact candidate filter for
+    #: ``best_jaccard``: a sample sharing no shingle has intersection 0 and so
+    #: Jaccard 0, which can never clear a positive threshold. Verdicts are
+    #: identical to a full scan; only the scan is narrowed.
+    shingle_index: dict[int, set[str]] = field(default_factory=dict)
     sample_count: int = 0
 
     def best_jaccard(self, shingles: set[int]) -> float:
-        """Maximum exact Jaccard over every registered sample.
+        """Maximum exact Jaccard over every sample that could score above zero.
 
         Deliberately biased toward recall: the maximum over samples rather
         than an average, and LSH is not consulted, so no banding miss can
-        turn real overlap into a CLEAN verdict.
+        turn real overlap into a CLEAN verdict. The shingle index only skips
+        samples with zero intersection, whose Jaccard is exactly 0.
         """
         if not shingles:
             return 0.0
+        candidates: set[str] = set()
+        for shingle in shingles:
+            candidates |= self.shingle_index.get(shingle, frozenset())
         best = 0.0
-        for sample in self.sample_shingles.values():
+        for key in candidates:
+            sample = self.sample_shingles[key]
             union = len(sample | shingles)
             if not union:
                 continue
@@ -231,7 +241,10 @@ class ContaminationFirewall:
             material.normalized_digests.add(_sha256(normalized))
             sample_key = f"{benchmark_qualified_id}:{material.sample_count}"
             index.add(sample_key, text)
-            material.sample_shingles[sample_key] = frozenset(_shingles(text))
+            shingles = frozenset(_shingles(text))
+            material.sample_shingles[sample_key] = shingles
+            for shingle in shingles:
+                material.shingle_index.setdefault(shingle, set()).add(sample_key)
             material.sample_count += 1
         material.minhash = index
         self._protected[benchmark_qualified_id] = material
