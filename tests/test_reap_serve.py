@@ -70,6 +70,7 @@ class FakeProc:
 
     def __init__(self, cmd, stdout=None, stderr=None, **kw):
         self.cmd = cmd
+        self.env = kw.get("env")
         stdout.write(FIT_LOG.encode())
         stdout.flush()
         FakeProc.last = self
@@ -145,6 +146,7 @@ def test_serve_json_and_eval_run(tmp_path, monkeypatch):
     eval_cmd = [c for c in calls if any("reap_eval.py" in str(x) for x in c)][0]
     assert eval_cmd[-6:] == ["--port", "8790", "--arm", "dense", "--out", str(tmp_path / "eval")]
     assert FakeProc.terminated
+    assert FakeProc.last.env["LLAMA_ARG_LOG_VERBOSITY"] == "4" and sj["log_verbosity"] == "4"
 
 
 def test_server_terminated_when_eval_fails(tmp_path, monkeypatch):
@@ -185,3 +187,23 @@ def test_eval_keeps_predicted_per_second(monkeypatch):
     payload.pop("timings")
     row = reap_eval._score("gsm8k", {"id": "x", "expected": "4"}, reap_eval._chat(8790, "q", 16))
     assert row["predicted_per_second"] is None
+
+
+FULL_FIT = (
+    "0.00.269 I common_fit_params: successfully fit params to free device memory\n"
+    "0.00.376 I load_tensors: offloaded 41/41 layers to GPU\n"
+)
+
+
+def test_clean_full_fit_is_a_measured_zero():
+    lines, n = reap_serve.parse_offload(FULL_FIT)
+    assert n == 0 and len(lines) == 2
+
+
+def test_full_fit_with_expert_override_counts_layers():
+    log = FULL_FIT + "tensor blk.7.ffn_up_exps.weight (q4_K) buffer type overridden to CPU\n"
+    assert reap_serve.parse_offload(log)[1] == 1
+
+
+def test_all_layers_without_fit_line_stays_unknown():
+    assert reap_serve.parse_offload("load_tensors: offloaded 41/41 layers to GPU\n")[1] is None
