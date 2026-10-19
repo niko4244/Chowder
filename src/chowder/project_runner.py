@@ -1,30 +1,43 @@
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
+import hashlib
+import json
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .backend_selection import (
     ROUTER_HEALING_ENGINE,
+    TRANSFORMERS_ENGINE,
     create_evaluation_executor,
     create_training_executor,
     normalize_training_config_for_executor,
     resolve_training_engine,
 )
+from .backends.transformers_peft import TransformersPeftExecutor
 from .cancellation import CancellationToken
 from .cycle import ExperimentCycleRunner, GenerationOutcome
 from .engine import EvolutionEngine
 from .evaluators.base_text import BaseModelTextEvaluator
+from .evaluators.transformers_text import TransformersTextEvaluator
 from .executors import EvaluationOutcome, ExecutionContext
 from .failures import harvest_transformers_text_failures
+from .goal_lifecycle import GoalLifecycle, GoalLifecycleError
+from .improvement.constitution import Constitution, goal_digest
 from .hardware import HardwareSnapshot, detect_hardware
 from .local_corpus_provider import LocalCorpusRepairProvider
 from .memory import HardwareProfile
 from .models import Experiment, ExperimentResult, ExperimentStatus, Hypothesis
+from .protocol import protocol_fingerprint, result_protocol_fingerprint
 from .project import ProjectSpec, load_project
+from .provenance import sha256_file
 from .recursive_repair import RecursiveRepairOutcome, run_bounded_autonomous_repair
-from .registry import RunRegistry
+from .registry import (
+    GoalObjectiveMigrationApproval as ProtocolContractMigrationApproval,
+    GoalObjectiveMigrationProvenance,
+    RegistryInvariantError,
+    RunRegistry,
+)
 from .run_events import (
     CheckpointEvent,
     FailureEvent,
@@ -53,7 +66,13 @@ class ProjectRunOutcome:
 
     @property
     def succeeded(self) -> bool:
-        return any(candidate.succeeded for candidate in self.generation.candidates)
+        """Return true only when the frozen lifecycle reports goal completion.
+
+        Training/evaluation success, promotion, and a clean process exit are
+        not product success. Bounded stops, refusal, cancellation, crashes,
+        and incomplete evidence all remain non-success.
+        """
+        return self.generation.goal_terminal_state == "STOP_GOALS_MET"
 
     @property
     def promoted_experiment_id(self) -> str | None:
@@ -90,6 +109,21 @@ def _emit_stage(
     experiment_id: str | None = None,
 ) -> None:
     _emit(callback, registry, RunEvent(stage=stage, message=message, experiment_id=experiment_id))
+
+
+def _closeout_registry_audit(
+    registry: RunRegistry,
+    on_event: EventCallback | None,
+) -> tuple[dict[str, object], ...]:
+    findings = tuple(registry.audit_stranded_results())
+    if findings:
+        _emit_stage(
+            on_event,
+            registry,
+            "registry-audit",
+            f"Registry audit found {len(findings)} stranded result(s)",
+        )
+    return findings
 
 
 def hardware_profile_from_snapshot(snapshot: HardwareSnapshot) -> HardwareProfile:
@@ -145,7 +179,7 @@ def _run_automatic_baseline(
     context: ExecutionContext,
     registry: RunRegistry,
     on_event: EventCallback | None,
-) -> tuple[ExperimentResult | None, str | None]:
+) -> tuple[ExperimentResult, str | None]:
     """Evaluate the untouched base model and persist it as the baseline.
 
     Runs before any training happens, using the exact same evaluator and
@@ -153,12 +187,6 @@ def _run_automatic_baseline(
     the trained candidate -- so ``Goal.require_protocol_match`` is comparing
     like with like, not the user's guess of where the base model already
     stood against a differently-configured post-training run.
-
-    For a router project running paired arms, this records the baseline ROW
-    but defers its measurement to the candidate's own resident-pair
-    evaluation (one model load instead of two) and returns None; the
-    deferred-baseline provider in run_project completes the row from that
-    measurement before the gate adjudicates.
     """
     _emit_stage(
         on_event, registry, "baseline", "Evaluating the untouched base model for an automatic baseline"
@@ -186,11 +214,6 @@ def _run_automatic_baseline(
             estimated_gpu_hours=estimated_gpu_hours,
         )
     )
-    # The baseline must be measured by the *same* scorer that will score the
-    # candidate: a router project's untouched base scored by the PEFT text
-    # evaluator would be a different measurement on a different protocol, and
-    # comparing it to a router payload's holdout loss would be arithmetic on two
-    # unrelated numbers.
     if resolve_training_engine(project.config) == ROUTER_HEALING_ENGINE:
         from .backends.router_healing import RouterHealingEvaluator
 
@@ -198,19 +221,10 @@ def _run_automatic_baseline(
         if evaluator.defers_automatic_baseline(
             experiment=project.experiment, context=context
         ):
-            # Paired arms: the candidate's own evaluation measures the base
-            # in the same resident process. Record the row now, settle it
-            # when the paired evidence lands.
-            return None, None
+            return None, None  # type: ignore[return-value]
         try:
-            outcome = evaluator.evaluate_base(
-                config=project.config, context=context
-            )
+            outcome = evaluator.evaluate_base(config=project.config, context=context)
         except Exception:
-            # The row exists; a measurement that never completed must not
-            # strand it in `planned` ("has not run yet") -- `failed` with no
-            # result is the honest record for an attempt that produced no
-            # scored outcome.
             registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
             raise
     else:
@@ -228,6 +242,8 @@ def _run_automatic_baseline(
         },
     }
     protocol_sha = outcome.evidence.get("protocol_sha256")
+    if not (isinstance(protocol_sha, str) and len(protocol_sha) == 64):
+        protocol_sha = outcome.evidence.get("eval_spec_digest")
     if isinstance(protocol_sha, str) and len(protocol_sha) == 64:
         evidence["evaluation_protocol_sha256"] = protocol_sha
     result = ExperimentResult(
@@ -239,11 +255,6 @@ def _run_automatic_baseline(
     )
     registry.record_evaluation_outcome(outcome)
     registry.record_result(result)
-    # A measured baseline is a completed measurement, not a gate verdict: the
-    # gate's accept/reject lives on the candidate's row. `parent_tournament`
-    # already persists its measured base-model rows as `passed`; the automatic
-    # baseline follows the same convention so the durable status finally
-    # matches the evidence the row carries.
     registry.update_experiment_status("baseline", ExperimentStatus.PASSED.value)
     metrics_summary = ", ".join(f"{name}={value:.4f}" for name, value in sorted(result.metrics.items()))
     _emit_stage(
@@ -252,13 +263,266 @@ def _run_automatic_baseline(
     return result, _resolved_revision_from_outcome(outcome)
 
 
+def _project_benchmark_digest(project: ProjectSpec) -> str:
+    """Hash the configured benchmark contract and its current dataset bytes."""
+    evaluation = project.config.get("evaluation", {})
+    suites = evaluation.get("suites", ()) if isinstance(evaluation, Mapping) else ()
+    benchmark_suites: list[dict[str, Any]] = []
+    for row in suites:
+        if not isinstance(row, Mapping):
+            continue
+        dataset = Path(str(row.get("dataset", "")))
+        if not dataset.is_absolute():
+            dataset = project.work_dir / dataset
+        benchmark_suites.append(
+            {
+                "name": str(row.get("name", "")),
+                "dataset_sha256": sha256_file(dataset),
+                "prompt_field": str(row.get("prompt_field", "prompt")),
+                "expected_field": str(row.get("expected_field", "expected")),
+                "scoring": str(row.get("scoring", "normalized_exact_match")),
+                "max_new_tokens": int(row.get("max_new_tokens", 64)),
+                "use_chat_template": bool(row.get("use_chat_template", False)),
+            }
+        )
+    payload = json.dumps(benchmark_suites, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _protocol_contract_digest(project: ProjectSpec) -> str:
+    """Hash the complete static evaluation/training contract for this project."""
+    config = project.config
+    backend = config.get("backend", {})
+    evaluation = config.get("evaluation", {})
+    if not isinstance(backend, Mapping) or not isinstance(evaluation, Mapping):
+        raise ValueError("project protocol contract requires backend and evaluation mappings")
+
+    backend_contract = dict(backend)
+    dataset_value = backend_contract.get("dataset")
+    if dataset_value:
+        dataset = Path(str(dataset_value))
+        if not dataset.is_absolute():
+            dataset = project.work_dir / dataset
+        backend_contract["dataset_sha256"] = sha256_file(dataset)
+    backend_contract.pop("dataset", None)
+
+    evaluation_contract = dict(evaluation)
+    suites = evaluation_contract.get("suites", ())
+    normalized_suites: list[dict[str, object]] = []
+    if not isinstance(suites, (list, tuple)):
+        raise ValueError("evaluation.suites must be a list")
+    for row in suites:
+        if not isinstance(row, Mapping):
+            raise ValueError("evaluation suite must be a mapping")
+        suite = dict(row)
+        dataset = Path(str(suite.get("dataset", "")))
+        if not dataset.is_absolute():
+            dataset = project.work_dir / dataset
+        suite["dataset_sha256"] = sha256_file(dataset)
+        suite.pop("dataset", None)
+        normalized_suites.append(suite)
+    evaluation_contract["suites"] = normalized_suites
+
+    payload = {
+        "seed": project.seed,
+        "config_seed": config.get("seed", project.seed),
+        "backend": backend_contract,
+        "evaluation": evaluation_contract,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _legacy_unbounded_lifecycle(project: ProjectSpec) -> bool:
+    lifecycle = project.config.get("goal_lifecycle")
+    return (
+        isinstance(lifecycle, Mapping)
+        and lifecycle.get("mode") == "legacy_unbounded"
+        and all(
+            metric.minimum is None and metric.maximum is None
+            for metric in project.goal.metrics
+        )
+    )
+
+
+def _measured_protocol_digest(result: ExperimentResult | None) -> str | None:
+    if result is None:
+        return None
+    digest = result_protocol_fingerprint(result.evidence)
+    if digest is not None:
+        return digest
+    evaluation = result.evidence.get("evaluation")
+    if isinstance(evaluation, Mapping):
+        digest = evaluation.get("eval_spec_digest")
+        if isinstance(digest, str) and len(digest) == 64:
+            return digest
+    digest = result.evidence.get("eval_spec_digest")
+    return digest if isinstance(digest, str) and len(digest) == 64 else None
+
+
+def _open_project_lifecycle(
+    project: ProjectSpec,
+    registry: RunRegistry,
+    *,
+    baseline: ExperimentResult | None = None,
+) -> GoalLifecycle:
+    """Construct the sole goal authority for the canonical project path."""
+    stored = registry.get_goal_objective(project.objective_version)
+    if stored is not None:
+        identity = stored["identity"]
+        baseline = baseline or next(
+            (
+                result
+                for result in registry.list_results()
+                if result.experiment_id == "baseline"
+            ),
+            None,
+        )
+        contract_digest = _protocol_contract_digest(project)
+        legacy_unbounded = _legacy_unbounded_lifecycle(project)
+        current_measured_digest = _measured_protocol_digest(baseline)
+        if (
+            current_measured_digest is not None
+            and current_measured_digest != str(identity["evaluation_protocol_digest"])
+        ):
+            raise GoalLifecycleError(
+                "objective identity changed (evaluation protocol evidence); refusing to resume objective"
+            )
+        return GoalLifecycle.open(
+            registry,
+            objective_version=project.objective_version,
+            goal=project.goal,
+            benchmark_digest=_project_benchmark_digest(project),
+            evaluation_protocol_digest=str(identity["evaluation_protocol_digest"]),
+            constitution=Constitution(),
+            objective_metadata={
+                "protocol_contract_digest": contract_digest,
+                "legacy_unbounded": legacy_unbounded,
+            },
+            legacy_unbounded=legacy_unbounded,
+            resume=True,
+        )
+
+    protocol_digest = _measured_protocol_digest(baseline) or protocol_fingerprint(
+        {"evaluation": project.config.get("evaluation", {})}
+    )
+    contract_digest = _protocol_contract_digest(project)
+    legacy_unbounded = _legacy_unbounded_lifecycle(project)
+    return GoalLifecycle.open(
+        registry,
+        objective_version=project.objective_version,
+        goal=project.goal,
+        benchmark_digest=_project_benchmark_digest(project),
+        evaluation_protocol_digest=protocol_digest,
+        constitution=Constitution(),
+        objective_metadata={
+            "protocol_contract_digest": contract_digest,
+            "legacy_unbounded": legacy_unbounded,
+        },
+        legacy_unbounded=legacy_unbounded,
+    )
+
+
+def migrate_legacy_protocol_contract(
+    project: ProjectSpec,
+    *,
+    new_objective_version: str,
+    approval: ProtocolContractMigrationApproval | None = None,
+) -> ProjectSpec:
+    """Migrate only a legacy objective's missing protocol contract.
+
+    This operation is deliberately explicit and never called by ``run_project``.
+    It preserves the legacy objective and appends a new objective plus an
+    approval/provenance migration record. The returned project is the only
+    version permitted to resume after migration.
+    """
+    if approval is None:
+        raise GoalLifecycleError(
+            "protocol-contract migration requires explicit human approval"
+        )
+    if not isinstance(new_objective_version, str) or not new_objective_version.strip():
+        raise GoalLifecycleError("migration requires a non-empty new objective version")
+    if new_objective_version == project.objective_version:
+        raise GoalLifecycleError("protocol-contract migration requires a new objective version")
+    project.validate_files()
+
+    with RunRegistry(project.registry_path) as registry:
+        stored = registry.get_goal_objective(project.objective_version)
+        if stored is None:
+            raise GoalLifecycleError(
+                f"cannot migrate unknown objective: {project.objective_version}"
+            )
+        stored_goal = stored["goal"]
+        if not isinstance(stored_goal, Mapping):
+            raise GoalLifecycleError("persisted objective payload is invalid")
+        if "protocol_contract_digest" in stored_goal:
+            raise GoalLifecycleError("objective already has a protocol contract")
+        stored_identity = stored["identity"]
+        if goal_digest(project.goal) != stored_identity["goal_digest"]:
+            raise GoalLifecycleError("current goal differs; migration scope is protocol contract only")
+        current_benchmark = _project_benchmark_digest(project)
+        if current_benchmark != stored_identity["benchmark_digest"]:
+            raise GoalLifecycleError("current benchmark differs; migration scope is protocol contract only")
+
+        target_identity = Constitution().new_objective_identity(
+            objective_version=new_objective_version,
+            goal=project.goal,
+            benchmark_digest=str(stored_identity["benchmark_digest"]),
+            evaluation_protocol_digest=str(stored_identity["evaluation_protocol_digest"]),
+        )
+        contract_digest = _protocol_contract_digest(project)
+        target_goal_payload = dict(stored_goal)
+        target_goal_payload["protocol_contract_digest"] = contract_digest
+        source_identity_json = json.dumps(stored_identity, sort_keys=True, separators=(",", ":"))
+        target_identity_payload = {
+            "objective_version": target_identity.objective_version,
+            "goal_digest": target_identity.goal_digest,
+            "benchmark_digest": target_identity.benchmark_digest,
+            "evaluation_protocol_digest": target_identity.evaluation_protocol_digest,
+            "constitution_digest": target_identity.constitution_digest,
+        }
+        target_identity_json = json.dumps(
+            target_identity_payload, sort_keys=True, separators=(",", ":")
+        )
+        provenance = GoalObjectiveMigrationProvenance(
+            operation="legacy_protocol_contract_migration",
+            source_objective_version=project.objective_version,
+            target_objective_version=new_objective_version,
+            source_identity_digest=hashlib.sha256(
+                source_identity_json.encode("utf-8")
+            ).hexdigest(),
+            target_identity_digest=hashlib.sha256(
+                target_identity_json.encode("utf-8")
+            ).hexdigest(),
+            protocol_contract_digest=contract_digest,
+            registry_path=str(project.registry_path),
+        )
+        try:
+            registry.record_goal_objective_migration(
+                source_objective_version=project.objective_version,
+                target_identity=target_identity,
+                target_goal_payload=target_goal_payload,
+                protocol_contract_digest=contract_digest,
+                approval=approval.to_dict(),
+                provenance=provenance,
+            )
+        except (KeyError, TypeError, ValueError, RegistryInvariantError) as exc:
+            raise GoalLifecycleError(str(exc)) from exc
+    return replace(project, objective_version=new_objective_version)
+
+
 def run_project(
     project_or_path: ProjectSpec | str | Path,
     *,
     on_event: EventCallback | None = None,
     cancellation: CancellationToken | None = None,
+    goal_lifecycle: GoalLifecycle | None = None,
 ) -> ProjectRunOutcome:
-    """Execute one real (baseline if automatic) → train → evaluate → gate project generation.
+    """Execute one lifecycle-authoritative project generation.
+
+    The canonical path always creates or resumes a frozen ``GoalLifecycle``;
+    ``ProjectRunOutcome.succeeded`` is true only for ``STOP_GOALS_MET``.
+    Training/evaluation success and promotion are deliberately not enough.
 
     `cancellation`, if given, is checked before each candidate (and each
     autonomous-repair hop) starts, and is bound to the real trainer/evaluator
@@ -276,6 +540,28 @@ def run_project(
 
     with RunRegistry(project.registry_path) as registry:
         _emit_stage(on_event, registry, "prepare", f"Loaded project {project.name!r}")
+        stored_objective = registry.get_goal_objective(project.objective_version)
+        lifecycle = goal_lifecycle
+        if lifecycle is None and stored_objective is not None:
+            lifecycle = _open_project_lifecycle(
+                project,
+                registry,
+                baseline=project.baseline,
+            )
+        if lifecycle is not None and lifecycle.terminal_state is not None:
+            persisted = lifecycle.terminal_result()
+            return ProjectRunOutcome(
+                project=project,
+                hardware=detect_hardware(project.work_dir),
+                generation=GenerationOutcome(
+                    candidates=(),
+                    ranking=(),
+                    promoted=None,
+                    goal_assessment=persisted.assessment,
+                    goal_terminal_state=persisted.terminal_state.value,
+                ),
+                registry_audit=_closeout_registry_audit(registry, on_event),
+            )
         hardware = detect_hardware(project.work_dir)
         profile = hardware_profile_from_snapshot(hardware)
         if hardware.accelerators:
@@ -296,19 +582,24 @@ def run_project(
             hardware=profile,
             work_dir=str(project.work_dir),
             seed=project.seed,
-            # The project config is the base resolution the backend resolvers
-            # read (e.g. the paired-arms decision at start time); the cycle
-            # runner replaces this per candidate with the graph-resolved
-            # config, so nothing downstream sees a stale view.
             resolved_config=project.config,
         )
 
-        deferred = False
         if project.baseline_mode == "auto":
-            baseline, resolved_revision = _run_automatic_baseline(
-                project, context, registry, on_event
-            )
-            deferred = baseline is None
+            if lifecycle is not None:
+                baseline = next(
+                    (result for result in registry.list_results() if result.experiment_id == "baseline"),
+                    None,
+                )
+                if baseline is None:
+                    raise RuntimeError(
+                        "persisted objective has no baseline result; refusing to bypass lifecycle"
+                    )
+                resolved_revision = None
+            else:
+                baseline, resolved_revision = _run_automatic_baseline(
+                    project, context, registry, on_event
+                )
             training_config: Mapping[str, Any] = (
                 _config_with_bound_revision(project.config, resolved_revision)
                 if resolved_revision
@@ -319,28 +610,82 @@ def run_project(
             baseline = project.baseline
             training_config = project.config
 
+        if lifecycle is None:
+            lifecycle = _open_project_lifecycle(project, registry, baseline=baseline)
+
+        if lifecycle.last_assessment is None and baseline is not None:
+            parent_result = lifecycle.assess_parent_result(baseline)
+            if parent_result.terminal_state is not None:
+                return ProjectRunOutcome(
+                    project=project,
+                    hardware=hardware,
+                    generation=GenerationOutcome(
+                        candidates=(),
+                        ranking=(),
+                        promoted=None,
+                        goal_assessment=parent_result.assessment,
+                        goal_terminal_state=parent_result.terminal_state.value,
+                    ),
+                    registry_audit=_closeout_registry_audit(registry, on_event),
+                )
+
         training_config = normalize_training_config_for_executor(training_config)
+        baseline_deferred = baseline is None
         engine = EvolutionEngine(
             goal=project.goal,
-            # A deferred baseline is a real seam, not a placeholder: the
-            # engine runs with no baseline at all and refuses every gate-time
-            # operation until the paired evaluation's measurement lands.
             baseline=baseline,
-            baseline_deferred=deferred,
-            # The row's estimate is the provisional spend so budget admission
-            # stays conservative; the provider reconciles it with the
-            # measured cost.
-            spent_gpu_hours=baseline.gpu_hours if baseline is not None else 0.01,
+            spent_gpu_hours=0.0 if baseline_deferred else baseline.gpu_hours,
+            baseline_deferred=baseline_deferred,
         )
-        trainer = create_training_executor(training_config)
-        # Same engine key as the trainer, so a router payload can never be handed
-        # to the PEFT text evaluator (or the reverse) and fail inside the
-        # library instead of at the dispatch seam.
-        evaluator = create_evaluation_executor(training_config)
+        if resolve_training_engine(training_config) == TRANSFORMERS_ENGINE:
+            # Preserve the existing constructor seam for the mature
+            # Transformers PEFT path.
+            trainer = TransformersPeftExecutor()
+            evaluator = TransformersTextEvaluator()
+        else:
+            # Every other engine (unsloth, router-healing) must go through
+            # factory dispatch -- the Transformers executor rejects their
+            # backend keys (e.g. backend.engine) at preflight.
+            trainer = create_training_executor(training_config)
+            evaluator = create_evaluation_executor(training_config)
+        deferred_baseline = None
+        if baseline_deferred:
+            def complete_deferred_baseline(candidate):
+                if candidate is None or candidate.evaluation is None:
+                    raise RuntimeError("paired evaluation produced no candidate evidence")
+                evaluation_evidence = dict(candidate.evaluation.evidence)
+                base_loss = evaluation_evidence.get("base_holdout_loss")
+                if not isinstance(base_loss, (int, float)):
+                    raise RuntimeError("paired evaluation omitted base_holdout_loss")
+                compute = {
+                    "baseline_source": "paired-candidate-evaluation",
+                    "model_loads": 1,
+                    "shared_wall_gpu_hours": candidate.result.gpu_hours if candidate.result else 0.0,
+                    "charged_to": candidate.experiment_id,
+                    "total_gpu_hours": 0.0,
+                }
+                evidence = {
+                    "baseline_source": "paired-candidate-evaluation",
+                    "evaluation": evaluation_evidence,
+                    "compute": compute,
+                }
+                result = ExperimentResult(
+                    experiment_id="baseline",
+                    metrics={"holdout_loss": float(base_loss)},
+                    gpu_hours=0.0,
+                    artifact_ref=None,
+                    evidence=evidence,
+                )
+                registry.record_result(result)
+                registry.update_experiment_status("baseline", ExperimentStatus.PASSED.value)
+                return result
+            deferred_baseline = complete_deferred_baseline
+
         runner = ExperimentCycleRunner(
             engine=engine,
             trainer=trainer,
             evaluator=evaluator,
+            deferred_baseline=deferred_baseline,
             context=context,
             base_config=training_config,
             registry=registry,
@@ -356,9 +701,10 @@ def run_project(
             # transitions, repair/failure/promotion events, and checkpoints
             # already are.
             progress_callback=on_event,
-            deferred_baseline=(
-                _paired_baseline_completer(registry, on_event) if deferred else None
-            ),
+            goal_lifecycle=lifecycle,
+            # Autonomous repair is the continuation of a rejected candidate,
+            # so its plateau is settled only after repair finishes.
+            defer_plateau=project.repair is not None,
         )
         accepted = engine.propose((project.experiment,))
         if not accepted:
@@ -374,10 +720,15 @@ def run_project(
             experiment_id=project.experiment.experiment_id,
         )
         generation = runner.run_generation(accepted)
-        _emit_candidate_events(on_event, registry, generation.candidates[0])
+        if generation.candidates:
+            _emit_candidate_events(on_event, registry, generation.candidates[0])
 
         repair_outcome: RecursiveRepairOutcome | None = None
-        if project.repair is not None and generation.promoted is None:
+        if (
+            project.repair is not None
+            and generation.promoted is None
+            and lifecycle.terminal_state is None
+        ):
             repair_spec = project.repair
             _emit(
                 on_event,
@@ -417,6 +768,23 @@ def run_project(
                     stop_reason=repair_outcome.stop_reason.value,
                     stop_detail=repair_outcome.stop_detail,
                 ),
+            )
+
+        if project.repair is not None and lifecycle.terminal_state is None and generation.promoted is None:
+            settled = lifecycle.close_deferred_plateau()
+            generation = replace(
+                generation,
+                goal_assessment=settled.assessment,
+                goal_terminal_state=settled.terminal_state.value,
+            )
+
+        if not generation.candidates:
+            return ProjectRunOutcome(
+                project=project,
+                hardware=hardware,
+                generation=generation,
+                repair=repair_outcome,
+                registry_audit=_closeout_registry_audit(registry, on_event),
             )
 
         candidate = generation.candidates[0]
@@ -460,108 +828,13 @@ def run_project(
                     experiment_id=candidate.experiment_id,
                 )
 
-        # Closeout audit: a result stranded on a non-terminal row is the class
-        # of durable-evidence disagreement the automatic-baseline settlement
-        # fixed for one writer. The audit keeps the class visible instead of
-        # trusting every writer to stay correct forever; the finding is both
-        # on the outcome for the caller and persisted as a run event so a
-        # restart reconstructs the warning from durable history.
-        registry_audit = tuple(registry.audit_stranded_results())
-        if registry_audit:
-            summary = ", ".join(
-                f"{finding['experiment_id']} ({finding['status']})"
-                for finding in registry_audit
-            )
-            _emit_stage(
-                on_event,
-                registry,
-                "registry-audit",
-                f"{len(registry_audit)} result(s) stranded on non-terminal rows: {summary}",
-            )
-
-    return ProjectRunOutcome(
-        project=project,
-        hardware=hardware,
-        generation=generation,
-        repair=repair_outcome,
-        registry_audit=registry_audit,
-    )
-
-
-def _paired_baseline_completer(
-    registry: RunRegistry,
-    on_event: EventCallback | None,
-) -> Callable[[object], ExperimentResult]:
-    """Complete the deferred baseline row from the paired evaluation.
-
-    Built by run_project when the router project deferred its automatic
-    baseline to the candidate's resident pair. The runner calls it with the
-    scored candidate outcome BEFORE the gate adjudicates; this closure is
-    the single writer of the baseline row (the same writer that created it),
-    so the stranded-result discipline holds.
-    """
-
-    def complete(candidate_outcome) -> ExperimentResult:
-        if candidate_outcome is None:
-            # No candidate ever scored: the resident pair that should have
-            # measured the base never ran to a score. Settle the row failed
-            # and tell the runner the measurement does not exist.
-            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
-            raise RuntimeError(
-                "no candidate evaluation scored, so the deferred baseline has no "
-                "resident-pair measurement to complete from"
-            )
-        evidence = candidate_outcome.evaluation.evidence
-        base_loss = evidence.get("base_holdout_loss")
-        if not isinstance(base_loss, (int, float)) or not math.isfinite(float(base_loss)):
-            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
-            raise RuntimeError(
-                "the paired evaluation carried no measurable base score; the deferred "
-                "baseline is unknown, not zero"
-            )
-        if evidence.get("arm") != "paired":
-            registry.update_experiment_status("baseline", ExperimentStatus.FAILED.value)
-            raise RuntimeError(
-                f"the candidate evaluation reported arm {evidence.get('arm')!r}, not a "
-                "resident pair: the deferral decision and the actual evaluation "
-                "disagree, so the baseline is not measured"
-            )
-        # Charge honesty (rung-3c reconciliation): the resident pair's wall
-        # time was already billed to the candidate row that ran the eval.
-        # Re-charging it to the baseline row double-counts the same seconds
-        # (0.0585 recorded against 0.0167 device-truth on rung 3c). The
-        # baseline row is a measurement pointer: gpu_hours 0.0, with the
-        # shared charge named and the owner row cited.
-        shared_wall_gpu_hours = float(candidate_outcome.evaluation.gpu_hours)
-        registry.update_experiment_status("baseline", ExperimentStatus.PASSED.value)
-        result = ExperimentResult(
-            experiment_id="baseline",
-            metrics={"holdout_loss": float(base_loss)},
-            gpu_hours=0.0,
-            artifact_ref=None,
-            evidence={
-                "baseline_source": "paired-candidate-evaluation",
-                "base_holdout_loss": float(base_loss),
-                "compute": {
-                    "baseline_source": "paired-candidate-evaluation",
-                    "total_gpu_hours": 0.0,
-                    "model_loads": 1,
-                    "shared_wall_gpu_hours": shared_wall_gpu_hours,
-                    "charged_to": candidate_outcome.experiment_id,
-                },
-            },
+        return ProjectRunOutcome(
+            project=project,
+            hardware=hardware,
+            generation=generation,
+            repair=repair_outcome,
+            registry_audit=_closeout_registry_audit(registry, on_event),
         )
-        registry.record_result(result)
-        metrics_summary = f"holdout_loss={float(base_loss):.4f}"
-        _emit_stage(
-            on_event,
-            registry,
-            "baseline",
-            f"Automatic baseline established from the resident pair: {metrics_summary}",
-        )
-        return result
-
-    return complete
 
 
 def _emit_candidate_events(
