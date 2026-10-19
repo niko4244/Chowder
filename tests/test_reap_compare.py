@@ -113,6 +113,18 @@ def test_suite_only_in_one_arm_is_not_compared(tmp_path):
         {"baseline": "dense", "suite": "humaneval", "candidate_has": True, "baseline_has": False}]
 
 
+def test_suite_of_another_baseline_is_not_attributed(tmp_path):
+    # math500 exists only in "other", so it is not a suite either "dense" pair lacks together
+    write_arm(tmp_path, "reap128", "gsm8k", [1] * 10)
+    write_arm(tmp_path, "dense", "gsm8k", [0] * 10)
+    write_arm(tmp_path, "other", "gsm8k", [0] * 10)
+    write_arm(tmp_path, "other", "math500", [1] * 10)
+    code, report = run(tmp_path, baselines="dense,other")
+    assert code == 0
+    assert report["not_compared"] == [
+        {"baseline": "other", "suite": "math500", "candidate_has": False, "baseline_has": True}]
+
+
 def test_overall_mixed_beats_one_ties_other(tmp_path):
     n = 40
     write_arm(tmp_path, "reap128", "gsm8k", [1] * n)

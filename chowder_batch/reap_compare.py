@@ -137,7 +137,7 @@ def compare(eval_dir, candidate: str, baselines: list[str], margin: float = 0.0)
         cand_suites, base_suites = set(summaries[candidate]), set(summaries[arm])
         shared = [s for s in all_suites if s in cand_suites & base_suites]
         for suite in all_suites:
-            if suite not in shared:
+            if suite not in shared and suite in cand_suites | base_suites:
                 not_compared.append({"baseline": arm, "suite": suite,
                                      "candidate_has": suite in cand_suites,
                                      "baseline_has": suite in base_suites})
@@ -212,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
 
     baselines = [b.strip() for b in a.baselines.split(",") if b.strip()]
+    baselines = list(dict.fromkeys(baselines))  # order kept, duplicates dropped
     try:
         if not baselines:
             raise CompareError("--baselines is empty")
