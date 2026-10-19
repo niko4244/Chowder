@@ -47,7 +47,14 @@ LLAMA_TAG = "b10985"
 WORK = Path("/kaggle/working")
 SCRATCH_PRIMARY = Path("/kaggle/tmp")
 SCRATCH_FALLBACK = Path("/tmp")
-EVAL_INPUT = Path("/kaggle/input/chowder-reap-eval")
+def _find_eval_input() -> Path:
+    """The attached chowder-reap-eval dataset, wherever Kaggle mounted it (layouts vary)."""
+    root = Path("/kaggle/input")
+    hits = sorted(p.parent for p in root.rglob("reap_serve.py") if (p.parent / "reap_eval.py").exists()) if root.exists() else []
+    return hits[0] if hits else root / "chowder-reap-eval"
+
+
+EVAL_INPUT = _find_eval_input()
 OUT = WORK / "eval"
 LOG_PATH = WORK / "run.log"
 PROVENANCE = WORK / "provenance.json"
