@@ -152,3 +152,40 @@ BF16 intermediates, so every arm follows the original §2 route:
 Step 3 quantizes from BF16 rather than requantizing from Q8_0 as amendment 2
 said, which is strictly less rounding. It is applied identically to both
 arms. No gate or threshold changes.
+
+## Amendment 4 (2026-10-19, before gates.json for the v1 arms is written): the v2 calibration arm
+
+**Disclosure:** the raw §4 Q8 summaries for `reap128`, `random128` and `dense` were visible
+when this was written. `reap_gates.py` had not yet produced `gates.json`, and the
+dense Q4 speed arm was still running. So this amendment changes nothing that
+those results could steer:
+- every v1 gate, threshold and statistic in §4 is unchanged;
+- the §5 decision, including the pre-declared `reap160` fallback, is unchanged.
+
+**What it adds:** one arm, `reap128_v2`. It is REAP top-128 per layer, observed on
+calibration v2 (`chowder_batch/reap_calibration.py --mix v2`, sha256 `f6a09b69`, plus
+the Ornith curriculum slot when a pinned `admitted.jsonl` exists; otherwise the build
+records it as absent). Everything else is §2–§3 identical: same parent, same converter
+and quantization route (amendments 1–3), same serving and decoding.
+
+**How it is judged:**
+1. `reap128_v2` must pass Gate D0, 0, 1 and 2, the control gate (against the
+   existing `random128`), and the Q4_K_M speed/fit gate, each against the same
+   `dense` arm, with the same statistics. `dense` and `random128` are reused;
+   they are not re-run.
+2. **v2 replaces v1** as the lineage's Gen-0 candidate only if both hold:
+   - v2 passes everything in (1);
+   - v2 is not worse than v1 on GSM8K and HumanEval: the lower bound of
+     `LB(v2 − v1) > −0.02` on each, paired McNemar, one-sided 95%.
+
+   Otherwise v1, or `reap160` if §5 required it, stays the candidate.
+3. **If v1 fails Gate 0 or 1, both §5's `reap160` and `reap128_v2` are built and
+   scored.**
+   - The candidate is the first in this order that passes every gate:
+     `reap128_v2`, `reap160`, then `reap160_v2`.
+   - `reap160_v2` (top-160 on calibration v2) is built only if neither
+     earlier arm passes.
+   - No other arm is added without a further amendment.
+4. **Reported, not gated:** `tool-use@reap-moe-v1` accuracy for every arm. That
+   is the workload v2 was calibrated for, and it is the evidence that
+   motivates v2.
