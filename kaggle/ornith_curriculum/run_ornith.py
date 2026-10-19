@@ -23,7 +23,14 @@ import traceback
 import urllib.request
 from pathlib import Path
 
-DATASET = Path("/kaggle/input/ornith-hermes")
+def _find_dataset() -> Path:
+    """The attached ornith-hermes dataset, wherever Kaggle mounted it (layouts vary)."""
+    hits = sorted(Path("/kaggle/input").rglob("run_baseline.py")) if Path("/kaggle/input").exists() else []
+    hits = [h.parent for h in hits if (h.parent / "ornith_phase.py").exists()]
+    return hits[0] if hits else Path("/kaggle/input/ornith-hermes")
+
+
+DATASET = _find_dataset()
 sys.path.insert(0, str(DATASET))
 
 ROUNDS = 96
