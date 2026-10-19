@@ -1411,6 +1411,21 @@ def _write_project_template(
     template.
     """
     budget = manifest.budget
+    # The training settings a MoE declaration may pass through to the worker
+    # (``training_backend.config``). Every one defaults to the value this
+    # template has always carried, so an undeclared campaign's template is
+    # byte-identical to before these keys existed.
+    training_settings = dict(getattr(manifest.training_backend, "config", {}) or {})
+    expert_placement = str(training_settings.get("expert_placement", "resident"))
+    target_preset = str(training_settings.get("target_preset", "auto"))
+    dataset_format = str(training_settings.get("dataset_format", "text"))
+    messages_field = str(training_settings.get("messages_field", "messages"))
+    tools_field = str(training_settings.get("tools_field", ""))
+    # Unset means "today's value": the in-run evaluation has always been
+    # declared ``offload``, and only a declaration that says otherwise moves it.
+    evaluation_placement = (
+        str(manifest.evaluation_execution.placement).strip() or "offload"
+    )
     material = _read_json_object(evaluation_material_path) or {}
     suites = []
     for suite in material.get("suites", ()) or ():
@@ -1478,43 +1493,14 @@ def _write_project_template(
         },
         "config": {
             "seed": 7,
-            "backend": {
-                "schema_version": 1,
-                "type": "transformers-peft",
-                "base_model": str(manifest.base_model_path),
-                "dataset": "{corpus}",
-                "dataset_format": "text",
-                "text_field": "text",
-                "max_length": 512,
-                "precision": "bf16",
-                "quantization": "none",
-                "trust_remote_code": False,
-                "training": {
-                    "epochs": 1.0,
-                    "max_steps": 30,
-                    "learning_rate": 2e-4,
-                    "lr_scheduler_type": "cosine",
-                    "warmup_steps": 2,
-                    "batch_size": 1,
-                    "gradient_accumulation_steps": 1,
-                    "gradient_checkpointing": True,
-                    "save_strategy": "no",
-                    "logging_steps": 20,
-                },
-                "lora": {
-                    "r": 16,
-                    "alpha": 32,
-                    "dropout": 0.05,
-                    "target_modules": [
-                        "q_proj",
-                        "k_proj",
-                        "v_proj",
-                        "o_proj",
-                    ],
-                    "use_rslora": False,
-                },
-                "runtime": {"active_accelerator_count": 0, "timeout_seconds": 7200.0},
-            },
+            "backend": _trainer_backend(
+                manifest,
+                expert_placement=expert_placement,
+                target_preset=target_preset,
+                dataset_format=dataset_format,
+                messages_field=messages_field,
+                tools_field=tools_field,
+            ),
             "evaluation": {
                 "type": "transformers-text",
                 # Unrounded: the cycle sums this with the training reservation
@@ -1522,7 +1508,7 @@ def _write_project_template(
                 "estimated_gpu_hours": evaluation_gpu_hours,
                 "precision": "bf16",
                 "quantization": "none",
-                "placement": "offload",
+                "placement": evaluation_placement,
                 "device": "cuda",
                 "trust_remote_code": False,
                 # The in-run evaluation measures exactly what an arm measures:
@@ -1539,7 +1525,119 @@ def _write_project_template(
             },
         },
     }
+    trainer_spec_refusal(
+        template,
+        where=f"the project template derived from {manifest.cycle_id}",
+        work_dir=root,
+    )
     return _write_json(root / "project-template.json", template)
+
+
+def _trainer_backend(
+    manifest: Any,
+    *,
+    expert_placement: str,
+    target_preset: str,
+    dataset_format: str,
+    messages_field: str,
+    tools_field: str,
+) -> dict[str, Any]:
+    """The project template's trainer backend, with the declared MoE settings.
+
+    A key is written only when the declaration moved it off its historical
+    value, so an undeclared campaign's template is unchanged. A named
+    ``target_preset`` replaces the explicit module list: the preset owns the
+    coverage (``moe_frozen_experts`` is even required to be the only owner by
+    ``TransformersPeftRunSpec`` for ``cpu-transient-grad``).
+    """
+    backend: dict[str, Any] = {
+        "schema_version": 1,
+        "type": "transformers-peft",
+        "base_model": str(manifest.base_model_path),
+        "dataset": "{corpus}",
+        "dataset_format": dataset_format,
+        "max_length": 512,
+        "precision": "bf16",
+        "quantization": "none",
+        "trust_remote_code": False,
+        "training": {
+            "epochs": 1.0,
+            "max_steps": 30,
+            "learning_rate": 2e-4,
+            "lr_scheduler_type": "cosine",
+            "warmup_steps": 2,
+            "batch_size": 1,
+            "gradient_accumulation_steps": 1,
+            "gradient_checkpointing": True,
+            "save_strategy": "no",
+            "logging_steps": 20,
+        },
+        "lora": {
+            "r": 16,
+            "alpha": 32,
+            "dropout": 0.05,
+            "use_rslora": False,
+        },
+        "runtime": {"active_accelerator_count": 0, "timeout_seconds": 7200.0},
+    }
+    if dataset_format == "chat":
+        backend["messages_field"] = messages_field
+        if tools_field:
+            backend["tools_field"] = tools_field
+    else:
+        backend["text_field"] = "text"
+    if target_preset == "auto":
+        backend["lora"]["target_modules"] = ["q_proj", "k_proj", "v_proj", "o_proj"]
+    else:
+        backend["lora"]["target_preset"] = target_preset
+    if expert_placement != "resident":
+        backend["expert_placement"] = expert_placement
+    return backend
+
+
+def trainer_spec_refusal(
+    template: Mapping[str, Any], *, where: str, work_dir: str | Path
+) -> None:
+    """Refuse a project template the training worker cannot resolve.
+
+    The worker's own admission is ``TransformersPeftRunSpec.from_resolved_config``
+    (``backends.transformers_peft``), so re-running that admission here refuses
+    a contradiction between declared MoE settings -- e.g.
+    ``expert_placement: cpu-transient-grad`` with
+    ``target_preset: attention_and_mlp`` -- before any compute is spent, and
+    with the same rule the worker enforces. The message names every declared
+    setting, because the declaration is what an operator can edit.
+
+    A template for another trainer engine is that engine's admission, not this
+    one's, so it is left alone.
+    """
+    from chowder.backends.transformers_peft import TransformersPeftRunSpec
+
+    config = template.get("config")
+    if not isinstance(config, Mapping):
+        return
+    backend = config.get("backend")
+    if not isinstance(backend, Mapping) or str(backend.get("type", "")) != "transformers-peft":
+        return
+    lora = backend.get("lora") if isinstance(backend.get("lora"), Mapping) else {}
+    settings = (
+        f"expert_placement={str(backend.get('expert_placement', 'resident'))!r}, "
+        f"target_preset={str(lora.get('target_preset', 'auto'))!r}, "
+        f"dataset_format={str(backend.get('dataset_format', 'text'))!r}, "
+        f"tools_field={str(backend.get('tools_field', ''))!r}"
+    )
+    try:
+        TransformersPeftRunSpec.from_resolved_config(
+            config,
+            work_dir=work_dir,
+            output_dir=work_dir,
+            seed=int(template.get("seed", 1)),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: {where} declares {settings}, which the training "
+            f"worker cannot resolve: {error}"
+        ) from error
 
 
 # --------------------------------------------------------------------------

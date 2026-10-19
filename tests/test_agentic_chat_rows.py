@@ -80,3 +80,35 @@ def test_real_qwen_template_renders_tools_and_labels_only_assistant_turns():
     labelled = tokenizer.decode([t for t, l in zip(example["input_ids"], example["labels"]) if l != -100])
     assert "order_id" in labelled and "Order A1 has shipped." in labelled  # the call and the answer are trained
     assert "status" not in labelled  # the tool result ({"status": ...}) is never trained on
+
+
+MULTI_TURN = [
+    {"role": "user", "content": "Where is order A1?"},
+    {"role": "assistant", "content": "Let me check.", "reasoning_content": "I should call the tool."},
+    {"role": "user", "content": "Thanks, and order B2?"},
+    {"role": "assistant", "content": "Order B2 is pending.", "reasoning_content": "Look up B2."},
+]
+
+
+@pytest.mark.skipif(not QWEN.is_dir(), reason="needs the local Qwen3.6 tokenizer")
+def test_qwen_multi_turn_with_reasoning_labels_every_assistant_turn():
+    """Qwen3.6 drops an earlier turn's reasoning once a later user turn follows,
+    so turn-by-turn renders are not a prefix of the whole; the ChatML spans of
+    the full render are labelled instead -- both answers, neither user turn."""
+    tokenizer = pytest.importorskip("transformers").AutoTokenizer.from_pretrained(str(QWEN), local_files_only=True)
+    messages = _validate_chat_messages(MULTI_TURN, row_index=0)
+    example = _build_chat_example(tokenizer, messages, max_length=4096, row_index=0)
+    labelled = tokenizer.decode([t for t, l in zip(example["input_ids"], example["labels"]) if l != -100])
+    assert "Let me check." in labelled and "Order B2 is pending." in labelled
+    assert "order B2?" not in labelled and "Where is order A1?" not in labelled
+
+
+def test_a_non_chatml_inconsistent_template_still_refuses():
+    from chowder.backends.training_data import _chatml_assistant_labels
+
+    class Plain:
+        def get_vocab(self):
+            return {}
+
+    with pytest.raises(RuntimeError, match="not prefix-consistent"):
+        _chatml_assistant_labels(Plain(), [{"role": "assistant", "content": "x"}], [1, 2, 3], row_index=0)

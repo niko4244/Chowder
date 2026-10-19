@@ -48,6 +48,7 @@ from .eval_isolation import (
 )
 from .retention import RetentionConstraint, RetentionProfile
 from .training_backends import TrainingBackendDeclaration, TrainingBackendRefusal
+from ..evaluators.placement import validate_placement
 
 #: The promotion rule this package implements. A campaign that declares any
 #: other version is refused: the manifest is a preregistration, so it must not
@@ -289,8 +290,14 @@ class EvaluationExecution:
 
     #: Rows per ``generate`` call. 1 means one row at a time.
     batch_size: int = 1
+    #: Where the evaluator loads the model: ``resident``, ``offload`` or
+    #: ``experts-cpu``. Empty means "unset": each call site keeps the value it
+    #: had before this key existed (the in-run template evaluates ``offload``,
+    #: the candidate evaluator ``resident``), so an existing declaration is
+    #: measured exactly as it was. A declared value reaches both.
+    placement: str = ""
 
-    _ALLOWED = ("batch_size",)
+    _ALLOWED = ("batch_size", "placement")
 
     def __post_init__(self) -> None:
         if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int):
@@ -299,6 +306,13 @@ class EvaluationExecution:
             raise CampaignManifestError(
                 "evaluation_execution.batch_size must be at least 1"
             )
+        if self.placement:
+            try:
+                validate_placement(
+                    self.placement, context="evaluation_execution.placement"
+                )
+            except ValueError as error:
+                raise CampaignManifestError(str(error)) from error
 
     @classmethod
     def from_mapping(
@@ -315,7 +329,10 @@ class EvaluationExecution:
         return cls(**{key: document[key] for key in cls._ALLOWED if key in document})
 
     def to_dict(self) -> dict[str, Any]:
-        return {"batch_size": self.batch_size}
+        document: dict[str, Any] = {"batch_size": self.batch_size}
+        if self.placement:
+            document["placement"] = self.placement
+        return document
 
 
 def _retention_profile_from_mapping(

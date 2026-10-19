@@ -181,6 +181,66 @@ def _build_chat_example(
     than silently mislabeling.
     """
     full_ids = _render_chat_ids(tokenizer, messages, add_generation_prompt=False, tools=tools)
+    try:
+        labels = _prefix_labels(tokenizer, messages, full_ids, row_index=row_index, tools=tools)
+    except RuntimeError:
+        # Qwen3.5/3.6 drop an earlier assistant turn's reasoning once a later user
+        # turn follows, so turn-by-turn renders are never a prefix of the whole.
+        # For a ChatML template the assistant turns are still delimited exactly in
+        # the full render, so label them there -- as the model sees them in
+        # history. A template without those markers keeps refusing.
+        labels = _chatml_assistant_labels(tokenizer, messages, full_ids, row_index=row_index)
+    return _truncate_example(full_ids, labels, max_length=max_length, row_index=row_index)
+
+
+def _chatml_assistant_labels(
+    tokenizer: Any, messages: list[dict[str, Any]], full_ids: list[int], *, row_index: int
+) -> list[int]:
+    """Label every ``<|im_start|>assistant\\n ... <|im_end|>`` span of the full render.
+
+    Refuses unless the template is ChatML and the span count equals the number
+    of assistant messages, so a mislabel cannot pass silently."""
+    vocab = tokenizer.get_vocab() if hasattr(tokenizer, "get_vocab") else {}
+    start_id, end_id = vocab.get("<|im_start|>"), vocab.get("<|im_end|>")
+    header = tokenizer.encode("assistant\n", add_special_tokens=False) if start_id is not None else []
+    if start_id is None or end_id is None or not header:
+        raise RuntimeError(
+            f"chat dataset row {row_index}: chat template is not prefix-consistent "
+            "across turns; cannot compute a reliable completion-only loss mask"
+        )
+    labels = [-100] * len(full_ids)
+    spans = 0
+    position = 0
+    while position < len(full_ids):
+        if full_ids[position] == start_id and full_ids[position + 1 : position + 1 + len(header)] == header:
+            body = position + 1 + len(header)
+            end = body
+            while end < len(full_ids) and full_ids[end] != end_id:
+                end += 1
+            if end == len(full_ids):
+                break
+            labels[body : end + 1] = full_ids[body : end + 1]
+            spans += 1
+            position = end + 1
+            continue
+        position += 1
+    expected = sum(1 for turn in messages if turn["role"] == "assistant")
+    if spans != expected:
+        raise RuntimeError(
+            f"chat dataset row {row_index}: found {spans} ChatML assistant spans for "
+            f"{expected} assistant turns; cannot compute a reliable completion-only loss mask"
+        )
+    return labels
+
+
+def _prefix_labels(
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    full_ids: list[int],
+    *,
+    row_index: int,
+    tools: list[Any] | None,
+) -> list[int]:
     labels = [-100] * len(full_ids)
     for index, turn in enumerate(messages):
         # Only assistant turns are trained on; tool results stay unlabelled.
@@ -212,7 +272,12 @@ def _build_chat_example(
                 "across turns; cannot compute a reliable completion-only loss mask"
             )
         labels[start : len(through_ids)] = full_ids[start : len(through_ids)]
+    return labels
 
+
+def _truncate_example(
+    full_ids: list[int], labels: list[int], *, max_length: int, row_index: int
+) -> dict[str, list[int]]:
     full_ids = full_ids[:max_length]
     labels = labels[:max_length]
     if not any(label != -100 for label in labels):

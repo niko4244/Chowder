@@ -352,6 +352,39 @@ _ROWS: list[dict[str, Any]] = [
         adapter="chowder.eval_adapters.native",
     ),
     dict(
+        benchmark_id="tool-use",
+        version="reap-moe-v1",
+        name="Chowder tool-use instrument (REAP MoE pruning, 240 agentic calls)",
+        category="tools",
+        subcategory="single-turn tool selection with arguments",
+        status="RUNNABLE_PUBLIC",
+        lifecycle="ACTIVE_DIAGNOSTIC",
+        tier=2,
+        scorer="tool_call_exact",
+        primary_metric="accuracy",
+        skills=("tools.function_calling", "tools.multi_turn"),
+        dataset_source=(
+            "src/chowder/growth/instruments/tool_use_reap_moe_v1.jsonl "
+            "(240 items; nvidia/Nemotron-Agentic-v1, CC BY 4.0)"
+        ),
+        implementation_source=(
+            "chowder.growth.tool_use_instrument (tool_call_exact over the "
+            "frozen, digest-verified committed items)"
+        ),
+        source="Chowder (this repository); source rows NVIDIA Nemotron-Agentic-v1",
+        license="Apache-2.0 (this repository); source data CC BY 4.0",
+        release_date="2026-10-18",
+        contamination_risk="low",
+        notes=(
+            "The REAP MoE target instrument: does an expert-pruned base still "
+            "make the right tool call, with the right arguments, after LoRA "
+            "tuning? Frozen in docs/quals/TOOL_USE_REAP_MOE_V1_PREREG_2026-10-18.md; "
+            "its number is comparable only against the same base measured with "
+            "the same items_sha256."
+        ),
+        adapter="chowder_custom",
+    ),
+    dict(
         benchmark_id="tau_bench_retail",
         version="2024-06-12",
         name="tau-bench (retail domain)",
