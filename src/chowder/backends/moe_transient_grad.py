@@ -50,6 +50,30 @@ def split_device_map(base_model: str, *, revision: str | None, local_files_only:
     return {name: ("cpu" if EXPERT_PARAM_INFIX in name else device) for name in names}
 
 
+def attach_preserving_split(base: Any, attach: Any) -> Any:
+    """Run ``attach(base)`` (e.g. ``PeftModel.from_pretrained``) without PEFT
+    re-planning the split: PEFT re-dispatches a model that carries an
+    ``hf_device_map``, which moves the CPU experts onto the device (measured in
+    #247: all 8 host expert tensors landed on the card). The map is withheld for
+    the attach and restored after; the experts are then checked, not assumed."""
+    sentinel = object()
+    withheld = base.__dict__.pop("hf_device_map", sentinel)
+    if withheld is sentinel and getattr(base, "hf_device_map", None) is not None:
+        raise RuntimeError(
+            "cannot withhold hf_device_map (not an instance attribute), so the attach "
+            "would re-plan the CPU experts onto the device"
+        )
+    try:
+        model = attach(base)
+    finally:
+        if withheld is not sentinel:
+            base.hf_device_map = withheld
+    moved = [n for n, p in model.named_parameters() if EXPERT_PARAM_INFIX in n and p.device.type != "cpu"]
+    if moved:
+        raise RuntimeError(f"the adapter attach moved {len(moved)} expert parameters off the CPU, e.g. {moved[0]}")
+    return model
+
+
 def prepare_split_model(model: Any, *, device_type: str = "cuda") -> dict[str, Any]:
     """Census the live placement, freeze the experts, install the transient-grad
     forward. Returns the evidence; raises when the placement did not happen."""

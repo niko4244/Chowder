@@ -1077,9 +1077,11 @@ def test_validate_chat_messages_rejects_malformed_message():
 
 
 def test_validate_chat_messages_rejects_unsupported_role():
-    with pytest.raises(RuntimeError, match="unsupported message role 'tool'"):
+    # "tool" turns are supported since agentic rows train (test_agentic_chat_rows);
+    # a role no chat template renders is still refused.
+    with pytest.raises(RuntimeError, match="unsupported message role 'function'"):
         _validate_chat_messages(
-            [{"role": "tool", "content": "x"}, {"role": "assistant", "content": "y"}],
+            [{"role": "function", "content": "x"}, {"role": "assistant", "content": "y"}],
             row_index=0,
         )
 

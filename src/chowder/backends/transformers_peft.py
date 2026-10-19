@@ -239,6 +239,9 @@ class TransformersPeftRunSpec:
     dataset_format: str = "text"
     text_field: str = "text"
     messages_field: str = "messages"
+    #: Chat only: a per-row column of tool schemas passed to the chat template
+    #: (agentic rows). Empty means no tools column, the historical behaviour.
+    tools_field: str = ""
     max_length: int = 512
     epochs: float = 1.0
     learning_rate: float = 2e-4
@@ -324,6 +327,8 @@ class TransformersPeftRunSpec:
             raise ValueError(f"unsupported dataset_format: {self.dataset_format}")
         if self.dataset_format == "chat" and not self.messages_field.strip():
             raise ValueError("backend.messages_field cannot be empty")
+        if self.tools_field and self.dataset_format != "chat":
+            raise ValueError("backend.tools_field requires dataset_format 'chat'")
         if self.max_length <= 0:
             raise ValueError("backend.max_length must be positive")
         if self.epochs <= 0 or self.learning_rate <= 0:
@@ -457,6 +462,10 @@ class TransformersPeftRunSpec:
         # transient-grad experts give the resident loss and every gradient.
         recipe.pop("expert_placement", None)
         recipe.pop("detailed_timing_telemetry", None)
+        # tools_field changes the rendered training text, so it is recipe when
+        # set; unset, it is dropped so every pre-existing recipe digest holds.
+        if not recipe.get("tools_field"):
+            recipe.pop("tools_field", None)
         payload = json.dumps(recipe, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -546,6 +555,7 @@ class TransformersPeftRunSpec:
             dataset_format=str(backend.get("dataset_format", "text")),
             text_field=str(backend.get("text_field", "text")),
             messages_field=str(backend.get("messages_field", "messages")),
+            tools_field=str(backend.get("tools_field", "")),
             max_length=int(backend.get("max_length", 512)),
             epochs=float(training.get("epochs", 1.0)),
             learning_rate=float(training.get("learning_rate", 2e-4)),
@@ -753,6 +763,8 @@ class TransformersPeftExecutor:
             "detailed_timing_telemetry",
         ):
             recipe.pop(key, None)
+        if not recipe.get("tools_field"):
+            recipe.pop("tools_field", None)  # unset: pre-existing digests hold
         # The base is only a *path* input when its content cannot be measured
         # (an external reference). For a local directory the path is
         # operational, not mathematical: leaving it in the recipe digest would
