@@ -333,6 +333,31 @@ def _protocol_contract_digest(project: ProjectSpec) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _declared_baseline(project: ProjectSpec) -> ExperimentResult:
+    """The fixed baseline, carrying the protocol identity it was declared under.
+
+    A ``baseline_mode: fixed`` baseline is a declaration: its metrics are stated
+    to be this project's measurements under this project's evaluation config,
+    and the objective is frozen under exactly that config's fingerprint when the
+    baseline carries none. Without the same digest on the baseline itself the
+    lifecycle assesses it as MISSING_EVALUATION_PROTOCOL and stops before the
+    first experiment (Gen-2 run 9, 2026-10-19). A baseline that already carries
+    measured protocol evidence is left untouched.
+    """
+    baseline = project.baseline
+    assert baseline is not None
+    if _measured_protocol_digest(baseline) is not None:
+        return baseline
+    evidence = dict(baseline.evidence or {})
+    evidence["evaluation_protocol_sha256"] = protocol_fingerprint(
+        {"evaluation": project.config.get("evaluation", {})}
+    )
+    evidence["evaluation_protocol_source"] = (
+        "declared fixed baseline: stated under this project's evaluation config"
+    )
+    return replace(baseline, evidence=evidence)
+
+
 def _legacy_unbounded_lifecycle(project: ProjectSpec) -> bool:
     lifecycle = project.config.get("goal_lifecycle")
     return (
@@ -607,7 +632,7 @@ def run_project(
             )
         else:
             assert project.baseline is not None  # enforced by ProjectSpec.__post_init__
-            baseline = project.baseline
+            baseline = _declared_baseline(project)
             training_config = project.config
 
         if lifecycle is None:
