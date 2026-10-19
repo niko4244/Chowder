@@ -1325,3 +1325,33 @@ def test_s6_every_refusal_refuses_before_any_trainer_starts(tmp_path, tiny_base)
     assert evidence["refused_by"] == "contamination-firewall"
     assert evidence["commands"] == []
     assert Path(evidence["evidence_path"]).exists()
+
+
+def test_an_unbounded_attempt_goal_declares_the_legacy_unbounded_lifecycle(tmp_path: Path):
+    """Gen-2 run 9 (2026-10-19): an attempt's candidate protocol fingerprint never
+    equals its declared baseline's config fingerprint, so a direction-only goal
+    runs under the lifecycle contract's unbounded opt-in."""
+    items = _items()
+    recipe = _recipe(item_ids=[i.item_id for i in items])
+    template = _template(tmp_path)
+    template["config"].pop("goal_lifecycle", None)  # the binding must add it, not the fixture
+    evidence = _binding(tmp_path, runner=_RecordingRunner(), template=template)(recipe, items)
+    composed = json.loads(Path(evidence["project_path"]).read_text(encoding="utf-8"))
+    assert composed["config"]["goal_lifecycle"] == {"mode": "legacy_unbounded"}
+
+
+def test_a_bounded_goal_or_a_declared_mode_is_left_alone(tmp_path: Path):
+    items = _items()
+    recipe = _recipe(item_ids=[i.item_id for i in items])
+    bounded = _template(tmp_path / "b")
+    bounded["goal"]["metrics"] = [{"name": "holdout_loss", "direction": "minimize", "maximum": 3.0}]
+    bounded["config"].pop("goal_lifecycle", None)
+    evidence = _binding(tmp_path / "b", runner=_RecordingRunner(), template=bounded)(recipe, items)
+    composed = json.loads(Path(evidence["project_path"]).read_text(encoding="utf-8"))
+    assert "goal_lifecycle" not in composed["config"]
+
+    declared = _template(tmp_path / "d")
+    declared["config"]["goal_lifecycle"] = {"mode": "canonical"}
+    evidence = _binding(tmp_path / "d", runner=_RecordingRunner(), template=declared)(recipe, items)
+    composed = json.loads(Path(evidence["project_path"]).read_text(encoding="utf-8"))
+    assert composed["config"]["goal_lifecycle"] == {"mode": "canonical"}
