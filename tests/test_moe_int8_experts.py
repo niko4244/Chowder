@@ -203,6 +203,9 @@ def test_loader_matches_from_pretrained_for_every_non_expert_parameter_and_buffe
     assert census["non_expert_params"] == len(loaded_params)
     assert census["non_expert_params_on_device"] == len(loaded_params)
     assert census["device"] == "cpu"
+    # This fixture's config names its dtype at the top level, so that is where
+    # the loader took it from.
+    assert census["dtype_source"] == "config"
 
 
 def test_loader_ties_the_head_exactly_as_from_pretrained_does(tmp_path):
@@ -1061,3 +1064,142 @@ def test_the_load_reports_progress_every_shard_and_every_four_layers(tmp_path, c
     # The every-4-layers cadence fired at 4. The shard lines alone cannot produce
     # it: this fixture has fewer shards than it has layers of experts.
     assert 4 in counts, counts
+
+# --- the dtype the loader materialises non-expert weights in ------------------
+#
+# The 2026-10-20 reap160 census found this the expensive way: every tensor in the
+# artifact's shards is BF16, but the composite config names its dtype only in
+# `text_config`, so a loader reading `config.dtype` alone fell back to fp32 and
+# materialised 4.55 GiB of non-expert weights as 9.09 GiB. `from_pretrained`
+# keeps them bf16. These tests pin the rule that matches it -- the config (top
+# level, then the sub-config), then the checkpoint's own dtype -- and would all
+# fail on the loader as it stood before that census.
+
+
+def _composite_checkpoint(
+    tmp_path: Path,
+    *,
+    name: str,
+    config_dtype: str | None,
+    weight_dtype: torch.dtype,
+) -> Path:
+    """The artifact's layout (``qwen3_5_moe`` + ``text_config``), at tiny size,
+    with the two dtype knobs the real artifact turned out to exercise."""
+    from safetensors.torch import save_file
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    text = {
+        "vocab_size": 64,
+        "hidden_size": HIDDEN,
+        "intermediate_size": 8,
+        "moe_intermediate_size": INTER,
+        "num_hidden_layers": LAYERS,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "num_experts": NUM_EXPERTS,
+        "num_experts_per_tok": TOP_K,
+        "decoder_sparse_step": 1,
+        "max_position_embeddings": 32,
+        "head_dim": HIDDEN // 2,
+        "tie_word_embeddings": False,
+    }
+    if config_dtype is not None:
+        text["dtype"] = config_dtype
+    base = tmp_path / name
+    base.mkdir()
+    (base / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen3_5_moe",
+                "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+                "text_config": text,
+                "tie_word_embeddings": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with torch.device("meta"):
+        skeleton = AutoModelForCausalLM.from_config(AutoConfig.from_pretrained(base))
+    generator = torch.Generator().manual_seed(7)
+    state = {
+        key.replace("model.", "model.language_model.", 1): (
+            torch.randn(tensor.shape, generator=generator).to(weight_dtype)
+        )
+        for key, tensor in skeleton.state_dict().items()
+    }
+    save_file(state, str(base / "model.safetensors"))
+    return base
+
+
+@pytest.mark.parametrize(
+    "config_dtype, weight_dtype, expected_source",
+    [
+        # The real artifact: no top-level dtype, BF16 shards. The checkpoint's
+        # dtype is the one from_pretrained loads, and keeping it is what halves
+        # the non-expert bytes.
+        (None, torch.bfloat16, "checkpoint"),
+        ("bfloat16", torch.bfloat16, "text_config"),
+        # A config that names a dtype outranks the weights, as from_pretrained.
+        ("bfloat16", torch.float32, "text_config"),
+        (None, torch.float32, "checkpoint"),
+    ],
+)
+def test_non_expert_dtype_matches_from_pretrained_for_a_composite_config(
+    tmp_path, config_dtype, weight_dtype, expected_source
+):
+    from transformers import AutoModelForCausalLM
+
+    base = _composite_checkpoint(
+        tmp_path,
+        name=f"dtype-{config_dtype}-{str(weight_dtype).split('.')[-1]}",
+        config_dtype=config_dtype,
+        weight_dtype=weight_dtype,
+    )
+    reference = AutoModelForCausalLM.from_pretrained(base)
+    model, census = mie.load_model_int8_experts(base)
+
+    reference_dtypes = {
+        parameter.dtype
+        for name, parameter in reference.named_parameters()
+        if mtg.EXPERT_PARAM_INFIX not in name
+    }
+    loaded_dtypes = {parameter.dtype for _, parameter in model.named_parameters()}
+    assert loaded_dtypes == reference_dtypes, (
+        f"loader materialised {loaded_dtypes}, from_pretrained {reference_dtypes}"
+    )
+    assert census["dtype"] == str(reference_dtypes.pop())
+    assert census["dtype_source"] == expected_source
+
+    # The bytes the census reports are the bytes it really allocated; the defect
+    # this fixes doubled exactly this number.
+    reference_bytes = sum(
+        parameter.numel() * parameter.element_size()
+        for name, parameter in reference.named_parameters()
+        if mtg.EXPERT_PARAM_INFIX not in name
+    )
+    assert census["non_expert_bytes"] == reference_bytes
+
+
+def test_a_dtype_less_composite_keeps_bf16_weights_bf16(tmp_path):
+    """The artifact's exact shape, isolated: BF16 shards and no dtype at the top
+    level. Materialising these as fp32 is 4.5 GiB of avoidable host RAM."""
+    base = _composite_checkpoint(
+        tmp_path, name="no-dtype", config_dtype=None, weight_dtype=torch.bfloat16
+    )
+    model, census = mie.load_model_int8_experts(base)
+
+    assert census["dtype"] == "torch.bfloat16"
+    assert census["dtype_source"] == "checkpoint"
+    for name, parameter in model.named_parameters():
+        assert parameter.dtype == torch.bfloat16, name
+        assert parameter.element_size() == 2, name
+
+
+def test_an_explicit_dtype_still_wins(tmp_path):
+    base = _composite_checkpoint(
+        tmp_path, name="explicit", config_dtype="bfloat16", weight_dtype=torch.bfloat16
+    )
+    model, census = mie.load_model_int8_experts(base, dtype=torch.float32)
+
+    assert census["dtype"] == "torch.float32" and census["dtype_source"] == "argument"
+    assert {parameter.dtype for _, parameter in model.named_parameters()} == {torch.float32}

@@ -242,18 +242,100 @@ def resolve_device(device: Any = 0) -> Any:
     return resolved
 
 
-def _dtype_from_config(config: Any) -> Any:
-    """The dtype ``from_pretrained`` would use: the config's, else fp32."""
+#: Where a composite (multimodal) config hides the text model's ``dtype``. The
+#: REAP-160 artifact says ``text_config.dtype: bfloat16`` and nothing at the top
+#: level, so reading only ``config.dtype`` resolved to fp32 and the loader
+#: materialised 4.55 GiB of bf16 non-expert weights as 9.09 GiB (2026-10-20
+#: census). ``from_pretrained`` keeps them bf16.
+_SUB_CONFIG_ATTRS = ("text_config", "llm_config", "language_config", "decoder")
+
+#: safetensors header dtype names -> torch dtypes, for the checkpoint fallback.
+_CHECKPOINT_DTYPES = {
+    "BF16": "bfloat16",
+    "F16": "float16",
+    "F32": "float32",
+    "F64": "float64",
+}
+
+
+def _torch_dtype(value: Any) -> Any:
+    """``value`` as a ``torch.dtype``, or ``None`` if it does not name one."""
     import torch
 
-    dtype = getattr(config, "dtype", None)
-    if isinstance(dtype, torch.dtype):
-        return dtype
-    if isinstance(dtype, str):
-        mapped = getattr(torch, dtype, None)
+    if isinstance(value, torch.dtype):
+        return value
+    if isinstance(value, str):
+        mapped = getattr(torch, value, None)
         if isinstance(mapped, torch.dtype):
             return mapped
-    return torch.float32
+    return None
+
+
+def _config_dtype(config: Any) -> tuple[Any, str] | None:
+    """``(dtype, where)`` from the config or its sub-configs, or ``None``.
+
+    The top level wins, as it does for ``from_pretrained``; a composite config
+    that keeps its text model's dtype one level down is read too.
+    """
+    resolved = _torch_dtype(getattr(config, "dtype", None))
+    if resolved is not None:
+        return resolved, "config"
+    for attribute in _SUB_CONFIG_ATTRS:
+        sub = getattr(config, attribute, None)
+        if sub is None:
+            continue
+        resolved = _torch_dtype(getattr(sub, "dtype", None))
+        if resolved is not None:
+            return resolved, attribute
+    return None
+
+
+def _checkpoint_dtype(shard: Path) -> Any:
+    """The first float dtype declared in a shard's header, read without weights.
+
+    ``from_pretrained`` defaults to the checkpoint's own dtype when no config
+    names one (verified against transformers 5.16: bf16 shards load as bf16 with
+    a dtype-less config), so this is what that default resolves to. Header only:
+    no tensor is read, so asking costs a few kilobytes.
+    """
+    import json
+    import struct
+
+    import torch
+
+    with shard.open("rb") as handle:
+        size = struct.unpack("<Q", handle.read(8))[0]
+        header = json.loads(handle.read(size))
+    header.pop("__metadata__", None)
+    for name in sorted(header):
+        mapped = _CHECKPOINT_DTYPES.get(str(header[name].get("dtype")))
+        if mapped is not None:
+            return getattr(torch, mapped)
+    return None
+
+
+def _resolve_weight_dtype(config: Any, shards: list[Path], dtype: Any = None) -> tuple[Any, str]:
+    """The dtype the loader materialises non-expert weights in, and its source.
+
+    The order is the one ``from_pretrained`` uses: an explicit dtype, then the
+    config (top level, then the text model's), then the checkpoint's own dtype.
+    fp32 remains the fallback for a checkpoint that declares nothing at all.
+    """
+    import torch
+
+    explicit = _torch_dtype(dtype) if dtype is not None else None
+    if dtype is not None and explicit is None:
+        raise ValueError(f"dtype must be a torch.dtype, got {dtype!r}")
+    if explicit is not None:
+        return explicit, "argument"
+    from_config = _config_dtype(config)
+    if from_config is not None:
+        return from_config
+    for shard in shards:
+        from_checkpoint = _checkpoint_dtype(shard)
+        if from_checkpoint is not None:
+            return from_checkpoint, "checkpoint"
+    return torch.float32, "default"
 
 
 def _experts_modules(model: Any) -> list[tuple[str, Any]]:
@@ -473,9 +555,16 @@ def load_model_int8_experts(
     shard's tensors are read one at a time -- expert tensors are quantized
     immediately and dropped before the next key is touched.
 
+    ``dtype`` defaults to what ``from_pretrained`` would use, which is not always
+    the config's top-level ``dtype``: a composite checkpoint that keeps it in
+    ``text_config`` is read there, and a checkpoint that names none loads in its
+    own dtype. The census records which of those applied, because materialising
+    bf16 weights as fp32 doubles them -- on REAP-160 that was 4.55 GiB of
+    non-expert weights become 9.09 GiB.
+
     Returns ``(model, census)``. The census carries the expert bytes resident in
-    RAM (int8 + scales), the non-expert parameters' device, the number of expert
-    modules the loader found, and any missing/unexpected keys.
+    RAM (int8 + scales), the non-expert parameters' device and dtype, the number
+    of expert modules the loader found, and any missing/unexpected keys.
     """
     import torch
     from transformers import AutoConfig, AutoModelForCausalLM
@@ -493,7 +582,8 @@ def load_model_int8_experts(
         local_files_only=local_files_only,
         trust_remote_code=trust_remote_code,
     )
-    resolved_dtype = dtype if dtype is not None else _dtype_from_config(config)
+    shards = _shard_files(base)
+    resolved_dtype, dtype_source = _resolve_weight_dtype(config, shards, dtype)
     if scale_dtype is None:
         scale_dtype = torch.float32
 
@@ -550,7 +640,6 @@ def load_model_int8_experts(
             for depth in range(1, len(parts) + 1):
                 model.get_submodule(".".join(parts[:depth]))._is_hf_initialized = True
 
-    shards = _shard_files(base)
     # Layers whose expert tensors have been streamed so far, in first-seen order;
     # this is the progress counter the load line reports.
     quantized_layers: list[str] = []
@@ -649,6 +738,7 @@ def load_model_int8_experts(
         "shards": len(shards),
         "device": str(target_device),
         "dtype": str(resolved_dtype),
+        "dtype_source": dtype_source,
         "scale_dtype": str(scale_dtype),
         **int8_expert_census(model),
         "non_expert_params": len(params),
