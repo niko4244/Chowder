@@ -224,10 +224,12 @@ That is 5.01 GiB for the whole 40-layer model at seq 128, 12.38 GiB at seq 512
 and **41.86 GiB at seq 2048**. The gate's own placement step therefore projects
 to 5.54 + 41.86 + 4.74 = **52.13 GiB**, not the 10.27 that weights alone suggest:
 the activation term is eight times the weight floor and 3.6x the 14.5 GB gate on
-its own. (Upper bounds: overlapping views of one storage are counted separately,
-and the seq-2048 column is the fitted line, not a third measurement -- the two
-measured points are a 4x range and the per-chunk tensors of the linear-attention
-block scale with it.)
+its own. (Upper bounds: overlapping views of one storage are counted separately.
+The seq-2048 column is the fitted line, not a measurement, and the line was
+checked at a third point: seq 576 predicts 0.4083 GiB and measures **0.4082 --
+0.04% apart over a 4.5x range** of sequence length. The slope is the per-chunk
+tensors of the linear-attention block, each a fixed slice of tokens, which is why
+it is a line at all.)
 
 **What that means for `memory_vram` before anyone reads it as a verdict on int8.**
 `_placement_steps` runs forward + backward with autograd in eager mode and never
