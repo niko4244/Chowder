@@ -370,3 +370,38 @@ def test_fake_tokenizer_renders_every_kept_row(tmp_path, monkeypatch):
     assert manifest["tokenizer"]["loaded"] is True
     assert "token_count_percentiles" in manifest["outputs"]["train-fable.jsonl"]
     assert manifest["outputs"]["train-fable.jsonl"]["rows"] > 0
+
+
+def test_rows_longer_than_the_training_length_are_dropped_not_cut(tmp_path, monkeypatch):
+    sources = _sources(tmp_path)
+    full = _build(tmp_path, sources, out="full", monkeypatch=monkeypatch,
+                  tokenizer=FakeTokenizer(), validate_template=True)
+    longest = full["outputs"]["train-fable.jsonl"]["token_count_percentiles"]["max"]
+    tight = _build(tmp_path, sources, out="tight", monkeypatch=monkeypatch,
+                   tokenizer=FakeTokenizer(), validate_template=True, max_length=longest - 1)
+
+    dropped = sum(s["drops"]["over_length"] for s in tight["sources"].values())
+    assert dropped >= 1
+    assert tight["outputs"]["train-fable.jsonl"]["token_count_percentiles"]["max"] <= longest - 1
+    assert builder.DEFAULT_MAX_LENGTH == 2048
+
+
+def test_selfoss_code_source_is_rendered_and_licensed(tmp_path, monkeypatch):
+    sources = _sources(tmp_path)
+    selfoss = tmp_path / "selfoss.jsonl"
+    selfoss.write_text("".join(
+        json.dumps({"id": str(i), "instruction": f"Write add_{i}(a, b) returning a + b.",
+                    "response": f"def add_{i}(a, b):\n    return a + b"}) + "\n" for i in range(5)
+    ), encoding="utf-8")
+    manifest = _build(tmp_path, sources, monkeypatch=monkeypatch, selfoss=selfoss)
+
+    entry = manifest["sources"]["selfoss_code"]
+    assert entry["kept"] == 5 and entry["licence"].startswith("ODC-BY")
+    rows = [json.loads(l) for l in (tmp_path / "out" / "train-control.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert any(r["messages"][-1]["content"].startswith("def add_") for r in rows)
+
+
+def test_omitted_selfoss_records_a_full_shortfall(tmp_path, monkeypatch):
+    manifest = _build(tmp_path, _sources(tmp_path), monkeypatch=monkeypatch)
+    assert manifest["sources"]["selfoss_code"]["kept"] == 0
+    assert manifest["sources"]["selfoss_code"]["shortfall"] > 0

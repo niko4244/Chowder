@@ -64,6 +64,8 @@ DEFAULT_OUT = r"C:\llm-work\train-sets\moe-gen1-v1"
 DEFAULT_TOKENIZER = r"G:\llm-cold\bf16\Qwen3.6-35B-A3B"
 DEFAULT_OPENR1 = r"C:\Users\nikma\chowder_teacher_free\supply\openr1_math_sample500.jsonl"
 DEFAULT_OT3 = r"C:\Users\nikma\chowder_teacher_free\ot3_sft.jsonl"
+#: OT3 rows are long reasoning traces (almost none fit 2,048 tokens); this source is short, test-verified Python.
+DEFAULT_SELFOSS = r"C:\llm-work\data\bigcode__self-oss-instruct-sc2-exec-filter-50k\selfoss.jsonl"
 DEFAULT_ORNITH = r"C:\llm-work\ornith\curriculum-all\ornith_sft.jsonl"
 DEFAULT_AGENTIC_FABLE = r"C:\llm-work\train-sets\agentic-v1\train-fable.jsonl"
 DEFAULT_AGENTIC_CONTROL = r"C:\llm-work\train-sets\agentic-v1\train-control.jsonl"
@@ -72,7 +74,7 @@ DEFAULT_AGENTIC_CONTROL = r"C:\llm-work\train-sets\agentic-v1\train-control.json
 ORNITH_SHA256 = "971475e0f44ba55cbeff3a693be221faf55e078bb67025292856c7e811b2fbb8"
 
 DEFAULT_SEED = 20261019
-DEFAULT_MAX_LENGTH = 4096  # the agentic block's own validated length
+DEFAULT_MAX_LENGTH = 2048  # the MoE Gen-1 training sequence (plan §4); longer rows are dropped, not cut
 NGRAM = 13  # the plan's 13-gram rule, as in chowder_batch/reap_calibration.py
 
 PLAN_FILE = "docs/PLAN-MOE-FINETUNE-BEAT-BASELINES-2026-10-19.md"
@@ -84,6 +86,7 @@ SOURCE_CAPS: tuple[tuple[str, int], ...] = (
     ("gsm8k_train", 200),
     ("ornith", 39),
     ("ot3_code", 150),
+    ("selfoss_code", 250),
     ("nemotron", 120),
     ("fable", 120),
 )
@@ -94,6 +97,7 @@ LICENCES = {
     "gsm8k_train": "MIT (openai/gsm8k, train split)",
     "ornith": "not declared (Ornith curriculum; owner-supplied)",
     "ot3_code": "Apache-2.0 (open-thoughts/OpenThoughts-3, code reasoning)",
+    "selfoss_code": "ODC-BY (bigcode/self-oss-instruct-sc2-exec-filter-50k, execution-filtered Python)",
     "nemotron": "CC-BY-4.0 (nvidia/Nemotron-Agentic-v1, interactive_agent)",
     "fable": "AGPL-3.0 (Fable 5 output; N2 Anthropic usage question open)",
 }
@@ -106,6 +110,7 @@ DROP_REASONS = (
     "no_assistant_turn",
     "template_error",
     "empty_label_span",
+    "over_length",
     "over_cap",
 )
 
@@ -236,6 +241,11 @@ def _ot3_row(row: Mapping[str, Any]) -> dict[str, Any]:
             role = "unknown"
         messages.append({"role": role, "content": turn.get("value") or ""})
     return {"messages": messages, "tools": ""}
+
+
+def _selfoss_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {"messages": [{"role": "user", "content": row["instruction"]},
+                         {"role": "assistant", "content": row["response"]}], "tools": ""}
 
 
 def _ornith_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -392,7 +402,7 @@ def _select(
                 example = _build_chat_example(
                     tokenizer,
                     normalized,
-                    max_length=max_length,
+                    max_length=1 << 30,  # measure the whole row; truncation would cut final answers
                     row_index=examined,
                     tools=parse_tools(tools, row_index=examined),
                 )
@@ -403,6 +413,11 @@ def _select(
                     else "template_error"
                 )
                 entry["drops"][reason] += 1
+                continue
+            if len(example["input_ids"]) > max_length:
+                # A row longer than the training sequence would be cut before its
+                # final answer; drop it whole and let the pool backfill.
+                entry["drops"]["over_length"] += 1
                 continue
             token_counts.append(len(example["input_ids"]))
         kept.append({"messages": messages_out, "tools": tools})
@@ -422,6 +437,7 @@ def build(
     caps: Mapping[str, int] | None = None,
     openr1: str | Path = DEFAULT_OPENR1,
     ot3: str | Path = DEFAULT_OT3,
+    selfoss: str | Path | None = None,
     ornith: str | Path = DEFAULT_ORNITH,
     agentic_fable: str | Path = DEFAULT_AGENTIC_FABLE,
     agentic_control: str | Path = DEFAULT_AGENTIC_CONTROL,
@@ -507,8 +523,14 @@ def build(
         ("openr1_math", Path(openr1), _openr1_row),
         ("ot3_code", Path(ot3), _ot3_row),
         ("ornith", ornith_path, _ornith_row),
+        ("selfoss_code", Path(selfoss) if selfoss else None, _selfoss_row),
     )
     for name, path, to_candidate in plain:
+        if path is None:
+            # Not supplied: an empty pool, so the manifest records the full shortfall.
+            run(name, path="not supplied", sha256="", candidates=iter(()), pool_size=0,
+                rows_in=0, duplicates=0)
+            continue
         offsets, rows_in, duplicates = _index_jsonl(path, to_candidate)
         run(
             name,
@@ -659,6 +681,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--openr1", default=DEFAULT_OPENR1)
     parser.add_argument("--ot3", default=DEFAULT_OT3)
+    parser.add_argument("--selfoss", default=DEFAULT_SELFOSS, help="short execution-filtered code; empty to omit")
     parser.add_argument("--ornith", default=DEFAULT_ORNITH)
     parser.add_argument("--agentic-fable", default=DEFAULT_AGENTIC_FABLE)
     parser.add_argument("--agentic-control", default=DEFAULT_AGENTIC_CONTROL)
@@ -675,6 +698,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         seed=args.seed,
         openr1=args.openr1,
         ot3=args.ot3,
+        selfoss=args.selfoss or None,
         ornith=args.ornith,
         agentic_fable=args.agentic_fable,
         agentic_control=args.agentic_control,
