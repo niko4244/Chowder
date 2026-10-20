@@ -500,7 +500,13 @@ def _project_only(args: argparse.Namespace) -> int:
             base, dtype=args.dtype or None, config=config
         )
         inv = mvp.inventory(base, dtype=str(dtype).replace("torch.", ""))
-        projection = mvp.project(inv, seq_len=args.seq_len, vocab_size=_vocab_size(config))
+        activations = None if args.activations_gib is None else int(args.activations_gib * mvp.GIB)
+        projection = mvp.project(
+            inv,
+            seq_len=args.seq_len,
+            vocab_size=_vocab_size(config),
+            activation_bytes=activations,
+        )
     except (OSError, ValueError, FileNotFoundError) as error:
         print(f"cannot project {base}: {type(error).__name__}: {error}", file=sys.stderr)
         return 2
@@ -585,6 +591,15 @@ def main(argv: list[str] | None = None) -> int:
         "--gates",
         default="",
         help="a gate record JSON to compare the projection against instead of the prereg table",
+    )
+    parser.add_argument(
+        "--activations-gib",
+        type=float,
+        default=None,
+        help=(
+            "the measured activation term for every layer at --seq-len, from "
+            "chowder_batch/moe_activation_probe.py; without it the step figure stays a floor"
+        ),
     )
     parser.add_argument(
         "--witness",

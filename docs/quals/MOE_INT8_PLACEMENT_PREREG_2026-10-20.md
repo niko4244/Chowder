@@ -150,8 +150,8 @@ halves**, and before this fix they were fp32 because the hidden states come from
 the embedding, whose dtype followed the non-expert parameters. At seq 2048 the
 GatedDeltaNet qkv projection output alone (2048 x 8192) drops 0.063 GiB to 0.031
 GiB, and each of 40 layers keeps its own set for the backward pass, so the
-activation term is GiB-scale -- but how much autograd retains per layer is an
-implementation detail, and this table does not pretend to size it.
+activation term is GiB-scale -- and `chowder_batch/moe_activation_probe.py`
+measures it below rather than guessing it.
 
 One term moves the wrong way in this runner: the placement step scores
 `logits.float().square().mean()`. With fp32 logits `.float()` was a no-op; with
@@ -200,10 +200,48 @@ figure the census note above attributes. The device terms are the ones the card
 would have to hold: 0.94 GiB for one layer's dequantized experts, 0.06 GiB of
 row-block scratch, a step's weights floor of 5.54 GiB, and 4.74 GiB more for the
 gate's own loss expression (logits + `.float()` copy + `.square()`), i.e. 10.27
-GiB before a single activation. The activation row is reported as `unsized`, not
-invented, and a recorded number that cannot be reconciled with this arithmetic
-makes the mode exit 5 rather than print both figures as if they described one
-placement.
+GiB before a single activation. Without a measured activation term that row reads
+`unsized` rather than silently standing in a zero; with `--activations-gib` from
+the probe below it becomes a total. A recorded number that cannot be reconciled
+with this arithmetic makes the mode exit 5 rather than print both figures as if
+they described one placement.
+
+**The activation term, measured. And it is the whole story.**
+`chowder_batch/moe_activation_probe.py` builds one decoder layer of each kind from
+this artifact's text config -- shapes only, the weights are never read, because
+every tensor autograd saves is sized by shape and dtype -- installs the
+placement's own int8 forward so the experts behave as they do at run time, and
+counts what autograd retains from the forward pass (deduplicated by storage, the
+Function's backward recompute excluded, since that churn is not residency). Two
+sequence lengths per kind give a line, `bytes = fixed + slope x seq`:
+
+| layer kind | seq 128 | seq 512 | slope | fitted at seq 2048 |
+|---|---|---|---|---|
+| `linear_attention`, 30 layers | 0.142 GiB | 0.370 GiB | 638 KB/token | **1.283 GiB** |
+| `full_attention`, 10 layers | 0.075 GiB | 0.127 GiB | 147 KB/token | **0.337 GiB** |
+
+That is 5.01 GiB for the whole 40-layer model at seq 128, 12.38 GiB at seq 512
+and **41.86 GiB at seq 2048**. The gate's own placement step therefore projects
+to 5.54 + 41.86 + 4.74 = **52.13 GiB**, not the 10.27 that weights alone suggest:
+the activation term is eight times the weight floor and 3.6x the 14.5 GB gate on
+its own. (Upper bounds: overlapping views of one storage are counted separately,
+and the seq-2048 column is the fitted line, not a third measurement -- the two
+measured points are a 4x range and the per-chunk tensors of the linear-attention
+block scale with it.)
+
+**What that means for `memory_vram` before anyone reads it as a verdict on int8.**
+`_placement_steps` runs forward + backward with autograd in eager mode and never
+calls `gradient_checkpointing_enable()`, so every layer keeps its activations
+until backward reaches it. A worker run checkpoints by default
+(`TransformersPeftRunSpec.gradient_checkpointing`, defaulted True), so the step a
+campaign pays for holds one layer's activations, not forty. The gate as written
+therefore sizes a step no campaign performs, and its FAIL would mean "activations of an
+un-checkpointed step", not "the int8 placement does not fit". Two honest ways
+out, neither taken here because both change what is being measured: run the gate
+with checkpointing on, or record this term beside the gate and read the gate
+against the checkpointed figure. The numbers above are what either decision
+needs, and `memory_vram` stays `not measured` until a `--steps 3` run records a
+peak.
 
 **Numerics.** The weights are the same values either way -- the shards are BF16
 and fp32 storage was an exact upcast -- but the compute dtype changes: bf16

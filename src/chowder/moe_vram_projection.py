@@ -272,6 +272,11 @@ def project(
         logits = gate_loss_bytes(seq_len=int(seq_len), vocab_size=int(vocab_size), itemsize=itemsize)
 
     step_floor = non_expert + layer_dequant + block
+    # Only when the activation term was measured: the gate's step also scores its
+    # own loss, so the total carries that term. This is information, not a gate:
+    # a real peak may sit above it (allocator slack) or below it (a worker that
+    # checkpoints, which the placement step does not).
+    step_total = None if activation_bytes is None else step_floor + int(activation_bytes) + (logits or 0)
     return {
         "dtype": inventory_record["dtype"],
         "seq_len": int(seq_len),
@@ -286,6 +291,7 @@ def project(
         "gate_loss_bytes": logits,
         "step_floor_bytes": step_floor,
         "step_floor_with_gate_loss_bytes": step_floor + (logits or 0),
+        "step_total_bytes": step_total,
         "activations_bytes": activation_bytes,
         "inventory": {
             key: inventory_record[key]
@@ -332,6 +338,7 @@ def render(
     proj_floor = gib(projection["step_floor_bytes"])
     proj_floor_gate = gib(projection["step_floor_with_gate_loss_bytes"])
     proj_act = gib(projection["activations_bytes"])
+    proj_total = gib(projection.get("step_total_bytes"))
 
     def delta(projected: float | None, measure: float | None) -> str:
         if projected is None or measure is None:
@@ -396,13 +403,23 @@ def render(
             "still a floor",
         ),
         (
-            "activations, per layer, retained for backward",
+            "activations, every layer, retained for backward",
             _cell(proj_act) if proj_act is not None else "unsized",
             "-",
             "-",
-            "unsized on purpose" if proj_act is None else "measured",
+            "unsized on purpose" if proj_act is None else "measured (moe_activation_probe)",
         ),
     ]
+    if proj_total is not None:
+        rows.append(
+            (
+                "step total: floor + activations + gate loss",
+                _cell(proj_total),
+                _cell(recorded.get("step_vram")),
+                delta(proj_total, recorded.get("step_vram")),
+                "the gate's own step; a checkpointed worker holds less",
+            )
+        )
 
     width = max(len(row[0]) for row in rows)
     lines = [
@@ -426,10 +443,16 @@ def render(
     for label, projected, measured, difference, note in rows:
         lines.append(f"  {label:<{width}}  {projected:>9}  {measured:>9}  {difference:>7}  {note}")
     lines.append("")
-    lines.append(
-        "  memory_vram stays not measured: the rows above are a floor, and the "
-        "activation term is what would turn it into a peak."
-    )
+    if proj_total is None:
+        lines.append(
+            "  memory_vram stays not measured: the rows above are a floor, and the "
+            "activation term is what would turn it into a peak (--activations-gib)."
+        )
+    else:
+        lines.append(
+            "  memory_vram stays not measured: the total above is arithmetic, and only a "
+            "--steps 3 run on the card turns it into a peak."
+        )
     if recorded.get("seq_len") and int(recorded["seq_len"]) != int(projection["seq_len"]):
         lines.append(
             f"  the recorded step was measured at seq {recorded['seq_len']}, this "

@@ -19,6 +19,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "chowder_batch"))
 
+import moe_activation_probe as probe  # noqa: E402
 import moe_int8_gates as gates  # noqa: E402
 from chowder import moe_placement_gates as mpg  # noqa: E402
 from chowder import moe_vram_projection as mvp  # noqa: E402
@@ -124,12 +125,54 @@ def test_the_step_figure_is_a_floor_not_a_peak(monkeypatch, tmp_path):
     assert projection["step_floor_with_gate_loss_bytes"] > projection["step_floor_bytes"]
 
 
+def test_a_measured_activation_term_turns_the_floor_into_a_total(monkeypatch, tmp_path):
+    """With the term supplied the projection can print a total; without it the row
+    must say ``unsized`` rather than quietly standing in a zero."""
+    base = fake_checkpoint(monkeypatch, tmp_path, fused_header())
+    inventory = mvp.inventory(base, dtype="bfloat16")
+    without = mvp.project(inventory, seq_len=16, vocab_size=32)
+    assert without["step_total_bytes"] is None
+
+    activation = int(0.5 * mvp.GIB)
+    with_term = mvp.project(inventory, seq_len=16, vocab_size=32, activation_bytes=activation)
+    assert with_term["step_total_bytes"] == (
+        with_term["step_floor_bytes"] + activation + with_term["gate_loss_bytes"]
+    )
+    text = mvp.render(with_term, {"source": "nothing"})
+    assert "step total" in text
+    assert "unsized" not in text
+
+
 def test_the_rendered_projection_names_the_rows_it_will_not_size(monkeypatch, tmp_path):
     base = fake_checkpoint(monkeypatch, tmp_path, fused_header())
     projection = mvp.project(mvp.inventory(base, dtype="bfloat16"), seq_len=16, vocab_size=32)
     text = mvp.render(projection, {"source": "nothing", "int8_plus_scales": None})
     assert "unsized on purpose" in text
     assert "not measured" in text
+
+
+# --- the activation probe's extrapolation ------------------------------------
+
+
+def test_the_probe_fits_a_line_through_two_sequence_lengths():
+    """The seq-2048 figure is an extrapolation from two measured points, so the fit
+    itself has to be right: bytes = fixed + slope * seq, slope per token."""
+    points = [
+        {"layer_kind": "linear_attention", "seq_len": 128, "saved_bytes": 152_594_432, "saved_gib": 0.1421},
+        {"layer_kind": "linear_attention", "seq_len": 512, "saved_bytes": 397_613_568, "saved_gib": 0.3703},
+    ]
+    fitted = probe.fit(points)
+    assert fitted["measured_at"] == [128, 512]
+    assert fitted["bytes_per_token"] == pytest.approx(638_071, rel=1e-4)
+    predicted = {point["seq_len"]: point["predicted_gib"] for point in fitted["predicted_at"]}
+    assert predicted[512] == pytest.approx(0.3703, abs=1e-3)
+    # The published seq-2048 figure for one linear-attention layer.
+    at_2048 = (fitted["fixed_bytes"] + fitted["bytes_per_token"] * 2048) / mvp.GIB
+    assert at_2048 == pytest.approx(1.283, abs=1e-3)
+
+
+def test_the_probe_refuses_a_directory_that_is_not_there(tmp_path):
+    assert probe.main(["--base-model", str(tmp_path / "missing")]) == 2
 
 
 # --- when the two cannot both be right ---------------------------------------
