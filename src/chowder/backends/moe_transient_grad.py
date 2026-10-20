@@ -160,14 +160,25 @@ def _layer_moe_forward(
     expert order, same ``index_add_`` accumulation and dtype handling as the
     per-expert transient forward, so the two are interchangeable by construction."""
     import torch
-    import torch.nn.functional as F
 
     final = torch.zeros_like(hidden_states)
-    mask = F.one_hot(top_k_index, num_classes=num_experts).permute(2, 1, 0)
-    hit = torch.greater(mask.sum(dim=(-1, -2)), 0).nonzero()
-    for row in hit:
-        e = int(row[0])
-        top_k_pos, token_idx = torch.where(mask[e])
+    # Sort the (token, slot) assignments by expert once and read every expert's
+    # count in ONE device->host sync. The per-expert ``int(row)`` /
+    # ``torch.where(mask[e])`` it replaces synced ~160 times per layer per pass;
+    # profiling reap160 put ~42 of ~45 s/step in this loop (2026-10-20).
+    top_k = top_k_index.shape[-1]
+    flat = top_k_index.reshape(-1)
+    order = torch.argsort(flat, stable=True)
+    counts = torch.bincount(flat, minlength=num_experts).tolist()
+    token_of = order // top_k
+    slot_of = order % top_k
+    start = 0
+    for e, count in enumerate(counts):
+        if count == 0:
+            continue
+        token_idx = token_of[start:start + count]
+        top_k_pos = slot_of[start:start + count]
+        start += count
         out = _expert_ffn(hidden_states[token_idx], gate_up_proj[e], down_proj[e], act_fn)
         out = out * top_k_weights[token_idx, top_k_pos, None]
         final.index_add_(0, token_idx, out.to(final.dtype))
