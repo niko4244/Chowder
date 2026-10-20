@@ -93,17 +93,19 @@ def _disk(path: Path) -> dict[str, float]:
 def find_dataset() -> Path | None:
     """The mounted dataset that holds the code, found by content rather than by name.
 
-    ``/kaggle/input/<slug>`` depends on the slug the site assigned, and a hardcoded
-    path fails on a rename with a mount error that hides the real state.
+    The mount layout is not stable across images: an older one mounts
+    ``/kaggle/input/<slug>``, the current one mounts
+    ``/kaggle/input/datasets/<owner>/<slug>``. Searching for the module itself
+    finds the root in either layout, and the failure message lists what was
+    actually there instead of a path that was only assumed.
     """
     if not INPUT.is_dir():
         return None
-    for candidate in sorted(INPUT.iterdir()):
-        if (candidate / CODE_FILE).is_file():
-            return candidate
-        for nested in sorted(p for p in candidate.iterdir() if p.is_dir()):
-            if (nested / CODE_FILE).is_file():
-                return nested
+    for hit in sorted(INPUT.rglob(CODE_FILE.name)):
+        # <root>/src/chowder/backends/moe_int8_experts.py
+        root = hit.parents[3]
+        if (root / CODE_FILE).is_file():
+            return root
     return None
 
 
@@ -117,7 +119,9 @@ def environment() -> dict:
         "disk_working": _disk(Path("/kaggle/working")),
         "disk_temp": _disk(Path("/kaggle/temp")),
         "python": sys.version.split()[0],
-        "inputs": sorted(p.name for p in INPUT.iterdir()) if INPUT.is_dir() else [],
+        "inputs": sorted(str(p.relative_to(INPUT)) for p in INPUT.rglob("*") if p.is_dir())[:20]
+        if INPUT.is_dir()
+        else [],
     }
     try:
         env["nvidia_smi"] = subprocess.run(
@@ -138,7 +142,7 @@ def environment() -> dict:
     if dataset is None:
         raise SystemExit(
             f"no mounted dataset under {INPUT} carries {CODE_FILE}; "
-            f"mounted: {sorted(p.name for p in INPUT.iterdir()) if INPUT.is_dir() else []}"
+            f"mounted: {sorted(str(p.relative_to(INPUT)) for p in INPUT.rglob('*') if p.is_dir()) if INPUT.is_dir() else []}"
         )
     env["dataset"] = str(dataset)
     # The dataset keeps the repo's own layout, so ``chowder`` lives under ``src/``
