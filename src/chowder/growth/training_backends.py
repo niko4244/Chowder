@@ -227,6 +227,7 @@ _LOCAL_CONFIG_KEYS = frozenset(
         "tools_field",
         "target_preset",
         "expert_placement",
+        "expert_pinning",
     }
 )
 _UNSLOTH_CONFIG_KEYS = frozenset({"device", "measured_evidence"})
