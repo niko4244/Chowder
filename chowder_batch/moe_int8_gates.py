@@ -23,12 +23,25 @@ fine-tune; this runner reports them as not measured rather than guessing.
 WDDM shared-memory spill is not observable from here either: the record carries
 ``peak_vram_gb`` and ``reserved_gb`` and leaves the spill verdict to the operator.
 
-Exit codes: 0 record written, 2 refusal (missing directory, unknown arm, no
-CUDA without ``--cpu``), 3 an arm failed to load or to place.
+The measurement goes straight into the prereg's gate table
+(``docs/quals/MOE_INT8_PLACEMENT_PREREG_2026-10-20.md``, or ``--prereg`` /
+``CHOWDER_MOE_GATE_TABLE``): only the generated block is replaced, so the prose
+stays hand-authored while the numbers cannot drift from the last measurement. A
+row this run cannot answer is carried forward from the recorded one rather than
+overwritten with "not measured". ``--check`` compares and writes nothing.
+
+Exit codes: 0 table written with no regression, 1 a recorded gate **regressed**
+(the table is still updated, so the worse numbers are the ones on record), 2
+refusal (missing directory, unknown arm, no CUDA without ``--cpu``), 3 an arm
+failed to load or to place, 4 the table was measured on a different artifact and
+would be overwritten with incomparable numbers (``--allow-new-baseline`` starts
+a new baseline).
 
 ``--self-check`` writes its own tiny synthetic checkpoint to a temporary
 directory and runs both arms on the CPU, so the runner itself is verifiable
-without a GPU or a real model.
+without a GPU or a real model. Without an explicit ``--prereg`` it writes its
+gate table beside that checkpoint, never over the placement's prereg: a
+synthetic model's numbers are not the placement's numbers.
 """
 
 from __future__ import annotations
@@ -42,10 +55,25 @@ import time
 from pathlib import Path
 from typing import Any
 
-EXPERT_PLACEMENT = "cpu-transient-grad-int8"
-VRAM_GATE_GB = 14.5
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))  # noqa: E402
+
+from chowder.moe_placement_gates import (  # noqa: E402
+    DEFAULT_PREREG,
+    EXPERT_PLACEMENT,
+    VRAM_GATE_GB,
+    artifact_identity,
+    parse_block,
+    regressions,
+    render_block,
+    resolve_prereg_path,
+    splice_block,
+)
+
 SCHEMA = "chowder.moe-placement-gates.v1"
 ARMS = ("int8", "bulk")
+#: A gate table written by a different artifact cannot back these numbers: the
+#: run refuses to overwrite it until the operator says the baseline moved.
+ARTIFACT_MISMATCH_EXIT = 4
 
 
 def _peak_rss_bytes() -> int | None:
@@ -256,6 +284,11 @@ def run(
         "dtype": str(dtype) if dtype is not None else "auto (the checkpoint's)",
         "placement": EXPERT_PLACEMENT,
         "vram_gate_gb": VRAM_GATE_GB,
+        "artifact": artifact_identity(base),
+        "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "code_commit": _code_commit(),
+        "steps": steps,
+        "seq_len": seq_len,
         "arms": {},
         "note": (
             "Placement steps only: forward+backward on inputs_embeds, no LoRA and no "
@@ -266,6 +299,28 @@ def run(
     for arm in arms:
         record["arms"][arm] = run_arm(arm, base, device=device, dtype=dtype, steps=steps, seq_len=seq_len)
     return record
+
+
+# --- the prereg table ---------------------------------------------------------
+#
+# The placement's prereg document owns one generated block, and
+# ``chowder.moe_placement_gates`` is the single definition of it: how it is
+# rendered, how it is read back, what counts as a regression, and when a campaign
+# is allowed to declare the placement at all. The runner replaces only that
+# block, so the prose (and the gate definitions) stay authored by hand while the
+# numbers cannot drift from the last measurement.
+
+
+def _code_commit() -> str | None:
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=10
+        )
+        return completed.stdout.strip() or None if completed.returncode == 0 else None
+    except Exception:
+        return None
 
 
 def _self_check_workspace() -> Path:
@@ -305,6 +360,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dtype", default="", help="auto (the config's), bfloat16, float16, float32")
     parser.add_argument("--cpu", action="store_true", help="run on the CPU (self-check, small models)")
     parser.add_argument("--self-check", action="store_true", help="tiny synthetic checkpoint, CPU, then print the record")
+    parser.add_argument("--prereg", default="", help=f"prereg document to update (default {DEFAULT_PREREG})")
+    parser.add_argument("--check", action="store_true", help="compare against the prereg table and write nothing")
+    parser.add_argument(
+        "--allow-new-baseline",
+        action="store_true",
+        help="accept a different artifact digest instead of refusing to compare",
+    )
     args = parser.parse_args(argv)
 
     import torch
@@ -341,6 +403,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         record = run(base, arms=arms, device=device, dtype=dtype, steps=args.steps, seq_len=args.seq_len)
     except Exception as error:  # a failed arm is a refusal, not a record with holes
+        # The stack, not only the message: a failure inside a loader is
+        # otherwise reported from the line that called it and nothing else.
+        import traceback
+
+        traceback.print_exc()
         print(f"{type(error).__name__}: {error}", file=sys.stderr)
         return 3
 
@@ -350,7 +417,68 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {args.out}")
     else:
         print(payload)
-    return 0
+
+    if args.self_check and not args.prereg:
+        # A synthetic model's numbers are not the placement's numbers: the
+        # self-check writes its table beside its own checkpoint, never over the
+        # pre-registration a campaign would be read against.
+        prereg = base / "PREREG-self-check.md"
+    else:
+        prereg = resolve_prereg_path(args.prereg)
+    if prereg is None:
+        print(
+            "no prereg document in this checkout and no --prereg; "
+            "the JSON record is the only evidence",
+            file=sys.stderr,
+        )
+        return 0
+    document = prereg.read_text(encoding="utf-8") if prereg.is_file() else ""
+    previous = parse_block(document)
+
+    measured_on = (record.get("artifact") or {}).get("config_sha256")
+    recorded_on = (previous or {}).get("config_sha256")
+    new_baseline = False
+    if previous is not None and recorded_on and measured_on and recorded_on != measured_on:
+        if not args.allow_new_baseline:
+            print(
+                f"{prereg} records gates measured on config sha256 `{recorded_on}`, but this run "
+                f"measured `{measured_on}`: refusing to overwrite one artifact's table with "
+                "another's numbers (pass --allow-new-baseline to start a new baseline)",
+                file=sys.stderr,
+            )
+            return ARTIFACT_MISMATCH_EXIT
+        new_baseline = True
+        print(
+            f"--allow-new-baseline: replacing the table measured on `{recorded_on}` "
+            f"with `{measured_on}`",
+            file=sys.stderr,
+        )
+        previous = None
+
+    problems = regressions(previous, record)
+    if problems:
+        print("REGRESSION against the recorded gates:", file=sys.stderr)
+        for problem in problems:
+            print(f"  - {problem}", file=sys.stderr)
+    elif previous is not None:
+        print("no regression against the recorded gates")
+
+    if args.check:
+        print(f"(--check: {prereg} was not written)")
+        return 1 if problems else 0
+
+    prereg.parent.mkdir(parents=True, exist_ok=True)
+    prereg.write_text(
+        splice_block(document, render_block(record, previous=previous)), encoding="utf-8"
+    )
+    print(f"wrote the gate table into {prereg}{' (new baseline)' if new_baseline else ''}")
+    carried = (parse_block(prereg.read_text(encoding="utf-8")) or {}).get("carried") or []
+    if carried:
+        print(
+            f"carried forward from the previous measurement: {', '.join(carried)} "
+            "(only a run that measures a gate can change its verdict)"
+        )
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":

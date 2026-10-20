@@ -120,10 +120,30 @@ was stopped: no census and no gate number exists from it. The GPU gates could
 not be attempted at all -- the card had 3.5 GiB free of 16.3 GB -- so they
 remain unmeasured, exactly as the section above says.
 
-**Gates.** This placement inherits the pre-registration in
-`docs/quals/MOE_TRANSIENT_GRAD_PLACEMENT_PREREG_2026-10-18.md`, and those gates
--- s/step, peak VRAM, WDDM spill -- must be **re-measured** on the real
-artifact before any campaign declares `cpu-transient-grad-int8`. The CPU tests
-here prove the mechanism (round trip bound, no bf16 expert resident, streaming,
+**Gates.** This placement has its own pre-registration,
+`docs/quals/MOE_INT8_PLACEMENT_PREREG_2026-10-20.md`, because it re-measures the
+2026-10-18 gates on quantized weights rather than inheriting them. Those gates --
+census, peak VRAM, host RSS, s/step, and the worker-run gates (gradient, smoke,
+router balance, WDDM spill) -- must be **measured on the real artifact** before
+any campaign declares `cpu-transient-grad-int8`. The CPU tests here prove the
+mechanism (round trip bound, no bf16 expert resident, streaming,
 forward/gradient agreement, checkpointing, admission) and say nothing about GPU
 speed or memory.
+
+**The table is generated, and it is enforced.** `chowder_batch/moe_int8_gates.py`
+replaces one marked block in that prereg with what it measured
+(`chowder.moe_placement_gates` owns the block: rendering, reading it back, and
+the regression rule). Three consequences worth naming:
+
+- A run that measures a **worse** number than the one on record exits non-zero
+  and still writes the table, so the regressed numbers are the ones on record;
+  a run against a **different artifact** refuses to overwrite the table at all.
+  A row the run could not answer (`--steps 0`) is carried forward, and the block
+  says which rows were carried.
+- `chowder.growth.campaign_prepare.placement_gate_refusal` refuses a campaign
+  that declares this placement while any gate is unmeasured, failed, or was
+  measured on a different config digest. That is what stops the placement from
+  being declared on stale numbers: the rule is read from the table, not
+  remembered by whoever edits the manifest.
+- A `--self-check` (synthetic model) writes its table beside its own temporary
+  checkpoint, never over the placement's prereg.
