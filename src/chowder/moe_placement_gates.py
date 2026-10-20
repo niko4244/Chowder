@@ -136,11 +136,18 @@ def gate_rows(record: dict[str, Any], *, placement: str = EXPERT_PLACEMENT) -> l
             "measured" if gates.get("load_census") == "measured" else "not measured",
         )
     ]
+    # Which step the row describes is part of the row: a peak measured on an
+    # eager step and one measured with per-layer recompute are not comparable,
+    # and the table is the only place a reader sees which one they got.
+    checkpointed = record.get("gradient_checkpointing")
+    step_kind = "" if checkpointed is None else ("checkpointed" if checkpointed else "eager")
     peak = arm.get("peak_vram_gb")
     rows.append(
         (
             "memory_vram",
-            "not measured (CPU arm)" if peak is None else f"{peak} GB peak (gate <= {VRAM_GATE_GB} GB)",
+            "not measured (CPU arm)"
+            if peak is None
+            else f"{peak} GB peak (gate <= {VRAM_GATE_GB} GB{', ' + step_kind if step_kind else ''})",
             (
                 "not measured"
                 if peak is None or gates.get("memory_vram_pass") is None
@@ -163,7 +170,7 @@ def gate_rows(record: dict[str, Any], *, placement: str = EXPERT_PLACEMENT) -> l
             (
                 "not measured (--steps 0)"
                 if s_per_step is None
-                else f"{s_per_step} s/placement-step (spread {_step_noise(arm)} s)"
+                else f"{s_per_step} s/placement-step (spread {_step_noise(arm)} s{', ' + step_kind if step_kind else ''})"
             ),
             "measured (placement step)" if s_per_step is not None else "not measured",
         )

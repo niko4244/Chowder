@@ -59,7 +59,7 @@ the only way those rows ever stop saying "not measured".
 | Gate | Measured as | Pass |
 |---|---|---|
 | `load_census` | The loader's own live census: expert bytes resident as int8 + scales, modules patched, live bf16 expert parameters left on the model | Every routed-expert parameter is an int8 CPU buffer with **0** live bf16 expert parameters. The census is an assertion, not a report: a placement that did not happen raises in the loader rather than recording a row |
-| `memory_vram` | Peak allocated VRAM per **placement step** (forward + backward on `inputs_embeds` through every expert layer, no LoRA, no optimizer) | Peak ≤ **14.5 GB** on the 16 GB card, with no WDDM shared-memory spill |
+| `memory_vram` | Peak allocated VRAM per **placement step** (forward + backward on `inputs_embeds` through every expert layer, with per-layer recompute as a worker run does it, no LoRA, no optimizer) | Peak ≤ **14.5 GB** on the 16 GB card, with no WDDM shared-memory spill |
 | `host_rss` | Process peak working set across load and steps | The number is recorded and compared run-to-run (a >10% growth is a regression). The design budget is 24 GB: anything that keeps the bf16 experts resident cannot be under ~40 GB, so a peak far above 24 GB means the int8 grid was copied |
 | `throughput` | The same placement step, timed | Recorded, and a >10% regression fails the run. Go/no-go is the worker's own measured s/step against the 2.5 GPU-h per-recipe ceiling — this runner measures the placement, never a training step |
 | `gradient` | The LoRA B gradients of the **first** step whose backward populated `.grad`, read once: for the first, middle and last decoder layer that holds a LoRA leaf, every leaf's gradient | All leaves present, all finite, all with a non-zero peak. A layer with no LoRA leaf fails the gate |
@@ -238,12 +238,34 @@ until backward reaches it. A worker run checkpoints by default
 (`TransformersPeftRunSpec.gradient_checkpointing`, defaulted True), so the step a
 campaign pays for holds one layer's activations, not forty. The gate as written
 therefore sizes a step no campaign performs, and its FAIL would mean "activations of an
-un-checkpointed step", not "the int8 placement does not fit". Two honest ways
-out, neither taken here because both change what is being measured: run the gate
-with checkpointing on, or record this term beside the gate and read the gate
-against the checkpointed figure. The numbers above are what either decision
-needs, and `memory_vram` stays `not measured` until a `--steps 3` run records a
-peak.
+un-checkpointed step", not "the int8 placement does not fit". That is settled
+below, on the strength of the same probe run with checkpointing on.
+
+**Gate definition, settled: the step a worker pays for.** `memory_vram` and
+`throughput` measure the placement step **with gradient checkpointing on**, which
+is what `TransformersPeftRunSpec` does by default and therefore what a campaign
+actually pays. The runner defaults to it, records `gradient_checkpointing` in the
+record, and stamps the row `checkpointed` -- or `eager` for a deliberate
+`--no-gradient-checkpointing` run -- so the two can never be read as one another.
+`chowder_batch/moe_activation_probe.py --gradient-checkpointing` measures the
+other side of the same layer, at seq 128 and 512 and fitted to 2048:
+
+| retention, GiB | eager | checkpointed |
+|---|---|---|
+| one `linear_attention` layer | 1.283 | 0.039 |
+| one `full_attention` layer | 0.337 | 0.039 |
+| all 40 layers | 41.86 | **1.56** |
+| one layer being recomputed in backward | -- | 1.28 |
+
+So the gate's step projects to 5.54 (weights) + 1.56 (inputs retained at layer
+boundaries) + 1.28 (the layer being recomputed) + 4.74 (the gate's own loss) =
+**13.12 GiB at seq 2048**, inside the 14.5 GB gate by about 1.4 GiB, where the
+eager step was 52.13 GiB, 3.6x over. At seq 512 it is 7.48 GiB. What the headroom
+consists of matters: 4.74 GiB of that total is `logits.float().square()`, which a
+real cross-entropy step would not pay (1.89 instead), so the gate is close to the
+card for a reason the placement does not own. None of this is measured on the
+card yet -- `memory_vram` stays `not measured` until `--steps 3` records a peak,
+and this is the step it will record.
 
 **Numerics.** The weights are the same values either way -- the shards are BF16
 and fp32 storage was an exact upcast -- but the compute dtype changes: bf16

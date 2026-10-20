@@ -738,8 +738,12 @@ def test_the_gate_runner_census_only_mode_steps_nothing_and_says_so(tmp_path):
     assert completed.returncode == 0, completed.stderr[-2000:]
 
     record = json.loads(out.read_text(encoding="utf-8"))
+    # The gate measures the step a worker pays for: per-layer recompute is on by
+    # default, and the record has to say so or its peak is unreadable later.
+    assert record["gradient_checkpointing"] is True
     for arm in ("int8", "bulk"):
         entry = record["arms"][arm]
+        assert entry["gradient_checkpointing"] is True, arm
         assert entry["steps"] == 0, arm
         assert entry["step_seconds"] == [], arm
         assert entry["s_per_step"] is None, arm

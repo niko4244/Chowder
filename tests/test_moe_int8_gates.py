@@ -131,6 +131,24 @@ def prewritten(tmp_path, *, text):
 # --- the block itself ---------------------------------------------------------
 
 
+def test_the_gate_row_names_the_step_definition_it_measured():
+    """A peak on an eager step and one with per-layer recompute are not comparable,
+    so the row says which produced it -- and a record from before the definition
+    existed still renders, without inventing a stamp."""
+    for flag, stamp in ((True, "checkpointed"), (False, "eager"), (None, None)):
+        payload = record()
+        if flag is None:
+            payload.pop("gradient_checkpointing", None)
+        else:
+            payload["gradient_checkpointing"] = flag
+        rows = {gate: value for gate, value, _ in mpg.gate_rows(payload)}
+        for gate in ("memory_vram", "throughput"):
+            if stamp is None:
+                assert "checkpointed" not in rows[gate] and "eager" not in rows[gate], rows[gate]
+            else:
+                assert rows[gate].endswith(f", {stamp})"), rows[gate]
+
+
 def test_rendered_block_reads_back_with_its_numbers():
     parsed = mpg.parse_block(mpg.render_block(record()))
     assert parsed["verdicts"]["memory_vram"] == "pass"

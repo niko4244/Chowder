@@ -236,7 +236,16 @@ def _vram(torch: Any, device: Any) -> dict[str, Any]:
     }
 
 
-def run_arm(arm: str, base: Path, *, device: Any, dtype: Any, steps: int, seq_len: int) -> dict[str, Any]:
+def run_arm(
+    arm: str,
+    base: Path,
+    *,
+    device: Any,
+    dtype: Any,
+    steps: int,
+    seq_len: int,
+    gradient_checkpointing: bool = True,
+) -> dict[str, Any]:
     import torch
 
     if device.type == "cuda":
@@ -246,12 +255,19 @@ def run_arm(arm: str, base: Path, *, device: Any, dtype: Any, steps: int, seq_le
     started = time.perf_counter()
     model, census = ARM_LOADERS[arm](base, device, dtype)
     load_seconds = time.perf_counter() - started
+    if gradient_checkpointing:
+        # The step a campaign pays for: a worker run checkpoints by default, so
+        # this is the memory and step time the gate has to describe. See the
+        # prereg's gate definition -- the un-checkpointed step retains every
+        # layer's activations and is 3.6x over the card at seq 2048.
+        model.gradient_checkpointing_enable()
     load_rss = _peak_rss_bytes()
 
     result: dict[str, Any] = {
         "arm": arm,
         "load_seconds": round(load_seconds, 3),
         "load_peak_rss_gb": _gib(load_rss),
+        "gradient_checkpointing": bool(gradient_checkpointing),
         "census": census,
     }
     if "expert_bytes" in census:
@@ -297,9 +313,11 @@ def run(
     dtype: Any,
     steps: int,
     seq_len: int,
+    gradient_checkpointing: bool = True,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
         "schema": SCHEMA,
+        "gradient_checkpointing": bool(gradient_checkpointing),
         "base_model": str(base),
         "device": str(device),
         "dtype": str(dtype) if dtype is not None else "auto (the checkpoint's)",
@@ -318,7 +336,15 @@ def run(
         ),
     }
     for arm in arms:
-        record["arms"][arm] = run_arm(arm, base, device=device, dtype=dtype, steps=steps, seq_len=seq_len)
+        record["arms"][arm] = run_arm(
+            arm,
+            base,
+            device=device,
+            dtype=dtype,
+            steps=steps,
+            seq_len=seq_len,
+            gradient_checkpointing=gradient_checkpointing,
+        )
     return record
 
 
@@ -571,6 +597,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--dtype", default="", help="auto (the config's), bfloat16, float16, float32")
     parser.add_argument("--cpu", action="store_true", help="run on the CPU (self-check, small models)")
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "measure the step with per-layer recompute, as a worker run does by default "
+            "(the gate's definition; --no-gradient-checkpointing measures the eager step)"
+        ),
+    )
     parser.add_argument("--self-check", action="store_true", help="tiny synthetic checkpoint, CPU, then print the record")
     parser.add_argument("--prereg", default="", help=f"prereg document to update (default {DEFAULT_PREREG})")
     parser.add_argument("--check", action="store_true", help="compare against the prereg table and write nothing")
@@ -660,7 +695,15 @@ def main(argv: list[str] | None = None) -> int:
     dtype = getattr(torch, args.dtype) if args.dtype else None
 
     try:
-        record = run(base, arms=arms, device=device, dtype=dtype, steps=args.steps, seq_len=args.seq_len)
+        record = run(
+            base,
+            arms=arms,
+            device=device,
+            dtype=dtype,
+            steps=args.steps,
+            seq_len=args.seq_len,
+            gradient_checkpointing=args.gradient_checkpointing,
+        )
     except Exception as error:  # a failed arm is a refusal, not a record with holes
         # The stack, not only the message: a failure inside a loader is
         # otherwise reported from the line that called it and nothing else.

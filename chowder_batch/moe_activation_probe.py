@@ -104,13 +104,25 @@ def install_placement(model: Any) -> int:
     return patched
 
 
-def measure(base: str, kind: str, seq_len: int, *, dtype_name: str = "bfloat16") -> dict[str, Any]:
+def measure(
+    base: str,
+    kind: str,
+    seq_len: int,
+    *,
+    dtype_name: str = "bfloat16",
+    gradient_checkpointing: bool = False,
+) -> dict[str, Any]:
     import torch
 
     dtype = getattr(torch, dtype_name)
     started = time.perf_counter()
     model = build_layer_model(base, kind, dtype)
     built = time.perf_counter() - started
+    if gradient_checkpointing:
+        # What a worker run does by default: each layer re-runs its forward in
+        # backward instead of keeping its activations, so what is *retained*
+        # between layers collapses to the layer's input.
+        model.gradient_checkpointing_enable()
     patched = install_placement(model)
     text = model.model
     torch.manual_seed(0)
@@ -150,6 +162,7 @@ def measure(base: str, kind: str, seq_len: int, *, dtype_name: str = "bfloat16")
         "seq_len": seq_len,
         "dtype": dtype_name,
         "placement": "cpu-transient-grad-int8",
+        "gradient_checkpointing": bool(gradient_checkpointing),
         "experts_modules_patched": patched,
         "saved_bytes": saved["bytes"],
         "saved_gib": round(saved["bytes"] / 2**30, 4),
@@ -217,6 +230,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--layer-kind", default="both", choices=(*LAYER_KINDS, "both"))
     parser.add_argument("--seq-len", type=int, nargs="+", default=[128, 512], help="one or more sequence lengths")
     parser.add_argument("--dtype", default="bfloat16")
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        help="recompute each layer's forward in backward, as a worker run does by default",
+    )
     parser.add_argument("--layers-per-kind", default="", help="override the artifact's own layer counts, e.g. 30,10")
     parser.add_argument("--out", default="", help="where to write the record (JSON)")
     args = parser.parse_args(argv)
@@ -231,7 +249,13 @@ def main(argv: list[str] | None = None) -> int:
     for kind in kinds:
         for seq_len in sorted(set(args.seq_len)):
             _log(f"measuring {kind} at seq {seq_len} ...")
-            point = measure(str(base), kind, seq_len, dtype_name=args.dtype)
+            point = measure(
+                str(base),
+                kind,
+                seq_len,
+                dtype_name=args.dtype,
+                gradient_checkpointing=args.gradient_checkpointing,
+            )
             points.append(point)
             _log(f"  {point['saved_gib']} GiB retained, {point['saved_tensors']} tensors")
 
