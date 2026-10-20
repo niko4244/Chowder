@@ -30,6 +30,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # reap160's own dims: config.json's text_config, and the shard header's expert
@@ -118,6 +119,7 @@ def environment() -> dict:
         "host_ram_available_gb": meminfo.get("MemAvailable", 0) / GIB,
         "disk_working": _disk(Path("/kaggle/working")),
         "disk_temp": _disk(Path("/kaggle/temp")),
+        "disk_root": _disk(Path("/tmp")),
         "python": sys.version.split()[0],
         "inputs": sorted(str(p.relative_to(INPUT)) for p in INPUT.rglob("*") if p.is_dir())[:20]
         if INPUT.is_dir()
@@ -195,6 +197,39 @@ def plan(available_gb: float) -> dict:
     }
 
 
+def build_grid(layers: int) -> list[dict]:
+    """Allocate and fill ``layers`` int8 layers, and keep every one of them.
+
+    The real loader holds the whole grid in host RAM for the length of the run,
+    so a probe that builds one layer and frees it measures a run that does not
+    exist -- its RSS would be the per-pass working set and nothing else. Every
+    byte is filled rather than reserved, because lazily mapped pages would not
+    count toward RSS and would understate the footprint this is here to measure.
+    """
+    import torch
+
+    grid: list[dict] = []
+    for index in range(layers):
+        grid.append(
+            {
+                "gate_up_q": torch.empty(
+                    (EXPERTS, 2 * INTERMEDIATE, HIDDEN), dtype=torch.int8
+                ).fill_(1),
+                "down_q": torch.empty(
+                    (EXPERTS, HIDDEN, INTERMEDIATE), dtype=torch.int8
+                ).fill_(1),
+                # Per-row scales, shaped exactly as ``_empty_int8_experts`` allocates them.
+                "gate_up_scale": torch.ones(
+                    (EXPERTS, 2 * INTERMEDIATE, 1), dtype=torch.float32
+                ),
+                "down_scale": torch.ones((EXPERTS, HIDDEN, 1), dtype=torch.float32),
+            }
+        )
+        rss = _self_status().get("VmRSS", 0) / GIB
+        log(f"grid {index + 1}/{layers} resident, rss {rss:.2f} GB")
+    return grid
+
+
 def run_layer_probe(device: str, dtype_name: str, layers: int) -> dict:
     """Walk ``layers`` int8 layers through the worker's own autograd function.
 
@@ -223,17 +258,12 @@ def run_layer_probe(device: str, dtype_name: str, layers: int) -> dict:
         }
 
     torch.cuda.reset_peak_memory_stats()
-    for index in range(layers):
-        # The loader writes every int8 byte, so the probe fills rather than
-        # reserves: zeros would be lazily mapped pages and under-count RSS.
-        gate_up_q = torch.empty(
-            (EXPERTS, 2 * INTERMEDIATE, HIDDEN), dtype=torch.int8
-        ).fill_(1)
-        down_q = torch.empty((EXPERTS, HIDDEN, INTERMEDIATE), dtype=torch.int8).fill_(1)
-        # Per-row scales, shaped exactly as ``_empty_int8_experts`` allocates them.
-        gate_up_scale = torch.ones((EXPERTS, 2 * INTERMEDIATE, 1), dtype=torch.float32)
-        down_scale = torch.ones((EXPERTS, HIDDEN, 1), dtype=torch.float32)
+    grid = build_grid(layers)
+    load_rss = _self_status().get("VmRSS", 0) / GIB
+    log(f"grid complete: {len(grid)} layers resident, rss {load_rss:.2f} GB")
 
+    for index in range(layers):
+        layer = grid[index]
         hidden = torch.randn(
             SEQ, HIDDEN, device=device, dtype=dtype, requires_grad=True
         )
@@ -242,19 +272,23 @@ def run_layer_probe(device: str, dtype_name: str, layers: int) -> dict:
             torch.randn(SEQ, TOP_K, device=device, dtype=torch.float32), dim=-1
         )
 
+        started = time.perf_counter()
         out = function.apply(
             hidden,
             top_k_index,
             top_k_weights,
-            gate_up_q,
-            gate_up_scale,
-            down_q,
-            down_scale,
+            layer["gate_up_q"],
+            layer["gate_up_scale"],
+            layer["down_q"],
+            layer["down_scale"],
             act_fn,
             EXPERTS,
         )
+        forward_seconds = time.perf_counter() - started
         after_forward = snapshot(index, "forward")
+        started = time.perf_counter()
         out.backward(torch.ones_like(out))
+        backward_seconds = time.perf_counter() - started
         after_backward = snapshot(index, "backward")
         peak_device = max(peak_device, torch.cuda.max_memory_allocated() / GIB)
 
@@ -263,34 +297,38 @@ def run_layer_probe(device: str, dtype_name: str, layers: int) -> dict:
             {
                 "forward": after_forward,
                 "backward": after_backward,
+                "forward_seconds": forward_seconds,
+                "backward_seconds": backward_seconds,
                 "grad_finite": finite,
                 "grad_nonzero": bool((hidden.grad != 0).any().item()),
             }
         )
         log(
-            f"layer {index + 1}/{layers} rss after backward {after_backward['rss_gb']:.2f} GB, "
-            f"device peak {peak_device:.2f} GB, grad finite={finite}"
+            f"layer {index + 1}/{layers} rss {after_backward['rss_gb']:.2f} GB, "
+            f"device peak {peak_device:.2f} GB, fwd {forward_seconds:.1f}s "
+            f"bwd {backward_seconds:.1f}s, grad finite={finite}"
         )
-        del (
-            gate_up_q,
-            down_q,
-            gate_up_scale,
-            down_scale,
-            hidden,
-            top_k_index,
-            top_k_weights,
-            out,
-        )
+        # The grid stays resident -- that is the whole point -- so only the
+        # per-pass tensors are dropped here.
+        del hidden, top_k_index, top_k_weights, out
         torch.cuda.empty_cache()
 
-    del function
+    del function, grid
     return {
         "layers_probed": layers,
+        "grid_resident_gb": layers * per_layer_bytes() / GIB,
+        "load_rss_gb": load_rss,
         "peak_device_gb": peak_device,
         "peak_host_rss_gb": max(s["backward"]["rss_gb"] for s in samples)
         if samples
         else 0.0,
         "peak_host_hwm_gb": max(s["backward"]["hwm_gb"] for s in samples)
+        if samples
+        else 0.0,
+        "mean_forward_seconds": sum(s["forward_seconds"] for s in samples) / len(samples)
+        if samples
+        else 0.0,
+        "mean_backward_seconds": sum(s["backward_seconds"] for s in samples) / len(samples)
         if samples
         else 0.0,
         "gradients_finite": all(s["grad_finite"] for s in samples),
@@ -337,9 +375,13 @@ def main() -> int:
         )
         peak = result["probe"]["peak_host_rss_gb"]
         result["verdict"] = (
-            f"{result['probe']['layers_probed']}/{LAYERS} layers probed in {dtype_name}: "
-            f"peak host RSS {peak:.2f} GB of {env['host_ram_total_gb']:.1f} GB, "
-            f"peak device {result['probe']['peak_device_gb']:.2f} GB, "
+            f"{result['probe']['layers_probed']}/{LAYERS} layers held resident "
+            f"({result['probe']['grid_resident_gb']:.2f} GB of int8) in {dtype_name}: "
+            f"RSS {result['probe']['load_rss_gb']:.2f} GB after load, {peak:.2f} GB peak "
+            f"of {env['host_ram_total_gb']:.1f} GB; "
+            f"device peak {result['probe']['peak_device_gb']:.2f} GB; "
+            f"{result['probe']['mean_forward_seconds']:.1f}s fwd + "
+            f"{result['probe']['mean_backward_seconds']:.1f}s bwd per layer pass; "
             f"gradients finite={result['probe']['gradients_finite']}"
         )
 
