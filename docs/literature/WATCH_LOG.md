@@ -211,3 +211,178 @@ was verified to hold before proposing it (zero candidate artifacts under
   completions, which is a different and narrower thing.
 
 
+## Automated pool drop -- 2026-10-19
+
+> **Unvetted, machine-appended -- nothing here is registered.** These are
+> arXiv search hits that named a surface mechanism in a watched primary
+> category, listed for triage. No paper here has been read, no result is
+> quoted, and no intervention family, maturity label, or gate is touched
+> (`README.md`, rule 7). Curate anything real into a dated curated section
+> under the rules, or delete this drop if it adds nothing.
+
+- window: last 14 day(s) | surfaced: 80 | new: 73 | already in the log: 7 | off-scope: 10
+- source: `.github/workflows/literature-watch.yml` (`watch.py --append-log`: the primary-category gate plus the surface-term screen)
+
+### training-methods
+
+- **CocoRNA: Collective RNA Design with Cooperative Multi-agent Reinforcement Learning** -- `arXiv:2610.23820v1` -- 2026-10-16 -- cs.LG -- matched: reinforcement learning
+  - https://arxiv.org/abs/2610.23820
+- **BMuon: Budgeting Muon's Spectral Geometry for Structured Compressibility** -- `arXiv:2610.23571v1` -- 2026-10-16 -- cs.LG -- matched: optimizer, post-training
+  - https://arxiv.org/abs/2610.23571
+- **Bridging Compressed Communication and Local Steps via Spectral Method in Federated Learning** -- `arXiv:2610.23434v1` -- 2026-10-16 -- cs.LG -- matched: optimizer
+  - https://arxiv.org/abs/2610.23434
+- **How Finite-Rank Bottlenecks Shape the Low-Rank Adaptation Landscape** -- `arXiv:2610.23343v1` -- 2026-10-16 -- cs.LG -- matched: optimizer, fine-tuning
+  - https://arxiv.org/abs/2610.23343
+- **Minimax-optimal Scaling Laws in Ridge Regression via Transfer Learning** -- `arXiv:2610.23337v1` -- 2026-10-16 -- cs.LG -- matched: fine-tuning, scaling law
+  - https://arxiv.org/abs/2610.23337
+
+### compression
+
+- **Explainable Machine Learning Analysis of Temperature Effects on Mechanical Strength of Fiber-Reinforced High-Performance Concrete** -- `arXiv:2610.23811v1` -- 2026-10-16 -- cs.LG -- matched: compress
+  - https://arxiv.org/abs/2610.23811
+- **Escaping Parameter Space: Tight Generalization Bounds via Representation Quality** -- `arXiv:2610.23729v1` -- 2026-10-16 -- cs.LG -- matched: compress
+  - https://arxiv.org/abs/2610.23729
+- **Beyond Expected Values: Risk-Sensitive Planning with Distributional Monte-Carlo Tree Search** -- `arXiv:2610.23565v1` -- 2026-10-16 -- cs.LG -- matched: compress
+  - https://arxiv.org/abs/2610.23565
+- **Uncertainty-aware AI-enabled framework for predicting hydrogen dispersion in confined spaces to enhance operator situational awareness** -- `arXiv:2610.23515v1` -- 2026-10-16 -- cs.LG -- matched: compress
+  - https://arxiv.org/abs/2610.23515
+- **SETAREH Transform: A Sorting-Assisted Haar-Wavelet Sparsification Method for Approximate Inner-Product Computation** -- `arXiv:2610.23338v1` -- 2026-10-16 -- cs.LG -- matched: quantiz, prun
+  - https://arxiv.org/abs/2610.23338
+- **Beyond Marginal Influence: Interaction-Aware Memory Selection for LLM Agents** -- `arXiv:2610.23266v1` -- 2026-10-16 -- cs.LG -- matched: compress
+  - https://arxiv.org/abs/2610.23266
+- **ADT: All-Atom Diffusion Tokenizer for 3D Molecular Structures** -- `arXiv:2610.23265v1` -- 2026-10-16 -- cs.LG -- matched: quantiz
+  - https://arxiv.org/abs/2610.23265
+- **TALLOP: Joint Optimization of Local Training and Communication Compression for Time-Constrained Federated Learning** -- `arXiv:2610.22996v1` -- 2026-10-16 -- cs.LG -- matched: compress
+  - https://arxiv.org/abs/2610.22996
+- **Towards Hyperparameter Transfer for Differentially Private Optimization** -- `arXiv:2610.22976v1` -- 2026-10-16 -- cs.LG -- matched: low-rank
+  - https://arxiv.org/abs/2610.22976
+- **When to Forget: Risk-Controlled Context Adaptation for Long-Horizon Agents** -- `arXiv:2610.22897v1` -- 2026-10-16 -- cs.AI -- matched: compress
+  - https://arxiv.org/abs/2610.22897
+- **ToPA: Block-wise Toeplitz Adaptation for Expressive and Efficient Fine-Tuning** -- `arXiv:2610.22883v1` -- 2026-10-16 -- cs.AI -- matched: low-rank, sparsit
+  - https://arxiv.org/abs/2610.22883
+- **Replay Pruning and Few-Bit Integer Inference for Hardware-Efficient Speed-Sign Recognition** -- `arXiv:2610.22811v1` -- 2026-10-16 -- cs.CV -- matched: prun, compress
+  - https://arxiv.org/abs/2610.22811
+- **Ori: Drift-Aware Streaming $k$-PCA for Very Low-Rank LLM Training** -- `arXiv:2610.22794v1` -- 2026-10-16 -- cs.LG -- matched: low-rank
+  - https://arxiv.org/abs/2610.22794
+- **Reusing Calibration Gains across Model Representations** -- `arXiv:2610.22771v1` -- 2026-10-16 -- cs.LG -- matched: quantiz
+  - https://arxiv.org/abs/2610.22771
+
+### peft-adapters
+
+- **MAS-Bai: Linguistically Informed Adaptive Multi-Agent Translation for Bowen-Script Bai** -- `arXiv:2610.23205v1` -- 2026-10-16 -- cs.CL -- matched: lora
+  - https://arxiv.org/abs/2610.23205
+- **Competence-Based Evaluation of Logical Reasoning in Large Language Models** -- `arXiv:2610.22894v1` -- 2026-10-16 -- cs.CL -- matched: lora
+  - https://arxiv.org/abs/2610.22894
+- **Watermarkability: Measuring and Improving Language-Model Compatibility with Logit-Based Watermarks** -- `arXiv:2610.22810v1` -- 2026-10-16 -- cs.CL -- matched: adapter
+  - https://arxiv.org/abs/2610.22810
+- **alkhder at AlexandriaX-2026: Context-Aware English-to-Dialectal Arabic Dialogue Translation with QLoRA-Fine-Tuned NileChat-3B** -- `arXiv:2610.22525v1` -- 2026-10-15 -- cs.CL -- matched: qlora, adapter
+  - https://arxiv.org/abs/2610.22525
+
+### distillation
+
+- **Beyond the Answer: Student-Conditioned Trace Construction for Reasoning Distillation** -- `arXiv:2610.23831v1` -- 2026-10-16 -- cs.CL -- matched: distillation
+  - https://arxiv.org/abs/2610.23831
+- **Blitz: Accelerating the Diffusion Modules of AlphaFold3 and Boltz-2** -- `arXiv:2610.23703v1` -- 2026-10-16 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.23703
+- **HydraLLM: Adaptive Width Slicing for Elastic Text and Vision-Language Models** -- `arXiv:2610.23455v1` -- 2026-10-16 -- cs.CL -- matched: distillation
+  - https://arxiv.org/abs/2610.23455
+- **A Stronger Teacher Within: Strengthening MoE Models via On-Policy Bidirectional Distillation** -- `arXiv:2610.23185v1` -- 2026-10-16 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.23185
+- **Tree-Aware Posterior Distillation for Long-Horizon Agentic Reinforcement Learning** -- `arXiv:2610.23181v1` -- 2026-10-16 -- cs.LG -- matched: distillation, reward model
+  - https://arxiv.org/abs/2610.23181
+- **Local proxies for memory-efficient training** -- `arXiv:2610.23145v1` -- 2026-10-16 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.23145
+- **GR-OPD: Group-Relative Sequence Credit for On-Policy Distillation** -- `arXiv:2610.23042v1` -- 2026-10-16 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.23042
+- **Normalizing Flow Maps** -- `arXiv:2610.22711v1` -- 2026-10-15 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.22711
+- **Learning the Shared Latent Structure of Cryo-EM Inverse Problems** -- `arXiv:2610.22523v1` -- 2026-10-15 -- cs.CV -- matched: distillation
+  - https://arxiv.org/abs/2610.22523
+- **Predicting Privileged Information Effectiveness for On-Policy Self-Distillation** -- `arXiv:2610.22512v1` -- 2026-10-15 -- cs.LG -- matched: distillation, teacher model
+  - https://arxiv.org/abs/2610.22512
+- **PathFM: Fast Generative Forecasting of Multivariate Trajectories** -- `arXiv:2610.22358v1` -- 2026-10-15 -- cs.LG -- matched: distil
+  - https://arxiv.org/abs/2610.22358
+- **Towards Continual Learning: Mitigating Forgetting With Subspace Tuning** -- `arXiv:2610.22293v1` -- 2026-10-15 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.22293
+- **Progressive Misalignment Can Emerge from Benign Recursive Self-Distillation** -- `arXiv:2610.22467v1` -- 2026-10-15 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.22467
+- **Training-Free On-Policy Distillation** -- `arXiv:2610.22236v1` -- 2026-10-15 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.22236
+- **How Much Physics Can Vision Learn from Audio? Probing and Distilling Damping Structure** -- `arXiv:2610.22221v1` -- 2026-10-15 -- cs.CV -- matched: distillation
+  - https://arxiv.org/abs/2610.22221
+- **Selection Is Not Learning: Choosing Model Futures** -- `arXiv:2610.22029v1` -- 2026-10-15 -- cs.LG -- matched: self-play
+  - https://arxiv.org/abs/2610.22029
+
+### efficient-inference
+
+- **Trajectory-Triggered Sparse Collaborative Decoding** -- `arXiv:2610.23613v1` -- 2026-10-16 -- cs.CL -- matched: speculative decoding, draft model
+  - https://arxiv.org/abs/2610.23613
+- **Peak-Memory Schedules You Can Trust: Exact Realization, Certified Optimality, and the Limits of Recomputation for Inference** -- `arXiv:2610.23328v1` -- 2026-10-16 -- cs.LG -- matched: latency
+  - https://arxiv.org/abs/2610.23328
+- **Sample, Mix, or Verify? Allocating Test-Time Compute under Imperfect Verifiers** -- `arXiv:2610.23255v1` -- 2026-10-16 -- cs.LG -- matched: latency
+  - https://arxiv.org/abs/2610.23255
+- **Edit Discovery in Human-AI Interactions** -- `arXiv:2610.22661v1` -- 2026-10-15 -- cs.LG -- matched: latency
+  - https://arxiv.org/abs/2610.22661
+- **On the SPOT: Enhancing Speculative Decoding for Diffusion Language Models via Commit-Order Prediction** -- `arXiv:2610.22543v1` -- 2026-10-15 -- cs.LG -- matched: speculative decoding, drafter, throughput
+  - https://arxiv.org/abs/2610.22543
+- **TRACE: Transformer Residual Activation Codebook Encoding for Communication-efficient Distributed Edge Inference** -- `arXiv:2610.22435v1` -- 2026-10-15 -- cs.LG -- matched: latency
+  - https://arxiv.org/abs/2610.22435
+- **LoopAhead: Speculating Ahead for Faster Decoding in Looped Language Models** -- `arXiv:2610.21594v1` -- 2026-10-15 -- cs.AI -- matched: speculative decoding, drafter, latency, serving
+  - https://arxiv.org/abs/2610.21594
+- **Trajectory-Level Speculation with Semantic Verification for Tool-Using Agents** -- `arXiv:2610.21463v1` -- 2026-10-15 -- cs.CL -- matched: speculative, latency
+  - https://arxiv.org/abs/2610.21463
+- **HyCo: Hybrid Drafting for Cost-Efficient Mobile-Cloud Speculative Decoding** -- `arXiv:2610.21436v1` -- 2026-10-15 -- cs.CL -- matched: speculative decoding, drafter
+  - https://arxiv.org/abs/2610.21436
+- **Fault Detection and Bit-Error Rate Diagnostics in Optical Wireless Links Using Edge-AI** -- `arXiv:2610.21402v1` -- 2026-10-15 -- cs.LG -- matched: latency
+  - https://arxiv.org/abs/2610.21402
+- **PocketTSLM: Deploying an On-Device Soft-Prompt Time-Series Language Model for Privacy-Preserving Smartphone Reasoning** -- `arXiv:2610.21308v1` -- 2026-10-15 -- cs.LG -- matched: latency, serving
+  - https://arxiv.org/abs/2610.21308
+- **System1-Arena: Which Decisions Can Be Left to System 1?** -- `arXiv:2610.21244v1` -- 2026-10-15 -- cs.CL -- matched: latency
+  - https://arxiv.org/abs/2610.21244
+- **PremiseCheck: Efficient Fact-Checking of Human and AI Peer Reviews** -- `arXiv:2610.21046v1` -- 2026-10-15 -- cs.CL -- matched: latency
+  - https://arxiv.org/abs/2610.21046
+- **How to Train Your Little Dragon: Teaching a Small Language Model to Construct and Refine GPU Optimization Scripts** -- `arXiv:2610.20980v1` -- 2026-10-14 -- cs.LG -- matched: latency, serving
+  - https://arxiv.org/abs/2610.20980
+- **LEV: Thinking Fast and Deep with Looped Decision Models** -- `arXiv:2610.20951v1` -- 2026-10-14 -- cs.AI -- matched: latency
+  - https://arxiv.org/abs/2610.20951
+- **Long-Context Drafting Does Not Require Long-Context Drafters** -- `arXiv:2610.20865v1` -- 2026-10-14 -- cs.LG -- matched: speculative decoding, drafter
+  - https://arxiv.org/abs/2610.20865
+
+### evaluation-integrity
+
+- **SIT-Eval: Situation-Based Interactive Turn-by-Turn Evaluation of Conversational Agents** -- `arXiv:2610.23612v1` -- 2026-10-16 -- cs.CL -- matched: judge
+  - https://arxiv.org/abs/2610.23612
+- **EduWild: How Teacher-Configured Chatbots Fail in Real-World Use and How to Fix Them** -- `arXiv:2610.23530v1` -- 2026-10-16 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.23530
+- **Ignored, Not Refused: What Low Prompt-Injection Success Rates Hide in Small Tool-Using Agents** -- `arXiv:2610.23254v1` -- 2026-10-16 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.23254
+- **MultiAgent-OPD: End-to-End Training of Hierarchical Multi-Agent Systems with On-Policy Distillation** -- `arXiv:2610.23234v1` -- 2026-10-16 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.23234
+- **AI Consilium: a Benchmark of LLM Clinical Multidisciplinary Second Opinions** -- `arXiv:2610.22298v1` -- 2026-10-15 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.22298
+- **Not X, but When: Diagnosing a Mandarin LLM Writing Tic through Contextual Appropriateness** -- `arXiv:2610.22249v1` -- 2026-10-15 -- cs.CL -- matched: llm judge, annotat
+  - https://arxiv.org/abs/2610.22249
+- **SITAR: A Situational Distortion Metric for Automatic Speech Recognition Evaluation** -- `arXiv:2610.21440v1` -- 2026-10-15 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.21440
+- **Judging the Judges: Confidence and Disagreement in Rubrics as Rewards** -- `arXiv:2610.21179v1` -- 2026-10-15 -- cs.LG -- matched: llm judge
+  - https://arxiv.org/abs/2610.21179
+- **Manacá-1B-Instruct-2: Reproducible Safety Alignment for a Native Brazilian-Portuguese LLM. Negative DPO Results, a Controlled Composition Scan, and a Silent Failure Mode of the LLM Judge** -- `arXiv:2610.20570v1` -- 2026-10-14 -- cs.CL -- matched: llm judge, contamination
+  - https://arxiv.org/abs/2610.20570
+- **Equal CER, Unequal Damage: Severity-Weighted Character Error Rate for OCR** -- `arXiv:2610.20461v1` -- 2026-10-14 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.20461
+- **What Makes a Social Agent's Interactions Effective? Learning from Verifiable Outcomes in Paired Worlds** -- `arXiv:2610.20195v1` -- 2026-10-14 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.20195
+- **SoK: Grading Open-Text Legal Answers, from Law School Exams to Trustworthy Rubric Judges** -- `arXiv:2610.19992v1` -- 2026-10-14 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.19992
+- **Qwen-MT-Lumen at WMT2026: Instruction-Specialized Translation via Quality-Aware Training and On-Policy Distillation** -- `arXiv:2610.19758v1` -- 2026-10-14 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.19758
+- **Can LLM Agents Efficiently Identify Appliance Faults? Insights From Diagnosing a Simulated Appliance** -- `arXiv:2610.19291v1` -- 2026-10-13 -- cs.CL -- matched: judge
+  - https://arxiv.org/abs/2610.19291
+- **Fantastic Metrics and How to Find Them: Meta-Evaluating Metrics for Multi-lingual Style-Personalized Generation** -- `arXiv:2610.19166v1` -- 2026-10-13 -- cs.CL -- matched: judge, annotat
+  - https://arxiv.org/abs/2610.19166
+- **ListQA: A Benchmark for Evaluating List-Formatted Factual Knowledge Retrieval in Large Language Models** -- `arXiv:2610.19165v1` -- 2026-10-13 -- cs.AI -- matched: judge
+  - https://arxiv.org/abs/2610.19165
+- **Looking Complete Is Not Being Grounded: Evaluating LLM Sitreps Against Human-Authored Situation Reports** -- `arXiv:2610.18762v1` -- 2026-10-13 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.18762
+- **Copying Is Not Grounding: Training Faithful Long-Form RAG with Authored-Sentence Credit** -- `arXiv:2610.18442v1` -- 2026-10-13 -- cs.CL -- matched: llm judge, evaluator
+  - https://arxiv.org/abs/2610.18442
