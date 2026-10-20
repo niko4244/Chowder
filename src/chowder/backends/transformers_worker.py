@@ -34,7 +34,7 @@ from ..adapter_guard import assert_adapter_is_live
 from ..hf_resilience import cache_status, resolve_model_commit, with_hub_retries
 from ..local_model_compat import patch_transformers5_custom_model
 from .activation_offload_hooks import offload_pack, offload_unpack
-from .moe_transient_grad import TRANSIENT_PLACEMENTS
+from .moe_transient_grad import INT8_PLACEMENTS, TRANSIENT_PLACEMENTS
 from .training_data import (
     _build_chat_example,
     _chat_digest,
@@ -602,6 +602,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         )
         model_kwargs["device_map"] = 0
     expert_placement = getattr(spec, "expert_placement", "resident")
+    int8_experts = expert_placement in INT8_PLACEMENTS
     if expert_placement in TRANSIENT_PLACEMENTS:
         from .moe_transient_grad import split_device_map
 
@@ -610,13 +611,39 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         model_kwargs["device_map"] = split_device_map(
             spec.base_model, revision=spec.revision, local_files_only=spec.offline
         )
+    if int8_experts:
+        if not torch.cuda.is_available():
+            raise RuntimeError(f"expert_placement={expert_placement!r} requires a CUDA device")
+        if getattr(spec, "expert_pinning", "none") == "registered":
+            raise RuntimeError(
+                "expert_pinning='registered' is not supported with "
+                f"expert_placement={expert_placement!r}: the int8 expert buffers are not "
+                "page-locked, so the copies stay synchronous; use expert_pinning='none'"
+            )
 
-    base_model = with_hub_retries(
-        lambda: AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs),
-        label=f"model download for {spec.base_model}",
-    )
+    if int8_experts:
+        # Not ``from_pretrained``: that materialises every bf16 expert on the host
+        # before anything can be quantised, which is the peak this placement removes.
+        from .moe_int8_experts import load_model_int8_experts
+
+        base_model, int8_census = load_model_int8_experts(
+            spec.base_model,
+            device=0,
+            dtype=dtype,
+            local_files_only=spec.offline,
+        )
+    else:
+        base_model = with_hub_retries(
+            lambda: AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs),
+            label=f"model download for {spec.base_model}",
+        )
     expert_placement_evidence: dict[str, Any] = {"placement": expert_placement}
-    if expert_placement in TRANSIENT_PLACEMENTS:
+    if int8_experts:
+        from .moe_int8_experts import prepare_int8_placement
+
+        expert_placement_evidence.update(int8_census)
+        expert_placement_evidence.update(prepare_int8_placement(base_model, device_type="cuda"))
+    elif expert_placement in TRANSIENT_PLACEMENTS:
         from .moe_transient_grad import pin_expert_memory, prepare_split_model
 
         expert_placement_evidence.update(
@@ -640,7 +667,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         def attach(base: Any) -> Any:
             return PeftModel.from_pretrained(base, spec.parent_adapter, is_trainable=True)
 
-        if expert_placement in TRANSIENT_PLACEMENTS:
+        if expert_placement in TRANSIENT_PLACEMENTS or int8_experts:
             from .moe_transient_grad import attach_preserving_split
 
             model = attach_preserving_split(base_model, attach)

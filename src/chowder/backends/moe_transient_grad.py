@@ -34,14 +34,23 @@ from typing import Any
 #: The experts classes this forward replaces (transformers 5.x, 3-D expert params).
 EXPERTS_CLASSES = ("Qwen3MoeExperts", "Qwen3_5MoeExperts")
 
-#: The placements that keep the experts on the CPU and copy them in per layer.
+#: The placements that keep the experts on the CPU as bf16 and copy them in per
+#: layer (per expert, or one matrix per layer).
 TRANSIENT_PLACEMENTS = ("cpu-transient-grad", "cpu-transient-grad-bulk")
+
+#: The int8 variant of the layer-bulk placement: the frozen experts stay in RAM
+#: as int8 + per-row scales and are dequantized on the device after the copy
+#: (moe_int8_experts). It is NOT in ``TRANSIENT_PLACEMENTS``: it does not load
+#: through ``from_pretrained`` + ``split_device_map``, it streams the shards.
+INT8_PLACEMENT = "cpu-transient-grad-int8"
+INT8_PLACEMENTS = (INT8_PLACEMENT,)
 
 #: The worker's expert placements. ``cpu-transient-grad`` is pre-registered in
 #: docs/quals/MOE_TRANSIENT_GRAD_PLACEMENT_PREREG_2026-10-18.md: no campaign may
 #: use it until that note's gates are measured on the real artifact. The bulk
-#: value is the same publication status and the same gates.
-EXPERT_PLACEMENTS = ("resident",) + TRANSIENT_PLACEMENTS
+#: value is the same publication status and the same gates; the int8 placement
+#: needs those gates re-measured (its weights are quantized).
+EXPERT_PLACEMENTS = ("resident",) + TRANSIENT_PLACEMENTS + INT8_PLACEMENTS
 EXPERT_PARAM_INFIX = ".mlp.experts."
 
 
