@@ -42,7 +42,8 @@ LAYERS = 40
 SEQ = 512
 GIB = 1 << 30
 OUTPUT = Path("/kaggle/working/int8_capacity.json")
-DATASET = Path("/kaggle/input/chowder-moe-int8")
+INPUT = Path("/kaggle/input")
+CODE_FILE = Path("src/chowder/backends/moe_int8_experts.py")
 
 
 def log(message: str) -> None:
@@ -89,6 +90,23 @@ def _disk(path: Path) -> dict[str, float]:
         return {"path": str(path), "error": f"{type(error).__name__}: {error}"}
 
 
+def find_dataset() -> Path | None:
+    """The mounted dataset that holds the code, found by content rather than by name.
+
+    ``/kaggle/input/<slug>`` depends on the slug the site assigned, and a hardcoded
+    path fails on a rename with a mount error that hides the real state.
+    """
+    if not INPUT.is_dir():
+        return None
+    for candidate in sorted(INPUT.iterdir()):
+        if (candidate / CODE_FILE).is_file():
+            return candidate
+        for nested in sorted(p for p in candidate.iterdir() if p.is_dir()):
+            if (nested / CODE_FILE).is_file():
+                return nested
+    return None
+
+
 def environment() -> dict:
     """Everything a decision about this placement needs, measured not assumed."""
     meminfo = _meminfo()
@@ -99,7 +117,7 @@ def environment() -> dict:
         "disk_working": _disk(Path("/kaggle/working")),
         "disk_temp": _disk(Path("/kaggle/temp")),
         "python": sys.version.split()[0],
-        "dataset_mounted": DATASET.is_dir(),
+        "inputs": sorted(p.name for p in INPUT.iterdir()) if INPUT.is_dir() else [],
     }
     try:
         env["nvidia_smi"] = subprocess.run(
@@ -116,11 +134,16 @@ def environment() -> dict:
     except (OSError, subprocess.SubprocessError) as error:
         env["nvidia_smi"] = f"{type(error).__name__}: {error}"
 
-    if not DATASET.is_dir():
-        raise SystemExit(f"{DATASET} is not mounted; attach the dataset to this kernel")
+    dataset = find_dataset()
+    if dataset is None:
+        raise SystemExit(
+            f"no mounted dataset under {INPUT} carries {CODE_FILE}; "
+            f"mounted: {sorted(p.name for p in INPUT.iterdir()) if INPUT.is_dir() else []}"
+        )
+    env["dataset"] = str(dataset)
     # The dataset keeps the repo's own layout, so ``chowder`` lives under ``src/``
     # and the batch scripts sit flat beside it.
-    for entry in (DATASET / "src", DATASET / "chowder_batch", DATASET):
+    for entry in (dataset / "src", dataset / "chowder_batch", dataset):
         if entry.is_dir():
             sys.path.insert(0, str(entry))
     import torch
