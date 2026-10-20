@@ -99,11 +99,13 @@ cannot say on its own, in GiB (the table's "GB" labels are GiB):
 - The **30.1 GB peak working set is live data, not a copied grid**: 18.75 of
   int8 stores, 0.07 of scales, 9.09 of non-expert parameters, and ~2.3 of
   interpreter/torch/transformers. A watchdog sampling beside the runner saw peak
-  private bytes of 39.13 GiB, of which 30.1 GiB was resident at the end: the rest
-  is int8 storage committed by `torch.empty` and not yet touched, which is why
-  private bytes read high while the process still fits. For comparison, the
-  branch head before the row-block fix held **37.8 GB** on this artifact with
-  ~20 GB of int8 expected.
+  private bytes of **39.13 GiB** and the loader's own last line reported
+  **36.34 GiB** private as it returned. The gap to the working-set row is int8
+  storage that `torch.empty` commits but the loader has not yet written: committed
+  and resident are different questions on Windows, and only the working-set figure
+  is the one the process actually held. For comparison, the branch head before the
+  row-block fix was reported holding **37.8 GB** (the unit as reported, not
+  re-measured here) against ~20 GB of int8 expected.
 - **The non-expert parameters were materialised in fp32.** Every tensor in the
   shards is BF16, but this multimodal config carries no top-level `dtype`, so
   `_dtype_from_config` falls back to fp32 and the loader upcasts 4.55 GiB of bf16
