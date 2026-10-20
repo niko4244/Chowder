@@ -84,6 +84,7 @@ from chowder.moe_placement_gates import (  # noqa: E402
     EXPERT_PLACEMENT,
     VRAM_GATE_GB,
     PlacementGateError,
+    vram_verdict,
     artifact_identity,
     assert_declaration_allowed,
     code_commit,
@@ -97,6 +98,13 @@ from chowder.moe_placement_gates import (  # noqa: E402
 
 SCHEMA = "chowder.moe-placement-gates.v1"
 ARMS = ("int8", "bulk")
+#: The step's own scoring scores cross-entropy one chunk of positions at a time.
+#: It used to hold ``logits.float().square()`` over the whole sequence: at seq
+#: 2048 x 248320 that is a 508.6M-element bf16 tensor plus two fp32 copies, 4.74
+#: GiB, a third of a 14.5 GB gate spent on an expression no campaign evaluates.
+#: One chunk at a time is what a real step does to fit, so the harness stops
+#: being what decides the peak.
+LOSS_CHUNK_TOKENS = 256
 #: A gate table written by a different artifact cannot back these numbers: the
 #: run refuses to overwrite it until the operator says the baseline moved.
 ARTIFACT_MISMATCH_EXIT = 4
@@ -236,12 +244,57 @@ def _load_bulk(base: Path, device: Any, dtype: Any) -> tuple[Any, dict[str, Any]
 ARM_LOADERS = {"int8": _load_int8, "bulk": _load_bulk}
 
 
-def _placement_steps(model: Any, *, steps: int, seq_len: int, device: Any) -> dict[str, Any]:
+def _step_loss(torch: Any, logits: Any, tokens: Any, *, score_tokens: int = 0) -> Any:
+    """Cross-entropy over the positions this step scores, one chunk at a time.
+
+    ``score_tokens`` 0 scores every position, which is the loss a campaign pays;
+    a small number scores only the last ones. The latter is not the campaign's
+    step and is not used as one: it is the re-run the prereg's rule prescribes
+    when a peak is over the gate only because of the harness, because the
+    gradient still reaches every layer while the head can no longer be the peak.
+    """
+    import torch.nn.functional as functional
+
+    targets = tokens[:, 1:]
+    positions = targets.shape[1]
+    if positions <= 0:
+        raise ValueError(
+            "a placement step needs at least two tokens: the loss predicts the next one, "
+            "so a single-token step has nothing to score and cannot backpropagate"
+        )
+    limit = positions if score_tokens <= 0 else min(int(score_tokens), positions)
+    # The last positions, not the first: those are the ones a generation-shaped
+    # step would report, and scoring them still sends a gradient through every
+    # layer while the head stops being the peak.
+    first = positions - limit
+    vocabulary = logits.shape[-1]
+    total = logits.new_zeros(()).float()
+    counted = 0
+    for start in range(first, positions, LOSS_CHUNK_TOKENS):
+        stop = min(start + LOSS_CHUNK_TOKENS, positions)
+        # float() on the slice makes the contiguous fp32 chunk; nothing materialises
+        # the whole sequence's fp32 logits, which is the point of chunking.
+        chunk = logits[:, start:stop, :].float().reshape(-1, vocabulary)
+        labels = targets[:, start:stop].reshape(-1)
+        total = total + functional.cross_entropy(chunk, labels, reduction="sum")
+        counted += int(labels.numel())
+    return total / max(1, counted)
+
+
+def _placement_steps(
+    model: Any, *, steps: int, seq_len: int, device: Any, score_tokens: int = 0
+) -> dict[str, Any]:
     """Forward + backward through every expert layer, timed per step.
 
     Deliberately not a training step: no LoRA, no optimizer. What it isolates is
     the placement's own cost -- the per-layer host->device copy (and, for int8,
     the dequantisation) in forward and again in the backward recompute.
+
+    Two peaks are taken per step, not one: after the forward and after the
+    backward. Their difference is what the step's own scoring adds, which is the
+    term the prereg's FAIL rule needs to tell a placement that does not fit from
+    a harness standing where the placement should be. No device peak is reported
+    when nothing is stepped -- a load's peak is not the gate's quantity.
     """
     import torch
 
@@ -252,6 +305,9 @@ def _placement_steps(model: Any, *, steps: int, seq_len: int, device: Any) -> di
             "seq_len": seq_len,
             "step_seconds": [],
             "s_per_step": None,
+            "peak_vram_gb": None,
+            "forward_peak_gb": None,
+            "harness_marginal_gb": None,
             "includes_lora": False,
             "includes_optimizer": False,
             "gradient_on_inputs_embeds": False,
@@ -261,26 +317,49 @@ def _placement_steps(model: Any, *, steps: int, seq_len: int, device: Any) -> di
     generator = torch.Generator().manual_seed(0)
     tokens = torch.randint(0, vocabulary, (1, seq_len), generator=generator).to(device)
     embedding = model.get_input_embeddings()
+    has_cuda = device.type == "cuda"
 
     times: list[float] = []
+    peaks: list[float] = []
+    forward_peaks: list[float] = []
     for _ in range(steps):
-        if device.type == "cuda":
+        if has_cuda:
             torch.cuda.synchronize()
+            # Per step, so the forward's peak on step 3 is step 3's and not the
+            # high-water mark of step 1's backward.
+            torch.cuda.reset_peak_memory_stats(device)
         start = time.perf_counter()
         hidden = embedding(tokens).detach().requires_grad_(True)
         with torch.enable_grad():
-            loss = model(inputs_embeds=hidden, use_cache=False).logits.float().square().mean()
+            logits = model(inputs_embeds=hidden, use_cache=False).logits
+            if has_cuda:
+                forward_peaks.append(torch.cuda.max_memory_allocated(device) / 2**30)
+            loss = _step_loss(torch, logits, tokens, score_tokens=score_tokens)
             loss.backward()
-        if device.type == "cuda":
+        if has_cuda:
             torch.cuda.synchronize()
+            peaks.append(torch.cuda.max_memory_allocated(device) / 2**30)
         times.append(time.perf_counter() - start)
         model.zero_grad(set_to_none=True)
+        del logits, loss, hidden
 
+    peak = max(peaks) if peaks else None
+    forward_peak = max(forward_peaks) if forward_peaks else None
     return {
         "steps": steps,
         "seq_len": seq_len,
         "step_seconds": [round(value, 4) for value in times],
         "s_per_step": round(sum(times) / len(times), 4) if times else None,
+        "peak_vram_gb": None if peak is None else round(peak, 3),
+        "forward_peak_gb": None if forward_peak is None else round(forward_peak, 3),
+        "harness_marginal_gb": (
+            None if peak is None or forward_peak is None else round(max(0.0, peak - forward_peak), 3)
+        ),
+        "score": {
+            "kind": "cross-entropy, chunked",
+            "chunk_tokens": LOSS_CHUNK_TOKENS,
+            "positions": (seq_len - 1) if score_tokens <= 0 else min(int(score_tokens), seq_len - 1),
+        },
         "includes_lora": False,
         "includes_optimizer": False,
         "gradient_on_inputs_embeds": True,
@@ -288,12 +367,16 @@ def _placement_steps(model: Any, *, steps: int, seq_len: int, device: Any) -> di
 
 
 def _vram(torch: Any, device: Any) -> dict[str, Any]:
+    """Reserved bytes: what the allocator held, spill or no spill.
+
+    The allocated peak is not read here any more. It belongs to ``_placement_steps``,
+    which measures it per step and -- with ``--steps 0`` -- reports none at all: a
+    load's peak is not the gate's quantity, and reporting it as ``memory_vram``
+    would make a census-only run look like a measured step.
+    """
     if device.type != "cuda":
-        return {"peak_vram_gb": None, "reserved_gb": None}
-    return {
-        "peak_vram_gb": round(torch.cuda.max_memory_allocated(device) / 2**30, 3),
-        "reserved_gb": round(torch.cuda.max_memory_reserved(device) / 2**30, 3),
-    }
+        return {"reserved_gb": None}
+    return {"reserved_gb": round(torch.cuda.max_memory_reserved(device) / 2**30, 3)}
 
 
 def run_arm(
@@ -305,6 +388,7 @@ def run_arm(
     steps: int,
     seq_len: int,
     gradient_checkpointing: bool = True,
+    score_tokens: int = 0,
 ) -> dict[str, Any]:
     import torch
 
@@ -327,6 +411,11 @@ def run_arm(
         "arm": arm,
         "load_seconds": round(load_seconds, 3),
         "load_peak_rss_gb": _gib(load_rss),
+        "load_peak_vram_gb": (
+            round(torch.cuda.max_memory_allocated(device) / 2**30, 3)
+            if device.type == "cuda"
+            else None
+        ),
         "gradient_checkpointing": bool(gradient_checkpointing),
         "census": census,
     }
@@ -336,21 +425,37 @@ def run_arm(
             "patched_expert_modules": census.get("patched_expert_modules"),
         }
 
-    result.update(_placement_steps(model, steps=steps, seq_len=seq_len, device=device))
+    result.update(
+        _placement_steps(model, steps=steps, seq_len=seq_len, device=device, score_tokens=score_tokens)
+    )
     result.update(_vram(torch, device))
     result["total_peak_rss_gb"] = _gib(_peak_rss_bytes())
+    verdict = vram_verdict(
+        peak_gb=result.get("peak_vram_gb"),
+        harness_gb=result.get("harness_marginal_gb"),
+    )
+    result["vram_verdict"] = verdict
     result["gates"] = {
         "load_census": "measured",
         "memory_vram": (
             "measured"
             if result["peak_vram_gb"] is not None
-            else "not measured (CPU arm)"
+            else (
+                "not measured (--steps 0: census only)"
+                if steps <= 0
+                else "not measured (CPU arm)"
+            )
         ),
+        # ``harness-bound`` is not a pass: the placement has not been shown to
+        # fit, it has been shown that the harness can hide whether it does. The
+        # declaration rule refuses either way, and the table says which one it
+        # was, so the first measured run cannot be re-read as the other later.
         "memory_vram_pass": (
             None
-            if result["peak_vram_gb"] is None
-            else bool(result["peak_vram_gb"] <= VRAM_GATE_GB)
+            if verdict["verdict"] == "not measured"
+            else bool(verdict["verdict"] == "pass")
         ),
+        "memory_vram_verdict": verdict["verdict"],
         "host_rss": "measured",
         "throughput": (
             "not measured (--steps 0: census only)"
@@ -374,10 +479,13 @@ def run(
     steps: int,
     seq_len: int,
     gradient_checkpointing: bool = True,
+    score_tokens: int = 0,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
         "schema": SCHEMA,
         "gradient_checkpointing": bool(gradient_checkpointing),
+        "score_tokens": int(score_tokens),
+        "loss": "cross-entropy, chunked",
         "base_model": str(base),
         "device": str(device),
         "dtype": str(dtype) if dtype is not None else "auto (the checkpoint's)",
@@ -404,6 +512,7 @@ def run(
             steps=steps,
             seq_len=seq_len,
             gradient_checkpointing=gradient_checkpointing,
+            score_tokens=score_tokens,
         )
     return record
 
@@ -711,6 +820,16 @@ def main(argv: list[str] | None = None) -> int:
             "(the gate's definition; --no-gradient-checkpointing measures the eager step)"
         ),
     )
+    parser.add_argument(
+        "--score-tokens",
+        type=int,
+        default=0,
+        help=(
+            "positions the step scores (0 = every position, chunked at %d); --score-tokens 1 is "
+            "the re-run the FAIL rule prescribes when a peak is over only because of the harness"
+            % LOSS_CHUNK_TOKENS
+        ),
+    )
     parser.add_argument("--self-check", action="store_true", help="tiny synthetic checkpoint, CPU, then print the record")
     parser.add_argument("--prereg", default="", help=f"prereg document to update (default {DEFAULT_PREREG})")
     parser.add_argument("--check", action="store_true", help="compare against the prereg table and write nothing")
@@ -843,6 +962,7 @@ def main(argv: list[str] | None = None) -> int:
             steps=args.steps,
             seq_len=args.seq_len,
             gradient_checkpointing=args.gradient_checkpointing,
+            score_tokens=args.score_tokens,
         )
     except Exception as error:  # a failed arm is a refusal, not a record with holes
         # The stack, not only the message: a failure inside a loader is

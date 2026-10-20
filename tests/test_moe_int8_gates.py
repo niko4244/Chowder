@@ -118,6 +118,73 @@ def record(
     }
 
 
+# --- what a peak means, decided before the run -------------------------------
+
+
+def test_the_vram_rule_separates_a_placement_that_does_not_fit_from_a_harness():
+    """The rule the prereg registers: a step over the gate only because of its own
+    scoring expression is neither a pass nor a fail, and it prescribes the re-run
+    that settles it. No attribution is assumed when the harness was not measured."""
+    passing = mpg.vram_verdict(peak_gb=10.0)
+    assert passing["verdict"] == "pass" and passing["next_action"] == "none"
+    assert mpg.vram_verdict(peak_gb=15.5, harness_gb=0.2)["verdict"] == "FAIL"
+    bound = mpg.vram_verdict(peak_gb=15.5, harness_gb=2.0)
+    assert bound["verdict"] == "harness-bound"
+    assert "score-tokens 1" in bound["next_action"]
+    # No measured harness term means no subtraction: an over-gate peak is a FAIL.
+    assert mpg.vram_verdict(peak_gb=15.5)["verdict"] == "FAIL"
+    assert mpg.vram_verdict(peak_gb=None)["verdict"] == "not measured"
+
+
+def test_the_table_row_carries_the_verdict_and_the_harness_share():
+    """A reader of the table must see which of the two over-gate readings they got,
+    and how much of the peak was the step's own loss."""
+    harness_bound = record(peak_vram=15.5)
+    arm = harness_bound["arms"]["int8"]
+    arm["harness_marginal_gb"] = 2.0
+    arm["gates"]["memory_vram_verdict"] = "harness-bound"
+    arm["gates"]["memory_vram_pass"] = False
+    row = dict((gate, (value, verdict)) for gate, value, verdict in mpg.gate_rows(harness_bound))
+    value, verdict = row["memory_vram"]
+    assert verdict == "harness-bound"
+    assert "15.5 GB peak" in value and "2.0 GB of it the step's own loss" in value
+
+    # A record written before the rule existed keeps its own boolean reading.
+    legacy = record(peak_vram=15.5)["arms"]["int8"]["gates"]
+    assert "memory_vram_verdict" not in legacy
+    rows = dict((gate, verdict) for gate, _value, verdict in mpg.gate_rows(record(peak_vram=15.5)))
+    assert rows["memory_vram"] == "FAIL"
+
+
+def test_the_step_scores_cross_entropy_in_chunks_and_matches_the_sequence_loss():
+    """Chunking must not change the loss: same targets, same values, a different
+    amount of memory held at once. And scoring one position must score the last
+    one -- the position a generation-shaped step reports."""
+    import torch
+    import torch.nn.functional as functional
+
+    torch.manual_seed(0)
+    logits = torch.randn(1, 9, 13, dtype=torch.bfloat16, requires_grad=True)
+    tokens = torch.randint(0, 13, (1, 9))
+    reference = functional.cross_entropy(
+        logits[:, :-1].float().reshape(-1, 13), tokens[:, 1:].reshape(-1)
+    )
+    chunked = gates._step_loss(torch, logits, tokens)
+    assert chunked.item() == pytest.approx(reference.item(), rel=1e-5)
+
+    last = functional.cross_entropy(
+        logits[:, -2:-1].float().reshape(-1, 13), tokens[:, -1:].reshape(-1)
+    )
+    assert gates._step_loss(torch, logits, tokens, score_tokens=1).item() == pytest.approx(
+        last.item(), rel=1e-5
+    )
+
+    # One token scores nothing, so the step cannot be built: say so rather than
+    # record a loss with no gradient behind it.
+    with pytest.raises(ValueError, match="at least two tokens"):
+        gates._step_loss(torch, logits[:, :1], tokens[:, :1])
+
+
 def clause(text, **kwargs):
     return mpg.splice_block(text, mpg.render_block(record(**kwargs)))
 

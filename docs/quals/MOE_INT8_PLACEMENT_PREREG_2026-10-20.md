@@ -59,7 +59,7 @@ the only way those rows ever stop saying "not measured".
 | Gate | Measured as | Pass |
 |---|---|---|
 | `load_census` | The loader's own live census: expert bytes resident as int8 + scales, modules patched, live bf16 expert parameters left on the model | Every routed-expert parameter is an int8 CPU buffer with **0** live bf16 expert parameters. The census is an assertion, not a report: a placement that did not happen raises in the loader rather than recording a row |
-| `memory_vram` | Peak allocated VRAM per **placement step** (forward + backward on `inputs_embeds` through every expert layer, with per-layer recompute as a worker run does it, no LoRA, no optimizer) | Peak ≤ **14.5 GB** on the 16 GB card, with no WDDM shared-memory spill |
+| `memory_vram` | Peak allocated VRAM per **placement step** (forward + backward on `inputs_embeds` through every expert layer, with per-layer recompute as a worker run does it, no LoRA, no optimizer, scoring chunked cross-entropy) | Peak ≤ **14.5 GB** on the 16 GB card, with no WDDM shared-memory spill. Three answers, not two: a peak over the gate only because of the step's own scoring is `harness-bound`, defined under "What a FAIL means", and is not a pass |
 | `host_rss` | Process peak working set across load and steps | The number is recorded and compared run-to-run (a >10% growth is a regression). The design budget is 24 GB: anything that keeps the bf16 experts resident cannot be under ~40 GB, so a peak far above 24 GB means the int8 grid was copied |
 | `throughput` | The same placement step, timed | Recorded, and a >10% regression fails the run. Go/no-go is the worker's own measured s/step against the 2.5 GPU-h per-recipe ceiling — this runner measures the placement, never a training step |
 | `gradient` | The LoRA B gradients of the **first** step whose backward populated `.grad`, read once: for the first, middle and last decoder layer that holds a LoRA leaf, every leaf's gradient | All leaves present, all finite, all with a non-zero peak. A layer with no LoRA leaf fails the gate |
@@ -198,9 +198,9 @@ census' 4.55, and therefore a 23.37 GiB host-resident total against the recorded
 25.56 peak -- the 2.19 GiB gap being interpreter + torch, which is the same
 figure the census note above attributes. The device terms are the ones the card
 would have to hold: 0.94 GiB for one layer's dequantized experts, 0.06 GiB of
-row-block scratch, a step's weights floor of 5.54 GiB, and 4.74 GiB more for the
-gate's own loss expression (logits + `.float()` copy + `.square()`), i.e. 10.27
-GiB before a single activation. Without a measured activation term that row reads
+row-block scratch, a step's weights floor of 5.54 GiB, and 1.66 GiB more for the
+step's own scoring (the logits the model returns plus one 256-position chunk of
+cross-entropy), i.e. 7.20 GiB before a single activation. Without a measured activation term that row reads
 `unsized` rather than silently standing in a zero; with `--activations-gib` from
 the probe below it becomes a total. A recorded number that cannot be reconciled
 with this arithmetic makes the mode exit 5 rather than print both figures as if
@@ -222,7 +222,7 @@ sequence lengths per kind give a line, `bytes = fixed + slope x seq`:
 
 That is 5.01 GiB for the whole 40-layer model at seq 128, 12.38 GiB at seq 512
 and **41.86 GiB at seq 2048**. The gate's own placement step therefore projects
-to 5.54 + 41.86 + 4.74 = **52.13 GiB**, not the 10.27 that weights alone suggest:
+to 5.54 + 41.86 + 1.66 = **49.06 GiB**, not the 7.20 that weights alone suggest:
 the activation term is eight times the weight floor and 3.6x the 14.5 GB gate on
 its own. (Upper bounds: overlapping views of one storage are counted separately.
 The seq-2048 column is the fitted line, not a measurement, and the line was
@@ -260,12 +260,13 @@ other side of the same layer, at seq 128 and 512 and fitted to 2048:
 | one layer being recomputed in backward | -- | 1.28 |
 
 So the gate's step projects to 5.54 (weights) + 1.56 (inputs retained at layer
-boundaries) + 1.28 (the layer being recomputed) + 4.74 (the gate's own loss) =
-**13.12 GiB at seq 2048**, inside the 14.5 GB gate by about 1.4 GiB, where the
-eager step was 52.13 GiB, 3.6x over. At seq 512 it is 7.48 GiB. What the headroom
-consists of matters: 4.74 GiB of that total is `logits.float().square()`, which a
-real cross-entropy step would not pay (1.89 instead), so the gate is close to the
-card for a reason the placement does not own.
+boundaries) + 1.28 (the layer being recomputed) + 1.66 (the step's own scoring) =
+**10.04 GiB at seq 2048**, inside the 14.5 GB gate by 4.46 GiB, where the eager
+step was 49.06 GiB, 3.4x over. At seq 512 it is 7.25 GiB. The scoring term still
+belongs in the total -- a step has to score something -- but it no longer decides
+the answer, and it is now a fixed size rather than a function of the sequence:
+the whole-sequence `logits.float().square()` it replaced held 4.74 GiB, a third
+of the gate spent on an expression no campaign evaluates.
 
 **Reachability, computed rather than summed in a paragraph.** Those four terms
 are no longer hand-added: `--project-only` composes the activation term from the
@@ -278,24 +279,50 @@ python chowder_batch/moe_int8_gates.py --project-only \
 ```
 
 which prints `activations: layer inputs + one layer re-run 2.85`, `step total:
-floor + checkpointed activations + gate loss 13.12` and `gate 14.5 GB: 13.12 GiB
-projected, 1.38 GiB under -- reachable` (exit 0; a projected step over the gate
+floor + checkpointed activations + scoring 10.04` and `gate 14.5 GB: 10.04 GiB
+projected, 4.46 GiB under -- reachable` (exit 0; a projected step over the gate
 exits 6, so "reachable" cannot print beside the code that means otherwise). The
 records are the same probe run with and without `--gradient-checkpointing`, and
 the runner refuses a swapped pair, a record that does not say which step it
 measured, and a record missing a layer kind -- each of those would print a
 plausible number for a step no campaign runs. What it adds is the 1.56 GiB
 retained and the 1.28 GiB of the layer in re-run, on top of the 5.54 GiB floor
-and 4.74 GiB gate loss the header projection already derived; on the same
-artifact the total is 13.12 GiB against the 14.5 GB gate.
+and 1.66 GiB of scoring the header projection already derived; on the same
+artifact the total is 10.04 GiB against the 14.5 GB gate.
 
 Also settled by the attempt, and it is the same point: `--steps 3 --seq-len 2048`
 was run on 2026-10-20 and **refused**, exit 2 in 8 s -- "cuda device has 2.39 GiB
 free of 15.93 GiB, below the 6.0 GiB this runner will not step under" (the
 training run still holds the card: 13.9 of 16.3 GB used, 8% utilisation). No peak
 was taken, and `memory_vram` stays `not measured` until one is: this is the step
-it will record, and 1.38 GiB of margin is a number to watch rather than headroom
-to spend.
+it will record, and 4.46 GiB of margin is the first headroom on this gate that
+belongs to the placement rather than to the harness.
+
+**What a FAIL means, decided before the run.** `memory_vram` has three answers,
+not two, because the step scores a loss of its own: a peak over the gate can be
+the placement's fault or the harness's, and after the fact both readings are
+plausible. The rule is fixed here, while no card measurement exists:
+
+| outcome | condition | what it obliges |
+|---|---|---|
+| `pass` | peak <= 14.5 GB | the gate is met |
+| `FAIL` | peak > 14.5 GB and (peak - harness) > 14.5 GB | do not declare the placement |
+| `harness-bound` | peak > 14.5 GB, but not once the harness is taken off | one prescribed re-run, whose verdict is final |
+
+`harness` is `harness_marginal_gb` in the record: the step's peak allocated
+memory after the backward minus the peak after the forward, both taken per step,
+so it is what this run's scoring actually added rather than an estimate. A run
+that cannot report it cannot attribute, and an over-gate peak is then a `FAIL`.
+The `harness-bound` re-run is `--score-tokens 1`: the same forward and backward
+through every layer, scoring the last position only, so the head cannot be the
+peak. If that run is over the gate, the placement is over.
+
+Two things the rule deliberately cannot do. It cannot become a pass: a
+`harness-bound` peak leaves `memory_vram_pass` false and the declaration rule
+refuses, because the placement has not been shown to fit. And it cannot adjust a
+number: the peak recorded and printed is the peak measured, never a corrected
+one, with the harness term beside it rather than subtracted into it -- a table
+whose measurement has been edited is a table with no measurements in it.
 
 **Numerics.** The weights are the same values either way -- the shards are BF16
 and fp32 storage was an exact upcast -- but the compute dtype changes: bf16

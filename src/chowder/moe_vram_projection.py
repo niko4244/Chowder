@@ -242,16 +242,28 @@ def inventory(base: str | Path, *, dtype: str) -> dict[str, Any]:
     }
 
 
-def gate_loss_bytes(*, seq_len: int, vocab_size: int, itemsize: int) -> int:
-    """The peak of the gate's own ``logits.float().square().mean()``.
+#: Positions per chunk in the step's own cross-entropy. Kept equal to the
+#: runner's ``LOSS_CHUNK_TOKENS``: a projection that sized a whole-sequence
+#: expression would describe a harness the runner no longer uses.
+LOSS_CHUNK_TOKENS = 256
 
-    With fp32 logits ``.float()`` is a no-op and ``.square()`` adds one fp32 copy.
-    With bf16 logits it materialises a second fp32 tensor, which is why this term
-    grows when the dtype fix lands -- a real cross-entropy step would not pay it.
+
+def gate_loss_bytes(
+    *, seq_len: int, vocab_size: int, itemsize: int, chunk_tokens: int = LOSS_CHUNK_TOKENS
+) -> int:
+    """What the step's own scoring adds: the logits, and one chunk of cross-entropy.
+
+    The model returns logits for every position whichever loss follows it, and a
+    campaign pays that, so the logits stay in. What the old expression added on
+    top was two fp32 copies of the *whole sequence* -- ``.float()`` then
+    ``.square()``, 3.79 GiB at seq 2048 x 248320 -- which no campaign evaluates.
+    Chunked cross-entropy keeps one chunk's fp32 logits, its log-softmax and the
+    gradient that comes back through it live instead: fixed-size, so the harness
+    can no longer be what decides the peak.
     """
     elements = int(seq_len) * int(vocab_size)
-    copies = 1 if itemsize == 4 else 2
-    return elements * itemsize + copies * elements * 4
+    chunk = min(int(chunk_tokens), int(seq_len))
+    return elements * itemsize + 3 * chunk * int(vocab_size) * 4
 
 
 def _line_bytes(fit: dict[str, Any], seq_len: int) -> int | None:
@@ -549,11 +561,11 @@ def render(
             "int8 block + fp32 product + cast",
         ),
         (
-            "gate loss: logits + fp32 copy + square",
+            "scoring: logits + one chunk of cross-entropy",
             _cell(proj_gate),
             "-",
             "-",
-            "the gate's own expression, not a CE step",
+            f"{LOSS_CHUNK_TOKENS} positions at a time, as a campaign must",
         ),
         (
             "step VRAM floor (weights + one layer + block)",
@@ -563,7 +575,7 @@ def render(
             "a peak cannot be below this",
         ),
         (
-            "step VRAM floor with the gate's loss term",
+            "step VRAM floor with the step's own scoring",
             _cell(proj_floor_gate),
             _cell(recorded.get("step_vram")),
             delta(proj_floor_gate, recorded.get("step_vram")),
@@ -593,9 +605,9 @@ def render(
         rows.append(
             (
                 (
-                    "step total: floor + checkpointed activations + gate loss"
+                    "step total: floor + checkpointed activations + scoring"
                     if checkpointed
-                    else "step total: floor + activations + gate loss"
+                    else "step total: floor + activations + scoring"
                 ),
                 _cell(proj_total),
                 _cell(recorded.get("step_vram")),

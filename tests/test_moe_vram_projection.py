@@ -144,6 +144,20 @@ def test_a_measured_activation_term_turns_the_floor_into_a_total(monkeypatch, tm
     assert "unsized" not in text
 
 
+def test_the_scoring_term_is_one_chunk_not_two_copies_of_the_sequence():
+    """The old expression materialised the whole sequence twice in fp32; a chunked
+    cross-entropy holds one chunk. At the run's seq 2048 and vocab 248320 that is
+    the difference between a third of the gate and a seventh of it."""
+    seq, vocab = 2048, 248320
+    elements = seq * vocab
+    old = elements * 2 + 2 * elements * 4          # bf16 logits + float() + square()
+    new = mvp.gate_loss_bytes(seq_len=seq, vocab_size=vocab, itemsize=2)
+    assert new / mvp.GIB == pytest.approx(1.66, abs=0.05)
+    assert new < 0.4 * old
+    # The logits stay: a campaign's own step produces them too.
+    assert new > elements * 2
+
+
 def test_the_rendered_projection_names_the_rows_it_will_not_size(monkeypatch, tmp_path):
     base = fake_checkpoint(monkeypatch, tmp_path, fused_header())
     projection = mvp.project(mvp.inventory(base, dtype="bfloat16"), seq_len=16, vocab_size=32)

@@ -68,6 +68,87 @@ WITNESS_VERDICTS = ("pass", "FAIL", "not measured")
 #: against the recorded one.
 SIZE_GATES = ("memory_vram", "throughput", "load_census", "host_rss")
 
+#: The answers the VRAM gate has. ``harness-bound`` exists because the step
+#: scores a loss of its own, and a step that is over the gate only because of
+#: that scoring answers a different question than the placement does.
+VRAM_VERDICTS = ("pass", "FAIL", "harness-bound", "not measured")
+
+
+def vram_verdict(
+    *,
+    peak_gb: float | None,
+    harness_gb: float | None = None,
+    gate_gb: float = VRAM_GATE_GB,
+) -> dict[str, Any]:
+    """The VRAM gate's answer under the rule the prereg registered before any run.
+
+    A peak says nothing on its own: the step also scores a loss. The rule, fixed
+    in advance so the first measured run cannot be argued either way afterwards:
+
+    * ``pass`` -- peak <= gate.
+    * ``FAIL`` -- peak > gate *and* peak minus the scoring's own marginal growth
+      is still over the gate: the placement is over with its harness removed.
+    * ``harness-bound`` -- over the gate, but not once the harness is taken off.
+      Neither answer: it prescribes the re-run that scores a single position --
+      the same backward through every layer, a head that can no longer be the
+      peak -- and that run's verdict is final.
+
+    ``harness_gb`` absent means the run could not say what its own scoring cost,
+    and then an over-gate peak is a ``FAIL``: attribution is not assumed. The
+    measured peak is never adjusted and never recorded as a corrected number;
+    only the verdict reads the harness term.
+    """
+    if peak_gb is None:
+        return {
+            "verdict": "not measured",
+            "peak_gb": None,
+            "harness_gb": harness_gb,
+            "gate_gb": gate_gb,
+            "basis": "no device peak was taken",
+            "next_action": "run --steps 3 on a free card",
+        }
+    peak = float(peak_gb)
+    if peak <= gate_gb:
+        return {
+            "verdict": "pass",
+            "peak_gb": peak,
+            "harness_gb": harness_gb,
+            "gate_gb": gate_gb,
+            "basis": f"peak {peak:.2f} GB is within the {gate_gb} GB gate",
+            "next_action": "none",
+        }
+    placement = None if harness_gb is None else peak - float(harness_gb)
+    if placement is not None and placement <= gate_gb:
+        return {
+            "verdict": "harness-bound",
+            "peak_gb": peak,
+            "harness_gb": harness_gb,
+            "gate_gb": gate_gb,
+            "basis": (
+                f"peak {peak:.2f} GB is over, but {float(harness_gb):.2f} GB of it is the "
+                f"step's own scoring; the placement alone is {placement:.2f} GB"
+            ),
+            "next_action": (
+                "re-run with --score-tokens 1: the same backward through every layer with "
+                "a head that cannot be the peak, and that run's verdict is final"
+            ),
+        }
+    return {
+        "verdict": "FAIL",
+        "peak_gb": peak,
+        "harness_gb": harness_gb,
+        "gate_gb": gate_gb,
+        "basis": (
+            f"peak {peak:.2f} GB is over the {gate_gb} GB gate"
+            if placement is None
+            else (
+                f"peak {peak:.2f} GB is over, and the placement is still {placement:.2f} GB "
+                f"once the {float(harness_gb):.2f} GB of scoring is taken off"
+            )
+        ),
+        "next_action": "do not declare the placement; shrink what has to be resident",
+    }
+
 
 class PlacementGateError(ValueError):
     """A declaration backed by a table that cannot support it."""
@@ -142,17 +223,28 @@ def gate_rows(record: dict[str, Any], *, placement: str = EXPERT_PLACEMENT) -> l
     checkpointed = record.get("gradient_checkpointing")
     step_kind = "" if checkpointed is None else ("checkpointed" if checkpointed else "eager")
     peak = arm.get("peak_vram_gb")
+    harness = arm.get("harness_marginal_gb")
+    verdict = gates.get("memory_vram_verdict")
+    if verdict is None:
+        # Records written before the rule existed keep their own reading: the
+        # boolean is all they carry, and inventing a verdict for them would be
+        # attributing a peak to a harness that was never measured.
+        verdict = (
+            "not measured"
+            if peak is None or gates.get("memory_vram_pass") is None
+            else ("pass" if gates["memory_vram_pass"] else "FAIL")
+        )
+    scoring = "" if harness is None else f", {harness} GB of it the step's own loss"
     rows.append(
         (
             "memory_vram",
             "not measured (CPU arm)"
             if peak is None
-            else f"{peak} GB peak (gate <= {VRAM_GATE_GB} GB{', ' + step_kind if step_kind else ''})",
-            (
-                "not measured"
-                if peak is None or gates.get("memory_vram_pass") is None
-                else ("pass" if gates["memory_vram_pass"] else "FAIL")
+            else (
+                f"{peak} GB peak (gate <= {VRAM_GATE_GB} GB"
+                f"{', ' + step_kind if step_kind else ''}{scoring})"
             ),
+            verdict,
         )
     )
     rows.append(
