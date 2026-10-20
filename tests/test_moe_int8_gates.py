@@ -141,6 +141,15 @@ def test_rendered_block_reads_back_with_its_numbers():
     assert parsed["config_sha256"] == "a" * 64
 
 
+def test_a_record_without_the_comparison_arm_says_so():
+    """`--arms int8` runs one arm; the block must not print `None s` for the other."""
+    record_ = record()
+    record_["arms"].pop("bulk")
+    block = mpg.render_block(record_)
+    assert "bulk comparison arm: not measured" in block
+    assert "None s" not in block
+
+
 def test_splicing_a_measurement_leaves_the_prose_alone():
     measured = clause(PLACEHOLDER)
     assert "Prose an operator wrote, which no run may rewrite." in measured

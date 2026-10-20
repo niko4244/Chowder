@@ -17,8 +17,10 @@ explicit "not measured" when this runner cannot answer it:
                   optimizer, so it is the cost of the placement, not of a training
                   step. The prereg's throughput gate is a worker run.
 
-``gradient``, ``smoke`` and ``router_balance`` need a dataset and a real
-fine-tune; this runner reports them as not measured rather than guessing.
+``gradient``, ``smoke``, ``router_balance`` and ``wddm_spill`` need a dataset and
+a real fine-tune, so this runner reports them as not measured rather than
+guessing -- and ``--witness`` is how a worker run's own record of them gets into
+the table (``chowder.placement_witnesses`` produces it from the run).
 
 WDDM shared-memory spill is not observable from here either: the record carries
 ``peak_vram_gb`` and ``reserved_gb`` and leaves the spill verdict to the operator.
@@ -58,15 +60,20 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))  # noqa: E402
 
 from chowder.moe_placement_gates import (  # noqa: E402
+    ALL_GATES,
     DEFAULT_PREREG,
     EXPERT_PLACEMENT,
     VRAM_GATE_GB,
+    PlacementGateError,
     artifact_identity,
+    assert_declaration_allowed,
+    code_commit,
     parse_block,
     regressions,
     render_block,
     resolve_prereg_path,
     splice_block,
+    splice_witness_rows,
 )
 
 SCHEMA = "chowder.moe-placement-gates.v1"
@@ -286,7 +293,7 @@ def run(
         "vram_gate_gb": VRAM_GATE_GB,
         "artifact": artifact_identity(base),
         "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "code_commit": _code_commit(),
+        "code_commit": code_commit(),
         "steps": steps,
         "seq_len": seq_len,
         "arms": {},
@@ -309,18 +316,6 @@ def run(
 # is allowed to declare the placement at all. The runner replaces only that
 # block, so the prose (and the gate definitions) stay authored by hand while the
 # numbers cannot drift from the last measurement.
-
-
-def _code_commit() -> str | None:
-    import subprocess
-
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=10
-        )
-        return completed.stdout.strip() or None if completed.returncode == 0 else None
-    except Exception:
-        return None
 
 
 def _self_check_workspace() -> Path:
@@ -349,6 +344,66 @@ def _self_check_workspace() -> Path:
     return directory
 
 
+def _record_witness(args: argparse.Namespace) -> int:
+    """Record a worker run's four gates in the table. No model, no device."""
+    try:
+        witness = json.loads(Path(args.witness).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        print(f"cannot read the witness file {args.witness}: {error}", file=sys.stderr)
+        return 2
+    if not isinstance(witness, dict):
+        print(f"{args.witness} is not a witness record (expected a JSON object)", file=sys.stderr)
+        return 2
+    if args.spill_verdict:
+        if not args.spill_basis.strip():
+            print(
+                "--spill-verdict needs --spill-basis: nobody can observe driver paging "
+                "from PyTorch, so the verdict must name what it rests on",
+                file=sys.stderr,
+            )
+            return 2
+        gates = dict(witness.get("gates") or {})
+        gates["wddm_spill"] = {
+            "value": f"operator {args.spill_verdict}: {args.spill_basis.strip()}",
+            "verdict": args.spill_verdict,
+            "evidence": {"basis": args.spill_basis.strip()},
+        }
+        witness["gates"] = gates
+
+    prereg = resolve_prereg_path(args.prereg)
+    if prereg is None or not prereg.is_file():
+        print(
+            f"no gate table to record into at {prereg or DEFAULT_PREREG}; run this "
+            "runner against the base model first, so the table is bound to an artifact",
+            file=sys.stderr,
+        )
+        return 2
+    document = prereg.read_text(encoding="utf-8")
+    try:
+        updated, recorded = splice_witness_rows(document, witness)
+    except PlacementGateError as error:
+        print(f"refused: {error}", file=sys.stderr)
+        return 2
+    prereg.write_text(updated, encoding="utf-8")
+    print(f"recorded {', '.join(recorded)} from {args.witness} into {prereg}")
+
+    parsed = parse_block(updated) or {}
+    verdicts = parsed.get("verdicts") or {}
+    measured = [gate for gate, verdict in verdicts.items() if not verdict.startswith("not measured")]
+    print(f"{len(measured)}/{len(ALL_GATES)} gates measured: {', '.join(sorted(measured))}")
+    # The artifact binding was enforced where the rows were written (the witness
+    # digest must equal the table's), so this only asks whether every gate is now
+    # measured. The campaign's own base is checked at prepare time, against the
+    # path it actually declares.
+    try:
+        assert_declaration_allowed(updated, ["a campaign declaring the placement"])
+    except PlacementGateError as error:
+        print(f"a campaign still cannot declare the placement: {error}")
+        return 0
+    print("every gate is measured on this artifact: a campaign may declare the placement")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base-model", default="", help="local checkpoint directory (safetensors shards)")
@@ -367,7 +422,29 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="accept a different artifact digest instead of refusing to compare",
     )
+    parser.add_argument(
+        "--witness",
+        default="",
+        help=(
+            "a worker run's placement-witnesses.json to record in the table; no "
+            "measurement is taken, only the four gates this runner cannot answer"
+        ),
+    )
+    parser.add_argument(
+        "--spill-verdict",
+        default="",
+        choices=("", "pass", "FAIL"),
+        help="operator verdict for wddm_spill (needs --spill-basis)",
+    )
+    parser.add_argument(
+        "--spill-basis",
+        default="",
+        help="what the spill verdict rests on; PyTorch cannot observe driver paging",
+    )
     args = parser.parse_args(argv)
+
+    if args.witness:
+        return _record_witness(args)
 
     import torch
 

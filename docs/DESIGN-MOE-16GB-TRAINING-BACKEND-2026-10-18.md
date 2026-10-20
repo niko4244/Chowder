@@ -147,3 +147,16 @@ the regression rule). Three consequences worth naming:
   remembered by whoever edits the manifest.
 - A `--self-check` (synthetic model) writes its table beside its own temporary
   checkpoint, never over the placement's prereg.
+
+**The four gates no loader can answer.** Gradient, smoke, router balance and
+spill are properties of a fine-tune, so `chowder.placement_witnesses` produces
+them: a `TrainerCallback` reads the LoRA B gradients on the first step whose
+backward populated them, counts expert load from the router's own output every
+step, and the run's loss log and device memory supply the rest. The worker writes
+`placement-witnesses.json` beside its adapter; `moe_int8_gates.py --witness`
+records it into the same table, replacing only those four rows and refusing a
+witness measured on another artifact. Until that file exists the four rows say
+"not measured" and no campaign may declare the placement -- which is why the
+runner alone could never complete its own gate table. `wddm_spill` stays the one
+gate no tool can see: it is recorded by an operator with the basis the verdict
+rests on, and a verdict without one is refused.

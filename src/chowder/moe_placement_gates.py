@@ -54,9 +54,15 @@ REGRESSION_TOLERANCE = 0.10
 #: Gates ``chowder_batch/moe_int8_gates.py`` measures.
 RUNNER_GATES = ("load_census", "memory_vram", "host_rss", "throughput")
 #: Gates that need a worker run (a dataset, a real fine-tune) before this
-#: placement may be declared; the runner records them as not measured.
+#: placement may be declared; the runner records them as not measured and
+#: ``placement_witnesses`` produces them.
 WITNESS_GATES = ("gradient", "smoke", "router_balance", "wddm_spill")
 ALL_GATES = RUNNER_GATES + WITNESS_GATES
+#: The one gate no tool can observe: an operator records it with a basis.
+OPERATOR_GATES = ("wddm_spill",)
+#: What a witness file declares itself to be.
+WITNESS_SCHEMA = "chowder.moe-placement-witnesses.v1"
+WITNESS_VERDICTS = ("pass", "FAIL", "not measured")
 
 #: Gates whose direction is "smaller is better" and whose number is compared
 #: against the recorded one.
@@ -65,6 +71,19 @@ SIZE_GATES = ("memory_vram", "throughput", "load_census", "host_rss")
 
 class PlacementGateError(ValueError):
     """A declaration backed by a table that cannot support it."""
+
+
+def code_commit() -> str | None:
+    """The commit the numbers were produced by, when this is a git checkout."""
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=10
+        )
+        return completed.stdout.strip() or None if completed.returncode == 0 else None
+    except Exception:
+        return None
 
 
 def repo_root() -> Path | None:
@@ -215,13 +234,22 @@ def render_block(record: dict[str, Any], *, previous: dict[str, Any] | None = No
         f"- measured at {record.get('measured_at')} on {record.get('device')} "
         f"({record.get('steps')} steps, seq {record.get('seq_len')}), "
         f"code `{record.get('code_commit')}`",
-        f"- int8 placement step: {arm.get('s_per_step')} s; "
-        f"bulk comparison arm: {bulk.get('s_per_step')} s",
+        f"- int8 placement step: {_seconds(arm.get('s_per_step'))}; "
+        f"bulk comparison arm: {_seconds(bulk.get('s_per_step'))}",
     ]
+    # A witness gate recorded by a worker run keeps its provenance line: the
+    # runner can carry the row forward but it did not produce it.
+    for line in (previous or {}).get("provenance", ()):
+        lines.append(line)
     if carried:
         lines.append(f"- carried forward from the previous measurement: `{'`, `'.join(carried)}`")
     lines += ["", BLOCK_END]
     return "\n".join(lines)
+
+
+def _seconds(value: Any) -> str:
+    """A timed value, or that it was not measured -- never ``None s``."""
+    return "not measured" if value is None else f"{value} s"
 
 
 def parse_block(document: str) -> dict[str, Any] | None:
@@ -256,12 +284,16 @@ def parse_block(document: str) -> dict[str, Any] | None:
         if line.startswith("- carried forward from the previous measurement:")
         for gate in line.split(":", 1)[1].split(",")
     ]
+    provenance = [
+        line for line in block.splitlines() if line.startswith("- witness gates:")
+    ]
     return {
         "verdicts": verdicts,
         "values": values,
         "numbers": numbers,
         "config_sha256": sha,
         "carried": carried,
+        "provenance": provenance,
         "block": block,
     }
 
@@ -273,6 +305,121 @@ def splice_block(document: str, block: str) -> str:
     if start < 0 or end < 0 or end < start:
         return document.rstrip() + "\n\n" + block + "\n"
     return document[:start] + block + document[end + len(BLOCK_END) :]
+
+
+def splice_witness_rows(document: str, witness: dict[str, Any]) -> tuple[str, list[str]]:
+    """Record a worker run's witness gates in the table, touching only those rows.
+
+    The runner owns the rows it measures; a worker run owns the four it does
+    not. So this replaces exactly the witness rows inside the existing block and
+    leaves every other row -- and the prose around the block -- as it was.
+    Refusals, all raised before anything is written:
+
+    * the table has no block yet (run the runner first: it is what binds the
+      table to an artifact);
+    * the witness was measured on another artifact than the table;
+    * a gate would be downgraded from measured/pass to not measured -- a run
+      that did not observe a gate cannot clear the verdict another run earned;
+    * an operator gate recorded as a verdict with no basis (``evidence.basis``),
+      which would be a hand-edit wearing a measurement's clothes.
+    """
+    parsed = parse_block(document)
+    if parsed is None:
+        raise PlacementGateError(
+            "the prereg has no gate table to record witnesses into; run "
+            "chowder_batch/moe_int8_gates.py against the artifact first (its table "
+            "is what binds the numbers to a checkpoint)"
+        )
+    if str(witness.get("schema", "")) != WITNESS_SCHEMA:
+        raise PlacementGateError(
+            f"witness schema {witness.get('schema')!r} is not {WITNESS_SCHEMA!r}"
+        )
+    if str(witness.get("placement", "")) != EXPERT_PLACEMENT:
+        raise PlacementGateError(
+            f"witness placement {witness.get('placement')!r} is not {EXPERT_PLACEMENT!r}"
+        )
+    gates = witness.get("gates") or {}
+    if not isinstance(gates, dict) or not gates:
+        raise PlacementGateError("the witness file records no gates")
+    unknown = sorted(set(gates) - set(WITNESS_GATES))
+    if unknown:
+        raise PlacementGateError(
+            f"the witness file records {unknown}, which this runner does not own; a "
+            f"witness may only write {list(WITNESS_GATES)}"
+        )
+    recorded_on = parsed.get("config_sha256")
+    witness_on = (witness.get("artifact") or {}).get("config_sha256")
+    if not recorded_on:
+        raise PlacementGateError(
+            "the table names no artifact yet, so a witness cannot be bound to it; "
+            "run chowder_batch/moe_int8_gates.py against the base model first"
+        )
+    if witness_on != recorded_on:
+        raise PlacementGateError(
+            f"the witness was measured on config sha256 `{witness_on}` but the table "
+            f"was measured on `{recorded_on}`; these numbers are not about the same artifact"
+        )
+
+    # Every gate, in the table's own order, so recording a witness on an older
+    # table completes it instead of quietly narrowing it.
+    rows: list[tuple[str, str, str]] = [
+        (gate, parsed["values"].get(gate, "not measured"), parsed["verdicts"].get(gate, "not measured"))
+        for gate in ALL_GATES
+        if gate in parsed["verdicts"] or gate in gates
+    ]
+    replaced: dict[str, tuple[str, str, str]] = {}
+    for gate, entry in gates.items():
+        if not isinstance(entry, dict):
+            raise PlacementGateError(f"{gate}: a witness entry must be an object, got {type(entry).__name__}")
+        verdict = str(entry.get("verdict", "not measured"))
+        if verdict not in WITNESS_VERDICTS:
+            raise PlacementGateError(
+                f"{gate}: witness verdict {verdict!r} is not one of {list(WITNESS_VERDICTS)}"
+            )
+        previous = parsed["verdicts"].get(gate, "not measured")
+        if verdict.startswith("not measured") and not previous.startswith("not measured"):
+            raise PlacementGateError(
+                f"{gate}: the table records {previous!r} and this run did not measure it; "
+                "a run that observed nothing cannot clear a verdict another run earned"
+            )
+        if gate in OPERATOR_GATES and not verdict.startswith("not measured"):
+            basis = str((entry.get("evidence") or {}).get("basis", "")).strip()
+            if not basis:
+                raise PlacementGateError(
+                    f"{gate} is an operator gate: record it with evidence.basis naming what "
+                    "the verdict rests on (PyTorch cannot observe driver paging)"
+                )
+        replaced[gate] = (gate, str(entry.get("value", verdict)), verdict)
+    if not replaced:
+        return document, []
+
+    merged = [replaced.get(gate, (gate, value, verdict)) for gate, value, verdict in rows]
+    lines = [
+        line
+        for line in parsed["block"].splitlines()
+        if line.startswith("- ")
+        and not line.startswith("- witness gates:")
+        and not line.startswith("- carried forward from the previous measurement:")
+    ]
+    lines.append(
+        f"- witness gates: `{'`, `'.join(sorted(replaced))}` recorded {witness.get('measured_at')} "
+        f"by {witness.get('run') or 'a worker run'} on {witness.get('device')} "
+        f"({witness.get('steps')} steps), code `{witness.get('code_commit')}`"
+    )
+    carried = [
+        line
+        for line in parsed["block"].splitlines()
+        if line.startswith("- carried forward from the previous measurement:")
+    ]
+    block = _compose_block(merged, lines + carried)
+    return splice_block(document, block), sorted(replaced)
+
+
+def _compose_block(rows: list[tuple[str, str, str]], extra_lines: list[str]) -> str:
+    lines = [BLOCK_BEGIN, "", "| gate | value | verdict |", "|---|---|---|"]
+    lines += [f"| `{gate}` | {value} | {verdict} |" for gate, value, verdict in rows]
+    lines += ["", *extra_lines, "", BLOCK_END]
+    return "\n".join(lines)
 
 
 def numeric_gates(record: dict[str, Any]) -> dict[str, float | None]:

@@ -713,6 +713,20 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             intended, adapted_module_paths(model), unknown_suffixes=unknown_targets
         ).to_dict()
 
+    # The placement's prereg has four gates no loader can answer (gradient on
+    # every LoRA leaf, loss over 20 steps, router balance, device spill). This
+    # callback collects their evidence while the run happens; it never fails a
+    # run, and a gate it could not observe is recorded as not measured.
+    placement_witness_callback: Any = None
+    if expert_placement in TRANSIENT_PLACEMENTS or int8_experts:
+        from ..placement_witnesses import build_witness_callback
+
+        # Routing is audited on the base model (the adapter wrapper has no
+        # ``.model.layers`` of its own); gradients are read from the wrapped one.
+        placement_witness_callback = build_witness_callback(
+            TrainerCallback, model, router_model=base_model
+        )
+
     if spec.gradient_checkpointing:
         model.config.use_cache = False
     load_timer.__exit__()
@@ -848,6 +862,8 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     if spec.detailed_timing_telemetry:
         timer_callback = _TrainingPhaseTimerCallback()
         callbacks.append(timer_callback)
+    if placement_witness_callback is not None:
+        callbacks.append(placement_witness_callback)
     trainer = Trainer(
         model=model,
         args=args,
@@ -1052,6 +1068,35 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
 
     peak_values = list(resource_snapshot["peak_vram_gb_by_accelerator"].values())
     peak_vram_gb = max(peak_values, default=0.0)
+
+    placement_witness_report: dict[str, Any] | None = None
+    if placement_witness_callback is not None:
+        from ..placement_witnesses import derive, gpu_snapshot, witness_record
+
+        evidence = placement_witness_callback.evidence()
+        gates = derive(
+            gradient=evidence.get("gradient"),
+            router=evidence.get("router"),
+            step_log=step_log,
+            gpu=gpu_snapshot(torch),
+        )
+        placement_witness_report = witness_record(
+            gates,
+            base_model=spec.base_model,
+            device=str(trainer.args.device),
+            steps=int(trainer.state.global_step),
+            run=output_dir.name,
+        )
+        # Written beside the adapter so the operator can record it into the
+        # prereg table without grepping this run's result JSON. Best-effort by
+        # design: the telemetry copy below is the authoritative one.
+        try:
+            (output_dir / "placement-witnesses.json").write_text(
+                json.dumps(placement_witness_report, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as error:
+            placement_witness_report["write_error"] = str(error)
     return {
         "telemetry": {
             "train_loss": float(train_output.training_loss),
@@ -1079,6 +1124,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             # The live census behind expert_placement (moe_transient_grad), so a
             # run that claims CPU-resident experts carries the counts that show it.
             "expert_placement": expert_placement_evidence,
+            "placement_witnesses": placement_witness_report,
             "memory_sampling": memory_sampling,
             "first_step_seconds": first_step_seconds,
             "resume": resume_report,

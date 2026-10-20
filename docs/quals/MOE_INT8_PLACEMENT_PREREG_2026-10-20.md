@@ -48,7 +48,8 @@ writes the table, so the regressed numbers are the ones on record. A run against
 a different artifact refuses to overwrite the table at all (`--allow-new-baseline`
 starts a new baseline). `--check` compares without writing. `--steps 0` measures
 the census only and carries the recorded throughput forward rather than erasing
-it.
+it. `--witness` records a training run's four gates instead of measuring, and is
+the only way those rows ever stop saying "not measured".
 
 **What each gate is, and what passes.**
 
@@ -58,10 +59,28 @@ it.
 | `memory_vram` | Peak allocated VRAM per **placement step** (forward + backward on `inputs_embeds` through every expert layer, no LoRA, no optimizer) | Peak ≤ **14.5 GB** on the 16 GB card, with no WDDM shared-memory spill |
 | `host_rss` | Process peak working set across load and steps | The number is recorded and compared run-to-run (a >10% growth is a regression). The design budget is 24 GB: anything that keeps the bf16 experts resident cannot be under ~40 GB, so a peak far above 24 GB means the int8 grid was copied |
 | `throughput` | The same placement step, timed | Recorded, and a >10% regression fails the run. Go/no-go is the worker's own measured s/step against the 2.5 GPU-h per-recipe ceiling — this runner measures the placement, never a training step |
-| `gradient` | One worker step: every LoRA B leaf in layers 0, middle, last is finite and non-zero | Needs a real fine-tune; this runner records it as not measured |
-| `smoke` | 20 steps lower the training loss and the adapter loads in the eval worker | Needs a dataset; recorded as not measured |
-| `router_balance` | Expert-load entropy stays within 20% of its step-0 value | Needs a smoke run; recorded as not measured |
-| `wddm_spill` | Shared-memory spill over the card's VRAM | Not observable from this runner: `peak_vram_gb` and `reserved_gb` are recorded and the verdict is the operator's |
+| `gradient` | The LoRA B gradients of the **first** step whose backward populated `.grad`, read once: for the first, middle and last decoder layer that holds a LoRA leaf, every leaf's gradient | All leaves present, all finite, all with a non-zero peak. A layer with no LoRA leaf fails the gate |
+| `smoke` | The run's own logged loss points and its optimizer step count | At least **20 steps**, and the mean of the last third of the logged losses at least **1%** below the mean of the first third |
+| `router_balance` | Expert-load histograms per MoE layer, from the router's own output: the first step's window and the most recent one | Every layer's entropy within **20%** of its step-0 entropy, and no layer with zero entropy at step 0 |
+| `wddm_spill` | Peak allocated and reserved device memory against the card's size | **Operator gate.** No tool can observe the driver paging, so the verdict is recorded with the basis it rests on, and a verdict without a basis is refused |
+
+**How the four witness gates get in.** `chowder.placement_witnesses` derives them
+from the evidence a real run collects -- `PlacementWitnessCallback` (LoRA-leaf
+gradients, router histograms) plus the run's own loss log and device memory -- and
+the worker writes `placement-witnesses.json` beside its adapter and carries the
+same record in `telemetry.placement_witnesses`. The runner records it without
+taking a measurement:
+
+```
+python chowder_batch/moe_int8_gates.py --witness placement-witnesses.json \
+    [--spill-verdict pass|FAIL --spill-basis "what the verdict rests on"]
+```
+
+That writer replaces only the four witness rows, refuses a witness measured on a
+different artifact, refuses to clear a verdict another run earned, and refuses an
+operator verdict with no basis. A gate the run did not observe lands as "not
+measured" with the reason, so a short or interrupted run narrows the table
+instead of filling it.
 
 **Recipe identity.** `expert_placement` is excluded from `recipe_digest()`, like
 `frozen_layer_streaming`: it changes where frozen weights live and at what
