@@ -11,6 +11,7 @@ requires to be measured on the real artifact.
 from __future__ import annotations
 
 import json
+import os
 import weakref
 from pathlib import Path
 
@@ -646,6 +647,55 @@ def test_placement_validation_accepts_int8_and_refuses_pinning():
         spec(expert_placement=mie.INT8_PLACEMENT, target_preset="moe_frozen_experts", quantization="4bit")
     with pytest.raises(ValueError, match="unsupported expert_placement"):
         spec(expert_placement="gpu-magic")
+
+
+def test_the_gate_runner_self_check_produces_a_record_that_names_its_gaps(tmp_path):
+    """The gate runner is the thing that measures the prereg; it has to be runnable
+    evidence itself, on the CPU, with the gates it cannot answer said out loud."""
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    out = tmp_path / "gates.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(root / "chowder_batch" / "moe_int8_gates.py"),
+            "--self-check",
+            "--out",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(root),
+        env={**os.environ, "CHOWDER_NO_GPU": "1", "PYTHONPATH": str(root / "src")},
+        timeout=600,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+
+    record = json.loads(out.read_text(encoding="utf-8"))
+    assert record["schema"] == "chowder.moe-placement-gates.v1"
+    assert record["placement"] == mie.INT8_PLACEMENT
+    assert set(record["arms"]) == {"int8", "bulk"}
+    for arm in ("int8", "bulk"):
+        entry = record["arms"][arm]
+        assert entry["census"], arm
+        assert entry["s_per_step"] and entry["s_per_step"] > 0, arm
+        assert entry["steps"] == 2, arm
+        # It measures the placement, never claims to be a training step.
+        assert entry["includes_lora"] is False, arm
+        assert entry["includes_optimizer"] is False, arm
+        assert entry["gates"]["load_census"] == "measured", arm
+        assert entry["gates"]["host_rss"] == "measured", arm
+        assert entry["gates"]["memory_vram"] == "not measured (CPU arm)", arm
+        assert entry["gates"]["smoke"].startswith("not measured"), arm
+        assert entry["gates"]["router_balance"].startswith("not measured"), arm
+        assert entry["gates"]["wddm_spill"].startswith("not observable")
+
+    int8_census = record["arms"]["int8"]["census"]
+    assert int8_census["remaining_expert_params"] == 0
+    assert int8_census["expert_bytes"] > 0
+    assert int8_census["patched_expert_modules"] == LAYERS
 
 
 def test_the_int8_placement_does_not_exist_before_this_change():
