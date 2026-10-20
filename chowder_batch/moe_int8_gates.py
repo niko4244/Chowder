@@ -34,7 +34,8 @@ overwritten with "not measured". ``--check`` compares and writes nothing.
 
 Exit codes: 0 table written with no regression, 1 a recorded gate **regressed**
 (the table is still updated, so the worse numbers are the ones on record), 2
-refusal (missing directory, unknown arm, no CUDA without ``--cpu``), 3 an arm
+refusal (missing directory, unknown arm, no CUDA without ``--cpu``, a card with
+less free memory than ``--min-free-vram-gb``), 3 an arm
 failed to load or to place, 4 the table was measured on a different artifact and
 would be overwritten with incomparable numbers (``--allow-new-baseline`` starts
 a new baseline), 5 the header projection disagrees with the recorded measurement
@@ -137,6 +138,53 @@ def _peak_rss_bytes() -> int | None:
             return int(peak) * (1024 if sys.platform != "darwin" else 1)
         except Exception:
             return None
+
+
+#: How much device memory this runner will not step without. The weights floor
+#: for reap160 is 5.54 GiB (non-expert parameters 4.55 + one layer's dequantized
+#: experts 0.94 + dequant scratch 0.06); below that no step can fit at all, and a
+#: peak measured on the remainder describes whatever else held the card.
+DEFAULT_MIN_FREE_VRAM_GB = 6.0
+
+
+def headroom_problem(free_gb: float | None, total_gb: float | None, *, minimum: float) -> str | None:
+    """Why this card cannot measure a placement step, or ``None`` if it can.
+
+    Telemetry that cannot measure is not telemetry, and a peak taken on a card
+    somebody else is using is not the placement's: on 2026-10-20 the training run
+    left 156 MiB free, and stepping there would have reported the leftovers as a
+    placement peak (via WDDM paging, silently). Refusing is the only honest move.
+    """
+    if free_gb is None or total_gb is None:
+        return None
+    if free_gb >= minimum:
+        return None
+    return (
+        f"cuda device has {free_gb:.2f} GiB free of {total_gb:.2f} GiB, below the "
+        f"{minimum:.1f} GiB this runner will not step under: a peak measured now would "
+        "describe the card's remaining memory (or a WDDM spill), not the placement. "
+        "Wait for the card, or pass --cpu to take the census instead."
+    )
+
+
+def device_headroom(index: int) -> tuple[float, float] | None:
+    """``(free, total)`` GiB of the card's **dedicated** memory, or ``None``.
+
+    ``torch.cuda.mem_get_info`` is the wrong instrument on Windows: WDDM lets a
+    process commit past the card into system RAM, so it reports headroom that
+    exists only as paging -- and it duly reported plenty free on a 16 GB card
+    holding 15.9 GB while this guard was being written, which is why the figure
+    comes from ``nvidia-smi`` instead. That number is machine-wide, which is
+    exactly the question here (is somebody else holding the card), unlike its use
+    as a proxy for one process's own footprint.
+    """
+    from chowder.llama_server_manager import query_gpu_vram_mib
+
+    usage = query_gpu_vram_mib().get(int(index))
+    if not usage:
+        return None
+    used, total = usage
+    return ((total - used) / 1024, total / 1024)
 
 
 def _gib(nbytes: int | None) -> float | None:
@@ -598,6 +646,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dtype", default="", help="auto (the config's), bfloat16, float16, float32")
     parser.add_argument("--cpu", action="store_true", help="run on the CPU (self-check, small models)")
     parser.add_argument(
+        "--min-free-vram-gb",
+        type=float,
+        default=DEFAULT_MIN_FREE_VRAM_GB,
+        help=(
+            "refuse to step when the card has less than this free; a peak taken on another "
+            "process's leftovers is not the placement's (default %(default)s)"
+        ),
+    )
+    parser.add_argument(
         "--gradient-checkpointing",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -687,10 +744,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"base model directory not found: {base}", file=sys.stderr)
         return 2
 
-    use_cuda = torch.cuda.is_available() and not args.cpu
-    if not use_cuda and not args.cpu:
+    # ``CHOWDER_NO_GPU`` has to mean the same thing here as it does to the loader
+    # (``resolve_device``): otherwise a no-GPU run would send its tokens to a card
+    # while the loader placed the model on the CPU, and report the card's empty
+    # peak as the placement's.
+    forced_cpu = os.environ.get("CHOWDER_NO_GPU", "").strip().lower() not in ("", "0", "false")
+    use_cuda = torch.cuda.is_available() and not args.cpu and not forced_cpu
+    if not use_cuda and not (args.cpu or forced_cpu):
         print("no CUDA device; pass --cpu to measure a census without the card", file=sys.stderr)
         return 2
+    if use_cuda and args.steps > 0:
+        headroom = device_headroom(args.device)
+        if headroom is None:
+            print(
+                "cannot read the card's occupancy (no nvidia-smi); the peak this run records "
+                "may include another process's memory",
+                file=sys.stderr,
+            )
+        else:
+            problem = headroom_problem(*headroom, minimum=args.min_free_vram_gb)
+            if problem:
+                print(problem, file=sys.stderr)
+                return 2
+            print(f"cuda:{args.device} has {headroom[0]:.2f} GiB free of {headroom[1]:.2f} GiB")
     device = torch.device("cuda", args.device) if use_cuda else torch.device("cpu")
     dtype = getattr(torch, args.dtype) if args.dtype else None
 

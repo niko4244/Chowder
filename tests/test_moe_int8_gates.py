@@ -131,6 +131,31 @@ def prewritten(tmp_path, *, text):
 # --- the block itself ---------------------------------------------------------
 
 
+def test_the_runner_refuses_a_card_it_would_only_measure_the_leftovers_of():
+    """On 2026-10-20 the training run left 156 MiB free. Stepping there would have
+    reported the remainder as a placement peak, so the runner says so and stops."""
+    problem = gates.headroom_problem(0.15, 15.93, minimum=gates.DEFAULT_MIN_FREE_VRAM_GB)
+    assert problem and "free of" in problem
+    assert "WDDM" in problem and "--cpu" in problem
+    assert gates.headroom_problem(15.9, 15.93, minimum=gates.DEFAULT_MIN_FREE_VRAM_GB) is None
+    # Telemetry that cannot see the card is not a refusal.
+    assert gates.headroom_problem(None, None, minimum=gates.DEFAULT_MIN_FREE_VRAM_GB) is None
+
+
+def test_the_card_figure_is_dedicated_memory_not_wddm_headroom(monkeypatch):
+    """``mem_get_info`` reports memory that only exists as paging on Windows, so the
+    guard reads the card's own used figure instead."""
+    import chowder.llama_server_manager as lsm
+
+    monkeypatch.setattr(lsm, "query_gpu_vram_mib", lambda: {0: (15895, 16311)})
+    free, total = gates.device_headroom(0)
+    assert free == pytest.approx((16311 - 15895) / 1024)
+    assert total == pytest.approx(16311 / 1024)
+
+    monkeypatch.setattr(lsm, "query_gpu_vram_mib", lambda: {})
+    assert gates.device_headroom(0) is None
+
+
 def test_the_gate_row_names_the_step_definition_it_measured():
     """A peak on an eager step and one with per-layer recompute are not comparable,
     so the row says which produced it -- and a record from before the definition
