@@ -75,6 +75,13 @@ skeleton has no module for -- a conditional-generation export's vision tower, or
 the MTP head -- are skipped and listed in the census (`ignored_keys`), never
 dropped silently.
 
+**Checked against the artifact (2026-10-20).** Reading only shard 1's 2.8 KB
+safetensors header, no weights: expert keys are the fused
+`model.language_model.layers.<i>.mlp.experts.gate_up_proj` [160, 1024, 2048]
+bf16 with no per-expert key present, the prefix is `model.language_model.`,
+`model.visual.*` tensors are in the same shards (so the ignored-tower path is
+required, not defensive), and no `mtp.*` key appears.
+
 **Quantisation.** Symmetric per-output-row int8: `scale = absmax(row)/127`
 (fp32 in RAM), `q = round(w/scale)` clamped to `[-127, 127]`. Dequantisation is
 `q * scale` in fp32, cast to the compute dtype, performed on whichever device
@@ -104,6 +111,14 @@ measurement, not an argument.
 
 `expert_pinning: registered` is refused with this placement: the int8 buffers
 are not page-locked, so the copies stay synchronous.
+
+**First measurement attempt (2026-10-20, aborted).**
+`chowder_batch/moe_int8_gates.py --arms int8 --steps 0 --cpu` on reap160 built
+~12.3 GB of the ~20.2 GB int8 census (peak working set 12.3 GiB, 43.2 GiB
+private commit) and then made no measurable CPU progress for 25 minutes, so it
+was stopped: no census and no gate number exists from it. The GPU gates could
+not be attempted at all -- the card had 3.5 GiB free of 16.3 GB -- so they
+remain unmeasured, exactly as the section above says.
 
 **Gates.** This placement inherits the pre-registration in
 `docs/quals/MOE_TRANSIENT_GRAD_PLACEMENT_PREREG_2026-10-18.md`, and those gates

@@ -136,6 +136,18 @@ def _placement_steps(model: Any, *, steps: int, seq_len: int, device: Any) -> di
     """
     import torch
 
+    if steps <= 0:
+        # Census-only: the load is the measurement, nothing is stepped.
+        return {
+            "steps": 0,
+            "seq_len": seq_len,
+            "step_seconds": [],
+            "s_per_step": None,
+            "includes_lora": False,
+            "includes_optimizer": False,
+            "gradient_on_inputs_embeds": False,
+        }
+
     vocabulary = _vocab_size(model.config)
     generator = torch.Generator().manual_seed(0)
     tokens = torch.randint(0, vocabulary, (1, seq_len), generator=generator).to(device)
@@ -215,7 +227,11 @@ def run_arm(arm: str, base: Path, *, device: Any, dtype: Any, steps: int, seq_le
             else bool(result["peak_vram_gb"] <= VRAM_GATE_GB)
         ),
         "host_rss": "measured",
-        "throughput": "measured (placement step, no LoRA/optimizer)",
+        "throughput": (
+            "not measured (--steps 0: census only)"
+            if not result["step_seconds"]
+            else "measured (placement step, no LoRA/optimizer)"
+        ),
         "gradient": "not measured by this runner (needs a LoRA run)",
         "smoke": "not measured by this runner (needs a dataset)",
         "router_balance": "not measured by this runner (needs a smoke run)",
@@ -316,8 +332,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     use_cuda = torch.cuda.is_available() and not args.cpu
-    if not use_cuda and not (args.cpu or args.self_check):
-        print("no CUDA device; pass --cpu only for a synthetic self-check", file=sys.stderr)
+    if not use_cuda and not args.cpu:
+        print("no CUDA device; pass --cpu to measure a census without the card", file=sys.stderr)
         return 2
     device = torch.device("cuda", args.device) if use_cuda else torch.device("cpu")
     dtype = getattr(torch, args.dtype) if args.dtype else None

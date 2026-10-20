@@ -698,6 +698,44 @@ def test_the_gate_runner_self_check_produces_a_record_that_names_its_gaps(tmp_pa
     assert int8_census["patched_expert_modules"] == LAYERS
 
 
+def test_the_gate_runner_census_only_mode_steps_nothing_and_says_so(tmp_path):
+    """``--steps 0`` is the mode a box with no free VRAM can still measure: the
+    load census and host RSS, with the throughput gate reported as unmeasured."""
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    out = tmp_path / "census.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(root / "chowder_batch" / "moe_int8_gates.py"),
+            "--self-check",
+            "--steps",
+            "0",
+            "--out",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(root),
+        env={**os.environ, "CHOWDER_NO_GPU": "1", "PYTHONPATH": str(root / "src")},
+        timeout=600,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+
+    record = json.loads(out.read_text(encoding="utf-8"))
+    for arm in ("int8", "bulk"):
+        entry = record["arms"][arm]
+        assert entry["steps"] == 0, arm
+        assert entry["step_seconds"] == [], arm
+        assert entry["s_per_step"] is None, arm
+        assert entry["gates"]["throughput"] == "not measured (--steps 0: census only)", arm
+        # The census itself is still a measurement, not a placeholder.
+        assert entry["census"], arm
+        assert entry["gates"]["load_census"] == "measured", arm
+
+
 def test_the_int8_placement_does_not_exist_before_this_change():
     """The one test that is red on the base branch: there is no int8 placement,
     no streaming loader, and no int8 forward to install."""
