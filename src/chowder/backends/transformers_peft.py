@@ -48,7 +48,8 @@ _ALLOWED_OPTIMIZER_TIERING_MODES = {"auto", "always", "off"}
 _ALLOWED_FROZEN_LAYER_STREAMING_MODES = {"auto", "always", "off"}
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
 _ALLOWED_DATASET_FORMATS = {"text", "chat"}
-_ALLOWED_EXPERT_PLACEMENTS = {"resident", "cpu-transient-grad"}
+_ALLOWED_EXPERT_PLACEMENTS = {"resident", "cpu-transient-grad", "cpu-transient-grad-bulk"}
+_ALLOWED_EXPERT_PINNING = {"none", "registered"}
 _ALLOWED_TARGET_PRESETS = {"auto", "attention_and_mlp", "moe_frozen_experts"}
 _ALLOWED_LR_SCHEDULER_TYPES = {
     "linear",
@@ -270,9 +271,13 @@ class TransformersPeftRunSpec:
     optimizer_tiering: bool = False
     frozen_layer_streaming: bool = False
     #: Where an MoE base's routed experts live while training: "resident"
-    #: (default) or "cpu-transient-grad" (frozen experts on the CPU, copied per
-    #: forward and backward; chowder.backends.moe_transient_grad).
+    #: (default) or "cpu-transient-grad"/"cpu-transient-grad-bulk" (frozen
+    #: experts on the CPU, copied per expert or once per layer; see
+    #: chowder.backends.moe_transient_grad).
     expert_placement: str = "resident"
+    #: Page-lock the CPU-resident expert tensors in place so their copies can be
+    #: asynchronous: "none" (default) or "registered" (cpu-transient-grad only).
+    expert_pinning: str = "none"
     detailed_timing_telemetry: bool = False
     seed: int = 1
     timeout_seconds: float | None = None
@@ -368,16 +373,28 @@ class TransformersPeftRunSpec:
             raise ValueError(f"unsupported precision: {self.precision}")
         if self.expert_placement not in _ALLOWED_EXPERT_PLACEMENTS:
             raise ValueError(f"unsupported expert_placement: {self.expert_placement}")
-        if self.expert_placement == "cpu-transient-grad":
+        if self.expert_pinning not in _ALLOWED_EXPERT_PINNING:
+            raise ValueError(f"unsupported expert_pinning: {self.expert_pinning}")
+        if self.expert_placement in {"cpu-transient-grad", "cpu-transient-grad-bulk"}:
             # Frozen experts are the placement's premise, so the coverage must say so,
             # and bitsandbytes cannot quantise the 3-D expert parameters it moves.
             if self.target_preset != "moe_frozen_experts" or self.target_modules:
                 raise ValueError(
-                    "expert_placement='cpu-transient-grad' requires lora.target_preset="
+                    f"expert_placement={self.expert_placement!r} requires lora.target_preset="
                     "'moe_frozen_experts' and no explicit target_modules"
                 )
             if self.quantization != "none":
-                raise ValueError("expert_placement='cpu-transient-grad' requires quantization='none'")
+                raise ValueError(
+                    f"expert_placement={self.expert_placement!r} requires quantization='none'"
+                )
+        if self.expert_pinning == "registered" and self.expert_placement not in {
+            "cpu-transient-grad",
+            "cpu-transient-grad-bulk",
+        }:
+            raise ValueError(
+                "expert_pinning='registered' requires an expert_placement that keeps the "
+                "experts on the CPU ('cpu-transient-grad' or 'cpu-transient-grad-bulk')"
+            )
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         if self.trust_remote_code:
@@ -592,6 +609,7 @@ class TransformersPeftRunSpec:
             optimizer_tiering=_resolve_optimizer_tiering_flag(training),
             frozen_layer_streaming=_resolve_frozen_layer_streaming_flag(training),
             expert_placement=str(backend.get("expert_placement", "resident")).lower(),
+            expert_pinning=str(backend.get("expert_pinning", "none")).lower(),
             detailed_timing_telemetry=_resolve_detailed_timing_telemetry_flag(training),
             seed=int(config.get("seed", seed)),
             timeout_seconds=(
@@ -760,6 +778,7 @@ class TransformersPeftExecutor:
             "activation_offload",
             "frozen_layer_streaming",
             "expert_placement",  # value-transparent, like frozen_layer_streaming
+            "expert_pinning",  # value-transparent: pinning changes where host memory sits, not what is computed
             "detailed_timing_telemetry",
         ):
             recipe.pop(key, None)
