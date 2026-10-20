@@ -218,6 +218,44 @@ def _quantize_into(store: dict[str, Any], which: str, rows: Any, expert: int | N
     s_target[offset:offset + rows_in].copy_(scale)
 
 
+#: Checkpoint key prefixes transformers' own loader rewrites and this streaming
+#: loader must rewrite itself. A Qwen3.5/3.6 conditional-generation checkpoint
+#: nests the text model one level deeper than ``...ForCausalLM`` does, and REAP
+#: exports keep the source keys byte-for-byte (see chowder_batch/reap_prune.py,
+#: which matches ``model.language_model.layers.<i>.mlp.experts.gate_up_proj``).
+_WRAPPER_PREFIXES = (
+    ("model.language_model.", "model."),
+    ("language_model.", "model."),
+)
+
+#: Tensors a causal-LM skeleton has no module for, recorded rather than treated
+#: as a load failure: a conditional-generation export carries its vision tower
+#: and MTP head in the same shards.
+_UNUSED_TOWER_PREFIXES = (
+    "model.visual.",
+    "visual.",
+    "model.vision_tower.",
+    "model.multi_modal_projector.",
+    "mtp.",
+)
+
+
+def _model_key(raw: str, params: dict[str, Any], buffers: dict[str, Any]) -> str:
+    """The skeleton's name for a checkpoint key, or the key unchanged.
+
+    An exact match wins; otherwise the text model's wrapper prefix is removed
+    when the skeleton names that tensor without it.
+    """
+    if raw in params or raw in buffers:
+        return raw
+    for prefix, replacement in _WRAPPER_PREFIXES:
+        if raw.startswith(prefix):
+            candidate = replacement + raw[len(prefix):]
+            if candidate in params or candidate in buffers or EXPERT_PARAM_INFIX in candidate:
+                return candidate
+    return raw
+
+
 def _expert_key_target(key: str) -> tuple[str, str, int | None, int]:
     """Map an expert checkpoint key to ``(layer_prefix, which, expert, offset)``.
 
@@ -345,34 +383,50 @@ def load_model_int8_experts(
     buffers = dict(model.named_buffers())
     loaded: set[str] = set()
     unexpected: list[str] = []
+    ignored: list[str] = []
+    renamed = 0
 
-    # A tensor can have several owners (a tied head is the embedding): every
-    # owner must be marked, or the re-initialisation of the unmarked one would
-    # overwrite the value just loaded through its twin's key.
-    owners: dict[int, list[Any]] = {}
-    for module in model.modules():
+    # A tensor can have several owners (a tied head is the embedding), and some
+    # models initialise a child's tensor from the parent's ``_init_weights``
+    # (Qwen3_5MoeSparseMoeBlock re-inits ``gate.weight``). So every owner AND its
+    # ancestor chain must be marked, or a later re-initialisation would overwrite
+    # the value just loaded.
+    owners: dict[int, list[str]] = {}
+    for module_name, module in model.named_modules():
         for tensor in list(module._parameters.values()) + list(module._buffers.values()):
             if tensor is not None:
-                owners.setdefault(id(tensor), []).append(module)
+                owners.setdefault(id(tensor), []).append(module_name)
 
     def mark_initialized(target: Any) -> None:
         """Tell ``initialize_weights`` these modules' tensors came from the
         checkpoint, so only the modules with nothing loaded (the rotary
         buffers) get initialised -- ``from_pretrained``'s own bookkeeping."""
-        for owner in owners.get(id(target), ()):
-            owner._is_hf_initialized = True
+        for module_name in owners.get(id(target), ()):
+            parts = module_name.split(".") if module_name else []
+            for depth in range(1, len(parts) + 1):
+                model.get_submodule(".".join(parts[:depth]))._is_hf_initialized = True
 
     shards = _shard_files(base)
     for shard in shards:
         with safe_open(str(shard), framework="pt", device="cpu") as handle:
-            for key in handle.keys():
-                tensor = handle.get_tensor(key)
+            for raw_key in handle.keys():
+                key = _model_key(raw_key, params, buffers)
+                if key != raw_key:
+                    renamed += 1
+                if (
+                    key not in params
+                    and key not in buffers
+                    and key.startswith(_UNUSED_TOWER_PREFIXES)
+                ):
+                    ignored.append(raw_key)
+                    continue
+                tensor = handle.get_tensor(raw_key)
                 if EXPERT_PARAM_INFIX in key:
                     layer, which, expert, offset = _expert_key_target(key)
                     store = stores.get(layer)
                     if store is None:
                         raise RuntimeError(
-                            f"expert tensor {key!r} belongs to {layer!r}, which is not an experts module "
+                            f"expert tensor {raw_key!r} belongs to {layer!r}, which is not an experts module "
                             f"on this model (experts modules: {sorted(stores)[:3]})"
                         )
                     if offset == -1:
@@ -385,7 +439,7 @@ def load_model_int8_experts(
                 if target is None:
                     target = buffers.get(key)
                 if target is None:
-                    unexpected.append(key)
+                    unexpected.append(raw_key)
                     del tensor
                     continue
                 with torch.no_grad():
@@ -410,6 +464,9 @@ def load_model_int8_experts(
     # checkpoint: ``initialize_weights`` fills exactly the modules this loader
     # did not mark, which is what ``from_pretrained`` does for missing keys.
     model.initialize_weights()
+    # ``from_pretrained`` records where the weights came from on the config, and
+    # generation/tooling reads it; ``from_config`` blanks it.
+    model.config._name_or_path = str(base)
 
     missing = [
         name
@@ -437,6 +494,9 @@ def load_model_int8_experts(
             parameter.numel() * parameter.element_size() for parameter in params.values()
         ),
         "tensors_loaded": len(loaded),
+        "keys_renamed": renamed,
+        "ignored_keys": sorted(ignored)[:20],
+        "ignored_key_count": len(ignored),
         "unexpected_keys": [],
         # Modules that received int8 storage instead of their bf16 parameters;
         # ``prepare_int8_placement`` overwrites this with the patched-forward

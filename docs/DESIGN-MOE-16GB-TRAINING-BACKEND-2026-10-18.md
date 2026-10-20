@@ -63,6 +63,18 @@ non-expert parameters on the device, patched modules -- is the measurement to
 run against reap160; the figures above are arithmetic from the checkpoint size,
 not a measurement of it.
 
+**The artifact's key layout.** `chowder_batch/reap_prune.py` slices
+`model.language_model.layers.<i>.mlp.experts.gate_up_proj` [E, 2I, H] and
+`...experts.down_proj` [E, H, I] in place and copies every other tensor
+byte-for-byte, so reap160's shards carry **fused** expert keys under a
+`model.language_model.` prefix (the conditional-generation nesting) and a
+multimodal `config.json` (`model_type: qwen3_5_moe` with a `text_config`).
+`from_pretrained` rewrites that prefix; the streaming loader does it itself
+(`_model_key`), and reports how many keys it renamed. Tensors a causal-LM
+skeleton has no module for -- a conditional-generation export's vision tower, or
+the MTP head -- are skipped and listed in the census (`ignored_keys`), never
+dropped silently.
+
 **Quantisation.** Symmetric per-output-row int8: `scale = absmax(row)/127`
 (fp32 in RAM), `q = round(w/scale)` clamped to `[-127, 127]`. Dequantisation is
 `q * scale` in fp32, cast to the compute dtype, performed on whichever device

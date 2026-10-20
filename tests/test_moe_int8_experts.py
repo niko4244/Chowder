@@ -10,6 +10,7 @@ requires to be measured on the real artifact.
 
 from __future__ import annotations
 
+import json
 import weakref
 from pathlib import Path
 
@@ -345,6 +346,146 @@ def test_a_fused_gate_up_checkpoint_loads_the_same_way_as_a_per_expert_one(tmp_p
         if name.endswith("experts"):
             assert module.gate_up_q.shape == (NUM_EXPERTS, 2 * INTER, HIDDEN)
             assert module.down_q.shape == (NUM_EXPERTS, HIDDEN, INTER)
+
+
+# --- the layout reap160 actually ships --------------------------------------
+#
+# chowder_batch/reap_prune.py keeps the source keys byte-for-byte and prunes the
+# three expert tensors in place, so the artifact's shards carry FUSED expert keys
+# under a `model.language_model.` prefix, a multimodal config (model_type
+# qwen3_5_moe with a text_config), and the conditional-generation export's vision
+# tower in the same shards. This fixture is that shape, tiny and synthetic.
+
+
+def _artifact_checkpoint(tmp_path: Path, *, extra_towers: bool = False) -> Path:
+    from safetensors.torch import save_file
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    text = {
+        "vocab_size": 64,
+        "hidden_size": HIDDEN,
+        "intermediate_size": 8,
+        "moe_intermediate_size": INTER,
+        "num_hidden_layers": LAYERS,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "num_experts": NUM_EXPERTS,
+        "num_experts_per_tok": TOP_K,
+        "decoder_sparse_step": 1,
+        "max_position_embeddings": 32,
+        "head_dim": HIDDEN // 2,
+        "tie_word_embeddings": False,
+    }
+    config = {
+        "model_type": "qwen3_5_moe",
+        "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+        "text_config": text,
+        "tie_word_embeddings": False,
+    }
+    base = tmp_path / ("artifact-towers" if extra_towers else "artifact")
+    base.mkdir()
+    (base / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    with torch.device("meta"):
+        skeleton = AutoModelForCausalLM.from_config(AutoConfig.from_pretrained(base))
+    generator = torch.Generator().manual_seed(5)
+    state = {
+        key.replace("model.", "model.language_model.", 1) if key.startswith("model.") else key: (
+            torch.randn(tensor.shape, generator=generator).to(tensor.dtype)
+        )
+        for key, tensor in skeleton.state_dict().items()
+    }
+    if extra_towers:
+        state["model.visual.patch_embed.proj.weight"] = torch.zeros(4, 3, 2, 2)
+        state["mtp.fc.weight"] = torch.zeros(2, 2)
+    save_file(state, str(base / "model.safetensors"))
+    return base, state
+
+
+def test_the_artifact_layout_loads_and_matches_from_pretrained(tmp_path):
+    from transformers import AutoModelForCausalLM
+
+    base, state = _artifact_checkpoint(tmp_path)
+    reference = AutoModelForCausalLM.from_pretrained(base)
+    model, census = mie.load_model_int8_experts(base)
+
+    # The shards really are the artifact's layout, not the plain one.
+    assert any(
+        key == "model.language_model.layers.0.mlp.experts.gate_up_proj" for key in state
+    )
+    assert not any(key.startswith("model.layers.") for key in state)
+    # Every nested text-model key was rewritten; the head's name has no wrapper.
+    assert census["keys_renamed"] == sum(1 for key in state if key.startswith("model."))
+    assert census["keys_renamed"] == len(state) - 1
+
+    reference_params = dict(reference.named_parameters())
+    for name, parameter in model.named_parameters():
+        assert torch.equal(parameter, reference_params[name]), name
+    for name, buffer in model.named_buffers():
+        if mtg.EXPERT_PARAM_INFIX in name:
+            continue
+        assert torch.equal(buffer, dict(reference.named_buffers())[name]), name
+    assert model.config.to_dict() == reference.config.to_dict()
+
+    # The fused expert tensors were quantized, not dropped.
+    experts = _experts_module(model)
+    for layer in range(LAYERS):
+        module = _experts_module(model, layer)
+        source = state[f"model.language_model.layers.{layer}.mlp.experts.gate_up_proj"]
+        want = mie.dequantize_rows(*mie.quantize_rows(source), torch.float32)
+        assert torch.allclose(module.gate_up_q.to(torch.float32) * module.gate_up_scale, want)
+    assert experts.num_experts == NUM_EXPERTS
+
+
+def test_a_vision_tower_in_the_shards_is_ignored_and_recorded(tmp_path):
+    base, _state = _artifact_checkpoint(tmp_path, extra_towers=True)
+    model, census = mie.load_model_int8_experts(base)
+
+    assert census["ignored_key_count"] == 2
+    assert census["ignored_keys"] == ["model.visual.patch_embed.proj.weight", "mtp.fc.weight"]
+    assert census["unexpected_keys"] == []
+    # The experts still quantized: the ignored towers did not derail the load.
+    assert census["expert_modules"] == LAYERS
+
+
+def test_the_artifact_layout_is_never_loaded_as_bf16_experts(tmp_path, monkeypatch):
+    """The same one-live-tensor bound, on the layout the real artifact uses."""
+    base, _state = _artifact_checkpoint(tmp_path)
+    observed = {"live": 0, "max": 0, "seen": 0}
+
+    class _TrackedHandle:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def keys(self):
+            return self._handle.keys()
+
+        def get_tensor(self, key):
+            tensor = self._handle.get_tensor(key)
+            if mtg.EXPERT_PARAM_INFIX in key:
+                observed["seen"] += 1
+                observed["live"] += 1
+                observed["max"] = max(observed["max"], observed["live"])
+                weakref.finalize(tensor, _released)
+            return tensor
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._handle.__exit__(*args)
+
+    def _released():
+        observed["live"] -= 1
+
+    real_open = mie.safe_open
+    monkeypatch.setattr(mie, "safe_open", lambda *a, **k: _TrackedHandle(real_open(*a, **k)))
+    mie.load_model_int8_experts(base)
+
+    assert observed["seen"] == 2 * LAYERS
+    assert observed["max"] == 1
+    assert observed["live"] == 0
 
 
 # --- forward / backward -------------------------------------------------------
