@@ -15,20 +15,18 @@ This lane moves the run to a Kaggle session in two kernels:
 Both refuse to claim gates. The pre-registration's rows stay `not measured`
 until a run finishes and the writer records a witness beside its adapter.
 
-It answers three things with measurements:
+The probe answers three things with measurements: host RAM, disk, GPU model,
+compute capability and whether that card does **bf16** (the spec's dtype); the
+int8 grid's real size (40 layers x 160 experts x 2048 hidden x 512 intermediate
+= 18.8 GiB with scales) and how many layers the session's RAM can hold; and the
+per-layer host RSS and device peak walking those layers through the worker's own
+`TransientLayerExpertsInt8`, which is where the Windows run grew by 16 GB during
+backward.
 
-- host RAM total and available, scratch disk, GPU model, compute capability,
-  and whether that card supports **bf16** — the spec is bf16, and T4/P100 do not;
-- the int8 grid's real size (40 layers x 160 experts x 2048 hidden x 512
-  intermediate = 20.1 GB int8 + scales), and how many layers the session's RAM
-  can actually hold;
-- per-layer host RSS and device peak walking those layers through the worker's
-  own `TransientLayerExpertsInt8`, which is where the Windows run grew by 16 GB
-  during backward.
-
-**It measures no gate.** The pre-registration's rows stay `not measured` until a
-real reap160 run finishes and writes `placement-witnesses.json`. A capacity probe
-that fits says a run *could* fit here; it does not say the placement passed.
+**Neither kernel measures a gate.** The pre-registration's rows stay
+`not measured` until a real reap160 run finishes and the writer records a witness
+beside its adapter. A capacity probe that fits says a run *could* fit here; it
+does not say the placement passed.
 
 ## 0. The checkpoint dataset (once)
 
