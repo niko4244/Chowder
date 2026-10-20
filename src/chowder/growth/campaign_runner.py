@@ -2612,15 +2612,19 @@ def check_campaign_readiness(
                 f"the declared {field} carries no measured rows, so it cannot be "
                 "the arm this run adjudicates against"
             )
-        # The raw artifacts the rows name must resolve exactly as certification
-        # will resolve them: Gen-2 run 10 trained for 2.16 GPU-h before
-        # certification found the ancestor's predictions missing beside its report.
+        versions = sorted({str(run.generation_version) for run in runs})
+        detail = f"{field}: {len(runs)} row(s) for {', '.join(versions)}"
+        if field != "baseline_eval_report_path":
+            return detail
+        # The ancestor arm is never re-measured by the run, so the raw artifacts its
+        # rows name must already resolve exactly as certification will resolve them:
+        # Gen-2 run 10 trained 2.16 GPU-h before certification found the ancestor's
+        # predictions missing beside its report (defect #10).
         source = Path(str(getattr(manifest, field)))
         artifacts = _measurement_artifacts(
             [(field, source, EvalReport.load(source))], root=source.parent
         )
-        versions = sorted({str(run.generation_version) for run in runs})
-        return f"{field}: {len(runs)} row(s) for {', '.join(versions)}; {len(artifacts)} raw artifact(s) resolved"
+        return f"{detail}; {len(artifacts)} raw artifact(s) resolved"
 
     check("parent_arm", READINESS_PARENT_ARM, ("declared_inputs",), lambda: (
         arm_detail("parent_eval_report_path")
