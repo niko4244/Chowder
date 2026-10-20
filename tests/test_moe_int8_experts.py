@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import weakref
 from pathlib import Path
 
@@ -38,7 +40,7 @@ def _no_gpu(monkeypatch):
     monkeypatch.setenv("CHOWDER_NO_GPU", "1")
 
 
-def _config(*, tie_word_embeddings: bool = False):
+def _config(*, tie_word_embeddings: bool = False, layers: int = LAYERS):
     from transformers import Qwen3MoeConfig
 
     return Qwen3MoeConfig(
@@ -46,7 +48,7 @@ def _config(*, tie_word_embeddings: bool = False):
         hidden_size=HIDDEN,
         intermediate_size=8,
         moe_intermediate_size=INTER,
-        num_hidden_layers=LAYERS,
+        num_hidden_layers=layers,
         num_attention_heads=2,
         num_key_value_heads=1,
         num_experts=NUM_EXPERTS,
@@ -59,13 +61,21 @@ def _config(*, tie_word_embeddings: bool = False):
     )
 
 
-def _checkpoint(tmp_path: Path, *, tie_word_embeddings: bool = False, name: str = "tiny") -> Path:
+def _checkpoint(
+    tmp_path: Path,
+    *,
+    tie_word_embeddings: bool = False,
+    name: str = "tiny",
+    layers: int = LAYERS,
+) -> Path:
     """A tiny sharded MoE checkpoint on disk: a config, a generation config and
     at least two safetensors shards."""
     from transformers import AutoModelForCausalLM
 
     torch.manual_seed(0)
-    model = AutoModelForCausalLM.from_config(_config(tie_word_embeddings=tie_word_embeddings))
+    model = AutoModelForCausalLM.from_config(
+        _config(tie_word_embeddings=tie_word_embeddings, layers=layers)
+    )
     base = tmp_path / name
     model.save_pretrained(base, max_shard_size="20KB")
     shards = sorted(base.glob("*.safetensors"))
@@ -747,3 +757,307 @@ def test_the_int8_placement_does_not_exist_before_this_change():
     from chowder.backends.transformers_peft import _ALLOWED_EXPERT_PLACEMENTS
 
     assert "cpu-transient-grad-int8" in _ALLOWED_EXPERT_PLACEMENTS
+
+# --- what the 2026-10-20 reap160 measurement found ----------------------------
+#
+# On reap160 the int8 load held 37.8 GB of private bytes -- nearly twice the
+# ~20 GB the int8 experts plus scales should occupy. The cause was quantisation
+# granularity, not a dangling reference: the loader quantised a whole checkpoint
+# tensor at once (a fused `gate_up_proj` is ~1 GB of bf16 for 160 experts), and
+# `round(w.float() / scale).clamp(...)` needs about nine times that tensor's bf16
+# bytes in fp32 intermediates. The host heap then keeps the high-water mark
+# committed, so the process never came back down.
+#
+# These tests pin the fix: quantise and dequantise in row blocks, never a
+# layer-sized fp32, and prove the block boundaries change nothing numerically.
+
+#: The mid-size fixture. Big enough that a whole-layer fp32 intermediate is
+#: unmistakable (one fused gate_up here is 201 MB of bf16, so the old path's fp32
+#: chain alone was ~1.8 GB), small enough to stay inside the 4 GB disk budget:
+#: 8 layers x 64 experts x [2x768, 1024] = 2.4 GB of bf16 experts.
+MID_LAYERS, MID_EXPERTS, MID_HIDDEN, MID_INTER, MID_VOCAB = 8, 64, 1024, 768, 512
+
+#: Elements per expert at the mid-size shape: gate_up (2*inter, hidden) plus
+#: down (hidden, inter); int8 is one byte per element, bf16 two.
+MID_EXPERT_ELEMENTS = MID_LAYERS * MID_EXPERTS * 3 * MID_INTER * MID_HIDDEN
+
+
+def _mid_checkpoint(tmp_path: Path) -> Path:
+    """A ~2.4 GB bf16 expert checkpoint in the layout reap160 ships.
+
+    One shard per layer plus one for the embedding/head, an index that names
+    them, and fused (not per-expert) expert tensors -- the fused tensors are what
+    make a single ``get_tensor`` layer-sized, which is the case that blew up.
+    """
+    from safetensors.torch import save_file
+    from transformers import AutoModelForCausalLM, Qwen3MoeConfig
+
+    base = tmp_path / "mid"
+    base.mkdir()
+    config = Qwen3MoeConfig(
+        vocab_size=MID_VOCAB,
+        hidden_size=MID_HIDDEN,
+        intermediate_size=256,
+        moe_intermediate_size=MID_INTER,
+        num_hidden_layers=MID_LAYERS,
+        num_attention_heads=8,
+        num_key_value_heads=4,
+        head_dim=MID_HIDDEN // 8,
+        num_experts=MID_EXPERTS,
+        num_experts_per_tok=2,
+        decoder_sparse_step=1,
+        max_position_embeddings=64,
+        initializer_range=0.02,
+        tie_word_embeddings=False,
+        dtype="bfloat16",
+    )
+    config.save_pretrained(base)
+    with torch.device("meta"):
+        skeleton = AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16)
+
+    # One group per layer, so a layer's ~300 MB is the most ever held here.
+    groups: dict[str, list[tuple[str, tuple[int, ...]]]] = {}
+    for name, tensor in skeleton.state_dict().items():
+        if ".layers." in name:
+            group = "layer" + name.rsplit(".layers.", 1)[-1].split(".", 1)[0]
+        else:
+            group = "stem"
+        groups.setdefault(group, []).append((name, tuple(tensor.shape)))
+
+    weight_map: dict[str, str] = {}
+    total = 0
+    for group, tensors in groups.items():
+        values = {}
+        for name, shape in tensors:
+            # Contents are irrelevant to a memory measurement; uniform avoids
+            # paying for a normal draw over 1.2e9 elements.
+            value = torch.empty(shape, dtype=torch.bfloat16).uniform_(-1.0, 1.0)
+            values[name] = value
+            total += value.numel() * value.element_size()
+        shard = f"model-{group}.safetensors"
+        save_file(values, str(base / shard))
+        weight_map.update({name: shard for name in values})
+        del values
+    (base / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": total}, "weight_map": weight_map}),
+        encoding="utf-8",
+    )
+    return base
+
+
+def _run_mem_probe(base: Path) -> dict:
+    """Load ``base`` in a child process and return its measured private bytes.
+
+    A child process, not this one: the checkpoint above had to be written from
+    somewhere, and on Windows the freed shard buffers stay committed, so a load
+    measured in the parent would be reading the generator's high-water mark.
+    """
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [sys.executable, str(Path(__file__).with_name("_moe_int8_mem_probe.py")), str(base)],
+        capture_output=True,
+        text=True,
+        cwd=str(root),
+        env={**os.environ, "CHOWDER_NO_GPU": "1", "PYTHONPATH": str(root / "src")},
+        timeout=900,
+    )
+    assert completed.returncode == 0, completed.stderr[-4000:]
+    lines = [line for line in completed.stdout.splitlines() if line.startswith("PROBE ")]
+    assert lines, completed.stdout[-2000:]
+    return json.loads(lines[-1][len("PROBE "):])
+
+
+def _gb(value: float) -> str:
+    return f"{value / 1024**3:.2f} GB"
+
+
+@pytest.mark.slow
+def test_loading_a_mid_size_checkpoint_fits_the_int8_budget(tmp_path):
+    """The one test that is red before this change.
+
+    What must stay resident is the int8 experts plus scales: peak and final
+    private bytes (less the process's own baseline -- interpreter, torch,
+    transformers) within ``int8 * 1.15 + 1 GB + non-expert bytes``. On the branch
+    head the peak runs ~3 GB over that, because the fused per-layer expert tensor
+    is quantised in one piece.
+    """
+    free = shutil.disk_usage(tmp_path).free
+    if free < 7 * 1024**3:
+        pytest.skip(f"the mid-size fixture needs ~5 GB of scratch disk, {_gb(free)} free")
+
+    base = _mid_checkpoint(tmp_path)
+    shard_bytes = sum(path.stat().st_size for path in base.glob("*.safetensors"))
+    result = _run_mem_probe(base)
+
+    int8 = result["expert_int8_bytes"]
+    scale = result["expert_scale_bytes"]
+    non_expert = result["non_expert_bytes"]
+    budget = int8 * 1.15 + 1024**3 + non_expert
+    peak = result["peak"] - result["baseline"]
+    final = result["final"] - result["baseline"]
+    measured = (
+        f"artifact {_gb(shard_bytes)}, int8 {_gb(int8)}, scales {_gb(scale)}, "
+        f"non-expert {_gb(non_expert)}, baseline {_gb(result['baseline'])}, "
+        f"budget {_gb(budget)}, peak {_gb(result['peak'])} (+{_gb(peak)} over baseline), "
+        f"final {_gb(result['final'])} (+{_gb(final)} over baseline)"
+    )
+
+    # The fixture is the mid-size case, and the census is its half-size int8 form:
+    # two bf16 bytes per expert weight became one int8 byte, plus the scales.
+    assert result["expert_modules"] == MID_LAYERS, measured
+    assert int8 == MID_EXPERT_ELEMENTS, measured
+    assert shard_bytes > 2 * int8, measured
+    assert non_expert > 0 and non_expert < 512 * 1024**2, measured
+    assert result["remaining_expert_params"] == 0, measured
+    assert result["expert_buffer_devices"] == ["cpu"], measured
+
+    assert final <= budget, f"resident after load exceeds the int8 budget: {measured}"
+    assert peak <= budget, f"peak during load exceeds the int8 budget: {measured}"
+    # Too few samples would mean the sampler thread never ran, not that the load
+    # was small.
+    assert result["samples"] > 10, measured
+
+
+def _whole_tensor_dequant(q, scale, dtype):
+    """What the pre-change loader did: one fp32 product for the whole tensor."""
+    return (q.to(torch.float32) * scale.to(torch.float32)).to(dtype)
+
+
+def _expert_shaped_weights(experts: int = 6, rows: int = 12, features: int = 40):
+    generator = torch.Generator().manual_seed(5)
+    weight = torch.randn(experts, rows, features, generator=generator)
+    # Experts of very different magnitudes, so a block boundary that took its
+    # scale from the wrong rows would change the int8 bytes.
+    weight = weight * torch.linspace(0.5, 12.0, experts).view(experts, 1, 1)
+    # One all-zero row: it must keep scale 1.0 and quantise to zero on either
+    # side of a block boundary, not divide by zero.
+    weight[0, 0] = 0
+    return weight
+
+
+def _pre_change_quantisation(weight):
+    """The head implementation, verbatim: one fp32 product for the whole tensor."""
+    absmax = weight.detach().abs().amax(dim=-1, keepdim=True).float()
+    scale = torch.where(absmax > 0, absmax / float(mie.INT8_MAX), torch.ones_like(absmax))
+    return torch.round(weight.detach().float() / scale).clamp(-mie.INT8_MAX, mie.INT8_MAX).to(torch.int8), scale
+
+
+def test_quantisation_is_bitwise_identical_in_row_blocks_or_all_at_once(monkeypatch):
+    """Chunking must not move the numbers: same int8 bytes, same scales."""
+    weight = _expert_shaped_weights()
+    whole_q, whole_scale = mie.quantize_rows(weight)
+
+    # One block per row: the tightest boundary the loop can draw.
+    monkeypatch.setattr(mie, "QUANTIZE_ELEMENTS_PER_BLOCK", weight.shape[-1])
+    block_q, block_scale = mie.quantize_rows(weight)
+
+    assert torch.equal(block_q, whole_q)
+    assert torch.equal(block_scale, whole_scale)
+    # ... and both are the bytes the pre-change whole-tensor code produced, so
+    # the fix changed the memory profile and nothing else.
+    old_q, old_scale = _pre_change_quantisation(weight)
+    assert torch.equal(whole_q, old_q)
+    assert torch.equal(whole_scale, old_scale)
+    # And the round trip is still within half a step of each row's absmax.
+    dequantized = mie.dequantize_rows(whole_q, whole_scale, torch.float32)
+    row_absmax = weight.abs().amax(dim=-1, keepdim=True)
+    assert torch.all((dequantized - weight).abs() <= row_absmax / mie.INT8_MAX)
+
+
+def test_quantising_into_the_store_matches_quantising_the_whole_tensor(monkeypatch):
+    """The loader writes straight into its preallocated stores; that must be the
+    same int8 as quantising the tensor on its own."""
+    weight = _expert_shaped_weights()
+    whole_q, whole_scale = mie.quantize_rows(weight)
+
+    store = {
+        "down_q": torch.empty(weight.shape, dtype=torch.int8),
+        "down_scale": torch.empty((*weight.shape[:-1], 1), dtype=torch.float32),
+    }
+    monkeypatch.setattr(mie, "QUANTIZE_ELEMENTS_PER_BLOCK", 4 * weight.shape[-1])
+    mie._quantize_into(store, "down", weight)
+
+    assert torch.equal(store["down_q"], whole_q)
+    assert torch.equal(store["down_scale"], whole_scale)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_dequantisation_is_bitwise_identical_in_row_blocks_or_all_at_once(monkeypatch, dtype):
+    """The old full-tensor dequant, block for block, is the same tensor."""
+    weight = _expert_shaped_weights()
+    q, scale = mie.quantize_rows(weight)
+    want = _whole_tensor_dequant(q, scale, dtype)
+
+    monkeypatch.setattr(mie, "DEQUANT_ELEMENTS_PER_BLOCK", 7 * weight.shape[-1])
+    got = mie.dequantize_rows(q, scale, dtype)
+
+    assert torch.equal(got, want), f"{(got.float() - want.float()).abs().max().item()}"
+
+
+def test_the_device_dequant_streams_row_blocks_and_matches_the_whole_tensor(monkeypatch):
+    """``_dequantized_on`` produces the layer's weights once, from blocks.
+
+    The blocks are what the 16 GB card can afford: the whole int8 matrix never
+    goes to the device, and no fp32 copy of the layer ever exists beside the
+    weights.
+    """
+    weight = _expert_shaped_weights()
+    q, scale = mie.quantize_rows(weight)
+    seen: list[tuple[int, torch.dtype]] = []
+    real = mie._dequantize_block
+
+    def traced(out_slice, q_block, scale_block):
+        seen.append((q_block.numel(), out_slice.dtype))
+        return real(out_slice, q_block, scale_block)
+
+    # One expert is 480 elements here, so a 320-element block budget means one
+    # expert per block: the finest granularity a 3-D matrix can be split on.
+    monkeypatch.setattr(mie, "DEQUANT_ELEMENTS_PER_BLOCK", 320)
+    monkeypatch.setattr(mie, "_dequantize_block", traced)
+    out = mie._dequantized_on(q, scale, "cpu", torch.bfloat16)
+
+    assert out.dtype == torch.bfloat16 and out.shape == q.shape
+    assert torch.equal(out, _whole_tensor_dequant(q, scale, torch.bfloat16))
+    assert len(seen) > 1, "the device dequant did not split the matrix"
+    one_expert = weight.shape[1] * weight.shape[2]
+    assert max(elements for elements, _ in seen) <= one_expert
+    assert sum(elements for elements, _ in seen) == q.numel()
+
+
+PROGRESS_LINE = re.compile(
+    r"^\[int8-load\] shard (?P<shard>\d+)/(?P<shards>\d+), "
+    r"layers quantized (?P<layers>\d+), host private (?P<host>\S+) GB$"
+)
+
+
+def test_the_load_reports_progress_every_shard_and_every_four_layers(tmp_path, capsys):
+    """A 40-minute real load has to be observable, not silent."""
+    base = _checkpoint(tmp_path, layers=5)
+    shards = len(sorted(base.glob("*.safetensors")))
+
+    mie.load_model_int8_experts(base)
+
+    lines = [
+        line
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith("[int8-load] ")
+    ]
+    parsed = [PROGRESS_LINE.match(line) for line in lines]
+    assert lines and all(parsed), lines
+    # Every shard is announced, and the count advances to n/n.
+    announced = {int(match.group("shard")) for match in parsed}
+    assert announced == set(range(1, shards + 1)), (sorted(announced), shards)
+    assert int(parsed[-1].group("shard")) == int(parsed[-1].group("shards"))
+    # Each line carries the host figure (a number, or n/a when unmeasurable).
+    for match in parsed:
+        assert match.group("host") == "n/a" or float(match.group("host")) > 0
+    # ... and the layer counter is monotonic, reaching all 5 layers.
+    counts = [int(match.group("layers")) for match in parsed]
+    assert counts == sorted(counts), counts
+    assert counts[-1] == 5, counts
+    # The every-4-layers cadence fired at 4. The shard lines alone cannot produce
+    # it: this fixture has fewer shards than it has layers of experts.
+    assert 4 in counts, counts

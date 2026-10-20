@@ -22,6 +22,15 @@ Two things this module exists to guarantee:
   tensor by tensor: an expert tensor is quantized as soon as it is read and the
   bf16 values are dropped before the next one is touched, so at most one expert
   tensor is live at a time. Everything else is loaded to the device.
+  Quantisation itself runs in row blocks straight into the preallocated int8 and
+  scale stores (``QUANTIZE_ELEMENTS_PER_BLOCK``), because a *fused* expert
+  tensor is layer-sized -- ~1 GB of bf16 for reap160's 160 experts -- and the
+  ``round(w.float() / scale).clamp(...)`` chain needs roughly nine times a
+  tensor's bf16 bytes in fp32 intermediates. Doing that per tensor is what put
+  the reap160 load at 37.8 GB of private bytes against the ~20 GB the int8
+  experts should occupy, and the host heap keeps that high-water mark committed
+  long after the load returns. The load reports its progress on stderr, so a
+  long one is observable.
 * **Nothing bf16 is left for the experts.** The expert parameters are removed
   from each experts module (before the skeleton is materialised, so they are
   never allocated) and replaced by four CPU buffers: ``gate_up_q``,
@@ -33,6 +42,11 @@ element (half a step of ``absmax/127``). The router and every LoRA leaf still se
 gradients computed through the dequantized weights, exactly as the bulk path
 computes them through the bf16 weights.
 
+Nothing layer-sized is dequantized but the weights themselves: ``dequantize_rows``
+and ``_dequantized_on`` walk row blocks, so the card holds one block of int8 plus
+one block's fp32 product at a time, never an fp32 copy of the layer beside its
+bf16 weights.
+
 Design: docs/DESIGN-MOE-16GB-TRAINING-BACKEND-2026-10-18.md (option B). This
 module is the mechanism only; the placement's preregistered gates must be
 re-measured on the real artifact before any campaign declares it.
@@ -41,6 +55,7 @@ re-measured on the real artifact before any campaign declares it.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +79,62 @@ INT8_EXPERT_BUFFERS = ("gate_up_q", "gate_up_scale", "down_q", "down_scale")
 INT8_MAX = 127
 
 
+#: Quantisation streams a matrix through row blocks of at most this many
+#: elements. The working set of a block is the block itself plus one fp32
+#: scratch buffer (``abs`` copy, fp32 copy, then round/clamp in place), so ~8M
+#: elements is ~48 MB -- not the ~9x a whole layer-sized tensor would need.
+#: Whole-layer blocks are what held reap160 at 37.8 GB private after load: a
+#: 1 GB fused ``gate_up_proj`` quantised in one go needs ~8 GB of fp32
+#: intermediates, and the host heap keeps that high-water mark committed.
+QUANTIZE_ELEMENTS_PER_BLOCK = 1 << 23
+
+
+def _rows_per_block(row_elements: int, limit: int) -> int:
+    """How many rows of ``row_elements`` fit in ``limit`` elements (at least one)."""
+    return max(1, limit // max(1, row_elements))
+
+
+def _quantize_block(block: Any) -> tuple[Any, Any]:
+    """``(int8, fp32 scale)`` for a 2-D row block, with one fp32 scratch buffer.
+
+    The arithmetic is the same expression the whole-tensor version used --
+    ``round(w.float() / scale).clamp(-127, 127)`` -- with ``/``, ``round`` and
+    ``clamp`` done in place on a single fp32 copy, so the int8 bytes are
+    identical to a block-agnostic quantisation.
+    """
+    import torch
+
+    absmax = block.abs().amax(dim=-1, keepdim=True).float()
+    # A row that is entirely zero keeps a scale of 1.0 rather than 0.0: dividing
+    # by zero would produce NaNs, while an all-zero int8 row dequantizes back to
+    # 0 with either scale.
+    scale = torch.where(absmax > 0, absmax / float(INT8_MAX), torch.ones_like(absmax))
+    # ``to(float32)`` aliases its input when it is already fp32, and the rest of
+    # this function mutates in place, so the copy has to be explicit.
+    scratch = block.to(torch.float32, copy=True)
+    scratch.div_(scale)
+    scratch.round_()
+    scratch.clamp_(-INT8_MAX, INT8_MAX)
+    return scratch.to(torch.int8), scale
+
+
+def _quantize_rows_into(q_out: Any, scale_out: Any, rows: Any) -> None:
+    """Quantize ``rows`` (2-D) into the preallocated int8/scale stores, in blocks.
+
+    The destination is written block by block, so neither an int8 copy of the
+    input nor an fp32 copy of it ever exists whole: only one block of each.
+    """
+    n_rows = rows.shape[0]
+    if n_rows == 0:
+        return
+    block = _rows_per_block(rows.shape[1], QUANTIZE_ELEMENTS_PER_BLOCK)
+    for start in range(0, n_rows, block):
+        stop = start + block
+        q_block, scale_block = _quantize_block(rows[start:stop])
+        q_out[start:stop].copy_(q_block)
+        scale_out[start:stop].copy_(scale_block)
+
+
 def quantize_rows(weight: Any, *, scale_dtype: Any = None) -> tuple[Any, Any]:
     """Symmetric per-output-row int8 quantisation of a weight matrix.
 
@@ -76,23 +147,59 @@ def quantize_rows(weight: Any, *, scale_dtype: Any = None) -> tuple[Any, Any]:
     with either scale.
 
     Returns ``(q[int8], scale)`` with the scale in ``scale_dtype`` (fp32 by
-    default: it is one value per output row, 0.5 byte per 4 weights).
+    default: it is one value per output row, 0.5 byte per 4 weights). The matrix
+    is quantised in row blocks (``QUANTIZE_ELEMENTS_PER_BLOCK``), so this never
+    allocates a whole-matrix fp32 intermediate; ``q`` is the destination itself.
     """
     import torch
 
     if scale_dtype is None:
         scale_dtype = torch.float32
-    detached = weight.detach()
-    absmax = detached.abs().amax(dim=-1, keepdim=True).float()
-    scale = torch.where(absmax > 0, absmax / float(INT8_MAX), torch.ones_like(absmax))
-    q = torch.round(detached.float() / scale).clamp(-INT8_MAX, INT8_MAX).to(torch.int8)
-    return q, scale.to(scale_dtype)
+    features = weight.shape[-1]
+    q = torch.empty(weight.shape, dtype=torch.int8)
+    scale = torch.empty((*weight.shape[:-1], 1), dtype=scale_dtype)
+    # The stores are the only matrix-sized allocations; the input is reshaped,
+    # never copied, so a whole-matrix fp32 intermediate never exists.
+    _quantize_rows_into(
+        q.reshape(-1, features),
+        scale.reshape(-1, 1),
+        weight.detach().reshape(-1, features),
+    )
+    return q, scale
 
 
-#: Dequantisation works through row blocks of at most this many fp32 elements
-#: (16 MB). The fp32 product of a whole expert matrix would be twice its bf16
-#: bytes on the card, which the 16 GB budget cannot spend on top of the copy.
-DEQUANT_ELEMENTS_PER_BLOCK = 1 << 22
+#: Dequantisation works through row blocks of at most this many elements, so a
+#: block's fp32 product stays under ~32 MB. The fp32 product of a whole expert
+#: matrix would be twice its bf16 bytes on the card, which the 16 GB budget
+#: cannot spend on top of the copy.
+DEQUANT_ELEMENTS_PER_BLOCK = 1 << 23
+
+
+def _dequantize_block(out_slice: Any, q_block: Any, scale_block: Any) -> None:
+    """``out_slice = (q * scale)`` for one block, multiplied in fp32.
+
+    The multiply is done in fp32 and cast once to the destination dtype: the
+    scale is a per-row fp32 value and casting it to bf16 first would move the
+    weights by up to half a bf16 ulp before any arithmetic happens.
+    """
+    import torch
+
+    out_slice.copy_((q_block.to(torch.float32) * scale_block.to(torch.float32)).to(out_slice.dtype))
+
+
+def _dequantize_into(out: Any, q: Any, scale: Any) -> None:
+    """Fill ``out`` (already allocated, ``q``'s shape) from ``q`` and ``scale``.
+
+    Row blocks only: nothing but one block's fp32 product is ever allocated, so
+    the caller may hold the layer's dequantized weights exactly once (``out``)
+    without a second, fp32, copy of the layer beside it.
+    """
+    if q.numel() == 0 or out.numel() == 0:
+        return
+    block = _rows_per_block(q[0].numel(), DEQUANT_ELEMENTS_PER_BLOCK)
+    for start in range(0, q.shape[0], block):
+        rows = slice(start, start + block)
+        _dequantize_block(out[rows], q[rows], scale[rows])
 
 
 def dequantize_rows(q: Any, scale: Any, dtype: Any = None) -> Any:
@@ -107,13 +214,7 @@ def dequantize_rows(q: Any, scale: Any, dtype: Any = None) -> Any:
 
     out_dtype = torch.float32 if dtype is None else dtype
     out = torch.empty(q.shape, dtype=out_dtype, device=q.device)
-    if q.numel() == 0:
-        return out
-    row_elements = max(1, q[0].numel())
-    block = max(1, DEQUANT_ELEMENTS_PER_BLOCK // row_elements)
-    for start in range(0, q.shape[0], block):
-        rows = slice(start, start + block)
-        out[rows] = (q[rows].to(torch.float32) * scale[rows].to(torch.float32)).to(out_dtype)
+    _dequantize_into(out, q, scale)
     return out
 
 
@@ -163,6 +264,38 @@ def _experts_modules(model: Any) -> list[tuple[str, Any]]:
     ]
 
 
+#: Report host memory every this many expert layers, and at every shard.
+PROGRESS_LAYERS = 4
+
+
+def _host_private_bytes() -> int | None:
+    """This process's private (committed) bytes, or ``None`` if unmeasurable.
+
+    Never raises: a progress line must not be able to kill a 40-minute load.
+    """
+    try:
+        import psutil
+
+        info = psutil.Process().memory_info()
+        private = getattr(info, "private", None)
+        if private is not None:
+            return int(private)
+        # POSIX has no "private bytes"; unique set size is the same question.
+        return int(psutil.Process().memory_full_info().uss)
+    except Exception:  # pragma: no cover - telemetry is never fatal
+        return None
+
+
+def _host_private_gb() -> str:
+    private = _host_private_bytes()
+    return "n/a" if private is None else f"{private / 1024**3:.2f}"
+
+
+def _log_load(message: str) -> None:
+    """A load progress line on stderr, flushed so a long load is observable."""
+    print(f"[int8-load] {message}", file=sys.stderr, flush=True)
+
+
 def _shard_files(base: Path) -> list[Path]:
     """Every safetensors shard of a local checkpoint, in index order when there
     is an index (a sharded checkpoint's order is the index's, not the name's)."""
@@ -205,17 +338,28 @@ def _quantize_into(store: dict[str, Any], which: str, rows: Any, expert: int | N
     legacy checkpoint's ``gate_proj`` and ``up_proj`` are the two halves of the
     fused ``gate_up_proj`` (``chunk(2, dim=-1)`` -> gate first), so they land in
     rows ``[0:inter]`` and ``[inter:2*inter]`` of the fused matrix.
+
+    The read tensor is quantised in row blocks straight into the store, so a
+    whole-layer checkpoint tensor (a fused ``gate_up_proj`` is ~1 GB of bf16 on
+    reap160) never gets a whole-layer int8 or fp32 companion -- the store is
+    already the int8 copy, and only one block of fp32 exists at a time.
     """
-    q, scale = quantize_rows(rows)
-    if expert is None:
-        store[f"{which}_q"].copy_(q)
-        store[f"{which}_scale"].copy_(scale)
-        return
-    q_target = store[f"{which}_q"][expert]
-    s_target = store[f"{which}_scale"][expert]
-    rows_in = q.shape[0]
-    q_target[offset:offset + rows_in].copy_(q)
-    s_target[offset:offset + rows_in].copy_(scale)
+    q_target = store[f"{which}_q"]
+    s_target = store[f"{which}_scale"]
+    if expert is not None:
+        q_target = q_target[expert]
+        s_target = s_target[expert]
+    features = rows.shape[-1]
+    # A fused per-layer key arrives 3-D (experts x out x in) and a per-expert key
+    # 2-D; both are quantised as a flat row list, which is the same thing.
+    total_rows = rows.numel() // features
+    q_target = q_target[offset:offset + total_rows]
+    s_target = s_target[offset:offset + total_rows]
+    _quantize_rows_into(
+        q_target.reshape(-1, features),
+        s_target.reshape(-1, 1),
+        rows.detach().reshape(total_rows, features),
+    )
 
 
 #: Checkpoint key prefixes transformers' own loader rewrites and this streaming
@@ -407,7 +551,14 @@ def load_model_int8_experts(
                 model.get_submodule(".".join(parts[:depth]))._is_hf_initialized = True
 
     shards = _shard_files(base)
-    for shard in shards:
+    # Layers whose expert tensors have been streamed so far, in first-seen order;
+    # this is the progress counter the load line reports.
+    quantized_layers: list[str] = []
+    for shard_index, shard in enumerate(shards, start=1):
+        _log_load(
+            f"shard {shard_index}/{len(shards)}, layers quantized {len(quantized_layers)}, "
+            f"host private {_host_private_gb()} GB"
+        )
         with safe_open(str(shard), framework="pt", device="cpu") as handle:
             for raw_key in handle.keys():
                 key = _model_key(raw_key, params, buffers)
@@ -423,6 +574,13 @@ def load_model_int8_experts(
                 tensor = handle.get_tensor(raw_key)
                 if EXPERT_PARAM_INFIX in key:
                     layer, which, expert, offset = _expert_key_target(key)
+                    if layer not in quantized_layers:
+                        quantized_layers.append(layer)
+                        if len(quantized_layers) % PROGRESS_LAYERS == 0:
+                            _log_load(
+                                f"shard {shard_index}/{len(shards)}, layers quantized "
+                                f"{len(quantized_layers)}, host private {_host_private_gb()} GB"
+                            )
                     store = stores.get(layer)
                     if store is None:
                         raise RuntimeError(
@@ -443,11 +601,18 @@ def load_model_int8_experts(
                     del tensor
                     continue
                 with torch.no_grad():
-                    target.copy_(tensor.to(dtype=target.dtype, device=target.device))
+                    # ``copy_`` does the cast and the host->device move itself.
+                    # ``tensor.to(device)`` would materialise a second,
+                    # device-sized copy of every non-expert tensor first.
+                    target.copy_(tensor)
                 mark_initialized(target)
                 del tensor
                 loaded.add(key)
 
+    _log_load(
+        f"shard {len(shards)}/{len(shards)}, layers quantized {len(quantized_layers)}, "
+        f"host private {_host_private_gb()} GB"
+    )
     if unexpected:
         raise RuntimeError(
             f"{len(unexpected)} checkpoint tensor(s) have no home on the model skeleton, "
@@ -507,8 +672,28 @@ def load_model_int8_experts(
 
 
 def _dequantized_on(tensor: Any, scale: Any, device: Any, dtype: Any) -> Any:
-    """Copy one int8 matrix and its scales to ``device``, dequantize there."""
-    return dequantize_rows(tensor.to(device, non_blocking=True), scale.to(device, non_blocking=True), dtype)
+    """Dequantize one CPU-resident int8 matrix onto ``device``, in row blocks.
+
+    The result (the layer's weights in ``dtype``, i.e. bf16 in training) is the
+    only layer-sized allocation: the int8 matrix is staged to the device one
+    block at a time and each block's fp32 product is freed before the next, so
+    the forward never needs an int8 *and* an fp32 copy of the whole layer beside
+    the weights. On the 16 GB card that difference is what decides whether the
+    layer fits or spills to WDDM.
+    """
+    import torch
+
+    out = torch.empty(tensor.shape, dtype=dtype, device=device)
+    if tensor.numel() == 0:
+        return out
+    block = _rows_per_block(tensor[0].numel(), DEQUANT_ELEMENTS_PER_BLOCK)
+    for start in range(0, tensor.shape[0], block):
+        rows = slice(start, start + block)
+        q_block = tensor[rows].to(device, non_blocking=True)
+        scale_block = scale[rows].to(device, non_blocking=True)
+        _dequantize_block(out[rows], q_block, scale_block)
+        del q_block, scale_block
+    return out
 
 
 def _int8_layer_function() -> Any:
