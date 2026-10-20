@@ -48,7 +48,10 @@ writes the table, so the regressed numbers are the ones on record. A run against
 a different artifact refuses to overwrite the table at all (`--allow-new-baseline`
 starts a new baseline). `--check` compares without writing. `--steps 0` measures
 the census only and carries the recorded throughput forward rather than erasing
-it. `--witness` records a training run's four gates instead of measuring, and is
+it. `--project-only` needs neither the card nor the weights: it reads the shard
+headers and prints what a placement step must occupy beside the recorded
+`load_census` and `host_rss`, writing no table -- a projection is not a
+measurement, and a number in that block would be indistinguishable from one. `--witness` records a training run's four gates instead of measuring, and is
 the only way those rows ever stop saying "not measured".
 
 **What each gate is, and what passes.**
@@ -129,10 +132,10 @@ dtype and nothing else.
 The card was never used for either census, so everything below is arithmetic from
 the artifact's shapes plus the one figure the census did measure. `--steps 3` on
 the card records `peak_vram_gb`, `reserved_gb` and `s_per_step`, and that is what
-settles it. Shapes: 40 layers, 160 experts, hidden 2048, moe-inter 512, top-2,
-vocab 248320, 22.573 B parameters of which experts are 20.133 B, embedding and
-head 0.509 B each, and the attention/router matmuls 1.423 B (30 GatedDeltaNet
-layers, 10 full-attention).
+settles it. Shapes: 40 layers, 160 experts, top-8 of them per token, hidden 2048,
+moe-inter 512, vocab 248320, 22.573 B parameters of which experts are 20.133 B,
+embedding and head 0.509 B each, and the attention/router matmuls 1.423 B (30
+GatedDeltaNet layers, 10 full-attention).
 
 Exact, because both sides are the census' own bytes:
 
@@ -160,16 +163,47 @@ least the 5.5 GiB of table above, less that 0.95, plus whatever the activation
 halving is worth.
 
 **Step time.** Per token the forward matmuls are 2.85 GFLOP on the non-expert
-path (1.423 B matmul parameters x 2) against 0.50 GFLOP through the 2-of-160
-active experts, so the non-expert path is ~5.7x the expert FLOPs. It also ran in
-fp32: this torch build has `allow_tf32=False` and `float32_matmul_precision =
-highest`, so those matmuls had no tensor cores, and the dequantized expert
-weights were fp32 too (`_dequantized_on` follows the hidden states' dtype). bf16
-puts both on tensor cores and halves the weight bytes every expert matmul reads
-(0.938 vs 1.875 GiB per layer, twice per step with the backward recompute). But
-the step is also 160 small matmuls per layer, which is launch- and
-copy-bound rather than FLOP-bound, so expect a modest improvement, not 5.7x. No
-number is claimed here.
+path (1.423 B matmul parameters x 2) against 0.050 GFLOP through the 8-of-160
+active experts (3.146 M MACs per expert: `[1024, 2048]` gate_up plus `[2048, 512]`
+down), so the non-expert path is ~57x the expert FLOPs. It also ran in fp32: this
+torch build has `allow_tf32=False` and `float32_matmul_precision = highest`, so
+those matmuls had no tensor cores, and the dequantized expert weights were fp32
+too (`_dequantized_on` follows the hidden states' dtype). bf16 puts both on
+tensor cores and halves the weight bytes every expert matmul reads (0.938 vs
+1.875 GiB per layer, twice per step with the backward recompute). But the step is
+also 160 small matmuls per layer, which is launch- and copy-bound rather than
+FLOP-bound, so expect a modest improvement, not 57x. No number is claimed here.
+
+*Correction, same day:* an earlier revision of the paragraph above said top-2,
+0.50 GFLOP and 5.7x. The artifact's `text_config.num_experts_per_tok` is **8**,
+and the per-expert count is 3.15 M MACs, so the expert path was understated ~10x
+in FLOPs and ~4x in routing width. Nothing else in this document depended on the
+ratio -- the weights, the residency and the int8 grid are untouched -- but the
+step-time expectation was wrong in the direction that flatters bf16, so it is
+corrected rather than quietly restated.
+
+**Reproduced without the card.** `--project-only` recomputes the table above from
+the 26 shard headers -- no weights, no model, no device -- and prints it beside
+whatever is recorded:
+
+```
+python chowder_batch/moe_int8_gates.py --project-only \
+    --base-model G:\llm-cold\bf16\Qwen3.6-REAP160 --gates gates-int8.json
+```
+
+It returns 18.82 GiB of int8 + scales against the census' 18.82 (agreement to
+the byte: one int8 byte per expert parameter and one fp32 scale per row is what
+`_empty_int8_experts` allocates), 4.55 GiB of non-expert parameters against the
+census' 4.55, and therefore a 23.37 GiB host-resident total against the recorded
+25.56 peak -- the 2.19 GiB gap being interpreter + torch, which is the same
+figure the census note above attributes. The device terms are the ones the card
+would have to hold: 0.94 GiB for one layer's dequantized experts, 0.06 GiB of
+row-block scratch, a step's weights floor of 5.54 GiB, and 4.74 GiB more for the
+gate's own loss expression (logits + `.float()` copy + `.square()`), i.e. 10.27
+GiB before a single activation. The activation row is reported as `unsized`, not
+invented, and a recorded number that cannot be reconciled with this arithmetic
+makes the mode exit 5 rather than print both figures as if they described one
+placement.
 
 **Numerics.** The weights are the same values either way -- the shards are BF16
 and fp32 storage was an exact upcast -- but the compute dtype changes: bf16

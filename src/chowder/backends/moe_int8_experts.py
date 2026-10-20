@@ -338,6 +338,36 @@ def _resolve_weight_dtype(config: Any, shards: list[Path], dtype: Any = None) ->
     return torch.float32, "default"
 
 
+def resolve_non_expert_dtype(
+    base_dir: str | Path,
+    *,
+    dtype: Any = None,
+    config: Any = None,
+    revision: str | None = None,
+    local_files_only: bool = True,
+    trust_remote_code: bool = False,
+) -> tuple[Any, str]:
+    """The dtype the loader materialises non-expert weights in, loading no weights.
+
+    ``load_model_int8_experts`` resolves this inline from the config it already
+    holds; this is the same call for a caller that wants the answer without
+    building the model, e.g. a projection that sizes the placement from the
+    shard headers. It resolves the dtype with ``_resolve_weight_dtype`` rather
+    than re-deriving the rule: two definitions of "what dtype is this checkpoint"
+    would eventually disagree, and then every byte figure would too.
+    """
+    if config is None:
+        from transformers import AutoConfig
+
+        config = AutoConfig.from_pretrained(
+            str(base_dir),
+            revision=revision,
+            local_files_only=local_files_only,
+            trust_remote_code=trust_remote_code,
+        )
+    return _resolve_weight_dtype(config, _shard_files(Path(base_dir)), dtype)
+
+
 def _experts_modules(model: Any) -> list[tuple[str, Any]]:
     return [
         (name, module)

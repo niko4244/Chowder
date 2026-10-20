@@ -37,7 +37,17 @@ Exit codes: 0 table written with no regression, 1 a recorded gate **regressed**
 refusal (missing directory, unknown arm, no CUDA without ``--cpu``), 3 an arm
 failed to load or to place, 4 the table was measured on a different artifact and
 would be overwritten with incomparable numbers (``--allow-new-baseline`` starts
-a new baseline).
+a new baseline), 5 the header projection disagrees with the recorded measurement
+(``--project-only``: the two cannot both be right).
+
+``--project-only`` is the mode a box with no free card can still answer with:
+it reads the shard **headers** (no tensor data, no model, no device), derives
+what a placement step must occupy, and prints that beside whatever the table
+records -- ``load_census`` and ``host_rss`` today, ``memory_vram`` once a
+``--steps 3`` run on the card has happened. It writes no table: a projection is
+not a measurement, and the block must never carry one. The int8 and non-expert
+terms are derived, not estimated, so a mismatch against the recorded census is a
+refusal (exit 5) rather than a rounding difference.
 
 ``--self-check`` writes its own tiny synthetic checkpoint to a temporary
 directory and runs both arms on the CPU, so the runner itself is verifiable
@@ -81,6 +91,10 @@ ARMS = ("int8", "bulk")
 #: A gate table written by a different artifact cannot back these numbers: the
 #: run refuses to overwrite it until the operator says the baseline moved.
 ARTIFACT_MISMATCH_EXIT = 4
+#: ``--project-only`` found the header arithmetic and the recorded measurement
+#: irreconcilable. Nothing is written either way; this says which of the two is
+#: the thing to look at before spending the card.
+PROJECTION_DISAGREES_EXIT = 5
 
 
 def _peak_rss_bytes() -> int | None:
@@ -404,6 +418,143 @@ def _record_witness(args: argparse.Namespace) -> int:
     return 0
 
 
+def _recorded_numbers(gates_path: str, prereg: Path | None) -> dict[str, Any]:
+    """What has already been measured, in the units the projection reports.
+
+    A gate record is the better witness when there is one: it carries the
+    census' own ``non_expert_bytes`` and, after a ``--steps 3`` run, the device
+    peak. The prereg table carries only the two numbers its rows publish, which
+    is why a projection against it can check the int8 grid and the host peak but
+    not the non-expert split.
+    """
+    recorded: dict[str, Any] = {
+        "source": None,
+        "int8_plus_scales": None,
+        "non_expert": None,
+        "host_peak": None,
+        "step_vram": None,
+        "seq_len": None,
+    }
+    if gates_path:
+        try:
+            payload = json.loads(Path(gates_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise ValueError(f"cannot read the gate record {gates_path}: {error}") from error
+        arm = (payload.get("arms") or {}).get("int8") or {}
+        census = arm.get("census") or {}
+        meta = arm.get("census_meta") or {}
+        recorded.update(
+            {
+                "source": Path(gates_path).name,
+                "int8_plus_scales": meta.get("expert_bytes_gb"),
+                "non_expert": _gib(census.get("non_expert_bytes")),
+                "host_peak": arm.get("total_peak_rss_gb"),
+                "step_vram": arm.get("peak_vram_gb"),
+                "seq_len": payload.get("seq_len"),
+            }
+        )
+        return recorded
+
+    if prereg is None or not prereg.is_file():
+        return recorded
+    parsed = parse_block(prereg.read_text(encoding="utf-8")) or {}
+    numbers = parsed.get("numbers") or {}
+    recorded.update(
+        {
+            "source": f"{prereg.name}: load_census, host_rss",
+            "int8_plus_scales": numbers.get("load_census"),
+            "host_peak": numbers.get("host_rss"),
+            "step_vram": numbers.get("memory_vram"),
+        }
+    )
+    return recorded
+
+
+def _project_only(args: argparse.Namespace) -> int:
+    """Print the projection from the headers, beside what is already recorded.
+
+    No model, no weights, no device: this is the mode that answers "how much did
+    the dtype fix buy" on a box whose card is busy. It never writes the gate
+    table -- the table is for measurements, and a projection in it would be
+    indistinguishable from one.
+    """
+    from chowder import moe_vram_projection as mvp
+
+    if args.self_check:
+        args.base_model = str(_self_check_workspace())
+    elif not args.base_model:
+        print("--project-only needs --base-model (or --self-check)", file=sys.stderr)
+        return 2
+    base = Path(args.base_model)
+    if not base.is_dir():
+        print(f"base model directory not found: {base}", file=sys.stderr)
+        return 2
+
+    from transformers import AutoConfig
+
+    from chowder.backends import moe_int8_experts as mie
+
+    try:
+        config = AutoConfig.from_pretrained(str(base))
+        dtype, dtype_source = mie.resolve_non_expert_dtype(
+            base, dtype=args.dtype or None, config=config
+        )
+        inv = mvp.inventory(base, dtype=str(dtype).replace("torch.", ""))
+        projection = mvp.project(inv, seq_len=args.seq_len, vocab_size=_vocab_size(config))
+    except (OSError, ValueError, FileNotFoundError) as error:
+        print(f"cannot project {base}: {type(error).__name__}: {error}", file=sys.stderr)
+        return 2
+
+    if args.prereg:
+        # An explicit table wins even under --self-check: this mode writes
+        # nothing, so naming one is asking to be compared against it.
+        prereg = Path(args.prereg)
+    elif args.self_check:
+        # The synthetic checkpoint's table is its own; the placement's prereg is
+        # never the comparison for numbers from a 2-layer toy.
+        prereg = base / "PREREG-self-check.md"
+    else:
+        prereg = resolve_prereg_path(None)
+    try:
+        recorded = _recorded_numbers(args.gates, prereg)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+    if recorded.get("seq_len") and int(recorded["seq_len"]) != int(args.seq_len):
+        print(
+            f"note: {recorded['source']} measured at seq {recorded['seq_len']}, projecting at "
+            f"seq {args.seq_len}; the step rows are only comparable at the same seq",
+            file=sys.stderr,
+        )
+
+    artifact = {**artifact_identity(base), "path": str(base)}
+    print(mvp.render(projection, recorded, artifact=artifact))
+    if dtype_source:
+        print(f"  dtype resolved as {str(dtype).replace('torch.', '')} ({dtype_source})")
+
+    problems = mvp.disagreements(projection, recorded)
+    if args.out:
+        payload = {
+            "schema": "chowder.moe-placement-projection.v1",
+            "base_model": str(base),
+            "artifact": artifact,
+            "dtype": str(dtype).replace("torch.", ""),
+            "dtype_source": dtype_source,
+            "projection": projection,
+            "recorded": recorded,
+            "disagreements": problems,
+        }
+        Path(args.out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(f"wrote {args.out}")
+    if problems:
+        for problem in problems:
+            print(f"DISAGREES: {problem}", file=sys.stderr)
+        return PROJECTION_DISAGREES_EXIT
+    print("projection and recorded measurement reconcile")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base-model", default="", help="local checkpoint directory (safetensors shards)")
@@ -421,6 +572,19 @@ def main(argv: list[str] | None = None) -> int:
         "--allow-new-baseline",
         action="store_true",
         help="accept a different artifact digest instead of refusing to compare",
+    )
+    parser.add_argument(
+        "--project-only",
+        action="store_true",
+        help=(
+            "print the VRAM projection from the shard headers beside the recorded gate "
+            "table; reads no weights, needs no device, writes no table"
+        ),
+    )
+    parser.add_argument(
+        "--gates",
+        default="",
+        help="a gate record JSON to compare the projection against instead of the prereg table",
     )
     parser.add_argument(
         "--witness",
@@ -442,6 +606,9 @@ def main(argv: list[str] | None = None) -> int:
         help="what the spill verdict rests on; PyTorch cannot observe driver paging",
     )
     args = parser.parse_args(argv)
+
+    if args.project_only:
+        return _project_only(args)
 
     if args.witness:
         return _record_witness(args)
