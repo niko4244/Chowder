@@ -1417,6 +1417,7 @@ def _write_project_template(
     # byte-identical to before these keys existed.
     training_settings = dict(getattr(manifest.training_backend, "config", {}) or {})
     expert_placement = str(training_settings.get("expert_placement", "resident"))
+    expert_pinning = str(training_settings.get("expert_pinning", "none"))
     target_preset = str(training_settings.get("target_preset", "auto"))
     dataset_format = str(training_settings.get("dataset_format", "text"))
     messages_field = str(training_settings.get("messages_field", "messages"))
@@ -1496,6 +1497,7 @@ def _write_project_template(
             "backend": _trainer_backend(
                 manifest,
                 expert_placement=expert_placement,
+                expert_pinning=expert_pinning,
                 target_preset=target_preset,
                 dataset_format=dataset_format,
                 messages_field=messages_field,
@@ -1541,6 +1543,7 @@ def _trainer_backend(
     dataset_format: str,
     messages_field: str,
     tools_field: str,
+    expert_pinning: str = "none",
 ) -> dict[str, Any]:
     """The project template's trainer backend, with the declared MoE settings.
 
@@ -1592,6 +1595,8 @@ def _trainer_backend(
         backend["lora"]["target_preset"] = target_preset
     if expert_placement != "resident":
         backend["expert_placement"] = expert_placement
+    if expert_pinning != "none":
+        backend["expert_pinning"] = expert_pinning
     return backend
 
 

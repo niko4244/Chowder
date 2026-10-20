@@ -34,6 +34,7 @@ from ..adapter_guard import assert_adapter_is_live
 from ..hf_resilience import cache_status, resolve_model_commit, with_hub_retries
 from ..local_model_compat import patch_transformers5_custom_model
 from .activation_offload_hooks import offload_pack, offload_unpack
+from .moe_transient_grad import TRANSIENT_PLACEMENTS
 from .training_data import (
     _build_chat_example,
     _chat_digest,
@@ -601,11 +602,11 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         )
         model_kwargs["device_map"] = 0
     expert_placement = getattr(spec, "expert_placement", "resident")
-    if expert_placement == "cpu-transient-grad":
+    if expert_placement in TRANSIENT_PLACEMENTS:
         from .moe_transient_grad import split_device_map
 
         if not torch.cuda.is_available():
-            raise RuntimeError("expert_placement='cpu-transient-grad' requires a CUDA device")
+            raise RuntimeError(f"expert_placement={expert_placement!r} requires a CUDA device")
         model_kwargs["device_map"] = split_device_map(
             spec.base_model, revision=spec.revision, local_files_only=spec.offline
         )
@@ -615,10 +616,20 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         label=f"model download for {spec.base_model}",
     )
     expert_placement_evidence: dict[str, Any] = {"placement": expert_placement}
-    if expert_placement == "cpu-transient-grad":
-        from .moe_transient_grad import prepare_split_model
+    if expert_placement in TRANSIENT_PLACEMENTS:
+        from .moe_transient_grad import pin_expert_memory, prepare_split_model
 
-        expert_placement_evidence.update(prepare_split_model(base_model))
+        expert_placement_evidence.update(
+            prepare_split_model(base_model, bulk=expert_placement.endswith("-bulk"))
+        )
+        if getattr(spec, "expert_pinning", "none") == "registered":
+            pinned = pin_expert_memory(base_model)
+            expert_placement_evidence["pinning"] = pinned
+            if pinned.get("failed"):
+                raise RuntimeError(
+                    f"expert_pinning='registered' failed for {len(pinned['failed'])} expert "
+                    f"tensors, e.g. {pinned['failed'][0]}; nothing was left pinned"
+                )
     if spec.quantization == "4bit":
         base_model = prepare_model_for_kbit_training(
             base_model,
@@ -629,7 +640,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         def attach(base: Any) -> Any:
             return PeftModel.from_pretrained(base, spec.parent_adapter, is_trainable=True)
 
-        if expert_placement == "cpu-transient-grad":
+        if expert_placement in TRANSIENT_PLACEMENTS:
             from .moe_transient_grad import attach_preserving_split
 
             model = attach_preserving_split(base_model, attach)
