@@ -22,7 +22,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PROBE = HERE / "probe.py"
 DATASET_SLUG = "chowder-moe-int8"
-KERNEL_SLUG = "chowder-int8-placement-capacity"
+# The site derives the slug from the title, and a metadata id that does not
+# resolve to it is refused with a 409 on the second push.
+KERNEL_SLUG = "chowder-int8-placement-capacity-probe"
 
 
 def kernel_metadata(owner: str) -> dict:
