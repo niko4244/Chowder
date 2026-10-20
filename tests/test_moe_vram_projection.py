@@ -171,6 +171,22 @@ def test_the_probe_fits_a_line_through_two_sequence_lengths():
     assert at_2048 == pytest.approx(1.283, abs=1e-3)
 
 
+def test_the_probe_reports_an_unfitted_kind_as_unknown_not_zero():
+    """One measured point is not a line: the model total must say unknown rather
+    than add up to a zero that reads as "this kind costs nothing"."""
+    fits = {"linear_attention": {"fixed_bytes": 1, "bytes_per_token": 2}}
+    assert probe.fit([{"seq_len": 512, "saved_bytes": 10}]) == {}
+    totals = probe.model_totals(fits, {"linear_attention": 30, "full_attention": 10}, ("linear_attention", "full_attention"), [512])
+    assert totals == {"512": None}
+
+    both = {**fits, "full_attention": {"fixed_bytes": 1, "bytes_per_token": 1}}
+    totals = probe.model_totals(
+        both, {"linear_attention": 30, "full_attention": 10}, ("linear_attention", "full_attention"), [512]
+    )
+    # 30 x (1 + 2*512) + 10 x (1 + 512) bytes: a number, not a placeholder.
+    assert totals["512"] == pytest.approx(35_880 / mvp.GIB, abs=5e-3)
+
+
 def test_the_probe_refuses_a_directory_that_is_not_there(tmp_path):
     assert probe.main(["--base-model", str(tmp_path / "missing")]) == 2
 

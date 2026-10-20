@@ -162,7 +162,12 @@ def measure(base: str, kind: str, seq_len: int, *, dtype_name: str = "bfloat16")
 
 
 def fit(points: list[dict[str, Any]]) -> dict[str, Any]:
-    """``bytes = fixed + slope * seq`` through the measured points."""
+    """``bytes = fixed + slope * seq`` from the two **shortest** measured lengths.
+
+    A third point is a check, not a fit: including it would make the line agree
+    with itself. ``predicted_at`` reports every point against the line so the
+    check is visible rather than assumed.
+    """
     if len(points) < 2:
         return {}
     (first, second) = sorted(points, key=lambda point: point["seq_len"])[:2]
@@ -182,6 +187,28 @@ def fit(points: list[dict[str, Any]]) -> dict[str, Any]:
             for point in points
         ],
     }
+
+
+def model_totals(
+    fits: dict[str, dict[str, Any]], counts: dict[str, int], kinds: tuple[str, ...], seq_lens: list[int]
+) -> dict[str, float | None]:
+    """The whole model's retention at each measured length, or ``None``.
+
+    ``None`` rather than 0.0 when a kind has no line to extrapolate: a single
+    measured point cannot be projected, and a zero there would read as "this kind
+    costs nothing" instead of "this kind was not fitted".
+    """
+    totals: dict[str, float | None] = {}
+    for seq_len in sorted(set(seq_lens)):
+        if any(not fits.get(kind) for kind in kinds):
+            totals[str(seq_len)] = None
+            continue
+        total = sum(
+            (fits[kind]["fixed_bytes"] + fits[kind]["bytes_per_token"] * seq_len) * counts[kind]
+            for kind in kinds
+        )
+        totals[str(seq_len)] = round(total / 2**30, 2)
+    return totals
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -222,22 +249,9 @@ def main(argv: list[str] | None = None) -> int:
         "points": points,
         "fits": fits,
         "layers_per_kind": counts,
-        "model_total_gib": {
-            str(seq_len): round(
-                sum(
-                    (
-                        (fits[kind]["fixed_bytes"] + fits[kind]["bytes_per_token"] * seq_len)
-                        if fits.get(kind)
-                        else 0
-                    )
-                    * counts[kind]
-                    for kind in kinds
-                )
-                / 2**30,
-                2,
-            )
-            for seq_len in sorted({point["seq_len"] for point in points})
-        },
+        "model_total_gib": model_totals(
+            fits, counts, kinds, [point["seq_len"] for point in points]
+        ),
         "note": (
             "Forward-retained, deduplicated by storage, with the int8 placement's "
             "forward installed. Upper bound: overlapping views of one storage count "
