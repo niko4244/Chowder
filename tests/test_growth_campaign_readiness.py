@@ -367,3 +367,23 @@ def test_readiness_refuses_a_search_that_cannot_fit_its_declared_envelope(
     statuses = {c.check: c.status for c in report.checks}
     assert statuses["campaign_projection"] == "skipped"
     assert report.ready is False
+
+
+def test_readiness_refuses_an_ancestor_whose_raw_artifact_is_missing(tmp_path: Path):
+    """Defect #10 (Gen-2 run 10): the ancestor report named predictions that were
+    not beside it, and only certification noticed -- after 2.16 GPU-h of training.
+    Readiness must resolve the arms' raw artifacts exactly as certification does."""
+    manifest, _runner, _document = _campaign(tmp_path, with_ancestor=True)
+    assert check_campaign_readiness(manifest).ready is True
+
+    ancestor = Path(manifest.baseline_eval_report_path)
+    from chowder.evals.result import EvalReport
+
+    reference = next(run.raw_artifact_ref for run in EvalReport.load(ancestor).runs if run.raw_artifact_ref)
+    (ancestor.parent / reference).unlink()
+    report = check_campaign_readiness(manifest)
+
+    assert report.ready is False
+    assert READINESS_ANCESTOR_ARM in report.reason_codes
+    detail = next(c.detail for c in report.checks if c.check == "ancestor_arm")
+    assert "does not exist next to" in detail
