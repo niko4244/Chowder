@@ -270,6 +270,11 @@ def main(argv: list[str] | None = None) -> int:
         "schema": SCHEMA,
         "base_model": str(base),
         "dtype": args.dtype,
+        # The record says which step it measured: a step measured with per-layer
+        # recompute and one measured without retain different amounts, and a
+        # consumer that had to infer the mode from a filename would eventually
+        # read one as the other.
+        "gradient_checkpointing": bool(args.gradient_checkpointing),
         "points": points,
         "fits": fits,
         "layers_per_kind": counts,

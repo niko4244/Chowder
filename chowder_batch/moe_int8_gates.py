@@ -39,7 +39,8 @@ less free memory than ``--min-free-vram-gb``), 3 an arm
 failed to load or to place, 4 the table was measured on a different artifact and
 would be overwritten with incomparable numbers (``--allow-new-baseline`` starts
 a new baseline), 5 the header projection disagrees with the recorded measurement
-(``--project-only``: the two cannot both be right).
+(``--project-only``: the two cannot both be right), 6 the projected step does not
+fit the gate (``--project-only`` with an activation term: a predicted FAIL).
 
 ``--project-only`` is the mode a box with no free card can still answer with:
 it reads the shard **headers** (no tensor data, no model, no device), derives
@@ -49,6 +50,13 @@ records -- ``load_census`` and ``host_rss`` today, ``memory_vram`` once a
 not a measurement, and the block must never carry one. The int8 and non-expert
 terms are derived, not estimated, so a mismatch against the recorded census is a
 refusal (exit 5) rather than a rounding difference.
+
+With ``--activation-probe`` and ``--activation-probe-eager`` it closes the last
+open term as well: the two probe records (the same layers measured with per-layer
+recompute and without) give the retention a checkpointed step actually holds, so
+the mode prints a step total and answers the gate -- the step a worker pays, not
+the forty-layer eager step no campaign runs (exit 6 when it does not fit). That
+answer is still arithmetic, and the table stays untouched.
 
 ``--self-check`` writes its own tiny synthetic checkpoint to a temporary
 directory and runs both arms on the CPU, so the runner itself is verifiable
@@ -96,6 +104,10 @@ ARTIFACT_MISMATCH_EXIT = 4
 #: irreconcilable. Nothing is written either way; this says which of the two is
 #: the thing to look at before spending the card.
 PROJECTION_DISAGREES_EXIT = 5
+#: ``--project-only`` projected a step that does not fit the gate. A projection
+#: over the gate is a predicted FAIL, so it must not exit 0 next to the verdict
+#: word "reachable" only ever appearing when it fits.
+PROJECTED_OVER_GATE_EXIT = 6
 
 
 def _peak_rss_bytes() -> int | None:
@@ -564,6 +576,18 @@ def _project_only(args: argparse.Namespace) -> int:
         print(f"base model directory not found: {base}", file=sys.stderr)
         return 2
 
+    if bool(args.activation_probe) != bool(args.activation_probe_eager):
+        print(
+            "--activation-probe and --activation-probe-eager are a pair: the gate's step "
+            "retains the layer inputs and re-runs one layer's forward in backward, so one "
+            "record alone describes some other step",
+            file=sys.stderr,
+        )
+        return 2
+    if args.activations_gib is not None and args.activation_probe:
+        print("pass --activations-gib or the probe records, not both", file=sys.stderr)
+        return 2
+
     from transformers import AutoConfig
 
     from chowder.backends import moe_int8_experts as mie
@@ -575,11 +599,24 @@ def _project_only(args: argparse.Namespace) -> int:
         )
         inv = mvp.inventory(base, dtype=str(dtype).replace("torch.", ""))
         activations = None if args.activations_gib is None else int(args.activations_gib * mvp.GIB)
+        activation_mode = "eager"
+        breakdown = None
+        if args.activation_probe:
+            retained = json.loads(Path(args.activation_probe).read_text(encoding="utf-8"))
+            eager = json.loads(Path(args.activation_probe_eager).read_text(encoding="utf-8"))
+            breakdown = mvp.activation_term(retained, eager, seq_len=args.seq_len)
+            breakdown["records"] = {
+                "retained": args.activation_probe,
+                "recompute": args.activation_probe_eager,
+            }
+            activations = int(breakdown["total_bytes"])
+            activation_mode = "checkpointed"
         projection = mvp.project(
             inv,
             seq_len=args.seq_len,
             vocab_size=_vocab_size(config),
             activation_bytes=activations,
+            activation_mode=activation_mode,
         )
     except (OSError, ValueError, FileNotFoundError) as error:
         print(f"cannot project {base}: {type(error).__name__}: {error}", file=sys.stderr)
@@ -609,7 +646,8 @@ def _project_only(args: argparse.Namespace) -> int:
         )
 
     artifact = {**artifact_identity(base), "path": str(base)}
-    print(mvp.render(projection, recorded, artifact=artifact))
+    verdict = mvp.gate_verdict(projection, gate_gb=VRAM_GATE_GB)
+    print(mvp.render(projection, recorded, artifact=artifact, verdict=verdict))
     if dtype_source:
         print(f"  dtype resolved as {str(dtype).replace('torch.', '')} ({dtype_source})")
 
@@ -622,6 +660,8 @@ def _project_only(args: argparse.Namespace) -> int:
             "dtype": str(dtype).replace("torch.", ""),
             "dtype_source": dtype_source,
             "projection": projection,
+            "activation_breakdown": breakdown,
+            "gate": verdict,
             "recorded": recorded,
             "disagreements": problems,
         }
@@ -631,6 +671,14 @@ def _project_only(args: argparse.Namespace) -> int:
         for problem in problems:
             print(f"DISAGREES: {problem}", file=sys.stderr)
         return PROJECTION_DISAGREES_EXIT
+    if verdict["reachable"] is False:
+        print(
+            f"PROJECTED OVER GATE: {verdict['step_total_gib']} GiB against {verdict['gate_gb']} GB, "
+            f"{-verdict['margin_gib']} GiB over; the placement step does not fit and this is "
+            "the reading to settle before spending the card on --steps 3",
+            file=sys.stderr,
+        )
+        return PROJECTED_OVER_GATE_EXIT
     print("projection and recorded measurement reconcile")
     return 0
 
@@ -689,8 +737,24 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=None,
         help=(
-            "the measured activation term for every layer at --seq-len, from "
-            "chowder_batch/moe_activation_probe.py; without it the step figure stays a floor"
+            "the measured activation term for every layer at --seq-len, typed in; without one "
+            "the step figure stays a floor (the probe records are the checkable form)"
+        ),
+    )
+    parser.add_argument(
+        "--activation-probe",
+        default="",
+        help=(
+            "a moe_activation_probe.py record run WITH --gradient-checkpointing: what the "
+            "gate's step retains between layers, summed over the artifact's layer counts"
+        ),
+    )
+    parser.add_argument(
+        "--activation-probe-eager",
+        default="",
+        help=(
+            "the same probe run without checkpointing: the one layer being re-run in "
+            "backward holds what its forward saved, which is the eager line"
         ),
     )
     parser.add_argument(

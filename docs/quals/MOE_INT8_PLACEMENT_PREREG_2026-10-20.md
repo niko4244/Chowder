@@ -232,14 +232,16 @@ tensors of the linear-attention block, each a fixed slice of tokens, which is wh
 it is a line at all.)
 
 **What that means for `memory_vram` before anyone reads it as a verdict on int8.**
-`_placement_steps` runs forward + backward with autograd in eager mode and never
-calls `gradient_checkpointing_enable()`, so every layer keeps its activations
-until backward reaches it. A worker run checkpoints by default
+`_placement_steps` *ran* forward + backward with autograd in eager mode and never
+called `gradient_checkpointing_enable()`, so every layer kept its activations
+until backward reached it. A worker run checkpoints by default
 (`TransformersPeftRunSpec.gradient_checkpointing`, defaulted True), so the step a
-campaign pays for holds one layer's activations, not forty. The gate as written
-therefore sizes a step no campaign performs, and its FAIL would mean "activations of an
-un-checkpointed step", not "the int8 placement does not fit". That is settled
-below, on the strength of the same probe run with checkpointing on.
+campaign pays for holds one layer's activations, not forty. The gate *as first
+written* therefore sized a step no campaign performs, and its FAIL would have
+meant "activations of an un-checkpointed step", not "the int8 placement does not
+fit". That is settled below, on the strength of the same probe run with
+checkpointing on: the runner now enables it by default and stamps the row with
+which step was measured.
 
 **Gate definition, settled: the step a worker pays for.** `memory_vram` and
 `throughput` measure the placement step **with gradient checkpointing on**, which
@@ -263,9 +265,37 @@ boundaries) + 1.28 (the layer being recomputed) + 4.74 (the gate's own loss) =
 eager step was 52.13 GiB, 3.6x over. At seq 512 it is 7.48 GiB. What the headroom
 consists of matters: 4.74 GiB of that total is `logits.float().square()`, which a
 real cross-entropy step would not pay (1.89 instead), so the gate is close to the
-card for a reason the placement does not own. None of this is measured on the
-card yet -- `memory_vram` stays `not measured` until `--steps 3` records a peak,
-and this is the step it will record.
+card for a reason the placement does not own.
+
+**Reachability, computed rather than summed in a paragraph.** Those four terms
+are no longer hand-added: `--project-only` composes the activation term from the
+probe's two records and answers the gate itself --
+
+```
+python chowder_batch/moe_int8_gates.py --project-only \
+    --base-model G:\llm-cold\bf16\Qwen3.6-REAP160 --seq-len 2048 \
+    --activation-probe probe-checkpointed.json --activation-probe-eager probe-eager.json
+```
+
+which prints `activations: layer inputs + one layer re-run 2.85`, `step total:
+floor + checkpointed activations + gate loss 13.12` and `gate 14.5 GB: 13.12 GiB
+projected, 1.38 GiB under -- reachable` (exit 0; a projected step over the gate
+exits 6, so "reachable" cannot print beside the code that means otherwise). The
+records are the same probe run with and without `--gradient-checkpointing`, and
+the runner refuses a swapped pair, a record that does not say which step it
+measured, and one missing a layer kind -- each of those would print a plausible
+number for a step no campaign runs. The three terms it adds are 1.56 GiB
+retained, 1.28 GiB for the layer in re-run, and the floor and gate loss the
+header projection already derived; measured on the same artifact, the total is
+13.12 GiB against the 14.5 GB gate.
+
+Also settled by the attempt, and it is the same point: `--steps 3 --seq-len 2048`
+was run on 2026-10-20 and **refused**, exit 2 in 8 s -- "cuda device has 2.39 GiB
+free of 15.93 GiB, below the 6.0 GiB this runner will not step under" (the
+training run still holds the card: 13.9 of 16.3 GB used, 8% utilisation). No peak
+was taken, and `memory_vram` stays `not measured` until one is: this is the step
+it will record, and 1.38 GiB of margin is a number to watch rather than headroom
+to spend.
 
 **Numerics.** The weights are the same values either way -- the shards are BF16
 and fp32 storage was an exact upcast -- but the compute dtype changes: bf16

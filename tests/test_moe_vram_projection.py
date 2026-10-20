@@ -8,6 +8,7 @@ on a real (if tiny) checkpoint. The rest -- the floor, the refusals, the CLI --
 is pinned around that.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -286,3 +287,192 @@ def gates_record():
             }
         },
     }
+
+
+# --- the checkpointed step: the step the gate is defined on ------------------
+
+
+def line(fixed, slope):
+    """One fitted retention line, in the shape the probe writes."""
+    return {"fixed_bytes": fixed, "bytes_per_token": slope, "measured_at": [128, 512], "predicted_at": []}
+
+
+def probe_record(fits, *, checkpointed, counts=None, base_model="G:/llm-cold/bf16/Qwen3.6-REAP160"):
+    return {
+        "schema": probe.SCHEMA,
+        "base_model": base_model,
+        "layers_per_kind": counts or {"linear_attention": 30, "full_attention": 10},
+        "gradient_checkpointing": bool(checkpointed),
+        "fits": fits,
+    }
+
+
+def test_the_checkpointed_step_retains_the_inputs_and_reruns_one_layer():
+    """With recompute on, the device holds the between-layer inputs plus -- at the
+    peak -- one layer's whole forward as backward re-runs it. Summing the eager
+    line over thirty layers would describe a step no campaign performs."""
+    retained = probe_record(
+        {"linear_attention": line(1_000, 10), "full_attention": line(500, 1)}, checkpointed=True
+    )
+    eager = probe_record(
+        {"linear_attention": line(1_000, 1_000), "full_attention": line(500, 1)}, checkpointed=False
+    )
+    term = mvp.activation_term(retained, eager, seq_len=100)
+    assert term["retained_bytes"] == (1_000 + 10 * 100) * 30 + (500 + 100) * 10
+    assert term["recompute_bytes"] == 1_000 + 1_000 * 100, "the largest kind, one layer"
+    assert term["total_bytes"] == term["retained_bytes"] + term["recompute_bytes"]
+    assert term["mode"] == "checkpointed"
+
+
+def test_the_preregs_checkpointed_terms_follow_from_the_two_measured_lines():
+    """The prereg's 13.12 GiB, recomposed from the probe's own lines rather than
+    hand-summed: 40 layers x 0.039 GiB of retained layer inputs, plus the one
+    linear-attention layer being re-run (its eager line, 1.28 GiB). The lines are
+    the probe's as recorded on 2026-10-20; re-measuring them updates this test with
+    the prereg, which is the point of computing it instead of typing it."""
+    counts = {"linear_attention": 30, "full_attention": 10}
+    retained = probe_record(
+        {kind: line(8_192, 20_492) for kind in counts}, checkpointed=True, counts=counts
+    )
+    eager = probe_record(
+        {
+            "linear_attention": line(70_921_387, 638_070.7),
+            "full_attention": line(61_503_488, 146_578.0),
+        },
+        checkpointed=False,
+        counts=counts,
+    )
+    term = mvp.activation_term(retained, eager, seq_len=2048)
+    assert term["retained_bytes"] / mvp.GIB == pytest.approx(1.56, abs=0.01), "40 layers of inputs"
+    assert term["recompute_bytes"] / mvp.GIB == pytest.approx(1.28, abs=0.01), "the layer in re-run"
+    assert term["total_bytes"] / mvp.GIB == pytest.approx(2.85, abs=0.01)
+
+    # Retained is the checkpointed line, not the eager one: 41.86 GiB of eager
+    # retention would make the step 3.6x the gate instead of inside it.
+    eager_all = probe_record(eager["fits"], checkpointed=True, counts=counts)
+    assert mvp.activation_term(eager_all, eager, seq_len=2048)["retained_bytes"] / mvp.GIB == pytest.approx(
+        41.86, abs=0.1
+    )
+
+
+def test_swapped_probe_records_are_refused_rather_than_quietly_trusted():
+    """Either swap produces a plausible number -- forty layers of eager retention,
+    or a peak with no layer being re-run -- so the roles are checked."""
+    fits = {"linear_attention": line(1, 1), "full_attention": line(1, 1)}
+    with pytest.raises(ValueError, match="must be the checkpointed run"):
+        mvp.activation_term(probe_record(fits, checkpointed=False), probe_record(fits, checkpointed=True), seq_len=512)
+    with pytest.raises(ValueError, match="must be the eager run"):
+        mvp.activation_term(probe_record(fits, checkpointed=True), probe_record(fits, checkpointed=True), seq_len=512)
+    with pytest.raises(ValueError, match="different base models"):
+        mvp.activation_term(
+            probe_record(fits, checkpointed=True),
+            probe_record(fits, checkpointed=False, base_model="G:/elsewhere"),
+            seq_len=512,
+        )
+
+
+def test_a_record_that_does_not_say_which_step_it_measured_is_refused():
+    """A record from before the mode was written down, or one whose own points
+    disagree, cannot stand for either step -- and the filename is not evidence."""
+    fits = {"linear_attention": line(1, 1), "full_attention": line(1, 1)}
+    unmarked = {
+        key: value
+        for key, value in probe_record(fits, checkpointed=True).items()
+        if key != "gradient_checkpointing"
+    }
+    with pytest.raises(ValueError, match="does not say which step"):
+        mvp.activation_term(unmarked, probe_record(fits, checkpointed=False), seq_len=512)
+
+    mixed = {**unmarked, "points": [{"gradient_checkpointing": True}, {"gradient_checkpointing": False}]}
+    assert mvp._probe_mode(mixed) is None
+    assert mvp._probe_mode({**unmarked, "points": [{"gradient_checkpointing": True}]}) is True
+
+
+def test_a_kind_with_no_line_is_refused_rather_than_summed_away():
+    """A total over fewer layers reads as "that kind costs nothing", which is the
+    failure the probe itself refuses."""
+    retained = probe_record({"linear_attention": line(1, 1)}, checkpointed=True)
+    eager = probe_record({"linear_attention": line(1, 1)}, checkpointed=False)
+    with pytest.raises(ValueError, match="full_attention"):
+        mvp.activation_term(retained, eager, seq_len=512)
+
+
+def test_the_gate_verdict_states_reachability_and_its_margin():
+    reachable = mvp.gate_verdict({"step_total_bytes": int(13.12 * mvp.GIB)}, gate_gb=14.5)
+    assert reachable["reachable"] is True
+    assert reachable["step_total_gib"] == pytest.approx(13.12, abs=0.01)
+    assert reachable["margin_gib"] == pytest.approx(1.38, abs=0.02)
+
+    over = mvp.gate_verdict({"step_total_bytes": int(15.9 * mvp.GIB)}, gate_gb=14.5)
+    assert over["reachable"] is False
+    assert over["margin_gib"] < 0
+
+    # A floor under the gate is not a fit: no activation term, no answer.
+    assert mvp.gate_verdict({"step_total_bytes": None}, gate_gb=14.5)["reachable"] is None
+
+
+def test_the_rendered_step_says_which_step_it_is(monkeypatch, tmp_path):
+    base = fake_checkpoint(monkeypatch, tmp_path, fused_header())
+    inventory = mvp.inventory(base, dtype="bfloat16")
+    checkpointed = mvp.project(
+        inventory, seq_len=16, vocab_size=32, activation_bytes=int(mvp.GIB), activation_mode="checkpointed"
+    )
+    text = mvp.render(checkpointed, {"source": "nothing"}, verdict=mvp.gate_verdict(checkpointed, gate_gb=14.5))
+    assert "layer inputs + one layer re-run" in text
+    assert "reachable" in text
+
+    eager = mvp.project(inventory, seq_len=16, vocab_size=32, activation_bytes=int(mvp.GIB))
+    eager_text = mvp.render(eager, {"source": "nothing"})
+    assert "every layer, retained" in eager_text
+    assert "NO campaign runs" in eager_text
+
+
+def test_project_only_answers_the_gate_from_the_two_probe_records(tmp_path):
+    counts = {"linear_attention": 30, "full_attention": 10}
+    fits = {"linear_attention": line(1_000, 1), "full_attention": line(1_000, 1)}
+    retained = tmp_path / "retained.json"
+    eager = tmp_path / "eager.json"
+    retained.write_text(json.dumps(probe_record(fits, checkpointed=True, counts=counts)), encoding="utf-8")
+    eager.write_text(json.dumps(probe_record(fits, checkpointed=False, counts=counts)), encoding="utf-8")
+    out = tmp_path / "projection.json"
+    completed = run_project_only(
+        "--self-check",
+        "--activation-probe",
+        str(retained),
+        "--activation-probe-eager",
+        str(eager),
+        "--out",
+        str(out),
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["gate"]["reachable"] is True
+    assert payload["projection"]["activation_mode"] == "checkpointed"
+    assert payload["activation_breakdown"]["total_bytes"] == payload["projection"]["activations_bytes"]
+    assert "layer inputs + one layer re-run" in completed.stdout
+
+    # The same wiring, the other answer: a step that does not fit exits 6.
+    blown = tmp_path / "retained-over.json"
+    blown.write_text(
+        json.dumps(
+            probe_record(
+                {"linear_attention": line(int(40 * mvp.GIB), 1), "full_attention": line(int(40 * mvp.GIB), 1)},
+                checkpointed=True,
+                counts=counts,
+            )
+        ),
+        encoding="utf-8",
+    )
+    over = run_project_only("--self-check", "--activation-probe", str(blown), "--activation-probe-eager", str(eager))
+    assert over.returncode == gates.PROJECTED_OVER_GATE_EXIT, over.stdout[-2000:]
+    assert "NOT reachable" in over.stdout
+    assert "PROJECTED OVER GATE" in over.stderr
+
+
+def test_project_only_refuses_a_half_probe_pair(tmp_path):
+    fits = {"linear_attention": line(1, 1), "full_attention": line(1, 1)}
+    one = tmp_path / "one.json"
+    one.write_text(json.dumps(probe_record(fits, checkpointed=True)), encoding="utf-8")
+    completed = run_project_only("--self-check", "--activation-probe", str(one))
+    assert completed.returncode == 2
+    assert "are a pair" in completed.stderr

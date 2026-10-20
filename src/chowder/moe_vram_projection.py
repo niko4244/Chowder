@@ -32,6 +32,14 @@ on this hybrid, 40 layers of it), and inventing a number there is how a
 projection becomes a fake measurement. So the reported step figure is a *floor*
 and the row that would make it a peak says ``unsized``.
 
+``activation_term`` is where a *measured* one goes in, composed from the two
+records ``chowder_batch/moe_activation_probe.py`` writes rather than typed in by
+hand: the checkpointed run's line summed over every layer, plus the eager run's
+line for the one layer re-run in backward. That is the step the placement gate
+is defined on -- ``TransformersPeftRunSpec`` checkpoints by default, so a
+campaign never pays for forty layers of activations -- and ``gate_verdict`` turns
+the resulting total into the yes/no the gate asks, with its margin.
+
 The imports below are the loader's own constants, not copies: a projection that
 disagreed with the loader about which keys are ignored, or about how wide a row
 block is, would disagree about the bytes.
@@ -246,12 +254,162 @@ def gate_loss_bytes(*, seq_len: int, vocab_size: int, itemsize: int) -> int:
     return elements * itemsize + copies * elements * 4
 
 
+def _line_bytes(fit: dict[str, Any], seq_len: int) -> int | None:
+    """One fitted retention line at ``seq_len``, or ``None`` when unfitted."""
+    fixed = fit.get("fixed_bytes")
+    slope = fit.get("bytes_per_token")
+    if fixed is None or slope is None:
+        return None
+    return int(round(float(fixed) + float(slope) * int(seq_len)))
+
+
+def _probe_mode(record: dict[str, Any]) -> bool | None:
+    """Which step a probe record measured: its own flag, or its points' unanimous one.
+
+    ``None`` when the record does not say -- it predates the record-level flag -- or
+    when its own points disagree. A record of mixed modes has no single per-layer
+    retention, so it can stand for neither step, and guessing from the filename is
+    how a step gets measured one way and reported as the other.
+    """
+    if "gradient_checkpointing" in record:
+        return bool(record["gradient_checkpointing"])
+    flags = {bool(point.get("gradient_checkpointing")) for point in record.get("points") or ()}
+    if len(flags) == 1:
+        return flags.pop()
+    return None
+
+
+def _check_probe_pair(retained: dict[str, Any], recompute: dict[str, Any]) -> dict[str, int]:
+    """Refuse a pair of probe records that cannot answer for one placement step.
+
+    The two records have opposite jobs -- one is the checkpointed run, one the
+    eager run -- so swapping them would either forty-fold the retention or hide
+    the layer being re-run, and both mistakes produce a plausible number. A
+    missing kind is a refusal too: a total over fewer layers reads as "that kind
+    costs nothing", the exact failure the probe itself refuses.
+    """
+    retained_mode = _probe_mode(retained)
+    if retained_mode is not True:
+        why = "does not say which step it measured" if retained_mode is None else "is an eager run"
+        raise ValueError(
+            f"the retained record {why}: it must be the checkpointed run "
+            "(moe_activation_probe.py --gradient-checkpointing), because the gate's step "
+            "keeps the layer inputs rather than every layer's activations"
+        )
+    recompute_mode = _probe_mode(recompute)
+    if recompute_mode is not False:
+        why = "does not say which step it measured" if recompute_mode is None else "is a checkpointed run"
+        raise ValueError(
+            f"the recompute record {why}: it must be the eager run, because the layer "
+            "being re-run in backward holds what its forward saved"
+        )
+    if retained.get("base_model") and recompute.get("base_model") and (
+        str(retained["base_model"]) != str(recompute["base_model"])
+    ):
+        raise ValueError(
+            f"the two probe records are for different base models: {retained['base_model']!r} "
+            f"and {recompute['base_model']!r}"
+        )
+    counts = retained.get("layers_per_kind") or {}
+    if not counts:
+        raise ValueError("the retained record names no layers_per_kind, so it cannot be summed")
+    other = recompute.get("layers_per_kind") or counts
+    if dict(other) != dict(counts):
+        raise ValueError(
+            f"the two probe records disagree about the layer counts: {dict(counts)} and {dict(other)}"
+        )
+    for kind in counts:
+        for label, record in (("retained", retained), ("recompute", recompute)):
+            if not (record.get("fits") or {}).get(kind):
+                raise ValueError(
+                    f"the {label} record has no fitted line for {kind!r}: one measured point "
+                    "is not a line, and leaving that kind out would report a smaller step than "
+                    "the placement occupies"
+                )
+    return {kind: int(count) for kind, count in counts.items()}
+
+
+def activation_term(
+    retained: dict[str, Any], recompute: dict[str, Any], *, seq_len: int
+) -> dict[str, Any]:
+    """The step's activation term from the two probe records, in bytes.
+
+    The gate's step runs with per-layer recompute -- what
+    ``TransformersPeftRunSpec`` does by default and therefore what a campaign
+    pays -- so at its peak the device holds two things: the layer inputs autograd
+    keeps between layers (the *checkpointed* record's line, summed over the
+    artifact's layer counts) and the whole forward of the one layer being re-run
+    in backward (the *eager* record's line for a single layer, the largest kind).
+
+    Summing only the first would understate the peak; summing the eager line for
+    thirty layers would describe a step no campaign performs. Both records are
+    fitted lines, so evaluating them at the projection's ``seq_len`` is the same
+    extrapolation the probe states, with a third measured point as its check.
+    """
+    counts = _check_probe_pair(retained, recompute)
+    retained_fits = retained["fits"]
+    eager_fits = recompute["fits"]
+    per_kind: dict[str, dict[str, int | None]] = {}
+    retained_total = 0
+    for kind, count in counts.items():
+        line = _line_bytes(retained_fits[kind], seq_len)
+        eager = _line_bytes(eager_fits[kind], seq_len)
+        if line is None or eager is None:
+            raise ValueError(f"{kind!r} has a fit that cannot be evaluated at seq {seq_len}")
+        retained_total += line * count
+        per_kind[kind] = {"layers": count, "retained_bytes_each": line, "eager_layer_bytes": eager}
+    recompute_bytes = max(int(values["eager_layer_bytes"]) for values in per_kind.values())
+    return {
+        "mode": "checkpointed",
+        "seq_len": int(seq_len),
+        "layers_per_kind": counts,
+        "retained_bytes": retained_total,
+        "recompute_bytes": recompute_bytes,
+        "total_bytes": retained_total + recompute_bytes,
+        "per_kind": per_kind,
+        "basis": (
+            "sum of the checkpointed retention line over every layer, plus the eager line "
+            "of the one layer re-run in backward; both fitted to two measured lengths"
+        ),
+    }
+
+
+def gate_verdict(projection: dict[str, Any], *, gate_gb: float) -> dict[str, Any]:
+    """Whether the projected step fits the gate, and the margin it does it by.
+
+    ``reachable`` is ``None`` rather than ``False`` when there is no activation
+    term: a floor below the gate is not a fit, it is an unanswered question.
+    """
+    total = projection.get("step_total_bytes")
+    if total is None:
+        return {
+            "gate_gb": float(gate_gb),
+            "step_total_gib": None,
+            "reachable": None,
+            "margin_gib": None,
+            "basis": "no activation term: this is a floor, and a floor under the gate answers nothing",
+        }
+    total_gib = float(total) / GIB
+    margin = float(gate_gb) - total_gib
+    return {
+        "gate_gb": float(gate_gb),
+        "step_total_gib": round(total_gib, 2),
+        "reachable": margin >= 0,
+        "margin_gib": round(margin, 2),
+        "basis": (
+            "floor + the measured activation term + the gate's own loss expression; "
+            "a projection, not a peak -- allocator slack is not in it"
+        ),
+    }
+
+
 def project(
     inventory_record: dict[str, Any],
     *,
     seq_len: int = 2048,
     vocab_size: int | None = None,
     activation_bytes: int | None = None,
+    activation_mode: str = "eager",
 ) -> dict[str, Any]:
     """The placement step's memory terms, in bytes, from an inventory.
 
@@ -274,8 +432,13 @@ def project(
     step_floor = non_expert + layer_dequant + block
     # Only when the activation term was measured: the gate's step also scores its
     # own loss, so the total carries that term. This is information, not a gate:
-    # a real peak may sit above it (allocator slack) or below it (a worker that
-    # checkpoints, which the placement step does not).
+    # a real peak may sit above it (allocator slack). ``activation_mode`` says
+    # which step the term describes -- ``checkpointed`` is the gate's own step,
+    # ``eager`` the step that keeps every layer's activations -- because the two
+    # differ by a factor of thirty on this model and a total without it would be
+    # readable as either.
+    if activation_mode not in ("eager", "checkpointed"):
+        raise ValueError(f"unknown activation mode {activation_mode!r}")
     step_total = None if activation_bytes is None else step_floor + int(activation_bytes) + (logits or 0)
     return {
         "dtype": inventory_record["dtype"],
@@ -292,6 +455,7 @@ def project(
         "step_floor_bytes": step_floor,
         "step_floor_with_gate_loss_bytes": step_floor + (logits or 0),
         "step_total_bytes": step_total,
+        "activation_mode": None if activation_bytes is None else activation_mode,
         "activations_bytes": activation_bytes,
         "inventory": {
             key: inventory_record[key]
@@ -326,6 +490,7 @@ def render(
     recorded: dict[str, Any] | None = None,
     *,
     artifact: dict[str, Any] | None = None,
+    verdict: dict[str, Any] | None = None,
 ) -> str:
     """The projection as a table, with whatever has been recorded beside it."""
     recorded = recorded or {}
@@ -339,6 +504,8 @@ def render(
     proj_floor_gate = gib(projection["step_floor_with_gate_loss_bytes"])
     proj_act = gib(projection["activations_bytes"])
     proj_total = gib(projection.get("step_total_bytes"))
+    mode = projection.get("activation_mode")
+    checkpointed = mode == "checkpointed"
 
     def delta(projected: float | None, measure: float | None) -> str:
         if projected is None or measure is None:
@@ -403,21 +570,41 @@ def render(
             "still a floor",
         ),
         (
-            "activations, every layer, retained for backward",
+            (
+                "activations: layer inputs + one layer re-run"
+                if checkpointed
+                else "activations, every layer, retained for backward"
+            ),
             _cell(proj_act) if proj_act is not None else "unsized",
             "-",
             "-",
-            "unsized on purpose" if proj_act is None else "measured (moe_activation_probe)",
+            (
+                "unsized on purpose"
+                if proj_act is None
+                else (
+                    "measured, fitted (moe_activation_probe --gradient-checkpointing)"
+                    if checkpointed
+                    else "measured (moe_activation_probe, eager)"
+                )
+            ),
         ),
     ]
     if proj_total is not None:
         rows.append(
             (
-                "step total: floor + activations + gate loss",
+                (
+                    "step total: floor + checkpointed activations + gate loss"
+                    if checkpointed
+                    else "step total: floor + activations + gate loss"
+                ),
                 _cell(proj_total),
                 _cell(recorded.get("step_vram")),
                 delta(proj_total, recorded.get("step_vram")),
-                "the gate's own step; a checkpointed worker holds less",
+                (
+                    "the step a worker pays for; a peak may sit above it"
+                    if checkpointed
+                    else "the step NO campaign runs: no recompute, every layer retained"
+                ),
             )
         )
 
@@ -446,13 +633,29 @@ def render(
     if proj_total is None:
         lines.append(
             "  memory_vram stays not measured: the rows above are a floor, and the "
-            "activation term is what would turn it into a peak (--activations-gib)."
+            "activation term is what would turn it into a peak (--activation-probe + "
+            "--activation-probe-eager, or --activations-gib)."
         )
     else:
+        step_kind = "the checkpointed step" if checkpointed else "the eager step"
         lines.append(
-            "  memory_vram stays not measured: the total above is arithmetic, and only a "
-            "--steps 3 run on the card turns it into a peak."
+            f"  memory_vram stays not measured: the total above is {step_kind} in "
+            "arithmetic, and only a --steps 3 run on the card turns it into a peak."
         )
+    if verdict:
+        gate = verdict["gate_gb"]
+        if verdict.get("reachable") is None:
+            lines.append(f"  gate      {gate} GB: unanswered -- there is no activation term to add")
+        elif verdict["reachable"]:
+            lines.append(
+                f"  gate      {gate} GB: {verdict['step_total_gib']:.2f} GiB projected, "
+                f"{verdict['margin_gib']:.2f} GiB under -- reachable"
+            )
+        else:
+            lines.append(
+                f"  gate      {gate} GB: {verdict['step_total_gib']:.2f} GiB projected, "
+                f"{-verdict['margin_gib']:.2f} GiB over -- NOT reachable"
+            )
     if recorded.get("seq_len") and int(recorded["seq_len"]) != int(projection["seq_len"]):
         lines.append(
             f"  the recorded step was measured at seq {recorded['seq_len']}, this "
