@@ -156,6 +156,54 @@ def test_the_table_row_carries_the_verdict_and_the_harness_share():
     assert rows["memory_vram"] == "FAIL"
 
 
+class ScriptedPeaks:
+    """A device reader with scripted readings, so the instrument can be checked
+    without a card. The *order* of the reads is what the FAIL rule rests on:
+    if the forward's peak were read after the backward, ``harness_gb`` would be
+    a zero and every over-gate step would read as a placement FAIL."""
+
+    enabled = True
+
+    def __init__(self, readings):
+        self._readings = list(readings)
+        self.resets = 0
+        self.syncs = 0
+
+    def reset(self):
+        self.resets += 1
+
+    def read(self):
+        return self._readings.pop(0)
+
+    def sync(self):
+        self.syncs += 1
+
+
+def test_the_two_peaks_are_read_where_the_harness_term_needs_them():
+    """One reading after the forward, one after the backward, reset per step. The
+    harness term is the difference of the two maxima -- not of the last readings,
+    since step 2's forward sits below step 1's backward."""
+    import torch
+
+    base = Path(gates._self_check_workspace())
+    model, _census = gates._load_int8(base, torch.device("cpu"), None)
+    reader = ScriptedPeaks([1.0, 1.5, 0.9, 1.2])
+    result = gates._placement_steps(
+        model, steps=2, seq_len=8, device=torch.device("cpu"), peaks=reader
+    )
+
+    assert reader.resets == 2, "a peak carries over between steps otherwise"
+    assert reader.syncs == 2
+    assert result["forward_peak_gb"] == 1.0
+    assert result["peak_vram_gb"] == 1.5
+    assert result["harness_marginal_gb"] == 0.5
+    assert result["score"]["chunk_tokens"] == gates.LOSS_CHUNK_TOKENS
+    assert result["score"]["positions"] == 7
+    assert mpg.vram_verdict(
+        peak_gb=result["peak_vram_gb"], harness_gb=result["harness_marginal_gb"]
+    )["verdict"] == "pass"
+
+
 def test_the_step_scores_cross_entropy_in_chunks_and_matches_the_sequence_loss():
     """Chunking must not change the loss: same targets, same values, a different
     amount of memory held at once. And scoring one position must score the last

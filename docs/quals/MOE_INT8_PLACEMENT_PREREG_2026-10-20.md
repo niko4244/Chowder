@@ -324,6 +324,25 @@ number: the peak recorded and printed is the peak measured, never a corrected
 one, with the harness term beside it rather than subtracted into it -- a table
 whose measurement has been edited is a table with no measurements in it.
 
+**Where the peak may come from, and where it may not.** `memory_vram` and
+`throughput` are the 16 GB card this placement exists for, on the Windows host
+where WDDM is what turns "out of VRAM" into silently paged system RAM. A
+measurement from anywhere else is not this gate, however clean it looks:
+
+* `kaggle/int8_witness/` (added the same day) is a **capacity** probe: it reports
+  host RAM, GPU, whether that card supports bf16, and per-layer RSS walking the
+  grid through `TransientLayerExpertsInt8`. Its own README says it measures no
+  gate, and that is right -- a session that could host the run is not a run that
+  passed. T4/P100 do not support bf16, which this spec is, so the probe falls
+  back to fp16: a different numeric path on a different card.
+* Linux has no WDDM, so `wddm_spill` is not merely unmeasured there, it is
+  unmeasurable, and "no spill" on Linux says nothing about this box.
+
+So a session elsewhere can answer whether the int8 grid fits in host RAM, and
+later can produce the witness gates (`gradient`, `smoke`, `router_balance`) from
+a real fine-tune. It cannot fill `memory_vram` or `throughput`, and no row in the
+block is filled from one.
+
 **Numerics.** The weights are the same values either way -- the shards are BF16
 and fp32 storage was an exact upcast -- but the compute dtype changes: bf16
 matmuls with fp32 accumulation instead of fp32 throughout, and the dequant now

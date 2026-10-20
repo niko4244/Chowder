@@ -244,6 +244,37 @@ def _load_bulk(base: Path, device: Any, dtype: Any) -> tuple[Any, dict[str, Any]
 ARM_LOADERS = {"int8": _load_int8, "bulk": _load_bulk}
 
 
+class _DevicePeaks:
+    """The step's device-memory readings, and nothing else.
+
+    A thin adapter so the instrument can be tested without a card: what the FAIL
+    rule depends on is *when* each peak is read -- the forward's after the
+    forward, the step's after the backward, both reset per step -- not that
+    ``torch.cuda`` is reachable from a unit test. A CPU device reports ``None``
+    and the record carries no harness term rather than a zero.
+    """
+
+    def __init__(self, torch: Any, device: Any) -> None:
+        self._torch = torch
+        self._device = device
+        self.enabled = device.type == "cuda"
+
+    def reset(self) -> None:
+        if not self.enabled:
+            return
+        self._torch.cuda.synchronize()
+        self._torch.cuda.reset_peak_memory_stats(self._device)
+
+    def read(self) -> float | None:
+        if not self.enabled:
+            return None
+        return self._torch.cuda.max_memory_allocated(self._device) / 2**30
+
+    def sync(self) -> None:
+        if self.enabled:
+            self._torch.cuda.synchronize()
+
+
 def _step_loss(torch: Any, logits: Any, tokens: Any, *, score_tokens: int = 0) -> Any:
     """Cross-entropy over the positions this step scores, one chunk at a time.
 
@@ -282,7 +313,13 @@ def _step_loss(torch: Any, logits: Any, tokens: Any, *, score_tokens: int = 0) -
 
 
 def _placement_steps(
-    model: Any, *, steps: int, seq_len: int, device: Any, score_tokens: int = 0
+    model: Any,
+    *,
+    steps: int,
+    seq_len: int,
+    device: Any,
+    score_tokens: int = 0,
+    peaks: _DevicePeaks | None = None,
 ) -> dict[str, Any]:
     """Forward + backward through every expert layer, timed per step.
 
@@ -317,34 +354,34 @@ def _placement_steps(
     generator = torch.Generator().manual_seed(0)
     tokens = torch.randint(0, vocabulary, (1, seq_len), generator=generator).to(device)
     embedding = model.get_input_embeddings()
-    has_cuda = device.type == "cuda"
+    meters = peaks or _DevicePeaks(torch, device)
 
     times: list[float] = []
-    peaks: list[float] = []
-    forward_peaks: list[float] = []
+    step_readings: list[float] = []
+    forward_readings: list[float] = []
     for _ in range(steps):
-        if has_cuda:
-            torch.cuda.synchronize()
-            # Per step, so the forward's peak on step 3 is step 3's and not the
-            # high-water mark of step 1's backward.
-            torch.cuda.reset_peak_memory_stats(device)
+        # Per step, so the forward's peak on step 3 is step 3's and not the
+        # high-water mark of step 1's backward.
+        meters.reset()
         start = time.perf_counter()
         hidden = embedding(tokens).detach().requires_grad_(True)
         with torch.enable_grad():
             logits = model(inputs_embeds=hidden, use_cache=False).logits
-            if has_cuda:
-                forward_peaks.append(torch.cuda.max_memory_allocated(device) / 2**30)
+            forward_reading = meters.read()
             loss = _step_loss(torch, logits, tokens, score_tokens=score_tokens)
             loss.backward()
-        if has_cuda:
-            torch.cuda.synchronize()
-            peaks.append(torch.cuda.max_memory_allocated(device) / 2**30)
+        meters.sync()
+        step_reading = meters.read()
+        if forward_reading is not None:
+            forward_readings.append(forward_reading)
+        if step_reading is not None:
+            step_readings.append(step_reading)
         times.append(time.perf_counter() - start)
         model.zero_grad(set_to_none=True)
         del logits, loss, hidden
 
-    peak = max(peaks) if peaks else None
-    forward_peak = max(forward_peaks) if forward_peaks else None
+    peak = max(step_readings) if step_readings else None
+    forward_peak = max(forward_readings) if forward_readings else None
     return {
         "steps": steps,
         "seq_len": seq_len,

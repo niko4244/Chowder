@@ -144,6 +144,79 @@ def test_a_measured_activation_term_turns_the_floor_into_a_total(monkeypatch, tm
     assert "unsized" not in text
 
 
+#: The artifact's own terms, as the census and the header projection measured
+#: them on 2026-10-20 (GiB in the comments; the integers are what the two runs
+#: wrote). The CI gate below is built from these plus the probe's fitted lines,
+#: because CI has neither the 43 GB checkpoint nor a card.
+ARTIFACT_INVENTORY = {
+    "dtype": "bfloat16",
+    "non_expert_bytes": 4_880_983_296,  # 4.55
+    "expert_int8_bytes": 20_132_659_200,  # 18.75
+    "expert_scale_bytes": 78_643_200,  # 0.07, one fp32 per weight row
+    "expert_bytes": 20_211_302_400,  # 18.82, the census' own number
+    "layer_dequant_bytes": 1_006_632_960,  # 0.94
+    "dequant_block_bytes": 58_785_792,  # 0.06
+    "shards": 26,
+    "tensors": 1026,
+    "source_dtypes": ["BF16"],
+    "expert_layers": 40,
+    "expert_matrices_per_layer": [2],
+    "layer_expert_numel_max": 503_316_480,
+    "non_expert_numel": 2_440_491_648,
+    "tower_bytes": 893_142_496,
+}
+
+#: The probe's fitted lines: (fixed bytes, bytes per token) per layer kind.
+ARTIFACT_FITS = {
+    "checkpointed": {"linear_attention": (8_192, 20_492.0), "full_attention": (8_192, 20_492.0)},
+    "eager": {
+        "linear_attention": (70_921_387, 638_070.7),
+        "full_attention": (61_503_488, 146_578.0),
+    },
+}
+
+
+def test_a_change_that_moves_the_projected_step_fails_here_and_not_on_the_card():
+    """The build check for the gate: the artifact's terms, the probe's lines, the
+    projection and the verdict, with no weights and no device.
+
+    It pins the total (10.04 GiB) rather than only asserting "under 14.5", because
+    the expression this replaced was 13.12 GiB and also under the gate: a drift
+    that quietly spends a gigabyte would pass a threshold and still change the
+    answer. An intended move updates this number and the prereg together. On a box
+    that has the artifact the same question is `--project-only`, which exits 6
+    when the projection does not fit.
+    """
+    counts = {"linear_attention": 30, "full_attention": 10}
+    retained = probe_record(
+        {kind: line(*ARTIFACT_FITS["checkpointed"][kind]) for kind in counts},
+        checkpointed=True,
+        counts=counts,
+    )
+    eager = probe_record(
+        {kind: line(*ARTIFACT_FITS["eager"][kind]) for kind in counts},
+        checkpointed=False,
+        counts=counts,
+    )
+    term = mvp.activation_term(retained, eager, seq_len=2048)
+    projection = mvp.project(
+        ARTIFACT_INVENTORY,
+        seq_len=2048,
+        vocab_size=248_320,
+        activation_bytes=term["total_bytes"],
+        activation_mode="checkpointed",
+    )
+    verdict = mvp.gate_verdict(projection, gate_gb=mpg.VRAM_GATE_GB)
+
+    assert projection["step_total_bytes"] == 10_783_082_309, (
+        "the projected step moved: update this number and the prereg's figures together, "
+        "or find out what changed"
+    )
+    assert verdict["step_total_gib"] == pytest.approx(10.04, abs=0.01)
+    assert verdict["margin_gib"] == pytest.approx(4.46, abs=0.02)
+    assert verdict["reachable"] is True
+
+
 def test_the_scoring_term_is_one_chunk_not_two_copies_of_the_sequence():
     """The old expression materialised the whole sequence twice in fp32; a chunked
     cross-entropy holds one chunk. At the run's seq 2048 and vocab 248320 that is
