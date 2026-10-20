@@ -283,11 +283,11 @@ projected, 1.38 GiB under -- reachable` (exit 0; a projected step over the gate
 exits 6, so "reachable" cannot print beside the code that means otherwise). The
 records are the same probe run with and without `--gradient-checkpointing`, and
 the runner refuses a swapped pair, a record that does not say which step it
-measured, and one missing a layer kind -- each of those would print a plausible
-number for a step no campaign runs. The three terms it adds are 1.56 GiB
-retained, 1.28 GiB for the layer in re-run, and the floor and gate loss the
-header projection already derived; measured on the same artifact, the total is
-13.12 GiB against the 14.5 GB gate.
+measured, and a record missing a layer kind -- each of those would print a
+plausible number for a step no campaign runs. What it adds is the 1.56 GiB
+retained and the 1.28 GiB of the layer in re-run, on top of the 5.54 GiB floor
+and 4.74 GiB gate loss the header projection already derived; on the same
+artifact the total is 13.12 GiB against the 14.5 GB gate.
 
 Also settled by the attempt, and it is the same point: `--steps 3 --seq-len 2048`
 was run on 2026-10-20 and **refused**, exit 2 in 8 s -- "cuda device has 2.39 GiB
