@@ -42,7 +42,9 @@ that table ever diverge, so a new field cannot land as decoration.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -387,7 +389,7 @@ class CampaignRun:
     def refused_by(self) -> str:
         """The phase that refused this run, or the empty string."""
         for phase in self.phases:
-            if str(phase.get("verdict")) == "refused":
+            if str(phase.get("verdict")) in ("refused", CAMPAIGN_INTERRUPTED):
                 return str(phase.get("phase"))
         return ""
 
@@ -395,7 +397,7 @@ class CampaignRun:
     def refusal_reason(self) -> str:
         """Why this run refused, in its own words, or the empty string."""
         for phase in self.phases:
-            if str(phase.get("verdict")) == "refused":
+            if str(phase.get("verdict")) in ("refused", CAMPAIGN_INTERRUPTED):
                 return str(phase.get("detail"))
         return ""
 
@@ -415,6 +417,159 @@ def assert_every_field_enforced(manifest_cls: type = CampaignManifest) -> None:
     undocumented = sorted(set(FIELD_ENFORCEMENT) - NON_BEHAVIORAL_FIELDS)
     if not undocumented:
         raise CampaignManifestError("FIELD_ENFORCEMENT lists no behavioral fields")
+
+
+# --------------------------------------------------------------------------
+# the campaign journal: a crash record written at every boundary
+# --------------------------------------------------------------------------
+
+#: The append-only journal the runner writes as the campaign advances: one
+#: JSON line per boundary the runner computes, flushed **and fsynced** as the
+#: boundary happens. An external termination of the process tree cannot be
+#: intercepted by any Python exit path -- the only other durable record,
+#: ``campaign-run.json``, was terminal, so a kill before it destroyed the
+#: entire campaign record (phase list, admission decisions, budget spend,
+#: which recipes were attempted and why). The journal closes that hole.
+CAMPAIGN_JOURNAL_NAME = "campaign-journal.jsonl"
+
+#: The entry refusal for a state root whose journal records no terminal
+#: outcome: a previous run there never reached a verdict, and re-running it
+#: would silently start from the top and re-spend every attempt it already
+#: made.
+CAMPAIGN_INTERRUPTED = "CAMPAIGN_INTERRUPTED"
+
+
+def _journal_path(root: Path) -> Path:
+    return root / CAMPAIGN_JOURNAL_NAME
+
+
+def _journal_event(
+    root: Path,
+    *,
+    phase: str,
+    status: Any,
+    recipe_id: Any = None,
+    attempt: Any = None,
+    gpu_hours: Any = None,
+    detail: str | None = None,
+) -> None:
+    """Append one boundary to the campaign journal, durably.
+
+    The line is flushed **and fsynced** before the call returns: the journal
+    is written for the process that does not survive long enough to close the
+    file. Everything the runner has computed by that boundary is on disk
+    afterwards; everything it has not computed is, honestly, absent.
+    """
+    record: dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "phase": phase,
+        "attempt": attempt,
+        "recipe_id": recipe_id,
+        "status": status,
+        "gpu_hours": gpu_hours,
+    }
+    if detail is not None:
+        record["detail"] = detail
+    with open(_journal_path(root), "a", encoding="utf-8") as journal:
+        journal.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+        journal.flush()
+        os.fsync(journal.fileno())
+
+
+def _journal_outcome(journal: Path) -> str | None:
+    """The ``terminal`` outcome the journal already records, or None.
+
+    A truncated final line is ignored: a kill between the write and its fsync
+    is exactly the interruption this check exists to catch, and a line that
+    never completed is not an outcome.
+    """
+    try:
+        text = journal.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    outcome: str | None = None
+    for line in text.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("phase") == "terminal":
+            outcome = str(record.get("status") or "")
+    return outcome
+
+
+def _refuse_interrupted(manifest: CampaignManifest, root: Path) -> CampaignRun:
+    """Refuse entry on a state root whose journal never reached a verdict.
+
+    A journal without a terminal record means a previous run on this state
+    root was killed mid-campaign: its attempts are spent and recorded. Rather
+    than silently starting from the top and re-spending them (the planner
+    reserves fresh attempt directories and selection re-runs from the first
+    recipe), the run refuses here and records the refusal. The refusal
+    deliberately writes **no** terminal journal record: it is a refusal about
+    an *open* record, not the verdict of a campaign, so the entry check below
+    keeps refusing every later entry until someone resolves that state
+    deliberately -- archive or delete the journal and ``campaign-run.json``.
+    """
+    journal = _journal_path(root)
+    detail = (
+        f"{CAMPAIGN_INTERRUPTED}: {journal} exists and records no terminal "
+        "outcome -- a previous run on this state root did not reach a "
+        "verdict, so its attempts are already spent and recorded there. "
+        "Resolve that state deliberately (archive or delete the journal and "
+        "campaign-run.json) before starting a campaign here; refusing rather "
+        "than silently starting from the top."
+    )
+    _journal_event(root, phase="entry_check", status=CAMPAIGN_INTERRUPTED, detail=detail)
+    run = CampaignRun(
+        cycle_id=manifest.cycle_id,
+        parent_version=manifest.parent_version,
+        candidate_version=manifest.resolved_candidate_version(),
+        verdict="REFUSED",
+        phases=(
+            {
+                "phase": "entry_check",
+                "verdict": CAMPAIGN_INTERRUPTED,
+                "detail": detail,
+            },
+        ),
+        admission=(),
+        cost={},
+        settlement={},
+        ceiling_enforcement={},
+        certification={},
+        selection={},
+        promotion=None,
+        record_path="",
+    )
+    # terminal=False: the refusal does not close the journal -- it records
+    # that the journal is open, and must stay that way until resolved.
+    return _write_record(run, root, outcome=None, terminal=False)
+
+
+class _JournalingPhases(list):
+    """The run's phase record, journaled: every append is one durable line.
+
+    A list subclass, so the run's own ``phases.append(...)`` sites carry the
+    journal with them: appending a phase *is* the moment the runner computed
+    that decision, and from here on that moment is also fsynced to the
+    journal -- a phase decision can no longer exist only in the memory of a
+    process that is about to be killed.
+    """
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self._root = root
+
+    def append(self, phase: Mapping[str, Any]) -> None:
+        super().append(phase)
+        detail = phase.get("detail")
+        _journal_event(
+            self._root,
+            phase=str(phase.get("phase")),
+            status=phase.get("verdict"),
+            detail=detail if isinstance(detail, str) else None,
+        )
 
 
 def run_campaign(
@@ -438,8 +593,22 @@ def run_campaign(
     assert_every_field_enforced()
     require_declared_inputs(manifest, phase="run")
     root = Path(state_root or manifest.state_root)
+    # Entry check: a journal with no terminal record means a previous run on
+    # this state root never reached a verdict. Refuse rather than silently
+    # starting from the top over its spent attempts (fail-closed, like every
+    # other admission rule).
+    journal = _journal_path(root)
+    interrupted = journal.is_file() and _journal_outcome(journal) is None
     root.mkdir(parents=True, exist_ok=True)
-    phases: list[Mapping[str, Any]] = []
+    if interrupted:
+        return _refuse_interrupted(manifest, root)
+    phases: list[Mapping[str, Any]] = _JournalingPhases(root)
+    _journal_event(
+        root,
+        phase="campaign_start",
+        status="started",
+        detail=f"campaign {manifest.cycle_id} (policy {PROMOTION_POLICY_VERSION})",
+    )
 
     _verify_parent_identity(manifest)
     phases.append(
@@ -537,6 +706,14 @@ def run_campaign(
         if refusal is not None:
             entry["refused_by"], entry["refusal_reason"] = refusal
         admission.append(entry)
+        _journal_event(
+            root,
+            phase="admission",
+            status="admitted" if refusal is None else "refused",
+            recipe_id=recipe.recipe_id,
+            gpu_hours=float(recipe.projected_wall_gpu_hours),
+            detail=(entry.get("refusal_reason") if refusal is not None else None),
+        )
     refused = [entry for entry in admission if not entry["admitted"]]
     detail = "; ".join(
         f"{entry['recipe_id']}: {entry['refusal_reason']}" for entry in refused
@@ -727,6 +904,29 @@ def run_campaign(
             return None
         return "campaign ceiling reached before the remaining candidates"
 
+    def run_one(recipe: Any) -> dict[str, Any]:
+        """Execute one attempt, journaling its start and its end.
+
+        The start line goes down *before* the executor is invoked: an attempt
+        that dies hard -- a killed subprocess tree, a killed process, a power
+        cut, anything no Python exit path can intercept -- still leaves who it
+        was and that it was running on the journal.
+        """
+        _journal_event(
+            root, phase="attempt", status="started", recipe_id=recipe.recipe_id
+        )
+        evidence = dict(executor(recipe, plan.items))
+        evidence["recipe_id"] = recipe.recipe_id
+        _journal_event(
+            root,
+            phase="attempt",
+            status=evidence.get("status"),
+            recipe_id=recipe.recipe_id,
+            attempt=evidence.get("attempt"),
+            gpu_hours=evidence.get("measured_gpu_hours"),
+        )
+        return evidence
+
     search_run = None
     if search.declared:
         # Bounded candidate search: cheap rounds first, only the final round's
@@ -738,7 +938,7 @@ def run_campaign(
             declaration=manifest.candidate_search,
             recipes=recipes,
             project_cost=cycle.planner.project_cost,
-            run_attempt=lambda recipe: executor(recipe, plan.items),
+            run_attempt=run_one,
             on_attempt=lambda evidence, row: charge(evidence),  # noqa: ARG005
             should_stop=lambda _device, _wall: overrun(),  # noqa: ARG005
         )
@@ -760,8 +960,7 @@ def run_campaign(
         )
     else:
         for recipe in recipes:
-            evidence = dict(executor(recipe, plan.items))
-            evidence["recipe_id"] = recipe.recipe_id
+            evidence = run_one(recipe)
             results.append(evidence)
             charge(evidence)
             stopped_by = overrun()
@@ -2784,13 +2983,34 @@ def check_campaign_readiness(
 
 
 def _write_record(
-    run: CampaignRun, root: Path, *, outcome: CycleOutcome | None
+    run: CampaignRun, root: Path, *, outcome: CycleOutcome | None, terminal: bool = True
 ) -> CampaignRun:
     document = run.to_dict()
     if outcome is not None:
         document["cycle_outcome"] = outcome.to_dict()
     path = root / "campaign-run.json"
-    path.write_text(json.dumps(document, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    # Atomic: a kill mid-write must never leave a truncated JSON verdict
+    # behind; the terminal journal line below only goes down once the verdict
+    # file is complete.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(
+        json.dumps(document, indent=2, sort_keys=True, default=str), encoding="utf-8"
+    )
+    os.replace(tmp, path)
+    if terminal:
+        # The journal record that closes the campaign: written *after* the
+        # verdict file it points at is durable, so a kill before this line
+        # leaves the journal open and the state root refusing rather than a
+        # verdict nobody's entry check trusts.
+        selection = dict(run.selection or {})
+        cost = dict(run.cost or {})
+        _journal_event(
+            root,
+            phase="terminal",
+            status=run.verdict,
+            recipe_id=selection.get("recipe_id"),
+            gpu_hours=cost.get("wall_gpu_hours"),
+        )
     return CampaignRun(
         cycle_id=run.cycle_id,
         parent_version=run.parent_version,
