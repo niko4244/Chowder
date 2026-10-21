@@ -190,10 +190,14 @@ DEQUANT_COPY_ELEMENTS = 1 << 26
 #: Whether the backward reuses the weights the recompute dequantised. Three passes
 #: dequantise a layer (checkpointed forward, recompute, backward); the recompute's
 #: copy is the one whose backward follows immediately, so keeping it saves a whole
-#: pass -- 18.75 GiB of host->device traffic and 4.4 s at the artifact's shapes --
-#: at the cost of one layer's bf16 weights (~0.94 GiB) held from recompute to
-#: backward. Off unless asked, because that is a memory trade the caller must see
-#: measured: ``retain_recomputed_weights``.
+#: pass. **On by default since 2026-10-21**, because it is now measured rather than
+#: projected: on REAP-160 at seq 2048 the A/B in
+#: ``docs/quals/MOE_INT8_THROUGHPUT_2026-10-20.md`` measured 32.63 -> 27.48 s/step
+#: (15.9%) for **0.000 GiB** of extra peak -- the retained buffer replaces the
+#: backward's own dequantisation instead of sitting beside it, so it is not the
+#: ~0.94 GiB the first design note assumed. Opt out with
+#: ``CHOWDER_INT8_RETAIN_WEIGHTS=0``; ``retain_recomputed_weights(False)`` still
+#: forces it off for a phase, which is how the A/B measures the other arm.
 _RETAIN_ENV = "CHOWDER_INT8_RETAIN_WEIGHTS"
 _retain_override: bool | None = None
 
@@ -208,7 +212,13 @@ def retain_recomputed_weights(enabled: bool | None = None) -> bool:
         return _retain_override
     import os
 
-    return os.environ.get(_RETAIN_ENV, "").strip().lower() not in ("", "0", "false", "off")
+    # Unset means on. An explicitly empty value is still an opt-out, so
+    # ``CHOWDER_INT8_RETAIN_WEIGHTS=`` in a shell profile cannot silently turn the
+    # optimisation off and make a run look slower than the default.
+    raw = os.environ.get(_RETAIN_ENV)
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("", "0", "false", "off")
 
 
 def _in_recompute_pass() -> bool:

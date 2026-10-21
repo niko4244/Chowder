@@ -602,15 +602,29 @@ def _count_dequant(monkeypatch) -> list[int]:
     return calls
 
 
-def test_weight_retention_is_off_unless_asked(monkeypatch):
+def test_weight_retention_is_on_unless_switched_off(monkeypatch):
+    """On by default since the A/B measured 15.9% for 0.000 GiB of extra peak.
+
+    The measurement is in ``docs/quals/MOE_INT8_THROUGHPUT_2026-10-20.md``; this
+    test pins the switch's semantics, not the number.
+    """
+    monkeypatch.setattr(mie, "_retain_override", None)
     monkeypatch.delenv(mie._RETAIN_ENV, raising=False)
-    assert mie.retain_recomputed_weights() is False
+    assert mie.retain_recomputed_weights() is True, "unset must mean the optimisation is on"
+    for value in ("0", "false", "off", " OFF ", ""):
+        monkeypatch.setenv(mie._RETAIN_ENV, value)
+        assert mie.retain_recomputed_weights() is False, value
     for value in ("1", "true", "on", " ON "):
         monkeypatch.setenv(mie._RETAIN_ENV, value)
         assert mie.retain_recomputed_weights() is True, value
+    # The process override wins over the environment in both directions, which is
+    # what lets the A/B measure the off arm without touching the caller's env.
     mie.retain_recomputed_weights(False)
     monkeypatch.setenv(mie._RETAIN_ENV, "1")
     assert mie.retain_recomputed_weights() is False, "the process override must win"
+    mie.retain_recomputed_weights(True)
+    monkeypatch.setenv(mie._RETAIN_ENV, "0")
+    assert mie.retain_recomputed_weights() is True, "the process override must win"
 
 
 def test_the_recompute_detector_is_true_only_inside_a_backward():
@@ -754,6 +768,35 @@ def test_under_checkpointing_retention_skips_exactly_the_backwards_dequant(tmp_p
     assert on == 4, on
     for got_tensor, want_tensor in zip(got, want):
         assert torch.equal(got_tensor, want_tensor)
+
+
+def test_the_shipped_default_is_the_two_pass_step(tmp_path, monkeypatch):
+    """No override, no env: the step a campaign pays for must be the 6 -> 4 one.
+
+    The tests above pin the switch's semantics in both directions; this pins the
+    *default* they serve, so flipping it back -- or a stray empty env var -- fails
+    here instead of quietly costing the measured 15.9%.
+    """
+    base = _checkpoint(tmp_path)
+    int8, _, _ = _int8_model(base)
+    module = _experts_module(int8)
+    calls = _count_dequant(monkeypatch)
+    monkeypatch.setattr(mie, "_retain_override", None)
+    monkeypatch.delenv(mie._RETAIN_ENV, raising=False)
+
+    hidden, index, weights = _inputs()
+
+    def forward(hidden_states):
+        return module(hidden_states, index, weights).square().sum()
+
+    loss = torch.utils.checkpoint.checkpoint(forward, hidden, use_reentrant=False)
+    torch.autograd.grad(loss, (hidden, weights))
+
+    assert len(calls) == 4, (
+        f"the default step dequantised {len(calls)} times; the shipped default must be "
+        "two passes (forward + recompute), with the backward reusing the recompute's weights"
+    )
+    assert mie._recomputed_weights is None, "the retained slot must be consumed by the backward"
 
 
 def test_a_full_forward_pass_matches_the_bf16_bulk_model(tmp_path):
