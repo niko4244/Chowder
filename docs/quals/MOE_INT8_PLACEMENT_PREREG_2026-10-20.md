@@ -356,16 +356,16 @@ license it, and both remain unmeasured.
 | gate | value | verdict |
 |---|---|---|
 | `load_census` | 18.82 GB int8+scales, 40 modules patched, 0 live bf16 expert params | measured |
-| `memory_vram` | not measured (CPU arm) | not measured |
-| `host_rss` | 25.56 GB peak (25.56 GB at load) | measured |
-| `throughput` | not measured (--steps 0) | not measured |
+| `memory_vram` | 11.345 GB peak (gate <= 14.5 GB, checkpointed, 5.383 GB of it the step's own loss) | pass |
+| `host_rss` | 20.57 GB peak (7.28 GB at load) | measured |
+| `throughput` | 51.8215 s/placement-step (spread 64.7157 s, checkpointed) | measured (placement step) |
 | `gradient` | not measured by this runner (needs a LoRA run) | not measured |
 | `smoke` | not measured by this runner (needs a dataset) | not measured |
 | `router_balance` | not measured by this runner (needs a smoke run) | not measured |
 | `wddm_spill` | not observable from here; compare peak_vram_gb to the card | not measured |
 
 - artifact: `G:\llm-cold\bf16\Qwen3.6-REAP160` config sha256 `15413a791b9eff423755743bb05b997c93f6ae6f4ce02a1966c9bdfdc2cdc3b9`, 26 shards, 46039573000 bytes
-- measured at 2026-10-20T15:31:24Z on cpu (0 steps, seq 2048), code `1a4b535`
-- int8 placement step: not measured; bulk comparison arm: not measured
+- measured at 2026-10-21T13:16:57Z on cuda:0 (3 steps, seq 2048), code `b4094c1`
+- int8 placement step: 51.8215 s; bulk comparison arm: not measured
 
 <!-- END moe-int8-gates -->
