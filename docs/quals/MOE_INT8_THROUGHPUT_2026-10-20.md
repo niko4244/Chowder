@@ -69,7 +69,19 @@ artifact's shapes, uniformly routed:
 | padded two-`bmm` grouped form (`CHOWDER_MOE_GROUPED_EXPERTS=1`, the default) | 5.1 | 26.34 |
 
 That is a **5.06×** improvement on the expert GEMMs, at 31% padding waste on
-uniform routing. The grouped path is not unconditional: `grouping_pays()`
+uniform routing.
+
+> **Erratum, 2026-10-21.** Those two millisecond figures are *not reproducible
+> from the committed script*: `measure_experts` built each expert's assignment
+> as `x[rows % tokens]` with `rows` a `slice`, which raises `TypeError:
+> unsupported operand type(s) for %: 'slice' and 'int'` before a timer starts, so
+> `--experts` could not run at all. The numbers came from an earlier variant of
+> the harness. The index construction is fixed (both forms now take the same
+> precomputed assignment and are shape-checked before either is timed) and the
+> mode runs again, but **the re-measurement on the card has not happened yet** --
+> treat 25.9 ms / 5.1 ms / 5.06× as unverified until it does. The A/B result in
+> §5 does not depend on them: it measured the grouped path inside a real step,
+> where the gain was 0.79 s (2.5%, inside the run's own drift). The grouped path is not unconditional: `grouping_pays()`
 compares the padded row count against the real one and falls back to the loop
 when the waste would exceed `GROUPED_MAX_WASTE = 3.0`, so a skewed router
 degrades to today's behaviour instead of paying for padding it cannot use.
@@ -115,8 +127,8 @@ is called out there):
    removed one of the three dequantize passes for **5.15 s/step (15.9%)** at
    **0.000 GiB** of extra peak, not the ~0.94 GiB §3 projected: the retained
    buffer replaces the backward's own dequantization rather than adding to it.
-   It is still opt-in in code, and flipping the default needs the placement step
-   re-measured under the new default before a campaign may cite the row.
+   It is still opt-in in code; §5 states the promotion order and why the default
+   has not been flipped yet.
 3. **Change the link.** Gen 4 x16 is ~4× the bandwidth of Gen 3 x8; the copy
    term becomes ~2.6 s and 9 s/step stops being arithmetic-impossible. This is
    the only option that reaches the target, and it is a host purchase, not a
@@ -183,6 +195,31 @@ steps per phase rather than twenty; one artifact, one card; no first-touch step
 of four per-step peaks, which is why it is worth exactly 0.000 GiB as evidence
 of *retention's* cost and nothing else. The gate row for `memory_vram` is still
 `chowder_batch/moe_int8_gates.py`'s to write, not this table's.
+
+### The sanctioned placement step
+
+The prereg's own runner measured the same card the next morning
+(`gates-sanctioned-int8-seq2048.json`, code `b4094c1`, 2026-10-21 08:16-08:41):
+**11.345 GB peak allocated, 11.664 GB reserved** against the 14.5 GB gate -- a
+pass -- with **5.383 GB** of that peak being the step's own scoring, so the
+placement's forward peak is 5.962 GB. Timed at 51.82 s per placement step over
+three steps `[94.11, 29.40, 31.95]`: the first carries the 20 GB store's first
+touch, and the steady 29.4-32.0 s agrees with this note's 33 s/step baseline. It
+is a placement step, not a training step: no LoRA, no optimizer, so it is not
+comparable to the A/B's 27.48 s and is not budgeted from.
+
+### Promotion of the retention switch: measured, not yet shipped
+
+The measured peak says `CHOWDER_INT8_RETAIN_WEIGHTS` **may** default on: 15.9%
+faster and 0.000 GiB of extra peak at seq 2048. It stays opt-in for now, and
+deliberately: the `memory_vram` row a campaign would cite was measured with the
+switch **off**, so flipping the default before a sanctioned run measures the
+default-on placement would leave the table describing a configuration nobody
+ships. The order that keeps both honest is: flip the default, re-run
+`chowder_batch/moe_int8_gates.py --arms int8 --steps 3 --seq-len 2048`, and let
+the runner overwrite its own rows. That re-run needs an idle card; on 2026-10-21
+another training job held it, so it is the first item of work when the host is
+free.
 
 ## 6. Reproduction
 
