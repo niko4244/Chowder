@@ -95,11 +95,13 @@ Two smaller changes landed with it:
   `DEQUANT_ELEMENTS_PER_BLOCK = 1 << 23` (8 Mi per arithmetic block): the same
   bytes, the same arithmetic, 7,200 → 480 copies per step. Measured ~5% off the
   copy term.
-- **Recompute weights can be retained for the backward**
-  (`CHOWDER_INT8_RETAIN_WEIGHTS=1`, off by default). It removes one of the three
-  dequantize passes at the cost of holding one layer's dequantized experts
-  (~0.94 GiB) across the recompute. It is off by default because the peak is the
-  gate, and the peak is measured by the A/B run below, not assumed.
+- **Recompute weights are retained for the backward**
+  (`CHOWDER_INT8_RETAIN_WEIGHTS`, **on by default since 2026-10-21**, opt out with
+  `=0`). It removes one of the three dequantize passes. The ~0.94 GiB cost this
+  note first projected was wrong: §5 measured **0.000 GiB**, because the retained
+  buffer replaces the backward's own dequantization instead of sitting beside it.
+  It was opt-in until that measurement existed; the measurement is why it is now
+  the default.
 
 Two hypotheses were **measured and rejected**, and are recorded so they are not
 re-proposed:
@@ -208,18 +210,25 @@ touch, and the steady 29.4-32.0 s agrees with this note's 33 s/step baseline. It
 is a placement step, not a training step: no LoRA, no optimizer, so it is not
 comparable to the A/B's 27.48 s and is not budgeted from.
 
-### Promotion of the retention switch: measured, not yet shipped
+### Promotion of the retention switch: now the default, re-measurement queued
 
-The measured peak says `CHOWDER_INT8_RETAIN_WEIGHTS` **may** default on: 15.9%
-faster and 0.000 GiB of extra peak at seq 2048. It stays opt-in for now, and
-deliberately: the `memory_vram` row a campaign would cite was measured with the
-switch **off**, so flipping the default before a sanctioned run measures the
-default-on placement would leave the table describing a configuration nobody
-ships. The order that keeps both honest is: flip the default, re-run
-`chowder_batch/moe_int8_gates.py --arms int8 --steps 3 --seq-len 2048`, and let
-the runner overwrite its own rows. That re-run needs an idle card; on 2026-10-21
-another training job held it, so it is the first item of work when the host is
-free.
+`CHOWDER_INT8_RETAIN_WEIGHTS` became **default-on in 956c214** on the strength of
+the measurement above: 15.9% faster and 0.000 GiB of extra peak at seq 2048, with
+`CHOWDER_INT8_RETAIN_WEIGHTS=0` as the opt-out and a test pinning the shipped
+default to the two-pass step.
+
+**The table has not caught up yet, and this note says so rather than letting a
+reader assume otherwise.** The `memory_vram` and `throughput` rows currently in
+`docs/quals/MOE_INT8_PLACEMENT_PREREG_2026-10-20.md` were measured at `b4094c1`,
+when the switch was still off. Until the sanctioned runner is re-run on 956c214,
+the rows describe the *previous* configuration and a campaign that cites them is
+citing a configuration that is no longer shipped. The re-run
+(`chowder_batch/moe_int8_gates.py --arms int8 --steps 3 --seq-len 2048`) is
+registered as `\llm-work\gates-witness` and held behind an idle-card gate: on
+2026-10-21 another workload cycled between ~1 GB and ~9 GB of the 16 GB card every
+few minutes, and the 20 GB load needs the whole card. Competing with it produced
+two OOMs (09:44, 10:07) and no number; waiting is the only honest option, and the
+row stays as measured until the re-run replaces it.
 
 ## 6. Reproduction
 
