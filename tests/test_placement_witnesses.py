@@ -534,3 +534,52 @@ def test_the_recorder_audits_the_campaign_architecture_not_just_qwen3moe():
     for counts in window.values():
         assert len(counts) == 6
         assert sum(counts) == 32  # 16 tokens x top-2
+
+
+def test_the_recorder_audits_the_int8_placement_it_is_meant_to_witness(tmp_path):
+    """The 2026-10-21 witness run passed a clean int8 load and was refused here.
+
+    ``prepare_int8_placement`` replaces an experts module's bf16 parameters with
+    four int8 buffers, so ``gate_up_proj``/``down_proj`` are gone and the audit
+    found no MoE layer at all -- on exactly the model the placement produces.
+    The int8 module is a second verified shape: same router, same fused layout,
+    same ``num_experts``/``act_fn``.
+    """
+    from transformers import AutoModelForCausalLM, Qwen3MoeConfig
+
+    from chowder.backends import moe_int8_experts as mie
+    from chowder.moe_instrumentation import INT8_EXPERT_BUFFERS
+
+    assert tuple(INT8_EXPERT_BUFFERS) == tuple(mie.INT8_EXPERT_BUFFERS)
+
+    config = Qwen3MoeConfig(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=8,
+        moe_intermediate_size=4,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        num_experts=6,
+        num_experts_per_tok=2,
+        decoder_sparse_step=1,
+        max_position_embeddings=32,
+        head_dim=8,
+    )
+    base = tmp_path / "tiny"
+    AutoModelForCausalLM.from_config(config).save_pretrained(base)
+    model, _census = mie.load_model_int8_experts(base, device="cpu")
+    mie.prepare_int8_placement(model, device_type="cpu")
+
+    with pw.RouterLoadRecorder(model) as recorder:
+        assert recorder.layers == 2
+        out = model(
+            input_ids=torch.randint(0, 64, (1, 8)),
+            labels=torch.randint(0, 64, (1, 8)),
+            use_cache=False,
+        )
+        out.loss.backward()
+        window = recorder.window()
+    for counts in window.values():
+        assert len(counts) == 6
+        assert sum(counts) == 16  # 8 tokens x top-2
