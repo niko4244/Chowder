@@ -24,7 +24,11 @@ import moe_activation_probe as probe  # noqa: E402
 import moe_int8_gates as gates  # noqa: E402
 from chowder import moe_placement_gates as mpg  # noqa: E402
 from chowder import moe_vram_projection as mvp  # noqa: E402
-from chowder.backends import moe_int8_experts as mie  # noqa: E402
+
+# ``chowder.backends.moe_int8_experts`` imports safetensors, and ``torch`` is in
+# the ``train`` extra: importing either at module scope would stop this file
+# collecting in the light CI job, which is where the build check below has to
+# run. The tests that need them import them, and say so.
 
 
 def fake_checkpoint(monkeypatch, tmp_path, header):
@@ -65,11 +69,12 @@ def test_the_header_projection_reproduces_the_loaders_own_census():
     """Not a tolerance: the loader allocates 1 byte per expert parameter and one
     fp32 scale per row, so anything but equality means the projection is sizing a
     different placement than the one that was measured."""
+    pytest.importorskip("torch")
     from chowder.backends import moe_int8_experts as loader_module
 
     base = Path(gates._self_check_workspace())
     model, census = loader_module.load_model_int8_experts(base, device="cpu")
-    dtype, _source = mie.resolve_non_expert_dtype(base)
+    dtype, _source = loader_module.resolve_non_expert_dtype(base)
     inventory = mvp.inventory(base, dtype=str(dtype).replace("torch.", ""))
     projection = mvp.project(inventory, seq_len=8, vocab_size=64)
 
@@ -310,6 +315,9 @@ def test_a_measured_peak_below_the_projected_floor_is_a_disagreement():
 
 
 def run_project_only(*extra):
+    # The runner resolves the artifact's config through transformers and its
+    # header inventory through safetensors; the light CI job has neither.
+    pytest.importorskip("transformers")
     return subprocess.run(
         [sys.executable, str(ROOT / "chowder_batch" / "moe_int8_gates.py"), "--project-only", *extra],
         capture_output=True,

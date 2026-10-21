@@ -15,6 +15,7 @@ The measurement itself is not re-run here: ``run`` is replaced with a record, so
 these test the table and the rule, not the GPU.
 """
 
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -31,6 +32,23 @@ from chowder.growth.campaign_prepare import (  # noqa: E402
     CampaignPrepareRefusal,
     placement_gate_refusal,
 )
+
+#: The runner's step, and every subprocess it spawns, needs torch. The light CI
+#: jobs install ``.[dev]`` only, and a job that is red for an unrelated reason
+#: cannot report a regression in the rule this file exists to pin.
+def _installed(module: str) -> bool:
+    """Whether an import of ``module`` would resolve, without importing it."""
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):  # a finder that refuses to say is not an install
+        return False
+
+
+needs_torch = pytest.mark.skipif(
+    not _installed("torch"),
+    reason="torch is in the train extra; the light CI job does not install it",
+)
+
 
 PLACEHOLDER = f"""# Pre-registration — the placement
 
@@ -179,6 +197,7 @@ class ScriptedPeaks:
         self.syncs += 1
 
 
+@needs_torch
 def test_the_two_peaks_are_read_where_the_harness_term_needs_them():
     """One reading after the forward, one after the backward, reset per step. The
     harness term is the difference of the two maxima -- not of the last readings,
@@ -204,6 +223,7 @@ def test_the_two_peaks_are_read_where_the_harness_term_needs_them():
     )["verdict"] == "pass"
 
 
+@needs_torch
 def test_the_step_scores_cross_entropy_in_chunks_and_matches_the_sequence_loss():
     """Chunking must not change the loss: same targets, same values, a different
     amount of memory held at once. And scoring one position must score the last
@@ -386,6 +406,7 @@ def no_measurement(monkeypatch):
     monkeypatch.setattr(gates, "run", fake_run)
 
 
+@needs_torch
 def test_cli_writes_the_measurement_into_the_prereg(monkeypatch, tmp_path, no_measurement):
     monkeypatch.setenv("CHOWDER_NO_GPU", "1")
     prereg = prewritten(tmp_path, text=PLACEHOLDER)
@@ -401,6 +422,7 @@ def test_cli_writes_the_measurement_into_the_prereg(monkeypatch, tmp_path, no_me
     assert mpg.parse_block(document)["verdicts"]["memory_vram"] == "pass"
 
 
+@needs_torch
 def test_self_check_never_writes_the_placement_prereg(monkeypatch, tmp_path, no_measurement):
     """A synthetic model's numbers must not become the placement's table."""
     monkeypatch.delenv("CHOWDER_MOE_GATE_TABLE", raising=False)
@@ -413,6 +435,7 @@ def test_self_check_never_writes_the_placement_prereg(monkeypatch, tmp_path, no_
     assert after == before
 
 
+@needs_torch
 def test_a_census_only_run_keeps_the_measured_throughput(
     monkeypatch, tmp_path, no_measurement, capsys
 ):
@@ -431,6 +454,7 @@ def test_a_census_only_run_keeps_the_measured_throughput(
     )
 
 
+@needs_torch
 def test_cli_fails_when_a_recorded_gate_regresses(monkeypatch, tmp_path):
     monkeypatch.setenv("CHOWDER_NO_GPU", "1")
     prereg = prewritten(tmp_path, text=clause(PLACEHOLDER))
@@ -443,6 +467,7 @@ def test_cli_fails_when_a_recorded_gate_regresses(monkeypatch, tmp_path):
     assert parsed["verdicts"]["memory_vram"] == "FAIL"
 
 
+@needs_torch
 def test_cli_refuses_to_overwrite_a_table_from_another_artifact(monkeypatch, tmp_path):
     monkeypatch.setenv("CHOWDER_NO_GPU", "1")
     prereg = prewritten(tmp_path, text=clause(PLACEHOLDER))
@@ -453,6 +478,7 @@ def test_cli_refuses_to_overwrite_a_table_from_another_artifact(monkeypatch, tmp
     assert prereg.read_text(encoding="utf-8") == before
 
 
+@needs_torch
 def test_a_new_baseline_replaces_the_table_it_could_not_compare(monkeypatch, tmp_path):
     monkeypatch.setenv("CHOWDER_NO_GPU", "1")
     prereg = prewritten(tmp_path, text=clause(PLACEHOLDER))
@@ -464,6 +490,7 @@ def test_a_new_baseline_replaces_the_table_it_could_not_compare(monkeypatch, tmp
     assert mpg.parse_block(prereg.read_text(encoding="utf-8"))["config_sha256"] == "c" * 64
 
 
+@needs_torch
 def test_check_compares_without_writing(monkeypatch, tmp_path, no_measurement):
     monkeypatch.setenv("CHOWDER_NO_GPU", "1")
     prereg = prewritten(tmp_path, text=clause(PLACEHOLDER))
