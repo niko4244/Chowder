@@ -101,9 +101,18 @@ def main(argv: list[str] | None = None) -> int:
     torch.manual_seed(20261018)
     started = time.perf_counter()
     tokenizer = AutoTokenizer.from_pretrained(args.base, local_files_only=True)
-    model, census = mie.load_model_int8_experts(args.base, device=0)
+    model, load_census = mie.load_model_int8_experts(args.base, device=0)
+    # The loader only *produces* the int8 buffers; the placement is not in force
+    # until ``prepare_int8_placement`` censuses the live model and installs the
+    # int8 expert forward. Without this the bf16 fused experts run against a
+    # module whose parameters are gone -- the 2026-10-21 09:14 attempt loaded for
+    # 21 minutes and then died on `Qwen3_5MoeExperts has no attribute
+    # 'gate_up_proj'`. It also refuses a placement that did not happen, so the
+    # census is the proof the step below is the int8 step.
+    placement_census = mie.prepare_int8_placement(model)
     report["load_seconds"] = round(time.perf_counter() - started, 1)
-    report["census"] = census
+    report["load_census"] = load_census
+    report["census"] = placement_census
 
     # The router recorder audits ``model.model.layers``, which is the text stack
     # only *before* PEFT wraps the model: after ``get_peft_model`` the trained

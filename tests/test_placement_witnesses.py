@@ -583,3 +583,42 @@ def test_the_recorder_audits_the_int8_placement_it_is_meant_to_witness(tmp_path)
     for counts in window.values():
         assert len(counts) == 6
         assert sum(counts) == 16  # 8 tokens x top-2
+
+
+def test_an_int8_load_without_the_install_still_runs_the_bf16_experts(tmp_path):
+    """Why `prepare_int8_placement` belongs in every int8 consumer.
+
+    The loader produces the int8 buffers and drops the bf16 expert parameters,
+    but the placement is not in force until the int8 forward is installed. This
+    is the trap that cost the 2026-10-21 09:14 witness run a 21-minute load: the
+    bf16 fused forward ran, looked for `gate_up_proj`, and raised.
+    """
+    from transformers import AutoModelForCausalLM, Qwen3MoeConfig
+
+    from chowder.backends import moe_int8_experts as mie
+
+    config = Qwen3MoeConfig(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=8,
+        moe_intermediate_size=4,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        num_experts=4,
+        num_experts_per_tok=2,
+        decoder_sparse_step=1,
+        max_position_embeddings=32,
+        head_dim=8,
+    )
+    base = tmp_path / "tiny"
+    AutoModelForCausalLM.from_config(config).save_pretrained(base)
+    model, _census = mie.load_model_int8_experts(base, device="cpu")
+
+    with pytest.raises(AttributeError, match="gate_up_proj"):
+        model(input_ids=torch.randint(0, 64, (1, 8)), use_cache=False)
+
+    mie.prepare_int8_placement(model, device_type="cpu")
+    with torch.no_grad():
+        out = model(input_ids=torch.randint(0, 64, (1, 8)), use_cache=False)
+    assert out.logits.shape == (1, 8, 64)
