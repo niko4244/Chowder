@@ -38,6 +38,10 @@ TOLERANCE = 2e-2
 def _no_gpu(monkeypatch):
     """Every loader call in this file resolves to the CPU."""
     monkeypatch.setenv("CHOWDER_NO_GPU", "1")
+    # The retention switch and its one-slot hand-off are process-global; no test
+    # may leak either.
+    monkeypatch.setattr(mie, "_retain_override", None)
+    monkeypatch.setattr(mie, "_recomputed_weights", None)
 
 
 def _config(*, tie_word_embeddings: bool = False, layers: int = LAYERS):
@@ -586,6 +590,172 @@ def test_int8_forward_and_grads_survive_activation_checkpointing(tmp_path):
     assert _relative(weights_ckpt, weights_bulk) <= TOLERANCE
 
 
+def _count_dequant(monkeypatch) -> list[int]:
+    calls: list[int] = []
+    real = mie._dequantized_on
+
+    def traced(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mie, "_dequantized_on", traced)
+    return calls
+
+
+def test_weight_retention_is_off_unless_asked(monkeypatch):
+    monkeypatch.delenv(mie._RETAIN_ENV, raising=False)
+    assert mie.retain_recomputed_weights() is False
+    for value in ("1", "true", "on", " ON "):
+        monkeypatch.setenv(mie._RETAIN_ENV, value)
+        assert mie.retain_recomputed_weights() is True, value
+    mie.retain_recomputed_weights(False)
+    monkeypatch.setenv(mie._RETAIN_ENV, "1")
+    assert mie.retain_recomputed_weights() is False, "the process override must win"
+
+
+def test_the_recompute_detector_is_true_only_inside_a_backward():
+    seen: dict[str, bool] = {}
+
+    class Probe(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, tensor):
+            seen["forward"] = mie._in_recompute_pass()
+            return tensor * 2
+
+        @staticmethod
+        def backward(ctx, grad):
+            seen["backward"] = mie._in_recompute_pass()
+            return grad
+
+    Probe.apply(torch.ones(1, requires_grad=True)).sum().backward()
+    assert seen == {"forward": False, "backward": True}
+
+
+def test_only_the_recompute_call_retains_its_weights(tmp_path):
+    """The flag is the contract: the checkpointed first pass must hold nothing,
+    or every layer would keep a second bf16 copy across the whole forward."""
+    base = _checkpoint(tmp_path)
+    int8, _, _ = _int8_model(base)
+    module = _experts_module(int8)
+    function = mie._int8_layer_function()
+    hidden, index, weights = _inputs()
+    args = (
+        hidden,
+        index,
+        weights,
+        module.gate_up_q,
+        module.gate_up_scale,
+        module.down_q,
+        module.down_scale,
+        module.act_fn,
+        module.num_experts,
+    )
+
+    class Ctx:
+        def save_for_backward(self, *tensors):
+            self.saved = tensors
+
+    first = Ctx()
+    with torch.no_grad():
+        function.forward(first, *args, False)
+    assert mie._recomputed_weights is None, "the checkpointed first pass must retain nothing"
+
+    recompute = Ctx()
+    function.forward(recompute, *args, True)
+    held = mie._recomputed_weights
+    assert held is not None
+    assert held[0] == id(module.gate_up_q)
+    assert held[1].shape == module.gate_up_q.shape
+    assert held[2].shape == module.down_q.shape
+
+
+def test_the_recompute_handoff_is_single_slot_and_keyed_to_its_layer(tmp_path):
+    """A backward only takes weights dequantised from its own layer, and taking
+    them clears the slot: one layer held at most, never a stale reuse."""
+    base = _checkpoint(tmp_path)
+    int8, _, _ = _int8_model(base)
+    module = _experts_module(int8)
+    function = mie._int8_layer_function()
+    hidden, index, weights = _inputs()
+    args = (
+        hidden,
+        index,
+        weights,
+        module.gate_up_q,
+        module.gate_up_scale,
+        module.down_q,
+        module.down_scale,
+        module.act_fn,
+        module.num_experts,
+    )
+
+    class Ctx:
+        def save_for_backward(self, *tensors):
+            self.saved = tensors
+
+    function.forward(Ctx(), *args, True)
+    assert mie._take_recomputed_weights(torch.empty(0, dtype=torch.int8)) is None
+    assert mie._recomputed_weights is None, "a mismatched take must not leave the slot behind"
+
+    function.forward(Ctx(), *args, True)
+    taken = mie._take_recomputed_weights(module.gate_up_q)
+    assert taken is not None
+    assert mie._recomputed_weights is None, "a consumed hand-off must be freed"
+    assert mie._take_recomputed_weights(module.gate_up_q) is None
+
+
+def test_retention_is_inert_without_a_checkpoint_recompute(tmp_path, monkeypatch):
+    """Eager forward/backward has no recompute pass, so nothing is held and the
+    copy count is unchanged: the flag must not silently move memory around."""
+    base = _checkpoint(tmp_path)
+    int8, _, _ = _int8_model(base)
+    module = _experts_module(int8)
+    calls = _count_dequant(monkeypatch)
+
+    mie.retain_recomputed_weights(False)
+    want = _forward_and_grads(module)
+    off = len(calls)
+
+    mie.retain_recomputed_weights(True)
+    got = _forward_and_grads(module)
+    on = len(calls) - off
+
+    assert off == 4, off
+    assert on == 4, on
+    for got_tensor, want_tensor in zip(got, want):
+        assert torch.equal(got_tensor, want_tensor)
+
+
+def test_under_checkpointing_retention_skips_exactly_the_backwards_dequant(tmp_path, monkeypatch):
+    """Checkpointed: forward, recompute and backward each dequantise, so 6 -> 4."""
+    base = _checkpoint(tmp_path)
+    int8, _, _ = _int8_model(base)
+    module = _experts_module(int8)
+    calls = _count_dequant(monkeypatch)
+
+    def grads():
+        hidden, index, weights = _inputs()
+
+        def forward(hidden_states):
+            return module(hidden_states, index, weights).square().sum()
+
+        loss = torch.utils.checkpoint.checkpoint(forward, hidden, use_reentrant=False)
+        return loss.detach(), *torch.autograd.grad(loss, (hidden, weights))
+
+    mie.retain_recomputed_weights(False)
+    want = grads()
+    off = len(calls)
+
+    mie.retain_recomputed_weights(True)
+    got = grads()
+    on = len(calls) - off
+
+    assert off == 6, off
+    assert on == 4, on
+    for got_tensor, want_tensor in zip(got, want):
+        assert torch.equal(got_tensor, want_tensor)
+
+
 def test_a_full_forward_pass_matches_the_bf16_bulk_model(tmp_path):
     base = _checkpoint(tmp_path)
     bulk = _bf16_bulk_model(base)
@@ -1032,6 +1202,37 @@ def test_the_device_dequant_streams_row_blocks_and_matches_the_whole_tensor(monk
     one_expert = weight.shape[1] * weight.shape[2]
     assert max(elements for elements, _ in seen) <= one_expert
     assert sum(elements for elements, _ in seen) == q.numel()
+
+
+def test_the_copy_block_is_decoupled_from_the_dequant_block(monkeypatch):
+    """Fewer, larger copies must not widen the fp32 working block.
+
+    A copy is ``max(dequant rows, copy rows)``; the arithmetic stays on the
+    dequant block inside it. Reading the two budgets as one number is what made
+    the artifact's layer cost 40 blocking copies, so the separation is pinned
+    here: the traced block never exceeds the dequant budget at either copy size.
+    """
+    weight = _expert_shaped_weights()
+    q, scale = mie.quantize_rows(weight)
+    row = weight.shape[1] * weight.shape[2]  # 480; a block cannot split a row
+    seen: list[int] = []
+    real = mie._dequantize_block
+
+    def traced(out_slice, q_block, scale_block):
+        seen.append(q_block.numel())
+        return real(out_slice, q_block, scale_block)
+
+    monkeypatch.setattr(mie, "DEQUANT_ELEMENTS_PER_BLOCK", 2 * row)
+    monkeypatch.setattr(mie, "_dequantize_block", traced)
+    want = _whole_tensor_dequant(q, scale, torch.bfloat16)
+
+    for copy_budget in (row, 16 * row):
+        seen.clear()
+        monkeypatch.setattr(mie, "DEQUANT_COPY_ELEMENTS", copy_budget)
+        out = mie._dequantized_on(q, scale, "cpu", torch.bfloat16)
+        assert torch.equal(out, want), copy_budget
+        assert seen and max(seen) == 2 * row, (copy_budget, seen)
+        assert sum(seen) == q.numel(), (copy_budget, seen)
 
 
 PROGRESS_LINE = re.compile(

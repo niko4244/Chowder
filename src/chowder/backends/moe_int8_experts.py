@@ -59,13 +59,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from safetensors import safe_open
+try:  # the light CI job has no safetensors, and this module's constants are read there
+    from safetensors import safe_open
+except ImportError:  # pragma: no cover - exercised by the dev-only CI jobs
+    safe_open = None  # type: ignore[assignment]
 
 from .moe_transient_grad import (
     EXPERTS_CLASSES,
     EXPERT_PARAM_INFIX,
     INT8_PLACEMENT,
-    _layer_moe_forward,
+    _moe_layer,
 )
 
 #: The placement name for this path (also in ``moe_transient_grad.EXPERT_PLACEMENTS``).
@@ -173,6 +176,84 @@ def quantize_rows(weight: Any, *, scale_dtype: Any = None) -> tuple[Any, Any]:
 #: matrix would be twice its bf16 bytes on the card, which the 16 GB budget
 #: cannot spend on top of the copy.
 DEQUANT_ELEMENTS_PER_BLOCK = 1 << 23
+
+#: How many elements one host->device copy of the int8 store moves. Separate from
+#: the dequantisation block above because the two limits answer different
+#: questions: the copy wants few, large transfers (each pageable one blocks the
+#: stream), the fp32 product wants a small working set. 2**26 elements is 64 MiB
+#: of int8 per copy -- 32 rows of the artifact's ``gate_up_proj`` (5 copies a
+#: layer instead of 40) and 4x that of ``down_proj`` -- while the dequantised
+#: output stays capped by ``DEQUANT_ELEMENTS_PER_BLOCK`` whatever this is.
+DEQUANT_COPY_ELEMENTS = 1 << 26
+
+
+#: Whether the backward reuses the weights the recompute dequantised. Three passes
+#: dequantise a layer (checkpointed forward, recompute, backward); the recompute's
+#: copy is the one whose backward follows immediately, so keeping it saves a whole
+#: pass -- 18.75 GiB of host->device traffic and 4.4 s at the artifact's shapes --
+#: at the cost of one layer's bf16 weights (~0.94 GiB) held from recompute to
+#: backward. Off unless asked, because that is a memory trade the caller must see
+#: measured: ``retain_recomputed_weights``.
+_RETAIN_ENV = "CHOWDER_INT8_RETAIN_WEIGHTS"
+_retain_override: bool | None = None
+
+
+def retain_recomputed_weights(enabled: bool | None = None) -> bool:
+    """Read, or set for the process, whether backward reuses the recompute's weights."""
+    global _retain_override
+    if enabled is not None:
+        _retain_override = bool(enabled)
+        return _retain_override
+    if _retain_override is not None:
+        return _retain_override
+    import os
+
+    return os.environ.get(_RETAIN_ENV, "").strip().lower() not in ("", "0", "false", "off")
+
+
+def _in_recompute_pass() -> bool:
+    """Whether this forward call is the activation-checkpoint recompute.
+
+    Only the recompute's weights are immediately consumed by their own backward,
+    so only they are worth holding. The signal has to be read in the module's
+    ``forward`` and passed into the autograd Function: a custom Function's own
+    ``forward`` always runs with grad disabled, so grad mode cannot tell the two
+    passes apart even from inside, and at the module level BOTH the checkpointed
+    first pass and the recompute run with grad enabled. What does differ is the
+    autograd graph task: -1 in the first pass, non-negative during the backward
+    that triggers the recompute. Measured on torch 2.11; a torch without the
+    introspection retains nothing, which only costs the optimization.
+    """
+    import torch
+
+    graph_task_id = getattr(torch._C, "_current_graph_task_id", None)
+    if graph_task_id is None:  # pragma: no cover - depends on the torch build
+        return False
+    return graph_task_id() >= 0
+
+
+#: The one layer whose weights the checkpoint recompute just dequantised, waiting
+#: for the backward that follows it: ``(id(gate_up_q), gate_up, down)``.
+#:
+#: This is a side channel, not ``ctx``, because the recompute's ctx is not the one
+#: whose backward runs: the non-reentrant checkpoint replays the FIRST forward's
+#: graph and uses the recompute only to refill the saved tensors it dropped, so the
+#: node that reaches ``backward`` was built by the pass that ran with grad enabled
+#: *before* the slot was worth filling. One slot, because the engine runs a layer's
+#: recompute and its backward back to back; a slot that does not match the layer
+#: being backwarded is dropped rather than kept, so a missed hand-off costs one
+#: copy -- never memory, and never a wrong weight: the int8 buffers are frozen, so
+#: even a stale entry would dequantise to the same bytes.
+_recomputed_weights: tuple[int, Any, Any] | None = None
+
+
+def _take_recomputed_weights(gate_up_q: Any) -> tuple[Any, Any] | None:
+    """Pop the recompute's hand-off if it belongs to this layer; always clears."""
+    global _recomputed_weights
+    held, _recomputed_weights = _recomputed_weights, None
+    if held is None or held[0] != id(gate_up_q):
+        return None
+    return held[1], held[2]
 
 
 def _dequantize_block(out_slice: Any, q_block: Any, scale_block: Any) -> None:
@@ -678,6 +759,11 @@ def load_model_int8_experts(
             f"shard {shard_index}/{len(shards)}, layers quantized {len(quantized_layers)}, "
             f"host private {_host_private_gb()} GB"
         )
+        if safe_open is None:  # the guarded import at the top of the module
+            raise ImportError(
+                "reading shards needs safetensors; the placement's header arithmetic "
+                "imports without it, but loading one does not"
+            )
         with safe_open(str(shard), framework="pt", device="cpu") as handle:
             for raw_key in handle.keys():
                 key = _model_key(raw_key, params, buffers)
@@ -796,22 +882,35 @@ def _dequantized_on(tensor: Any, scale: Any, device: Any, dtype: Any) -> Any:
 
     The result (the layer's weights in ``dtype``, i.e. bf16 in training) is the
     only layer-sized allocation: the int8 matrix is staged to the device one
-    block at a time and each block's fp32 product is freed before the next, so
-    the forward never needs an int8 *and* an fp32 copy of the whole layer beside
-    the weights. On the 16 GB card that difference is what decides whether the
-    layer fits or spills to WDDM.
+    *copy block* at a time and each copy's fp32 product is freed before the next,
+    so the forward never needs an int8 *and* an fp32 copy of the whole layer
+    beside the weights. On the 16 GB card that difference is what decides whether
+    the layer fits or spills to WDDM.
+
+    The copy granularity and the dequantisation granularity are separate: a copy
+    is as large as ``DEQUANT_COPY_ELEMENTS`` allows (few host->device calls, each
+    of which blocks the stream while a pageable source is staged), while the fp32
+    product is still capped at ``DEQUANT_ELEMENTS_PER_BLOCK``. Reading them as one
+    number is what made a layer cost 60 blocking copies of 8 MiB: measured on the
+    card, that granularity ran at 5.52 GiB/s against 5.82 GiB/s for the 10x block,
+    and the pinned variant was no faster than the pageable one (5.52 both), so the
+    link -- not the pinning -- is the ceiling.
     """
     import torch
 
     out = torch.empty(tensor.shape, dtype=dtype, device=device)
     if tensor.numel() == 0:
         return out
-    block = _rows_per_block(tensor[0].numel(), DEQUANT_ELEMENTS_PER_BLOCK)
-    for start in range(0, tensor.shape[0], block):
-        rows = slice(start, start + block)
-        q_block = tensor[rows].to(device, non_blocking=True)
-        scale_block = scale[rows].to(device, non_blocking=True)
-        _dequantize_block(out[rows], q_block, scale_block)
+    row = tensor[0].numel()
+    block = _rows_per_block(row, DEQUANT_ELEMENTS_PER_BLOCK)
+    copy = max(block, _rows_per_block(row, DEQUANT_COPY_ELEMENTS))
+    for start in range(0, tensor.shape[0], copy):
+        stop = min(start + copy, tensor.shape[0])
+        q_block = tensor[start:stop].to(device, non_blocking=True)
+        scale_block = scale[start:stop].to(device, non_blocking=True)
+        for sub in range(0, stop - start, block):
+            rows = slice(start + sub, min(start + sub + block, stop))
+            _dequantize_block(out[rows], q_block[sub:sub + block], scale_block[sub:sub + block])
         del q_block, scale_block
     return out
 
@@ -835,7 +934,9 @@ def _int8_layer_function() -> Any:
             down_scale: Any,
             act_fn: Any,
             num_experts: int,
+            reuse_weights: bool,
         ) -> Any:
+            global _recomputed_weights
             ctx.save_for_backward(hidden_states, top_k_index, top_k_weights)
             ctx.weights = (gate_up_q, gate_up_scale, down_q, down_scale)  # CPU-resident int8
             ctx.act_fn = act_fn
@@ -844,26 +945,35 @@ def _int8_layer_function() -> Any:
             with torch.no_grad():
                 gate_up = _dequantized_on(gate_up_q, gate_up_scale, dev, dtype)
                 down = _dequantized_on(down_q, down_scale, dev, dtype)
-                out = _layer_moe_forward(
+                out = _moe_layer(
                     hidden_states, top_k_index, top_k_weights, gate_up, down, act_fn, num_experts
                 )
-            del gate_up, down
+            if reuse_weights:
+                # This call is the checkpoint recompute; the backward that follows
+                # it is the consumer (see _recomputed_weights for why not ctx).
+                _recomputed_weights = (id(gate_up_q), gate_up, down)
+            else:
+                del gate_up, down
             return out
 
         @staticmethod
         def backward(ctx: Any, grad_out: Any) -> Any:
             hidden_states, top_k_index, top_k_weights = ctx.saved_tensors
             gate_up_q, gate_up_scale, down_q, down_scale = ctx.weights
+            reused = _take_recomputed_weights(gate_up_q)
             with torch.enable_grad():
                 x = hidden_states.detach().requires_grad_(True)
                 w = top_k_weights.detach().requires_grad_(True)
                 dev, dtype = x.device, x.dtype
-                gate_up = _dequantized_on(gate_up_q, gate_up_scale, dev, dtype)
-                down = _dequantized_on(down_q, down_scale, dev, dtype)
-                y = _layer_moe_forward(x, top_k_index, w, gate_up, down, ctx.act_fn, ctx.num_experts)
+                if reused is not None:
+                    gate_up, down = reused
+                else:
+                    gate_up = _dequantized_on(gate_up_q, gate_up_scale, dev, dtype)
+                    down = _dequantized_on(down_q, down_scale, dev, dtype)
+                y = _moe_layer(x, top_k_index, w, gate_up, down, ctx.act_fn, ctx.num_experts)
                 grad_x, grad_w = torch.autograd.grad(y, (x, w), grad_out)
-            del gate_up, down
-            return grad_x, None, grad_w, None, None, None, None, None, None
+            del gate_up, down, reused
+            return grad_x, None, grad_w, None, None, None, None, None, None, None
 
     return TransientLayerExpertsInt8
 
@@ -880,6 +990,9 @@ def install_int8_expert_forward(model: Any) -> int:
     function = _int8_layer_function()
 
     def forward(self: Any, hidden_states: Any, top_k_index: Any, top_k_weights: Any) -> Any:
+        # Read here, where the checkpoint's two passes are distinguishable; the
+        # Function's own forward cannot tell them apart (see _in_recompute_pass).
+        reuse = retain_recomputed_weights() and _in_recompute_pass()
         return function.apply(
             hidden_states,
             top_k_index,
@@ -890,6 +1003,7 @@ def install_int8_expert_forward(model: Any) -> int:
             self.down_scale,
             self.act_fn,
             self.num_experts,
+            reuse,
         )
 
     patched = 0
