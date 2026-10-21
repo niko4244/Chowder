@@ -28,8 +28,11 @@ import time
 from pathlib import Path
 
 GIB = 1 << 30
+MIB = 1 << 20
 INPUT = Path("/kaggle/input")
 WORK = Path("/kaggle/working")
+# Local scratch for the staged checkpoint: the dataset mount is read-only and slow.
+SCRATCH = Path("/tmp/chowder-model")
 CODE_FILE = Path("src/chowder/backends/moe_int8_experts.py")
 MODEL_FILE = "model.safetensors.index.json"
 
@@ -162,6 +165,53 @@ def _proc_status(pid: int) -> dict[str, int]:
     return values
 
 
+def stage_model(source: Path, dest: Path = SCRATCH) -> dict:
+    """Copy the checkpoint out of the dataset mount onto local scratch first.
+
+    The first real attempt read the 26 shards straight from the mount and spent
+    11 h 47 m on 16 of them -- 29.25 GB at **0.69 MB/s**, an extrapolated 18.5 h
+    for the checkpoint, against a 12 h session cap. The loader reads one tensor
+    at a time; the mount pays a round trip for each. One sequential copy is a
+    different access pattern, so the copy is timed and reported here: if it is
+    not faster, the next run knows staging bought nothing.
+    """
+    if dest.is_dir() and any(dest.iterdir()):
+        log(f"staging: reusing {dest} from an earlier session")
+        return {"staged": str(dest), "reused": True}
+    dest.mkdir(parents=True, exist_ok=True)
+    files = sorted(p for p in source.iterdir() if p.is_file())
+    total = sum(p.stat().st_size for p in files)
+    log(f"staging {len(files)} files, {total / 1e9:.2f} GB, from {source} to {dest}")
+    started = time.time()
+    copied = 0
+    next_report = 5e9
+    for path in files:
+        target = dest / path.name
+        with path.open("rb") as reader, target.open("wb") as writer:
+            while True:
+                chunk = reader.read(1 << 24)
+                if not chunk:
+                    break
+                writer.write(chunk)
+                copied += len(chunk)
+                if copied >= next_report:
+                    rate = copied / MIB / (time.time() - started)
+                    log(f"staged {copied / 1e9:.1f} GB, {rate:.1f} MB/s")
+                    next_report += 5e9
+        target.chmod(path.stat().st_mode)
+    seconds = time.time() - started
+    rate = total / MIB / seconds if seconds else 0.0
+    log(f"staged {total / 1e9:.2f} GB in {seconds / 60:.1f} min = {rate:.1f} MB/s")
+    return {
+        "staged": str(dest),
+        "reused": False,
+        "files": len(files),
+        "bytes": total,
+        "seconds": seconds,
+        "mb_per_s": rate,
+    }
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -178,10 +228,12 @@ def main() -> int:
         raise SystemExit(f"no mounted code dataset carries {CODE_FILE}")
     if model is None:
         raise SystemExit(f"no mounted checkpoint has {MODEL_FILE} for qwen3_5_moe")
+    staging = stage_model(model)
 
     env = {
         "code_dataset": str(code),
         "model_dataset": str(model),
+        "model_staging": staging,
         "max_steps": MAX_STEPS,
         "max_length": MAX_LENGTH,
         "torch": None,
@@ -197,7 +249,7 @@ def main() -> int:
     digest = sha256(dataset)
 
     spec = {
-        "base_model": str(model),
+        "base_model": str(env["model_staging"]["staged"]),
         "dataset": str(dataset),
         "dataset_sha256": digest,
         "dataset_format": "text",
