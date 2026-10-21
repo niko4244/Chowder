@@ -62,48 +62,81 @@ def measure_h2d(gib: float, reps: int) -> dict:
 
 
 def measure_experts(
-    tokens: int, topk: int, experts: int, hidden: int, moe_inter: int, reps: int
+    tokens: int,
+    topk: int,
+    experts: int,
+    hidden: int,
+    moe_inter: int,
+    reps: int,
+    *,
+    device: str = "cuda",
 ) -> dict:
+    """Time the reference per-expert loop against the padded two-``bmm`` form.
+
+    Both forms compute the same work on the same rows: the ``tokens * topk``
+    routed assignments dealt uniformly over ``experts`` (``counts`` rows each,
+    dropping the few assignments that do not divide evenly) and drawn from the
+    ``tokens`` rows of ``x``. What is compared is one rectangle of expert work
+    done two ways -- 160 kernel launches against two -- so the row *indices*
+    have to be built once, outside the timed forms, or the benchmark would be
+    timing its own plumbing.
+
+    ``device`` is a parameter so the shapes can be exercised without a card:
+    a form that cannot even index its rows is a correctness bug, not a slow
+    measurement.
+    """
     import torch
     import torch.nn.functional as F
 
     dtype = torch.bfloat16
-    device = "cuda"
     x = torch.randn(tokens, hidden, dtype=dtype, device=device)
     w1 = torch.randn(experts, 2 * moe_inter, hidden, dtype=dtype, device=device)
     w2 = torch.randn(experts, hidden, moe_inter, dtype=dtype, device=device)
-    counts = (tokens * topk) // experts
-    flops = 2 * tokens * topk * (2 * moe_inter * hidden + hidden * moe_inter)
+    counts = max(1, (tokens * topk) // experts)
+    rows_used = counts * experts
+    # The fixed routing assignment: `counts` rows per expert, wrapping around
+    # the token rows. `counts` rows may exceed `tokens` (102 vs 2048 rows here),
+    # so the assignment is an index tensor, not a slice of x.
+    index = torch.arange(rows_used, device=device) % tokens
+    assignments = x.index_select(0, index)
+    flops = 2 * rows_used * (2 * moe_inter * hidden + hidden * moe_inter)
 
-    # The reference path: one small GEMM pair per expert, twice (gate_up, down).
+    # The reference path: one small GEMM pair per expert (gate_up, down).
     def loop() -> torch.Tensor:
-        total = torch.zeros(tokens * topk, hidden, dtype=dtype, device=device)
+        total = torch.zeros(rows_used, hidden, dtype=dtype, device=device)
         for e in range(experts):
             rows = slice(e * counts, (e + 1) * counts)
-            gate_up = F.linear(x[rows % tokens], w1[e])
+            gate_up = F.linear(assignments[rows], w1[e])
             total[rows] = F.linear(F.silu(gate_up[:, :moe_inter]) * gate_up[:, moe_inter:], w2[e])
         return total
 
     # The grouped path: pad every expert to the same row count, two bmm calls.
     def grouped() -> torch.Tensor:
-        per = counts
-        xg = torch.stack([x[(e * per) % tokens:((e * per) % tokens) + per] for e in range(experts)])
+        xg = assignments.view(experts, counts, hidden)
         gate_up = torch.bmm(xg, w1.transpose(1, 2))
         act = F.silu(gate_up[:, :, :moe_inter]) * gate_up[:, :, moe_inter:]
-        return torch.bmm(act, w2.transpose(1, 2))
+        return torch.bmm(act, w2.transpose(1, 2)).view(rows_used, hidden)
 
     out = {}
     for name, fn in (("loop", loop), ("grouped", grouped)):
-        fn()
-        torch.cuda.synchronize()
+        result = fn()
+        if result.shape != (rows_used, hidden):
+            raise RuntimeError(
+                f"{name} produced {tuple(result.shape)}, expected {(rows_used, hidden)}; "
+                "the two forms are not comparable and their timings mean nothing"
+            )
+        if device.startswith("cuda"):
+            torch.cuda.synchronize()
         best = float("inf")
         for _ in range(reps):
             start = time.perf_counter()
             fn()
-            torch.cuda.synchronize()
+            if device.startswith("cuda"):
+                torch.cuda.synchronize()
             best = min(best, time.perf_counter() - start)
         out[name] = {"ms": round(best * 1e3, 2), "tflops": round(flops / best / 1e12, 2)}
     out["speedup"] = round(out["loop"]["ms"] / out["grouped"]["ms"], 2)
+    out["rows_per_expert"] = counts
     out["padded_rows_waste"] = round((experts * counts - tokens * topk) / (tokens * topk), 4)
     return out
 
