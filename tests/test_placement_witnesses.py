@@ -460,3 +460,77 @@ def test_cli_operator_spill_verdict_completes_the_table(tmp_path, capsys):
     assert code == 0
     assert "8/8 gates measured" in printed
     assert "may declare the placement" in printed
+
+
+def test_the_router_recorder_needs_the_base_model_not_the_peft_wrapper():
+    """The 2026-10-21 witness run audited the *trained* model and was refused.
+
+    ``get_peft_model`` puts the LoRA wrapper at ``model.model``, so the text
+    stack the audit looks for is one level further down and the audit -- which
+    will not guess an alternate path -- raises. The producer keeps the base
+    model and hands that to the recorder; the hooks reach the same
+    ``mlp.gate`` modules either way.
+    """
+    from peft import LoraConfig, TaskType, get_peft_model
+    from transformers import AutoModelForCausalLM, Qwen3MoeConfig
+
+    from chowder.moe_instrumentation import MoeArchitectureAuditError
+
+    config = Qwen3MoeConfig(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=8,
+        moe_intermediate_size=4,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        num_experts=6,
+        num_experts_per_tok=2,
+        decoder_sparse_step=1,
+        max_position_embeddings=32,
+        head_dim=8,
+    )
+    base = AutoModelForCausalLM.from_config(config).eval()
+    wrapped = get_peft_model(
+        base, LoraConfig(r=2, target_modules=["q_proj"], task_type=TaskType.CAUSAL_LM)
+    )
+    with pytest.raises(MoeArchitectureAuditError, match="cannot locate model.model.layers"):
+        pw.RouterLoadRecorder(wrapped)
+    with pw.RouterLoadRecorder(base) as recorder:
+        assert recorder.layers == 2
+
+
+def test_the_recorder_audits_the_campaign_architecture_not_just_qwen3moe():
+    """The shipped model is ``Qwen3_5MoeForCausalLM`` (LinearAttention + fused
+    experts). It exposes the audited shape on the same ``model.model.layers``
+    path, so the recorder counts the router's own indices there too."""
+    from transformers import AutoModelForCausalLM
+    from transformers.models.qwen3_5_moe import Qwen3_5MoeTextConfig
+
+    config = Qwen3_5MoeTextConfig(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=8,
+        moe_intermediate_size=4,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        num_experts=6,
+        num_experts_per_tok=2,
+        decoder_sparse_step=1,
+        max_position_embeddings=64,
+        head_dim=8,
+    )
+    model = AutoModelForCausalLM.from_config(config).train()
+    with pw.RouterLoadRecorder(model) as recorder:
+        assert recorder.layers == 2
+        out = model(
+            input_ids=torch.randint(0, 64, (1, 16)),
+            labels=torch.randint(0, 64, (1, 16)),
+            use_cache=False,
+        )
+        out.loss.backward()
+        window = recorder.window()
+    for counts in window.values():
+        assert len(counts) == 6
+        assert sum(counts) == 32  # 16 tokens x top-2

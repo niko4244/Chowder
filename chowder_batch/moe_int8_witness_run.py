@@ -105,6 +105,14 @@ def main(argv: list[str] | None = None) -> int:
     report["load_seconds"] = round(time.perf_counter() - started, 1)
     report["census"] = census
 
+    # The router recorder audits ``model.model.layers``, which is the text stack
+    # only *before* PEFT wraps the model: after ``get_peft_model`` the trained
+    # object's ``.model`` is the LoRA wrapper and the audit refuses it (as it
+    # should -- it will not guess an alternate path). Keep the base model, and
+    # hand that to the recorder. The hooks land on the same ``mlp.gate`` modules
+    # either way: PEFT wraps leaves, it does not rebuild the block.
+    placement_model = model
+
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model.enable_input_require_grads()
     model.train()
@@ -125,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     step0_window: dict[str, list[int]] = {}
     last_window: dict[str, list[int]] = {}
 
-    with RouterLoadRecorder(model) as recorder:
+    with RouterLoadRecorder(placement_model) as recorder:
         for step in range(args.steps):
             ids = batches[step % len(batches)]
             torch.cuda.synchronize()

@@ -244,6 +244,27 @@ def _load_bulk(base: Path, device: Any, dtype: Any) -> tuple[Any, dict[str, Any]
 ARM_LOADERS = {"int8": _load_int8, "bulk": _load_bulk}
 
 
+def _reset_peak(torch: Any, device: Any) -> None:
+    """Reset the allocator's peak counters on ``device``.
+
+    The installed torch (2.11+cu128) normalises ``reset_peak_memory_stats``'s
+    argument to a device index and hands that index to a binding which refuses
+    it -- ``RuntimeError: Invalid device argument`` -- for both an ``int`` and a
+    ``torch.device``. Only the no-argument form works, and it acts on the
+    *current* device. So the current device is set from the caller's index and
+    a device without one is a hard stop: a peak read from card 0 and stamped
+    as card 1's would be a fabricated measurement.
+    """
+    index = getattr(device, "index", None)
+    if index is None:
+        raise RuntimeError(
+            f"peak accounting needs an explicit cuda index; got device={device!r}. "
+            "torch.cuda.reset_peak_memory_stats only accepts the current device"
+        )
+    torch.cuda.set_device(int(index))
+    torch.cuda.reset_peak_memory_stats()
+
+
 class _DevicePeaks:
     """The step's device-memory readings, and nothing else.
 
@@ -263,7 +284,7 @@ class _DevicePeaks:
         if not self.enabled:
             return
         self._torch.cuda.synchronize()
-        self._torch.cuda.reset_peak_memory_stats(self._device)
+        _reset_peak(self._torch, self._device)
 
     def read(self) -> float | None:
         if not self.enabled:
@@ -431,7 +452,7 @@ def run_arm(
 
     if device.type == "cuda":
         torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats(device)
+        _reset_peak(torch, device)
 
     started = time.perf_counter()
     model, census = ARM_LOADERS[arm](base, device, dtype)

@@ -580,3 +580,63 @@ def test_campaign_prepare_refuses_a_missing_table(monkeypatch, tmp_path):
         placement_gate_refusal(
             expert_placement=INT8_PLACEMENT, where="campaign.json", base_model=tmp_path
         )
+
+
+# --- the peak reset the measurement depends on --------------------------------
+
+
+class _StrictCuda:
+    """The installed torch's peak reset: any device argument is refused.
+
+    ``torch 2.11.0+cu128`` normalises ``reset_peak_memory_stats``'s argument to a
+    device index and hands it to a binding that answers ``Invalid device
+    argument`` for both ``int`` and ``torch.device``; only ``None`` works.
+    """
+
+    def __init__(self) -> None:
+        self.device = 0
+        self.resets = 0
+
+    def set_device(self, index: int) -> None:
+        self.device = int(index)
+
+    def reset_peak_memory_stats(self, *args) -> None:
+        if args:
+            raise RuntimeError("Invalid device argument")
+        self.resets += 1
+
+    def synchronize(self) -> None:
+        pass
+
+    def max_memory_allocated(self, device=None) -> int:
+        return 4096
+
+
+class _FakeTorch:
+    def __init__(self) -> None:
+        self.cuda = _StrictCuda()
+
+
+@needs_torch
+def test_the_step_peak_reset_never_passes_a_device_argument():
+    """The 2026-10-21 sanctioned run died here.
+
+    ``reset_peak_memory_stats(device)`` raises on the installed build, so the
+    measurement has to select the card itself and call the no-argument form --
+    the alternative, skipping the reset, would report a load's peak as a step's.
+    """
+    import torch
+
+    fake = _FakeTorch()
+    peaks = gates._DevicePeaks(fake, torch.device("cuda", 0))
+    peaks.reset()
+    assert (fake.cuda.resets, fake.cuda.device) == (1, 0)
+    assert peaks.read() == pytest.approx(4096 / 2**30)
+
+
+@needs_torch
+def test_peak_accounting_refuses_a_device_without_an_index():
+    import torch
+
+    with pytest.raises(RuntimeError, match="explicit cuda index"):
+        gates._reset_peak(_FakeTorch(), torch.device("cuda"))
