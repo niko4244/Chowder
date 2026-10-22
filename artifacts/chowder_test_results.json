@@ -357,13 +357,13 @@
   },
   "latest_finalization": {
     "revisions": {
-      "head": "a0a678dfa13a2d15f2b3176fb668eebbb8335728",
+      "head": "8d30dde25679b9f23d4151a4118120d93473f8be",
       "draft_pr": 277,
       "human_approval_pr": 278,
       "human_approval_sha": "ef866b2d05f54a15e6b9d0b7c1bb19ddc1ac17ce",
       "readiness_regression_fix_sha": "d6e378a7bcb0f570c05dc36d87453eeb2bdaa15d",
       "all_changes_merged_to_main": false,
-      "new_ci": "RUNNING_NOT_YET_CLAIMED_GREEN"
+      "new_ci": "SIX_SUCCESS"
     },
     "initial_full_ci_on_53ebcab": {
       "linux_py311_passed": 3485,
@@ -387,11 +387,11 @@
       "passed": 71,
       "failed": 0
     },
-    "full_final_ci": "PENDING",
+    "full_final_ci": "SIX_SUCCESS",
     "head": "8d30dde25679b9f23d4151a4118120d93473f8be",
     "draft_pr": 277,
     "main_merged": false,
-    "new_ci": "PENDING",
+    "new_ci": "SIX_SUCCESS",
     "targeted_cpu_pass": 397
   },
   "active_finalization_20261022": {
@@ -407,12 +407,12 @@
       "all_new_promotions_require_transaction": "6f35d09584f614164542318f27b080b076ef4a43",
       "frozen_judge_accounting_parity": "8d30dde25679b9f23d4151a4118120d93473f8be"
     },
-    "ci_at_head": "PENDING",
+    "ci_at_head": "SIX_SUCCESS",
     "targeted_cpu_pass": 397,
     "full_cpu_at_head": {
-      "passed": 0,
-      "skipped": 0,
-      "status": "UNVERIFIED"
+      "passed": 4037,
+      "skipped": 78,
+      "status": "COMPLETED"
     },
     "earlier_full_cpu_baseline": {
       "head": "a0a678dfa13a2d15f2b3176fb668eebbb8335728",
@@ -455,7 +455,8 @@
       "Entire untrusted local evidence tree can be erased without externally anchored append-only digest",
       "In-process Python caller can monkeypatch owner/judge predicates; no cryptographic owner identity",
       "Frozen judge cannot certify without missing prepromotion declaration/receipt",
-      "No fresh 14.5GB VRAM, 20-step or 2.5 GPU-hour hardware qualification"
+      "No fresh 14.5GB VRAM, 20-step or 2.5 GPU-hour hardware qualification",
+      "Fast stat/inode checkpoint identity after a one-time SHA inventory is not an adversarial in-place rewrite defense if an attacker can restore timestamps; strict boundary rehash for release is unverified"
     ]
   }
 }

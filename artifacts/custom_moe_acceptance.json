@@ -187,12 +187,12 @@
       "all_new_promotions_require_transaction": "6f35d09584f614164542318f27b080b076ef4a43",
       "frozen_judge_accounting_parity": "8d30dde25679b9f23d4151a4118120d93473f8be"
     },
-    "ci_at_head": "PENDING",
+    "ci_at_head": "SIX_SUCCESS",
     "targeted_cpu_pass": 397,
     "full_cpu_at_head": {
-      "passed": 0,
-      "skipped": 0,
-      "status": "UNVERIFIED"
+      "passed": 4037,
+      "skipped": 78,
+      "status": "COMPLETED"
     },
     "earlier_full_cpu_baseline": {
       "head": "a0a678dfa13a2d15f2b3176fb668eebbb8335728",
@@ -235,7 +235,8 @@
       "Entire untrusted local evidence tree can be erased without externally anchored append-only digest",
       "In-process Python caller can monkeypatch owner/judge predicates; no cryptographic owner identity",
       "Frozen judge cannot certify without missing prepromotion declaration/receipt",
-      "No fresh 14.5GB VRAM, 20-step or 2.5 GPU-hour hardware qualification"
+      "No fresh 14.5GB VRAM, 20-step or 2.5 GPU-hour hardware qualification",
+      "Fast stat/inode checkpoint identity after a one-time SHA inventory is not an adversarial in-place rewrite defense if an attacker can restore timestamps; strict boundary rehash for release is unverified"
     ]
   }
 }
