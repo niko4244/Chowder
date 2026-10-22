@@ -496,6 +496,7 @@ def _journal_event(
     detail: str | None = None,
     identity: str | None = None,
     index: int | None = None,
+    proof_mode: str | None = None,
 ) -> None:
     """Append one boundary to the campaign journal, durably.
 
@@ -518,6 +519,8 @@ def _journal_event(
         record["identity"] = identity
     if index is not None:
         record["index"] = index
+    if proof_mode is not None:
+        record["proof_mode"] = proof_mode
     with open(_journal_path(root), "a", encoding="utf-8") as journal:
         journal.write(json.dumps(record, sort_keys=True, default=str) + "\n")
         journal.flush()
@@ -1290,9 +1293,16 @@ def _run_campaign_locked(
                     "CAMPAIGN_RESUME_BUDGET: insufficient unspent declared "
                     "campaign ceiling for another attempt"
                 )
+        # Choose the proof contract BEFORE executing any trainer. Never infer
+        # native-vs-remote proof from a mutable completion event afterward.
+        native_receipt = (
+            train_fn is None
+            and isinstance(getattr(executor, "_inner", None), SubprocessTrainingFn)
+        )
+        proof_mode = "receipt" if native_receipt else "completion"
         _journal_event(
             root, phase="attempt", status="started", recipe_id=recipe.recipe_id,
-            identity=spec_digest, index=index,
+            identity=spec_digest, index=index, proof_mode=proof_mode,
         )
         evidence = dict(executor(recipe, plan.items))
         evidence["recipe_id"] = recipe.recipe_id
@@ -1300,11 +1310,14 @@ def _run_campaign_locked(
         # may lack the on-disk attempt evidence contract, so they continue to
         # settle normally but never become replayable. A production attempt
         # refused before training also has no GPU cost to checkpoint.
-        replayable = (
-            train_fn is None
-            and isinstance(getattr(executor, "_inner", None), SubprocessTrainingFn)
-            and isinstance(evidence.get("actual_cost"), Mapping)
-        )
+        replayable = native_receipt and isinstance(evidence.get("actual_cost"), Mapping)
+        if native_receipt and not replayable:
+            # Local paid training cannot be relabeled as a remote completion
+            # when its durable native cost/evidence receipt is missing.
+            raise CampaignRunRefusal(
+                "CAMPAIGN_NATIVE_PROOF_MISSING: local training has no native "
+                "priced receipt; reconcile spend before any settlement"
+            )
         if not replayable:
             # Remote/custom executors have no native, byte-bound local
             # checkpoint receipt. Give their terminal journal entry a distinct

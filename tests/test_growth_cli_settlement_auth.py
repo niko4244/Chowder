@@ -13,6 +13,7 @@ from chowder.growth import campaign_runner
 from chowder.growth.campaign_runner import run_campaign
 from chowder.growth.compute_cost import CycleCostLedger, ledger_digest
 from chowder.growth.compute_cost import ComputeCost
+from chowder.growth.promotion_transaction import content_digest
 from test_growth_campaign_runner import (
     OVERRUN_WALL_GPU_HOURS,
     _RecordingRunner,
@@ -205,6 +206,99 @@ def test_nonreplayable_executor_has_cost_bound_completion_not_native_receipt(
         assert code == 0, payload  # cost-only compliance; training verdict was REFUSED
         assert payload["budget_compliant"] is True
         assert payload["actual"]["wall_gpu_hours"] == pytest.approx(0.01)
+
+
+@pytest.mark.parametrize("tamper_start_mode", [False, True, "start_and_run_backend"])
+def test_native_receipt_cannot_be_downgraded_to_nonreplayable_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], tamper_start_mode: bool | str,
+) -> None:
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    run = run_campaign(manifest)
+    root = Path(manifest.state_root)
+    journal = root / "campaign-journal.jsonl"
+    rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    starts = [row for row in rows if row.get("phase") == "attempt" and row.get("status") == "started"]
+    receipts = [row for row in rows if row.get("phase") == "attempt_receipt"]
+    assert starts and len(starts) == len(receipts)
+    ledger = json.loads(Path(run.cost["accounting_path"]).read_text(encoding="utf-8"))
+    cost = ledger["entries"][0]["cost"]
+    if tamper_start_mode:
+        starts[0]["proof_mode"] = "completion"
+    if tamper_start_mode == "start_and_run_backend":
+        record_path = root / "campaign-run.json"
+        document = json.loads(record_path.read_text(encoding="utf-8"))
+        phase = next(p for p in document["phases"] if p.get("phase") == "training-backend")
+        phase["backend"]["executor"] = "caller-supplied"
+        phase["backend"]["provider"] = None
+        record_path.write_text(json.dumps(document), encoding="utf-8")
+    event = receipts[0]
+    event["phase"] = "attempt"
+    event["detail"] = content_digest({
+        "identity": starts[0]["identity"],
+        "recipe_id": event["recipe_id"],
+        "attempt": event["attempt"],
+        "status": event["status"],
+        "cost": ComputeCost.from_dict(cost).to_dict(),
+    })
+    (root / "campaign-attempt-receipts" / "000000.json").unlink()
+    journal.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    code, payload = settle(
+        monkeypatch, capsys, tmp_path / "inputs" / "campaign.json",
+        Path(run.cost["accounting_path"]),
+    )
+    assert code == 1, payload
+    assert "CAMPAIGN_SETTLEMENT_UNVERIFIED" in payload["refusal_reason"]
+
+
+@pytest.mark.parametrize("invalid_status", ["RUNNING", "BOGUS", ""])
+def test_nonnative_completion_rejects_nonterminal_status_even_with_valid_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], invalid_status: str,
+) -> None:
+    manifest, runner, _ = _campaign(tmp_path, recipe_count=1, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+
+    class RemoteFixture:
+        firewall = campaign_runner.ContaminationFirewall()
+
+        def admit(self, recipe):
+            return None
+
+        def __call__(self, recipe, items):
+            return {
+                "status": "FAILED", "attempt": "remote-attempt-01",
+                "train_started": True, "measured_gpu_hours": None,
+                "actual_cost": ComputeCost.from_wall_only(
+                    0.01, source="verified remote executor fixture"
+                ).to_dict(),
+            }
+
+    run = run_campaign(manifest, train_fn=RemoteFixture())
+    root = Path(manifest.state_root)
+    journal = root / "campaign-journal.jsonl"
+    rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    completion = next(
+        row for row in rows
+        if row.get("phase") == "attempt" and row.get("status") == "FAILED"
+    )
+    accounting = Path(run.cost["accounting_path"])
+    ledger = json.loads(accounting.read_text(encoding="utf-8"))
+    completion["status"] = invalid_status
+    completion["detail"] = content_digest({
+        "identity": completion["identity"],
+        "recipe_id": completion["recipe_id"],
+        "attempt": completion["attempt"],
+        "status": invalid_status,
+        "cost": ComputeCost.from_dict(ledger["entries"][0]["cost"]).to_dict(),
+    })
+    journal.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    code, payload = settle(
+        monkeypatch, capsys, tmp_path / "inputs" / "campaign.json", accounting,
+    )
+    assert code == 1, payload
+    assert "CAMPAIGN_SETTLEMENT_UNVERIFIED" in payload["refusal_reason"]
 
 
 @pytest.mark.parametrize(
