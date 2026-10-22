@@ -2,7 +2,7 @@
   "schema": "chowder.custom-moe-model-manifest.v1",
   "date": "2026-10-22",
   "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
-  "moe_pr_268_sha": "24f2f8865b215b477796364b1ec30e944d5ec087",
+  "moe_pr_268_sha": "108f9322bf16b78890547f0e222f8092587e82e4",
   "journal_pr_269_sha": "e3f0fbd77bc679ea9a856461294cd26b40316562",
   "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
   "selection_status": "UNVERIFIED",
@@ -11,7 +11,7 @@
   "candidate": {
     "name": "Qwen3.6-REAP160",
     "reported_path": "G:\\llm-cold\\bf16\\Qwen3.6-REAP160",
-    "physical_access": false,
+    "physical_access": true,
     "reported_shards": 26,
     "reported_bytes": 46039573000,
     "config_sha256_reported": "15413a791b9eff423755743bb05b997c93f6ae6f4ce02a1966c9bdfdc2cdc3b9",
@@ -26,7 +26,11 @@
     "tokenizer_sha256": null,
     "gen0_freeze_digest": null,
     "qualified_q4_artifact": null,
-    "qualified_adapter": null
+    "qualified_adapter": null,
+    "header_integrity": "PASS",
+    "index_tensor_count_verified": 1026,
+    "tensor_payload_bytes_verified": 46039444192,
+    "config_sha256_verified": "15413a791b9eff423755743bb05b997c93f6ae6f4ce02a1966c9bdfdc2cdc3b9"
   },
   "historical_cuda": {
     "int8_grid_gib": 18.82,
@@ -42,5 +46,29 @@
     "current config placement witness",
     "legal N2",
     "human N5"
-  ]
+  ],
+  "selection_evidence": {
+    "reap128_gsm8k_gate1": "FAIL LB -0.037807 versus -0.03",
+    "reap160_quality_control": "historically PASS",
+    "reap160_q4_speed": "historically PASS 3.8523x dense, zero offloaded",
+    "comparison_raw_files": "12 of 12 SHA256 matched",
+    "gen0_immutable_freeze": "unverified"
+  },
+  "witness": {
+    "file_sha256": "20e466d5362b8492fb9b55c312a57486283e641d46844e41c3ae4a85799617d7",
+    "steps": 24,
+    "gradient": "PASS 19/19",
+    "smoke": "PASS 1.421 to 0.551",
+    "router_balance": "PASS 1.8pct worst",
+    "wddm_spill": "NOT MEASURED",
+    "table": "7 of 8 measured"
+  },
+  "gen1_training_mix": {
+    "fable_rows": 767,
+    "fable_sha256": "384b6f10ae579af10ce36cbbe5278716b681d3223beab7343742b51c1857024d",
+    "control_rows": 647,
+    "control_sha256": "681b2aa957d042028db8fa8710be6538b23f6563e088b9f752410bf5da174c9e",
+    "max_length": 2048,
+    "template_validated": true
+  }
 }

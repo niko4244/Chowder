@@ -83,5 +83,47 @@
     "workflow_run_id": 39751860841,
     "status_at_last_query": "in_progress",
     "conclusion": null
+  },
+  "local_windows_recovered": true,
+  "fresh_local_tests": [
+    {
+      "revision": "e3f0fbd7",
+      "passed": 90,
+      "failed": 0,
+      "suite": "growth campaign runner/campaign/kaggle/MoE plumbing",
+      "python": "3.11.9",
+      "execution": "CPU"
+    },
+    {
+      "revision": "24f2f886",
+      "passed": 54,
+      "failed": 0,
+      "suite": "MoE int8 experts and preflight",
+      "python": "3.11.9",
+      "execution": "CPU with CHOWDER_NO_GPU, CUDA visibility normal"
+    },
+    {
+      "revision": "108f9322 (before commit)",
+      "passed": 75,
+      "failed": 0,
+      "suite": "MoE placement witnesses, gate table, preflight",
+      "python": "3.11.9",
+      "execution": "CPU"
+    },
+    {
+      "revision": "24f2f886",
+      "passed": 24,
+      "failed": 30,
+      "suite": "initial MoE CPU diagnostic",
+      "classification": "TorchAO import exception due CUDA_VISIBLE_DEVICES intentionally empty; corrected invocation 54 pass"
+    }
+  ],
+  "artifact_checks": {
+    "reap160_headers": "PASS 26 shards/1026 BF16 tensors, payload 46039444192",
+    "reap160_config_sha256": "MATCH",
+    "evaluation_comparison_inputs_sha256": "12 of 12 MATCH",
+    "fable_training_mix_sha256": "MATCH 767 rows",
+    "control_training_mix_sha256": "MATCH 647 rows",
+    "witness_gate_import": "7 of 8; WDDM not measured"
   }
 }

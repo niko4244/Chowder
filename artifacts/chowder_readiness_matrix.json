@@ -53,7 +53,7 @@
       "subsystem": "int8_experts",
       "grade": "PARTIAL",
       "workstream_status": "UNVERIFIED",
-      "evidence": "PR268 live census and historical real 20-step run, unmerged",
+      "evidence": "Physical REAP160 structural header verified; real witness 3 passes imported; 7/8 gate table",
       "reference": "PR #268"
     },
     {
@@ -74,7 +74,7 @@
       "subsystem": "campaign_journal",
       "grade": "PARTIAL",
       "workstream_status": "UNVERIFIED",
-      "evidence": "Code hardening in PR269, fresh CI pending",
+      "evidence": "Independent Windows recovery pytest 90 PASSED at e3f0fbd7; auto-resume still absent",
       "reference": "PR #269"
     },
     {
@@ -102,7 +102,7 @@
       "subsystem": "data_and_licensing",
       "grade": "PARTIAL",
       "workstream_status": "BLOCKED",
-      "evidence": "Contamination builder exists; Fable N2 unresolved",
+      "evidence": "Hashed training Fable 767 rows and Fable-free 647 rows, N2 unresolved",
       "reference": "docs/MOE_GEN1_MIX_V1.md"
     },
     {
@@ -119,5 +119,6 @@
       "evidence": "Implemented; no current interactive smoke",
       "reference": "src/chowder/tui_growth.py"
     }
-  ]
+  ],
+  "local_windows_recovered": true
 }

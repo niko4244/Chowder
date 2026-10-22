@@ -2,7 +2,7 @@
   "schema": "chowder.custom-moe-acceptance.v1",
   "date": "2026-10-22",
   "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
-  "moe_pr_268_sha": "24f2f8865b215b477796364b1ec30e944d5ec087",
+  "moe_pr_268_sha": "108f9322bf16b78890547f0e222f8092587e82e4",
   "journal_pr_269_sha": "e3f0fbd77bc679ea9a856461294cd26b40316562",
   "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
   "overall": "BLOCKED",
@@ -14,23 +14,23 @@
     },
     {
       "gate": "reap_generation_health",
-      "status": "UNVERIFIED"
+      "status": "HISTORICAL_REAP160_PASS"
     },
     {
       "gate": "reap_gsm8k",
-      "status": "UNVERIFIED"
+      "status": "HISTORICAL_REAP160_PASS"
     },
     {
       "gate": "reap_humaneval",
-      "status": "UNVERIFIED"
+      "status": "HISTORICAL_REAP160_PASS"
     },
     {
       "gate": "reap_random128_control",
-      "status": "UNVERIFIED"
+      "status": "HISTORICAL_REAP160_PASS"
     },
     {
       "gate": "q4_fit_speed",
-      "status": "UNVERIFIED"
+      "status": "HISTORICAL_REAP160_PASS"
     },
     {
       "gate": "load_census",
@@ -50,15 +50,15 @@
     },
     {
       "gate": "lora_gradient",
-      "status": "NOT_MEASURED"
+      "status": "LOCAL_WITNESS_PASS"
     },
     {
       "gate": "smoke_20_steps_loss_drop",
-      "status": "NOT_MEASURED"
+      "status": "LOCAL_WITNESS_PASS"
     },
     {
       "gate": "router_entropy_20pct",
-      "status": "NOT_MEASURED"
+      "status": "LOCAL_WITNESS_PASS"
     },
     {
       "gate": "wddm_no_spill_operator",
@@ -66,7 +66,7 @@
     },
     {
       "gate": "fable_free_control",
-      "status": "UNVERIFIED"
+      "status": "HASH_VERIFIED_UNTRAINED"
     },
     {
       "gate": "license_N2",
@@ -80,5 +80,6 @@
   "promotion_allowed": false,
   "gen1_training_authorized": false,
   "expensive_gpu_requires_approval": true,
-  "selection_note": "REAP160 candidate is not automatically eligible: apply REAP128 and fallback gates first"
+  "selection_note": "REAP160 candidate is not automatically eligible: apply REAP128 and fallback gates first",
+  "int8_table": "7 of 8 measured, WDDM spill not measured, admission refused"
 }
