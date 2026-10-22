@@ -482,11 +482,14 @@ def witness_record(
     unknown = sorted(set(gates) - set(WITNESS_GATES))
     if unknown:
         raise ValueError(f"unknown witness gate(s) {unknown}; expected a subset of {WITNESS_GATES}")
+    identity = artifact_identity(base_model)
+    if not identity.get("content_sha256") or not identity.get("inventory_sha256"):
+        raise ValueError("witness requires a verified SHA inventory for its exact checkpoint")
     return {
         "schema": WITNESS_SCHEMA,
         "placement": EXPERT_PLACEMENT,
         "base_model": str(base_model),
-        "artifact": artifact_identity(base_model),
+        "artifact": identity,
         "device": device,
         "steps": int(steps),
         "run": run,
