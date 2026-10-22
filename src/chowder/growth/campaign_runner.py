@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -571,6 +572,51 @@ def _refuse_interrupted(manifest: CampaignManifest, root: Path) -> CampaignRun:
     return _write_record(run, root, outcome=None, terminal=False)
 
 
+@contextmanager
+def _campaign_writer_lock(root: Path):
+    """Hold one cross-process advisory writer lock for the entire campaign.
+
+    The lock file persists after a crash, but the *kernel lock* does not, so
+    the interrupted-journal refusal still determines recovery. A second
+    process cannot overwrite the first writer's journal/record/accounting.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / ".campaign-writer.lock"
+    with path.open("a+b") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+            os.fsync(handle.fileno())
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise CampaignRunRefusal(
+                "CAMPAIGN_WRITER_BUSY: another campaign owns the state root "
+                f"{root}; no execution or record write is authorized"
+            ) from error
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 class _JournalingPhases(list):
     """The run's phase record, journaled: every append is one durable line.
 
@@ -597,6 +643,23 @@ class _JournalingPhases(list):
 
 
 def run_campaign(
+    manifest: CampaignManifest,
+    *,
+    train_fn: Any = None,
+    eval_fn: CandidateEvaluator | None = None,
+    state_root: str | Path | None = None,
+) -> CampaignRun:
+    """Validate inputs, then serialize all writers against the state root."""
+    assert_every_field_enforced()
+    require_declared_inputs(manifest, phase="run")
+    root = Path(state_root or manifest.state_root)
+    with _campaign_writer_lock(root):
+        return _run_campaign_locked(
+            manifest, train_fn=train_fn, eval_fn=eval_fn, state_root=root
+        )
+
+
+def _run_campaign_locked(
     manifest: CampaignManifest,
     *,
     train_fn: Any = None,
@@ -2140,6 +2203,16 @@ def _attempt_cost(evidence: Mapping[str, Any]) -> ComputeCost:
     if isinstance(recorded, Mapping):
         return ComputeCost.from_dict(recorded)
     measured = evidence.get("measured_gpu_hours")
+    if measured is None and evidence.get("train_started") is True:
+        # An executed trainer with no valid cost has UNKNOWN spend, not zero.
+        # Raising here leaves the durable campaign journal open, so re-entry
+        # refuses until an operator reconciles the actual GPU time. No further
+        # recipe or downstream promotion may run on unverifiable accounting.
+        raise CampaignRunRefusal(
+            "ACTUAL_WALL_GPU_HOURS_UNMEASURED: trainer started but neither "
+            "a trustworthy summary nor subprocess wall-time measurement "
+            "was available; reconcile this attempt before resuming"
+        )
     return ComputeCost.from_wall_only(
         float(measured or 0.0), source=f"attempt:{evidence.get('attempt', 'unknown')}"
     )

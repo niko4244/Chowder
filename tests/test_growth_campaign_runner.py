@@ -97,6 +97,82 @@ from chowder.growth.lineage import GenerationLedger
 from chowder.growth.training_binding import directory_digest
 from chowder.local_model_manifest import model_content_digest
 
+
+def test_spent_failed_training_without_a_summary_uses_observed_wall_clock():
+    """A paid failed trainer is not charged zero because its summary vanished."""
+    failed = {
+        "attempt": "attempt-01",
+        "status": "FAILED",
+        "train_started": True,
+        "measured_gpu_hours": None,
+        "actual_cost": ComputeCost(
+            device_gpu_hours=0.0,
+            wall_gpu_hours=1.0,
+            source="attempt:attempt-01:subprocess-wall",
+            measurement_method="observed subprocess elapsed wall time",
+        ).to_dict(),
+    }
+    charged = campaign_runner._attempt_cost(failed)
+    assert charged.wall_gpu_hours == pytest.approx(1.0)
+    assert charged.device_measured is False
+    assert charged.source.endswith(":subprocess-wall")
+
+
+def test_trained_attempt_with_no_cost_is_unknown_not_zero():
+    """No trusted summary or process clock means campaign spend is unknown."""
+    with pytest.raises(CampaignRunRefusal, match="ACTUAL_WALL_GPU_HOURS_UNMEASURED"):
+        campaign_runner._attempt_cost(
+            {"status": "FAILED", "train_started": True, "measured_gpu_hours": None}
+        )
+
+
+def test_concurrent_campaign_writers_cannot_share_a_root(tmp_path: Path):
+    """A second process/handle must never journal over an active campaign."""
+    root = tmp_path / "state"
+    with campaign_runner._campaign_writer_lock(root):
+        with pytest.raises(CampaignRunRefusal, match="CAMPAIGN_WRITER_BUSY"):
+            with campaign_runner._campaign_writer_lock(root):
+                pytest.fail("a simultaneous writer acquired the campaign lock")
+    # The kernel releases the lock even though the lock file stays on disk.
+    with campaign_runner._campaign_writer_lock(root):
+        assert (root / ".campaign-writer.lock").is_file()
+
+
+def test_failed_training_elapsed_cost_stops_next_recipe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A failed trainer with no summary must exhaust the actual budget, not run twice."""
+    manifest, runner, _document = _campaign(tmp_path)
+    _patch_seams(monkeypatch, runner)
+    calls: list[str] = []
+
+    class _NoSummaryTrainer:
+        firewall = campaign_runner.ContaminationFirewall()
+
+        def admit(self, recipe: Any) -> None:
+            return None
+
+        def __call__(self, recipe: Any, items: Any) -> Mapping[str, Any]:
+            calls.append(recipe.recipe_id)
+            return {
+                "status": "FAILED",
+                "attempt": f"attempt-{len(calls):02d}",
+                "train_started": True,
+                "measured_gpu_hours": None,
+                "actual_cost": ComputeCost(
+                    device_gpu_hours=0,
+                    wall_gpu_hours=1.0,
+                    source="observed subprocess:3600 seconds",
+                    measurement_method="observed subprocess elapsed wall time",
+                ).to_dict(),
+            }
+
+    run = run_campaign(manifest, train_fn=_NoSummaryTrainer())
+    assert run.verdict == "REFUSED"
+    assert len(calls) == 1, "a failed hour-long attempt may not be considered free"
+    assert run.cost["wall_gpu_hours"] == pytest.approx(1.0)
+    assert "campaign ceiling reached" in _refusal(run)
+    ledger = json.loads(Path(run.cost["accounting_path"]).read_text(encoding="utf-8"))
+    assert "1.0" in json.dumps(ledger), "the paid attempt remains in durable accounting"
+
 from test_growth_training_binding import _RecordingRunner, _source, _template
 
 TARGET_ID = "generation-diagnostics@gen1-eval-protocol-v1"
