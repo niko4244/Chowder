@@ -81,6 +81,28 @@ def main(argv: list[str] | None = None) -> int:
     missing = [name for name, value in (("--base", args.base), ("--calib", args.calib), ("--out", args.out)) if not value]
     if missing:
         parser.error(f"missing {', '.join(missing)} (or pass --self-check)")
+    # Reject impossible/unsafe witness requests before opening 46 GB of
+    # checkpoint shards. Partial (<20-step) witnesses are still allowed:
+    # derive() will honestly leave the smoke gate unmeasured.
+    if args.seq < 2 or args.steps < 1 or args.examples < 1 or args.lora_r < 1:
+        parser.error("--seq must be >=2 and --steps, --examples, --lora-r must be >=1")
+    if not (0.0 < args.lr < float("inf")):
+        parser.error("--lr must be finite and greater than zero")
+    try:
+        rows = [
+            json.loads(line)
+            for line in Path(args.calib).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except (OSError, UnicodeError, ValueError) as exc:
+        parser.error(f"unreadable or malformed calibration JSONL: {exc}")
+    if not rows or any(
+        not isinstance(row, dict)
+        or not isinstance(row.get("text"), str)
+        or not row["text"].strip()
+        for row in rows
+    ):
+        parser.error("calibration JSONL must have at least one nonempty text row")
 
     import torch
     from peft import LoraConfig, TaskType, get_peft_model
@@ -101,6 +123,13 @@ def main(argv: list[str] | None = None) -> int:
     torch.manual_seed(20261018)
     started = time.perf_counter()
     tokenizer = AutoTokenizer.from_pretrained(args.base, local_files_only=True)
+    stream = tokenizer("\n\n".join(row["text"] for row in rows), return_tensors="pt")["input_ids"][0]
+    batch_count = min(args.examples, len(stream) // args.seq)
+    if batch_count < 1:
+        parser.error(
+            f"calibration contains {len(stream)} tokens; need at least "
+            f"--seq={args.seq} tokens for one complete training batch"
+        )
     model, load_census = mie.load_model_int8_experts(args.base, device=0)
     # The loader only *produces* the int8 buffers; the placement is not in force
     # until ``prepare_int8_placement`` censuses the live model and installs the
@@ -132,9 +161,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     report["trainable_params"] = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    rows = [json.loads(line) for line in Path(args.calib).read_text(encoding="utf-8").splitlines() if line.strip()]
-    stream = tokenizer("\n\n".join(row["text"] for row in rows), return_tensors="pt")["input_ids"][0]
-    batches = [stream[i * args.seq:(i + 1) * args.seq].unsqueeze(0).cuda() for i in range(min(args.examples, len(stream) // args.seq))]
+    batches = [
+        stream[i * args.seq:(i + 1) * args.seq].unsqueeze(0).cuda()
+        for i in range(batch_count)
+    ]
 
     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
     entries: list[dict[str, Any]] = []
