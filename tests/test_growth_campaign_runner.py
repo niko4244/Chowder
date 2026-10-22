@@ -2439,3 +2439,27 @@ def test_corrupt_or_unverified_terminal_journal_fails_closed(tmp_path: Path):
 
     verdict.unlink()
     assert campaign_runner._journal_outcome(journal) is None
+
+
+def test_interrupted_entry_does_not_destroy_an_unclosed_original_verdict(tmp_path: Path):
+    """A crash after publication but before terminal marker preserves the evidence."""
+    manifest, _runner, _document = _campaign(tmp_path)
+    root = Path(manifest.state_root)
+    root.mkdir(parents=True, exist_ok=True)
+    original = b'{"cycle_id":"old","verdict":"PROMOTED","cycle_outcome":{"verdict":"PROMOTED"}}'
+    (root / "campaign-run.json").write_bytes(original)
+    (root / "campaign-journal.jsonl").write_text(
+        json.dumps({"phase": "campaign_start", "status": "started"}) + "\n",
+        encoding="utf-8",
+    )
+
+    class _NoCompute:
+        def __call__(self, *_args):
+            raise AssertionError("interrupted campaign must not start compute")
+
+    run = run_campaign(manifest, train_fn=_NoCompute())
+    assert run.verdict == "REFUSED"
+    assert Path(run.record_path).name == "campaign-entry-refusal.json"
+    assert (root / "campaign-run.json").read_bytes() == original
+    assert json.loads((root / "campaign-entry-refusal.json").read_text())["verdict"] == "REFUSED"
+    assert campaign_runner._journal_outcome(root / "campaign-journal.jsonl") is None

@@ -567,9 +567,18 @@ def _refuse_interrupted(manifest: CampaignManifest, root: Path) -> CampaignRun:
         promotion=None,
         record_path="",
     )
-    # terminal=False: the refusal does not close the journal -- it records
-    # that the journal is open, and must stay that way until resolved.
-    return _write_record(run, root, outcome=None, terminal=False)
+    # An interrupted promotion can leave its original campaign-run.json
+    # published before the terminal journal marker. That original is forensic
+    # evidence and must never be overwritten by a later entry refusal: it may
+    # be needed to reconcile an already-persisted generation ledger entry.
+    # An initial hard kill (no verdict yet) keeps the historical location.
+    target = (
+        "campaign-entry-refusal.json"
+        if (root / "campaign-run.json").exists()
+        else "campaign-run.json"
+    )
+    # terminal=False: this refusal cannot close the interrupted journal.
+    return _write_record(run, root, outcome=None, terminal=False, record_name=target)
 
 
 @contextmanager
@@ -3080,12 +3089,15 @@ def check_campaign_readiness(
 
 
 def _write_record(
-    run: CampaignRun, root: Path, *, outcome: CycleOutcome | None, terminal: bool = True
+    run: CampaignRun, root: Path, *, outcome: CycleOutcome | None,
+    terminal: bool = True, record_name: str = "campaign-run.json"
 ) -> CampaignRun:
     document = run.to_dict()
     if outcome is not None:
         document["cycle_outcome"] = outcome.to_dict()
-    path = root / "campaign-run.json"
+    if record_name not in ("campaign-run.json", "campaign-entry-refusal.json"):
+        raise ValueError("campaign record location is not an approved filename")
+    path = root / record_name
     # Atomic: a kill mid-write must never leave a truncated JSON verdict
     # behind; the terminal journal line below only goes down once the verdict
     # file is complete.
