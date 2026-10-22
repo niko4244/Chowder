@@ -86,5 +86,18 @@
   "moe_placement_measured_gates": 7,
   "moe_placement_total_gates": 8,
   "all_checkpoint_shards_sha256_verified": true,
-  "model_package_digest": "06aaa74bab80d6a025e25428eacfe8006d0d43fad2406370e563ff1a0c2f1c36"
+  "model_package_digest": "06aaa74bab80d6a025e25428eacfe8006d0d43fad2406370e563ff1a0c2f1c36",
+  "gen1_data_control": {
+    "fable_rows": 767,
+    "control_rows": 647,
+    "subset_order_verified": true,
+    "fable_extra_rows": 120,
+    "nemotron_rows": 0,
+    "nemotron_shortfall": 120,
+    "ot3_rows": 9,
+    "ot3_shortfall": 141,
+    "ornith_rows": 38,
+    "ornith_license_declared": false,
+    "license_release_ready": false
+  }
 }
