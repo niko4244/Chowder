@@ -14,9 +14,9 @@ import sys
 from pathlib import Path
 
 try:
-    from reap_gates import GateError, _load, compute, lower_bound
-except ImportError:
     from chowder_batch.reap_gates import GateError, _load, compute, lower_bound
+except ImportError:  # direct script mode outside the repository package path
+    from reap_gates import GateError, _load, compute, lower_bound
 
 REQUIRED = ("d0", "gate0", "gate1", "gate2", "control", "speed")
 MARGIN = -0.02  # frozen strict lower bound for paired v2-v1 comparisons

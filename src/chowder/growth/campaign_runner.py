@@ -3077,10 +3077,18 @@ def check_campaign_readiness(
         assert_every_field_enforced() or "schema matches FIELD_ENFORCEMENT"
     ))
 
-    check("declared_inputs", READINESS_DECLARED_INPUT, ("schema",), lambda: (
+    def declared_source_identity() -> str:
         require_declared_inputs(manifest, phase="run")
-        or "every input the run phase requires is declared"
-    ))
+        # The run hashes declared input files *before* starting any trainer.
+        # Readiness must perform that same preflight, otherwise it can report
+        # READY for a nonexistent file while run_campaign correctly refuses.
+        try:
+            digest = declared_inputs_digest(manifest)
+        except ResumeRefusal as error:
+            raise CampaignRunRefusal(str(error)) from error
+        return f"required inputs declared and source file SHA256 manifest {digest[:12]} verified"
+
+    check("declared_inputs", READINESS_DECLARED_INPUT, ("schema",), declared_source_identity)
 
     def base_identity() -> str:
         return _verify_base_identity(manifest)

@@ -191,13 +191,19 @@ def test_readiness_refuses_a_recipe_set_the_planner_did_not_propose(tmp_path: Pa
 
 
 def test_readiness_refuses_when_the_instrument_has_no_material(tmp_path: Path):
-    """A declared material path that does not exist is not an available evaluator."""
+    """Absent declared material is rejected by the same preflight as the runner."""
     _, _runner, document = _campaign(tmp_path)
     manifest = _redeclare(document, evaluation_material_path=str(tmp_path / "absent.json"))
 
     report = check_campaign_readiness(manifest)
 
-    assert READINESS_EVALUATOR in report.reason_codes
+    # The new verified-resume input-SHA preflight runs before instrument
+    # construction. Its precise failure code replaces the old evaluator-only
+    # reason; both paths must still refuse before training.
+    assert READINESS_DECLARED_INPUT in report.reason_codes
+    assert "evaluation_material_path" in next(
+        c.detail for c in report.checks if c.check == "declared_inputs"
+    )
     assert next(c for c in report.checks if c.check == "evaluator_coverage").status == "skipped"
 
 
