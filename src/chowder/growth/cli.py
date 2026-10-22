@@ -917,21 +917,16 @@ def _growth_campaign_run(args: argparse.Namespace) -> int:
 def _growth_campaign_settle(args: argparse.Namespace) -> int:
     """Settle the campaign's actual cost from its durable accounting artifact."""
     from .campaign import CampaignManifest, settle_campaign
+    from .compute_cost import checked_ledger_total
 
     manifest = CampaignManifest.from_file(Path(args.manifest))
     document = json.loads(Path(args.accounting).read_text(encoding="utf-8"))
-    totals = document.get("totals", {}).get("incremental", {})
-    from .compute_cost import ComputeCost
-
-    # The artifact says whether its device figure is a measurement; absent or
-    # false means unmeasured, so a declared device ceiling cannot be settled
-    # against a placeholder read back from disk.
-    total = ComputeCost(
-        device_gpu_hours=float(totals.get("device_gpu_hours", 0.0)),
-        wall_gpu_hours=float(totals.get("wall_gpu_hours", 0.0)),
-        source=str(args.accounting),
-        device_measured=bool(totals.get("device_measured", False)),
-    )
+    try:
+        total = checked_ledger_total(document, cycle_id=manifest.cycle_id)
+    except ValueError as exc:
+        _print_json({"cycle_id": manifest.cycle_id, "budget_compliant": False,
+                     "refusal_reason": str(exc)})
+        return 1
     verdict = settle_campaign(manifest, total=total)
     return _print_json(
         {
