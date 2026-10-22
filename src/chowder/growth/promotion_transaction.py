@@ -79,6 +79,7 @@ def prepare_transaction(
         "state": "PREPARED",
         "cycle_id": cycle_id,
         "candidate_version": candidate_version,
+        "parent_version": run_document.get("parent_version"),
         "manifest_digest": manifest_digest,
         "run_digest": content_digest(run_document),
         "promotion_digest": content_digest(promotion),
@@ -168,9 +169,14 @@ def reconcile_transaction(
         document.get("verdict") != "PROMOTED"
         or document.get("cycle_id") != cycle_id
         or document.get("candidate_version") != candidate_version
+        or not isinstance(document.get("parent_version"), str)
+        or not document["parent_version"]
+        or (marker.get("parent_version") is not None
+            and marker["parent_version"] != document["parent_version"])
         or not isinstance(outcome, dict)
         or outcome.get("cycle_id") != cycle_id
         or outcome.get("candidate_version") != candidate_version
+        or outcome.get("parent_version") != document["parent_version"]
         or outcome.get("verdict") != "PROMOTED"
     ):
         return None
@@ -182,6 +188,7 @@ def reconcile_transaction(
     if (
         generation is None
         or generation.get("cycle_id") != cycle_id
+        or generation.get("parent_version") != document["parent_version"]
         or not isinstance(promotion, dict)
         or promotion.get("verdict") != "PROMOTED"
         or content_digest(promotion) != marker.get("promotion_digest")
@@ -264,9 +271,15 @@ def assert_committed(ledger_root: Path, record: Mapping[str, Any]) -> None:
         document.get("verdict") != "PROMOTED"
         or document.get("cycle_id") != record["cycle_id"]
         or document.get("candidate_version") != record["version"]
+        or not isinstance(document.get("parent_version"), str)
+        or not document["parent_version"]
+        or document["parent_version"] != record.get("parent_version")
+        or (marker.get("parent_version") is not None
+            and marker["parent_version"] != document["parent_version"])
         or not isinstance(outcome, Mapping)
         or outcome.get("cycle_id") != record["cycle_id"]
         or outcome.get("candidate_version") != record["version"]
+        or outcome.get("parent_version") != document["parent_version"]
         or outcome.get("verdict") != "PROMOTED"
         or outcome.get("promotion") != record["promotion"]
     ):
