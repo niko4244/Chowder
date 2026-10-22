@@ -1311,7 +1311,18 @@ def _run_campaign_locked(
         # settle normally but never become replayable. A production attempt
         # refused before training also has no GPU cost to checkpoint.
         replayable = native_receipt and isinstance(evidence.get("actual_cost"), Mapping)
-        if native_receipt and not replayable:
+        # A native executor can refuse during template/data/admission preflight
+        # *before* any trainer process is started. That legitimately has no
+        # paid native receipt and must remain recordable as REFUSED, not raise
+        # as though paid GPU evidence disappeared. It does not become an
+        # accepted native settlement proof or resumable trained attempt.
+        harmless_precompute_refusal = (
+            evidence.get("status") == "REFUSED"
+            and evidence.get("train_started") is False
+            and evidence.get("actual_cost") is None
+            and evidence.get("measured_gpu_hours") is None
+        )
+        if native_receipt and not replayable and not harmless_precompute_refusal:
             # Local paid training cannot be relabeled as a remote completion
             # when its durable native cost/evidence receipt is missing.
             raise CampaignRunRefusal(
