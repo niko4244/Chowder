@@ -136,7 +136,7 @@ from chowder.growth.retention import (  # noqa: E402
 from chowder.growth import certification as _certification  # noqa: E402
 from chowder.growth.certification import ArmError, MeasuredArm  # noqa: E402
 from chowder.growth.catalog import default_registry  # noqa: E402
-from chowder.growth.compute_cost import ComputeCost, ledger_digest  # noqa: E402
+from chowder.growth.compute_cost import checked_ledger_total, ledger_digest  # noqa: E402
 from chowder.growth.metric_binding import MetricBinder  # noqa: E402
 from chowder.growth.statistics import compare  # noqa: E402
 from chowder.growth.training_binding import directory_digest  # noqa: E402
@@ -1337,6 +1337,22 @@ def _contamination_gate(
     )
 
 
+def _ledger_total(document: Mapping[str, Any], cycle_id: str):
+    """Validate paid ledger entries, with absent legacy evidence inconclusive."""
+    totals = document.get("totals")
+    if (
+        not isinstance(totals, Mapping)
+        or not isinstance(totals.get("incremental"), Mapping)
+        or not isinstance(document.get("entries"), list)
+        or not isinstance(document.get("digest_sha256"), str)
+        or not document.get("cycle_id")
+    ):
+        raise LookupError("incremental totals, entry ledger, cycle identity or embedded digest missing")
+    # Frozen judge checks independently pinned campaign evidence before
+    # accepting zero-cost no-work evaluation/probe references.
+    return checked_ledger_total(document, cycle_id=cycle_id, allow_zero_evaluation=True)
+
+
 def _settlement_gates(
     verdict: Verdict, run_root: Path, campaign: CampaignManifest | None
 ) -> None:
@@ -1349,7 +1365,8 @@ def _settlement_gates(
         )
         verdict.add("T14", "all recipes accounted", UNKNOWN, "accounting artifact unavailable")
         return
-    totals = (document.get("totals") or {}).get("incremental")
+    declared_totals = document.get("totals")
+    totals = declared_totals.get("incremental") if isinstance(declared_totals, Mapping) else None
     if not isinstance(totals, Mapping):
         verdict.add(
             "T13", "cost settles within the declared ceilings", UNKNOWN,
@@ -1362,11 +1379,16 @@ def _settlement_gates(
         )
     else:
         try:
-            total = ComputeCost.from_dict(totals)
-        except (KeyError, TypeError, ValueError) as error:
+            total = _ledger_total(document, campaign.cycle_id)
+        except LookupError as error:
             verdict.add(
                 "T13", "cost settles within the declared ceilings", UNKNOWN,
-                f"incremental totals are not a readable ComputeCost: {error}",
+                f"accounting evidence is incomplete: {error}",
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            verdict.add(
+                "T13", "cost settles within the declared ceilings", FAIL,
+                f"accounting entries, flags or totals are inconsistent: {error}",
             )
         else:
             # The production settlement, verbatim: the judge and
@@ -1426,17 +1448,17 @@ def _settlement_artifact_gate(
 ) -> None:
     """The run's recorded settlement must be the settlement of the artifact it pinned.
 
-    T13 settles the accounting artifact against the declared ceilings, from
-    whatever bytes are in the run root. This gate closes the other half: that
-    the artifact *is* the one the run settled. ``CycleCostLedger.write``
+    T13 reconciles paid entries with claimed totals and settles the recomputed
+    amount against the declared ceilings. This gate closes the other half:
+    the artifact must be the one the run settled. ``CycleCostLedger.write``
     (``chowder.growth.compute_cost``) stamps a digest over the document it
     writes and ``CampaignRun.to_dict`` pins that digest in
     ``cost.accounting_digest``, so an edit to the artifact -- a total, an entry,
     a measurement flag -- moves a number the record already carries. Without
     this gate a run the branch refused on its frozen envelope could be
     certified PROMOTED by editing one file: the refusal lives in the record,
-    and T13 would recompute the settlement from the edited bytes and find them
-    compliant.
+    and digest verification is needed to detect a changed, internally valid
+    ledger whose accounting entries were also rewritten.
 
     Fail-closed in every branch: an absent record, an absent pin, an absent
     recorded settlement, an unreadable artifact or an unreadable campaign is
@@ -1449,7 +1471,7 @@ def _settlement_artifact_gate(
         "the run's recorded settlement is the settlement of the artifact it pinned"
     )
     record = _load_json(run_root / RUN_RECORD_NAME)
-    if record is None:
+    if not isinstance(record, Mapping):
         verdict.add(
             "T23", requirement, UNKNOWN,
             f"{RUN_RECORD_ABSENT}: {run_root / RUN_RECORD_NAME} is absent or "
@@ -1464,7 +1486,8 @@ def _settlement_artifact_gate(
             "artifact to settle",
         )
         return
-    pinned = str((record.get("cost") or {}).get("accounting_digest") or "")
+    record_cost = record.get("cost")
+    pinned = str(record_cost.get("accounting_digest") or "") if isinstance(record_cost, Mapping) else ""
     if not pinned:
         verdict.add(
             "T23", requirement, UNKNOWN,
@@ -1497,17 +1520,28 @@ def _settlement_artifact_gate(
             "be recomputed",
         )
         return
-    totals = (document.get("totals") or {}).get("incremental")
     try:
-        total = ComputeCost.from_dict(totals)
-    except (KeyError, TypeError, ValueError) as error:
+        total = _ledger_total(document, campaign.cycle_id)
+    except LookupError as error:
         verdict.add(
             "T23", requirement, UNKNOWN,
-            f"incremental totals are not a readable ComputeCost: {error}",
+            f"accounting evidence is incomplete: {error}",
+        )
+        return
+    except (KeyError, TypeError, ValueError) as error:
+        verdict.add(
+            "T23", requirement, FAIL,
+            f"accounting entries, flags or totals are inconsistent: {error}",
         )
         return
     settlement = settle_campaign(campaign, total=total)
-    if bool(recorded["budget_compliant"]) != settlement.compliant:
+    if not isinstance(recorded["budget_compliant"], bool):
+        verdict.add(
+            "T23", requirement, FAIL,
+            "recorded budget_compliant must be a JSON boolean",
+        )
+        return
+    if recorded["budget_compliant"] != settlement.compliant:
         verdict.add(
             "T23", requirement, FAIL,
             f"{SETTLEMENT_DISAGREES_WITH_RECORD}: the run recorded "

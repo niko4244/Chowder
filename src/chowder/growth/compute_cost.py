@@ -457,7 +457,7 @@ def checked_ledger_total(
                     raise ValueError("baseline reference must have zero non-incremental cost")
             elif not parsed_cost.incremental and not (
                 allow_zero_evaluation
-                and row["kind"] == "evaluation"
+                and row["kind"] in {"evaluation", "load_probe"}
                 and parsed_cost.wall_gpu_hours == 0
                 and parsed_cost.device_gpu_hours == 0
             ):
