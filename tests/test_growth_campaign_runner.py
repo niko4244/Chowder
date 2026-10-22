@@ -2312,3 +2312,54 @@ def test_reentry_on_an_interrupted_journal_refuses_and_starts_nothing(tmp_path: 
     # And a third entry against the same state root refuses the same way.
     again = run_campaign(manifest, train_fn=_ProhibitedExecutor())
     assert again.refused_by == "entry_check"
+
+
+def test_a_later_interrupted_start_cannot_borrow_an_old_terminal(tmp_path: Path):
+    """A second run's start invalidates the earlier run's terminal marker."""
+    journal = tmp_path / "campaign-journal.jsonl"
+    (tmp_path / "campaign-run.json").write_text(
+        json.dumps({"verdict": "REFUSED"}), encoding="utf-8"
+    )
+    records = [
+        {"phase": "campaign_start", "status": "started"},
+        {"phase": "terminal", "status": "REFUSED"},
+    ]
+
+    def write_records() -> None:
+        journal.write_text(
+            "".join(json.dumps(row) + "\\n" for row in records), encoding="utf-8"
+        )
+
+    write_records()
+    assert campaign_runner._journal_outcome(journal) == "REFUSED"
+
+    records.append({"phase": "campaign_start", "status": "started"})
+    write_records()
+    assert campaign_runner._journal_outcome(journal) is None
+
+    # A matching, stale verdict file cannot turn a second run's incomplete
+    # journal back into a successful or refused terminal run.
+    records.append({"phase": "attempt", "status": "started", "recipe_id": "r0"})
+    write_records()
+    assert campaign_runner._journal_outcome(journal) is None
+
+
+def test_corrupt_or_unverified_terminal_journal_fails_closed(tmp_path: Path):
+    """No torn/corrupt terminal marker or mismatched verdict authorizes entry."""
+    journal = tmp_path / "campaign-journal.jsonl"
+    verdict = tmp_path / "campaign-run.json"
+    terminal = json.dumps({"phase": "terminal", "status": "REFUSED"})
+    verdict.write_text(json.dumps({"verdict": "REFUSED"}), encoding="utf-8")
+
+    journal.write_text(terminal, encoding="utf-8")  # missing final LF
+    assert campaign_runner._journal_outcome(journal) is None
+
+    journal.write_text(terminal + "\\n" + '{"phase":"attempt"', encoding="utf-8")
+    assert campaign_runner._journal_outcome(journal) is None
+
+    journal.write_text(terminal + "\\n", encoding="utf-8")
+    verdict.write_text(json.dumps({"verdict": "PROMOTED"}), encoding="utf-8")
+    assert campaign_runner._journal_outcome(journal) is None
+
+    verdict.unlink()
+    assert campaign_runner._journal_outcome(journal) is None

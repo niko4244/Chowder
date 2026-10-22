@@ -477,24 +477,48 @@ def _journal_event(
 
 
 def _journal_outcome(journal: Path) -> str | None:
-    """The ``terminal`` outcome the journal already records, or None.
+    """Return only the latest run's durable terminal outcome, or None.
 
-    A truncated final line is ignored: a kill between the write and its fsync
-    is exactly the interruption this check exists to catch, and a line that
-    never completed is not an outcome.
+    A terminal from an earlier run must not mask a newer interrupted start.
+    Any malformed or torn line is ambiguous and therefore refuses re-entry.
+    The terminal must be the final journal event and agree with the durable
+    verdict file; a journal marker alone cannot attest to a verdict.
     """
     try:
         text = journal.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
+
     outcome: str | None = None
-    for line in text.splitlines():
+    last_phase = ""
+    for line in text.splitlines(keepends=True):
+        # Every _journal_event writes a trailing LF before fsync.
+        if not line.endswith("\n"):
+            return None
         try:
             record = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(record, dict) and record.get("phase") == "terminal":
-            outcome = str(record.get("status") or "")
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(record, dict) or not isinstance(record.get("phase"), str):
+            return None
+        phase = record["phase"]
+        if phase == "campaign_start":
+            outcome = None
+        elif phase == "terminal":
+            status = record.get("status")
+            if not isinstance(status, str) or not status:
+                return None
+            outcome = status
+        last_phase = phase
+
+    if last_phase != "terminal" or outcome is None:
+        return None
+    try:
+        verdict = json.loads(journal.with_name("campaign-run.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(verdict, dict) or verdict.get("verdict") != outcome:
+        return None
     return outcome
 
 
@@ -2993,9 +3017,12 @@ def _write_record(
     # behind; the terminal journal line below only goes down once the verdict
     # file is complete.
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(
-        json.dumps(document, indent=2, sort_keys=True, default=str), encoding="utf-8"
-    )
+    # Make the verdict file's bytes durable before publishing its name. The
+    # terminal journal marker must never follow an unflushed verdict file.
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(document, indent=2, sort_keys=True, default=str))
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(tmp, path)
     if terminal:
         # The journal record that closes the campaign: written *after* the
