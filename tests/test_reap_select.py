@@ -156,7 +156,7 @@ def test_v2_cannot_borrow_v1_observer_d0(tmp_path):
     raw.write_text('{"sample":"test"}\n', encoding="utf-8")
     digest = hashlib.sha256(raw.read_bytes()).hexdigest()
     (calib / "calibration-manifest.json").write_text(json.dumps(
-        {"mix": "v2", "calibration_sha256": digest}), encoding="utf-8")
+        {"mix": "v2", "rows": 1, "calibration_sha256": digest}), encoding="utf-8")
     cloned_observer = json.loads(v2.read_text(encoding="utf-8"))
     cloned_observer["calibration_sha256"] = digest
     v2.write_text(json.dumps(cloned_observer), encoding="utf-8")
@@ -166,5 +166,9 @@ def test_v2_cannot_borrow_v1_observer_d0(tmp_path):
     assert str(raw) in report_v2["input_sha256"]
     (calib / "calibration-manifest.json").write_text(json.dumps(
         {"mix": "v2", "calibration_sha256": "0" * 64}), encoding="utf-8")
+    with pytest.raises(GateError, match="calibration SHA"):
+        evaluate(tmp_path, obs, v2, calib)
+    (calib / "calibration-manifest.json").write_text(json.dumps(
+        {"mix": "v2", "rows": 2, "calibration_sha256": digest}), encoding="utf-8")
     with pytest.raises(GateError, match="calibration SHA"):
         evaluate(tmp_path, obs, v2, calib)
