@@ -104,6 +104,13 @@ from .frontier_reference import SnapshotStore
 from .lineage import GenerationLedger, RegressionMemory
 from .metric_binding import MetricBinder, PromotionAssembly
 from .recipe_planner import HardwareBudget, RecipePlanner, TrainingRecipe
+from .campaign_resume import (
+    ResumeRefusal,
+    commit_receipt,
+    declared_inputs_digest,
+    load_receipts,
+    validate_evidence as validate_resume_evidence,
+)
 from .promotion_transaction import (
     content_digest,
     load_transaction,
@@ -481,6 +488,8 @@ def _journal_event(
     attempt: Any = None,
     gpu_hours: Any = None,
     detail: str | None = None,
+    identity: str | None = None,
+    index: int | None = None,
 ) -> None:
     """Append one boundary to the campaign journal, durably.
 
@@ -499,6 +508,10 @@ def _journal_event(
     }
     if detail is not None:
         record["detail"] = detail
+    if identity is not None:
+        record["identity"] = identity
+    if index is not None:
+        record["index"] = index
     with open(_journal_path(root), "a", encoding="utf-8") as journal:
         journal.write(json.dumps(record, sort_keys=True, default=str) + "\n")
         journal.flush()
@@ -728,6 +741,16 @@ def _run_campaign_locked(
     require_declared_inputs(manifest, phase="run")
     root = Path(state_root or manifest.state_root)
     declaration_digest = content_digest(asdict(manifest))
+    try:
+        from chowder.worker_env import chowder_source_identity
+
+        replay_identity = content_digest({
+            "declaration": declaration_digest,
+            "declared_files": declared_inputs_digest(manifest),
+            "source_sha256": chowder_source_identity()["source_sha256"],
+        })
+    except ResumeRefusal as error:
+        raise CampaignRunRefusal(str(error)) from error
     # A crash after the durable promotion intent may have left a committed
     # verdict, an unfinished ledger write, or only the PREPARED marker. Replay
     # only a fully verified terminal decision; otherwise preserve forensic
@@ -757,15 +780,27 @@ def _run_campaign_locked(
     journal = _journal_path(root)
     interrupted = journal.is_file() and _journal_outcome(journal) is None
     root.mkdir(parents=True, exist_ok=True)
+    replay: list[dict[str, Any]] = []
     if interrupted:
-        return _refuse_interrupted(manifest, root)
+        try:
+            replay = load_receipts(root, manifest_digest=replay_identity)
+        except ResumeRefusal:
+            return _refuse_interrupted(manifest, root)
     phases: list[Mapping[str, Any]] = _JournalingPhases(root)
-    _journal_event(
-        root,
-        phase="campaign_start",
-        status="started",
-        detail=f"campaign {manifest.cycle_id} (policy {PROMOTION_POLICY_VERSION})",
-    )
+    if not interrupted:
+        _journal_event(
+            root,
+            phase="campaign_start",
+            status="started",
+            detail=f"campaign {manifest.cycle_id} (policy {PROMOTION_POLICY_VERSION})",
+            identity=replay_identity,
+        )
+    else:
+        _journal_event(
+            root, phase="campaign_resume", status="verified",
+            detail=f"resuming {len(replay)} settled attempt(s) from exact declared campaign",
+            identity=replay_identity,
+        )
 
     _verify_parent_identity(manifest)
     phases.append(
@@ -830,6 +865,16 @@ def _run_campaign_locked(
     cycle = _build_cycle(manifest, executor=executor, firewall=firewall, root=root)
     candidate_version = manifest.resolved_candidate_version()
 
+    def precompute_refusal(
+        phases: list[Mapping[str, Any]], admission: list[Mapping[str, Any]]
+    ) -> CampaignRun:
+        # A recovered run already spent and durably journaled training. A
+        # changed admission/readiness environment cannot publish a zero-cost
+        # terminal verdict over its prior receipt history.
+        if interrupted:
+            return _refuse_interrupted(manifest, root)
+        return _refuse(manifest, root, candidate_version, phases, admission)
+
     # Plan on the cycle that will execute, not a second assembly of it: one
     # owner of "what runs", so the ids planned are the ids run.
     items = cycle.plan_curriculum(_load_profile(manifest))
@@ -877,12 +922,12 @@ def _run_campaign_locked(
     )
     if refused and stops_on_admission_refusal(manifest.stopping_rules):
         phases.append({"phase": "admission", "verdict": "refused", "detail": detail})
-        return _refuse(manifest, root, candidate_version, phases, admission)
+        return precompute_refusal(phases, admission)
     admitted_ids = {entry["recipe_id"] for entry in admission if entry["admitted"]}
     recipes = tuple(recipe for recipe in recipes if recipe.recipe_id in admitted_ids)
     if not recipes:
         phases.append({"phase": "admission", "verdict": "refused", "detail": detail})
-        return _refuse(manifest, root, candidate_version, phases, admission)
+        return precompute_refusal(phases, admission)
     phases.append(
         {
             "phase": "admission",
@@ -905,7 +950,7 @@ def _run_campaign_locked(
         phases.append(
             {"phase": "candidate_search", "verdict": "refused", "detail": str(refusal)}
         )
-        return _refuse(manifest, root, candidate_version, phases, admission)
+        return precompute_refusal(phases, admission)
     if search.declared:
         phases.append(
             {
@@ -954,7 +999,7 @@ def _run_campaign_locked(
                 "detail": "; ".join(projection.failure_reasons),
             }
         )
-        return _refuse(manifest, root, candidate_version, phases, admission)
+        return precompute_refusal(phases, admission)
     phases.append(
         {
             "phase": "campaign_projection",
@@ -978,7 +1023,7 @@ def _run_campaign_locked(
         phases.append(
             {"phase": "readiness", "verdict": "refused", "detail": str(refusal)}
         )
-        return _refuse(manifest, root, candidate_version, phases, admission)
+        return precompute_refusal(phases, admission)
 
     try:
         evaluator = (
@@ -988,7 +1033,7 @@ def _run_campaign_locked(
         phases.append(
             {"phase": "readiness", "verdict": "refused", "detail": str(refusal)}
         )
-        return _refuse(manifest, root, candidate_version, phases, admission)
+        return precompute_refusal(phases, admission)
     if evaluator is None:
         phases.append(
             {
@@ -1001,7 +1046,7 @@ def _run_campaign_locked(
                 ),
             }
         )
-        return _refuse(manifest, root, candidate_version, phases, admission)
+        return precompute_refusal(phases, admission)
 
     # The evaluator's own admission seam: material coverage, dataset existence
     # and slice length are all knowable before a GPU is touched, and the
@@ -1020,7 +1065,7 @@ def _run_campaign_locked(
                     "detail": "; ".join(str(part) for part in evaluator_refusal),
                 }
             )
-            return _refuse(manifest, root, candidate_version, phases, admission)
+            return precompute_refusal(phases, admission)
     phases.append(
         {
             "phase": "readiness",
@@ -1035,6 +1080,7 @@ def _run_campaign_locked(
     ledger = CycleCostLedger(cycle_id=manifest.cycle_id)
     results: list[Mapping[str, Any]] = []
     stopped_by: str | None = None
+    replay_index = 0
 
     def charge(evidence: Mapping[str, Any]) -> None:
         """Charge one attempt to the campaign's own ledger as it happens."""
@@ -1069,19 +1115,94 @@ def _run_campaign_locked(
         cut, anything no Python exit path can intercept -- still leaves who it
         was and that it was running on the journal.
         """
+        nonlocal replay_index
+        index = replay_index
+        spec_digest = content_digest({
+            "manifest_digest": replay_identity,
+            "recipe": asdict(recipe),
+            "curriculum_ids": [item.item_id for item in plan.items],
+            "index": index,
+        })
+        if index < len(replay):
+            receipt = replay[index]
+            if receipt.get("spec_digest") != spec_digest:
+                raise CampaignRunRefusal(
+                    "CAMPAIGN_RESUME_UNVERIFIED: planned recipe/round/checkpoint "
+                    "identity differs from the durable completed attempt"
+                )
+            evidence = dict(receipt["evidence"])
+            validate_resume_evidence(root, evidence)
+            if isinstance(executor, _BackendStampedTrainingFn):
+                expected_backend = {
+                    **executor.__dict__["_declared"],
+                    "version": executor.__dict__["_version"],
+                }
+                if evidence.get("backend") != expected_backend:
+                    raise CampaignRunRefusal(
+                        "CAMPAIGN_RESUME_UNVERIFIED: recorded attempt backend "
+                        "does not match the current declared backend"
+                    )
+            replay_index += 1
+            return evidence
+        if interrupted and index != len(replay):
+            raise CampaignRunRefusal("CAMPAIGN_RESUME_UNVERIFIED: attempt order changed")
+        if interrupted:
+            # Admission projected the *original* complete campaign before
+            # training. A resumed leg needs a fresh headroom check after the
+            # actual spend of its replayed attempts has been restored.
+            spent = ledger.total()
+            if (
+                spent.wall_gpu_hours + float(recipe.projected_wall_gpu_hours)
+                > manifest.budget.wall_gpu_hours_ceiling_campaign + 1e-12
+                or (
+                    manifest.budget.device_time_measured
+                    and spent.device_gpu_hours + float(recipe.projected_device_gpu_hours)
+                    > manifest.budget.device_gpu_hours_ceiling_campaign + 1e-12
+                )
+            ):
+                raise CampaignRunRefusal(
+                    "CAMPAIGN_RESUME_BUDGET: insufficient unspent declared "
+                    "campaign ceiling for another attempt"
+                )
         _journal_event(
-            root, phase="attempt", status="started", recipe_id=recipe.recipe_id
+            root, phase="attempt", status="started", recipe_id=recipe.recipe_id,
+            identity=spec_digest, index=index,
         )
         evidence = dict(executor(recipe, plan.items))
         evidence["recipe_id"] = recipe.recipe_id
-        _journal_event(
-            root,
-            phase="attempt",
-            status=evidence.get("status"),
-            recipe_id=recipe.recipe_id,
-            attempt=evidence.get("attempt"),
-            gpu_hours=evidence.get("measured_gpu_hours"),
+        # Caller-provided executors are an open extension seam. Their records
+        # may lack the on-disk attempt evidence contract, so they continue to
+        # settle normally but never become replayable. A production attempt
+        # refused before training also has no GPU cost to checkpoint.
+        replayable = (
+            train_fn is None
+            and isinstance(getattr(executor, "_inner", None), SubprocessTrainingFn)
+            and isinstance(evidence.get("actual_cost"), Mapping)
         )
+        if not replayable:
+            _journal_event(
+                root, phase="attempt", status=evidence.get("status"),
+                recipe_id=recipe.recipe_id, attempt=evidence.get("attempt"),
+                gpu_hours=evidence.get("measured_gpu_hours"),
+            )
+            replay_index += 1
+            return evidence
+        # Price the finished production invocation *before* its receipt
+        # becomes replayable. Unknown cost leaves it unpaired and blocks entry.
+        _attempt_cost(evidence)
+        try:
+            evidence_digest = commit_receipt(
+                root, index=index, spec_digest=spec_digest, evidence=evidence
+            )
+        except ResumeRefusal as error:
+            raise CampaignRunRefusal(str(error)) from error
+        _journal_event(
+            root, phase="attempt_receipt", status=evidence.get("status"),
+            recipe_id=recipe.recipe_id, attempt=evidence.get("attempt"),
+            gpu_hours=evidence.get("measured_gpu_hours"), identity=spec_digest,
+            index=index, detail=evidence_digest,
+        )
+        replay_index += 1
         return evidence
 
     search_run = None
@@ -1123,6 +1244,11 @@ def _run_campaign_locked(
             stopped_by = overrun()
             if stopped_by:
                 break
+    if replay_index < len(replay) and interrupted:
+        raise CampaignRunRefusal(
+            "CAMPAIGN_RESUME_UNVERIFIED: journal holds attempts outside the "
+            "presently admitted plan or budget; refusing uncharged evidence"
+        )
     # Every attempt, from every round: a search's earlier, cheaper rounds are
     # real compute and real evidence, so they stay in the record even though
     # selection may only read the final round's results.
@@ -1197,6 +1323,10 @@ def _run_campaign_locked(
     # written out as evidence before the run stops.
     try:
         _verify_selected_artifact(selected, purpose="before it is measured")
+        _journal_event(
+            root, phase="candidate_evaluation_started", status="started",
+            detail="external candidate evaluator may have spent compute",
+        )
         evaluation_started = time.perf_counter()
         request, evaluation = _evaluate_candidate(
             manifest, root=root, selected=selected, eval_fn=evaluator
