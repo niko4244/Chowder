@@ -453,7 +453,15 @@ def checked_ledger_total(document: Mapping[str, Any], *, cycle_id: str) -> Compu
                 if parsed_cost.incremental or parsed_cost.wall_gpu_hours or parsed_cost.device_gpu_hours:
                     raise ValueError("baseline reference must have zero non-incremental cost")
             elif not parsed_cost.incremental:
-                raise ValueError("paid accounting entry cannot be non-incremental")
+                # Synthetic/no-work evaluations and load probes can record a
+                # literal zero. Never let a training/failed attempt disappear
+                # from settlement, or any row carrying nonzero spend.
+                if (
+                    row["kind"] not in {"evaluation", "load_probe"}
+                    or parsed_cost.wall_gpu_hours
+                    or parsed_cost.device_gpu_hours
+                ):
+                    raise ValueError("paid accounting entry cannot be non-incremental")
             ledger.add(
                 row["label"], row["kind"], parsed_cost,
                 recipe_id=row["recipe_id"], notes=row["notes"],

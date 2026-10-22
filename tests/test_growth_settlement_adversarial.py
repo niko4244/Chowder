@@ -713,32 +713,23 @@ def test_the_judge_never_certifies_a_root_whose_accounting_artifact_moved(
     assert exit_code == 1
     assert rows["T23"][0] == "FAIL", rows["T23"]
     assert judge_gen2.ACCOUNTING_ARTIFACT_MOVED in rows["T23"][1]
-    # And the edited totals read as compliant, which is why the pin is the
-    # gate that matters: T13 alone would have passed them.
-    assert rows["T13"][0] == "PASS", rows["T13"]
+    # T13 independently refuses the edited arithmetic even if the pin is
+    # subsequently moved; it recomputes the totals from paid entries.
+    assert rows["T13"][0] == "FAIL", rows["T13"]
 
 
 def test_the_judge_never_certifies_a_settlement_the_record_disagrees_with(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The second half of T23: a consistently re-pinned artifact still disagrees.
-
-    A tamperer who edits the artifact *and* re-pins its digest in the record
-    has produced bytes whose digest matches the pin -- and left the record's
-    own settlement verdict saying the campaign breached. The two halves of one
-    record cannot both be trusted, so the judge refuses: the artifact settles
-    compliant while the record says non-compliant, and no reading of that pair
-    is a promotion.
-    """
+    """T23 refuses a recorded settlement that contradicts a valid pinned ledger."""
     _manifest, run, root = _run_over_envelope(tmp_path, monkeypatch)
     assert run.verdict == "REJECTED"
 
-    _rerender_ledger(
-        root, lambda document: document["totals"]["incremental"].update({"wall_gpu_hours": 0.0})
-    )
     record_path = root / RUN_RECORD
     record = _record(root)
-    record["cost"]["accounting_digest"] = _accounting(root)["digest_sha256"]
+    # The ledger remains independently consistent and correctly pinned.
+    # The run record alone falsely claims its overrun was compliant.
+    record["settlement"]["budget_compliant"] = True
     record_path.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
 
     rows, final, exit_code = _judge(root, tmp_path / "inputs" / "campaign.json")

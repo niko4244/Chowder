@@ -36,7 +36,7 @@ from chowder.growth.campaign import (
     TargetThreshold,
     settle_campaign,
 )
-from chowder.growth.compute_cost import ComputeCost, ledger_digest
+from chowder.growth.compute_cost import ComputeCost, CycleCostLedger, ledger_digest
 from chowder.growth.training_binding import directory_digest
 
 JUDGE_PATH = (
@@ -338,19 +338,15 @@ def _run_root(
     )
     parent_report.save(root / "parent_evaluation.json")
 
-    totals = {
-        "device_gpu_hours": 0.5,
-        "wall_gpu_hours": wall_gpu_hours,
-        "device_measured": False,
-        "source": "total",
-    }
-    accounting = {
-        "totals": {"incremental": totals},
-        "entries": [
-            {"kind": "training", "recipe_id": "recipe-00"},
-            {"kind": "training", "recipe_id": "recipe-01"},
-        ],
-    }
+    ledger = CycleCostLedger(cycle_id=document["cycle_id"])
+    for index in range(2):
+        ledger.add(
+            f"train-{index}", "training",
+            ComputeCost(device_gpu_hours=0.25, wall_gpu_hours=wall_gpu_hours / 2, source="test"),
+            recipe_id=f"recipe-0{index}",
+        )
+    accounting = ledger.render()
+    totals = accounting["totals"]["incremental"]
     (root / "cycle_compute_accounting.json").write_text(
         json.dumps(accounting, indent=2), encoding="utf-8"
     )
@@ -523,6 +519,77 @@ def test_tampered_accounting_artifact_fails_the_pin(
     document = json.loads(path.read_text(encoding="utf-8"))
     document["entries"].append({"kind": "evaluation", "recipe_id": "recipe-00"})
     path.write_text(json.dumps(document), encoding="utf-8")
+    code, output = _judge(root, capsys)
+    assert code == 1, output
+    assert _rows(output)["R3"] == ["FAIL"], output
+
+
+@pytest.mark.parametrize("tamper", ["total", "measurement", "paid_flag", "entry_cost", "entries", "cycle", "flag_type"])
+def test_reap_settlement_rejects_self_hashed_inconsistent_ledgers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], tamper: str,
+) -> None:
+    root = _run_root(tmp_path, monkeypatch)
+    path = root / "cycle_compute_accounting.json"
+    accounting = json.loads(path.read_text(encoding="utf-8"))
+    if tamper == "total":
+        accounting["totals"]["incremental"]["wall_gpu_hours"] = 0.0
+    elif tamper == "measurement":
+        accounting["totals"]["incremental"]["device_measured"] = True
+    elif tamper == "paid_flag":
+        accounting["entries"][0]["cost"]["incremental"] = False
+    elif tamper == "entry_cost":
+        accounting["entries"][0]["cost"]["wall_gpu_hours"] = 0.0
+    elif tamper == "entries":
+        accounting["entries"] = []
+    elif tamper == "cycle":
+        accounting["cycle_id"] = "different-campaign"
+    else:
+        accounting["entries"][0]["cost"]["device_measured"] = "false"
+    # Rehash both identities: the accounting check must not trust a digest
+    # that the attacker could recompute alongside the asserted totals.
+    accounting["digest_sha256"] = ledger_digest(accounting)
+    path.write_text(json.dumps(accounting), encoding="utf-8")
+    record_path = root / "campaign-run.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["cost"]["accounting_digest"] = accounting["digest_sha256"]
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    code, output = _judge(root, capsys)
+    assert code == 1, output
+    assert _rows(output)["R2"] == ["FAIL"], output
+    assert _rows(output)["R3"] == ["FAIL"], output
+
+
+def test_reap_legacy_totals_only_accounting_remains_inconclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _run_root(tmp_path, monkeypatch)
+    path = root / "cycle_compute_accounting.json"
+    accounting = json.loads(path.read_text(encoding="utf-8"))
+    accounting.pop("entries")
+    accounting.pop("digest_sha256")
+    path.write_text(json.dumps(accounting), encoding="utf-8")
+    record_path = root / "campaign-run.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["cost"]["accounting_digest"] = ledger_digest(accounting)
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    code, output = _judge(root, capsys)
+    assert code == 2, output
+    assert _rows(output)["R2"] == ["UNKNOWN"], output
+    assert _rows(output)["R3"] == ["UNKNOWN"], output
+
+
+def test_reap_recorded_settlement_flag_must_be_boolean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _run_root(tmp_path, monkeypatch)
+    path = root / "campaign-run.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["settlement"]["budget_compliant"] = "true"
+    path.write_text(json.dumps(record), encoding="utf-8")
     code, output = _judge(root, capsys)
     assert code == 1, output
     assert _rows(output)["R3"] == ["FAIL"], output

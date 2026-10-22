@@ -20,6 +20,7 @@ from chowder.growth.compute_cost import (
     RESOURCE_OVERRUN,
     ComputeCost,
     CycleCostLedger,
+    checked_ledger_total,
     settle_cost,
 )
 
@@ -246,6 +247,24 @@ def test_historical_baseline_reference_adds_zero_incremental_spend() -> None:
     rendered = ledger.render()
     kinds = [e["kind"] for e in rendered["entries"]]
     assert kinds.count("baseline_reference") == 1
+
+
+def test_accounting_reader_accepts_zero_no_work_rows_but_never_hides_paid_spend() -> None:
+    ledger = CycleCostLedger(cycle_id="c1")
+    ledger.add("train", "training", ComputeCost.from_wall_only(0.2, source="train"))
+    for kind in ("evaluation", "load_probe"):
+        ledger.add(kind, kind, ComputeCost.zero(source=f"no-work:{kind}"))
+    document = ledger.render()
+    assert checked_ledger_total(document, cycle_id="c1").wall_gpu_hours == 0.2
+
+    for kind in ("training", "failed_attempt", "evaluation", "load_probe"):
+        invalid = CycleCostLedger(cycle_id="c1")
+        invalid.add(
+            "concealed work", kind,
+            ComputeCost(0.0, 0.1, source="spent", incremental=False),
+        )
+        with pytest.raises(ValueError, match="paid accounting entry cannot be non-incremental"):
+            checked_ledger_total(invalid.render(), cycle_id="c1")
 
 
 def test_winner_only_accounting_is_detectably_wrong() -> None:
