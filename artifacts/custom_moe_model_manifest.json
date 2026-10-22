@@ -5,7 +5,7 @@
   "moe_pr_268_sha": "184291fb1dfba921ced254bfe4e7fcd148c37ae6",
   "journal_pr_269_sha": "cf544801af525826c5bd507581b27580feff23f2",
   "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
-  "selection_status": "UNVERIFIED",
+  "selection_status": "BLOCKED_REQUIRED_V2_EVALUATION",
   "lineage": "REAP-MoE",
   "primary_lineage_isolation": "Qwen3.8 Native Sparse no-distillation and separate state",
   "candidate": {
@@ -474,5 +474,95 @@
     "draft": true,
     "main_merged": false,
     "release_certification": false
+  },
+  "engineering_followup_20261022": {
+    "revision_refs": {
+      "pr273": "f099d3a",
+      "pr274": "7d79586",
+      "pr275": "3e118c2",
+      "pr276": "8393a3b",
+      "pr277": "53ebcab",
+      "main_merged": false
+    },
+    "parent_tokenizer_sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "six_parent_assets_sha_match": true,
+    "indexed_tensors": 1026,
+    "layers": 40,
+    "experts": 160,
+    "top_k": 8,
+    "release_adapter_certified": false
+  },
+  "finalization_source_revisions": {
+    "head": "a0a678dfa13a2d15f2b3176fb668eebbb8335728",
+    "draft_pr": 277,
+    "human_approval_pr": 278,
+    "human_approval_sha": "ef866b2d05f54a15e6b9d0b7c1bb19ddc1ac17ce",
+    "readiness_regression_fix_sha": "d6e378a7bcb0f570c05dc36d87453eeb2bdaa15d",
+    "all_changes_merged_to_main": false,
+    "new_ci": "RUNNING_NOT_YET_CLAIMED_GREEN"
+  },
+  "active_finalization_20261022": {
+    "date": "2026-10-22",
+    "draft_pr": 277,
+    "head": "8d30dde25679b9f23d4151a4118120d93473f8be",
+    "main_merged": false,
+    "patch_revisions": {
+      "accounting_validation": "96701b9dd03c00be0c5188847997cd2cf6dbf0f6",
+      "n5_ledger_fences": "cce44112275f5ab22d6295dec281bae5c3dd35a1",
+      "terminal_root_readiness": "55a110911e66da89ac8ff3bcd0cc225aa76e26ac",
+      "authenticated_cli_settlement": "9a14f73c5224e6ef7640583331ad9d0b0ff511d6",
+      "all_new_promotions_require_transaction": "6f35d09584f614164542318f27b080b076ef4a43",
+      "frozen_judge_accounting_parity": "8d30dde25679b9f23d4151a4118120d93473f8be"
+    },
+    "ci_at_head": "PENDING",
+    "targeted_cpu_pass": 397,
+    "full_cpu_at_head": {
+      "passed": 0,
+      "skipped": 0,
+      "status": "UNVERIFIED"
+    },
+    "earlier_full_cpu_baseline": {
+      "head": "a0a678dfa13a2d15f2b3176fb668eebbb8335728",
+      "passed": 3960,
+      "skipped": 78,
+      "failed": 0,
+      "ci_6_of_6": "SUCCESS",
+      "not_current_head": true
+    },
+    "fresh_gguf_sha256": "8c840461752e1343e81bc12ab9b95d422a4b45c0b0048f00938fe882f299f8f5",
+    "inventory_file_sha256": "be8bc1c36156a2d7f82823f961fa2f8f583d027fa63d7174ce31be2460e7750c",
+    "frozen_selection": "BLOCKED_REAP128_V2_MISSING",
+    "human_promoted": false,
+    "expensive_gpu_performed": false,
+    "verdicts": {
+      "repository_implementation_review_branch": "COMPLETED",
+      "main_merge": "BLOCKED",
+      "verified_settled_attempt_replay": "COMPLETED",
+      "unknown_cost_partial_training_restart": "BLOCKED",
+      "duplicate_terminal_campaign_compute_guard": "COMPLETED",
+      "new_ledger_promotion_transaction_admission": "COMPLETED",
+      "authenticated_offline_settlement_cli": "COMPLETED",
+      "frozen_judge_recomputed_accounting": "COMPLETED",
+      "atomic_promotion_and_recovery_cpu_coverage": "COMPLETED",
+      "independent_frozen_REAP_judge_certification": "BLOCKED",
+      "cryptographically_attributable_owner_approval": "UNVERIFIED",
+      "production_REAP_promotion": "BLOCKED",
+      "reap160_checkpoint_tokenizer_integrity": "COMPLETED",
+      "reap160_gguf_sha256": "COMPLETED",
+      "mandatory_REAP128_v2_checkpoint_and_evaluation": "BLOCKED",
+      "frozen_Gen0_selection": "BLOCKED",
+      "historical_1000_step_training_budget": "FAILED",
+      "fresh_training_step_performance": "UNVERIFIED",
+      "current_14_5_GB_VRAM_and_WDDM_gate": "UNVERIFIED",
+      "full_20_step_real_GPU_smoke": "UNVERIFIED",
+      "complete_Gen1_LoRA_adapter": "BLOCKED",
+      "derivative_and_N2_Fable_data_rights": "UNVERIFIED"
+    },
+    "known_limits": [
+      "Entire untrusted local evidence tree can be erased without externally anchored append-only digest",
+      "In-process Python caller can monkeypatch owner/judge predicates; no cryptographic owner identity",
+      "Frozen judge cannot certify without missing prepromotion declaration/receipt",
+      "No fresh 14.5GB VRAM, 20-step or 2.5 GPU-hour hardware qualification"
+    ]
   }
 }

@@ -119,7 +119,7 @@
   "current_release_verdict": "BLOCKED",
   "frozen_selection_v2": "UNVERIFIED_REQUIRED",
   "wddm_spill_current": "NOT_MEASURED",
-  "full_auto_resume": "NOT_IMPLEMENTED",
+  "full_auto_resume": "SCOPED_COMPLETED_RECEIPT_REPLAY_PASS; UNPRICED_INFLIGHT_CHECKPOINT_REFUSED",
   "promotion_human_approved": false,
   "checkpoint_sha_inventory": {
     "schema": "chowder.moe-checkpoint-sha256.v1",
@@ -154,5 +154,88 @@
     "draft": true,
     "main_merged": false,
     "release_certification": false
+  },
+  "engineering_followup_20261022": {
+    "reap128_gate1_lb": -0.0378074119723426,
+    "reap128_v2": "BLOCKED",
+    "wddm": "UNVERIFIED",
+    "current_vram": "UNVERIFIED",
+    "recipe_budget": "FAILED_HISTORICAL",
+    "human_approval": "REQUIRES_OWNER",
+    "release": false
+  },
+  "owner_approval_N5": {
+    "code_pr": 278,
+    "sha": "ef866b2d05f54a15e6b9d0b7c1bb19ddc1ac17ce",
+    "frozen_judge_manifest_present": false,
+    "production_judge_certified": false,
+    "owner_release_approved": false,
+    "lineage_promotion": "BLOCKED",
+    "N5_safety_guard": "IMPLEMENTED_DRAFT_NOT_MAIN"
+  },
+  "owner_approval_after_frozen_judge": "BLOCKED_NO_VALID_PRECOMMIT_JUDGE_EVIDENCE",
+  "active_finalization_20261022": {
+    "date": "2026-10-22",
+    "draft_pr": 277,
+    "head": "8d30dde25679b9f23d4151a4118120d93473f8be",
+    "main_merged": false,
+    "patch_revisions": {
+      "accounting_validation": "96701b9dd03c00be0c5188847997cd2cf6dbf0f6",
+      "n5_ledger_fences": "cce44112275f5ab22d6295dec281bae5c3dd35a1",
+      "terminal_root_readiness": "55a110911e66da89ac8ff3bcd0cc225aa76e26ac",
+      "authenticated_cli_settlement": "9a14f73c5224e6ef7640583331ad9d0b0ff511d6",
+      "all_new_promotions_require_transaction": "6f35d09584f614164542318f27b080b076ef4a43",
+      "frozen_judge_accounting_parity": "8d30dde25679b9f23d4151a4118120d93473f8be"
+    },
+    "ci_at_head": "PENDING",
+    "targeted_cpu_pass": 397,
+    "full_cpu_at_head": {
+      "passed": 0,
+      "skipped": 0,
+      "status": "UNVERIFIED"
+    },
+    "earlier_full_cpu_baseline": {
+      "head": "a0a678dfa13a2d15f2b3176fb668eebbb8335728",
+      "passed": 3960,
+      "skipped": 78,
+      "failed": 0,
+      "ci_6_of_6": "SUCCESS",
+      "not_current_head": true
+    },
+    "fresh_gguf_sha256": "8c840461752e1343e81bc12ab9b95d422a4b45c0b0048f00938fe882f299f8f5",
+    "inventory_file_sha256": "be8bc1c36156a2d7f82823f961fa2f8f583d027fa63d7174ce31be2460e7750c",
+    "frozen_selection": "BLOCKED_REAP128_V2_MISSING",
+    "human_promoted": false,
+    "expensive_gpu_performed": false,
+    "verdicts": {
+      "repository_implementation_review_branch": "COMPLETED",
+      "main_merge": "BLOCKED",
+      "verified_settled_attempt_replay": "COMPLETED",
+      "unknown_cost_partial_training_restart": "BLOCKED",
+      "duplicate_terminal_campaign_compute_guard": "COMPLETED",
+      "new_ledger_promotion_transaction_admission": "COMPLETED",
+      "authenticated_offline_settlement_cli": "COMPLETED",
+      "frozen_judge_recomputed_accounting": "COMPLETED",
+      "atomic_promotion_and_recovery_cpu_coverage": "COMPLETED",
+      "independent_frozen_REAP_judge_certification": "BLOCKED",
+      "cryptographically_attributable_owner_approval": "UNVERIFIED",
+      "production_REAP_promotion": "BLOCKED",
+      "reap160_checkpoint_tokenizer_integrity": "COMPLETED",
+      "reap160_gguf_sha256": "COMPLETED",
+      "mandatory_REAP128_v2_checkpoint_and_evaluation": "BLOCKED",
+      "frozen_Gen0_selection": "BLOCKED",
+      "historical_1000_step_training_budget": "FAILED",
+      "fresh_training_step_performance": "UNVERIFIED",
+      "current_14_5_GB_VRAM_and_WDDM_gate": "UNVERIFIED",
+      "full_20_step_real_GPU_smoke": "UNVERIFIED",
+      "complete_Gen1_LoRA_adapter": "BLOCKED",
+      "derivative_and_N2_Fable_data_rights": "UNVERIFIED"
+    },
+    "known_limits": [
+      "Entire untrusted local evidence tree can be erased without externally anchored append-only digest",
+      "In-process Python caller can monkeypatch owner/judge predicates; no cryptographic owner identity",
+      "Frozen judge cannot certify without missing prepromotion declaration/receipt",
+      "No fresh 14.5GB VRAM, 20-step or 2.5 GPU-hour hardware qualification"
+    ]
   }
 }
