@@ -182,13 +182,23 @@ class GenerationLedger:
         owner_approval: Any = None,
         candidate_artifact_sha256: str = "",
     ) -> GenerationRecord:
+        if version in self._records:
+            raise ValueError(f"generation {version} already recorded")
         if promotion.verdict == "PROMOTED":
-            from .owner_approval import requires_owner_approval, verify_grant
+            from .owner_approval import judge_certifies_candidate, requires_owner_approval, verify_grant
 
-            model_path = str(base_model.get("base_model_path") or base_model.get("path") or "")
-            n5 = base_model.get("lineage") == "reap-moe" or (
-                bool(model_path) and requires_owner_approval(model_path)
-            )
+            # This is a public low-level mutation API: do not let a caller
+            # omit the on-disk model path to make an otherwise REAP promotion
+            # look like a historical primary generation. A bare revision
+            # string cannot identify whether a local REAP checkpoint is in use.
+            model_path = base_model.get("base_model_path") or base_model.get("path")
+            if not isinstance(model_path, str) or not model_path.strip():
+                raise ValueError(
+                    "PROMOTION_BASE_UNDECLARED: a PROMOTED ledger record must name "
+                    "its base model path; a bare revision is insufficient"
+                )
+
+            n5 = base_model.get("lineage") == "reap-moe" or requires_owner_approval(model_path)
             if n5 and not verify_grant(
                 owner_approval,
                 cycle_id=cycle_id,
@@ -199,8 +209,15 @@ class GenerationLedger:
                     "HUMAN_APPROVAL_REQUIRED: direct lineage.record cannot write "
                     "a REAP PROMOTED generation without a bound owner grant"
                 )
-        if version in self._records:
-            raise ValueError(f"generation {version} already recorded")
+            if n5 and not judge_certifies_candidate(self._path.parent.parent):
+                # A local `_grant(..., judge_certified=True)` is importable and
+                # not proof that the frozen REAP judge ran. Until an immutable
+                # independently verified judge receipt exists, this also
+                # refuses directly forged approvals at the ledger boundary.
+                raise ValueError(
+                    "FROZEN_REAP_JUDGE_REQUIRED: REAP lineage promotion needs "
+                    "independent frozen-judge evidence before ledger mutation"
+                )
         record = GenerationRecord(
             version=version,
             parent_version=parent_version,
@@ -257,6 +274,11 @@ class GenerationLedger:
         # A recovery-period PREPARED record must never accept a revision that
         # could later become the effective decision after recovery.
         self.get(generation_version)
+        if new_verdict == "PROMOTED" and self.effective_verdict(generation_version) != "PROMOTED":
+            raise ValueError(
+                "ADJUDICATION_PROMOTION_UNAUTHORIZED: revisions cannot restore or "
+                "create a PROMOTED generation without a new independently authorized release"
+            )
         prior = [r for r in self._revisions if r.generation_version == generation_version]
         if prior:
             supersedes = prior[-1].revision_id
@@ -294,11 +316,20 @@ class GenerationLedger:
         """
         # Even a superseding adjudication cannot make an unfinished campaign
         # appear admitted. The terminal transaction gate always runs first.
-        self.get(version)
+        original = self.get(version)
         revisions = self.revisions_for(version)
-        if revisions:
-            return revisions[-1].new_verdict
-        return self.get(version).promotion.get("verdict", "UNKNOWN")
+        verdict = original.promotion.get("verdict", "UNKNOWN")
+        for revision in revisions:
+            # Apply the same promotion fence on reload: a hand-edited revision
+            # file must not bypass the writer's check. Historical upward
+            # revisions lacking release attestations are no longer admitted.
+            if revision.new_verdict == "PROMOTED" and verdict != "PROMOTED":
+                raise ValueError(
+                    "ADJUDICATION_PROMOTION_UNAUTHORIZED: unverified upward "
+                    "revision cannot establish a promoted generation"
+                )
+            verdict = revision.new_verdict
+        return verdict
 
     def _flush_revisions(self) -> None:
         self._revisions_path.parent.mkdir(parents=True, exist_ok=True)
