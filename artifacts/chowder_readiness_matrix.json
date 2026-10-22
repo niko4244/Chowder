@@ -164,5 +164,20 @@
     ],
     "accepted_as_full_training_gate": false,
     "reason": "Existing VRAM/WDDM/witness records must be remeasured or explicitly content-pinned by sanctioned gates."
+  },
+  "latest_integration_ci": {
+    "pr": 273,
+    "head_sha": "f099d3ac7d7bc09ef071acb6efd09994ede19667",
+    "overall": "SUCCESS_6_OF_6",
+    "linux_py310": "SUCCESS",
+    "linux_py311": "SUCCESS",
+    "linux_py312": "SUCCESS",
+    "windows_py312": "SUCCESS",
+    "lint_build": "SUCCESS",
+    "transformers_peft_cpu": "SUCCESS",
+    "mergeable": true,
+    "draft": true,
+    "main_merged": false,
+    "release_certification": false
   }
 }

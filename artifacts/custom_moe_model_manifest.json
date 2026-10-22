@@ -459,5 +459,20 @@
     "complete_distribution_rights_verified": false,
     "fable_source_rights": "N2 unresolved",
     "release_permission": "NOT_GRANTED_BY_AUDIT"
+  },
+  "latest_integration_ci": {
+    "pr": 273,
+    "head_sha": "f099d3ac7d7bc09ef071acb6efd09994ede19667",
+    "overall": "SUCCESS_6_OF_6",
+    "linux_py310": "SUCCESS",
+    "linux_py311": "SUCCESS",
+    "linux_py312": "SUCCESS",
+    "windows_py312": "SUCCESS",
+    "lint_build": "SUCCESS",
+    "transformers_peft_cpu": "SUCCESS",
+    "mergeable": true,
+    "draft": true,
+    "main_merged": false,
+    "release_certification": false
   }
 }

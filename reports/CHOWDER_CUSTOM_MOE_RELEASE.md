@@ -88,3 +88,7 @@ The read-only local enrollment completed using the new PR272 code and a NEW file
 ## Local model licensing evidence (2026-10-22)
 
 The verified REAP160 checkpoint includes a full Apache License Version 2.0 text in its LICENSE file, but its accompanying dataset-metadata.json identifies the repository licence as "other" and private. These statements are not equivalent to a verified licence grant for every derivative artifact, hosted model distribution, Fable-derived training example, or adapter. Publication rights remain UNVERIFIED and require a documented independent legal/source-rights decision; N2 is not implicitly cleared by the presence of an Apache-2.0 text.
+
+## Integration CI completion (2026-10-22)
+
+Draft PR #273 at exact commit f099d3ac7d7bc09ef071acb6efd09994ede19667 has now completed all six GitHub checks SUCCESS: Linux Python 3.10, 3.11 and 3.12, Windows Python 3.12, lint/build smoke, and real Transformers/PEFT CPU smoke. GitHub reports mergeable, but the branch is deliberately still draft and NOT merged into main. All frozen hardware/model/licensing/human gates remain in force; CI success is not MoE release certification.
