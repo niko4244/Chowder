@@ -19,7 +19,7 @@ from chowder.growth.promotion_transaction import (
 
 def _prepare_record_and_terminal(
     root: Path, *, run_parent: str = "gen1", ledger_parent: str = "gen1",
-    outcome_parent: str = "gen1",
+    outcome_parent: str = "gen1", model_path_key: str = "base_model_path",
 ) -> tuple[GenerationLedger, Path]:
     base = root / "dense-base"
     base.mkdir(parents=True)
@@ -36,7 +36,7 @@ def _prepare_record_and_terminal(
     ledger = GenerationLedger(root / "ledger")
     ledger.record(
         version="gen2", parent_version=ledger_parent, cycle_id="transaction-parent",
-        base_model={"base_model_path": str(base), "lineage": "primary"},
+        base_model={model_path_key: str(base), "lineage": "primary"},
         dataset_manifest_ref="data", curriculum_manifest_ref="curriculum", recipe={},
         training_evidence_ref="train", evaluation_report_ref="eval", promotion=decision,
     )
@@ -88,5 +88,63 @@ def test_reconcile_accepts_exact_parent_and_read_refuses_late_outcome_change(tmp
     record = json.loads(record_path.read_text(encoding="utf-8"))
     record["cycle_outcome"]["parent_version"] = "gen0"
     record_path.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(ValueError, match="PROMOTION_UNCOMMITTED"):
+        GenerationLedger(tmp_path / "ledger").get("gen2")
+
+
+def _change_base_to_reap(root: Path) -> None:
+    (root / "dense-base" / "config.json").write_text(json.dumps({
+        "model_type": "qwen3_5_moe", "text_config": {"num_experts": 160},
+    }), encoding="utf-8")
+
+
+@pytest.mark.parametrize("model_path_key", ["path", "base_model_path"])
+def test_committed_nonreap_model_path_alias_requires_owner_if_reap_later(
+    tmp_path: Path, model_path_key: str,
+) -> None:
+    """The same live model path must be checked at admission and every read."""
+    ledger, marker = _prepare_record_and_terminal(tmp_path, model_path_key=model_path_key)
+    assert reconcile_transaction(
+        tmp_path, cycle_id="transaction-parent", candidate_version="gen2",
+        journal_verdict="PROMOTED", manifest_digest="a" * 64,
+    ) is not None
+    assert load_transaction(marker)["state"] == "COMMITTED"
+    assert ledger.get("gen2").parent_version == "gen1"
+    _change_base_to_reap(tmp_path)
+    reloaded = GenerationLedger(tmp_path / "ledger")
+    with pytest.raises(ValueError, match="PROMOTION_UNCOMMITTED"):
+        reloaded.get("gen2")
+    assert "gen2" not in reloaded.versions()
+
+
+@pytest.mark.parametrize("model_path_key", ["path", "base_model_path"])
+def test_reconcile_refuses_reap_conversion_before_terminal_commit(
+    tmp_path: Path, model_path_key: str,
+) -> None:
+    """A newly REAP-classified model cannot turn a PREPARED intent into COMMITTED."""
+    _ledger, marker = _prepare_record_and_terminal(tmp_path, model_path_key=model_path_key)
+    _change_base_to_reap(tmp_path)
+    assert reconcile_transaction(
+        tmp_path, cycle_id="transaction-parent", candidate_version="gen2",
+        journal_verdict="PROMOTED", manifest_digest="a" * 64,
+    ) is None
+    assert load_transaction(marker)["state"] == "PREPARED"
+
+
+@pytest.mark.parametrize("damage", ["deleted", "unreadable", "missing_expert_count"])
+def test_committed_unknown_model_path_fails_closed(tmp_path: Path, damage: str) -> None:
+    ledger, marker = _prepare_record_and_terminal(tmp_path, model_path_key="path")
+    assert reconcile_transaction(
+        tmp_path, cycle_id="transaction-parent", candidate_version="gen2",
+        journal_verdict="PROMOTED", manifest_digest="a" * 64,
+    ) is not None
+    assert load_transaction(marker)["state"] == "COMMITTED"
+    model_config = tmp_path / "dense-base" / "config.json"
+    if damage == "deleted":
+        model_config.unlink()
+    elif damage == "unreadable":
+        model_config.write_text("{broken", encoding="utf-8")
+    else:
+        model_config.write_text('{"model_type":"qwen3_5_moe"}', encoding="utf-8")
     with pytest.raises(ValueError, match="PROMOTION_UNCOMMITTED"):
         GenerationLedger(tmp_path / "ledger").get("gen2")
