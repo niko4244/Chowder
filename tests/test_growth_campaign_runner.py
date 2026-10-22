@@ -2327,7 +2327,7 @@ def test_a_later_interrupted_start_cannot_borrow_an_old_terminal(tmp_path: Path)
 
     def write_records() -> None:
         journal.write_text(
-            "".join(json.dumps(row) + "\\n" for row in records), encoding="utf-8"
+            "".join(json.dumps(row) + "\n" for row in records), encoding="utf-8"
         )
 
     write_records()
@@ -2354,10 +2354,10 @@ def test_corrupt_or_unverified_terminal_journal_fails_closed(tmp_path: Path):
     journal.write_text(terminal, encoding="utf-8")  # missing final LF
     assert campaign_runner._journal_outcome(journal) is None
 
-    journal.write_text(terminal + "\\n" + '{"phase":"attempt"', encoding="utf-8")
+    journal.write_text(terminal + "\n" + '{"phase":"attempt"', encoding="utf-8")
     assert campaign_runner._journal_outcome(journal) is None
 
-    journal.write_text(terminal + "\\n", encoding="utf-8")
+    journal.write_text(terminal + "\n", encoding="utf-8")
     verdict.write_text(json.dumps({"verdict": "PROMOTED"}), encoding="utf-8")
     assert campaign_runner._journal_outcome(journal) is None
 
