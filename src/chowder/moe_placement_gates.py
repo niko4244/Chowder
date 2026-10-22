@@ -324,7 +324,7 @@ def render_block(record: dict[str, Any], *, previous: dict[str, Any] | None = No
     rows, carried = merge_rows(gate_rows(record), previous)
     lines = [BLOCK_BEGIN, "", "| gate | value | verdict |", "|---|---|---|"]
     for gate, value, verdict in rows:
-        lines.append(f"| `{gate}` | {value} | {verdict} |")
+        lines.append(f"| `{gate}` | {_table_cell(value)} | {verdict} |")
     lines += [
         "",
         f"- artifact: `{record.get('base_model')}` config sha256 "
@@ -351,6 +351,11 @@ def _seconds(value: Any) -> str:
     return "not measured" if value is None else f"{value} s"
 
 
+def _table_cell(value: str) -> str:
+    """Prevent a witness value like ``|g|`` from creating extra columns."""
+    return value.replace("|", "&#124;")
+
+
 def parse_block(document: str) -> dict[str, Any] | None:
     """Read a rendered block back: gate verdicts, values, numbers, provenance."""
     start = document.find(BLOCK_BEGIN)
@@ -363,7 +368,7 @@ def parse_block(document: str) -> dict[str, Any] | None:
     for line in block.splitlines():
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
         if len(cells) == 3 and cells[0].startswith("`"):
-            values[cells[0].strip("`")] = cells[1]
+            values[cells[0].strip("`")] = cells[1].replace("&#124;", "|")
             verdicts[cells[0].strip("`")] = cells[2]
     numbers: dict[str, float] = {}
     for gate, value in values.items():
@@ -516,7 +521,7 @@ def splice_witness_rows(document: str, witness: dict[str, Any]) -> tuple[str, li
 
 def _compose_block(rows: list[tuple[str, str, str]], extra_lines: list[str]) -> str:
     lines = [BLOCK_BEGIN, "", "| gate | value | verdict |", "|---|---|---|"]
-    lines += [f"| `{gate}` | {value} | {verdict} |" for gate, value, verdict in rows]
+    lines += [f"| `{gate}` | {_table_cell(value)} | {verdict} |" for gate, value, verdict in rows]
     lines += ["", *extra_lines, "", BLOCK_END]
     return "\n".join(lines)
 

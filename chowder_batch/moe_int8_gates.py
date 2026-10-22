@@ -651,8 +651,11 @@ def _record_witness(args: argparse.Namespace) -> int:
     except PlacementGateError as error:
         print(f"refused: {error}", file=sys.stderr)
         return 2
-    prereg.write_text(updated, encoding="utf-8")
-    print(f"recorded {', '.join(recorded)} from {args.witness} into {prereg}")
+    if args.check:
+        print(f"(--check: would record {', '.join(recorded)} from {args.witness}; {prereg} was not written)")
+    else:
+        prereg.write_text(updated, encoding="utf-8")
+        print(f"recorded {', '.join(recorded)} from {args.witness} into {prereg}")
 
     parsed = parse_block(updated) or {}
     verdicts = parsed.get("verdicts") or {}

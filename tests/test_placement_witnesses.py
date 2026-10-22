@@ -340,6 +340,16 @@ def test_a_witness_updates_only_the_rows_it_owns():
     assert "gen1-candidate-7" in updated
 
 
+def test_witness_value_with_vertical_bars_preserves_gradient_gate():
+    """A real gradient witness says '|g|': this must not split Markdown cells."""
+    entry = {"value": "19/19 leaves (smallest peak |g| 0.0075)", "verdict": "pass"}
+    updated, _ = mpg.splice_witness_rows(table(), witness(gradient=entry))
+    assert "&#124;g&#124;" in updated
+    parsed = mpg.parse_block(updated)
+    assert parsed["verdicts"]["gradient"] == "pass"
+    assert parsed["values"]["gradient"] == entry["value"]
+
+
 def test_a_witness_cannot_write_a_row_the_runner_owns():
     with pytest.raises(mpg.PlacementGateError, match="does not own"):
         mpg.splice_witness_rows(
@@ -422,6 +432,20 @@ def test_cli_records_a_witness_file(monkeypatch, tmp_path, capsys):
     assert "7/8 gates measured" in printed
     assert "still cannot declare" in printed
     assert mpg.parse_block(prereg.read_text(encoding="utf-8"))["verdicts"]["smoke"] == "pass"
+
+
+def test_cli_witness_check_does_not_mutate_prereg(tmp_path, capsys):
+    """--check is a dry run for witness import as it is for measured gates."""
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    digest = mpg.artifact_identity(tmp_path)["config_sha256"]
+    prereg = tmp_path / "PREREG.md"
+    original = table(digest=digest)
+    prereg.write_text(original, encoding="utf-8")
+    path = tmp_path / "witness.json"
+    path.write_text(json.dumps(witness(digest=digest)), encoding="utf-8")
+    assert gates.main(["--witness", str(path), "--prereg", str(prereg), "--check"]) == 0
+    assert prereg.read_text(encoding="utf-8") == original
+    assert "was not written" in capsys.readouterr().out
 
 
 def test_cli_operator_spill_verdict_needs_a_basis(monkeypatch, tmp_path, capsys):

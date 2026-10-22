@@ -359,13 +359,14 @@ license it, and both remain unmeasured.
 | `memory_vram` | 11.345 GB peak (gate <= 14.5 GB, checkpointed, 5.383 GB of it the step's own loss) | pass |
 | `host_rss` | 20.57 GB peak (7.28 GB at load) | measured |
 | `throughput` | 51.8215 s/placement-step (spread 64.7157 s, checkpointed) | measured (placement step) |
-| `gradient` | not measured by this runner (needs a LoRA run) | not measured |
-| `smoke` | not measured by this runner (needs a dataset) | not measured |
-| `router_balance` | not measured by this runner (needs a smoke run) | not measured |
-| `wddm_spill` | not observable from here; compare peak_vram_gb to the card | not measured |
+| `gradient` | layers 0, 20, 39: 19/19 LoRA B leaves finite and non-zero (smallest peak &#124;g&#124; 0.0075) | pass |
+| `smoke` | 24 steps, mean loss 1.421 -> 0.551 (+61.2%; needs 1%) | pass |
+| `router_balance` | 40 MoE layers, worst change +1.8% in layer 19 (tolerance 20%) | pass |
+| `wddm_spill` | 10.788 GB peak allocated, 13.645 GB reserved of a 15.93 GB card; driver paging is not observable from PyTorch | not measured |
 
 - artifact: `G:\llm-cold\bf16\Qwen3.6-REAP160` config sha256 `15413a791b9eff423755743bb05b997c93f6ae6f4ce02a1966c9bdfdc2cdc3b9`, 26 shards, 46039573000 bytes
 - measured at 2026-10-21T13:16:57Z on cuda:0 (3 steps, seq 2048), code `b4094c1`
 - int8 placement step: 51.8215 s; bulk comparison arm: not measured
+- witness gates: `gradient`, `router_balance`, `smoke`, `wddm_spill` recorded 2026-10-21T17:37:44Z by moe_int8_witness_run on cuda:0 (24 steps), code `e0218b2`
 
 <!-- END moe-int8-gates -->
