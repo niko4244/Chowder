@@ -95,7 +95,8 @@ def _identity_digests(tmp_path: Path) -> tuple[str, str]:
     """
     base = tmp_path / "parent-model"
     base.mkdir(exist_ok=True)
-    (base / "config.json").write_text("{}", encoding="utf-8")
+    # Keep the digest fixture's bytes identical to the shared campaign model.
+    (base / "config.json").write_text('{"model_type":"llama"}', encoding="utf-8")
     adapter = tmp_path / "parent-adapter"
     adapter.mkdir(exist_ok=True)
     (adapter / "adapter_model.safetensors").write_text("gen1-parent-weights", encoding="utf-8")
