@@ -63,7 +63,8 @@ def load_transaction(path: Path) -> dict[str, Any] | None:
 
 def prepare_transaction(
     root: Path, *, cycle_id: str, candidate_version: str,
-    run_document: Mapping[str, Any], promotion: Mapping[str, Any]
+    run_document: Mapping[str, Any], promotion: Mapping[str, Any],
+    manifest_digest: str,
 ) -> None:
     """Write the intent before GrowthCycle.finalize can touch lineage."""
     path = transaction_path(root / "ledger", candidate_version)
@@ -78,6 +79,7 @@ def prepare_transaction(
         "state": "PREPARED",
         "cycle_id": cycle_id,
         "candidate_version": candidate_version,
+        "manifest_digest": manifest_digest,
         "run_digest": content_digest(run_document),
         "promotion_digest": content_digest(promotion),
     })
@@ -99,7 +101,7 @@ def _matching_generation(root: Path, candidate_version: str) -> dict[str, Any] |
 
 def reconcile_transaction(
     root: Path, *, cycle_id: str, candidate_version: str,
-    journal_verdict: str | None
+    journal_verdict: str | None, manifest_digest: str,
 ) -> dict[str, Any] | None:
     """Return a verified durable verdict, finishing PREPARED iff all evidence exists.
 
@@ -113,6 +115,7 @@ def reconcile_transaction(
     if (
         marker.get("cycle_id") != cycle_id
         or marker.get("candidate_version") != candidate_version
+        or marker.get("manifest_digest") != manifest_digest
         or journal_verdict != "PROMOTED"
     ):
         return None

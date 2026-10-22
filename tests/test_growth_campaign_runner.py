@@ -2614,6 +2614,27 @@ def test_promotion_transaction_rejects_tampered_lineage_even_after_commit(
     assert result.verdict == "REFUSED"
 
 
+def test_committed_transaction_cannot_be_replayed_under_a_changed_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A valid old promotion cannot certify a new budget or preregistration."""
+    manifest, runner, document = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    first = run_campaign(manifest)
+    assert first.verdict == "PROMOTED"
+    root = Path(manifest.state_root)
+    original_verdict = (root / "campaign-run.json").read_bytes()
+    new_budget = dict(document["budget"])
+    new_budget["wall_gpu_hours_ceiling_campaign"] *= 0.95
+    changed = _redeclare(document, budget=new_budget)
+    number_before = len(runner.commands)
+    refused = run_campaign(changed)
+    assert refused.verdict == "REFUSED"
+    assert "PROMOTION_TRANSACTION_UNRESOLVED" in refused.phases[0]["detail"]
+    assert (root / "campaign-run.json").read_bytes() == original_verdict
+    assert len(runner.commands) == number_before
+
+
 @pytest.mark.parametrize("tampered_file", ["campaign-run.json", "ledger/generations.json"])
 def test_promotion_recovery_refuses_tampered_precommit_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tampered_file: str

@@ -45,7 +45,7 @@ import json
 import os
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -105,6 +105,7 @@ from .lineage import GenerationLedger, RegressionMemory
 from .metric_binding import MetricBinder, PromotionAssembly
 from .recipe_planner import HardwareBudget, RecipePlanner, TrainingRecipe
 from .promotion_transaction import (
+    content_digest,
     load_transaction,
     prepare_transaction,
     reconcile_transaction,
@@ -726,6 +727,7 @@ def _run_campaign_locked(
     assert_every_field_enforced()
     require_declared_inputs(manifest, phase="run")
     root = Path(state_root or manifest.state_root)
+    declaration_digest = content_digest(asdict(manifest))
     # A crash after the durable promotion intent may have left a committed
     # verdict, an unfinished ledger write, or only the PREPARED marker. Replay
     # only a fully verified terminal decision; otherwise preserve forensic
@@ -741,6 +743,7 @@ def _run_campaign_locked(
                 cycle_id=manifest.cycle_id,
                 candidate_version=manifest.resolved_candidate_version(),
                 journal_verdict=_journal_outcome(_journal_path(root)),
+                manifest_digest=declaration_digest,
             )
         except ValueError:
             recovered = None
@@ -1442,6 +1445,7 @@ def _run_campaign_locked(
         prepare_transaction(
             root, cycle_id=manifest.cycle_id, candidate_version=candidate_version,
             run_document=run.to_dict(), promotion=finalized_decision.to_dict(),
+            manifest_digest=declaration_digest,
         )
         _journal_event(root, phase="promotion_prepare", status="PREPARED")
     outcome = _finalize(
@@ -1463,6 +1467,7 @@ def _run_campaign_locked(
         committed = reconcile_transaction(
             root, cycle_id=manifest.cycle_id, candidate_version=candidate_version,
             journal_verdict=_journal_outcome(_journal_path(root)),
+            manifest_digest=declaration_digest,
         )
         if committed is None:
             raise CampaignRunRefusal(
