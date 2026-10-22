@@ -25,13 +25,22 @@ def _decision(verdict: str) -> PromotionDecision:
 
 
 def _record(ledger: GenerationLedger, verdict: str = "PROMOTED") -> None:
+    # Historical PROMOTED fixtures now need real, inspectable non-REAP model
+    # identity: a Windows-only F: path is not a valid Linux model provenance
+    # witness, and must not bypass the production fail-closed reader.
+    base = ledger._path.parent / "legacy-dense-base"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "config.json").write_text(
+        json.dumps({"model_type": "llama"}), encoding="utf-8"
+    )
+    base_path = str(base.resolve())
     if verdict == "PROMOTED":
         # Exercise append-only corrections on a pre-transaction historical
         # non-REAP ledger. New promoted writes require a PREPARED intent.
         ledger._path.parent.mkdir(parents=True, exist_ok=True)
         ledger._path.write_text(json.dumps([{
             "version": "gen1", "parent_version": "gen0", "cycle_id": "c1",
-            "base_model": {"path": "F:/llm-models/tiny"},
+            "base_model": {"path": base_path, "lineage": "dense"},
             "promotion": _decision(verdict).to_dict(),
         }]), encoding="utf-8")
         return
@@ -39,7 +48,7 @@ def _record(ledger: GenerationLedger, verdict: str = "PROMOTED") -> None:
         version="gen1",
         parent_version="gen0",
         cycle_id="c1",
-        base_model={"path": "F:/llm-models/tiny"},
+        base_model={"path": base_path, "lineage": "dense"},
         dataset_manifest_ref="d.json",
         curriculum_manifest_ref="c.json",
         recipe={"lr": 1e-4},
