@@ -277,5 +277,33 @@
       "failed": 0
     }
   },
-  "integration_suite_note": "Overlapping test selections, do not sum to unique count."
+  "integration_suite_note": "Overlapping test selections, do not sum to unique count.",
+  "local_sha_enrollment": {
+    "status": "PASS",
+    "verify": {
+      "schema": "chowder.moe-checkpoint-sha256.v1",
+      "inventory_path": "C:\\Users\\nikma\\_audit\\reap160_content_inventory_verified_20261022.json",
+      "checkpoint_path": "G:\\llm-cold\\bf16\\Qwen3.6-REAP160",
+      "file_count": 36,
+      "weight_shards": 26,
+      "content_sha256": "a1ba0e434eea76fdfc4b85843ab90d7957fa2ffd08ac319c2d2f8aed3ae4aa92",
+      "inventory_sha256": "ece6b1c359c357450539826d4183edc5b80182ca6aeaa703d7ce091b9c142b41",
+      "third_pass_matches_two_prior_hashes": true,
+      "fast_identity_check": "PASS",
+      "other_package_files_hashed_previously": [
+        "LICENSE",
+        "dataset-metadata.json",
+        "reap-prune.json"
+      ],
+      "accepted_as_full_training_gate": false,
+      "reason": "Existing VRAM/WDDM/witness records must be remeasured or explicitly content-pinned by sanctioned gates."
+    },
+    "command": "python chowder_batch/moe_sha_enroll.py --model G:\\llm-cold\\bf16\\Qwen3.6-REAP160 --out C:\\Users\\nikma\\_audit\\reap160_content_inventory_verified_20261022.json",
+    "integration_cpu_66": {
+      "passed": 66,
+      "failed": 0,
+      "suite": "test_tui_growth, growth_autonomous_integration, growth_certification_coupling, growth_promotion_settlement, moe_checkpoint_inventory and moe_int8_witness_preflight"
+    },
+    "note": "Model bytes read with SHA256; no GPU training or inference run."
+  }
 }

@@ -427,11 +427,29 @@
   "current_engineering": {
     "moe_sha_inventory_implementation_sha": "c2202c1",
     "integrated_sha": "f099d3a",
-    "inventory_enrollment": "RUNNING_NOT_VERIFIED",
+    "inventory_enrollment": "COMPLETED_SHA_VERIFIED_FAST_IDENTITY_PASS",
     "actual_v2_model_found": false,
     "v2_calibration": {
       "rows": 717,
       "sha256": "516f2e4a931fd3f025c6206e1f7e96b53ed68801ec503cb3d3367ca43f540c9f"
+    },
+    "content_inventory": {
+      "schema": "chowder.moe-checkpoint-sha256.v1",
+      "inventory_path": "C:\\Users\\nikma\\_audit\\reap160_content_inventory_verified_20261022.json",
+      "checkpoint_path": "G:\\llm-cold\\bf16\\Qwen3.6-REAP160",
+      "file_count": 36,
+      "weight_shards": 26,
+      "content_sha256": "a1ba0e434eea76fdfc4b85843ab90d7957fa2ffd08ac319c2d2f8aed3ae4aa92",
+      "inventory_sha256": "ece6b1c359c357450539826d4183edc5b80182ca6aeaa703d7ce091b9c142b41",
+      "third_pass_matches_two_prior_hashes": true,
+      "fast_identity_check": "PASS",
+      "other_package_files_hashed_previously": [
+        "LICENSE",
+        "dataset-metadata.json",
+        "reap-prune.json"
+      ],
+      "accepted_as_full_training_gate": false,
+      "reason": "Existing VRAM/WDDM/witness records must be remeasured or explicitly content-pinned by sanctioned gates."
     }
   }
 }
