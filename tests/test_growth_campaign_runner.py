@@ -1002,6 +1002,7 @@ def test_reap_qualified_candidate_awaits_human_before_lineage(tmp_path, monkeypa
 
 def test_reap_synthetic_campaign_requires_explicit_fixture_approval(tmp_path, monkeypatch):
     """Only this test injects an approval; no production flag can enable it."""
+    from chowder.growth import owner_approval
     from chowder.growth.owner_approval import _grant
 
     manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
@@ -1015,6 +1016,9 @@ def test_reap_synthetic_campaign_requires_explicit_fixture_approval(tmp_path, mo
 
     monkeypatch.setattr(campaign_runner, "authorize_promotion", approve)
     monkeypatch.setattr(campaign_runner, "judge_certifies_candidate", lambda root: True)
+    # The ledger itself checks the frozen judge independently; inject the
+    # explicit synthetic result at both seams, never through an env switch.
+    monkeypatch.setattr(owner_approval, "judge_certifies_candidate", lambda root: True)
     run = run_campaign(manifest)
     assert len(calls) == 1
     assert calls[0]["artifact_sha256"] == run.selection["artifact_sha256"]
