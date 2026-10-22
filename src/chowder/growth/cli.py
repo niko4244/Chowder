@@ -531,7 +531,11 @@ def register_growth_subcommands(sub: argparse._SubParsersAction) -> None:
     settle.add_argument("manifest", help="Path to the campaign manifest JSON")
     settle.add_argument(
         "accounting",
-        help="Path to the cycle_compute_accounting.json produced by the cycle",
+        help=(
+            "Path to the cycle_compute_accounting.json under the finished "
+            "campaign state root; requires matching terminal campaign-run.json "
+            "and journal, not standalone ledger fixtures"
+        ),
     )
     settle.set_defaults(func=_growth_campaign_settle)
 
@@ -915,20 +919,26 @@ def _growth_campaign_run(args: argparse.Namespace) -> int:
 
 
 def _growth_campaign_settle(args: argparse.Namespace) -> int:
-    """Settle the campaign's actual cost from its durable accounting artifact."""
+    """Settle only a terminal campaign's independently bound accounting."""
     from .campaign import CampaignManifest, settle_campaign
-    from .compute_cost import checked_ledger_total
+    from .campaign_settlement_verify import verified_settlement_total
 
     manifest = CampaignManifest.from_file(Path(args.manifest))
-    document = json.loads(Path(args.accounting).read_text(encoding="utf-8"))
     try:
-        total = checked_ledger_total(document, cycle_id=manifest.cycle_id)
-    except ValueError as exc:
+        total = verified_settlement_total(
+            cycle_id=manifest.cycle_id,
+            parent_version=manifest.parent_version,
+            candidate_version=manifest.resolved_candidate_version(),
+            state_root=Path(manifest.state_root),
+            accounting=Path(args.accounting),
+            manifest=manifest,
+        )
+    except (ValueError, OSError, UnicodeError) as exc:
         _print_json({"cycle_id": manifest.cycle_id, "budget_compliant": False,
                      "refusal_reason": str(exc)})
         return 1
     verdict = settle_campaign(manifest, total=total)
-    return _print_json(
+    _print_json(
         {
             "cycle_id": manifest.cycle_id,
             "budget_compliant": verdict.compliant,
@@ -940,6 +950,7 @@ def _growth_campaign_settle(args: argparse.Namespace) -> int:
             },
         }
     )
+    return 0 if verdict.compliant else 1
 
 
 # --------------------------------------------------------------------------

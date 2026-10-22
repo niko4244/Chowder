@@ -425,7 +425,10 @@ class CycleCostLedger:
         return document["digest_sha256"]
 
 
-def checked_ledger_total(document: Mapping[str, Any], *, cycle_id: str) -> ComputeCost:
+def checked_ledger_total(
+    document: Mapping[str, Any], *, cycle_id: str,
+    allow_zero_evaluation: bool = False,
+) -> ComputeCost:
     """Read an accounting artifact without trusting editable claimed totals.
 
     An embedded digest detects accidental/casual alteration but is not an
@@ -452,7 +455,12 @@ def checked_ledger_total(document: Mapping[str, Any], *, cycle_id: str) -> Compu
             if row["kind"] == "baseline_reference":
                 if parsed_cost.incremental or parsed_cost.wall_gpu_hours or parsed_cost.device_gpu_hours:
                     raise ValueError("baseline reference must have zero non-incremental cost")
-            elif not parsed_cost.incremental:
+            elif not parsed_cost.incremental and not (
+                allow_zero_evaluation
+                and row["kind"] == "evaluation"
+                and parsed_cost.wall_gpu_hours == 0
+                and parsed_cost.device_gpu_hours == 0
+            ):
                 raise ValueError("paid accounting entry cannot be non-incremental")
             ledger.add(
                 row["label"], row["kind"], parsed_cost,
