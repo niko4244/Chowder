@@ -3009,6 +3009,39 @@ def test_promotion_transaction_rejects_tampered_lineage_even_after_commit(
     assert result.verdict == "REFUSED"
 
 
+@pytest.mark.parametrize("tamper", ["journal", "cycle_outcome", "outcome_promotion"])
+def test_committed_lineage_read_rechecks_terminal_journal_and_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str
+):
+    """A COMMITTED marker cannot outlive the exact terminal decision it certified."""
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    assert run_campaign(manifest).verdict == "PROMOTED"
+    root = Path(manifest.state_root)
+    ledger_root = root / "ledger"
+    assert GenerationLedger(ledger_root).effective_verdict(CANDIDATE_VERSION) == "PROMOTED"
+
+    if tamper == "journal":
+        journal = root / "campaign-journal.jsonl"
+        with journal.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"phase": "campaign_start", "status": "started"}) + "\n")
+    else:
+        record_path = root / "campaign-run.json"
+        document = json.loads(record_path.read_text(encoding="utf-8"))
+        if tamper == "cycle_outcome":
+            document["cycle_outcome"]["verdict"] = "REJECTED"
+        else:
+            document["cycle_outcome"]["promotion"]["verdict"] = "REJECTED"
+        record_path.write_text(json.dumps(document), encoding="utf-8")
+
+    reloaded = GenerationLedger(ledger_root)
+    with pytest.raises(ValueError, match="PROMOTION_UNCOMMITTED"):
+        reloaded.get(CANDIDATE_VERSION)
+    with pytest.raises(ValueError, match="PROMOTION_UNCOMMITTED"):
+        reloaded.effective_verdict(CANDIDATE_VERSION)
+    assert CANDIDATE_VERSION not in reloaded.versions()
+
+
 def test_committed_transaction_cannot_be_replayed_under_a_changed_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

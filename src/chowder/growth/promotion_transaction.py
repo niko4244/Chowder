@@ -214,12 +214,30 @@ def assert_committed(ledger_root: Path, record: Mapping[str, Any]) -> None:
             if not isinstance(identity, Mapping):
                 raise ValueError("PROMOTION_UNCOMMITTED: promoted model identity is missing")
             path_value = str(identity.get("base_model_path") or identity.get("path") or "")
-            if not path_value:
-                raise ValueError("PROMOTION_UNCOMMITTED: promoted model has no verifiable base path")
-            if identity.get("lineage") == "reap-moe" or requires_owner_approval(path_value):
+            if not path_value or not Path(path_value).is_absolute():
+                raise ValueError("PROMOTION_UNCOMMITTED: promoted model has no absolute verifiable base path")
+            # Old records may lack transactions, but a nonexistent or
+            # unclassifiable base is not evidence that this was non-REAP.
+            # Recheck physical identity on every read, including after reload.
+            base = Path(path_value)
+            try:
+                config = json.loads((base / "config.json").read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError) as exc:
                 raise ValueError(
-                    "PROMOTION_UNCOMMITTED: REAP N5 release lacks a committed "
-                    "promotion transaction and human approval evidence"
+                    "PROMOTION_UNCOMMITTED: historical promoted base identity cannot be verified"
+                ) from exc
+            if (
+                not base.is_dir()
+                or not isinstance(config, dict)
+                or not isinstance(config.get("model_type"), str)
+                or not config["model_type"].strip()
+                or identity.get("lineage") not in (None, "", "primary", "dense")
+                or config["model_type"] == "qwen3_5_moe"
+                or requires_owner_approval(base)
+            ):
+                raise ValueError(
+                    "PROMOTION_UNCOMMITTED: historical promoted base is unverified or "
+                    "may require REAP N5 approval and a committed transaction"
                 )
         return
     if (
@@ -241,3 +259,22 @@ def assert_committed(ledger_root: Path, record: Mapping[str, Any]) -> None:
     # merely an unverified string in a separately mutable campaign JSON.
     if content_digest({k: v for k, v in document.items() if k != "cycle_outcome"}) != marker.get("run_digest"):
         raise ValueError("PROMOTION_UNCOMMITTED: campaign record changed after approval")
+    outcome = document.get("cycle_outcome")
+    if (
+        document.get("verdict") != "PROMOTED"
+        or document.get("cycle_id") != record["cycle_id"]
+        or document.get("candidate_version") != record["version"]
+        or not isinstance(outcome, Mapping)
+        or outcome.get("cycle_id") != record["cycle_id"]
+        or outcome.get("candidate_version") != record["version"]
+        or outcome.get("verdict") != "PROMOTED"
+        or outcome.get("promotion") != record["promotion"]
+    ):
+        raise ValueError("PROMOTION_UNCOMMITTED: campaign terminal outcome disagrees with lineage")
+    # The digest intentionally excludes cycle_outcome because it is published
+    # after finalization. Verify that late field and the fsynced journal on
+    # every read; a COMMITTED marker alone cannot keep a stale promotion live.
+    from .campaign_runner import _journal_outcome
+
+    if _journal_outcome(root / "campaign-journal.jsonl") != "PROMOTED":
+        raise ValueError("PROMOTION_UNCOMMITTED: final terminal journal is absent or inconsistent")
