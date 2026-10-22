@@ -647,6 +647,123 @@ def _refuse_interrupted(
     return _write_record(run, root, outcome=None, terminal=False, record_name=target)
 
 
+def _campaign_root_state(
+    root: Path, *, replay_identity: str,
+) -> tuple[str, tuple[dict[str, Any], ...], str]:
+    """Read-only campaign admission: fresh, verified resume, or occupied.
+
+    A terminal verdict is the *end* of a state-root campaign, not authority
+    to overwrite that campaign's receipts or spend. Never infer permission
+    from an editable human-approval phase: its removal must not rearm compute.
+    """
+    run_record = root / "campaign-run.json"
+    if run_record.exists():
+        # The approval phase improves the diagnostic only. Occupancy derives
+        # from durable record existence, not from its editable JSON contents.
+        try:
+            previous = json.loads(run_record.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            previous = None
+        phases = previous.get("phases") if isinstance(previous, Mapping) else None
+        approval_pending = isinstance(previous, Mapping) and any(
+            isinstance(phase, Mapping)
+            and phase.get("phase") == "human_approval"
+            and phase.get("verdict") == "pending"
+            for phase in (phases if isinstance(phases, (list, tuple)) else ())
+        )
+        return (
+            "occupied", (),
+            (
+                "HUMAN_APPROVAL_PENDING: the qualified candidate awaits frozen "
+                "judge and owner approval; do not retrain it in this root."
+                if approval_pending else
+                "CAMPAIGN_STATE_OCCUPIED: campaign-run.json already exists; "
+                "its terminal/pending/ambiguous verdict and prior compute must "
+                "remain intact. Start an intentional new campaign in a new state root."
+            ),
+        )
+    journal = _journal_path(root)
+    receipts = root / "campaign-attempt-receipts"
+    refusal_record = root / "campaign-entry-refusal.json"
+    if not journal.exists():
+        attempts = root / "attempts"
+        orphaned_attempts = attempts.is_dir() and any(attempts.iterdir())
+        leftover_outputs = any(
+            (root / filename).exists()
+            for filename in (
+                "cycle_compute_accounting.json", "candidate_evaluation.json",
+                "chosen_candidate.json", "gen2_certification.json",
+            )
+        )
+        if (
+            receipts.exists() or refusal_record.exists()
+            or orphaned_attempts or leftover_outputs
+        ):
+            return (
+                "occupied", (),
+                "CAMPAIGN_STATE_OCCUPIED: durable attempts, cost/evaluation "
+                "artifacts, receipts or an entry refusal remain without their "
+                "campaign journal; "
+                "restarting could lose already-spent compute.",
+            )
+        return "fresh", (), "state root has no prior campaign"
+    if _journal_outcome(journal) is not None:
+        return (
+            "occupied", (),
+            "CAMPAIGN_STATE_OCCUPIED: the prior campaign has a terminal "
+            "journal verdict. Its state root may not be reused for training.",
+        )
+    # An otherwise valid terminal record whose campaign-run.json was deleted
+    # or corrupted is still evidence of concluded/spent work. Do not reinterpret
+    # that history as an in-progress campaign eligible for replay.
+    try:
+        past_rows = [
+            json.loads(line)
+            for line in journal.read_text(encoding="utf-8").splitlines()
+        ]
+    except (OSError, UnicodeError, ValueError):
+        past_rows = []
+    if any(
+        isinstance(row, Mapping) and row.get("phase") == "terminal"
+        for row in past_rows
+    ):
+        return (
+            "occupied", (),
+            "CAMPAIGN_STATE_OCCUPIED: terminal journal evidence remains but "
+            "its campaign verdict is missing or inconsistent; refuse replay.",
+        )
+    try:
+        replay = tuple(load_receipts(root, manifest_digest=replay_identity))
+    except ResumeRefusal as error:
+        return "unresolved", (), str(error)
+    return "resume", replay, f"{len(replay)} verified settled attempt(s) may replay"
+
+
+def _refuse_occupied(
+    manifest: CampaignManifest, root: Path, *, detail: str,
+) -> CampaignRun:
+    """Publish an entry refusal without modifying a prior terminal journal."""
+    run = CampaignRun(
+        cycle_id=manifest.cycle_id,
+        parent_version=manifest.parent_version,
+        candidate_version=manifest.resolved_candidate_version(),
+        verdict="REFUSED",
+        phases=({"phase": "entry_check", "verdict": "refused", "detail": detail},),
+        admission=(),
+        cost={},
+        settlement={},
+        ceiling_enforcement={},
+        certification={},
+        selection={},
+        promotion=None,
+        record_path="",
+    )
+    return _write_record(
+        run, root, outcome=None, terminal=False,
+        record_name="campaign-entry-refusal.json",
+    )
+
+
 @contextmanager
 def _campaign_writer_lock(root: Path):
     """Hold one cross-process advisory writer lock for the entire campaign.
@@ -788,35 +905,13 @@ def _run_campaign_locked(
         if recovered is None or marker is None or recovered.get("parent_version") != manifest.parent_version:
             return _refuse_interrupted(manifest, root, promotion_unresolved=True)
         return _restored_run(recovered, root)
-    # A pending N5 release is not permission to spend the same campaign again.
-    # Preserve the original terminal candidate record and refuse new compute,
-    # even though its journal has an honest INCONCLUSIVE terminal verdict.
-    run_path = root / "campaign-run.json"
-    if run_path.is_file():
-        try:
-            previous_run = json.loads(run_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError):
-            previous_run = None
-        if isinstance(previous_run, dict) and any(
-            isinstance(phase, dict)
-            and phase.get("phase") == "human_approval"
-            and phase.get("verdict") == "pending"
-            for phase in (previous_run.get("phases") or ())
-        ):
-            return _refuse_interrupted(manifest, root, approval_pending=True)
-    # Entry check: a journal with no terminal record means a previous run on
-    # this state root never reached a verdict. Refuse rather than silently
-    # starting from the top over its spent attempts (fail-closed, like every
-    # other admission rule).
-    journal = _journal_path(root)
-    interrupted = journal.is_file() and _journal_outcome(journal) is None
-    root.mkdir(parents=True, exist_ok=True)
-    replay: list[dict[str, Any]] = []
-    if interrupted:
-        try:
-            replay = load_receipts(root, manifest_digest=replay_identity)
-        except ResumeRefusal:
-            return _refuse_interrupted(manifest, root)
+    state, verified, detail = _campaign_root_state(root, replay_identity=replay_identity)
+    if state == "occupied":
+        return _refuse_occupied(manifest, root, detail=detail)
+    if state == "unresolved":
+        return _refuse_interrupted(manifest, root)
+    interrupted = state == "resume"
+    replay = list(verified)
     phases: list[Mapping[str, Any]] = _JournalingPhases(root)
     if not interrupted:
         _journal_event(
@@ -3041,6 +3136,8 @@ READINESS_CANDIDATE_SEARCH = "READINESS_CANDIDATE_SEARCH"
 READINESS_CAMPAIGN_PROJECTION = "READINESS_CAMPAIGN_PROJECTION"
 READINESS_EVALUATOR = "READINESS_EVALUATOR"
 READINESS_EVALUATOR_COVERAGE = "READINESS_EVALUATOR_COVERAGE"
+READINESS_CAMPAIGN_STATE = "READINESS_CAMPAIGN_STATE"
+READINESS_EXECUTOR_ADMISSION = "READINESS_EXECUTOR_ADMISSION"
 
 
 @dataclass(frozen=True)
@@ -3168,6 +3265,46 @@ def check_campaign_readiness(
         return f"required inputs declared and source file SHA256 manifest {digest[:12]} verified"
 
     check("declared_inputs", READINESS_DECLARED_INPUT, ("schema",), declared_source_identity)
+
+    def campaign_state_detail() -> str:
+        from chowder.worker_env import chowder_source_identity
+
+        replay_identity = content_digest({
+            "declaration": content_digest(asdict(manifest)),
+            "declared_files": declared_inputs_digest(manifest),
+            "source_sha256": chowder_source_identity()["source_sha256"],
+        })
+        state, receipts, detail = _campaign_root_state(
+            root, replay_identity=replay_identity,
+        )
+        if state not in ("fresh", "resume"):
+            raise CampaignRunRefusal(detail)
+        # The runner also holds a kernel lock throughout admission and
+        # execution. Probe an existing lock without creating/writing one:
+        # readiness is advisory, and the runner acquires it again atomically.
+        lock_path = root / ".campaign-writer.lock"
+        if lock_path.exists():
+            try:
+                with lock_path.open("r+b") as handle:
+                    handle.seek(0)
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError as error:
+                raise CampaignRunRefusal(
+                    f"CAMPAIGN_WRITER_BUSY: state root writer is locked: {error}"
+                ) from error
+        return detail
+
+    check(
+        "campaign_state", READINESS_CAMPAIGN_STATE,
+        ("declared_inputs",), campaign_state_detail,
+    )
 
     def base_identity() -> str:
         return _verify_base_identity(manifest)
@@ -3324,6 +3461,34 @@ def check_campaign_readiness(
     check("recipe_set", READINESS_RECIPE_SET, ("plan",), lambda: (
         f"{len(recipes_of())} declared recipe(s) proposed by the planner"
     ))
+
+    def training_admission_detail() -> str:
+        # Mirror the run's provider and per-recipe admission seam before it
+        # journals campaign_start or touches an actual training subprocess.
+        if train_fn is not None:
+            executor = train_fn
+        else:
+            executor, _selection = build_executor_with_selection(
+                manifest, state_root=root, runner=runner,
+            )
+        admit = getattr(executor, "admit", None)
+        if not callable(admit):
+            raise CampaignRunRefusal("training executor has no admit(recipe) seam")
+        refusals = []
+        for recipe in recipes_of():
+            refusal = admit(recipe)
+            if refusal is not None:
+                refusals.append(f"{recipe.recipe_id}: {refusal}")
+        if refusals and stops_on_admission_refusal(manifest.stopping_rules):
+            raise CampaignRunRefusal("; ".join(refusals))
+        if len(refusals) == len(recipes_of()):
+            raise CampaignRunRefusal("every declared recipe was refused by its executor")
+        return f"{len(recipes_of()) - len(refusals)} recipe(s) admitted by training backend"
+
+    check(
+        "executor_admission", READINESS_EXECUTOR_ADMISSION,
+        ("recipe_set", "campaign_state"), training_admission_detail,
+    )
 
     def search_detail() -> str:
         plan = plan_of()
