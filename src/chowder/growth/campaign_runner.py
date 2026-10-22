@@ -103,6 +103,12 @@ from .failure_bank import FailureBank
 from .frontier_reference import SnapshotStore
 from .lineage import GenerationLedger, RegressionMemory
 from .metric_binding import MetricBinder, PromotionAssembly
+from .owner_approval import (
+    authorize_promotion,
+    judge_certifies_candidate,
+    requires_owner_approval,
+    verify_grant,
+)
 from .recipe_planner import HardwareBudget, RecipePlanner, TrainingRecipe
 from .campaign_resume import (
     ResumeRefusal,
@@ -565,7 +571,8 @@ def _journal_outcome(journal: Path) -> str | None:
 
 
 def _refuse_interrupted(
-    manifest: CampaignManifest, root: Path, *, promotion_unresolved: bool = False
+    manifest: CampaignManifest, root: Path, *, promotion_unresolved: bool = False,
+    approval_pending: bool = False,
 ) -> CampaignRun:
     """Refuse entry on a state root whose journal never reached a verdict.
 
@@ -580,7 +587,15 @@ def _refuse_interrupted(
     deliberately -- archive or delete the journal and ``campaign-run.json``.
     """
     journal = _journal_path(root)
-    if promotion_unresolved:
+    if approval_pending:
+        detail = (
+            "HUMAN_APPROVAL_PENDING: this root contains a fully measured candidate "
+            "awaiting independent frozen REAP judge certification and owner N5 "
+            "approval. Its compute is already spent; do not rerun training as a "
+            "substitute for the missing release transaction. The original run "
+            "and evaluation evidence remain unchanged."
+        )
+    elif promotion_unresolved:
         detail = (
             "PROMOTION_TRANSACTION_UNRESOLVED: a PREPARED or inconsistent "
             "promotion transaction exists. Its lineage is not admitted; "
@@ -773,6 +788,22 @@ def _run_campaign_locked(
         if recovered is None or marker is None or recovered.get("parent_version") != manifest.parent_version:
             return _refuse_interrupted(manifest, root, promotion_unresolved=True)
         return _restored_run(recovered, root)
+    # A pending N5 release is not permission to spend the same campaign again.
+    # Preserve the original terminal candidate record and refuse new compute,
+    # even though its journal has an honest INCONCLUSIVE terminal verdict.
+    run_path = root / "campaign-run.json"
+    if run_path.is_file():
+        try:
+            previous_run = json.loads(run_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            previous_run = None
+        if isinstance(previous_run, dict) and any(
+            isinstance(phase, dict)
+            and phase.get("phase") == "human_approval"
+            and phase.get("verdict") == "pending"
+            for phase in (previous_run.get("phases") or ())
+        ):
+            return _refuse_interrupted(manifest, root, approval_pending=True)
     # Entry check: a journal with no terminal record means a previous run on
     # this state root never reached a verdict. Refuse rather than silently
     # starting from the top over its spent attempts (fail-closed, like every
@@ -1540,6 +1571,47 @@ def _run_campaign_locked(
             }
         )
 
+    # The promotion policy's PROMOTED is *candidate qualification*, not Nik's
+    # permission to advance a generation. A denied/headless prompt preserves
+    # every measured arm and the mechanical verdict in `promotion`, but no
+    # promotion transaction or lineage record may be written. Never accept an
+    # environment variable as an approval switch, even during tests.
+    owner_grant = None
+    if verdict == "PROMOTED" and requires_owner_approval(manifest.base_model_path):
+        artifact_sha = str((selected or {}).get("artifact_sha256") or "")
+        judge_passed = judge_certifies_candidate(root)
+        if judge_passed:
+            owner_grant = authorize_promotion(
+                cycle_id=manifest.cycle_id,
+                candidate_version=candidate_version,
+                artifact_sha256=artifact_sha,
+                judge_certified=True,
+            )
+        approved = judge_passed and verify_grant(
+            owner_grant, cycle_id=manifest.cycle_id,
+            candidate_version=candidate_version, artifact_sha256=artifact_sha,
+        )
+        phases.append({
+            "phase": "human_approval",
+            "verdict": "approved" if approved else "pending",
+            "cycle_id": manifest.cycle_id,
+            "candidate_version": candidate_version,
+            "artifact_sha256": artifact_sha,
+            "frozen_judge_passed": judge_passed,
+            "detail": (
+                f"operator explicitly approved {candidate_version} artifact sha256 {artifact_sha}"
+                if approved else "HUMAN_APPROVAL_REQUIRED: qualified candidate is not authorized "
+                "for generation advancement; frozen REAP judge certification and subsequent "
+                "owner approval are both required; no lineage will be recorded"
+            ),
+        })
+        if not approved:
+            verdict = "INCONCLUSIVE"
+            decision = replace(
+                decision, verdict=verdict,
+                reasons=tuple(decision.reasons) + ("HUMAN_APPROVAL_REQUIRED",),
+            )
+
     run = CampaignRun(
         cycle_id=manifest.cycle_id,
         parent_version=manifest.parent_version,
@@ -1591,6 +1663,7 @@ def _run_campaign_locked(
         # generation: a reader sees which generator produced it without
         # joining this run record.
         backend_record=backend_record,
+        owner_approval=owner_grant,
     )
     saved = _write_record(run, root, outcome=outcome)
     if run.verdict == "PROMOTED":
@@ -2754,12 +2827,16 @@ def _finalize(
     root: Path,
     evaluation_report_ref: str,
     backend_record: Mapping[str, Any] | None = None,
+    owner_approval: Any = None,
 ) -> CycleOutcome:
     return cycle.finalize(
         decision,
         base_model={
             **manifest.model_identity(),
             "version": manifest.parent_version,
+            "lineage": (
+                "reap-moe" if requires_owner_approval(manifest.base_model_path) else "primary"
+            ),
         },
         dataset_manifest_ref=selected.get("evidence_path", "") if selected else "",
         curriculum_manifest_ref=str(root / "cycle_compute_accounting.json"),
@@ -2768,6 +2845,8 @@ def _finalize(
         evaluation_report_ref=evaluation_report_ref,
         notes=f"campaign {manifest.cycle_id} (policy {PROMOTION_POLICY_VERSION})",
         backend=_backend_lineage(backend_record),
+        owner_approval=owner_approval,
+        candidate_artifact_sha256=str((selected or {}).get("artifact_sha256") or ""),
     )
 
 

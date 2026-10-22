@@ -99,6 +99,44 @@ def _matching_generation(root: Path, candidate_version: str) -> dict[str, Any] |
     return matches[0] if len(matches) == 1 else None
 
 
+def _reap_approval_in_record(root: Path, document: Mapping[str, Any], generation: Mapping[str, Any]) -> bool:
+    """Refuse recovery/read of a REAP PROMOTED result with no bound N5 evidence.
+
+    The immutable transaction digest binds the approval phase to this run's
+    selected adapter. This is audit evidence of an interactive confirmation,
+    not cryptographic proof of the operator's identity.
+    """
+    from .owner_approval import requires_owner_approval
+
+    base_model = generation.get("base_model") or {}
+    if not isinstance(base_model, Mapping):
+        return False
+    model_path = str(base_model.get("base_model_path") or "")
+    if base_model.get("lineage") != "reap-moe" and (
+        not model_path or not requires_owner_approval(model_path)
+    ):
+        return True
+    selection = document.get("selection")
+    if not isinstance(selection, Mapping):
+        return False
+    artifact = selection.get("artifact_sha256")
+    if not isinstance(artifact, str) or len(artifact) != 64:
+        return False
+    phases = document.get("phases")
+    if not isinstance(phases, list):
+        return False
+    matches = [
+        item for item in phases
+        if isinstance(item, Mapping) and item.get("phase") == "human_approval"
+        and item.get("verdict") == "approved"
+        and item.get("cycle_id") == document.get("cycle_id")
+        and item.get("candidate_version") == document.get("candidate_version")
+        and item.get("artifact_sha256") == artifact
+        and item.get("frozen_judge_passed") is True
+    ]
+    return len(matches) == 1
+
+
 def reconcile_transaction(
     root: Path, *, cycle_id: str, candidate_version: str,
     journal_verdict: str | None, manifest_digest: str,
@@ -150,6 +188,8 @@ def reconcile_transaction(
         or outcome.get("promotion") != promotion
     ):
         return None
+    if not _reap_approval_in_record(root, document, generation):
+        return None
     generation_digest = content_digest(generation)
     if marker["state"] == "COMMITTED":
         if marker.get("generation_digest") != generation_digest:
@@ -173,3 +213,14 @@ def assert_committed(ledger_root: Path, record: Mapping[str, Any]) -> None:
         or marker.get("promotion_digest") != content_digest(record["promotion"])
     ):
         raise ValueError("PROMOTION_UNCOMMITTED: campaign terminal commitment not proven")
+    root = ledger_root.parent
+    try:
+        document = json.loads((root / "campaign-run.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        document = None
+    if not isinstance(document, Mapping) or not _reap_approval_in_record(root, document, record):
+        raise ValueError("PROMOTION_UNCOMMITTED: REAP owner approval evidence not proven")
+    # Keep this binding checked across processes; the approval phase is not
+    # merely an unverified string in a separately mutable campaign JSON.
+    if content_digest({k: v for k, v in document.items() if k != "cycle_outcome"}) != marker.get("run_digest"):
+        raise ValueError("PROMOTION_UNCOMMITTED: campaign record changed after approval")

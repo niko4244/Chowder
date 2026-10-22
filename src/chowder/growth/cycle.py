@@ -480,6 +480,8 @@ class GrowthCycle:
         frontier_snapshot_id: str | None = None,
         notes: str = "",
         backend: Mapping[str, Any] | None = None,
+        owner_approval: Any = None,
+        candidate_artifact_sha256: str = "",
     ) -> CycleOutcome:
         """Record the outcome in the lineage ledger (PROMOTED and REJECTED
         both get recorded -- rejected candidates are evidence too).
@@ -496,6 +498,25 @@ class GrowthCycle:
         ),)
         promoted = decision.verdict == "PROMOTED"
         if promoted:
+            from .owner_approval import requires_owner_approval, verify_grant
+
+            base_path = str(base_model.get("base_model_path") or base_model.get("path") or "")
+            if not base_path:
+                raise ValueError(
+                    "PROMOTION_BASE_UNDECLARED: direct finalize cannot infer lineage from "
+                    "an omitted base model path; use the manifest-driven campaign"
+                )
+            n5 = base_model.get("lineage") == "reap-moe" or requires_owner_approval(base_path)
+            if n5 and not verify_grant(
+                owner_approval,
+                cycle_id=self.config.cycle_id,
+                candidate_version=self.config.candidate_version,
+                artifact_sha256=candidate_artifact_sha256,
+            ):
+                raise ValueError(
+                    "HUMAN_APPROVAL_REQUIRED: mechanical PROMOTED is not permission "
+                    "to record a generation without an artifact-bound owner grant"
+                )
             self.ledger.record(
                 version=self.config.candidate_version,
                 parent_version=self.config.parent_version,
@@ -511,6 +532,8 @@ class GrowthCycle:
                 frontier_snapshot_id=frontier_snapshot_id,
                 notes=notes,
                 backend=backend or {},
+                owner_approval=owner_approval,
+                candidate_artifact_sha256=candidate_artifact_sha256,
             )
         return CycleOutcome(
             cycle_id=self.config.cycle_id,

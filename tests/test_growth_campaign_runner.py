@@ -967,6 +967,73 @@ def test_a_certified_campaign_reaches_a_recorded_promotion(
     assert record["cost"]["accounting_digest"]
 
 
+def test_reap_qualified_candidate_awaits_human_before_lineage(tmp_path, monkeypatch):
+    """N5: score/certify the candidate, but never auto-promote REAP in headless use."""
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    (Path(manifest.base_model_path) / "reap-prune.json").write_text('{"method":"reap"}')
+    monkeypatch.setenv("CHOWDER_AUTO_APPROVE", "yes")
+    def premature_prompt(**kwargs):
+        pytest.fail("frozen REAP judge has not certified this run; do not ask for approval yet")
+
+    monkeypatch.setattr(campaign_runner, "authorize_promotion", premature_prompt)
+
+    run = run_campaign(manifest)
+    assert _phase(run, "promotion")["verdict"] == "PROMOTED"
+    assert _phase(run, "certification")["verdict"] == "PASS"
+    assert _phase(run, "human_approval")["verdict"] == "pending"
+    assert _phase(run, "human_approval")["frozen_judge_passed"] is False
+    assert run.verdict == "INCONCLUSIVE"
+    assert run.cost["wall_gpu_hours"] > 0
+    assert run.selection["artifact_sha256"]
+    assert run.promotion["decision"]["verdict"] == "PROMOTED"  # mechanical result preserved
+    ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
+    with pytest.raises(KeyError):
+        ledger.effective_verdict(CANDIDATE_VERSION)
+    assert not (Path(manifest.state_root) / "ledger" / "promotion-transactions").exists()
+    original_record = Path(run.record_path).read_bytes()
+    train_calls = _verbs(runner).count("train")
+    next_entry = run_campaign(manifest)
+    assert next_entry.verdict == "REFUSED"
+    assert "HUMAN_APPROVAL_PENDING" in next_entry.refusal_reason
+    assert _verbs(runner).count("train") == train_calls
+    assert Path(run.record_path).read_bytes() == original_record
+
+
+def test_reap_synthetic_campaign_requires_explicit_fixture_approval(tmp_path, monkeypatch):
+    """Only this test injects an approval; no production flag can enable it."""
+    from chowder.growth.owner_approval import _grant
+
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    (Path(manifest.base_model_path) / "reap-prune.json").write_text('{"method":"reap"}')
+    calls = []
+
+    def approve(**kwargs):
+        calls.append(dict(kwargs))
+        return _grant(**kwargs)
+
+    monkeypatch.setattr(campaign_runner, "authorize_promotion", approve)
+    monkeypatch.setattr(campaign_runner, "judge_certifies_candidate", lambda root: True)
+    run = run_campaign(manifest)
+    assert len(calls) == 1
+    assert calls[0]["artifact_sha256"] == run.selection["artifact_sha256"]
+    assert run.verdict == "PROMOTED"
+    assert _phase(run, "human_approval")["verdict"] == "approved"
+    assert GenerationLedger(Path(manifest.state_root) / "ledger").effective_verdict(CANDIDATE_VERSION) == "PROMOTED"
+
+    # A committed REAP generation is no longer trusted if a later edit deletes
+    # the run's exact human-and-judge approval evidence.
+    record = Path(run.record_path)
+    document = json.loads(record.read_text(encoding="utf-8"))
+    document["phases"] = [
+        phase for phase in document["phases"] if phase.get("phase") != "human_approval"
+    ]
+    record.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(ValueError, match="PROMOTION_UNCOMMITTED"):
+        GenerationLedger(Path(manifest.state_root) / "ledger").effective_verdict(CANDIDATE_VERSION)
+
+
 def test_the_candidate_version_is_declared_or_derived_never_invented(tmp_path: Path):
     manifest, _runner, _document = _campaign(tmp_path)
     assert manifest.candidate_version == ""
