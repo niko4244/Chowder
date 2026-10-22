@@ -2,8 +2,8 @@
   "schema": "chowder.readiness-audit.v1",
   "date": "2026-10-22",
   "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
-  "moe_pr_268_sha": "24f2f8865b215b477796364b1ec30e944d5ec087",
-  "journal_pr_269_sha": "e3f0fbd77bc679ea9a856461294cd26b40316562",
+  "moe_pr_268_sha": "184291fb1dfba921ced254bfe4e7fcd148c37ae6",
+  "journal_pr_269_sha": "cf544801af525826c5bd507581b27580feff23f2",
   "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
   "grades": "PASS=current verified; PARTIAL=partially evidenced; FAIL=requirement unmet; UNVERIFIED=insufficient evidence",
   "subsystems": [
@@ -53,7 +53,7 @@
       "subsystem": "int8_experts",
       "grade": "PARTIAL",
       "workstream_status": "UNVERIFIED",
-      "evidence": "Physical REAP160 structural header verified; real witness 3 passes imported; 7/8 gate table",
+      "evidence": "24-step local witness imported 3 PASS, 7/8 total measured; WDDM unmeasured; code not merged",
       "reference": "PR #268"
     },
     {
@@ -109,7 +109,7 @@
       "subsystem": "model_release",
       "grade": "FAIL",
       "workstream_status": "BLOCKED",
-      "evidence": "Full hashes, selected Gen0, Q4, witness gates unavailable",
+      "evidence": "26 BF16 shards double-SHA256 verified; final Gen0 selection, WDDM, budget and approval blocked",
       "reference": "PR #268"
     },
     {
@@ -120,5 +120,8 @@
       "reference": "src/chowder/tui_growth.py"
     }
   ],
-  "local_windows_recovered": true
+  "local_windows_recovered": true,
+  "local_windows_access": "VERIFIED",
+  "model_hashes": "39 SHA256 hashes independently agree",
+  "moe_final_selection": "BLOCKED: REAP128_v2 frozen amendment"
 }

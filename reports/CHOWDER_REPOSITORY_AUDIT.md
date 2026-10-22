@@ -1,6 +1,6 @@
 # Chowder repository audit
 
-> Audit snapshot: 2026-10-22 UTC. Main 0bc566c5db052b90e3aa1223fef94445d1045dc5; PR #268 24f2f8865b215b477796364b1ec30e944d5ec087; recovery PR #269 e3f0fbd77bc679ea9a856461294cd26b40316562. GitHub code and published evidence were inspected; local Windows workspace inaccessible (Chat On Steroids Core root /strata invalid). Source claims below are **historical reports**, not rerun hardware measurements. No model weights or protected local evidence were accessed in this audit.
+> Final audit 2026-10-22. Main 0bc566c5; MoE PR268 184291f; recovery PR269 cf54480 with local 82-test verification; REAP PR271 73f1593. GitHub and read-only Windows workspaces inspected, 39 model files independently SHA-256 verified twice. No GPU training was started in this audit. Frozen gates and required approvals remain binding.
 
 ## Verified Git state
 
@@ -17,8 +17,8 @@
 
 ## Branch work and defects
 
-- #268 holds the int8 loader, exact shape/quantization tests, live census, real-card measurements, and witness mechanisms. Audit commit 24f2f886 additionally validates flags and dataset/token batches *before* an expensive full-checkpoint load; CPU regression CI pending. Not merged; its gate table lacks gradient, smoke, router-balance and WDDM operator evidence, and its recorded sanctioned gate belongs to pre-default-retention code. See `reports/MOE_INT8_16GB_QUALIFICATION.md`.
-- #269 addresses an actual Gen-2 hard termination; its earlier parser could mistake an older terminal marker for a later interrupted run. Added fail-closed parser, atomic-verdict fsync and tests on PR branch at `e3f0fbd77bc679ea9a856461294cd26b40316562`. New CI was in progress when inspected. No automated continuation was added.
+- #268 holds the int8 loader, exact shape/quantization tests, live census, real-card measurements, and witness mechanisms. Audit commit 24f2f886 additionally validates flags and dataset/token batches *before* an expensive full-checkpoint load; CPU regression CI pending. Not merged; gradient, smoke and router-balance are now imported PASS, while WDDM operator evidence is still missing and the sanctioned VRAM measurement belongs to pre-default-retention code. See `reports/MOE_INT8_16GB_QUALIFICATION.md`.
+- #269 addresses an actual Gen-2 hard termination; its earlier parser could mistake an older terminal marker for a later interrupted run. Added fail-closed parser, atomic-verdict fsync and tests on PR branch at `cf544801af525826c5bd507581b27580feff23f2`. New CI was in progress when inspected. No automated continuation was added.
 - #226 and #210 target older bases and must be rebased/reviewed; do not mass-merge. #214 requires human review under the literature curation policy.
 - Gen-2 run 10 had a late ancestor raw-artifact refusal after historical 2.16 GPU-h; amendment 24 and merged #266 describe the evidence-location repair and earlier readiness verification. Gen-2 run 11 was terminated externally, not certified.
 
@@ -42,3 +42,13 @@ The local 24-step int8 witness SHA256 20e466d5362b8492fb9b55c312a57486283e641d46
 Fresh Windows Python 3.11.9 focused CPU tests: recovery 90 PASS; int8/preflight 54 PASS; witness/gate/preflight 75 PASS; targeted Ruff clean. An initial 30-failure probe with artificially hidden CUDA was traced to a TorchAO import-time device query and succeeded when rerun with CHOWDER_NO_GPU=1 but CUDA device visibility restored, without GPU training.
 
 The Gen-1 mix file checks passed against its current template-validated, 2048-token manifest: Fable 767 rows SHA256 384b6f10ae579af10ce36cbbe5278716b681d3223beab7343742b51c1857024d, Fable-free control 647 rows SHA256 681b2aa957d042028db8fa8710be6538b23f6563e088b9f752410bf5da174c9e. License decision N2 remains open. The card had approximately 12 GiB occupied and 4 GiB free, so no expensive CUDA tests or promotions were authorized or run.
+
+## Final local reconciliation (2026-10-22)
+
+Full cryptographic inventory: 39 physical REAP160 files, including 26 BF16 shards, hashed twice independently with matching SHA-256 for each file. Package inventory digest: 06aaa74bab80d6a025e25428eacfe8006d0d43fad2406370e563ff1a0c2f1c36. Per-file hashes are in artifacts/custom_moe_model_manifest.json; a sharded checkpoint has no claimed monolithic SHA-256.
+
+Frozen REAP observer D0 locally PASS (40 layers, perplexity 10.646096, threshold less than 20). REAP128 v1 Gate1 FAIL; REAP160 v1 quality gates PASS and historical separate Q4 fit/speed proof. Amendment 4 requires REAP128_v2 scoring before Gen0 can be selected. PR271 adds fail-closed D0/cardinality/duplicate and ordered-arm disclosure; 15 tests PASS. No v2 model/score was located.
+
+Local int8 witness imported 24-step gradient, loss-smoke and router PASS; seven of eight gate rows measured; WDDM operator no-spill remains unmeasured. Historical best 27.48s/step implies 7.63h per 1000 steps versus frozen 2.5h ceiling. Current retention-default VRAM remeasurement remains outstanding.
+
+Additional P1 findings: automatic safe resume remains unavailable, promotion ledger commit can precede terminal verdict, failed evaluation charges need stronger reconciliation, and model placement gate identity currently uses config/size rather than weight contents. Recovery work includes budget fallback and cross-process writer locking with focused tests but awaits complete CI/merge. No expensive GPU run, Gen1 training or promotion occurred.

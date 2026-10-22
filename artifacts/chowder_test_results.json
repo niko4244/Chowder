@@ -2,8 +2,8 @@
   "schema": "chowder.audit-test-results.v1",
   "date": "2026-10-22",
   "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
-  "moe_pr_268_sha": "24f2f8865b215b477796364b1ec30e944d5ec087",
-  "journal_pr_269_sha": "e3f0fbd77bc679ea9a856461294cd26b40316562",
+  "moe_pr_268_sha": "184291fb1dfba921ced254bfe4e7fcd148c37ae6",
+  "journal_pr_269_sha": "cf544801af525826c5bd507581b27580feff23f2",
   "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
   "session_test_runs": [],
   "historical_reported_runs": [
@@ -46,7 +46,7 @@
   ],
   "ci": {
     "pr": 269,
-    "head": "e3f0fbd77bc679ea9a856461294cd26b40316562",
+    "head": "cf544801af525826c5bd507581b27580feff23f2",
     "workflow_run_id": 39750310076,
     "status_at_last_query": "in_progress",
     "conclusion": null,
@@ -125,5 +125,60 @@
     "fable_training_mix_sha256": "MATCH 767 rows",
     "control_training_mix_sha256": "MATCH 647 rows",
     "witness_gate_import": "7 of 8; WDDM not measured"
+  },
+  "fresh_windows_cpu": [
+    {
+      "suite": "recovery + growth + kaggle + MoE plumbing",
+      "passed": 90,
+      "failed": 0
+    },
+    {
+      "suite": "int8 preflight and experts",
+      "passed": 54,
+      "failed": 0
+    },
+    {
+      "suite": "placement witnesses/gates/preflight",
+      "passed": 75,
+      "failed": 0
+    },
+    {
+      "suite": "harness-bound gate followup",
+      "passed": 66,
+      "failed": 0
+    },
+    {
+      "suite": "CLI/TUI autonomous integration",
+      "passed": 111,
+      "failed": 0
+    },
+    {
+      "suite": "integrity/adversarial",
+      "passed": 160,
+      "failed": 0
+    },
+    {
+      "suite": "REAP D0/count/selection fixes",
+      "passed": 15,
+      "failed": 0
+    },
+    {
+      "suite": "targeted wall-cost and exclusive writer/kill tests",
+      "passed": 4,
+      "failed": 0
+    }
+  ],
+  "recovery_ci_after_fix": "SUCCESS: linux py3.10/11/12, windows py3.12, lint/build, real ML CPU smoke",
+  "all_39_model_files_double_sha256_verified": true,
+  "model_package_digest": "06aaa74bab80d6a025e25428eacfe8006d0d43fad2406370e563ff1a0c2f1c36",
+  "current_recovery_pr_head_sha": "cf544801af525826c5bd507581b27580feff23f2",
+  "fresh_recovery_total_test_results": {
+    "command": "python -m pytest tests/test_growth_campaign_runner.py tests/test_growth_training_binding.py -q",
+    "passed": 82,
+    "failed": 0,
+    "warnings": 14,
+    "os": "Windows",
+    "python": "3.11.9",
+    "head_sha": "cf544801af525826c5bd507581b27580feff23f2"
   }
 }

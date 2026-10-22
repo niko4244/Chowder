@@ -2,15 +2,15 @@
   "schema": "chowder.custom-moe-acceptance.v1",
   "date": "2026-10-22",
   "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
-  "moe_pr_268_sha": "108f9322bf16b78890547f0e222f8092587e82e4",
-  "journal_pr_269_sha": "e3f0fbd77bc679ea9a856461294cd26b40316562",
+  "moe_pr_268_sha": "184291fb1dfba921ced254bfe4e7fcd148c37ae6",
+  "journal_pr_269_sha": "cf544801af525826c5bd507581b27580feff23f2",
   "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
   "overall": "BLOCKED",
   "frozen_gates_preserved": true,
   "gate_status": [
     {
       "gate": "reap_d0_observation",
-      "status": "UNVERIFIED"
+      "status": "LOCAL_PASS_40_LAYERS_PPL_10_646096"
     },
     {
       "gate": "reap_generation_health",
@@ -18,7 +18,7 @@
     },
     {
       "gate": "reap_gsm8k",
-      "status": "HISTORICAL_REAP160_PASS"
+      "status": "REAP128_FAIL_REAP160_PASS"
     },
     {
       "gate": "reap_humaneval",
@@ -50,15 +50,15 @@
     },
     {
       "gate": "lora_gradient",
-      "status": "LOCAL_WITNESS_PASS"
+      "status": "WITNESS_IMPORTED_PASS"
     },
     {
       "gate": "smoke_20_steps_loss_drop",
-      "status": "LOCAL_WITNESS_PASS"
+      "status": "WITNESS_IMPORTED_PASS"
     },
     {
       "gate": "router_entropy_20pct",
-      "status": "LOCAL_WITNESS_PASS"
+      "status": "WITNESS_IMPORTED_PASS"
     },
     {
       "gate": "wddm_no_spill_operator",
@@ -66,7 +66,7 @@
     },
     {
       "gate": "fable_free_control",
-      "status": "HASH_VERIFIED_UNTRAINED"
+      "status": "LOCAL_MANIFEST_HASH_MATCH"
     },
     {
       "gate": "license_N2",
@@ -81,5 +81,10 @@
   "gen1_training_authorized": false,
   "expensive_gpu_requires_approval": true,
   "selection_note": "REAP160 candidate is not automatically eligible: apply REAP128 and fallback gates first",
-  "int8_table": "7 of 8 measured, WDDM spill not measured, admission refused"
+  "int8_table": "7 of 8 measured, WDDM spill not measured, admission refused",
+  "selection_status": "BLOCKED_REAP128_V2_REQUIRED",
+  "moe_placement_measured_gates": 7,
+  "moe_placement_total_gates": 8,
+  "all_checkpoint_shards_sha256_verified": true,
+  "model_package_digest": "06aaa74bab80d6a025e25428eacfe8006d0d43fad2406370e563ff1a0c2f1c36"
 }
