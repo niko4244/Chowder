@@ -99,5 +99,7 @@
     "ornith_rows": 38,
     "ornith_license_declared": false,
     "license_release_ready": false
-  }
+  },
+  "q4_inference_artifact_sha256_verified": true,
+  "q4_speed_gate": "HISTORICALLY_RESOLVED_REAP160_3_852X"
 }
