@@ -4,21 +4,21 @@
   "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
   "moe_pr_268_sha": "184291fb1dfba921ced254bfe4e7fcd148c37ae6",
   "journal_pr_269_sha": "cf544801af525826c5bd507581b27580feff23f2",
-  "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
+  "evidence_basis": "Local Windows Python 3.11 CPU pytest at pinned 1960b7a241 (0 passed, 0 skipped); GitHub CI PENDING; historical GPU results remain archived, no new GPU qualification",
   "grades": "PASS=current verified; PARTIAL=partially evidenced; FAIL=requirement unmet; UNVERIFIED=insufficient evidence",
   "subsystems": [
     {
       "subsystem": "training_peft",
       "grade": "PARTIAL",
       "workstream_status": "COMPLETED",
-      "evidence": "Real historical PEFT and CI; no fresh local test",
+      "evidence": "Pinned real Transformers/PEFT CPU CI smoke and Windows regression suite; GPU training release gates still unqualified",
       "reference": "README.md; .github/workflows/ci.yml"
     },
     {
       "subsystem": "autonomous_growth",
       "grade": "PARTIAL",
       "workstream_status": "UNVERIFIED",
-      "evidence": "Service/CLI/TUI exists; no fresh end-to-end validation",
+      "evidence": "CLI/TUI and autonomous-growth CPU integration exercises passed; real full GPU autonomous promotion not qualified",
       "reference": "src/chowder/growth/service.py"
     },
     {
@@ -73,22 +73,22 @@
     {
       "subsystem": "campaign_journal",
       "grade": "PARTIAL",
-      "workstream_status": "UNVERIFIED",
-      "evidence": "Independent Windows recovery pytest 90 PASSED at e3f0fbd7; auto-resume still absent",
-      "reference": "PR #269"
+      "workstream_status": "COMPLETED",
+      "evidence": "Durable exclusive writer/journal plus verified completed-attempt recovery; incomplete paid attempt refuses",
+      "reference": "PR #277; verified Windows CPU regression suite"
     },
     {
       "subsystem": "safe_resume",
-      "grade": "FAIL",
-      "workstream_status": "BLOCKED",
-      "evidence": "Not implemented; cannot re-spend interrupted attempts",
-      "reference": "PR #269"
+      "grade": "PARTIAL",
+      "workstream_status": "COMPLETED",
+      "evidence": "Validated fsynced receipt replay of fully settled attempts; unknown in-flight GPU spend and partial training state remain BLOCKED",
+      "reference": "PR #276; integrated PR #277 campaign_resume.py"
     },
     {
       "subsystem": "evidence_provenance",
       "grade": "PARTIAL",
       "workstream_status": "UNVERIFIED",
-      "evidence": "Readiness raw evidence fix merged; local artifacts inaccessible",
+      "evidence": "REAP160 local checkpoint inventory and GGUF identity verified; frozen real GPU and license gates still open",
       "reference": "PR #266"
     },
     {
@@ -116,7 +116,7 @@
       "subsystem": "cli_tui",
       "grade": "PARTIAL",
       "workstream_status": "UNVERIFIED",
-      "evidence": "Implemented; no current interactive smoke",
+      "evidence": "Pinned CLI/TUI readiness and settlement CPU regressions passed; no final interactive manual smoke",
       "reference": "src/chowder/tui_growth.py"
     }
   ],
@@ -195,21 +195,21 @@
     "release": "BLOCKED"
   },
   "latest_finalization": {
-    "head": "8d30dde25679b9f23d4151a4118120d93473f8be",
+    "head": "1960b7a241cdbd136affe63534e4fc23b738875c",
     "draft_pr": 277,
     "human_approval_pr": 278,
     "human_approval_sha": "ef866b2d05f54a15e6b9d0b7c1bb19ddc1ac17ce",
     "readiness_regression_fix_sha": "d6e378a7bcb0f570c05dc36d87453eeb2bdaa15d",
     "all_changes_merged_to_main": false,
-    "new_ci": "SIX_SUCCESS",
+    "new_ci": "PENDING",
     "main_merged": false,
-    "full_final_ci": "SIX_SUCCESS",
-    "targeted_cpu_pass": 397
+    "full_final_ci": "PENDING",
+    "targeted_cpu_pass": 24
   },
   "active_finalization_20261022": {
     "date": "2026-10-22",
     "draft_pr": 277,
-    "head": "8d30dde25679b9f23d4151a4118120d93473f8be",
+    "head": "1960b7a241cdbd136affe63534e4fc23b738875c",
     "main_merged": false,
     "patch_revisions": {
       "accounting_validation": "96701b9dd03c00be0c5188847997cd2cf6dbf0f6",
@@ -217,14 +217,24 @@
       "terminal_root_readiness": "55a110911e66da89ac8ff3bcd0cc225aa76e26ac",
       "authenticated_cli_settlement": "9a14f73c5224e6ef7640583331ad9d0b0ff511d6",
       "all_new_promotions_require_transaction": "6f35d09584f614164542318f27b080b076ef4a43",
-      "frozen_judge_accounting_parity": "8d30dde25679b9f23d4151a4118120d93473f8be"
+      "frozen_judge_accounting_parity": "8d30dde25679b9f23d4151a4118120d93473f8be",
+      "complete_receipt_settlement": "878950bc246527c05d91a9ceb2eb05874a2fb2be",
+      "committed_lineage_terminal_fence": "13ef42eba33ad0e88246a5b3924d0baa32a64cb8",
+      "remote_cost_completion_and_streaming_hash": "9ec9985ac8165812d79fefd5ee12d946eea1e5a2",
+      "portable_legacy_dense_fixture": "c88f8593b1c250360a94627fb35d4e77353b0256",
+      "promotion_parent_ancestry_binding": "d62b07a",
+      "reap_model_path_alias_gate": "fba03d2",
+      "native_vs_remote_attempt_proof_binding": "eb9dd7b",
+      "inspectable_campaign_model_fixture": "a1a1754",
+      "native_zero_spend_preflight_refusal": "c7c1b60f7d3cb419fcf4388d6a7fbbd8be1a541f",
+      "certification_fixture_model_identity": "1960b7a241cdbd136affe63534e4fc23b738875c"
     },
-    "ci_at_head": "SIX_SUCCESS",
-    "targeted_cpu_pass": 397,
+    "ci_at_head": "PENDING",
+    "targeted_cpu_pass": 24,
     "full_cpu_at_head": {
-      "passed": 4037,
-      "skipped": 78,
-      "status": "COMPLETED"
+      "passed": 0,
+      "skipped": 0,
+      "status": "UNVERIFIED"
     },
     "earlier_full_cpu_baseline": {
       "head": "a0a678dfa13a2d15f2b3176fb668eebbb8335728",
@@ -247,6 +257,18 @@
       "duplicate_terminal_campaign_compute_guard": "COMPLETED",
       "new_ledger_promotion_transaction_admission": "COMPLETED",
       "authenticated_offline_settlement_cli": "COMPLETED",
+      "receipt_index_bijection_and_native_evidence_revalidation": "COMPLETED",
+      "non_native_executor_cost_bound_completion": "COMPLETED",
+      "bounded_memory_checkpoint_sha256": "COMPLETED",
+      "cross_platform_legacy_lineage_fixture": "COMPLETED",
+      "transaction_parent_identity_consistency": "COMPLETED",
+      "reap_approval_legacy_path_alias_gate": "COMPLETED",
+      "native_attempt_proof_downgrade_prevention": "COMPLETED",
+      "native_precompute_refusal_recording": "COMPLETED",
+      "gen2_certification_fixture_digest_alignment": "COMPLETED",
+      "offline_terminal_settlement_parity": "COMPLETED",
+      "committed_lineage_terminal_revalidation": "COMPLETED",
+      "unknown_historical_promoted_model_identity": "BLOCKED",
       "frozen_judge_recomputed_accounting": "COMPLETED",
       "atomic_promotion_and_recovery_cpu_coverage": "COMPLETED",
       "independent_frozen_REAP_judge_certification": "BLOCKED",

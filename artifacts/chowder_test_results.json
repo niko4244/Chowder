@@ -4,7 +4,7 @@
   "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
   "moe_pr_268_sha": "184291fb1dfba921ced254bfe4e7fcd148c37ae6",
   "journal_pr_269_sha": "cf544801af525826c5bd507581b27580feff23f2",
-  "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
+  "evidence_basis": "Local Windows Python 3.11 CPU pytest at pinned 1960b7a241 (0 passed, 0 skipped); GitHub CI PENDING; historical GPU results remain archived, no new GPU qualification",
   "session_test_runs": [],
   "historical_reported_runs": [
     {
@@ -65,7 +65,7 @@
     "test_bad_witness_args_refuse_before_model_load",
     "test_unusable_calibration_refuses_before_model_load"
   ],
-  "new_test_status": "committed, not yet independently run in this session",
+  "new_test_status": "FINAL_PINNED_FULL_SUITE_UNVERIFIED",
   "blocked_tests": [
     "Windows CUDA and WDDM",
     "real MoE sharded checkpoint/load",
@@ -357,13 +357,13 @@
   },
   "latest_finalization": {
     "revisions": {
-      "head": "8d30dde25679b9f23d4151a4118120d93473f8be",
+      "head": "1960b7a241cdbd136affe63534e4fc23b738875c",
       "draft_pr": 277,
       "human_approval_pr": 278,
       "human_approval_sha": "ef866b2d05f54a15e6b9d0b7c1bb19ddc1ac17ce",
       "readiness_regression_fix_sha": "d6e378a7bcb0f570c05dc36d87453eeb2bdaa15d",
       "all_changes_merged_to_main": false,
-      "new_ci": "SIX_SUCCESS"
+      "new_ci": "PENDING"
     },
     "initial_full_ci_on_53ebcab": {
       "linux_py311_passed": 3485,
@@ -387,17 +387,17 @@
       "passed": 71,
       "failed": 0
     },
-    "full_final_ci": "SIX_SUCCESS",
-    "head": "8d30dde25679b9f23d4151a4118120d93473f8be",
+    "full_final_ci": "PENDING",
+    "head": "1960b7a241cdbd136affe63534e4fc23b738875c",
     "draft_pr": 277,
     "main_merged": false,
-    "new_ci": "SIX_SUCCESS",
-    "targeted_cpu_pass": 397
+    "new_ci": "PENDING",
+    "targeted_cpu_pass": 24
   },
   "active_finalization_20261022": {
     "date": "2026-10-22",
     "draft_pr": 277,
-    "head": "8d30dde25679b9f23d4151a4118120d93473f8be",
+    "head": "1960b7a241cdbd136affe63534e4fc23b738875c",
     "main_merged": false,
     "patch_revisions": {
       "accounting_validation": "96701b9dd03c00be0c5188847997cd2cf6dbf0f6",
@@ -405,14 +405,24 @@
       "terminal_root_readiness": "55a110911e66da89ac8ff3bcd0cc225aa76e26ac",
       "authenticated_cli_settlement": "9a14f73c5224e6ef7640583331ad9d0b0ff511d6",
       "all_new_promotions_require_transaction": "6f35d09584f614164542318f27b080b076ef4a43",
-      "frozen_judge_accounting_parity": "8d30dde25679b9f23d4151a4118120d93473f8be"
+      "frozen_judge_accounting_parity": "8d30dde25679b9f23d4151a4118120d93473f8be",
+      "complete_receipt_settlement": "878950bc246527c05d91a9ceb2eb05874a2fb2be",
+      "committed_lineage_terminal_fence": "13ef42eba33ad0e88246a5b3924d0baa32a64cb8",
+      "remote_cost_completion_and_streaming_hash": "9ec9985ac8165812d79fefd5ee12d946eea1e5a2",
+      "portable_legacy_dense_fixture": "c88f8593b1c250360a94627fb35d4e77353b0256",
+      "promotion_parent_ancestry_binding": "d62b07a",
+      "reap_model_path_alias_gate": "fba03d2",
+      "native_vs_remote_attempt_proof_binding": "eb9dd7b",
+      "inspectable_campaign_model_fixture": "a1a1754",
+      "native_zero_spend_preflight_refusal": "c7c1b60f7d3cb419fcf4388d6a7fbbd8be1a541f",
+      "certification_fixture_model_identity": "1960b7a241cdbd136affe63534e4fc23b738875c"
     },
-    "ci_at_head": "SIX_SUCCESS",
-    "targeted_cpu_pass": 397,
+    "ci_at_head": "PENDING",
+    "targeted_cpu_pass": 24,
     "full_cpu_at_head": {
-      "passed": 4037,
-      "skipped": 78,
-      "status": "COMPLETED"
+      "passed": 0,
+      "skipped": 0,
+      "status": "UNVERIFIED"
     },
     "earlier_full_cpu_baseline": {
       "head": "a0a678dfa13a2d15f2b3176fb668eebbb8335728",
@@ -435,6 +445,18 @@
       "duplicate_terminal_campaign_compute_guard": "COMPLETED",
       "new_ledger_promotion_transaction_admission": "COMPLETED",
       "authenticated_offline_settlement_cli": "COMPLETED",
+      "receipt_index_bijection_and_native_evidence_revalidation": "COMPLETED",
+      "non_native_executor_cost_bound_completion": "COMPLETED",
+      "bounded_memory_checkpoint_sha256": "COMPLETED",
+      "cross_platform_legacy_lineage_fixture": "COMPLETED",
+      "transaction_parent_identity_consistency": "COMPLETED",
+      "reap_approval_legacy_path_alias_gate": "COMPLETED",
+      "native_attempt_proof_downgrade_prevention": "COMPLETED",
+      "native_precompute_refusal_recording": "COMPLETED",
+      "gen2_certification_fixture_digest_alignment": "COMPLETED",
+      "offline_terminal_settlement_parity": "COMPLETED",
+      "committed_lineage_terminal_revalidation": "COMPLETED",
+      "unknown_historical_promoted_model_identity": "BLOCKED",
       "frozen_judge_recomputed_accounting": "COMPLETED",
       "atomic_promotion_and_recovery_cpu_coverage": "COMPLETED",
       "independent_frozen_REAP_judge_certification": "BLOCKED",
@@ -458,5 +480,36 @@
       "No fresh 14.5GB VRAM, 20-step or 2.5 GPU-hour hardware qualification",
       "Fast stat/inode checkpoint identity after a one-time SHA inventory is not an adversarial in-place rewrite defense if an attacker can restore timestamps; strict boundary rehash for release is unverified"
     ]
+  },
+  "superseded_cross_platform_regression": {
+    "head": "9ec9985ac8165812d79fefd5ee12d946eea1e5a2",
+    "github_ci": "FAILED_LINUX_PY310_PY311_PY312",
+    "linux_py311_observed": {
+      "failed": 4,
+      "passed": 3589,
+      "skipped": 223
+    },
+    "failed_test_module": "tests/test_growth_ledger_corrections.py",
+    "cause": "Windows-only F:/ fixture model path invalid under strict historical identity gate on Linux",
+    "resolution_revision": "c88f8593b1c250360a94627fb35d4e77353b0256",
+    "resolution_targeted_pass": 28,
+    "superseded": true
+  },
+  "superseded_gen2_certification_regression": {
+    "head": "c7c1b60f7d3cb419fcf4388d6a7fbbd8be1a541f",
+    "github_ci": "FAILED_5_OF_6",
+    "local_full_suite": {
+      "failed": 10,
+      "passed": 4063,
+      "skipped": 78
+    },
+    "failed_test_modules": [
+      "tests/test_growth_certification_coupling.py",
+      "tests/test_growth_gen2_dry_run_matrix.py"
+    ],
+    "cause": "test fixture hashed empty base-model config, then shared fixture overwrote checkpoint with classified non-REAP llama config",
+    "resolution_revision": "1960b7a241cdbd136affe63534e4fc23b738875c",
+    "resolution_affected_pass": 24,
+    "superseded": true
   }
 }
