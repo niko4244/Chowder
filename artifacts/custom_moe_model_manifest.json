@@ -451,5 +451,13 @@
       "accepted_as_full_training_gate": false,
       "reason": "Existing VRAM/WDDM/witness records must be remeasured or explicitly content-pinned by sanctioned gates."
     }
+  },
+  "packaged_license_review": {
+    "LICENSE": "Apache License Version 2.0 text present",
+    "dataset_metadata_license": "other",
+    "dataset_metadata_isPrivate": true,
+    "complete_distribution_rights_verified": false,
+    "fable_source_rights": "N2 unresolved",
+    "release_permission": "NOT_GRANTED_BY_AUDIT"
   }
 }

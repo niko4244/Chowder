@@ -138,5 +138,6 @@
     ],
     "accepted_as_full_training_gate": false,
     "reason": "Existing VRAM/WDDM/witness records must be remeasured or explicitly content-pinned by sanctioned gates."
-  }
+  },
+  "weight_and_derivative_redistribution_rights": "UNVERIFIED_LICENSE_TEXT_METADATA_CONFLICT"
 }
