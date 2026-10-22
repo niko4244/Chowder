@@ -6,7 +6,7 @@ import json
 import pytest
 
 from chowder_batch.reap_gates import GateError
-from chowder_batch.reap_select import REQUIRED, evaluate, select
+from chowder_batch.reap_select import REQUIRED, _validate_v2_observation, evaluate, select
 
 
 def arm(**statuses):
@@ -153,12 +153,16 @@ def test_v2_cannot_borrow_v1_observer_d0(tmp_path):
     calib = tmp_path / "calib-v2"
     calib.mkdir()
     raw = calib / "calibration.jsonl"
-    raw.write_text('{"sample":"test"}\n', encoding="utf-8")
+    raw.write_text('{"source":"ornith_curriculum","n_tokens":256,"text":"test one"}\n'
+                   '{"source":"ornith_curriculum","n_tokens":256,"text":"test two"}\n',
+                   encoding="utf-8")
     digest = hashlib.sha256(raw.read_bytes()).hexdigest()
     (calib / "calibration-manifest.json").write_text(json.dumps(
-        {"mix": "v2", "rows": 1, "calibration_sha256": digest}), encoding="utf-8")
+        {"mix": "v2", "rows": 2, "tokens": 512, "max_tokens": 2048,
+         "sources": {"ornith_curriculum": {"kept": 2}}, "calibration_sha256": digest}),
+        encoding="utf-8")
     cloned_observer = json.loads(v2.read_text(encoding="utf-8"))
-    cloned_observer["calibration_sha256"] = digest
+    cloned_observer.update(calibration_sha256=digest, n_seqs=2, n_tokens=512)
     v2.write_text(json.dumps(cloned_observer), encoding="utf-8")
     report_v2 = evaluate(tmp_path, obs, v2, calib)
     assert report_v2["gates"]["reap128_v2"]["gates"]["d0"]["status"] == "PASS"
@@ -169,6 +173,62 @@ def test_v2_cannot_borrow_v1_observer_d0(tmp_path):
     with pytest.raises(GateError, match="calibration SHA"):
         evaluate(tmp_path, obs, v2, calib)
     (calib / "calibration-manifest.json").write_text(json.dumps(
-        {"mix": "v2", "rows": 2, "calibration_sha256": digest}), encoding="utf-8")
-    with pytest.raises(GateError, match="calibration SHA"):
+        {"mix": "v2", "rows": 3, "tokens": 512, "max_tokens": 2048,
+         "sources": {"ornith_curriculum": {"kept": 2}}, "calibration_sha256": digest}),
+        encoding="utf-8")
+    with pytest.raises(GateError, match="row/token/source census"):
         evaluate(tmp_path, obs, v2, calib)
+
+
+@pytest.mark.parametrize(("tamper", "reason"), [
+    ("partial_observation", "full calibration sequence"),
+    ("boolean_sequence_count", "full calibration sequence"),
+    ("missing_observed_tokens", "full calibration sequence"),
+    ("manifest_token_total", "token total"),
+    ("manifest_source_total", "source count"),
+    ("rewritten_row_source", "invalid source"),
+    ("rewritten_row_token_count", "token total"),
+])
+def test_v2_d0_refuses_incomplete_or_rewritten_calibration_census(tmp_path, tamper, reason):
+    calib = tmp_path / "calib"
+    calib.mkdir()
+    rows_path = calib / "calibration.jsonl"
+    manifest_path = calib / "calibration-manifest.json"
+    obs_path = tmp_path / "observed.json"
+    rows = [{"source": "ornith_curriculum", "n_tokens": 256, "text": f"sample {i}"}
+            for i in range(2)]
+    def save_rows():
+        rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        return hashlib.sha256(rows_path.read_bytes()).hexdigest()
+    digest = save_rows()
+    manifest = {"mix": "v2", "rows": 2, "tokens": 512, "max_tokens": 2048,
+                "sources": {"ornith_curriculum": {"kept": 2}},
+                "calibration_sha256": digest}
+    observed = {"calibration_sha256": digest, "n_seqs": 2, "n_tokens": 512,
+                "calibration_ppl": 10, "layers": [{"layer": i} for i in range(40)]}
+    if tamper == "partial_observation":
+        observed["n_seqs"] = 1  # --limit-seqs 1 could still record 40 layers and PPL < 20
+        observed["n_tokens"] = 256
+    elif tamper == "boolean_sequence_count":
+        observed["n_seqs"] = True
+    elif tamper == "missing_observed_tokens":
+        observed.pop("n_tokens")
+    elif tamper == "manifest_token_total":
+        manifest["tokens"] = 513
+    elif tamper == "manifest_source_total":
+        manifest["sources"]["ornith_curriculum"]["kept"] = 1
+    elif tamper == "rewritten_row_source":
+        rows[0]["source"] = "undeclared"
+    elif tamper == "rewritten_row_token_count":
+        rows[0]["n_tokens"] = 257
+    if tamper.startswith("rewritten_row"):
+        digest = save_rows()
+        manifest["calibration_sha256"] = observed["calibration_sha256"] = digest
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    obs_path.write_text(json.dumps(observed), encoding="utf-8")
+    with pytest.raises(GateError, match=reason):
+        _validate_v2_observation(calib, obs_path)
+    if tamper == "partial_observation":
+        observed["n_seqs"], observed["n_tokens"] = 2, 512
+        obs_path.write_text(json.dumps(observed), encoding="utf-8")
+        _validate_v2_observation(calib, obs_path)

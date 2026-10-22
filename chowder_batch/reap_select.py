@@ -137,6 +137,62 @@ def _input_digests(
             for path in paths if path.is_file()}
 
 
+def _validate_v2_observation(calibration: Path, observation: Path) -> None:
+    """Bind v2 D0 to the complete declared calibration, not a limited observer run."""
+    manifest_path = calibration / "calibration-manifest.json"
+    rows_path = calibration / "calibration.jsonl"
+    if not manifest_path.is_file() or not rows_path.is_file():
+        raise GateError("v2 calibration evidence missing manifest or input rows")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    observed = json.loads(observation.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or not isinstance(observed, dict):
+        raise GateError("v2 calibration manifest or observer is not an object")
+    calibration_sha = hashlib.sha256(rows_path.read_bytes()).hexdigest()
+    if (manifest.get("mix") != "v2"
+            or manifest.get("calibration_sha256") != calibration_sha
+            or observed.get("calibration_sha256") != calibration_sha):
+        raise GateError("v2 D0 observer calibration SHA disagrees with the v2 manifest")
+
+    rows = [json.loads(line) for line in rows_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+    def integer(value: object) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool)
+    declared_rows = manifest.get("rows")
+    declared_tokens = manifest.get("tokens")
+    max_tokens = manifest.get("max_tokens")
+    sources = manifest.get("sources")
+    if (not integer(declared_rows) or declared_rows < 1 or len(rows) != declared_rows
+            or not integer(declared_tokens) or declared_tokens < 1
+            or not integer(max_tokens) or max_tokens < 256
+            or not isinstance(sources, dict) or not sources):
+        raise GateError("v2 calibration manifest has invalid row/token/source census")
+    source_counts: dict[str, int] = {}
+    tokens = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            raise GateError("v2 calibration contains a non-object row")
+        source, count = row.get("source"), row.get("n_tokens")
+        if (not isinstance(source, str) or source not in sources
+                or not integer(count) or not 256 <= count <= max_tokens
+                or not isinstance(row.get("text"), str) or not row["text"]):
+            raise GateError("v2 calibration row has invalid source, text or token count")
+        source_counts[source] = source_counts.get(source, 0) + 1
+        tokens += count
+    if tokens != declared_tokens:
+        raise GateError("v2 calibration token total disagrees with manifest")
+    for name, stats in sources.items():
+        if (not isinstance(stats, dict) or not integer(stats.get("kept"))
+                or stats["kept"] != source_counts.get(name, 0)):
+            raise GateError(f"v2 calibration source count disagrees for {name!r}")
+
+    # The observer may retokenize decoded calibration text; its token count
+    # need not equal the packed IDs, but it must prove all sequences were read.
+    if (not integer(observed.get("n_seqs")) or observed["n_seqs"] != declared_rows
+            or not integer(observed.get("n_tokens"))
+            or observed["n_tokens"] < declared_rows):
+        raise GateError("v2 D0 observer did not process the full calibration sequence census")
+
+
 def evaluate(
     eval_dir: str | Path, observation: str | Path,
     observation_v2: str | Path | None = None,
@@ -172,23 +228,7 @@ def evaluate(
         if arm.endswith("_v2"):
             observer = None  # no v1 observer substitution
             if v2_path is not None and v2_calib is not None:
-                manifest_path = v2_calib / "calibration-manifest.json"
-                rows_path = v2_calib / "calibration.jsonl"
-                if not manifest_path.is_file() or not rows_path.is_file():
-                    raise GateError("v2 calibration evidence missing manifest or input rows")
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                actual_calib_sha = hashlib.sha256(rows_path.read_bytes()).hexdigest()
-                rows_count = sum(1 for line in rows_path.read_text(encoding="utf-8").splitlines()
-                                 if line.strip())
-                observation_record = json.loads(v2_path.read_text(encoding="utf-8"))
-                if (manifest.get("mix") != "v2"
-                        or not isinstance(manifest.get("rows"), int)
-                        or isinstance(manifest.get("rows"), bool)
-                        or manifest["rows"] != rows_count
-                        or rows_count == 0
-                        or manifest.get("calibration_sha256") != actual_calib_sha
-                        or observation_record.get("calibration_sha256") != actual_calib_sha):
-                    raise GateError("v2 D0 observer calibration SHA disagrees with the v2 manifest")
+                _validate_v2_observation(v2_calib, v2_path)
                 observer = v2_path
         present[arm] = compute(root, arm, "dense", "random128",
                                speed_arm, "dense_q4", observer)
