@@ -1,0 +1,1014 @@
+{
+  "environment": {
+    "meminfo_bytes": {
+      "MemTotal": 33658314752,
+      "MemFree": 27954659328,
+      "MemAvailable": 32518418432,
+      "Buffers": 856956928,
+      "Cached": 3926351872,
+      "SwapCached": 0,
+      "Active": 1276571648,
+      "Inactive": 3738599424,
+      "Active(anon)": 815104,
+      "Inactive(anon)": 232493056,
+      "Active(file)": 1275756544,
+      "Inactive(file)": 3506106368,
+      "Unevictable": 0,
+      "Mlocked": 0,
+      "SwapTotal": 0,
+      "SwapFree": 0,
+      "Zswap": 0,
+      "Zswapped": 0,
+      "Dirty": 4161536,
+      "Writeback": 0,
+      "AnonPages": 232263680,
+      "Mapped": 268124160,
+      "Shmem": 1294336,
+      "KReclaimable": 259178496,
+      "Slab": 323903488,
+      "SReclaimable": 259178496,
+      "SUnreclaim": 64724992,
+      "KernelStack": 5914624,
+      "PageTables": 5816320,
+      "SecPageTables": 0,
+      "NFS_Unstable": 0,
+      "Bounce": 0,
+      "WritebackTmp": 0,
+      "CommitLimit": 16829157376,
+      "Committed_AS": 2049060864,
+      "VmallocTotal": 35184372087808,
+      "VmallocUsed": 62590976,
+      "VmallocChunk": 0,
+      "Percpu": 2080768,
+      "HardwareCorrupted": 0,
+      "AnonHugePages": 0,
+      "ShmemHugePages": 0,
+      "ShmemPmdMapped": 0,
+      "FileHugePages": 0,
+      "FilePmdMapped": 0,
+      "CmaTotal": 0,
+      "CmaFree": 0,
+      "Unaccepted": 0,
+      "Balloon": 0,
+      "HugePages_Total": 0,
+      "HugePages_Free": 0,
+      "HugePages_Rsvd": 0,
+      "HugePages_Surp": 0,
+      "Hugepagesize": 2097152,
+      "Hugetlb": 0,
+      "DirectMap4k": 156004352,
+      "DirectMap2M": 14873001984,
+      "DirectMap1G": 21474836480
+    },
+    "host_ram_total_gb": 31.34674835205078,
+    "host_ram_available_gb": 30.285137176513672,
+    "disk_working": {
+      "path": "/kaggle/working",
+      "total_gb": 19.518142700195312,
+      "free_gb": 19.50238037109375
+    },
+    "disk_temp": {
+      "path": "/kaggle/temp",
+      "error": "FileNotFoundError: [Errno 2] No such file or directory: '/kaggle/temp'"
+    },
+    "disk_root": {
+      "path": "/tmp",
+      "total_gb": 8156.881748199463,
+      "free_gb": 1067.3061294555664
+    },
+    "python": "3.13.15",
+    "inputs": [
+      "datasets",
+      "datasets/nikmarco",
+      "datasets/nikmarco/chowder-moe-int8",
+      "datasets/nikmarco/chowder-moe-int8/.github",
+      "datasets/nikmarco/chowder-moe-int8/.github/workflows",
+      "datasets/nikmarco/chowder-moe-int8/chowder_batch",
+      "datasets/nikmarco/chowder-moe-int8/docs",
+      "datasets/nikmarco/chowder-moe-int8/docs/gen0",
+      "datasets/nikmarco/chowder-moe-int8/docs/gen1",
+      "datasets/nikmarco/chowder-moe-int8/docs/gen2",
+      "datasets/nikmarco/chowder-moe-int8/docs/growth",
+      "datasets/nikmarco/chowder-moe-int8/docs/literature",
+      "datasets/nikmarco/chowder-moe-int8/docs/moe",
+      "datasets/nikmarco/chowder-moe-int8/docs/quals",
+      "datasets/nikmarco/chowder-moe-int8/docs/reap_moe",
+      "datasets/nikmarco/chowder-moe-int8/docs/superpowers",
+      "datasets/nikmarco/chowder-moe-int8/docs/superpowers/plans",
+      "datasets/nikmarco/chowder-moe-int8/examples",
+      "datasets/nikmarco/chowder-moe-int8/examples/experiment_d",
+      "datasets/nikmarco/chowder-moe-int8/examples/experiment_d/configs"
+    ],
+    "nvidia_smi": "Tesla T4, 15360 MiB, 0 MiB, 7.5, 580.178.04\nTesla T4, 15360 MiB, 0 MiB, 7.5, 580.178.04",
+    "dataset": "/kaggle/input/datasets/nikmarco/chowder-moe-int8",
+    "torch": "2.11.0+cu128",
+    "cuda": "12.8",
+    "cuda_available": true,
+    "device_name": "Tesla T4",
+    "compute_capability": "7.5",
+    "device_total_gb": 14.56219482421875,
+    "bf16_supported": true
+  },
+  "plan": {
+    "per_layer_gb": 0.4705810546875,
+    "full_grid_gb": 18.8232421875,
+    "layers_affordable": 40,
+    "budget_gb": 26.285137176513672
+  },
+  "probe": {
+    "layers_probed": 40,
+    "grid_resident_gb": 18.8232421875,
+    "load_rss_gb": 19.434650421142578,
+    "peak_device_gb": 1.0296478271484375,
+    "peak_host_rss_gb": 19.888484954833984,
+    "peak_host_hwm_gb": 19.888484954833984,
+    "mean_forward_seconds": 0.1950156304250008,
+    "mean_backward_seconds": 0.39455416402500276,
+    "gradients_finite": true,
+    "gradients_nonzero": true,
+    "samples": [
+      {
+        "forward": {
+          "layer": 0,
+          "phase": "forward",
+          "rss_gb": 19.737163543701172,
+          "hwm_gb": 19.737163543701172,
+          "device_allocated_gb": 0.0118865966796875,
+          "device_reserved_gb": 1.021484375
+        },
+        "backward": {
+          "layer": 0,
+          "phase": "backward",
+          "rss_gb": 19.85122299194336,
+          "hwm_gb": 19.85122299194336,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.9039942320000023,
+        "backward_seconds": 3.410525419999999,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 1,
+          "phase": "forward",
+          "rss_gb": 19.887981414794922,
+          "hwm_gb": 19.887981414794922,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 1,
+          "phase": "backward",
+          "rss_gb": 19.888141632080078,
+          "hwm_gb": 19.888141632080078,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.20165765000001556,
+        "backward_seconds": 0.3010380160000068,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 2,
+          "phase": "forward",
+          "rss_gb": 19.888172149658203,
+          "hwm_gb": 19.888172149658203,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 2,
+          "phase": "backward",
+          "rss_gb": 19.88819122314453,
+          "hwm_gb": 19.88819122314453,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17699366400000827,
+        "backward_seconds": 0.3174891589999902,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 3,
+          "phase": "forward",
+          "rss_gb": 19.88819122314453,
+          "hwm_gb": 19.88819122314453,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 3,
+          "phase": "backward",
+          "rss_gb": 19.888214111328125,
+          "hwm_gb": 19.888214111328125,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17726147700000183,
+        "backward_seconds": 0.3169036700000163,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 4,
+          "phase": "forward",
+          "rss_gb": 19.88821792602539,
+          "hwm_gb": 19.88821792602539,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 4,
+          "phase": "backward",
+          "rss_gb": 19.888256072998047,
+          "hwm_gb": 19.888256072998047,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17639297599998827,
+        "backward_seconds": 0.31749119299999506,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 5,
+          "phase": "forward",
+          "rss_gb": 19.888263702392578,
+          "hwm_gb": 19.888263702392578,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 5,
+          "phase": "backward",
+          "rss_gb": 19.888294219970703,
+          "hwm_gb": 19.888294219970703,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.1756026179999992,
+        "backward_seconds": 0.31845660999999836,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 6,
+          "phase": "forward",
+          "rss_gb": 19.888294219970703,
+          "hwm_gb": 19.888294219970703,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 6,
+          "phase": "backward",
+          "rss_gb": 19.8883056640625,
+          "hwm_gb": 19.8883056640625,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17654931499998838,
+        "backward_seconds": 0.3190276830000016,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 7,
+          "phase": "forward",
+          "rss_gb": 19.8883056640625,
+          "hwm_gb": 19.8883056640625,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 7,
+          "phase": "backward",
+          "rss_gb": 19.888320922851562,
+          "hwm_gb": 19.888320922851562,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.1781604800000025,
+        "backward_seconds": 0.31799652799998057,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 8,
+          "phase": "forward",
+          "rss_gb": 19.888320922851562,
+          "hwm_gb": 19.888320922851562,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 8,
+          "phase": "backward",
+          "rss_gb": 19.888324737548828,
+          "hwm_gb": 19.888324737548828,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17567823199999566,
+        "backward_seconds": 0.32174810300000445,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 9,
+          "phase": "forward",
+          "rss_gb": 19.888336181640625,
+          "hwm_gb": 19.888336181640625,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 9,
+          "phase": "backward",
+          "rss_gb": 19.888370513916016,
+          "hwm_gb": 19.888370513916016,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17827685200001042,
+        "backward_seconds": 0.3149217850000241,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 10,
+          "phase": "forward",
+          "rss_gb": 19.888370513916016,
+          "hwm_gb": 19.888370513916016,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 10,
+          "phase": "backward",
+          "rss_gb": 19.888378143310547,
+          "hwm_gb": 19.888378143310547,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.1769291069999781,
+        "backward_seconds": 0.3165867370000228,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 11,
+          "phase": "forward",
+          "rss_gb": 19.888378143310547,
+          "hwm_gb": 19.888378143310547,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 11,
+          "phase": "backward",
+          "rss_gb": 19.88839340209961,
+          "hwm_gb": 19.88839340209961,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17539558200002148,
+        "backward_seconds": 0.318016431000018,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 12,
+          "phase": "forward",
+          "rss_gb": 19.88839340209961,
+          "hwm_gb": 19.88839340209961,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 12,
+          "phase": "backward",
+          "rss_gb": 19.888397216796875,
+          "hwm_gb": 19.888397216796875,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.1763032070000179,
+        "backward_seconds": 0.31639126299998566,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 13,
+          "phase": "forward",
+          "rss_gb": 19.88840103149414,
+          "hwm_gb": 19.88840103149414,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 13,
+          "phase": "backward",
+          "rss_gb": 19.88840103149414,
+          "hwm_gb": 19.88840103149414,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17556689099998835,
+        "backward_seconds": 0.316576380999976,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 14,
+          "phase": "forward",
+          "rss_gb": 19.88840103149414,
+          "hwm_gb": 19.88840103149414,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 14,
+          "phase": "backward",
+          "rss_gb": 19.88840103149414,
+          "hwm_gb": 19.88840103149414,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.1735211950000064,
+        "backward_seconds": 0.3174715570000046,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 15,
+          "phase": "forward",
+          "rss_gb": 19.888404846191406,
+          "hwm_gb": 19.888404846191406,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 15,
+          "phase": "backward",
+          "rss_gb": 19.888408660888672,
+          "hwm_gb": 19.888408660888672,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17507977500000038,
+        "backward_seconds": 0.31782610499999464,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 16,
+          "phase": "forward",
+          "rss_gb": 19.888408660888672,
+          "hwm_gb": 19.888408660888672,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 16,
+          "phase": "backward",
+          "rss_gb": 19.888412475585938,
+          "hwm_gb": 19.888412475585938,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.09765625
+        },
+        "forward_seconds": 0.17657059999999092,
+        "backward_seconds": 0.3174122880000141,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 17,
+          "phase": "forward",
+          "rss_gb": 19.888412475585938,
+          "hwm_gb": 19.888412475585938,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 17,
+          "phase": "backward",
+          "rss_gb": 19.888427734375,
+          "hwm_gb": 19.888427734375,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.09765625
+        },
+        "forward_seconds": 0.17559026200001426,
+        "backward_seconds": 0.3166731550000179,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 18,
+          "phase": "forward",
+          "rss_gb": 19.888427734375,
+          "hwm_gb": 19.888427734375,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 18,
+          "phase": "backward",
+          "rss_gb": 19.888427734375,
+          "hwm_gb": 19.888427734375,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17545241600001305,
+        "backward_seconds": 0.32105508699999064,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 19,
+          "phase": "forward",
+          "rss_gb": 19.888439178466797,
+          "hwm_gb": 19.888439178466797,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 19,
+          "phase": "backward",
+          "rss_gb": 19.888446807861328,
+          "hwm_gb": 19.888446807861328,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17931104099997697,
+        "backward_seconds": 0.33028991000000474,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 20,
+          "phase": "forward",
+          "rss_gb": 19.888450622558594,
+          "hwm_gb": 19.888450622558594,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 20,
+          "phase": "backward",
+          "rss_gb": 19.888450622558594,
+          "hwm_gb": 19.888450622558594,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17729181100000346,
+        "backward_seconds": 0.315721319000005,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 21,
+          "phase": "forward",
+          "rss_gb": 19.88845443725586,
+          "hwm_gb": 19.88845443725586,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 21,
+          "phase": "backward",
+          "rss_gb": 19.88845443725586,
+          "hwm_gb": 19.88845443725586,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.09765625
+        },
+        "forward_seconds": 0.17542926200002285,
+        "backward_seconds": 0.31797057299999665,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 22,
+          "phase": "forward",
+          "rss_gb": 19.88845443725586,
+          "hwm_gb": 19.88845443725586,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 22,
+          "phase": "backward",
+          "rss_gb": 19.88845443725586,
+          "hwm_gb": 19.88845443725586,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17962136299999543,
+        "backward_seconds": 0.31566890799999214,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 23,
+          "phase": "forward",
+          "rss_gb": 19.88845443725586,
+          "hwm_gb": 19.88845443725586,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 23,
+          "phase": "backward",
+          "rss_gb": 19.888458251953125,
+          "hwm_gb": 19.888458251953125,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.1774278820000177,
+        "backward_seconds": 0.3158351200000027,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 24,
+          "phase": "forward",
+          "rss_gb": 19.888458251953125,
+          "hwm_gb": 19.888458251953125,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 24,
+          "phase": "backward",
+          "rss_gb": 19.888458251953125,
+          "hwm_gb": 19.888458251953125,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.1776056980000078,
+        "backward_seconds": 0.3171493350000105,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 25,
+          "phase": "forward",
+          "rss_gb": 19.88846206665039,
+          "hwm_gb": 19.88846206665039,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 25,
+          "phase": "backward",
+          "rss_gb": 19.888477325439453,
+          "hwm_gb": 19.888477325439453,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17583259599999224,
+        "backward_seconds": 0.3160153620000017,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 26,
+          "phase": "forward",
+          "rss_gb": 19.888477325439453,
+          "hwm_gb": 19.888477325439453,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 26,
+          "phase": "backward",
+          "rss_gb": 19.888477325439453,
+          "hwm_gb": 19.888477325439453,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17623578399999928,
+        "backward_seconds": 0.31560647300000255,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 27,
+          "phase": "forward",
+          "rss_gb": 19.888477325439453,
+          "hwm_gb": 19.888477325439453,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 27,
+          "phase": "backward",
+          "rss_gb": 19.88848114013672,
+          "hwm_gb": 19.88848114013672,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17642319899999848,
+        "backward_seconds": 0.3166693660000135,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 28,
+          "phase": "forward",
+          "rss_gb": 19.88848114013672,
+          "hwm_gb": 19.88848114013672,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 28,
+          "phase": "backward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17700220700001523,
+        "backward_seconds": 0.31479609400000186,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 29,
+          "phase": "forward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 29,
+          "phase": "backward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.1749728509999784,
+        "backward_seconds": 0.31639028899999744,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 30,
+          "phase": "forward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 30,
+          "phase": "backward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17480389900001114,
+        "backward_seconds": 0.3164686019999863,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 31,
+          "phase": "forward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 31,
+          "phase": "backward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.1767770980000023,
+        "backward_seconds": 0.3145372790000067,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 32,
+          "phase": "forward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 32,
+          "phase": "backward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17529702100000577,
+        "backward_seconds": 0.318317473999997,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 33,
+          "phase": "forward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 33,
+          "phase": "backward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17472244900000078,
+        "backward_seconds": 0.31771160900001405,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 34,
+          "phase": "forward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 34,
+          "phase": "backward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17481980099998395,
+        "backward_seconds": 0.3173708830000237,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 35,
+          "phase": "forward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 35,
+          "phase": "backward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17544501899999432,
+        "backward_seconds": 0.3158749549999982,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 36,
+          "phase": "forward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 36,
+          "phase": "backward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17459875699998406,
+        "backward_seconds": 0.31778743300000656,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 37,
+          "phase": "forward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 37,
+          "phase": "backward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17541010200000073,
+        "backward_seconds": 0.31642787499998803,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 38,
+          "phase": "forward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 38,
+          "phase": "backward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17607274300002018,
+        "backward_seconds": 0.3244928350000009,
+        "grad_finite": true,
+        "grad_nonzero": true
+      },
+      {
+        "forward": {
+          "layer": 39,
+          "phase": "forward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0198211669921875,
+          "device_reserved_gb": 1.052734375
+        },
+        "backward": {
+          "layer": 39,
+          "phase": "backward",
+          "rss_gb": 19.888484954833984,
+          "hwm_gb": 19.888484954833984,
+          "device_allocated_gb": 0.0217742919921875,
+          "device_reserved_gb": 1.095703125
+        },
+        "forward_seconds": 0.17454810299997803,
+        "backward_seconds": 0.3174576960000195,
+        "grad_finite": true,
+        "grad_nonzero": true
+      }
+    ]
+  },
+  "verdict": "40/40 layers held resident (18.82 GB of int8) in bfloat16: RSS 19.43 GB after load, 19.89 GB peak of 31.3 GB; device peak 1.03 GB; 0.2s fwd + 0.4s bwd per layer pass; gradients finite=True",
+  "probe_dtype": "bfloat16"
+}

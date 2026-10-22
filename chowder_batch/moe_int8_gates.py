@@ -1,0 +1,1108 @@
+"""Measure the frozen-expert placement gates on a real MoE checkpoint.
+
+  python chowder_batch/moe_int8_gates.py --base-model <dir> --out gates.json \
+      [--arms int8,bulk] [--steps 3] [--seq-len 2048] [--device 0] [--cpu]
+
+For each arm this records what the prereg in
+``docs/quals/MOE_TRANSIENT_GRAD_PLACEMENT_PREREG_2026-10-18.md`` asks for, or an
+explicit "not measured" when this runner cannot answer it:
+
+  load_census     live placement census from the loader itself
+                  (``moe_int8_experts.load_model_int8_experts`` for ``int8``,
+                  ``moe_transient_grad.prepare_split_model`` for ``bulk``)
+  memory_vram     peak allocated VRAM per step, against the <= 14.5 GB gate
+  host_rss        process peak working set across load and steps
+  throughput      measured s/step of a **placement step**: forward + backward on
+                  ``inputs_embeds`` covering every expert layer, no LoRA and no
+                  optimizer, so it is the cost of the placement, not of a training
+                  step. The prereg's throughput gate is a worker run.
+
+``gradient``, ``smoke``, ``router_balance`` and ``wddm_spill`` need a dataset and
+a real fine-tune, so this runner reports them as not measured rather than
+guessing -- and ``--witness`` is how a worker run's own record of them gets into
+the table (``chowder.placement_witnesses`` produces it from the run).
+
+WDDM shared-memory spill is not observable from here either: the record carries
+``peak_vram_gb`` and ``reserved_gb`` and leaves the spill verdict to the operator.
+
+The measurement goes straight into the prereg's gate table
+(``docs/quals/MOE_INT8_PLACEMENT_PREREG_2026-10-20.md``, or ``--prereg`` /
+``CHOWDER_MOE_GATE_TABLE``): only the generated block is replaced, so the prose
+stays hand-authored while the numbers cannot drift from the last measurement. A
+row this run cannot answer is carried forward from the recorded one rather than
+overwritten with "not measured". ``--check`` compares and writes nothing.
+
+Exit codes: 0 table written with no regression, 1 a recorded gate **regressed**
+(the table is still updated, so the worse numbers are the ones on record), 2
+refusal (missing directory, unknown arm, no CUDA without ``--cpu``, a card with
+less free memory than ``--min-free-vram-gb``), 3 an arm
+failed to load or to place, 4 the table was measured on a different artifact and
+would be overwritten with incomparable numbers (``--allow-new-baseline`` starts
+a new baseline), 5 the header projection disagrees with the recorded measurement
+(``--project-only``: the two cannot both be right), 6 the projected step does not
+fit the gate (``--project-only`` with an activation term: a predicted FAIL).
+
+``--project-only`` is the mode a box with no free card can still answer with:
+it reads the shard **headers** (no tensor data, no model, no device), derives
+what a placement step must occupy, and prints that beside whatever the table
+records -- ``load_census`` and ``host_rss`` today, ``memory_vram`` once a
+``--steps 3`` run on the card has happened. It writes no table: a projection is
+not a measurement, and the block must never carry one. The int8 and non-expert
+terms are derived, not estimated, so a mismatch against the recorded census is a
+refusal (exit 5) rather than a rounding difference.
+
+With ``--activation-probe`` and ``--activation-probe-eager`` it closes the last
+open term as well: the two probe records (the same layers measured with per-layer
+recompute and without) give the retention a checkpointed step actually holds, so
+the mode prints a step total and answers the gate -- the step a worker pays, not
+the forty-layer eager step no campaign runs (exit 6 when it does not fit). That
+answer is still arithmetic, and the table stays untouched.
+
+``--self-check`` writes its own tiny synthetic checkpoint to a temporary
+directory and runs both arms on the CPU, so the runner itself is verifiable
+without a GPU or a real model. Without an explicit ``--prereg`` it writes its
+gate table beside that checkpoint, never over the placement's prereg: a
+synthetic model's numbers are not the placement's numbers.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))  # noqa: E402
+
+from chowder.moe_placement_gates import (  # noqa: E402
+    ALL_GATES,
+    DEFAULT_PREREG,
+    EXPERT_PLACEMENT,
+    VRAM_GATE_GB,
+    PlacementGateError,
+    vram_verdict,
+    artifact_identity,
+    assert_declaration_allowed,
+    code_commit,
+    parse_block,
+    regressions,
+    render_block,
+    resolve_prereg_path,
+    splice_block,
+    splice_witness_rows,
+)
+
+SCHEMA = "chowder.moe-placement-gates.v1"
+ARMS = ("int8", "bulk")
+#: The step's own scoring scores cross-entropy one chunk of positions at a time.
+#: It used to hold ``logits.float().square()`` over the whole sequence: at seq
+#: 2048 x 248320 that is a 508.6M-element bf16 tensor plus two fp32 copies, 4.74
+#: GiB, a third of a 14.5 GB gate spent on an expression no campaign evaluates.
+#: One chunk at a time is what a real step does to fit, so the harness stops
+#: being what decides the peak.
+LOSS_CHUNK_TOKENS = 256
+#: A gate table written by a different artifact cannot back these numbers: the
+#: run refuses to overwrite it until the operator says the baseline moved.
+ARTIFACT_MISMATCH_EXIT = 4
+#: ``--project-only`` found the header arithmetic and the recorded measurement
+#: irreconcilable. Nothing is written either way; this says which of the two is
+#: the thing to look at before spending the card.
+PROJECTION_DISAGREES_EXIT = 5
+#: ``--project-only`` projected a step that does not fit the gate. A projection
+#: over the gate is a predicted FAIL, so it must not exit 0 next to the verdict
+#: word "reachable" only ever appearing when it fits.
+PROJECTED_OVER_GATE_EXIT = 6
+
+
+def _peak_rss_bytes() -> int | None:
+    """This process's peak working set: the host RAM the arm actually touched."""
+    try:  # Windows: psapi gives the peak, not just the current
+        import ctypes
+        from ctypes import wintypes
+
+        class ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        counters = ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(ProcessMemoryCounters)
+        # The pseudohandle is pointer sized: untyped, ctypes truncates it to -1
+        # and the call fails with an overflow instead of returning memory.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        query = kernel32.K32GetProcessMemoryInfo
+        query.argtypes = [ctypes.c_void_p, ctypes.POINTER(ProcessMemoryCounters), wintypes.DWORD]
+        query.restype = wintypes.BOOL
+        if query(kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+            return int(counters.PeakWorkingSetSize)
+        return None
+    except Exception:  # non-Windows or a stripped-down interpreter
+        try:
+            import resource
+
+            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return int(peak) * (1024 if sys.platform != "darwin" else 1)
+        except Exception:
+            return None
+
+
+#: How much device memory this runner will not step without. The weights floor
+#: for reap160 is 5.54 GiB (non-expert parameters 4.55 + one layer's dequantized
+#: experts 0.94 + dequant scratch 0.06); below that no step can fit at all, and a
+#: peak measured on the remainder describes whatever else held the card.
+DEFAULT_MIN_FREE_VRAM_GB = 6.0
+
+
+def headroom_problem(free_gb: float | None, total_gb: float | None, *, minimum: float) -> str | None:
+    """Why this card cannot measure a placement step, or ``None`` if it can.
+
+    Telemetry that cannot measure is not telemetry, and a peak taken on a card
+    somebody else is using is not the placement's: on 2026-10-20 the training run
+    left 156 MiB free, and stepping there would have reported the leftovers as a
+    placement peak (via WDDM paging, silently). Refusing is the only honest move.
+    """
+    if free_gb is None or total_gb is None:
+        return None
+    if free_gb >= minimum:
+        return None
+    return (
+        f"cuda device has {free_gb:.2f} GiB free of {total_gb:.2f} GiB, below the "
+        f"{minimum:.1f} GiB this runner will not step under: a peak measured now would "
+        "describe the card's remaining memory (or a WDDM spill), not the placement. "
+        "Wait for the card, or pass --cpu to take the census instead."
+    )
+
+
+def device_headroom(index: int) -> tuple[float, float] | None:
+    """``(free, total)`` GiB of the card's **dedicated** memory, or ``None``.
+
+    ``torch.cuda.mem_get_info`` is the wrong instrument on Windows: WDDM lets a
+    process commit past the card into system RAM, so it reports headroom that
+    exists only as paging -- and it duly reported plenty free on a 16 GB card
+    holding 15.9 GB while this guard was being written, which is why the figure
+    comes from ``nvidia-smi`` instead. That number is machine-wide, which is
+    exactly the question here (is somebody else holding the card), unlike its use
+    as a proxy for one process's own footprint.
+    """
+    from chowder.llama_server_manager import query_gpu_vram_mib
+
+    usage = query_gpu_vram_mib().get(int(index))
+    if not usage:
+        return None
+    used, total = usage
+    return ((total - used) / 1024, total / 1024)
+
+
+def _gib(nbytes: int | None) -> float | None:
+    return None if nbytes is None else round(nbytes / 2**30, 2)
+
+
+def _vocab_size(config: Any) -> int:
+    text = getattr(config, "get_text_config", lambda: config)()
+    return int(getattr(text, "vocab_size", 0) or getattr(config, "vocab_size", 0) or 1000)
+
+
+def _load_int8(base: Path, device: Any, dtype: Any) -> tuple[Any, dict[str, Any]]:
+    from chowder.backends import moe_int8_experts as mie
+
+    model, census = mie.load_model_int8_experts(base, device=device, dtype=dtype)
+    device_type = "cuda" if str(device).startswith("cuda") else "cpu"
+    census = {**census, **mie.prepare_int8_placement(model, device_type=device_type)}
+    return model, census
+
+
+def _load_bulk(base: Path, device: Any, dtype: Any) -> tuple[Any, dict[str, Any]]:
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    from chowder.backends import moe_transient_grad as mtg
+
+    if str(device).startswith("cuda"):
+        device_map = mtg.split_device_map(str(base), revision=None, local_files_only=True, device=device.index or 0)
+        model = AutoModelForCausalLM.from_pretrained(str(base), dtype=dtype, device_map=device_map)
+        census = mtg.prepare_split_model(model, device_type="cuda", bulk=True)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(str(base), dtype=dtype)
+        census = mtg.prepare_split_model(model, device_type="cpu", bulk=True)
+    return model, dict(census)
+
+
+ARM_LOADERS = {"int8": _load_int8, "bulk": _load_bulk}
+
+
+def _reset_peak(torch: Any, device: Any) -> None:
+    """Reset the allocator's peak counters on ``device``.
+
+    The installed torch (2.11+cu128) normalises ``reset_peak_memory_stats``'s
+    argument to a device index and hands that index to a binding which refuses
+    it -- ``RuntimeError: Invalid device argument`` -- for both an ``int`` and a
+    ``torch.device``. Only the no-argument form works, and it acts on the
+    *current* device. So the current device is set from the caller's index and
+    a device without one is a hard stop: a peak read from card 0 and stamped
+    as card 1's would be a fabricated measurement.
+    """
+    index = getattr(device, "index", None)
+    if index is None:
+        raise RuntimeError(
+            f"peak accounting needs an explicit cuda index; got device={device!r}. "
+            "torch.cuda.reset_peak_memory_stats only accepts the current device"
+        )
+    torch.cuda.set_device(int(index))
+    torch.cuda.reset_peak_memory_stats()
+
+
+class _DevicePeaks:
+    """The step's device-memory readings, and nothing else.
+
+    A thin adapter so the instrument can be tested without a card: what the FAIL
+    rule depends on is *when* each peak is read -- the forward's after the
+    forward, the step's after the backward, both reset per step -- not that
+    ``torch.cuda`` is reachable from a unit test. A CPU device reports ``None``
+    and the record carries no harness term rather than a zero.
+    """
+
+    def __init__(self, torch: Any, device: Any) -> None:
+        self._torch = torch
+        self._device = device
+        self.enabled = device.type == "cuda"
+
+    def reset(self) -> None:
+        if not self.enabled:
+            return
+        self._torch.cuda.synchronize()
+        _reset_peak(self._torch, self._device)
+
+    def read(self) -> float | None:
+        if not self.enabled:
+            return None
+        return self._torch.cuda.max_memory_allocated(self._device) / 2**30
+
+    def sync(self) -> None:
+        if self.enabled:
+            self._torch.cuda.synchronize()
+
+
+def _step_loss(torch: Any, logits: Any, tokens: Any, *, score_tokens: int = 0) -> Any:
+    """Cross-entropy over the positions this step scores, one chunk at a time.
+
+    ``score_tokens`` 0 scores every position, which is the loss a campaign pays;
+    a small number scores only the last ones. The latter is not the campaign's
+    step and is not used as one: it is the re-run the prereg's rule prescribes
+    when a peak is over the gate only because of the harness, because the
+    gradient still reaches every layer while the head can no longer be the peak.
+    """
+    import torch.nn.functional as functional
+
+    targets = tokens[:, 1:]
+    positions = targets.shape[1]
+    if positions <= 0:
+        raise ValueError(
+            "a placement step needs at least two tokens: the loss predicts the next one, "
+            "so a single-token step has nothing to score and cannot backpropagate"
+        )
+    limit = positions if score_tokens <= 0 else min(int(score_tokens), positions)
+    # The last positions, not the first: those are the ones a generation-shaped
+    # step would report, and scoring them still sends a gradient through every
+    # layer while the head stops being the peak.
+    first = positions - limit
+    vocabulary = logits.shape[-1]
+    total = logits.new_zeros(()).float()
+    counted = 0
+    for start in range(first, positions, LOSS_CHUNK_TOKENS):
+        stop = min(start + LOSS_CHUNK_TOKENS, positions)
+        # float() on the slice makes the contiguous fp32 chunk; nothing materialises
+        # the whole sequence's fp32 logits, which is the point of chunking.
+        chunk = logits[:, start:stop, :].float().reshape(-1, vocabulary)
+        labels = targets[:, start:stop].reshape(-1)
+        total = total + functional.cross_entropy(chunk, labels, reduction="sum")
+        counted += int(labels.numel())
+    return total / max(1, counted)
+
+
+def _placement_steps(
+    model: Any,
+    *,
+    steps: int,
+    seq_len: int,
+    device: Any,
+    score_tokens: int = 0,
+    peaks: _DevicePeaks | None = None,
+) -> dict[str, Any]:
+    """Forward + backward through every expert layer, timed per step.
+
+    Deliberately not a training step: no LoRA, no optimizer. What it isolates is
+    the placement's own cost -- the per-layer host->device copy (and, for int8,
+    the dequantisation) in forward and again in the backward recompute.
+
+    Two peaks are taken per step, not one: after the forward and after the
+    backward. Their difference is what the step's own scoring adds, which is the
+    term the prereg's FAIL rule needs to tell a placement that does not fit from
+    a harness standing where the placement should be. No device peak is reported
+    when nothing is stepped -- a load's peak is not the gate's quantity.
+    """
+    import torch
+
+    if steps <= 0:
+        # Census-only: the load is the measurement, nothing is stepped.
+        return {
+            "steps": 0,
+            "seq_len": seq_len,
+            "step_seconds": [],
+            "s_per_step": None,
+            "peak_vram_gb": None,
+            "forward_peak_gb": None,
+            "harness_marginal_gb": None,
+            "includes_lora": False,
+            "includes_optimizer": False,
+            "gradient_on_inputs_embeds": False,
+        }
+
+    vocabulary = _vocab_size(model.config)
+    generator = torch.Generator().manual_seed(0)
+    tokens = torch.randint(0, vocabulary, (1, seq_len), generator=generator).to(device)
+    embedding = model.get_input_embeddings()
+    meters = peaks or _DevicePeaks(torch, device)
+
+    times: list[float] = []
+    step_readings: list[float] = []
+    forward_readings: list[float] = []
+    for _ in range(steps):
+        # Per step, so the forward's peak on step 3 is step 3's and not the
+        # high-water mark of step 1's backward.
+        meters.reset()
+        start = time.perf_counter()
+        hidden = embedding(tokens).detach().requires_grad_(True)
+        with torch.enable_grad():
+            logits = model(inputs_embeds=hidden, use_cache=False).logits
+            forward_reading = meters.read()
+            loss = _step_loss(torch, logits, tokens, score_tokens=score_tokens)
+            loss.backward()
+        meters.sync()
+        step_reading = meters.read()
+        if forward_reading is not None:
+            forward_readings.append(forward_reading)
+        if step_reading is not None:
+            step_readings.append(step_reading)
+        times.append(time.perf_counter() - start)
+        model.zero_grad(set_to_none=True)
+        del logits, loss, hidden
+
+    peak = max(step_readings) if step_readings else None
+    forward_peak = max(forward_readings) if forward_readings else None
+    return {
+        "steps": steps,
+        "seq_len": seq_len,
+        "step_seconds": [round(value, 4) for value in times],
+        "s_per_step": round(sum(times) / len(times), 4) if times else None,
+        "peak_vram_gb": None if peak is None else round(peak, 3),
+        "forward_peak_gb": None if forward_peak is None else round(forward_peak, 3),
+        "harness_marginal_gb": (
+            None if peak is None or forward_peak is None else round(max(0.0, peak - forward_peak), 3)
+        ),
+        "score": {
+            "kind": "cross-entropy, chunked",
+            "chunk_tokens": LOSS_CHUNK_TOKENS,
+            "positions": (seq_len - 1) if score_tokens <= 0 else min(int(score_tokens), seq_len - 1),
+        },
+        "includes_lora": False,
+        "includes_optimizer": False,
+        "gradient_on_inputs_embeds": True,
+    }
+
+
+def _vram(torch: Any, device: Any) -> dict[str, Any]:
+    """Reserved bytes: what the allocator held, spill or no spill.
+
+    The allocated peak is not read here any more. It belongs to ``_placement_steps``,
+    which measures it per step and -- with ``--steps 0`` -- reports none at all: a
+    load's peak is not the gate's quantity, and reporting it as ``memory_vram``
+    would make a census-only run look like a measured step.
+    """
+    if device.type != "cuda":
+        return {"reserved_gb": None}
+    return {"reserved_gb": round(torch.cuda.max_memory_reserved(device) / 2**30, 3)}
+
+
+def run_arm(
+    arm: str,
+    base: Path,
+    *,
+    device: Any,
+    dtype: Any,
+    steps: int,
+    seq_len: int,
+    gradient_checkpointing: bool = True,
+    score_tokens: int = 0,
+) -> dict[str, Any]:
+    import torch
+
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+        _reset_peak(torch, device)
+
+    started = time.perf_counter()
+    model, census = ARM_LOADERS[arm](base, device, dtype)
+    load_seconds = time.perf_counter() - started
+    if gradient_checkpointing:
+        # The step a campaign pays for: a worker run checkpoints by default, so
+        # this is the memory and step time the gate has to describe. See the
+        # prereg's gate definition -- the un-checkpointed step retains every
+        # layer's activations and is 3.6x over the card at seq 2048.
+        model.gradient_checkpointing_enable()
+    load_rss = _peak_rss_bytes()
+
+    result: dict[str, Any] = {
+        "arm": arm,
+        "load_seconds": round(load_seconds, 3),
+        "load_peak_rss_gb": _gib(load_rss),
+        "load_peak_vram_gb": (
+            round(torch.cuda.max_memory_allocated(device) / 2**30, 3)
+            if device.type == "cuda"
+            else None
+        ),
+        "gradient_checkpointing": bool(gradient_checkpointing),
+        "census": census,
+    }
+    if "expert_bytes" in census:
+        result["census_meta"] = {
+            "expert_bytes_gb": _gib(int(census["expert_bytes"])),
+            "patched_expert_modules": census.get("patched_expert_modules"),
+        }
+
+    result.update(
+        _placement_steps(model, steps=steps, seq_len=seq_len, device=device, score_tokens=score_tokens)
+    )
+    result.update(_vram(torch, device))
+    result["total_peak_rss_gb"] = _gib(_peak_rss_bytes())
+    verdict = vram_verdict(
+        peak_gb=result.get("peak_vram_gb"),
+        harness_gb=result.get("harness_marginal_gb"),
+    )
+    result["vram_verdict"] = verdict
+    result["gates"] = {
+        "load_census": "measured",
+        "memory_vram": (
+            "measured"
+            if result["peak_vram_gb"] is not None
+            else (
+                "not measured (--steps 0: census only)"
+                if steps <= 0
+                else "not measured (CPU arm)"
+            )
+        ),
+        # ``harness-bound`` is not a pass: the placement has not been shown to
+        # fit, it has been shown that the harness can hide whether it does. The
+        # declaration rule refuses either way, and the table says which one it
+        # was, so the first measured run cannot be re-read as the other later.
+        "memory_vram_pass": (
+            None
+            if verdict["verdict"] == "not measured"
+            else bool(verdict["verdict"] == "pass")
+        ),
+        "memory_vram_verdict": verdict["verdict"],
+        "host_rss": "measured",
+        "throughput": (
+            "not measured (--steps 0: census only)"
+            if not result["step_seconds"]
+            else "measured (placement step, no LoRA/optimizer)"
+        ),
+        "gradient": "not measured by this runner (needs a LoRA run)",
+        "smoke": "not measured by this runner (needs a dataset)",
+        "router_balance": "not measured by this runner (needs a smoke run)",
+        "wddm_spill": "not observable from here; compare peak_vram_gb to the card",
+    }
+    return result
+
+
+def run(
+    base: Path,
+    *,
+    arms: tuple[str, ...],
+    device: Any,
+    dtype: Any,
+    steps: int,
+    seq_len: int,
+    gradient_checkpointing: bool = True,
+    score_tokens: int = 0,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "schema": SCHEMA,
+        "gradient_checkpointing": bool(gradient_checkpointing),
+        "score_tokens": int(score_tokens),
+        "loss": "cross-entropy, chunked",
+        "base_model": str(base),
+        "device": str(device),
+        "dtype": str(dtype) if dtype is not None else "auto (the checkpoint's)",
+        "placement": EXPERT_PLACEMENT,
+        "vram_gate_gb": VRAM_GATE_GB,
+        "artifact": artifact_identity(base),
+        "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "code_commit": code_commit(),
+        "steps": steps,
+        "seq_len": seq_len,
+        "arms": {},
+        "note": (
+            "Placement steps only: forward+backward on inputs_embeds, no LoRA and no "
+            "optimizer. The prereg's throughput, gradient, smoke and router-balance "
+            "gates still require a worker run."
+        ),
+    }
+    for arm in arms:
+        record["arms"][arm] = run_arm(
+            arm,
+            base,
+            device=device,
+            dtype=dtype,
+            steps=steps,
+            seq_len=seq_len,
+            gradient_checkpointing=gradient_checkpointing,
+            score_tokens=score_tokens,
+        )
+    return record
+
+
+# --- the prereg table ---------------------------------------------------------
+#
+# The placement's prereg document owns one generated block, and
+# ``chowder.moe_placement_gates`` is the single definition of it: how it is
+# rendered, how it is read back, what counts as a regression, and when a campaign
+# is allowed to declare the placement at all. The runner replaces only that
+# block, so the prose (and the gate definitions) stay authored by hand while the
+# numbers cannot drift from the last measurement.
+
+
+def _self_check_workspace() -> Path:
+    """A tiny synthetic Qwen3-MoE checkpoint, so the runner is provable on CPU."""
+    import torch
+    from transformers import AutoModelForCausalLM, Qwen3MoeConfig
+
+    directory = Path(tempfile.mkdtemp(prefix="moe-int8-gates-"))
+    config = Qwen3MoeConfig(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=8,
+        moe_intermediate_size=4,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        num_experts=6,
+        num_experts_per_tok=2,
+        decoder_sparse_step=1,
+        max_position_embeddings=32,
+        head_dim=8,
+        tie_word_embeddings=False,
+    )
+    torch.manual_seed(0)
+    AutoModelForCausalLM.from_config(config).save_pretrained(directory, max_shard_size="20KB")
+    return directory
+
+
+def _record_witness(args: argparse.Namespace) -> int:
+    """Record a worker run's four gates in the table. No model, no device."""
+    try:
+        witness = json.loads(Path(args.witness).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        print(f"cannot read the witness file {args.witness}: {error}", file=sys.stderr)
+        return 2
+    if not isinstance(witness, dict):
+        print(f"{args.witness} is not a witness record (expected a JSON object)", file=sys.stderr)
+        return 2
+    if args.spill_verdict:
+        if not args.spill_basis.strip():
+            print(
+                "--spill-verdict needs --spill-basis: nobody can observe driver paging "
+                "from PyTorch, so the verdict must name what it rests on",
+                file=sys.stderr,
+            )
+            return 2
+        gates = dict(witness.get("gates") or {})
+        gates["wddm_spill"] = {
+            "value": f"operator {args.spill_verdict}: {args.spill_basis.strip()}",
+            "verdict": args.spill_verdict,
+            "evidence": {"basis": args.spill_basis.strip()},
+        }
+        witness["gates"] = gates
+
+    prereg = resolve_prereg_path(args.prereg)
+    if prereg is None or not prereg.is_file():
+        print(
+            f"no gate table to record into at {prereg or DEFAULT_PREREG}; run this "
+            "runner against the base model first, so the table is bound to an artifact",
+            file=sys.stderr,
+        )
+        return 2
+    document = prereg.read_text(encoding="utf-8")
+    try:
+        updated, recorded = splice_witness_rows(document, witness)
+    except PlacementGateError as error:
+        print(f"refused: {error}", file=sys.stderr)
+        return 2
+    if args.check:
+        print(f"(--check: would record {', '.join(recorded)} from {args.witness}; {prereg} was not written)")
+    else:
+        prereg.write_text(updated, encoding="utf-8")
+        print(f"recorded {', '.join(recorded)} from {args.witness} into {prereg}")
+
+    parsed = parse_block(updated) or {}
+    verdicts = parsed.get("verdicts") or {}
+    measured = [gate for gate, verdict in verdicts.items() if not verdict.startswith("not measured")]
+    print(f"{len(measured)}/{len(ALL_GATES)} gates measured: {', '.join(sorted(measured))}")
+    # The artifact binding was enforced where the rows were written (the witness
+    # digest must equal the table's), so this only asks whether every gate is now
+    # measured. The campaign's own base is checked at prepare time, against the
+    # path it actually declares.
+    try:
+        assert_declaration_allowed(updated, ["a campaign declaring the placement"])
+    except PlacementGateError as error:
+        print(f"a campaign still cannot declare the placement: {error}")
+        return 0
+    print("every gate is measured on this artifact: a campaign may declare the placement")
+    return 0
+
+
+def _recorded_numbers(gates_path: str, prereg: Path | None) -> dict[str, Any]:
+    """What has already been measured, in the units the projection reports.
+
+    A gate record is the better witness when there is one: it carries the
+    census' own ``non_expert_bytes`` and, after a ``--steps 3`` run, the device
+    peak. The prereg table carries only the two numbers its rows publish, which
+    is why a projection against it can check the int8 grid and the host peak but
+    not the non-expert split.
+    """
+    recorded: dict[str, Any] = {
+        "source": None,
+        "int8_plus_scales": None,
+        "non_expert": None,
+        "host_peak": None,
+        "step_vram": None,
+        "seq_len": None,
+    }
+    if gates_path:
+        try:
+            payload = json.loads(Path(gates_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise ValueError(f"cannot read the gate record {gates_path}: {error}") from error
+        arm = (payload.get("arms") or {}).get("int8") or {}
+        census = arm.get("census") or {}
+        meta = arm.get("census_meta") or {}
+        recorded.update(
+            {
+                "source": Path(gates_path).name,
+                "int8_plus_scales": meta.get("expert_bytes_gb"),
+                "non_expert": _gib(census.get("non_expert_bytes")),
+                "host_peak": arm.get("total_peak_rss_gb"),
+                "step_vram": arm.get("peak_vram_gb"),
+                "seq_len": payload.get("seq_len"),
+            }
+        )
+        return recorded
+
+    if prereg is None or not prereg.is_file():
+        return recorded
+    parsed = parse_block(prereg.read_text(encoding="utf-8")) or {}
+    numbers = parsed.get("numbers") or {}
+    recorded.update(
+        {
+            "source": f"{prereg.name}: load_census, host_rss",
+            "int8_plus_scales": numbers.get("load_census"),
+            "host_peak": numbers.get("host_rss"),
+            "step_vram": numbers.get("memory_vram"),
+        }
+    )
+    return recorded
+
+
+def _project_only(args: argparse.Namespace) -> int:
+    """Print the projection from the headers, beside what is already recorded.
+
+    No model, no weights, no device: this is the mode that answers "how much did
+    the dtype fix buy" on a box whose card is busy. It never writes the gate
+    table -- the table is for measurements, and a projection in it would be
+    indistinguishable from one.
+    """
+    from chowder import moe_vram_projection as mvp
+
+    if args.self_check:
+        args.base_model = str(_self_check_workspace())
+    elif not args.base_model:
+        print("--project-only needs --base-model (or --self-check)", file=sys.stderr)
+        return 2
+    base = Path(args.base_model)
+    if not base.is_dir():
+        print(f"base model directory not found: {base}", file=sys.stderr)
+        return 2
+
+    if bool(args.activation_probe) != bool(args.activation_probe_eager):
+        print(
+            "--activation-probe and --activation-probe-eager are a pair: the gate's step "
+            "retains the layer inputs and re-runs one layer's forward in backward, so one "
+            "record alone describes some other step",
+            file=sys.stderr,
+        )
+        return 2
+    if args.activations_gib is not None and args.activation_probe:
+        print("pass --activations-gib or the probe records, not both", file=sys.stderr)
+        return 2
+
+    from transformers import AutoConfig
+
+    from chowder.backends import moe_int8_experts as mie
+
+    try:
+        config = AutoConfig.from_pretrained(str(base))
+        dtype, dtype_source = mie.resolve_non_expert_dtype(
+            base, dtype=args.dtype or None, config=config
+        )
+        inv = mvp.inventory(base, dtype=str(dtype).replace("torch.", ""))
+        activations = None if args.activations_gib is None else int(args.activations_gib * mvp.GIB)
+        activation_mode = "eager"
+        breakdown = None
+        if args.activation_probe:
+            retained = json.loads(Path(args.activation_probe).read_text(encoding="utf-8"))
+            eager = json.loads(Path(args.activation_probe_eager).read_text(encoding="utf-8"))
+            breakdown = mvp.activation_term(retained, eager, seq_len=args.seq_len)
+            breakdown["records"] = {
+                "retained": args.activation_probe,
+                "recompute": args.activation_probe_eager,
+            }
+            activations = int(breakdown["total_bytes"])
+            activation_mode = "checkpointed"
+        projection = mvp.project(
+            inv,
+            seq_len=args.seq_len,
+            vocab_size=_vocab_size(config),
+            activation_bytes=activations,
+            activation_mode=activation_mode,
+        )
+    except (OSError, ValueError, FileNotFoundError) as error:
+        print(f"cannot project {base}: {type(error).__name__}: {error}", file=sys.stderr)
+        return 2
+
+    if args.prereg:
+        # An explicit table wins even under --self-check: this mode writes
+        # nothing, so naming one is asking to be compared against it.
+        prereg = Path(args.prereg)
+    elif args.self_check:
+        # The synthetic checkpoint's table is its own; the placement's prereg is
+        # never the comparison for numbers from a 2-layer toy.
+        prereg = base / "PREREG-self-check.md"
+    else:
+        prereg = resolve_prereg_path(None)
+    try:
+        recorded = _recorded_numbers(args.gates, prereg)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+    if recorded.get("seq_len") and int(recorded["seq_len"]) != int(args.seq_len):
+        print(
+            f"note: {recorded['source']} measured at seq {recorded['seq_len']}, projecting at "
+            f"seq {args.seq_len}; the step rows are only comparable at the same seq",
+            file=sys.stderr,
+        )
+
+    artifact = {**artifact_identity(base), "path": str(base)}
+    verdict = mvp.gate_verdict(projection, gate_gb=VRAM_GATE_GB)
+    print(mvp.render(projection, recorded, artifact=artifact, verdict=verdict))
+    if dtype_source:
+        print(f"  dtype resolved as {str(dtype).replace('torch.', '')} ({dtype_source})")
+
+    problems = mvp.disagreements(projection, recorded)
+    if args.out:
+        payload = {
+            "schema": "chowder.moe-placement-projection.v1",
+            "base_model": str(base),
+            "artifact": artifact,
+            "dtype": str(dtype).replace("torch.", ""),
+            "dtype_source": dtype_source,
+            "projection": projection,
+            "activation_breakdown": breakdown,
+            "gate": verdict,
+            "recorded": recorded,
+            "disagreements": problems,
+        }
+        Path(args.out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(f"wrote {args.out}")
+    if problems:
+        for problem in problems:
+            print(f"DISAGREES: {problem}", file=sys.stderr)
+        return PROJECTION_DISAGREES_EXIT
+    if verdict["reachable"] is False:
+        print(
+            f"PROJECTED OVER GATE: {verdict['step_total_gib']} GiB against {verdict['gate_gb']} GB, "
+            f"{-verdict['margin_gib']} GiB over; the placement step does not fit and this is "
+            "the reading to settle before spending the card on --steps 3",
+            file=sys.stderr,
+        )
+        return PROJECTED_OVER_GATE_EXIT
+    print("projection and recorded measurement reconcile")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--base-model", default="", help="local checkpoint directory (safetensors shards)")
+    parser.add_argument("--out", default="", help="where to write the gate record (JSON)")
+    parser.add_argument("--arms", default="int8,bulk", help=f"comma-separated subset of {ARMS}")
+    parser.add_argument("--steps", type=int, default=3)
+    parser.add_argument("--seq-len", type=int, default=2048)
+    parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--dtype", default="", help="auto (the config's), bfloat16, float16, float32")
+    parser.add_argument("--cpu", action="store_true", help="run on the CPU (self-check, small models)")
+    parser.add_argument(
+        "--min-free-vram-gb",
+        type=float,
+        default=DEFAULT_MIN_FREE_VRAM_GB,
+        help=(
+            "refuse to step when the card has less than this free; a peak taken on another "
+            "process's leftovers is not the placement's (default %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "measure the step with per-layer recompute, as a worker run does by default "
+            "(the gate's definition; --no-gradient-checkpointing measures the eager step)"
+        ),
+    )
+    parser.add_argument(
+        "--score-tokens",
+        type=int,
+        default=0,
+        help=(
+            "positions the step scores (0 = every position, chunked at %d); --score-tokens 1 is "
+            "the re-run the FAIL rule prescribes when a peak is over only because of the harness"
+            % LOSS_CHUNK_TOKENS
+        ),
+    )
+    parser.add_argument("--self-check", action="store_true", help="tiny synthetic checkpoint, CPU, then print the record")
+    parser.add_argument("--prereg", default="", help=f"prereg document to update (default {DEFAULT_PREREG})")
+    parser.add_argument("--check", action="store_true", help="compare against the prereg table and write nothing")
+    parser.add_argument(
+        "--allow-new-baseline",
+        action="store_true",
+        help="accept a different artifact digest instead of refusing to compare",
+    )
+    parser.add_argument(
+        "--project-only",
+        action="store_true",
+        help=(
+            "print the VRAM projection from the shard headers beside the recorded gate "
+            "table; reads no weights, needs no device, writes no table"
+        ),
+    )
+    parser.add_argument(
+        "--gates",
+        default="",
+        help="a gate record JSON to compare the projection against instead of the prereg table",
+    )
+    parser.add_argument(
+        "--activations-gib",
+        type=float,
+        default=None,
+        help=(
+            "the measured activation term for every layer at --seq-len, typed in; without one "
+            "the step figure stays a floor (the probe records are the checkable form)"
+        ),
+    )
+    parser.add_argument(
+        "--activation-probe",
+        default="",
+        help=(
+            "a moe_activation_probe.py record run WITH --gradient-checkpointing: what the "
+            "gate's step retains between layers, summed over the artifact's layer counts"
+        ),
+    )
+    parser.add_argument(
+        "--activation-probe-eager",
+        default="",
+        help=(
+            "the same probe run without checkpointing: the one layer being re-run in "
+            "backward holds what its forward saved, which is the eager line"
+        ),
+    )
+    parser.add_argument(
+        "--witness",
+        default="",
+        help=(
+            "a worker run's placement-witnesses.json to record in the table; no "
+            "measurement is taken, only the four gates this runner cannot answer"
+        ),
+    )
+    parser.add_argument(
+        "--spill-verdict",
+        default="",
+        choices=("", "pass", "FAIL"),
+        help="operator verdict for wddm_spill (needs --spill-basis)",
+    )
+    parser.add_argument(
+        "--spill-basis",
+        default="",
+        help="what the spill verdict rests on; PyTorch cannot observe driver paging",
+    )
+    args = parser.parse_args(argv)
+
+    if args.project_only:
+        return _project_only(args)
+
+    if args.witness:
+        return _record_witness(args)
+
+    import torch
+
+    arms = tuple(arm.strip() for arm in args.arms.split(",") if arm.strip())
+    unknown = [arm for arm in arms if arm not in ARM_LOADERS]
+    if unknown:
+        print(f"unknown arm(s) {unknown}; expected a subset of {ARMS}", file=sys.stderr)
+        return 2
+
+    if args.self_check:
+        os.environ["CHOWDER_NO_GPU"] = "1"
+        args.base_model = str(_self_check_workspace())
+        args.cpu = True
+        arms = ARMS
+        args.steps = min(args.steps, 2)
+        args.seq_len = min(args.seq_len, 8)
+    elif not args.base_model:
+        print("--base-model is required (or --self-check)", file=sys.stderr)
+        return 2
+
+    base = Path(args.base_model)
+    if not base.is_dir():
+        print(f"base model directory not found: {base}", file=sys.stderr)
+        return 2
+
+    # ``CHOWDER_NO_GPU`` has to mean the same thing here as it does to the loader
+    # (``resolve_device``): otherwise a no-GPU run would send its tokens to a card
+    # while the loader placed the model on the CPU, and report the card's empty
+    # peak as the placement's.
+    forced_cpu = os.environ.get("CHOWDER_NO_GPU", "").strip().lower() not in ("", "0", "false")
+    use_cuda = torch.cuda.is_available() and not args.cpu and not forced_cpu
+    if not use_cuda and not (args.cpu or forced_cpu):
+        print("no CUDA device; pass --cpu to measure a census without the card", file=sys.stderr)
+        return 2
+    if use_cuda and args.steps > 0:
+        headroom = device_headroom(args.device)
+        if headroom is None:
+            print(
+                "cannot read the card's occupancy (no nvidia-smi); the peak this run records "
+                "may include another process's memory",
+                file=sys.stderr,
+            )
+        else:
+            problem = headroom_problem(*headroom, minimum=args.min_free_vram_gb)
+            if problem:
+                print(problem, file=sys.stderr)
+                return 2
+            print(f"cuda:{args.device} has {headroom[0]:.2f} GiB free of {headroom[1]:.2f} GiB")
+    device = torch.device("cuda", args.device) if use_cuda else torch.device("cpu")
+    dtype = getattr(torch, args.dtype) if args.dtype else None
+
+    try:
+        record = run(
+            base,
+            arms=arms,
+            device=device,
+            dtype=dtype,
+            steps=args.steps,
+            seq_len=args.seq_len,
+            gradient_checkpointing=args.gradient_checkpointing,
+            score_tokens=args.score_tokens,
+        )
+    except Exception as error:  # a failed arm is a refusal, not a record with holes
+        # The stack, not only the message: a failure inside a loader is
+        # otherwise reported from the line that called it and nothing else.
+        import traceback
+
+        traceback.print_exc()
+        print(f"{type(error).__name__}: {error}", file=sys.stderr)
+        return 3
+
+    payload = json.dumps(record, indent=2)
+    if args.out:
+        Path(args.out).write_text(payload, encoding="utf-8")
+        print(f"wrote {args.out}")
+    else:
+        print(payload)
+
+    if args.self_check and not args.prereg:
+        # A synthetic model's numbers are not the placement's numbers: the
+        # self-check writes its table beside its own checkpoint, never over the
+        # pre-registration a campaign would be read against.
+        prereg = base / "PREREG-self-check.md"
+    else:
+        prereg = resolve_prereg_path(args.prereg)
+    if prereg is None:
+        print(
+            "no prereg document in this checkout and no --prereg; "
+            "the JSON record is the only evidence",
+            file=sys.stderr,
+        )
+        return 0
+    document = prereg.read_text(encoding="utf-8") if prereg.is_file() else ""
+    previous = parse_block(document)
+
+    measured_on = (record.get("artifact") or {}).get("config_sha256")
+    recorded_on = (previous or {}).get("config_sha256")
+    new_baseline = False
+    if previous is not None and recorded_on and measured_on and recorded_on != measured_on:
+        if not args.allow_new_baseline:
+            print(
+                f"{prereg} records gates measured on config sha256 `{recorded_on}`, but this run "
+                f"measured `{measured_on}`: refusing to overwrite one artifact's table with "
+                "another's numbers (pass --allow-new-baseline to start a new baseline)",
+                file=sys.stderr,
+            )
+            return ARTIFACT_MISMATCH_EXIT
+        new_baseline = True
+        print(
+            f"--allow-new-baseline: replacing the table measured on `{recorded_on}` "
+            f"with `{measured_on}`",
+            file=sys.stderr,
+        )
+        previous = None
+
+    problems = regressions(previous, record)
+    if problems:
+        print("REGRESSION against the recorded gates:", file=sys.stderr)
+        for problem in problems:
+            print(f"  - {problem}", file=sys.stderr)
+    elif previous is not None:
+        print("no regression against the recorded gates")
+
+    if args.check:
+        print(f"(--check: {prereg} was not written)")
+        return 1 if problems else 0
+
+    prereg.parent.mkdir(parents=True, exist_ok=True)
+    prereg.write_text(
+        splice_block(document, render_block(record, previous=previous)), encoding="utf-8"
+    )
+    print(f"wrote the gate table into {prereg}{' (new baseline)' if new_baseline else ''}")
+    carried = (parse_block(prereg.read_text(encoding="utf-8")) or {}).get("carried") or []
+    if carried:
+        print(
+            f"carried forward from the previous measurement: {', '.join(carried)} "
+            "(only a run that measures a gate can change its verdict)"
+        )
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
