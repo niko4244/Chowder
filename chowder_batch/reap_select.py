@@ -114,9 +114,17 @@ def _paired(eval_dir: Path) -> dict | None:
     return pairs
 
 
-def _input_digests(eval_dir: Path, observation: Path) -> dict[str, str]:
+def _input_digests(
+    eval_dir: Path, observation: Path, observation_v2: Path | None,
+    calibration_v2: Path | None,
+) -> dict[str, str]:
     """Pin every evaluation input actually present; absent files remain absent."""
     paths = [observation]
+    if observation_v2 is not None:
+        paths.append(observation_v2)
+    if calibration_v2 is not None:
+        paths.extend((calibration_v2 / "calibration.jsonl",
+                      calibration_v2 / "calibration-manifest.json"))
     for arm in ("dense", "dense_q4", "random128", "reap128",
                 "reap128_q4", "reap128_v2", "reap128_v2_q4",
                 "reap160", "reap160_q4", "reap160_v2", "reap160_v2_q4"):
@@ -129,11 +137,17 @@ def _input_digests(eval_dir: Path, observation: Path) -> dict[str, str]:
             for path in paths if path.is_file()}
 
 
-def evaluate(eval_dir: str | Path, observation: str | Path) -> dict:
+def evaluate(
+    eval_dir: str | Path, observation: str | Path,
+    observation_v2: str | Path | None = None,
+    calibration_v2: str | Path | None = None,
+) -> dict:
     """Compute gates from raw, SHA-attested full-size evaluation rows."""
     root = Path(eval_dir)
     observation_path = Path(observation)
-    input_sha256 = _input_digests(root, observation_path)
+    v2_path = Path(observation_v2) if observation_v2 else None
+    v2_calib = Path(calibration_v2) if calibration_v2 else None
+    input_sha256 = _input_digests(root, observation_path, v2_path, v2_calib)
     # The shared dense/control inputs must be authenticated *before* any arm
     # computation reads them. Otherwise an altered baseline could trigger a
     # parser exception or influence a gate before its summary SHA was checked.
@@ -152,11 +166,29 @@ def evaluate(eval_dir: str | Path, observation: str | Path) -> dict:
             raise GateError(f"{arm}: missing full SHA-attested quality evidence")
         speed_arm = f"{arm}_q4"
         _attested_rows(root, speed_arm, "gsm8k", 200)
+        # v2 is a separately observed saliency/calibration arm. Never borrow
+        # the v1 observer's successful D0 as evidence that v2 passed D0.
+        observer = observation_path
+        if arm.endswith("_v2"):
+            observer = None  # no v1 observer substitution
+            if v2_path is not None and v2_calib is not None:
+                manifest_path = v2_calib / "calibration-manifest.json"
+                rows_path = v2_calib / "calibration.jsonl"
+                if not manifest_path.is_file() or not rows_path.is_file():
+                    raise GateError("v2 calibration evidence missing manifest or input rows")
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                actual_calib_sha = hashlib.sha256(rows_path.read_bytes()).hexdigest()
+                observation_record = json.loads(v2_path.read_text(encoding="utf-8"))
+                if (manifest.get("mix") != "v2"
+                        or manifest.get("calibration_sha256") != actual_calib_sha
+                        or observation_record.get("calibration_sha256") != actual_calib_sha):
+                    raise GateError("v2 D0 observer calibration SHA disagrees with the v2 manifest")
+                observer = v2_path
         present[arm] = compute(root, arm, "dense", "random128",
-                               speed_arm, "dense_q4", observation)
+                               speed_arm, "dense_q4", observer)
     paired = _paired(root) if "reap128_v2" in present else None
     decision = select(present, paired)
-    if _input_digests(root, observation_path) != input_sha256:
+    if _input_digests(root, observation_path, v2_path, v2_calib) != input_sha256:
         raise GateError("REAP evaluation inputs changed while frozen gates were computed")
     return {"schema": "reap-frozen-amendment4-selection-v1", "gates": present,
             "paired_v2_minus_v1": paired, "decision": decision,
@@ -168,10 +200,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--eval-dir", required=True)
     parser.add_argument("--observation", required=True)
+    parser.add_argument("--observation-v2",
+                        help="distinct full v2 observer record; mandatory to pass any v2 D0")
+    parser.add_argument("--calibration-v2",
+                        help="v2 calibration folder with calibration.jsonl and SHA-pinned manifest")
     parser.add_argument("--out", required=True)
     args = parser.parse_args(argv)
     try:
-        result = evaluate(args.eval_dir, args.observation)
+        result = evaluate(args.eval_dir, args.observation, args.observation_v2,
+                          args.calibration_v2)
     except (GateError, ValueError, OSError) as error:
         print(f"REAP frozen selection refused: {error}", file=sys.stderr)
         return 2

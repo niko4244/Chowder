@@ -134,3 +134,37 @@ def test_missing_quality_arm_is_not_silently_equivalent(tmp_path):
     _attest(tmp_path, "reap128_v2", "gsm8k", 1319)
     with pytest.raises(GateError, match="missing full SHA-attested"):
         evaluate(tmp_path, obs)
+
+
+def test_v2_cannot_borrow_v1_observer_d0(tmp_path):
+    obs = _evidence(tmp_path)
+    _attest(tmp_path, "reap128_v2", "gsm8k", 1319)
+    _attest(tmp_path, "reap128_v2", "humaneval", 164)
+    _attest(tmp_path, "reap128_v2_q4", "gsm8k", 200, speed=True)
+    _attest(tmp_path, "reap160", "gsm8k", 1319)
+    _attest(tmp_path, "reap160", "humaneval", 164)
+    _attest(tmp_path, "reap160_q4", "gsm8k", 200, speed=True)
+    report = evaluate(tmp_path, obs)
+    assert report["gates"]["reap128_v2"]["gates"]["d0"]["status"] == "UNKNOWN"
+    assert report["decision"]["status"] == "BLOCKED"
+    v2 = tmp_path / "observation-v2.json"
+    v2.write_text(obs.read_text(encoding="utf-8"), encoding="utf-8")
+    assert evaluate(tmp_path, obs, v2)["gates"]["reap128_v2"]["gates"]["d0"]["status"] == "UNKNOWN"
+    calib = tmp_path / "calib-v2"
+    calib.mkdir()
+    raw = calib / "calibration.jsonl"
+    raw.write_text('{"sample":"test"}\n', encoding="utf-8")
+    digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+    (calib / "calibration-manifest.json").write_text(json.dumps(
+        {"mix": "v2", "calibration_sha256": digest}), encoding="utf-8")
+    cloned_observer = json.loads(v2.read_text(encoding="utf-8"))
+    cloned_observer["calibration_sha256"] = digest
+    v2.write_text(json.dumps(cloned_observer), encoding="utf-8")
+    report_v2 = evaluate(tmp_path, obs, v2, calib)
+    assert report_v2["gates"]["reap128_v2"]["gates"]["d0"]["status"] == "PASS"
+    assert str(v2) in report_v2["input_sha256"]
+    assert str(raw) in report_v2["input_sha256"]
+    (calib / "calibration-manifest.json").write_text(json.dumps(
+        {"mix": "v2", "calibration_sha256": "0" * 64}), encoding="utf-8")
+    with pytest.raises(GateError, match="calibration SHA"):
+        evaluate(tmp_path, obs, v2, calib)
