@@ -31,6 +31,30 @@ def test_gpu_hours_reject_bool_as_numeric(field):
         ComputeCost.from_dict(_record(**{field: True}))
 
 
+@pytest.mark.parametrize("field", ["wall_gpu_hours", "device_gpu_hours"])
+@pytest.mark.parametrize("value", ["0.25", "0", "1e-3", None, [], {}])
+def test_persisted_gpu_hours_reject_coercible_nonnumeric_json_values(field, value):
+    # A typed serialized charge is part of the payment/receipt proof.  A
+    # self-pinned ledger cannot redefine its numeric cost as a JSON string.
+    with pytest.raises(ValueError, match="GPU-hour amounts must be JSON numbers"):
+        ComputeCost.from_dict(_record(**{field: value}))
+
+
+@pytest.mark.parametrize("field", ["wall_gpu_hours", "device_gpu_hours"])
+def test_persisted_gpu_hours_allow_finite_numeric_ints(field):
+    assert getattr(ComputeCost.from_dict(_record(**{field: 1})), field) == 1.0
+
+
+def test_checked_ledger_rejects_cost_string_with_recomputed_digest():
+    ledger = CycleCostLedger("cycle-1")
+    ledger.add("paid", "training", ComputeCost.from_wall_only(0.25, source="fixture"))
+    doc = ledger.render()
+    doc["entries"][0]["cost"]["wall_gpu_hours"] = "0.25"
+    doc["digest_sha256"] = ledger_digest(doc)
+    with pytest.raises(ValueError, match="GPU-hour amounts must be JSON numbers"):
+        checked_ledger_total(doc, cycle_id="cycle-1")
+
+
 def test_legacy_absent_flags_are_unmeasured_and_incremental():
     decoded = ComputeCost.from_dict({"wall_gpu_hours": 0.25, "device_gpu_hours": 0.0})
     assert decoded.incremental is True

@@ -173,11 +173,15 @@ class ComputeCost:
         device_measured = data.get("device_measured", False)
         if not isinstance(incremental, bool) or not isinstance(device_measured, bool):
             raise ValueError("compute cost flags must be JSON booleans")
-        if isinstance(data["device_gpu_hours"], bool) or isinstance(data["wall_gpu_hours"], bool):
+        device = data["device_gpu_hours"]
+        wall = data["wall_gpu_hours"]
+        if isinstance(device, bool) or isinstance(wall, bool):
             raise ValueError("GPU-hour amounts must be numeric, not booleans")
+        if not isinstance(device, (int, float)) or not isinstance(wall, (int, float)):
+            raise ValueError("GPU-hour amounts must be JSON numbers")
         return cls(
-            device_gpu_hours=float(data["device_gpu_hours"]),
-            wall_gpu_hours=float(data["wall_gpu_hours"]),
+            device_gpu_hours=float(device),
+            wall_gpu_hours=float(wall),
             source=str(data.get("source", "unspecified")),
             incremental=incremental,
             measurement_method=str(data.get("measurement_method", "")),
