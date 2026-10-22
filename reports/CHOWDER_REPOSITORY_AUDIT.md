@@ -1,5 +1,8 @@
 # Chowder repository audit
 
+<!-- CHOWDER_LATEST_VERIFIED_20261022 -->
+> **Latest pinned review evidence:** PR #277 at `10a0044df73d71a7c40313082f524d13acc8fa1d` (SIX_SUCCESS, draft/unmerged); see the supplemental 2026-10-22 qualification at the end. Prior sections are retained as dated historical checkpoints.
+
 > Final audit 2026-10-22. Main 0bc566c5; MoE PR268 184291f; recovery PR269 cf54480 with local 82-test verification; REAP PR271 73f1593. GitHub and read-only Windows workspaces inspected, 39 model files independently SHA-256 verified twice. No GPU training was started in this audit. Frozen gates and required approvals remain binding.
 
 ## Verified Git state
@@ -122,3 +125,26 @@ Evaluation-cost compatibility: a trustworthy evaluator-reported `ComputeCost` re
 
 **Release blockers:** Mandatory REAP128_v2 checkpoint/full measured arm absent; REAP128 v1 GSM8K lower bound -0.0378074 violates frozen strict -0.03 and triggers Amendment-4 fallback requirements. Frozen REAP judge declaration missing and real independent precommit judge remains unable to certify, so explicit human N5 authorization has NOT occurred. Historical 27.48 seconds/step implies 7.63 GPU-hours for 1,000 steps versus 2.5 hours; no fresh improvement measurement. Current 14.5 GB VRAM, 20-step, WDDM spill, hardware/LoRA and derivative/Fable/Ornith rights remain unverified or blocked. Qwen3.8 Native Sparse remains separate. Never equate passing CPU CI with Gen-0 freeze or production promotion.
 <!-- CHOWDER_FINAL_20261022_END -->
+
+<!-- CHOWDER_POSTFINAL_20261022_BEGIN -->
+## Supplemental pinned qualification — Repository state and branch provenance (2026-10-22)
+
+**Current review revision:** PR #277 `10a0044df73d71a7c40313082f524d13acc8fa1d`; draft and **not merged to `main`**. Pinned final-head Windows REAP/calibration and campaign/accounting regression across disjoint modules: **380 passed, 0 skipped**, no failures (49 selector/calibration in 2.28 seconds; 331 campaign/cost/judge in 104.69 seconds). At the preceding `c73ed0a` revision two non-overlapping broader CPU groups recorded **420 PASS / 1 SKIP** (208.57 seconds) and **136 PASS** (22.38 seconds); those 556 earlier results are NOT fresh measurements on the final head. The earlier `c73ed0a` head independently achieved six of six successful GitHub CI checks. GitHub CI at this exact revision: **SIX_SUCCESS** (six jobs required before acceptance). The earlier 4,073 passed / 78 skipped full suite applies only to `1960b7a241cdbd136affe63534e4fc23b738875c` and has not been represented as a new complete-suite run.
+
+- `71883c2` fixes a reproduced persisted GPU-cost decoding flaw: a self-consistent ledger could previously carry JSON strings such as `"0.25"` for device/wall GPU-hours. `ComputeCost.from_dict` now accepts finite JSON integer/float values (not booleans), rejects strings/null/containers with `ValueError`, and preserves proven reported evaluator costs; conservative elapsed fallback remains only for untrusted/missing cost. The original 13 targeted negative cases failed before the fix; 118 isolated cost regressions passed, and 331 connected campaign/accounting/judge tests passed on `71883c2`.
+- `c73ed0a` incorporates isolated patch `dd1c428`: frozen Amendment-4 REAP128_v2 D0 preflight now verifies the calibration SHA, manifest source/row/packed-token census, per-row bounds, and observer `n_seqs` for the complete admitted 717-row corpus. A `--limit-seqs` partial observation cannot silently satisfy v2 D0. The observer retokenizes decoded text, so observer `n_tokens` is validated as integral/plausible rather than equated incorrectly with the manifest's 1,197,289 packed tokens. Isolated worker reported 45 REAP tests passed and 25 loader tests passed/one skipped. Fixture positives are not actual REAP128_v2 GPU D0 evidence. A fresh read-only scan of the actual 717-row, nine-source v2 corpus verified SHA-256, 1,197,289 packed tokens, row bounds and all nine source kept-counts. Fresh manifest-file SHA-256: `d3f8733769a060a924db395b00d3c7c3acf65655ed6ed30a118df3dd58373f81`; the distinct raw calibration JSONL SHA-256 is `516f2e4a931fd3f025c6206e1f7e96b53ed68801ec503cb3d3367ca43f540c9f`.
+- `10a0044` integrates isolated commit `3dce236`: frozen Amendment-4 v2 eligibility now checks the Ornith calibration render identity. The preregistered builder default is `bare`; `worked` is a separate optional render absent from the frozen amendment. The REAL existing v2 manifest states `ornith.render=worked`, despite being SHA- and census-valid, so it **must not be admitted as the frozen Gen-0 v2 arm** without an independently approved prospective amendment/new eligible calibration. Script and module entrypoint adversarial tests refuse the variant, while bare/absent positive fixtures pass; isolated 49 REAP tests and final-head selector tests pass. A fresh **negative-only** check against the actual on-disk v2 manifest (with a temporary synthetic observer, never called measured D0) returned the expected `not preregistered: expected bare` refusal. No archived source, model weight, threshold or frozen prereg was changed.
+- The REAP160 BF16 candidate exists as 26 indexed shards with 40 MoE layers, 160 experts/layer and top-8 routing; router/expert keys were independently matched across 40/40 layers and its v1 pruning observation digest matched the archived observation. The 13,821,482,880-byte Q4 GGUF `C:\llm-work\reap\gguf\reap160-q4_k_m.gguf` retains its separately previously verified SHA-256 `8c840461752e1343e81bc12ab9b95d422a4b45c0b0048f00938fe882f299f8f5`. No new full GGUF hash or GPU execution was performed for this increment.
+- **Frozen release remains BLOCKED.** REAP128 v1 strict GSM8K Gate1 bound failed (-0.0378074119723426 versus required > -0.03). Mandatory distinct REAP128_v2 checkpoint and full D0/evaluation, both fallback arms, frozen independent judge, explicit postjudge owner N5 approval, actual 14.5-GB/20-step GPU qualification, 2.5 GPU-hour recipe, and Fable/Ornith/derivative licensing clearance are missing. Historical 27.48 s/step implies ~7.63 hours/1,000 steps; 10.23-second estimated bulk-transfer floor is an analytical bound, **not** measured improvement. No Gen-0 selection, Gen-1 adapter certification, production promotion or autonomous model improvement is claimed. The separate Qwen3.8 Native Sparse Program is untouched.
+
+**Reproduction / exact-commit checks (PowerShell from review worktree):**
+
+```powershell
+git rev-parse HEAD  # 10a0044df73d71a7c40313082f524d13acc8fa1d
+$env:CHOWDER_NO_GPU='1'
+python -m pytest -q --tb=short tests/test_reap_select.py tests/test_reap_gates.py tests/test_reap_calibration.py
+gh pr checks 277 --repo niko4244/Chowder
+```
+
+The worktree/PR lineage was rechecked before all three safe cherry-picks. Main stayed at `0bc566c5`, and the intentionally modified rescue checkout was not changed. These revisions are review-only.
+<!-- CHOWDER_POSTFINAL_20261022_END -->

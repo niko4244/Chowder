@@ -141,8 +141,8 @@
   },
   "weight_and_derivative_redistribution_rights": "UNVERIFIED_LICENSE_TEXT_METADATA_CONFLICT",
   "latest_integration_ci": {
-    "pr": 273,
-    "head_sha": "f099d3ac7d7bc09ef071acb6efd09994ede19667",
+    "pr": 277,
+    "head_sha": "10a0044df73d71a7c40313082f524d13acc8fa1d",
     "overall": "SUCCESS_6_OF_6",
     "linux_py310": "SUCCESS",
     "linux_py311": "SUCCESS",
@@ -150,7 +150,6 @@
     "windows_py312": "SUCCESS",
     "lint_build": "SUCCESS",
     "transformers_peft_cpu": "SUCCESS",
-    "mergeable": true,
     "draft": true,
     "main_merged": false,
     "release_certification": false
@@ -270,5 +269,166 @@
       "No fresh 14.5GB VRAM, 20-step or 2.5 GPU-hour hardware qualification",
       "Fast stat/inode checkpoint identity after a one-time SHA inventory is not an adversarial in-place rewrite defense if an attacker can restore timestamps; strict boundary rehash for release is unverified"
     ]
+  },
+  "validated_increment_20261022": {
+    "schema": "chowder.postfinalization-evidence.v1",
+    "date": "2026-10-22",
+    "pr": 277,
+    "head": "10a0044df73d71a7c40313082f524d13acc8fa1d",
+    "main_merged": false,
+    "main_head": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+    "ci": {
+      "head": "10a0044df73d71a7c40313082f524d13acc8fa1d",
+      "status": "SIX_SUCCESS",
+      "jobs_success": 6,
+      "jobs_total": 6
+    },
+    "cpu_targeted": {
+      "head": "10a0044df73d71a7c40313082f524d13acc8fa1d",
+      "passed": 380,
+      "skipped": 0,
+      "failed": 0,
+      "runs": [
+        {
+          "passed": 49,
+          "skipped": 0,
+          "seconds": 2.28,
+          "focus": "reap selector, gates, calibration, module/script guard"
+        },
+        {
+          "passed": 331,
+          "skipped": 0,
+          "seconds": 104.69,
+          "focus": "settlement, ledger, budget, owner, campaign and frozen judges"
+        }
+      ],
+      "overlaps_previous_suites": true
+    },
+    "preceding_c73ed0a_cpu": {
+      "head": "c73ed0a1e8c33da3ce2024d0a6051bc3bd5b748e",
+      "passed": 556,
+      "skipped": 1,
+      "failed": 0,
+      "runs": [
+        {
+          "passed": 420,
+          "skipped": 1,
+          "seconds": 208.57,
+          "focus": "reap, accounting, campaign, judges, moe loader"
+        },
+        {
+          "passed": 136,
+          "skipped": 0,
+          "seconds": 22.38,
+          "focus": "readiness, budget, promotion, manifest, TUI"
+        }
+      ]
+    },
+    "preceding_c73ed0a_ci": {
+      "head": "c73ed0a1e8c33da3ce2024d0a6051bc3bd5b748e",
+      "status": "SIX_SUCCESS",
+      "jobs_success": 6
+    },
+    "historical_full_cpu": {
+      "head": "1960b7a241cdbd136affe63534e4fc23b738875c",
+      "passed": 4073,
+      "skipped": 78,
+      "is_current_head": false
+    },
+    "cost_hardening": {
+      "integrated_commit": "71883c2a6f940d6b2dbf9da9e34a29c9bd13f0f2",
+      "isolated_commit": "5f636dfdcda72f30e06b28cbed1f9daa525bf46d",
+      "status": "COMPLETED_DRAFT",
+      "isolated_cpu_passed": 118,
+      "integrated_cpu_passed": 331,
+      "affected_failed_before_fix": 13
+    },
+    "v2_d0_hardening": {
+      "integrated_commit": "c73ed0a1e8c33da3ce2024d0a6051bc3bd5b748e",
+      "isolated_commit": "dd1c4284b240d857b112491c6ba3965867f4a401",
+      "status": "COMPLETED_DRAFT",
+      "worker_reap_cpu_passed": 45,
+      "worker_loader_cpu_passed": 25,
+      "worker_loader_skipped": 1,
+      "real_v2_observation_complete": false
+    },
+    "frozen_ornith_render_guard": {
+      "integrated_commit": "10a0044df73d71a7c40313082f524d13acc8fa1d",
+      "isolated_commit": "3dce236541d5e30afc25f0619427752df662aa8d",
+      "status": "COMPLETED_DRAFT",
+      "preregistered_render": "bare",
+      "existing_calibration_render": "worked",
+      "existing_calibration_eligible_for_frozen_selection": false,
+      "actual_manifest_synthetic_observer_negative_test": "EXPECTED_REFUSAL",
+      "real_gpu_d0_observation": false,
+      "isolated_reap_cpu_passed": 49
+    },
+    "calibration": {
+      "rows": 717,
+      "packed_tokens": 1197289,
+      "sources": 9,
+      "all_source_counts_verified": true,
+      "per_row_token_bounds_verified": true,
+      "fresh_readonly_sha256_matches_manifest": true,
+      "manifest_file_sha256": "d3f8733769a060a924db395b00d3c7c3acf65655ed6ed30a118df3dd58373f81",
+      "ornith_admitted_source_sha256": "92c35137658ca212fb5783eb1b1087929a889f1ae5a6eaf9a584866a3373d01a",
+      "ornith_render": "worked",
+      "ornith_frozen_eligibility": "BLOCKED_UNREGISTERED_VARIANT",
+      "calibration_jsonl_sha256": "516f2e4a931fd3f025c6206e1f7e96b53ed68801ec503cb3d3367ca43f540c9f"
+    },
+    "reap160_inventory": {
+      "bf16_shards": 26,
+      "bf16_bytes": 46039573000,
+      "indexed_tensors": 1026,
+      "router_layers_verified": 40,
+      "routed_experts_per_layer": 160,
+      "top_k": 8,
+      "checkpoint_content_pin": "a1ba0e434eea76fdfc4b85843ab90d7957fa2ffd08ac319c2d2f8aed3ae4aa92",
+      "tokenizer_json_sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+      "gguf_bytes": 13821482880,
+      "gguf_prior_complete_sha256": "8c840461752e1343e81bc12ab9b95d422a4b45c0b0048f00938fe882f299f8f5",
+      "gguf_full_rehash_this_increment": false,
+      "gen1_adapter_qualified": false
+    },
+    "model_status": "BLOCKED_V2_UNREGISTERED_CALIBRATION_AND_MISSING_MODEL_EVALUATION",
+    "frozen_judge_certified": false,
+    "owner_n5_release_approved": false,
+    "actual_gpu_qualification_current_head": "UNVERIFIED",
+    "historical_recipe_budget": "FAILED",
+    "licensing": "UNVERIFIED",
+    "autonomous_model_improvement": "UNVERIFIED",
+    "workstream_verdicts": {
+      "campaign_journal_recovery": "COMPLETED_DRAFT_CPU_TESTED",
+      "verified_completed_attempt_resume": "COMPLETED_DRAFT_CPU_TESTED",
+      "exclusive_writer_and_cli_tui_admission": "COMPLETED_DRAFT_CPU_TESTED",
+      "authenticated_accounting_and_exactly_once_settlement": "COMPLETED_DRAFT_CPU_TESTED",
+      "promotion_lineage_and_n5_guards": "COMPLETED_DRAFT_CPU_TESTED",
+      "frozen_judge_production_certification": "BLOCKED",
+      "qwen36_v2_calibration_integrity": "HASH_VERIFIED_VARIANT_BLOCKED_FROZEN_INELIGIBLE",
+      "qwen36_reap128_v2_checkpoint_and_d0": "BLOCKED",
+      "qwen36_gen0_frozen_selector": "BLOCKED",
+      "reap160_bf16_and_q4_candidate_inventory": "COMPLETED_FILE_METADATA_NOT_SELECTION",
+      "int8_lora_real_current_gpu_smoke": "UNVERIFIED",
+      "frozen_2_5_gpu_hour_training_recipe": "FAILED_HISTORICAL_UNVERIFIED_NEW_CODE",
+      "contamination_and_fable_free_controls": "PARTIAL_UNVERIFIED_FULL_CONTROLS",
+      "derivative_license_and_redistribution": "UNVERIFIED",
+      "autonomous_model_improvement": "UNVERIFIED",
+      "merge_to_main_and_release": "BLOCKED_REVIEW_ONLY"
+    }
+  },
+  "historical_integration_ci_before_postfinal_20261022": {
+    "pr": 273,
+    "head_sha": "f099d3ac7d7bc09ef071acb6efd09994ede19667",
+    "overall": "SUCCESS_6_OF_6",
+    "linux_py310": "SUCCESS",
+    "linux_py311": "SUCCESS",
+    "linux_py312": "SUCCESS",
+    "windows_py312": "SUCCESS",
+    "lint_build": "SUCCESS",
+    "transformers_peft_cpu": "SUCCESS",
+    "mergeable": true,
+    "draft": true,
+    "main_merged": false,
+    "release_certification": false
   }
 }
