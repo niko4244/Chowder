@@ -229,5 +229,53 @@
       "ornith": 1
     }
   },
-  "all_assertions_are_mutually_nonexclusive": "The listed suites overlap, so their passed counts must NOT be summed into a unique test count."
+  "all_assertions_are_mutually_nonexclusive": "The listed suites overlap, so their passed counts must NOT be summed into a unique test count.",
+  "latest_integration": {
+    "draft_pr": 273,
+    "branch": "integration/chowder-recovery-moe-20261022",
+    "head": "f099d3a",
+    "main_merged": false,
+    "source_prs": {
+      "moe": 268,
+      "recovery": 269,
+      "reap": 271,
+      "moe_integrity": 272
+    },
+    "conflict_free_merge": true,
+    "current_ci": "PENDING_VERIFICATION"
+  },
+  "fresh_integration_cpu": {
+    "cli_tui": {
+      "passed": 151,
+      "failed": 0
+    },
+    "first_broad": {
+      "passed": 187,
+      "failed": 1,
+      "explanation": "source identity transient during concurrent local edits"
+    },
+    "stable_real_cpu_identity": {
+      "passed": 1,
+      "failed": 0,
+      "seconds": 74.62
+    },
+    "second_broad": {
+      "passed": 188,
+      "failed": 2,
+      "explanation": "prior evaluation-cost assertions; subsequently fixed"
+    },
+    "fixed_eval_cost_targeted": {
+      "passed": 4,
+      "failed": 0
+    },
+    "promotion_transaction_crash_targeted": {
+      "passed": 8,
+      "failed": 0
+    },
+    "moe_inventory_gate_witness": {
+      "passed": 64,
+      "failed": 0
+    }
+  },
+  "integration_suite_note": "Overlapping test selections, do not sum to unique count."
 }

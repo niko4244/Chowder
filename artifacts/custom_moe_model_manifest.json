@@ -423,5 +423,15 @@
     "config_sha256": "15413a791b9eff423755743bb05b997c93f6ae6f4ce02a1966c9bdfdc2cdc3b9",
     "weight_body_hashed": true
   },
-  "selection_blocker": "Frozen REAP amendment 4 requires REAP128_v2 score and v2-v1 paired bounds before Gen0"
+  "selection_blocker": "Frozen REAP amendment 4 requires REAP128_v2 score and v2-v1 paired bounds before Gen0",
+  "current_engineering": {
+    "moe_sha_inventory_implementation_sha": "c2202c1",
+    "integrated_sha": "f099d3a",
+    "inventory_enrollment": "RUNNING_NOT_VERIFIED",
+    "actual_v2_model_found": false,
+    "v2_calibration": {
+      "rows": 717,
+      "sha256": "516f2e4a931fd3f025c6206e1f7e96b53ed68801ec503cb3d3367ca43f540c9f"
+    }
+  }
 }

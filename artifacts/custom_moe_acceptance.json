@@ -101,5 +101,24 @@
     "license_release_ready": false
   },
   "q4_inference_artifact_sha256_verified": true,
-  "q4_speed_gate": "HISTORICALLY_RESOLVED_REAP160_3_852X"
+  "q4_speed_gate": "HISTORICALLY_RESOLVED_REAP160_3_852X",
+  "current_integration": {
+    "draft_pr": 273,
+    "branch": "integration/chowder-recovery-moe-20261022",
+    "head": "f099d3a",
+    "main_merged": false,
+    "source_prs": {
+      "moe": 268,
+      "recovery": 269,
+      "reap": 271,
+      "moe_integrity": 272
+    },
+    "conflict_free_merge": true,
+    "current_ci": "PENDING_VERIFICATION"
+  },
+  "current_release_verdict": "BLOCKED",
+  "frozen_selection_v2": "UNVERIFIED_REQUIRED",
+  "wddm_spill_current": "NOT_MEASURED",
+  "full_auto_resume": "NOT_IMPLEMENTED",
+  "promotion_human_approved": false
 }

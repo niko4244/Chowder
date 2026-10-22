@@ -123,5 +123,28 @@
   "local_windows_recovered": true,
   "local_windows_access": "VERIFIED",
   "model_hashes": "39 SHA256 hashes independently agree",
-  "moe_final_selection": "BLOCKED: REAP128_v2 frozen amendment"
+  "moe_final_selection": "BLOCKED: REAP128_v2 frozen amendment",
+  "latest_integration": {
+    "draft_pr": 273,
+    "branch": "integration/chowder-recovery-moe-20261022",
+    "head": "f099d3a",
+    "main_merged": false,
+    "source_prs": {
+      "moe": 268,
+      "recovery": 269,
+      "reap": 271,
+      "moe_integrity": 272
+    },
+    "conflict_free_merge": true,
+    "current_ci": "PENDING_VERIFICATION"
+  },
+  "current_failure_classes": {
+    "safe_partial_training_resume": "BLOCKED_NOT_IMPLEMENTED",
+    "atomic_promotion": "LOCAL_IMPLEMENTED_PENDING_INTEGRATED_CI",
+    "eval_failed_cost": "LOCAL_IMPLEMENTED_PENDING_INTEGRATED_CI",
+    "sha_bound_admission": "LOCAL_IMPLEMENTED_PENDING_INTEGRATED_CI",
+    "reap128_v2": "BLOCKED_NO_MODEL_EVAL",
+    "wddm_no_spill": "UNVERIFIED",
+    "1000_step_2_5h": "FAILED"
+  }
 }
