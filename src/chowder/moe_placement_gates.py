@@ -186,20 +186,26 @@ def resolve_prereg_path(explicit: str | Path | None = None) -> Path | None:
 
 
 def artifact_identity(base: str | Path) -> dict[str, Any]:
-    """What the numbers belong to: a config digest and the shard inventory.
+    """What the numbers belong to: config and a verified SHA checkpoint pin.
 
-    A path or a tag is not identity -- the same directory can hold a different
-    prune -- so the record carries the digest the numbers were measured against.
+    A full SHA inventory is enrolled once; subsequent identity queries only
+    stat the shards and rehash small semantic files. Without enrollment the
+    content pin remains absent and no campaign or witness can be admitted.
     """
+    from .moe_checkpoint_inventory import inventory_path, verified_identity
+
     base = Path(base)
     config = base / "config.json"
     digest = hashlib.sha256(config.read_bytes()).hexdigest() if config.is_file() else None
     shards = sorted(base.glob("*.safetensors"))
-    return {
+    identity = {
         "config_sha256": digest,
         "shards": len(shards),
         "shard_bytes": sum(path.stat().st_size for path in shards),
     }
+    if inventory_path(base).is_file():
+        identity.update(verified_identity(base))
+    return identity
 
 
 def gate_rows(record: dict[str, Any], *, placement: str = EXPERT_PLACEMENT) -> list[tuple[str, str, str]]:
@@ -330,6 +336,8 @@ def render_block(record: dict[str, Any], *, previous: dict[str, Any] | None = No
         f"- artifact: `{record.get('base_model')}` config sha256 "
         f"`{artifact.get('config_sha256')}`, {artifact.get('shards')} shards, "
         f"{artifact.get('shard_bytes')} bytes",
+        f"- verified checkpoint content sha256 `{artifact.get('content_sha256') or ''}`; "
+        f"SHA inventory `{artifact.get('inventory_sha256') or ''}`",
         f"- measured at {record.get('measured_at')} on {record.get('device')} "
         f"({record.get('steps')} steps, seq {record.get('seq_len')}), "
         f"code `{record.get('code_commit')}`",
@@ -377,11 +385,16 @@ def parse_block(document: str) -> dict[str, Any] | None:
         except ValueError:
             continue
     sha = None
+    content_sha = None
+    inventory_sha = None
     for line in block.splitlines():
         if "config sha256" in line:
             match = re.search(r"sha256\s*`([^`]*)`", line)
             sha = (match.group(1) or None) if match else None
-            break
+        if line.startswith("- verified checkpoint content sha256"):
+            match = re.fullmatch(r"- verified checkpoint content sha256 `([0-9a-f]{64})`; SHA inventory `([0-9a-f]{64})`", line)
+            if match:
+                content_sha, inventory_sha = match.groups()
     carried = [
         gate.strip().strip("`")
         for line in block.splitlines()
@@ -396,6 +409,8 @@ def parse_block(document: str) -> dict[str, Any] | None:
         "values": values,
         "numbers": numbers,
         "config_sha256": sha,
+        "content_sha256": content_sha,
+        "inventory_sha256": inventory_sha,
         "carried": carried,
         "provenance": provenance,
         "block": block,
@@ -451,17 +466,18 @@ def splice_witness_rows(document: str, witness: dict[str, Any]) -> tuple[str, li
             f"the witness file records {unknown}, which this runner does not own; a "
             f"witness may only write {list(WITNESS_GATES)}"
         )
-    recorded_on = parsed.get("config_sha256")
-    witness_on = (witness.get("artifact") or {}).get("config_sha256")
-    if not recorded_on:
+    recorded_on = parsed.get("content_sha256")
+    recorded_inventory = parsed.get("inventory_sha256")
+    witnessed = witness.get("artifact") or {}
+    witness_on = witnessed.get("content_sha256")
+    if not recorded_on or not recorded_inventory:
         raise PlacementGateError(
-            "the table names no artifact yet, so a witness cannot be bound to it; "
-            "run chowder_batch/moe_int8_gates.py against the base model first"
+            "the table has no verified checkpoint SHA inventory; requalify its checkpoint first"
         )
-    if witness_on != recorded_on:
+    if witness_on != recorded_on or witnessed.get("inventory_sha256") != recorded_inventory:
         raise PlacementGateError(
-            f"the witness was measured on config sha256 `{witness_on}` but the table "
-            f"was measured on `{recorded_on}`; these numbers are not about the same artifact"
+            f"the witness SHA inventory/content pin ({witness_on}) does not match "
+            f"the placement's verified checkpoint ({recorded_on})"
         )
 
     # Every gate, in the table's own order, so recording a witness on an older
@@ -582,6 +598,10 @@ def regressions(previous: dict[str, Any] | None, record: dict[str, Any]) -> list
                 "artifact: the config digest differs from the recorded one, so these numbers "
                 "are not comparable to the table"
             )
+    for key in ("content_sha256", "inventory_sha256"):
+        measured = (record.get("artifact") or {}).get(key)
+        if previous.get(key) and previous[key] != measured:
+            problems.append(f"artifact: {key} differs from verified checkpoint gate baseline")
     return problems
 
 
@@ -621,14 +641,24 @@ def assert_declaration_allowed(
             f"table is not satisfied: unmeasured={sorted(unmeasured)}, failed={sorted(failed)}, "
             f"missing={sorted(missing)}"
         )
+    if not parsed.get("content_sha256") or not parsed.get("inventory_sha256"):
+        raise PlacementGateError(
+            "gate table lacks a verified per-shard SHA checkpoint inventory; "
+            "old config-only measurements cannot authorize this placement"
+        )
     if base_model is not None:
-        measured_on = parsed.get("config_sha256")
-        declared_on = artifact_identity(base_model)["config_sha256"]
-        if measured_on != declared_on:
+        try:
+            declared = artifact_identity(base_model)
+        except (OSError, ValueError) as error:
+            raise PlacementGateError(f"checkpoint SHA inventory verification failed: {error}") from error
+        if (
+            parsed["content_sha256"] != declared.get("content_sha256")
+            or parsed["inventory_sha256"] != declared.get("inventory_sha256")
+            or parsed.get("config_sha256") != declared.get("config_sha256")
+        ):
             raise PlacementGateError(
                 f"{declarations[0]} declares expert_placement={EXPERT_PLACEMENT!r} but the gate "
-                f"table was measured on a different artifact (config sha256 `{measured_on}`) than "
-                f"the declared base ({declared_on!r}); re-run "
-                "chowder_batch/moe_int8_gates.py against this base"
+                "table SHA inventory is missing, stale, or belongs to another checkpoint; "
+                "requalify the placement with a verified checkpoint inventory"
             )
     return parsed

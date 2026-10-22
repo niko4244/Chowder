@@ -252,14 +252,16 @@ def test_the_callback_collects_gradients_and_router_windows_from_a_real_step():
 # --- the table ----------------------------------------------------------------
 
 
-def runner_record(*, digest="a" * 64, peak_vram=11.2, s_per_step=1.5):
+def runner_record(*, digest="a" * 64, peak_vram=11.2, s_per_step=1.5,
+                  content="e" * 64, inventory="f" * 64):
     return {
         "schema": gates.SCHEMA,
         "base_model": "G:/llm-cold/bf16/Qwen3.6-REAP160",
         "device": "cuda:0",
         "dtype": "auto (the checkpoint's)",
         "placement": mpg.EXPERT_PLACEMENT,
-        "artifact": {"config_sha256": digest, "shards": 19, "shard_bytes": 1},
+        "artifact": {"config_sha256": digest, "shards": 19, "shard_bytes": 1,
+                     "content_sha256": content, "inventory_sha256": inventory},
         "measured_at": "2026-10-20T12:00:00Z",
         "code_commit": "4aa5891",
         "steps": 3,
@@ -294,11 +296,28 @@ def runner_record(*, digest="a" * 64, peak_vram=11.2, s_per_step=1.5):
 PROSE = "# Pre-registration\n\nProse nobody may rewrite.\n\n"
 
 
+def enrolled_fixture(tmp_path):
+    from chowder.moe_checkpoint_inventory import enroll
+
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "model.safetensors").write_bytes(b"CPU witness fixture")
+    enroll(tmp_path)
+    return mpg.artifact_identity(tmp_path)
+
+
+def bound_kwargs(identity):
+    return {
+        "digest": identity["config_sha256"],
+        "content": identity["content_sha256"],
+        "inventory": identity["inventory_sha256"],
+    }
+
+
 def table(**kwargs):
     return PROSE + mpg.render_block(runner_record(**kwargs), previous=None)
 
 
-def witness(digest="a" * 64, **overrides):
+def witness(digest="a" * 64, *, content="e" * 64, inventory="f" * 64, **overrides):
     gate = lambda value, verdict: {"value": value, "verdict": verdict, "evidence": {}}
     gates_ = {
         "gradient": gate("layers 0, 22, 44: 6/6 LoRA B leaves finite and non-zero", "pass"),
@@ -314,7 +333,8 @@ def witness(digest="a" * 64, **overrides):
         "schema": mpg.WITNESS_SCHEMA,
         "placement": mpg.EXPERT_PLACEMENT,
         "base_model": "G:/llm-cold/bf16/Qwen3.6-REAP160",
-        "artifact": {"config_sha256": digest, "shards": 19, "shard_bytes": 1},
+        "artifact": {"config_sha256": digest, "shards": 19, "shard_bytes": 1,
+                     "content_sha256": content, "inventory_sha256": inventory},
         "device": "cuda:0",
         "steps": 30,
         "run": "gen1-candidate-7",
@@ -358,8 +378,8 @@ def test_a_witness_cannot_write_a_row_the_runner_owns():
 
 
 def test_a_witness_from_another_artifact_is_refused():
-    with pytest.raises(mpg.PlacementGateError, match="not about the same artifact"):
-        mpg.splice_witness_rows(table(), witness(digest="b" * 64))
+    with pytest.raises(mpg.PlacementGateError, match="SHA inventory/content pin"):
+        mpg.splice_witness_rows(table(), witness(content="b" * 64))
 
 
 def test_a_witness_cannot_clear_a_verdict_another_run_earned():
@@ -394,15 +414,14 @@ def test_the_operator_gate_needs_a_basis():
 
 def test_completing_the_table_lets_a_campaign_declare_the_placement(tmp_path):
     """The end this whole producer exists for: runner rows + witness rows = allowed."""
-    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
-    digest = mpg.artifact_identity(tmp_path)["config_sha256"]
-    document = table(digest=digest)
+    binding = bound_kwargs(enrolled_fixture(tmp_path))
+    document = table(**binding)
     with pytest.raises(mpg.PlacementGateError, match="not satisfied"):
         mpg.assert_declaration_allowed(document, ["campaign.json"], base_model=tmp_path)
     completed, _ = mpg.splice_witness_rows(
         document,
         witness(
-            digest=digest,
+            **binding,
             wddm_spill={
                 "value": "operator pass: no shared-memory use during the run",
                 "verdict": "pass",
@@ -417,12 +436,11 @@ def test_completing_the_table_lets_a_campaign_declare_the_placement(tmp_path):
 
 
 def test_cli_records_a_witness_file(monkeypatch, tmp_path, capsys):
-    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
-    digest = mpg.artifact_identity(tmp_path)["config_sha256"]
+    binding = bound_kwargs(enrolled_fixture(tmp_path))
     prereg = tmp_path / "PREREG.md"
-    prereg.write_text(table(digest=digest), encoding="utf-8")
+    prereg.write_text(table(**binding), encoding="utf-8")
     path = tmp_path / "witness.json"
-    path.write_text(json.dumps(witness(digest=digest)), encoding="utf-8")
+    path.write_text(json.dumps(witness(**binding)), encoding="utf-8")
 
     code = gates.main(["--witness", str(path), "--prereg", str(prereg)])
     printed = capsys.readouterr().out
@@ -436,13 +454,12 @@ def test_cli_records_a_witness_file(monkeypatch, tmp_path, capsys):
 
 def test_cli_witness_check_does_not_mutate_prereg(tmp_path, capsys):
     """--check is a dry run for witness import as it is for measured gates."""
-    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
-    digest = mpg.artifact_identity(tmp_path)["config_sha256"]
+    binding = bound_kwargs(enrolled_fixture(tmp_path))
     prereg = tmp_path / "PREREG.md"
-    original = table(digest=digest)
+    original = table(**binding)
     prereg.write_text(original, encoding="utf-8")
     path = tmp_path / "witness.json"
-    path.write_text(json.dumps(witness(digest=digest)), encoding="utf-8")
+    path.write_text(json.dumps(witness(**binding)), encoding="utf-8")
     assert gates.main(["--witness", str(path), "--prereg", str(prereg), "--check"]) == 0
     assert prereg.read_text(encoding="utf-8") == original
     assert "was not written" in capsys.readouterr().out
@@ -462,12 +479,11 @@ def test_cli_operator_spill_verdict_needs_a_basis(monkeypatch, tmp_path, capsys)
 
 
 def test_cli_operator_spill_verdict_completes_the_table(tmp_path, capsys):
-    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
-    digest = mpg.artifact_identity(tmp_path)["config_sha256"]
+    binding = bound_kwargs(enrolled_fixture(tmp_path))
     prereg = tmp_path / "PREREG.md"
-    prereg.write_text(table(digest=digest), encoding="utf-8")
+    prereg.write_text(table(**binding), encoding="utf-8")
     path = tmp_path / "witness.json"
-    path.write_text(json.dumps(witness(digest=digest)), encoding="utf-8")
+    path.write_text(json.dumps(witness(**binding)), encoding="utf-8")
     code = gates.main(
         [
             "--witness",

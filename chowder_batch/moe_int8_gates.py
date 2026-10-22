@@ -975,6 +975,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_check:
         os.environ["CHOWDER_NO_GPU"] = "1"
         args.base_model = str(_self_check_workspace())
+        # This tiny synthetic checkpoint is safe to hash in full: the same
+        # content pin path as production must be exercised by the self-check.
+        from chowder.moe_checkpoint_inventory import enroll
+
+        enroll(args.base_model)
         args.cpu = True
         arms = ARMS
         args.steps = min(args.steps, 2)
@@ -986,6 +991,17 @@ def main(argv: list[str] | None = None) -> int:
     base = Path(args.base_model)
     if not base.is_dir():
         print(f"base model directory not found: {base}", file=sys.stderr)
+        return 2
+    # Verify the one-time full-SHA inventory before a costly checkpoint load.
+    # Large shards are stat-checked on each call; they are never rehashed here.
+    try:
+        identity = artifact_identity(base)
+        if not identity.get("content_sha256"):
+            raise PlacementGateError(
+                "a verified per-shard SHA inventory is required before recording MoE gates"
+            )
+    except (OSError, ValueError) as error:
+        print(f"checkpoint SHA inventory preflight refused: {error}", file=sys.stderr)
         return 2
 
     # ``CHOWDER_NO_GPU`` has to mean the same thing here as it does to the loader
@@ -1058,13 +1074,20 @@ def main(argv: list[str] | None = None) -> int:
     document = prereg.read_text(encoding="utf-8") if prereg.is_file() else ""
     previous = parse_block(document)
 
-    measured_on = (record.get("artifact") or {}).get("config_sha256")
-    recorded_on = (previous or {}).get("config_sha256")
+    measured_on = (record.get("artifact") or {}).get("content_sha256")
+    recorded_on = (previous or {}).get("content_sha256")
     new_baseline = False
-    if previous is not None and recorded_on and measured_on and recorded_on != measured_on:
+    has_previous_evidence = previous is not None and any(
+        not verdict.startswith("not measured") for verdict in previous["verdicts"].values()
+    )
+    if has_previous_evidence and (
+        not recorded_on or recorded_on != measured_on
+        or previous.get("inventory_sha256") != (record.get("artifact") or {}).get("inventory_sha256")
+        or previous.get("config_sha256") != (record.get("artifact") or {}).get("config_sha256")
+    ):
         if not args.allow_new_baseline:
             print(
-                f"{prereg} records gates measured on config sha256 `{recorded_on}`, but this run "
+                f"{prereg} records gates measured on verified checkpoint SHA `{recorded_on}`, but this run "
                 f"measured `{measured_on}`: refusing to overwrite one artifact's table with "
                 "another's numbers (pass --allow-new-baseline to start a new baseline)",
                 file=sys.stderr,
