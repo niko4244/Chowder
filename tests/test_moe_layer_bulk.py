@@ -21,6 +21,12 @@ NUM_EXPERTS, HIDDEN, INTER = 6, 8, 4
 TOKENS, TOP_K = 10, 2
 
 
+@pytest.fixture(autouse=True)
+def _reset_switches(monkeypatch):
+    """The grouped switch is process-global; no test may leak its setting."""
+    monkeypatch.setattr(mtg, "_grouped_override", None)
+
+
 class Qwen3MoeExperts(nn.Module):
     """The name and the three 3-D attributes the install hook looks for."""
 
@@ -226,3 +232,121 @@ def test_layer_bulk_mode_does_not_exist_on_origin_main():
     from chowder.backends.transformers_peft import _ALLOWED_EXPERT_PLACEMENTS
 
     assert "cpu-transient-grad-bulk" in _ALLOWED_EXPERT_PLACEMENTS
+
+
+# --- the grouped form ---------------------------------------------------------
+#
+# The layer-bulk tests above compare the installed forward against an independent
+# loop. Those tests pass whether or not the grouped path is what ran, because the
+# only difference is which of the two implementations answered. The tests below
+# pin the choice: the default is grouped, the grouped form must not reach the
+# loop, and the loop must answer exactly when the padding does not pay.
+
+
+def _layer(experts, hidden, index, weights):
+    return hidden, index, weights, experts.gate_up_proj, experts.down_proj, F.silu, NUM_EXPERTS
+
+
+def _boom(*args, **kwargs):
+    raise AssertionError("the wrong expert form ran")
+
+
+def _skewed_routing() -> torch.Tensor:
+    """17 of 20 assignments on expert 0: ``17 * 6 > 3 * 20``, so grouping pads badly."""
+    index = torch.zeros(TOKENS, TOP_K, dtype=torch.long)
+    index[:3, 1] = 1
+    counts = torch.bincount(index.reshape(-1), minlength=NUM_EXPERTS).tolist()
+    assert max(counts) * NUM_EXPERTS > mtg.GROUPED_MAX_WASTE * sum(counts)
+    return index
+
+
+def _grads(forward) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    hidden, index, weights = _inputs()
+    out = forward(hidden, index, weights)
+    out.square().sum().backward()
+    return out.detach(), hidden.grad.detach(), weights.grad.detach()
+
+
+def test_grouping_pays_caps_the_padded_rectangle_at_three_times_the_useful_work():
+    assert mtg.grouping_pays([1] * NUM_EXPERTS)
+    assert mtg.grouping_pays([5, 5, 0, 0, 0, 0])  # 30 of 60
+    assert mtg.grouping_pays([10, 10, 0, 0, 0, 0])  # exactly at the cap
+    assert not mtg.grouping_pays([11, 9, 0, 0, 0, 0])  # one over
+    assert not mtg.grouping_pays([20, 0, 0, 0, 0, 0])
+    assert not mtg.grouping_pays([0] * NUM_EXPERTS)
+    assert not mtg.grouping_pays([])
+
+
+def test_the_grouped_switch_defaults_on_and_the_override_beats_the_environment(monkeypatch):
+    monkeypatch.delenv("CHOWDER_MOE_GROUPED_EXPERTS", raising=False)
+    assert mtg.grouped_experts() is True
+    for value in ("0", "false", "off", " OFF "):
+        monkeypatch.setenv("CHOWDER_MOE_GROUPED_EXPERTS", value)
+        assert mtg.grouped_experts() is False, value
+    monkeypatch.setenv("CHOWDER_MOE_GROUPED_EXPERTS", "1")
+    assert mtg.grouped_experts() is True
+    mtg.grouped_experts(False)
+    monkeypatch.setenv("CHOWDER_MOE_GROUPED_EXPERTS", "1")
+    assert mtg.grouped_experts() is False
+    mtg.grouped_experts(True)
+    monkeypatch.setenv("CHOWDER_MOE_GROUPED_EXPERTS", "0")
+    assert mtg.grouped_experts() is True
+
+
+def test_the_grouped_forward_matches_the_reference_without_reaching_the_loop(monkeypatch):
+    experts = FakeMoeModel().experts
+    hidden, index, weights = _inputs()
+    reference = _reference(hidden, index, weights, experts)
+    monkeypatch.setattr(mtg, "_layer_moe_forward", _boom)
+    got = mtg._layer_moe_forward_grouped(*_layer(experts, hidden, index, weights))
+    assert torch.allclose(reference, got, atol=1e-6)
+
+
+def test_the_grouped_gradients_match_the_reference():
+    experts = FakeMoeModel().experts
+    out_loop, hidden_loop, weights_loop = _grads(
+        lambda h, i, w: mtg._layer_moe_forward(*_layer(experts, h, i, w))
+    )
+    out_grouped, hidden_grouped, weights_grouped = _grads(
+        lambda h, i, w: mtg._layer_moe_forward_grouped(*_layer(experts, h, i, w))
+    )
+    assert torch.allclose(out_loop, out_grouped, atol=1e-6)
+    assert torch.allclose(hidden_loop, hidden_grouped, atol=1e-5)
+    assert torch.allclose(weights_loop, weights_grouped, atol=1e-5)
+    assert weights_grouped.abs().sum() > 0
+
+
+def test_skewed_routing_falls_back_to_the_loop_and_still_matches(monkeypatch):
+    experts = FakeMoeModel().experts
+    hidden, _, weights = _inputs()
+    index = _skewed_routing()
+    reference = _reference(hidden, index, weights, experts)
+
+    loop_calls: list[int] = []
+    loop = mtg._layer_moe_forward
+
+    def spy(*args, **kwargs):
+        loop_calls.append(1)
+        return loop(*args, **kwargs)
+
+    monkeypatch.setattr(mtg, "_layer_moe_forward", spy)
+    got = mtg._layer_moe_forward_grouped(*_layer(experts, hidden, index, weights))
+    assert loop_calls, "skewed routing must take the loop"
+    assert torch.allclose(reference, got, atol=1e-6)
+
+
+def test_the_layer_dispatch_uses_the_loop_only_when_the_switch_is_off(monkeypatch):
+    experts = FakeMoeModel().experts
+    hidden, index, weights = _inputs()
+    reference = _reference(hidden, index, weights, experts)
+    args = _layer(experts, hidden, index, weights)
+
+    with monkeypatch.context() as patch:
+        mtg.grouped_experts(False)
+        patch.setattr(mtg, "_layer_moe_forward_grouped", _boom)
+        assert torch.allclose(reference, mtg._moe_layer(*args), atol=1e-6)
+
+    with monkeypatch.context() as patch:
+        mtg.grouped_experts(True)
+        patch.setattr(mtg, "_layer_moe_forward", _boom)
+        assert torch.allclose(reference, mtg._moe_layer(*args), atol=1e-6)
