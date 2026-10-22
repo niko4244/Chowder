@@ -179,7 +179,26 @@ class GenerationLedger:
         frontier_snapshot_id: str | None = None,
         notes: str = "",
         backend: Mapping[str, Any] | None = None,
+        owner_approval: Any = None,
+        candidate_artifact_sha256: str = "",
     ) -> GenerationRecord:
+        if promotion.verdict == "PROMOTED":
+            from .owner_approval import requires_owner_approval, verify_grant
+
+            model_path = str(base_model.get("base_model_path") or base_model.get("path") or "")
+            n5 = base_model.get("lineage") == "reap-moe" or (
+                bool(model_path) and requires_owner_approval(model_path)
+            )
+            if n5 and not verify_grant(
+                owner_approval,
+                cycle_id=cycle_id,
+                candidate_version=version,
+                artifact_sha256=candidate_artifact_sha256,
+            ):
+                raise ValueError(
+                    "HUMAN_APPROVAL_REQUIRED: direct lineage.record cannot write "
+                    "a REAP PROMOTED generation without a bound owner grant"
+                )
         if version in self._records:
             raise ValueError(f"generation {version} already recorded")
         record = GenerationRecord(
