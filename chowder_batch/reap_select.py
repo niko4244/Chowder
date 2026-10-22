@@ -178,8 +178,14 @@ def evaluate(
                     raise GateError("v2 calibration evidence missing manifest or input rows")
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 actual_calib_sha = hashlib.sha256(rows_path.read_bytes()).hexdigest()
+                rows_count = sum(1 for line in rows_path.read_text(encoding="utf-8").splitlines()
+                                 if line.strip())
                 observation_record = json.loads(v2_path.read_text(encoding="utf-8"))
                 if (manifest.get("mix") != "v2"
+                        or not isinstance(manifest.get("rows"), int)
+                        or isinstance(manifest.get("rows"), bool)
+                        or manifest["rows"] != rows_count
+                        or rows_count == 0
                         or manifest.get("calibration_sha256") != actual_calib_sha
                         or observation_record.get("calibration_sha256") != actual_calib_sha):
                     raise GateError("v2 D0 observer calibration SHA disagrees with the v2 manifest")
