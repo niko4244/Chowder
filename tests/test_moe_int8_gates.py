@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT / "chowder_batch"))
 
 import moe_int8_gates as gates  # noqa: E402
 from chowder import moe_placement_gates as mpg  # noqa: E402
+from chowder.moe_checkpoint_inventory import enroll  # noqa: E402
 from chowder.backends.moe_transient_grad import INT8_PLACEMENT  # noqa: E402
 from chowder.growth.campaign_prepare import (  # noqa: E402
     CampaignPrepareRefusal,
@@ -87,6 +88,8 @@ def record(
     remaining_expert_params=0,
     patched=40,
     gradient="not measured by this runner (needs a LoRA run)",
+    content="e" * 64,
+    inventory="f" * 64,
 ):
     return {
         "schema": gates.SCHEMA,
@@ -94,7 +97,8 @@ def record(
         "device": "cuda:0",
         "dtype": "auto (the checkpoint's)",
         "placement": INT8_PLACEMENT,
-        "artifact": {"config_sha256": digest, "shards": 19, "shard_bytes": 1},
+        "artifact": {"config_sha256": digest, "shards": 19, "shard_bytes": 1,
+                     "content_sha256": content, "inventory_sha256": inventory},
         "measured_at": "2026-10-20T12:00:00Z",
         "code_commit": "92ed738",
         "steps": steps,
@@ -258,6 +262,11 @@ def clause(text, **kwargs):
 
 
 def prewritten(tmp_path, *, text):
+    checkpoint = tmp_path / "model-00001-of-00001.safetensors"
+    if not checkpoint.exists():
+        (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+        checkpoint.write_bytes(b"synthetic MoE checkpoint")
+        enroll(tmp_path)
     path = tmp_path / "PREREG.md"
     path.write_text(text, encoding="utf-8")
     return path
@@ -427,6 +436,8 @@ def test_self_check_never_writes_the_placement_prereg(monkeypatch, tmp_path, no_
     """A synthetic model's numbers must not become the placement's table."""
     monkeypatch.delenv("CHOWDER_MOE_GATE_TABLE", raising=False)
     monkeypatch.setattr(gates, "_self_check_workspace", lambda: tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "model.safetensors").write_bytes(b"tiny synthetic")
     repo_prereg = mpg.resolve_prereg_path()
     before = repo_prereg.read_text(encoding="utf-8") if repo_prereg.is_file() else None
     assert gates.main(["--self-check"]) == 0
@@ -529,8 +540,11 @@ def test_a_declaration_is_refused_when_the_table_has_no_block():
 
 def test_a_fully_measured_table_on_this_artifact_allows_it(tmp_path):
     (tmp_path / "config.json").write_text("{}", encoding="utf-8")
-    digest = mpg.artifact_identity(tmp_path)["config_sha256"]
-    text = fully_measured(digest=digest)
+    (tmp_path / "model.safetensors").write_bytes(b"fixture weights")
+    enroll(tmp_path)
+    identity = mpg.artifact_identity(tmp_path)
+    text = fully_measured(digest=identity["config_sha256"],
+                          content=identity["content_sha256"], inventory=identity["inventory_sha256"])
     text = text.replace(
         "| `smoke` | not measured by this runner (needs a dataset) | not measured |",
         "| `smoke` | 20 steps lowered the loss; adapter loaded | measured |",
@@ -548,7 +562,7 @@ def test_a_table_measured_on_another_artifact_does_not_allow_it(tmp_path):
     text = fully_measured(digest="d" * 64)
     text = text.replace("| not measured |", "| measured |")
     (tmp_path / "config.json").write_text("{}", encoding="utf-8")
-    with pytest.raises(mpg.PlacementGateError, match="different artifact"):
+    with pytest.raises(mpg.PlacementGateError, match="SHA inventory|different artifact"):
         mpg.assert_declaration_allowed(text, ["campaign.json"], base_model=tmp_path)
 
 
