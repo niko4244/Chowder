@@ -153,6 +153,19 @@ def _validate_v2_observation(calibration: Path, observation: Path) -> None:
             or observed.get("calibration_sha256") != calibration_sha):
         raise GateError("v2 D0 observer calibration SHA disagrees with the v2 manifest")
 
+    # Amendment 4 names reap_calibration.py --mix v2, whose preregistered
+    # Ornith rendering is "bare". An explicit "worked" override changes the
+    # calibration population and needs a separate preregistered variant.
+    ornith = manifest.get("ornith")
+    if isinstance(ornith, dict):
+        if ornith.get("render") != "bare":
+            raise GateError(
+                "v2 calibration Ornith render is not preregistered: expected 'bare'; "
+                "the '--ornith-render worked' variant needs a dated preregistration"
+            )
+    elif ornith != "absent: no admitted Ornith curriculum supplied":
+        raise GateError("v2 calibration Ornith rendering/absence declaration is missing or invalid")
+
     rows = [json.loads(line) for line in rows_path.read_text(encoding="utf-8").splitlines()
             if line.strip()]
     def integer(value: object) -> bool:
@@ -166,6 +179,8 @@ def _validate_v2_observation(calibration: Path, observation: Path) -> None:
             or not integer(max_tokens) or max_tokens < 256
             or not isinstance(sources, dict) or not sources):
         raise GateError("v2 calibration manifest has invalid row/token/source census")
+    if not isinstance(ornith, dict) and "ornith_curriculum" in sources:
+        raise GateError("v2 calibration declares Ornith rows despite absent admitted curriculum")
     source_counts: dict[str, int] = {}
     tokens = 0
     for row in rows:

@@ -2,11 +2,17 @@
 
 import hashlib
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 from chowder_batch.reap_gates import GateError
 from chowder_batch.reap_select import REQUIRED, _validate_v2_observation, evaluate, select
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def arm(**statuses):
@@ -159,7 +165,8 @@ def test_v2_cannot_borrow_v1_observer_d0(tmp_path):
     digest = hashlib.sha256(raw.read_bytes()).hexdigest()
     (calib / "calibration-manifest.json").write_text(json.dumps(
         {"mix": "v2", "rows": 2, "tokens": 512, "max_tokens": 2048,
-         "sources": {"ornith_curriculum": {"kept": 2}}, "calibration_sha256": digest}),
+         "sources": {"ornith_curriculum": {"kept": 2}}, "calibration_sha256": digest,
+         "ornith": {"render": "bare"}}),
         encoding="utf-8")
     cloned_observer = json.loads(v2.read_text(encoding="utf-8"))
     cloned_observer.update(calibration_sha256=digest, n_seqs=2, n_tokens=512)
@@ -174,7 +181,8 @@ def test_v2_cannot_borrow_v1_observer_d0(tmp_path):
         evaluate(tmp_path, obs, v2, calib)
     (calib / "calibration-manifest.json").write_text(json.dumps(
         {"mix": "v2", "rows": 3, "tokens": 512, "max_tokens": 2048,
-         "sources": {"ornith_curriculum": {"kept": 2}}, "calibration_sha256": digest}),
+         "sources": {"ornith_curriculum": {"kept": 2}}, "calibration_sha256": digest,
+         "ornith": {"render": "bare"}}),
         encoding="utf-8")
     with pytest.raises(GateError, match="row/token/source census"):
         evaluate(tmp_path, obs, v2, calib)
@@ -203,6 +211,7 @@ def test_v2_d0_refuses_incomplete_or_rewritten_calibration_census(tmp_path, tamp
     digest = save_rows()
     manifest = {"mix": "v2", "rows": 2, "tokens": 512, "max_tokens": 2048,
                 "sources": {"ornith_curriculum": {"kept": 2}},
+                "ornith": {"render": "bare"},
                 "calibration_sha256": digest}
     observed = {"calibration_sha256": digest, "n_seqs": 2, "n_tokens": 512,
                 "calibration_ppl": 10, "layers": [{"layer": i} for i in range(40)]}
@@ -232,3 +241,87 @@ def test_v2_d0_refuses_incomplete_or_rewritten_calibration_census(tmp_path, tamp
         observed["n_seqs"], observed["n_tokens"] = 2, 512
         obs_path.write_text(json.dumps(observed), encoding="utf-8")
         _validate_v2_observation(calib, obs_path)
+
+
+@pytest.mark.parametrize(("ornith", "source"), [
+    ({"render": "bare"}, "ornith_curriculum"),
+    ("absent: no admitted Ornith curriculum supplied", "swe_smith_trajectories"),
+])
+def test_v2_accepts_only_preregistered_bare_or_declared_absent_ornith(tmp_path, ornith, source):
+    calib = tmp_path / "calib"
+    calib.mkdir()
+    text = json.dumps({"source": source, "n_tokens": 256, "text": "valid calibration"}) + "\n"
+    raw = calib / "calibration.jsonl"
+    raw.write_text(text, encoding="utf-8")
+    digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+    manifest = {"mix": "v2", "rows": 1, "tokens": 256, "max_tokens": 2048,
+                "sources": {source: {"kept": 1}}, "ornith": ornith,
+                "calibration_sha256": digest}
+    manifest_path = calib / "calibration-manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    observed = tmp_path / "observation.json"
+    observed.write_text(json.dumps({"calibration_sha256": digest, "n_seqs": 1, "n_tokens": 256}))
+    _validate_v2_observation(calib, observed)
+
+    if isinstance(ornith, dict):
+        for invalid in ("worked", "WORKED", "", None):
+            manifest["ornith"] = {"render": invalid}
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with pytest.raises(GateError, match="not preregistered"):
+                _validate_v2_observation(calib, observed)
+    else:
+        manifest.pop("ornith")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with pytest.raises(GateError, match="declaration is missing"):
+            _validate_v2_observation(calib, observed)
+
+
+@pytest.mark.parametrize("entrypoint", ["module", "script"])
+def test_v2_worked_is_refused_by_both_selector_entrypoints(tmp_path, entrypoint):
+    v1 = _evidence(tmp_path)
+    _attest(tmp_path, "reap128_v2", "gsm8k", 1319)
+    _attest(tmp_path, "reap128_v2", "humaneval", 164)
+    _attest(tmp_path, "reap128_v2_q4", "gsm8k", 200, speed=True)
+    calib = tmp_path / "calib"
+    calib.mkdir()
+    raw = calib / "calibration.jsonl"
+    raw.write_text('{"source":"ornith_curriculum","n_tokens":256,"text":"worked row"}\n')
+    digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+    manifest_path = calib / "calibration-manifest.json"
+    manifest = {"mix": "v2", "rows": 1, "tokens": 256, "max_tokens": 2048,
+                "sources": {"ornith_curriculum": {"kept": 1}},
+                "calibration_sha256": digest, "ornith": {"render": "worked"}}
+    manifest_path.write_text(json.dumps(manifest))
+    v2 = tmp_path / "observer-v2.json"
+    v2.write_text(json.dumps({"calibration_sha256": digest, "n_seqs": 1, "n_tokens": 256,
+                              "calibration_ppl": 10,
+                              "layers": [{"layer": i} for i in range(40)]}))
+
+    env = os.environ.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env.pop("PYTHONPATH", None)
+    if entrypoint == "module":
+        env["PYTHONPATH"] = str(ROOT)
+        entry = ["-m", "chowder_batch.reap_select"]
+    else:
+        entry = [str(ROOT / "chowder_batch" / "reap_select.py")]
+
+    def invoke(name):
+        command = [sys.executable, *entry, "--eval-dir", str(tmp_path),
+                   "--observation", str(v1), "--observation-v2", str(v2),
+                   "--calibration-v2", str(calib), "--out", str(tmp_path / name)]
+        return subprocess.run(command, cwd=tmp_path, env=env, capture_output=True,
+                              text=True, check=False)
+
+    refused = invoke("worked-selection.json")
+    assert refused.returncode == 2
+    assert "Ornith render is not preregistered" in refused.stderr
+    assert not (tmp_path / "worked-selection.json").exists()
+
+    manifest["ornith"]["render"] = "bare"
+    manifest_path.write_text(json.dumps(manifest))
+    allowed = invoke("bare-selection.json")
+    assert allowed.returncode == 1, allowed.stderr  # still BLOCKED by mandatory REAP160
+    result = json.loads((tmp_path / "bare-selection.json").read_text())
+    assert result["gates"]["reap128_v2"]["gates"]["d0"]["status"] == "PASS"
+    assert result["decision"]["status"] == "BLOCKED"
