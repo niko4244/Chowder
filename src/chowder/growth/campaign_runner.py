@@ -1148,21 +1148,34 @@ def _run_campaign_locked(
             # interval conservatively, mark device-hours unmeasured, and refuse.
             # A missing evaluation summary is NEVER evidence of free compute.
             elapsed = max(0.0, time.perf_counter() - evaluation_started)
-            ledger.add(
-                "failed candidate evaluation (observed wall fallback)",
-                "evaluation",
-                ComputeCost.from_wall_only(
+            declared_cost = getattr(refusal, "measured_evaluation_cost", None)
+            cost = (
+                declared_cost
+                if isinstance(declared_cost, ComputeCost)
+                else ComputeCost.from_wall_only(
                     elapsed / 3600.0,
                     source="failed-candidate-evaluation:subprocess-wall-fallback",
+                )
+            )
+            ledger.add(
+                "failed candidate evaluation (reported cost or observed wall fallback)",
+                "evaluation",
+                cost,
+                notes=(
+                    "the reported evaluation cost is independently valid"
+                    if declared_cost is not None
+                    else "partial evaluation elapsed wall time; device use unmeasured"
                 ),
-                notes="partial evaluation elapsed wall time; device use unmeasured",
             )
             _journal_event(
                 root,
                 phase="candidate_evaluation_cost",
-                status="fallback_unmeasured_device",
-                gpu_hours=elapsed / 3600.0,
-                detail="elapsed wall charged conservatively; no promotion allowed",
+                status=(
+                    "reported_cost_before_refusal"
+                    if declared_cost is not None else "fallback_unmeasured_device"
+                ),
+                gpu_hours=cost.wall_gpu_hours,
+                detail="evaluation failure charged; no promotion allowed",
             )
         accounting_digest = ledger.write(accounting_path)
         total = ledger.total()
@@ -2417,7 +2430,16 @@ def _evaluate_candidate(
     try:
         return request, validate_candidate_report(coerce_evaluation(returned), request)
     except CandidateEvaluationRefusal as refusal:
-        raise CampaignRunRefusal(str(refusal)) from refusal
+        wrapped = CampaignRunRefusal(str(refusal))
+        # A report can be invalid for provenance/identity while its cost is
+        # still a valid measurement. Preserve that cost rather than replacing
+        # it with a second, timer-derived estimate.
+        if isinstance(returned, CandidateEvaluation):
+            try:
+                wrapped.measured_evaluation_cost = validate_evaluation_cost(returned)
+            except CandidateEvaluationRefusal:
+                pass
+        raise wrapped from refusal
 
 
 def _adjudicate(

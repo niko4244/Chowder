@@ -1916,7 +1916,10 @@ def test_an_evaluation_that_reports_no_cost_is_refused_rather_than_charged_zero(
     # The compute that really happened is durably closed out anyway.
     accounting = Path(run.cost["accounting_path"])
     assert accounting.is_file()
-    assert run.cost["wall_gpu_hours"] == pytest.approx(2 * ATTEMPT_WALL_GPU_HOURS)
+    assert run.cost["wall_gpu_hours"] > 2 * ATTEMPT_WALL_GPU_HOURS
+    assert "failed-candidate-evaluation:subprocess-wall-fallback" in accounting.read_text(
+        encoding="utf-8"
+    )
     assert json.dumps(json.loads(accounting.read_text(encoding="utf-8"))) .count("attempt") >= 2
     ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
     assert CANDIDATE_VERSION not in ledger.versions()
