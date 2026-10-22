@@ -2468,6 +2468,230 @@ def test_interrupted_entry_does_not_destroy_an_unclosed_original_verdict(tmp_pat
     assert campaign_runner._journal_outcome(root / "campaign-journal.jsonl") is None
 
 
+@pytest.mark.parametrize("search_declared", [False, True])
+def test_completed_attempt_receipts_resume_without_duplicate_training_or_cost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, search_declared: bool
+):
+    """Crash after durable receipt, replay settled attempts, finish the same plan.
+
+    The search variant crosses a round boundary and must restore the winning
+    round-0 checkpoint into the actual round-1 project config.
+    """
+    kwargs = (
+        {"candidate_search": dict(SEARCH_DECLARATION)}
+        if search_declared else {}
+    )
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True, **kwargs)
+    _patch_seams(monkeypatch, runner)
+    root = Path(manifest.state_root)
+    # Search crashes after both round-0 receipts. Single pass crashes after
+    # the first receipt, leaving the second attempt to run on resume.
+    crash_count = 2 if search_declared else 1
+    seen = 0
+    original = campaign_runner._journal_event
+
+    def crash_after_receipt(*args: Any, **kwargs: Any) -> None:
+        nonlocal seen
+        original(*args, **kwargs)
+        if kwargs.get("phase") == "attempt_receipt":
+            seen += 1
+            if seen == crash_count:
+                raise SystemExit("process killed after committed receipt")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(campaign_runner, "_journal_event", crash_after_receipt)
+        with pytest.raises(SystemExit, match="committed receipt"):
+            run_campaign(manifest)
+    prior_trains = _verbs(runner).count("train")
+    assert prior_trains == crash_count
+    resumed = run_campaign(manifest)
+    assert resumed.verdict == "PROMOTED"
+    assert _verbs(runner).count("train") == (3 if search_declared else 2)
+    assert len(resumed.attempts) == (3 if search_declared else 2)
+    assert resumed.cost["wall_gpu_hours"] == pytest.approx(
+        len(resumed.attempts) * ATTEMPT_WALL_GPU_HOURS
+    )
+    cost_document = json.loads(Path(resumed.cost["accounting_path"]).read_text())
+    attempt_rows = [row for row in cost_document["entries"] if row["kind"] in ("training", "failed_attempt")]
+    assert len(attempt_rows) == len(resumed.attempts)
+    assert len({row["cost"]["source"] for row in attempt_rows}) == len(resumed.attempts)
+    if search_declared:
+        source = _latest_checkpoint_of(root / "attempts" / "attempt-01")
+        project = json.loads((root / "attempts" / "attempt-03" / "project.json").read_text())
+        assert project["config"]["backend"]["router_healing"]["resume_from"] == source
+    assert any(
+        item.get("phase") == "campaign_resume"
+        for item in _journal_records(root / "campaign-journal.jsonl")
+    )
+
+
+@pytest.mark.parametrize(
+    "damage",
+    ["receipt", "checkpoint", "spend", "extra_receipt", "manifest", "training_input"],
+)
+def test_recovery_refuses_corrupted_or_unpriced_attempt_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+):
+    from chowder.growth.campaign_resume import receipt_path
+
+    manifest, runner, document = _campaign(
+        tmp_path, with_ancestor=True, candidate_search=dict(SEARCH_DECLARATION)
+    )
+    _patch_seams(monkeypatch, runner)
+    root = Path(manifest.state_root)
+    original = campaign_runner._journal_event
+
+    def crash_after_receipt(*args: Any, **kwargs: Any) -> None:
+        original(*args, **kwargs)
+        if kwargs.get("phase") == "attempt_receipt":
+            raise SystemExit("crash")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(campaign_runner, "_journal_event", crash_after_receipt)
+        with pytest.raises(SystemExit, match="crash"):
+            run_campaign(manifest)
+    receipt = receipt_path(root, 0)
+    if damage == "receipt":
+        receipt.write_text('{"corrupt":true}', encoding="utf-8")
+    elif damage == "checkpoint":
+        artifact = root / "attempts" / "attempt-01" / "work" / "artifact"
+        target = next(path for path in artifact.rglob("*") if path.is_file())
+        target.write_bytes(target.read_bytes() + b"modified")
+    elif damage == "spend":
+        payload = json.loads(receipt.read_text())
+        payload["evidence"]["actual_cost"]["wall_gpu_hours"] = -1.0
+        receipt.write_text(json.dumps(payload), encoding="utf-8")
+    elif damage == "extra_receipt":
+        receipt_path(root, 1).write_text(receipt.read_text(), encoding="utf-8")
+    elif damage == "manifest":
+        manifest = _redeclare(document, notes="declaration changed on recovery")
+    elif damage == "training_input":
+        source = Path(manifest.training_material_path)
+        source.write_text(source.read_text(encoding="utf-8") + "\nnew dataset", encoding="utf-8")
+    trained_before = _verbs(runner).count("train")
+    refused = run_campaign(manifest)
+    assert refused.verdict == "REFUSED"
+    assert refused.refused_by == "entry_check"
+    assert _verbs(runner).count("train") == trained_before
+    assert not (root / "ledger" / "generations.json").exists()
+
+
+def test_resume_blocks_started_attempt_with_no_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    original = campaign_runner._journal_event
+
+    def crash_after_started(*args: Any, **kwargs: Any) -> None:
+        original(*args, **kwargs)
+        if kwargs.get("phase") == "attempt" and kwargs.get("status") == "started":
+            raise SystemExit("crashed after reserved invocation")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(campaign_runner, "_journal_event", crash_after_started)
+        with pytest.raises(SystemExit):
+            run_campaign(manifest)
+    assert _verbs(runner).count("train") == 0
+    assert run_campaign(manifest).verdict == "REFUSED"
+    assert _verbs(runner).count("train") == 0
+
+
+def test_resume_refuses_new_compute_when_actual_spend_uses_remaining_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manifest, runner, _ = _campaign(
+        tmp_path, with_ancestor=True,
+        runner=_RecordingRunner(gpu_hours=0.035),
+        budget=_tight_campaign_budget(wall_gpu_hours_ceiling_campaign=0.036),
+    )
+    _patch_seams(monkeypatch, runner)
+    original = campaign_runner._journal_event
+
+    def kill_after_receipt(*args: Any, **kwargs: Any) -> None:
+        original(*args, **kwargs)
+        if kwargs.get("phase") == "attempt_receipt":
+            raise SystemExit("cost journaled")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(campaign_runner, "_journal_event", kill_after_receipt)
+        with pytest.raises(SystemExit, match="cost journaled"):
+            run_campaign(manifest)
+    assert _verbs(runner).count("train") == 1
+    with pytest.raises(CampaignRunRefusal, match="CAMPAIGN_RESUME_BUDGET"):
+        run_campaign(manifest)
+    assert _verbs(runner).count("train") == 1
+
+
+def test_resume_never_repeats_an_evaluator_after_its_start_was_journaled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    original = campaign_runner._journal_event
+
+    def kill_at_evaluator(*args: Any, **kwargs: Any) -> None:
+        original(*args, **kwargs)
+        if kwargs.get("phase") == "candidate_evaluation_started":
+            raise SystemExit("evaluator boundary")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(campaign_runner, "_journal_event", kill_at_evaluator)
+        with pytest.raises(SystemExit, match="evaluator boundary"):
+            run_campaign(manifest)
+    trained = _verbs(runner).count("train")
+    refused = run_campaign(manifest)
+    assert refused.verdict == "REFUSED"
+    assert refused.refused_by == "entry_check"
+    assert _verbs(runner).count("train") == trained
+
+
+def test_hard_process_exit_after_fsynced_receipt_resumes_only_unspent_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """os._exit bypasses finally/exception handling; the journal survives it."""
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    state = Path(manifest.state_root)
+    child = tmp_path / "die-after-receipt.py"
+    child.write_text(
+        "import os, sys\n"
+        "sys.path.insert(0, sys.argv[2])\n"
+        "import test_growth_campaign_runner as fixtures\n"
+        "from chowder.growth.campaign import CampaignManifest\n"
+        "from chowder.growth import campaign_runner as c\n"
+        "r = fixtures._RecordingRunner(gpu_hours=fixtures.ATTEMPT_WALL_GPU_HOURS)\n"
+        "c.default_runner = r\n"
+        "c.default_evaluator_factory = lambda manifest, state_root=None: "
+        "fixtures._RecordingEvaluator(fixtures._candidate_report("
+        "fixtures.Path(manifest.state_root).parent))\n"
+        "original = c._journal_event\n"
+        "def inject(*args, **kwargs):\n"
+        "    original(*args, **kwargs)\n"
+        "    if kwargs.get('phase') == 'attempt_receipt': os._exit(17)\n"
+        "c._journal_event = inject\n"
+        "c.run_campaign(CampaignManifest.from_file(sys.argv[1]))\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    src = Path(campaign_runner.__file__).resolve().parents[2]
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(src), env.get("PYTHONPATH"))))
+    env["CHOWDER_NO_GPU"] = "1"
+    done = subprocess.run(
+        [sys.executable, str(child), str(tmp_path / "inputs" / "campaign.json"),
+         str(Path(__file__).resolve().parent)],
+        capture_output=True, text=True, cwd=str(tmp_path), env=env, timeout=60,
+    )
+    assert done.returncode == 17, done.stderr or done.stdout
+    assert (state / "campaign-attempt-receipts" / "000000.json").is_file()
+    assert not (state / "campaign-run.json").exists()
+    _patch_seams(monkeypatch, runner)
+    resumed = run_campaign(manifest)
+    assert resumed.verdict == "PROMOTED"
+    assert len(resumed.attempts) == 2
+    assert _verbs(runner).count("train") == 1
+    assert resumed.cost["wall_gpu_hours"] == pytest.approx(2 * ATTEMPT_WALL_GPU_HOURS)
+
+
 def test_failed_candidate_evaluation_charges_observed_elapsed_wall_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
