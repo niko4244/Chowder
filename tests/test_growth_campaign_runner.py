@@ -1142,8 +1142,15 @@ def test_a_plan_that_does_not_fit_the_campaign_envelope_refuses_before_compute(
         ("wall_gpu_hours_ceiling_campaign", "PROJECTED_WALL_GPU_HOURS_EXCEEDED"),
         ("device_gpu_hours_ceiling_campaign", "PROJECTED_DEVICE_GPU_HOURS_EXCEEDED"),
     ):
+        # A terminal campaign root is immutable, even when the earlier run
+        # refused before training. Test distinct declared plans in distinct
+        # state roots rather than depending on unsafe terminal-root reuse.
         refused = run_campaign(
-            _redeclare(document, budget={**_tight_campaign_budget(), field_name: 1e-6})
+            _redeclare(
+                document,
+                state_root=str(tmp_path / f"state-{field_name}"),
+                budget={**_tight_campaign_budget(), field_name: 1e-6},
+            )
         )
         assert refused.verdict == "REFUSED"
         assert code in _phase(refused, "campaign_projection")["detail"]
@@ -2537,6 +2544,99 @@ def test_interrupted_entry_does_not_destroy_an_unclosed_original_verdict(tmp_pat
     assert (root / "campaign-run.json").read_bytes() == original
     assert json.loads((root / "campaign-entry-refusal.json").read_text())["verdict"] == "REFUSED"
     assert campaign_runner._journal_outcome(root / "campaign-journal.jsonl") is None
+
+
+def test_terminal_rejected_root_cannot_retrain_or_overwrite_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The prior terminal receipt for index zero survives an attempted rerun."""
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner, bind=False)
+    first = run_campaign(manifest)
+    assert first.verdict == "REFUSED"
+    root = Path(manifest.state_root)
+    receipts = root / "campaign-attempt-receipts"
+    before = {p.name: p.read_bytes() for p in receipts.glob("*.json")}
+    assert before and _verbs(runner).count("train") == len(before)
+    first_record = (root / "campaign-run.json").read_bytes()
+    journal = (root / "campaign-journal.jsonl").read_bytes()
+    cost = (root / "cycle_compute_accounting.json").read_bytes()
+    trained = _verbs(runner).count("train")
+
+    refused = run_campaign(manifest)
+    assert refused.verdict == "REFUSED"
+    assert refused.refused_by == "entry_check"
+    assert "CAMPAIGN_STATE_OCCUPIED" in refused.refusal_reason
+    assert _verbs(runner).count("train") == trained
+    assert {p.name: p.read_bytes() for p in receipts.glob("*.json")} == before
+    assert (root / "campaign-run.json").read_bytes() == first_record
+    assert (root / "campaign-journal.jsonl").read_bytes() == journal
+    assert (root / "cycle_compute_accounting.json").read_bytes() == cost
+    # A repeated refusal cannot itself destroy the original terminal status.
+    assert campaign_runner._journal_outcome(root / "campaign-journal.jsonl") == "REFUSED"
+    again = run_campaign(manifest)
+    assert again.refused_by == "entry_check"
+    assert _verbs(runner).count("train") == trained
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["drop_pending_phase", "malformed_record", "remove_record", "bad_phases_shape"],
+)
+def test_pending_approval_evidence_tampering_never_rearms_compute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str
+):
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    monkeypatch.setattr(campaign_runner, "requires_owner_approval", lambda _path: True)
+    monkeypatch.setattr(campaign_runner, "judge_certifies_candidate", lambda _root: False)
+    original = run_campaign(manifest)
+    assert original.verdict == "INCONCLUSIVE"
+    root = Path(manifest.state_root)
+    verdict_file = root / "campaign-run.json"
+    terminal_journal = (root / "campaign-journal.jsonl").read_bytes()
+    before_trains = _verbs(runner).count("train")
+    assert before_trains
+    if tamper == "drop_pending_phase":
+        doc = json.loads(verdict_file.read_text())
+        doc["phases"] = [item for item in doc["phases"] if item.get("phase") != "human_approval"]
+        verdict_file.write_text(json.dumps(doc), encoding="utf-8")
+    elif tamper == "bad_phases_shape":
+        doc = json.loads(verdict_file.read_text())
+        doc["phases"] = 123
+        verdict_file.write_text(json.dumps(doc), encoding="utf-8")
+    elif tamper == "malformed_record":
+        verdict_file.write_text('{"not-a-verdict":', encoding="utf-8")
+    else:
+        verdict_file.unlink()
+    expected_record = verdict_file.read_bytes() if verdict_file.exists() else None
+
+    blocked = run_campaign(manifest)
+    assert blocked.verdict == "REFUSED"
+    assert blocked.refused_by == "entry_check"
+    assert _verbs(runner).count("train") == before_trains
+    assert (root / "campaign-journal.jsonl").read_bytes() == terminal_journal
+    if expected_record is not None:
+        assert verdict_file.read_bytes() == expected_record
+    else:
+        assert not verdict_file.exists()
+
+
+def test_orphan_attempt_directory_without_journal_is_not_a_fresh_root(
+    tmp_path: Path,
+):
+    manifest, _runner, _ = _campaign(tmp_path, with_ancestor=True)
+    root = Path(manifest.state_root)
+    (root / "attempts" / "attempt-01").mkdir(parents=True)
+
+    class _NoCompute:
+        def __call__(self, *_args: Any) -> None:
+            raise AssertionError("orphaned spend must not train")
+
+    blocked = run_campaign(manifest, train_fn=_NoCompute())
+    assert blocked.verdict == "REFUSED"
+    assert "CAMPAIGN_STATE_OCCUPIED" in blocked.refusal_reason
+    assert not (root / "campaign-journal.jsonl").exists()
 
 
 @pytest.mark.parametrize("search_declared", [False, True])
