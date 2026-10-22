@@ -12,6 +12,7 @@ from chowder.cli import main as chowder_main
 from chowder.growth import campaign_runner
 from chowder.growth.campaign_runner import run_campaign
 from chowder.growth.compute_cost import CycleCostLedger, ledger_digest
+from chowder.growth.compute_cost import ComputeCost
 from test_growth_campaign_runner import (
     OVERRUN_WALL_GPU_HOURS,
     _RecordingRunner,
@@ -154,6 +155,56 @@ def test_settlement_revalidates_original_trainer_evidence_bytes(
     )
     assert code == 1, payload
     assert "CAMPAIGN_SETTLEMENT_UNVERIFIED" in payload["refusal_reason"]
+
+
+@pytest.mark.parametrize("tamper_completion", [False, True])
+def test_nonreplayable_executor_has_cost_bound_completion_not_native_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], tamper_completion: bool,
+) -> None:
+    """Remote/custom backends must not be forced to invent native receipts."""
+    manifest, runner, _ = _campaign(tmp_path, recipe_count=1, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+
+    class RemoteFixture:
+        firewall = campaign_runner.ContaminationFirewall()
+
+        def admit(self, recipe):
+            return None
+
+        def __call__(self, recipe, items):
+            return {
+                "status": "FAILED", "attempt": "remote-attempt-01",
+                "train_started": True, "measured_gpu_hours": None,
+                "actual_cost": ComputeCost.from_wall_only(
+                    0.01, source="verified remote executor fixture"
+                ).to_dict(),
+            }
+
+    run = run_campaign(manifest, train_fn=RemoteFixture())
+    root = Path(manifest.state_root)
+    assert run.verdict == "REFUSED"
+    assert not (root / "campaign-attempt-receipts").exists()
+    journal = root / "campaign-journal.jsonl"
+    rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    completions = [row for row in rows if row.get("phase") == "attempt"
+                   and row.get("status") != "started"]
+    assert len(completions) == 1
+    assert completions[0].get("detail")
+    if tamper_completion:
+        completions[0]["detail"] = "f" * 64
+        journal.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    code, payload = settle(
+        monkeypatch, capsys, tmp_path / "inputs" / "campaign.json",
+        Path(run.cost["accounting_path"]),
+    )
+    if tamper_completion:
+        assert code == 1
+        assert "CAMPAIGN_SETTLEMENT_UNVERIFIED" in payload["refusal_reason"]
+    else:
+        assert code == 0, payload  # cost-only compliance; training verdict was REFUSED
+        assert payload["budget_compliant"] is True
+        assert payload["actual"]["wall_gpu_hours"] == pytest.approx(0.01)
 
 
 @pytest.mark.parametrize(

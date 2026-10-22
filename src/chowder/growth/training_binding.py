@@ -211,7 +211,14 @@ def _sha256_text(text: str) -> str:
 
 
 def _sha256_file(path: Path) -> str:
-    return _sha256_bytes(path.read_bytes())
+    # Checkpoints can contain individual shards larger than available RAM.
+    # Verification must use bounded memory, especially when settlement calls
+    # directory_digest on a previously completed native training artifact.
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def directory_digest(root: Path) -> tuple[str, tuple[dict[str, str], ...]]:

@@ -197,24 +197,36 @@ def verified_settlement_total(
         (pos, row) for pos, row in enumerate(journal_rows)
         if isinstance(row, dict) and row.get("phase") == "attempt_receipt"
     ]
+    indexed_completions = [
+        (pos, row) for pos, row in enumerate(journal_rows)
+        if isinstance(row, dict) and row.get("phase") == "attempt"
+        and row.get("status") not in (None, "started")
+    ]
     receipt_dir = root / "campaign-attempt-receipts"
     receipt_paths = set(receipt_dir.glob("*.json")) if receipt_dir.is_dir() else set()
-    expected_receipt_paths = {
-        receipt_dir / f"{index:06d}.json" for index in range(len(started))
-    }
+    # Exactly one terminal proof per charged attempt. Native local execution
+    # yields a verified checkpoint receipt; an explicitly non-replayable remote
+    # or injected executor yields a cost-bound completion journal record. A
+    # count of files/events alone would accept duplicate index 0 and never
+    # inspect index 1, or wrongly exclude legitimate remote executions.
+    endings = sorted(
+        [(pos, row, "receipt") for pos, row in indexed_receipts]
+        + [(pos, row, "completion") for pos, row in indexed_completions],
+        key=lambda event: event[0],
+    )
     _require(
-        len(indexed_receipts) == len(indexed_starts)
-        and receipt_paths == expected_receipt_paths,
-        "every paid attempt needs one canonical, durable indexed receipt",
+        len(endings) == len(indexed_starts),
+        "every paid attempt needs one terminal receipt or cost-bound completion",
     )
     # A simple length check can be bypassed by duplicating receipt index 0
     # while leaving index 1 unchecked; enforce a complete ordered bijection,
     # with each receipt following its own start and preceding the next start.
-    for expected_index, (position, row) in enumerate(indexed_receipts):
+    expected_receipt_paths = set()
+    for expected_index, (position, row, kind) in enumerate(endings):
         index = row.get("index")
         _require(
             type(index) is int and index == expected_index,
-            "receipt has duplicate, missing or out-of-order attempt index",
+            "terminal attempt proof has duplicate, missing or out-of-order index",
         )
         start_position, started_row = indexed_starts[expected_index]
         _require(
@@ -222,10 +234,52 @@ def verified_settlement_total(
             and start_position < position
             and (expected_index + 1 == len(indexed_starts)
                  or position < indexed_starts[expected_index + 1][0]),
-            "receipt is not ordered after its matching attempt start",
+            "terminal attempt proof is not ordered after its matching start",
         )
-        started_row = started[index]
+        billed = charged_attempts[index]
+        _require(
+            billed.get("recipe_id") == started_row.get("recipe_id"),
+            "charged attempt recipe differs from journal start",
+        )
+        if kind == "completion":
+            # A remote/custom backend intentionally cannot be replayed from a
+            # local checkpoint. The fsynced completion instead binds the
+            # charge and invocation identity. Legacy unbound completions are
+            # not retroactively considered independently verified.
+            _require(
+                row.get("identity") == started_row.get("identity")
+                and row.get("recipe_id") == started_row.get("recipe_id")
+                and isinstance(row.get("status"), str)
+                and billed.get("kind") == (
+                    "training" if row.get("status") == "SUCCEEDED" else "failed_attempt"
+                ),
+                "non-replayable completion has mismatched identity or status",
+            )
+            try:
+                billed_cost = ComputeCost.from_dict(billed["cost"])
+            except (TypeError, ValueError, KeyError) as error:
+                raise ValueError("CAMPAIGN_SETTLEMENT_UNVERIFIED: invalid completion cost") from error
+            expected = content_digest({
+                "identity": started_row["identity"],
+                "recipe_id": row["recipe_id"],
+                "attempt": row.get("attempt"),
+                "status": row["status"],
+                "cost": billed_cost.to_dict(),
+            })
+            _require(
+                row.get("detail") == expected,
+                "non-replayable completion cost digest is missing or inconsistent",
+            )
+            measured = row.get("gpu_hours")
+            if measured is not None:
+                _require(
+                    type(measured) in (int, float)
+                    and abs(measured - billed_cost.wall_gpu_hours) < 1e-10,
+                    "non-replayable completion's measured GPU hours disagree with charge",
+                )
+            continue
         receipt_file = receipt_dir / f"{index:06d}.json"
+        expected_receipt_paths.add(receipt_file)
         _require(receipt_file in receipt_paths, "receipt event has no indexed receipt file")
         try:
             receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
@@ -240,7 +294,6 @@ def verified_settlement_total(
             "receipt digest/identity does not match the attempt journal",
         )
         evidence = receipt.get("evidence")
-        billed = charged_attempts[index]
         _require(
             isinstance(evidence, dict)
             and evidence.get("attempt") == row.get("attempt")
@@ -268,4 +321,8 @@ def verified_settlement_total(
             source_cost == billed_cost,
             "durable attempt receipt cost differs from settled ledger entry",
         )
+    _require(
+        receipt_paths == expected_receipt_paths,
+        "unpaired or unexpectedly named native attempt receipt file",
+    )
     return total

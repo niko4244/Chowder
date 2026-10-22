@@ -1306,10 +1306,25 @@ def _run_campaign_locked(
             and isinstance(evidence.get("actual_cost"), Mapping)
         )
         if not replayable:
+            # Remote/custom executors have no native, byte-bound local
+            # checkpoint receipt. Give their terminal journal entry a distinct
+            # invocation identity and a digest of the charge actually settled,
+            # rather than pretending they have a replayable native receipt.
+            # An unpriced started attempt still raises and leaves an open
+            # journal; no fabricated zero-cost completion is recorded.
+            charged = _attempt_cost(evidence)
+            completion_digest = content_digest({
+                "identity": spec_digest,
+                "recipe_id": recipe.recipe_id,
+                "attempt": evidence.get("attempt"),
+                "status": evidence.get("status"),
+                "cost": charged.to_dict(),
+            })
             _journal_event(
                 root, phase="attempt", status=evidence.get("status"),
                 recipe_id=recipe.recipe_id, attempt=evidence.get("attempt"),
                 gpu_hours=evidence.get("measured_gpu_hours"),
+                identity=spec_digest, index=index, detail=completion_digest,
             )
             replay_index += 1
             return evidence
