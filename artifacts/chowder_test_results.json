@@ -1,0 +1,72 @@
+{
+  "schema": "chowder.audit-test-results.v1",
+  "date": "2026-10-22",
+  "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+  "moe_pr_268_sha": "fe94342c1073eb39e69be01ba224c63b38057b95",
+  "journal_pr_269_sha": "e3f0fbd77bc679ea9a856461294cd26b40316562",
+  "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
+  "session_test_runs": [],
+  "historical_reported_runs": [
+    {
+      "origin": "#268",
+      "command": "pytest tests/test_moe_int8_experts.py",
+      "passed": 23,
+      "skipped": 0,
+      "model": "synthetic CPU",
+      "fresh": false
+    },
+    {
+      "origin": "#268",
+      "command": "pytest -k 'transient or moe or bulk'",
+      "passed": 113,
+      "skipped": 1,
+      "model": "mostly CPU",
+      "fresh": false
+    },
+    {
+      "origin": "#268",
+      "command": "pytest tests/test_transformers_backend.py tests/test_config_validation.py tests/test_growth_training_backends.py",
+      "passed": 289,
+      "skipped": 21,
+      "fresh": false
+    },
+    {
+      "origin": "#269 before current audit changes",
+      "command": "pytest tests/test_growth_campaign_runner.py tests/test_growth_campaign.py tests/test_growth_kaggle_campaign.py tests/test_moe_campaign_plumbing.py -q",
+      "passed": 88,
+      "fresh": false
+    },
+    {
+      "origin": "#210 older nonmergeable PR",
+      "command": "pytest -q",
+      "passed": 2879,
+      "skipped": 77,
+      "fresh": false
+    }
+  ],
+  "ci": {
+    "pr": 269,
+    "head": "e3f0fbd77bc679ea9a856461294cd26b40316562",
+    "workflow_run_id": 39750310076,
+    "status_at_last_query": "in_progress",
+    "conclusion": null,
+    "url": "https://github.com/niko4244/Chowder/actions/runs/39750310076"
+  },
+  "new_regression_tests": [
+    "test_a_later_interrupted_start_cannot_borrow_an_old_terminal",
+    "test_corrupt_or_unverified_terminal_journal_fails_closed"
+  ],
+  "new_test_status": "committed, not yet independently run in this session",
+  "blocked_tests": [
+    "Windows CUDA and WDDM",
+    "real MoE sharded checkpoint/load",
+    "Gen0 paired benchmarks",
+    "Gen1 campaign",
+    "local end-to-end CLI/TUI"
+  ],
+  "recommended_commands": [
+    "python -m pytest tests/test_growth_campaign_runner.py tests/test_growth_campaign.py tests/test_growth_kaggle_campaign.py tests/test_moe_campaign_plumbing.py -q",
+    "ruff check src tests",
+    "python chowder_batch/moe_int8_gates.py --base-model <artifact> --arms int8 --steps 3 --seq-len 2048 --out <new-result.json>"
+  ]
+}

@@ -1,0 +1,123 @@
+{
+  "schema": "chowder.readiness-audit.v1",
+  "date": "2026-10-22",
+  "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+  "moe_pr_268_sha": "fe94342c1073eb39e69be01ba224c63b38057b95",
+  "journal_pr_269_sha": "e3f0fbd77bc679ea9a856461294cd26b40316562",
+  "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
+  "grades": "PASS=current verified; PARTIAL=partially evidenced; FAIL=requirement unmet; UNVERIFIED=insufficient evidence",
+  "subsystems": [
+    {
+      "subsystem": "training_peft",
+      "grade": "PARTIAL",
+      "workstream_status": "COMPLETED",
+      "evidence": "Real historical PEFT and CI; no fresh local test",
+      "reference": "README.md; .github/workflows/ci.yml"
+    },
+    {
+      "subsystem": "autonomous_growth",
+      "grade": "PARTIAL",
+      "workstream_status": "UNVERIFIED",
+      "evidence": "Service/CLI/TUI exists; no fresh end-to-end validation",
+      "reference": "src/chowder/growth/service.py"
+    },
+    {
+      "subsystem": "autonomous_repair",
+      "grade": "PARTIAL",
+      "workstream_status": "UNVERIFIED",
+      "evidence": "Repair/cycle code exists; current integration untested",
+      "reference": "src/chowder/autonomous_repair.py"
+    },
+    {
+      "subsystem": "memory_fabric",
+      "grade": "PARTIAL",
+      "workstream_status": "UNVERIFIED",
+      "evidence": "Historical OOM-success; WDDM flakiness",
+      "reference": "docs/MEMORY_FABRIC_ACCEPTANCE.md"
+    },
+    {
+      "subsystem": "unsloth",
+      "grade": "PARTIAL",
+      "workstream_status": "UNVERIFIED",
+      "evidence": "Prior real-CUDA pilot and resume; deferred chat/parent path",
+      "reference": "docs/UNSLOTH_REAL_CUDA_ACCEPTANCE.md"
+    },
+    {
+      "subsystem": "bf16_layer_bulk",
+      "grade": "PARTIAL",
+      "workstream_status": "UNVERIFIED",
+      "evidence": "Merged #264; CPU equivalence, no matched fresh GPU proof",
+      "reference": "docs/DESIGN-MOE-16GB-TRAINING-BACKEND-2026-10-18.md"
+    },
+    {
+      "subsystem": "int8_experts",
+      "grade": "PARTIAL",
+      "workstream_status": "UNVERIFIED",
+      "evidence": "PR268 live census and historical real 20-step run, unmerged",
+      "reference": "PR #268"
+    },
+    {
+      "subsystem": "moe_14_5_vram",
+      "grade": "PARTIAL",
+      "workstream_status": "UNVERIFIED",
+      "evidence": "Historical PASS 11.345 GiB on old retention setting",
+      "reference": "PR #268 generated gate table"
+    },
+    {
+      "subsystem": "training_budget",
+      "grade": "FAIL",
+      "workstream_status": "FAILED",
+      "evidence": "27.48 s/step projects 7.63 GPU-h/1000 vs 2.5h",
+      "reference": "PR #268 throughput A/B"
+    },
+    {
+      "subsystem": "campaign_journal",
+      "grade": "PARTIAL",
+      "workstream_status": "UNVERIFIED",
+      "evidence": "Code hardening in PR269, fresh CI pending",
+      "reference": "PR #269"
+    },
+    {
+      "subsystem": "safe_resume",
+      "grade": "FAIL",
+      "workstream_status": "BLOCKED",
+      "evidence": "Not implemented; cannot re-spend interrupted attempts",
+      "reference": "PR #269"
+    },
+    {
+      "subsystem": "evidence_provenance",
+      "grade": "PARTIAL",
+      "workstream_status": "UNVERIFIED",
+      "evidence": "Readiness raw evidence fix merged; local artifacts inaccessible",
+      "reference": "PR #266"
+    },
+    {
+      "subsystem": "promotion",
+      "grade": "PARTIAL",
+      "workstream_status": "BLOCKED",
+      "evidence": "Frozen judge and explicit human approval; no qualified candidate",
+      "reference": "docs/REAP_MOE_LINEAGE.md"
+    },
+    {
+      "subsystem": "data_and_licensing",
+      "grade": "PARTIAL",
+      "workstream_status": "BLOCKED",
+      "evidence": "Contamination builder exists; Fable N2 unresolved",
+      "reference": "docs/MOE_GEN1_MIX_V1.md"
+    },
+    {
+      "subsystem": "model_release",
+      "grade": "FAIL",
+      "workstream_status": "BLOCKED",
+      "evidence": "Full hashes, selected Gen0, Q4, witness gates unavailable",
+      "reference": "PR #268"
+    },
+    {
+      "subsystem": "cli_tui",
+      "grade": "PARTIAL",
+      "workstream_status": "UNVERIFIED",
+      "evidence": "Implemented; no current interactive smoke",
+      "reference": "src/chowder/tui_growth.py"
+    }
+  ]
+}

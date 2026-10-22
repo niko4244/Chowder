@@ -1,0 +1,84 @@
+{
+  "schema": "chowder.custom-moe-acceptance.v1",
+  "date": "2026-10-22",
+  "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+  "moe_pr_268_sha": "fe94342c1073eb39e69be01ba224c63b38057b95",
+  "journal_pr_269_sha": "e3f0fbd77bc679ea9a856461294cd26b40316562",
+  "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
+  "overall": "BLOCKED",
+  "frozen_gates_preserved": true,
+  "gate_status": [
+    {
+      "gate": "reap_d0_observation",
+      "status": "UNVERIFIED"
+    },
+    {
+      "gate": "reap_generation_health",
+      "status": "UNVERIFIED"
+    },
+    {
+      "gate": "reap_gsm8k",
+      "status": "UNVERIFIED"
+    },
+    {
+      "gate": "reap_humaneval",
+      "status": "UNVERIFIED"
+    },
+    {
+      "gate": "reap_random128_control",
+      "status": "UNVERIFIED"
+    },
+    {
+      "gate": "q4_fit_speed",
+      "status": "UNVERIFIED"
+    },
+    {
+      "gate": "load_census",
+      "status": "HISTORICAL_MEASURED"
+    },
+    {
+      "gate": "memory_vram_14_5_gib",
+      "status": "HISTORICAL_PASS_OLD_REVISION"
+    },
+    {
+      "gate": "host_rss",
+      "status": "HISTORICAL_MEASURED"
+    },
+    {
+      "gate": "throughput_2_5gpuh",
+      "status": "HISTORICAL_RECIPE_FAIL"
+    },
+    {
+      "gate": "lora_gradient",
+      "status": "NOT_MEASURED"
+    },
+    {
+      "gate": "smoke_20_steps_loss_drop",
+      "status": "NOT_MEASURED"
+    },
+    {
+      "gate": "router_entropy_20pct",
+      "status": "NOT_MEASURED"
+    },
+    {
+      "gate": "wddm_no_spill_operator",
+      "status": "NOT_MEASURED"
+    },
+    {
+      "gate": "fable_free_control",
+      "status": "UNVERIFIED"
+    },
+    {
+      "gate": "license_N2",
+      "status": "BLOCKED"
+    },
+    {
+      "gate": "approval_N5",
+      "status": "BLOCKED"
+    }
+  ],
+  "promotion_allowed": false,
+  "gen1_training_authorized": false,
+  "expensive_gpu_requires_approval": true,
+  "selection_note": "REAP160 candidate is not automatically eligible: apply REAP128 and fallback gates first"
+}

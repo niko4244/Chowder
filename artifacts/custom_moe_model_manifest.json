@@ -1,0 +1,46 @@
+{
+  "schema": "chowder.custom-moe-model-manifest.v1",
+  "date": "2026-10-22",
+  "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+  "moe_pr_268_sha": "fe94342c1073eb39e69be01ba224c63b38057b95",
+  "journal_pr_269_sha": "e3f0fbd77bc679ea9a856461294cd26b40316562",
+  "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
+  "selection_status": "UNVERIFIED",
+  "lineage": "REAP-MoE",
+  "primary_lineage_isolation": "Qwen3.8 Native Sparse no-distillation and separate state",
+  "candidate": {
+    "name": "Qwen3.6-REAP160",
+    "reported_path": "G:\\llm-cold\\bf16\\Qwen3.6-REAP160",
+    "physical_access": false,
+    "reported_shards": 26,
+    "reported_bytes": 46039573000,
+    "config_sha256_reported": "15413a791b9eff423755743bb05b997c93f6ae6f4ce02a1966c9bdfdc2cdc3b9",
+    "model_type_reported": "qwen3_5_moe",
+    "layers": 40,
+    "routed_experts_per_layer": 160,
+    "experts_per_token": 8,
+    "hidden_size": 2048,
+    "moe_intermediate_size": 512,
+    "full_weights_sha256": null,
+    "shard_hashes": [],
+    "tokenizer_sha256": null,
+    "gen0_freeze_digest": null,
+    "qualified_q4_artifact": null,
+    "qualified_adapter": null
+  },
+  "historical_cuda": {
+    "int8_grid_gib": 18.82,
+    "peak_allocated_placement_gib": 11.345,
+    "peak_reserved_placement_gib": 11.664,
+    "best_ab_step_seconds": 27.48,
+    "projected_1000_step_hours": 7.633
+  },
+  "release_ready": false,
+  "critical_missing": [
+    "full checkpoint/tokenizer hashes",
+    "REAP frozen selection gates",
+    "current config placement witness",
+    "legal N2",
+    "human N5"
+  ]
+}
