@@ -20,7 +20,7 @@ from typing import Any, Mapping
 from .campaign_runner import _journal_outcome
 from .compute_cost import ComputeCost, checked_ledger_total
 from .promotion_transaction import content_digest
-from .campaign_resume import declared_inputs_digest
+from .campaign_resume import declared_inputs_digest, validate_evidence
 
 
 def _require(condition: bool, detail: str) -> None:
@@ -97,6 +97,22 @@ def verified_settlement_total(
         and abs(recorded_cost["device_gpu_hours"] - total.device_gpu_hours) < 1e-10,
         "campaign-run.json cost totals differ from the reaggregated ledger",
     )
+    # This CLI computes compliance itself, but it must not produce a positive
+    # result contradicting the terminal campaign's own recorded settlement.
+    # A REFUSED early-exit can intentionally lack settlement (for example,
+    # evaluator failure after charged training); in that case only a fresh
+    # accounting answer is available, not an independently certified verdict.
+    from .campaign import settle_campaign
+
+    actual_settlement = settle_campaign(manifest, total=total).to_dict()
+    recorded_settlement = run.get("settlement")
+    _require(isinstance(recorded_settlement, dict), "recorded settlement is malformed")
+    if run.get("verdict") != "REFUSED" or recorded_settlement:
+        _require(
+            type(recorded_settlement.get("budget_compliant")) is bool
+            and recorded_settlement == actual_settlement,
+            "terminal campaign settlement disagrees with recomputed budget result",
+        )
     entries = ledger_doc.get("entries") or []
     paid = [
         row for row in entries
@@ -172,21 +188,41 @@ def verified_settlement_total(
     # from the aggregate ledger. Cross-check every such receipt against the
     # originally charged attempt row, not just against its own self-hash. A
     # rehashed winner-only/substituted cost entry must not pass.
-    receipt_events = [
-        row for row in journal_rows
+    indexed_starts = [
+        (pos, row) for pos, row in enumerate(journal_rows)
+        if isinstance(row, dict) and row.get("phase") == "attempt"
+        and row.get("status") == "started"
+    ]
+    indexed_receipts = [
+        (pos, row) for pos, row in enumerate(journal_rows)
         if isinstance(row, dict) and row.get("phase") == "attempt_receipt"
     ]
     receipt_dir = root / "campaign-attempt-receipts"
     receipt_paths = set(receipt_dir.glob("*.json")) if receipt_dir.is_dir() else set()
+    expected_receipt_paths = {
+        receipt_dir / f"{index:06d}.json" for index in range(len(started))
+    }
     _require(
-        len(receipt_events) == len(receipt_paths),
-        "receipt journal count differs from durable attempt receipt files",
+        len(indexed_receipts) == len(indexed_starts)
+        and receipt_paths == expected_receipt_paths,
+        "every paid attempt needs one canonical, durable indexed receipt",
     )
-    for row in receipt_events:
+    # A simple length check can be bypassed by duplicating receipt index 0
+    # while leaving index 1 unchecked; enforce a complete ordered bijection,
+    # with each receipt following its own start and preceding the next start.
+    for expected_index, (position, row) in enumerate(indexed_receipts):
         index = row.get("index")
         _require(
-            type(index) is int and 0 <= index < len(started),
-            "receipt has invalid attempt index",
+            type(index) is int and index == expected_index,
+            "receipt has duplicate, missing or out-of-order attempt index",
+        )
+        start_position, started_row = indexed_starts[expected_index]
+        _require(
+            started_row.get("index") == expected_index
+            and start_position < position
+            and (expected_index + 1 == len(indexed_starts)
+                 or position < indexed_starts[expected_index + 1][0]),
+            "receipt is not ordered after its matching attempt start",
         )
         started_row = started[index]
         receipt_file = receipt_dir / f"{index:06d}.json"
@@ -209,9 +245,20 @@ def verified_settlement_total(
             isinstance(evidence, dict)
             and evidence.get("attempt") == row.get("attempt")
             and evidence.get("recipe_id") == row.get("recipe_id")
-            and billed.get("recipe_id") == row.get("recipe_id"),
+            and billed.get("recipe_id") == row.get("recipe_id")
+            and row.get("status") == evidence.get("status")
+            and billed.get("kind") == (
+                "training" if evidence.get("status") == "SUCCEEDED" else "failed_attempt"
+            ),
             "receipt attempt/recipe does not match charged training",
         )
+        try:
+            validate_evidence(root, evidence)
+        except (ValueError, TypeError, OSError) as error:
+            raise ValueError(
+                f"CAMPAIGN_SETTLEMENT_UNVERIFIED: receipt's original attempt "
+                f"evidence or checkpoint cannot be verified: {error}"
+            ) from error
         try:
             source_cost = ComputeCost.from_dict(evidence["actual_cost"])
             billed_cost = ComputeCost.from_dict(billed["cost"])

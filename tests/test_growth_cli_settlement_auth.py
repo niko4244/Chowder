@@ -71,6 +71,91 @@ def test_real_terminal_campaign_accounting_settles_under_budget(
     assert _verbs(runner).count("train") == trained  # CLI is read-only
 
 
+@pytest.mark.parametrize("tamper", ["duplicate_first", "drop_all", "out_of_order"])
+def test_settlement_refuses_nonbijective_or_unordered_attempt_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], tamper: str,
+) -> None:
+    """One receipt must independently prove each paid, ordered attempt."""
+    manifest, runner, _ = _campaign(tmp_path, recipe_count=2, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    run = run_campaign(manifest)
+    root = Path(manifest.state_root)
+    journal = root / "campaign-journal.jsonl"
+    rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    indices = [i for i, row in enumerate(rows) if row.get("phase") == "attempt_receipt"]
+    assert len(indices) == 2, rows
+    if tamper == "duplicate_first":
+        # The old verifier compared only counts, rereading 000000 twice and
+        # never checking 000001 despite the real paid second invocation.
+        rows[indices[1]] = dict(rows[indices[0]])
+    elif tamper == "drop_all":
+        # No receipt events and no receipt files formerly passed the equal
+        # length check (zero == zero) while training rows remained charged.
+        rows = [row for row in rows if row.get("phase") != "attempt_receipt"]
+        for file in (root / "campaign-attempt-receipts").glob("*.json"):
+            file.unlink()
+    else:
+        rows[indices[0]], rows[indices[1]] = rows[indices[1]], rows[indices[0]]
+    journal.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    code, payload = settle(
+        monkeypatch, capsys, tmp_path / "inputs" / "campaign.json",
+        Path(run.cost["accounting_path"]),
+    )
+    assert code == 1, payload
+    assert payload["budget_compliant"] is False
+    assert "CAMPAIGN_SETTLEMENT_UNVERIFIED" in payload["refusal_reason"]
+
+
+@pytest.mark.parametrize("tamper", ["false_success", "string_status", "clear_settlement"])
+def test_settlement_rejects_disagreement_with_terminal_settlement_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], tamper: str,
+) -> None:
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    run = run_campaign(manifest)
+    assert run.verdict != "REFUSED"
+    record_path = Path(manifest.state_root) / "campaign-run.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["settlement"]["budget_compliant"] is True
+    if tamper == "false_success":
+        record["settlement"]["budget_compliant"] = False
+    elif tamper == "string_status":
+        record["settlement"]["budget_compliant"] = "true"
+    else:
+        record["settlement"] = {}
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    code, payload = settle(
+        monkeypatch, capsys, tmp_path / "inputs" / "campaign.json",
+        Path(run.cost["accounting_path"]),
+    )
+    assert code == 1, payload
+    assert payload["budget_compliant"] is False
+    assert "CAMPAIGN_SETTLEMENT_UNVERIFIED" in payload["refusal_reason"]
+
+
+def test_settlement_revalidates_original_trainer_evidence_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    run = run_campaign(manifest)
+    receipt_file = Path(manifest.state_root) / "campaign-attempt-receipts" / "000000.json"
+    receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
+    evidence_file = Path(receipt["evidence"]["evidence_path"])
+    original = json.loads(evidence_file.read_text(encoding="utf-8"))
+    original["status"] = "FAILED"
+    evidence_file.write_text(json.dumps(original), encoding="utf-8")
+    code, payload = settle(
+        monkeypatch, capsys, tmp_path / "inputs" / "campaign.json",
+        Path(run.cost["accounting_path"]),
+    )
+    assert code == 1, payload
+    assert "CAMPAIGN_SETTLEMENT_UNVERIFIED" in payload["refusal_reason"]
+
+
 @pytest.mark.parametrize(
     "tamper",
     [
