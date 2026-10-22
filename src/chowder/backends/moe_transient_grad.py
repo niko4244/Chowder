@@ -34,14 +34,23 @@ from typing import Any
 #: The experts classes this forward replaces (transformers 5.x, 3-D expert params).
 EXPERTS_CLASSES = ("Qwen3MoeExperts", "Qwen3_5MoeExperts")
 
-#: The placements that keep the experts on the CPU and copy them in per layer.
+#: The placements that keep the experts on the CPU as bf16 and copy them in per
+#: layer (per expert, or one matrix per layer).
 TRANSIENT_PLACEMENTS = ("cpu-transient-grad", "cpu-transient-grad-bulk")
+
+#: The int8 variant of the layer-bulk placement: the frozen experts stay in RAM
+#: as int8 + per-row scales and are dequantized on the device after the copy
+#: (moe_int8_experts). It is NOT in ``TRANSIENT_PLACEMENTS``: it does not load
+#: through ``from_pretrained`` + ``split_device_map``, it streams the shards.
+INT8_PLACEMENT = "cpu-transient-grad-int8"
+INT8_PLACEMENTS = (INT8_PLACEMENT,)
 
 #: The worker's expert placements. ``cpu-transient-grad`` is pre-registered in
 #: docs/quals/MOE_TRANSIENT_GRAD_PLACEMENT_PREREG_2026-10-18.md: no campaign may
 #: use it until that note's gates are measured on the real artifact. The bulk
-#: value is the same publication status and the same gates.
-EXPERT_PLACEMENTS = ("resident",) + TRANSIENT_PLACEMENTS
+#: value is the same publication status and the same gates; the int8 placement
+#: needs those gates re-measured (its weights are quantized).
+EXPERT_PLACEMENTS = ("resident",) + TRANSIENT_PLACEMENTS + INT8_PLACEMENTS
 EXPERT_PARAM_INFIX = ".mlp.experts."
 
 
@@ -185,6 +194,129 @@ def _layer_moe_forward(
     return final
 
 
+#: Padding the (sorted) assignments to a rectangle multiplies the expert work by
+#: ``max_count * experts / assignments``. Below this waste the batched form is
+#: still far cheaper than the loop, because the loop is bound by kernel launches,
+#: not FLOPs: measured on the 16 GB card at the REAP-160 shapes, one expert visit
+#: is 162 us of which ~54 us is a single empty-launch's worth of driver overhead,
+#: so 160 visits cost 25.9 ms against 5.1 ms for two padded ``bmm`` at 31% waste.
+GROUPED_MAX_WASTE = 3.0
+
+#: The grouped switch. ``grouped_experts(True/False)`` sets it for the process so a
+#: harness can measure both arms in one load; unset it falls back to the env var,
+#: which defaults to on because the two paths are tested to agree.
+_GROUPED_ENV = "CHOWDER_MOE_GROUPED_EXPERTS"
+_grouped_override: bool | None = None
+
+
+def grouped_experts(enabled: bool | None = None) -> bool:
+    """Read, or set for the process, whether the expert loop batches."""
+    global _grouped_override
+    if enabled is not None:
+        _grouped_override = bool(enabled)
+        return _grouped_override
+    if _grouped_override is not None:
+        return _grouped_override
+    import os
+
+    return os.environ.get(_GROUPED_ENV, "").strip().lower() not in ("0", "false", "off")
+
+
+def grouping_pays(counts: Any) -> bool:
+    """Whether batching these per-expert counts wastes less than ``GROUPED_MAX_WASTE``.
+
+    A heavily skewed routing table (one expert taking most assignments) pads badly;
+    the loop is then the cheaper form, so the caller falls back rather than paying
+    for a rectangle nobody fills.
+    """
+    total = int(sum(counts))
+    if total <= 0 or len(counts) == 0:
+        return False
+    return int(max(counts)) * len(counts) <= GROUPED_MAX_WASTE * total
+
+
+def _layer_moe_forward_grouped(
+    hidden_states: Any,
+    top_k_index: Any,
+    top_k_weights: Any,
+    gate_up_proj: Any,
+    down_proj: Any,
+    act_fn: Any,
+    num_experts: int,
+) -> Any:
+    """The same expert maths as ``_layer_moe_forward``, two ``bmm`` instead of 160 pairs.
+
+    The assignments are already sorted by expert, so they fill a rectangle
+    ``[experts, max_count]`` with zeros in the gaps: one ``bmm`` over the whole
+    grid for ``gate_up``, one for ``down``. Every useful row is the same
+    ``F.linear`` the loop computes -- the padding rows are zero and contribute to
+    nothing that is read back -- and the accumulation is the same
+    ``index_add_`` in the same expert order, so the difference is the reduction
+    order inside cuBLAS, not the arithmetic.
+
+    Gradients reach ``hidden_states`` through the gather and ``top_k_weights``
+    through the same per-assignment multiply as the loop.
+    """
+    import torch
+
+    counts_t = torch.bincount(top_k_index.reshape(-1), minlength=num_experts)
+    counts = counts_t.tolist()
+    if not grouping_pays(counts):
+        return _layer_moe_forward(
+            hidden_states, top_k_index, top_k_weights, gate_up_proj, down_proj, act_fn, num_experts
+        )
+
+    top_k = top_k_index.shape[-1]
+    flat = top_k_index.reshape(-1)
+    order = torch.argsort(flat, stable=True)
+    token_of = order // top_k
+    slot_of = order % top_k
+    expert_of = flat[order]
+    maxc = int(max(counts))
+
+    # Row of each sorted assignment in the padded rectangle: its expert's block
+    # plus its offset inside that expert's run. One device-side expression, one
+    # sync (the counts above), no per-expert Python.
+    starts = torch.cumsum(counts_t, 0) - counts_t
+    offsets = torch.arange(order.numel(), device=flat.device) - starts[expert_of]
+    slots = expert_of * maxc + offsets
+
+    rows = hidden_states[token_of]
+    padded = rows.new_zeros((num_experts * maxc, rows.shape[-1]))
+    padded.index_copy_(0, slots, rows)
+
+    grid = padded.view(num_experts, maxc, -1)
+    up_down = torch.bmm(grid, gate_up_proj.transpose(1, 2))
+    gate, up = up_down.chunk(2, dim=-1)
+    hidden = act_fn(gate) * up
+    out = torch.bmm(hidden, down_proj.transpose(1, 2))
+
+    gathered = out.reshape(num_experts * maxc, -1).index_select(0, slots)
+    gathered = gathered * top_k_weights[token_of, slot_of, None]
+    final = torch.zeros_like(hidden_states)
+    final.index_add_(0, token_of, gathered.to(final.dtype))
+    return final
+
+
+def _moe_layer(
+    hidden_states: Any,
+    top_k_index: Any,
+    top_k_weights: Any,
+    gate_up_proj: Any,
+    down_proj: Any,
+    act_fn: Any,
+    num_experts: int,
+) -> Any:
+    """The expert block, grouped when the switch is on and the padding is affordable."""
+    if grouped_experts():
+        return _layer_moe_forward_grouped(
+            hidden_states, top_k_index, top_k_weights, gate_up_proj, down_proj, act_fn, num_experts
+        )
+    return _layer_moe_forward(
+        hidden_states, top_k_index, top_k_weights, gate_up_proj, down_proj, act_fn, num_experts
+    )
+
+
 def _layer_function() -> Any:
     import torch
 
@@ -213,7 +345,7 @@ def _layer_function() -> Any:
             with torch.no_grad():
                 gate_up = gate_up_cpu.to(dev, non_blocking=True)
                 down = down_cpu.to(dev, non_blocking=True)
-                out = _layer_moe_forward(
+                out = _moe_layer(
                     hidden_states, top_k_index, top_k_weights, gate_up, down, act_fn, num_experts
                 )
             del gate_up, down
@@ -229,7 +361,7 @@ def _layer_function() -> Any:
                 dev = x.device
                 gate_up = gate_up_cpu.to(dev, non_blocking=True)
                 down = down_cpu.to(dev, non_blocking=True)
-                y = _layer_moe_forward(x, top_k_index, w, gate_up, down, ctx.act_fn, ctx.num_experts)
+                y = _moe_layer(x, top_k_index, w, gate_up, down, ctx.act_fn, ctx.num_experts)
                 grad_x, grad_w = torch.autograd.grad(y, (x, w), grad_out)
             del gate_up, down
             return grad_x, None, grad_w, None, None, None, None

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
 import sys
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -94,6 +96,82 @@ from chowder.growth.compute_cost import ComputeCost
 from chowder.growth.lineage import GenerationLedger
 from chowder.growth.training_binding import directory_digest
 from chowder.local_model_manifest import model_content_digest
+
+
+def test_spent_failed_training_without_a_summary_uses_observed_wall_clock():
+    """A paid failed trainer is not charged zero because its summary vanished."""
+    failed = {
+        "attempt": "attempt-01",
+        "status": "FAILED",
+        "train_started": True,
+        "measured_gpu_hours": None,
+        "actual_cost": ComputeCost(
+            device_gpu_hours=0.0,
+            wall_gpu_hours=1.0,
+            source="attempt:attempt-01:subprocess-wall",
+            measurement_method="observed subprocess elapsed wall time",
+        ).to_dict(),
+    }
+    charged = campaign_runner._attempt_cost(failed)
+    assert charged.wall_gpu_hours == pytest.approx(1.0)
+    assert charged.device_measured is False
+    assert charged.source.endswith(":subprocess-wall")
+
+
+def test_trained_attempt_with_no_cost_is_unknown_not_zero():
+    """No trusted summary or process clock means campaign spend is unknown."""
+    with pytest.raises(CampaignRunRefusal, match="ACTUAL_WALL_GPU_HOURS_UNMEASURED"):
+        campaign_runner._attempt_cost(
+            {"status": "FAILED", "train_started": True, "measured_gpu_hours": None}
+        )
+
+
+def test_concurrent_campaign_writers_cannot_share_a_root(tmp_path: Path):
+    """A second process/handle must never journal over an active campaign."""
+    root = tmp_path / "state"
+    with campaign_runner._campaign_writer_lock(root):
+        with pytest.raises(CampaignRunRefusal, match="CAMPAIGN_WRITER_BUSY"):
+            with campaign_runner._campaign_writer_lock(root):
+                pytest.fail("a simultaneous writer acquired the campaign lock")
+    # The kernel releases the lock even though the lock file stays on disk.
+    with campaign_runner._campaign_writer_lock(root):
+        assert (root / ".campaign-writer.lock").is_file()
+
+
+def test_failed_training_elapsed_cost_stops_next_recipe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A failed trainer with no summary must exhaust the actual budget, not run twice."""
+    manifest, runner, _document = _campaign(tmp_path)
+    _patch_seams(monkeypatch, runner)
+    calls: list[str] = []
+
+    class _NoSummaryTrainer:
+        firewall = campaign_runner.ContaminationFirewall()
+
+        def admit(self, recipe: Any) -> None:
+            return None
+
+        def __call__(self, recipe: Any, items: Any) -> Mapping[str, Any]:
+            calls.append(recipe.recipe_id)
+            return {
+                "status": "FAILED",
+                "attempt": f"attempt-{len(calls):02d}",
+                "train_started": True,
+                "measured_gpu_hours": None,
+                "actual_cost": ComputeCost(
+                    device_gpu_hours=0,
+                    wall_gpu_hours=1.0,
+                    source="observed subprocess:3600 seconds",
+                    measurement_method="observed subprocess elapsed wall time",
+                ).to_dict(),
+            }
+
+    run = run_campaign(manifest, train_fn=_NoSummaryTrainer())
+    assert run.verdict == "REFUSED"
+    assert len(calls) == 1, "a failed hour-long attempt may not be considered free"
+    assert run.cost["wall_gpu_hours"] == pytest.approx(1.0)
+    assert "campaign ceiling reached" in _refusal(run)
+    ledger = json.loads(Path(run.cost["accounting_path"]).read_text(encoding="utf-8"))
+    assert "1.0" in json.dumps(ledger), "the paid attempt remains in durable accounting"
 
 from test_growth_training_binding import _RecordingRunner, _source, _template
 
@@ -1838,7 +1916,10 @@ def test_an_evaluation_that_reports_no_cost_is_refused_rather_than_charged_zero(
     # The compute that really happened is durably closed out anyway.
     accounting = Path(run.cost["accounting_path"])
     assert accounting.is_file()
-    assert run.cost["wall_gpu_hours"] == pytest.approx(2 * ATTEMPT_WALL_GPU_HOURS)
+    assert run.cost["wall_gpu_hours"] > 2 * ATTEMPT_WALL_GPU_HOURS
+    assert "failed-candidate-evaluation:subprocess-wall-fallback" in accounting.read_text(
+        encoding="utf-8"
+    )
     assert json.dumps(json.loads(accounting.read_text(encoding="utf-8"))) .count("attempt") >= 2
     ledger = GenerationLedger(Path(manifest.state_root) / "ledger")
     assert CANDIDATE_VERSION not in ledger.versions()
@@ -2162,3 +2243,434 @@ def test_a_caller_supplied_executor_is_recorded_as_such_in_lineage(
     for phase in run.phases:
         if phase.get("phase") == "training-backend":
             assert phase["backend"]["provider"] is None
+
+
+# --------------------------------------------------------------------------
+# the campaign journal survives an interrupted run (FORENSICS run 11, D1)
+# --------------------------------------------------------------------------
+
+
+def _interrupted_run(tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    """Run one campaign whose first attempt dies hard, in a subprocess.
+
+    The child loads the same fixture manifest and passes an
+    ``_InterruptingTrainer`` as the execution seam: it admits everything, then
+    calls ``os._exit(1)`` from inside the first attempt. That is the signature
+    of an external tree kill -- no Python exit path runs, no exception unwinds,
+    no ``finally`` executes, nothing after it is ever computed.
+
+    ``PYTHONPATH`` is rebuilt from the installed module rather than trusted
+    from the environment, so the child imports the same code pytest is testing.
+    """
+    manifest, _runner, _document = _campaign(tmp_path)
+    states = Path(manifest.state_root)
+    manifest_path = tmp_path / "inputs" / "campaign.json"
+    assert manifest_path.is_file()  # the fixture wrote it just above
+    script = tmp_path / "dead-campaign.py"
+    script.write_text(
+        "import os, sys\n"
+        "from chowder.growth.campaign import CampaignManifest\n"
+        "from chowder.growth.campaign_runner import run_campaign\n"
+        "\n"
+        "\n"
+        "class _InterruptingTrainer:\n"
+        "    \"\"\"Admit everything, then die hard inside the first attempt.\"\"\"\n"
+        "\n"
+        "    def admit(self, recipe):\n"
+        "        return None\n"
+        "\n"
+        "    def __call__(self, recipe, items):\n"
+        "        os._exit(1)\n"
+        "\n"
+        "\n"
+        "manifest = CampaignManifest.from_file(sys.argv[1])\n"
+        "run = run_campaign(manifest, train_fn=_InterruptingTrainer())\n"
+        "print(f'unexpected: the run returned {run.verdict}', flush=True)\n",
+        encoding="utf-8",
+    )
+    src = Path(campaign_runner.__file__).resolve().parents[2]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(src), env.get("PYTHONPATH"))))
+    env["CHOWDER_NO_GPU"] = "1"
+    return subprocess.run(
+        [sys.executable, str(script), str(manifest_path)],
+        capture_output=True,
+        cwd=str(tmp_path),
+        env=env,
+        text=True,
+        timeout=120,
+    )
+
+
+def _journal_records(journal: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+
+
+def test_an_interrupted_run_leaves_a_durable_attempt_journal(tmp_path: Path):
+    """A campaign killed inside its first attempt still leaves a record.
+
+    The subprocess dies with no Python exit path running, so nothing after the
+    attempt's start line could ever be computed. The journal it kept as it went
+    is the only durable account of what happened: the attempted recipe is
+    there, with a non-terminal status, and no terminal outcome exists.
+    """
+    manifest, _runner, _document = _campaign(tmp_path)
+    states = Path(manifest.state_root)
+    result = _interrupted_run(tmp_path)
+
+    assert result.returncode == 1, result.stderr or result.stdout
+    # The child must have died *hard*: no traceback (a fixture failure would
+    # print one) and no "unexpected" line (the run finishing would print one).
+    assert result.stderr == ""
+    assert result.stdout == ""
+
+    journal = states / "campaign-journal.jsonl"
+    assert journal.is_file()
+    records = _journal_records(journal)
+    assert records[0]["phase"] == "campaign_start"
+    # The attempted recipe is on the journal with a non-terminal status: the
+    # start line went down before the executor was invoked, the end never
+    # happened because the process died inside it.
+    attempted = [record for record in records if record["phase"] == "attempt"]
+    assert [record["recipe_id"] for record in attempted] == [manifest.recipe_ids[0]]
+    assert attempted[0]["status"] == "started"
+    assert attempted[0]["recipe_id"] == manifest.recipe_ids[0]
+    assert not any(record["phase"] == "terminal" for record in records)
+    # The terminal record was the run's only durable artifact -- its absence
+    # after death is exactly what D1 is about. Nothing else claims a verdict.
+    assert not (states / "campaign-run.json").exists()
+
+
+def test_reentry_on_an_interrupted_journal_refuses_and_starts_nothing(tmp_path: Path):
+    """A state root whose journal never reached a verdict refuses re-entry.
+
+    The interrupting subprocess from the previous scenario leaves a journal
+    with no terminal record; entering that state root again must refuse with
+    CAMPAIGN_INTERRUPTED, write that refusal where campaign-run.json lives,
+    journal it -- and, because it deliberately writes no terminal record, keep
+    refusing every later entry too. It must not silently start from the top
+    and re-spend the attempts the killed run already made.
+    """
+    manifest, _runner, _document = _campaign(tmp_path)
+    interrupted_child = _interrupted_run(tmp_path)
+    assert interrupted_child.returncode == 1
+
+    started: list[Any] = []
+
+    class _ProhibitedExecutor:
+        """Admits, but any attempt it starts is a test failure."""
+
+        def admit(self, recipe: Any) -> None:
+            return None
+
+        def __call__(self, recipe: Any, items: Any) -> Mapping[str, Any]:
+            started.append(recipe.recipe_id)
+            raise AssertionError("no attempt may start on an interrupted root")
+
+    run = run_campaign(manifest, train_fn=_ProhibitedExecutor())
+
+    assert started == []
+    assert run.verdict == "REFUSED"
+    assert run.refused_by == "entry_check"
+    assert run.refusal_reason.startswith("CAMPAIGN_INTERRUPTED:")
+    record = json.loads(
+        (Path(manifest.state_root) / "campaign-run.json").read_text(encoding="utf-8")
+    )
+    assert record["verdict"] == "REFUSED"
+    assert record["refused_by"] == "entry_check"
+    assert record["refusal_reason"].startswith("CAMPAIGN_INTERRUPTED:")
+    # The refusal is in the journal, and the journal is still open: the entry
+    # check that produced it was *about* an interruption, so it must not close
+    # the record it refuses to start over.
+    records = _journal_records(Path(manifest.state_root) / "campaign-journal.jsonl")
+    assert any(
+        entry["phase"] == "entry_check" and entry["status"] == "CAMPAIGN_INTERRUPTED"
+        for entry in records
+    )
+    assert not any(entry["phase"] == "terminal" for entry in records)
+    # And a third entry against the same state root refuses the same way.
+    again = run_campaign(manifest, train_fn=_ProhibitedExecutor())
+    assert again.refused_by == "entry_check"
+
+
+def test_a_later_interrupted_start_cannot_borrow_an_old_terminal(tmp_path: Path):
+    """A second run's start invalidates the earlier run's terminal marker."""
+    journal = tmp_path / "campaign-journal.jsonl"
+    (tmp_path / "campaign-run.json").write_text(
+        json.dumps({"verdict": "REFUSED"}), encoding="utf-8"
+    )
+    records = [
+        {"phase": "campaign_start", "status": "started"},
+        {"phase": "terminal", "status": "REFUSED"},
+    ]
+
+    def write_records() -> None:
+        journal.write_text(
+            "".join(json.dumps(row) + "\n" for row in records), encoding="utf-8"
+        )
+
+    write_records()
+    assert campaign_runner._journal_outcome(journal) == "REFUSED"
+
+    records.append({"phase": "campaign_start", "status": "started"})
+    write_records()
+    assert campaign_runner._journal_outcome(journal) is None
+
+    # A matching, stale verdict file cannot turn a second run's incomplete
+    # journal back into a successful or refused terminal run.
+    records.append({"phase": "attempt", "status": "started", "recipe_id": "r0"})
+    write_records()
+    assert campaign_runner._journal_outcome(journal) is None
+
+
+def test_corrupt_or_unverified_terminal_journal_fails_closed(tmp_path: Path):
+    """No torn/corrupt terminal marker or mismatched verdict authorizes entry."""
+    journal = tmp_path / "campaign-journal.jsonl"
+    verdict = tmp_path / "campaign-run.json"
+    terminal = json.dumps({"phase": "terminal", "status": "REFUSED"})
+    verdict.write_text(json.dumps({"verdict": "REFUSED"}), encoding="utf-8")
+
+    journal.write_text(terminal, encoding="utf-8")  # missing final LF
+    assert campaign_runner._journal_outcome(journal) is None
+
+    journal.write_text(terminal + "\n" + '{"phase":"attempt"', encoding="utf-8")
+    assert campaign_runner._journal_outcome(journal) is None
+
+    journal.write_text(terminal + "\n", encoding="utf-8")
+    verdict.write_text(json.dumps({"verdict": "PROMOTED"}), encoding="utf-8")
+    assert campaign_runner._journal_outcome(journal) is None
+
+    verdict.unlink()
+    assert campaign_runner._journal_outcome(journal) is None
+
+
+def test_interrupted_entry_does_not_destroy_an_unclosed_original_verdict(tmp_path: Path):
+    """A crash after publication but before terminal marker preserves the evidence."""
+    manifest, _runner, _document = _campaign(tmp_path)
+    root = Path(manifest.state_root)
+    root.mkdir(parents=True, exist_ok=True)
+    original = b'{"cycle_id":"old","verdict":"PROMOTED","cycle_outcome":{"verdict":"PROMOTED"}}'
+    (root / "campaign-run.json").write_bytes(original)
+    (root / "campaign-journal.jsonl").write_text(
+        json.dumps({"phase": "campaign_start", "status": "started"}) + "\n",
+        encoding="utf-8",
+    )
+
+    class _NoCompute:
+        def __call__(self, *_args):
+            raise AssertionError("interrupted campaign must not start compute")
+
+    run = run_campaign(manifest, train_fn=_NoCompute())
+    assert run.verdict == "REFUSED"
+    assert Path(run.record_path).name == "campaign-entry-refusal.json"
+    assert (root / "campaign-run.json").read_bytes() == original
+    assert json.loads((root / "campaign-entry-refusal.json").read_text())["verdict"] == "REFUSED"
+    assert campaign_runner._journal_outcome(root / "campaign-journal.jsonl") is None
+
+
+def test_failed_candidate_evaluation_charges_observed_elapsed_wall_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A crashing evaluator still has a nonzero, explicitly unmeasured-device charge."""
+    manifest, runner, _document = _campaign(tmp_path)
+
+    class _FailedEvaluator:
+        def __call__(self, _request):
+            raise CampaignRunRefusal("controlled failure after evaluator invocation")
+
+    _patch_seams(monkeypatch, runner, evaluator=_FailedEvaluator())
+    run = run_campaign(manifest)
+    assert run.verdict == "REFUSED"
+    assert "controlled failure" in _refusal(run)
+    assert run.cost["wall_gpu_hours"] > 2 * ATTEMPT_WALL_GPU_HOURS
+    ledger = json.loads(Path(run.cost["accounting_path"]).read_text(encoding="utf-8"))
+    assert "failed candidate evaluation" in json.dumps(ledger)
+    assert "subprocess-wall-fallback" in json.dumps(ledger)
+    journal = _journal_records(Path(manifest.state_root) / "campaign-journal.jsonl")
+    assert any(
+        item["phase"] == "candidate_evaluation_cost"
+        and item["status"] == "fallback_unmeasured_device"
+        for item in journal
+    )
+
+@pytest.mark.parametrize(
+    "crash_boundary",
+    ["prepared_intent", "lineage_written", "verdict_published", "terminal_written"],
+)
+def test_promotion_transaction_fails_closed_across_crash_boundaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crash_boundary: str
+):
+    """A killed promoter may not surface a ledger-only PROMOTED generation.
+
+    If the final verdict and terminal marker were both persisted, recovery can
+    commit their matching lineage once without re-evaluating or re-training.
+    Earlier crashes preserve their forensic records and refuse re-entry.
+    """
+    from chowder.growth.promotion_transaction import (
+        load_transaction,
+        transaction_path,
+    )
+
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    root = Path(manifest.state_root)
+    marker_path = transaction_path(root / "ledger", CANDIDATE_VERSION)
+
+    def killed(*_args: Any, **_kwargs: Any) -> None:
+        raise SystemExit("simulated process death at " + crash_boundary)
+
+    with monkeypatch.context() as fault:
+        if crash_boundary == "prepared_intent":
+            original = campaign_runner.prepare_transaction
+
+            def after_prepare(*args: Any, **kwargs: Any) -> None:
+                original(*args, **kwargs)
+                killed()
+
+            fault.setattr(campaign_runner, "prepare_transaction", after_prepare)
+        elif crash_boundary == "lineage_written":
+            original = campaign_runner._finalize
+
+            def after_lineage(*args: Any, **kwargs: Any) -> None:
+                original(*args, **kwargs)
+                killed()
+
+            fault.setattr(campaign_runner, "_finalize", after_lineage)
+        elif crash_boundary == "verdict_published":
+            original = campaign_runner._journal_event
+
+            def before_terminal(*args: Any, **kwargs: Any) -> None:
+                if kwargs.get("phase") == "terminal":
+                    killed()
+                original(*args, **kwargs)
+
+            fault.setattr(campaign_runner, "_journal_event", before_terminal)
+        else:
+            original = campaign_runner.reconcile_transaction
+
+            def before_commit(*args: Any, **kwargs: Any) -> None:
+                killed()
+
+            fault.setattr(campaign_runner, "reconcile_transaction", before_commit)
+
+        with pytest.raises(SystemExit, match="simulated process death"):
+            run_campaign(manifest)
+
+    assert load_transaction(marker_path)["state"] == "PREPARED"
+    generation_ledger = GenerationLedger(root / "ledger")
+    assert CANDIDATE_VERSION not in generation_ledger.versions()
+    if crash_boundary != "prepared_intent":
+        with pytest.raises(ValueError, match="PROMOTION_UNCOMMITTED"):
+            generation_ledger.effective_verdict(CANDIDATE_VERSION)
+    journal = root / "campaign-journal.jsonl"
+    attempts_before_recovery = _verbs(runner).count("train")
+    journal_bytes_before = journal.read_bytes()
+
+    class _NoCompute:
+        def __call__(self, *_args: Any) -> None:
+            raise AssertionError("crash recovery must never train again")
+
+    recovered = run_campaign(manifest, train_fn=_NoCompute())
+    if crash_boundary == "terminal_written":
+        assert recovered.verdict == "PROMOTED"
+        assert load_transaction(marker_path)["state"] == "COMMITTED"
+        assert GenerationLedger(root / "ledger").effective_verdict(CANDIDATE_VERSION) == "PROMOTED"
+        assert journal.read_bytes() == journal_bytes_before
+        repeated = run_campaign(manifest, train_fn=_NoCompute())
+        assert repeated.to_dict() == recovered.to_dict()
+        assert journal.read_bytes() == journal_bytes_before
+    else:
+        assert recovered.verdict == "REFUSED"
+        assert load_transaction(marker_path)["state"] == "PREPARED"
+        assert CANDIDATE_VERSION not in GenerationLedger(root / "ledger").versions()
+        expected = (
+            "campaign-entry-refusal.json"
+            if crash_boundary == "verdict_published"
+            else "campaign-run.json"
+        )
+        assert recovered.record_path.endswith(expected)
+    assert _verbs(runner).count("train") == attempts_before_recovery
+
+
+def test_promotion_transaction_rejects_tampered_lineage_even_after_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """After commitment, changing the ledger cannot silently retain promotion."""
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    run = run_campaign(manifest)
+    assert run.verdict == "PROMOTED"
+
+    root = Path(manifest.state_root)
+    path = root / "ledger" / "generations.json"
+    generations = json.loads(path.read_text(encoding="utf-8"))
+    generations[0]["promotion"]["verdict"] = "REJECTED"
+    path.write_text(json.dumps(generations), encoding="utf-8")
+    ledger = GenerationLedger(root / "ledger")
+    assert CANDIDATE_VERSION not in ledger.versions()
+    with pytest.raises(ValueError, match="PROMOTION_UNCOMMITTED"):
+        ledger.get(CANDIDATE_VERSION)
+    result = run_campaign(manifest)
+    assert result.verdict == "REFUSED"
+
+
+def test_committed_transaction_cannot_be_replayed_under_a_changed_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A valid old promotion cannot certify a new budget or preregistration."""
+    manifest, runner, document = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    first = run_campaign(manifest)
+    assert first.verdict == "PROMOTED"
+    root = Path(manifest.state_root)
+    original_verdict = (root / "campaign-run.json").read_bytes()
+    new_budget = dict(document["budget"])
+    new_budget["wall_gpu_hours_ceiling_campaign"] *= 0.95
+    changed = _redeclare(document, budget=new_budget)
+    number_before = len(runner.commands)
+    refused = run_campaign(changed)
+    assert refused.verdict == "REFUSED"
+    assert "PROMOTION_TRANSACTION_UNRESOLVED" in refused.phases[0]["detail"]
+    assert (root / "campaign-run.json").read_bytes() == original_verdict
+    assert len(runner.commands) == number_before
+
+
+@pytest.mark.parametrize("tampered_file", ["campaign-run.json", "ledger/generations.json"])
+def test_promotion_recovery_refuses_tampered_precommit_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tampered_file: str
+):
+    """A terminal marker alone cannot commit altered verdict or lineage bytes."""
+    from chowder.growth.promotion_transaction import (
+        load_transaction,
+        transaction_path,
+    )
+
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    root = Path(manifest.state_root)
+
+    def before_commit(*_args: Any, **_kwargs: Any) -> None:
+        raise SystemExit("crash before commit")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(campaign_runner, "reconcile_transaction", before_commit)
+        with pytest.raises(SystemExit, match="crash before commit"):
+            run_campaign(manifest)
+
+    changed = root / tampered_file
+    content = json.loads(changed.read_text(encoding="utf-8"))
+    if isinstance(content, list):
+        content[0]["promotion"]["verdict"] = "REJECTED"
+    else:
+        content["selection"]["artifact_sha256"] = "0" * 64
+    changed.write_text(json.dumps(content), encoding="utf-8")
+
+    attempted_before = _verbs(runner).count("train")
+    result = run_campaign(manifest)
+    assert result.verdict == "REFUSED"
+    assert "PROMOTION_TRANSACTION_UNRESOLVED" in result.phases[0]["detail"]
+    assert _verbs(runner).count("train") == attempted_before
+    assert load_transaction(
+        transaction_path(root / "ledger", CANDIDATE_VERSION)
+    )["state"] == "PREPARED"
+    assert CANDIDATE_VERSION not in GenerationLedger(root / "ledger").versions()

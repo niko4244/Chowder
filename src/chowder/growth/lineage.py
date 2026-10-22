@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .promotion import PromotionDecision
+from .promotion_transaction import assert_committed, atomic_json
 
 
 def _utc_now() -> str:
@@ -206,7 +207,9 @@ class GenerationLedger:
     def get(self, version: str) -> GenerationRecord:
         if version not in self._records:
             raise KeyError(f"unknown generation: {version}")
-        return self._records[version]
+        record = self._records[version]
+        assert_committed(self._path.parent, record.to_dict())
+        return record
 
     # ---------------- superseding adjudications (append-only) ----------------
 
@@ -232,6 +235,9 @@ class GenerationLedger:
             raise KeyError(
                 f"cannot adjudicate unknown generation: {generation_version!r}"
             )
+        # A recovery-period PREPARED record must never accept a revision that
+        # could later become the effective decision after recovery.
+        self.get(generation_version)
         prior = [r for r in self._revisions if r.generation_version == generation_version]
         if prior:
             supersedes = prior[-1].revision_id
@@ -267,6 +273,9 @@ class GenerationLedger:
         consulted for its verdict once superseded, but remains fully intact
         and inspectable for audit.
         """
+        # Even a superseding adjudication cannot make an unfinished campaign
+        # appear admitted. The terminal transaction gate always runs first.
+        self.get(version)
         revisions = self.revisions_for(version)
         if revisions:
             return revisions[-1].new_verdict
@@ -287,20 +296,28 @@ class GenerationLedger:
         while current and current in self._records and current not in seen:
             seen.add(current)
             record = self._records[current]
+            self.get(record.version)
             chain.append(record)
             current = record.parent_version
         chain.reverse()
         return chain
 
     def versions(self) -> list[str]:
-        return list(self._records)
+        # PREPARED campaign lineage is forensic evidence, not an admitted
+        # generation. Exposing it as a candidate version would bypass the
+        # terminal-verdict transaction fence used by get/effective_verdict.
+        visible: list[str] = []
+        for version in self._records:
+            try:
+                self.get(version)
+            except ValueError:
+                continue
+            visible.append(version)
+        return visible
 
     def _flush(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = [record.to_dict() for record in self._records.values()]
-        self._path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
-        )
+        atomic_json(self._path, payload)
 
 
 @dataclass(frozen=True)

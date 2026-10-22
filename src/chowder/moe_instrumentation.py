@@ -90,12 +90,20 @@ def _decoder_layers(model: Any) -> list[Any]:
     return list(layers)
 
 
+#: The buffers ``chowder.backends.moe_int8_experts`` substitutes for an
+#: experts module's bf16 parameters. Duplicated rather than imported so this
+#: module stays independent of any one backend; a test keeps the two in step.
+INT8_EXPERT_BUFFERS = ("gate_up_q", "gate_up_scale", "down_q", "down_scale")
+
+
 def _moe_block(layer: Any) -> Any | None:
     """Return ``layer.mlp`` if it matches the verified fused-expert shape.
 
     Verified shape (transformers 5.x Qwen3Moe/Qwen3_5Moe/Olmoe): ``mlp.gate``
     has ``.weight``/``.num_experts``/``.top_k``; ``mlp.experts`` has
-    ``.gate_up_proj``/``.down_proj``/``.num_experts``/``.act_fn``. Returns
+    ``.gate_up_proj``/``.down_proj``/``.num_experts``/``.act_fn`` -- or, after the
+    int8 placement has run, the four ``INT8_EXPERT_BUFFERS`` with the same
+    ``num_experts``/``act_fn``. Returns
     None for a legitimate dense layer (Qwen3Moe interleaves dense layers via
     ``decoder_sparse_step``) rather than raising -- absence on one layer is
     not evidence the whole model lacks the shape.
@@ -108,13 +116,23 @@ def _moe_block(layer: Any) -> Any | None:
     if gate is None or experts is None:
         return None
     has_router_shape = hasattr(gate, "weight") and hasattr(gate, "num_experts") and hasattr(gate, "top_k")
-    has_experts_shape = (
+    has_bf16_experts_shape = (
         hasattr(experts, "gate_up_proj")
         and hasattr(experts, "down_proj")
         and hasattr(experts, "num_experts")
         and hasattr(experts, "act_fn")
     )
-    if not (has_router_shape and has_experts_shape):
+    # The int8 placement keeps the module, the router and the fused gate_up/down
+    # layout, but not the bf16 parameters: they are replaced by four CPU buffers
+    # per layer. Same contract, second verified shape -- and without it the audit
+    # refuses exactly the model that placement produces, which is how the
+    # 2026-10-21 witness run failed after a clean int8 load.
+    has_int8_experts_shape = (
+        all(hasattr(experts, name) for name in INT8_EXPERT_BUFFERS)
+        and hasattr(experts, "num_experts")
+        and hasattr(experts, "act_fn")
+    )
+    if not (has_router_shape and (has_bf16_experts_shape or has_int8_experts_shape)):
         return None
     return block
 
