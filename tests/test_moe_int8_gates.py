@@ -559,6 +559,21 @@ def test_a_failed_gate_does_not_allow_it():
         mpg.assert_declaration_allowed(text, ["campaign.json"])
 
 
+def test_a_harness_bound_memory_gate_does_not_authorize_training():
+    """A smaller-head remeasurement is required; provisional is not passing."""
+    rec = record(
+        peak_vram=gates.VRAM_GATE_GB + 1.0,
+        gradient="measured (finite, non-zero on every LoRA B leaf)",
+    )
+    rec["arms"]["int8"]["harness_marginal_gb"] = 2.0
+    rec["arms"]["int8"]["gates"]["memory_vram_verdict"] = "harness-bound"
+    text = mpg.splice_block(PLACEHOLDER, mpg.render_block(rec))
+    text = text.replace("| not measured |", "| measured |")
+    assert mpg.parse_block(text)["verdicts"]["memory_vram"] == "harness-bound"
+    with pytest.raises(mpg.PlacementGateError, match="unmeasured=\\['memory_vram'\\]"):
+        mpg.assert_declaration_allowed(text, ["campaign.json"])
+
+
 def test_campaign_prepare_refuses_the_placement_while_the_table_is_unmeasured(monkeypatch, tmp_path):
     prereg = prewritten(tmp_path, text=PLACEHOLDER)
     monkeypatch.setenv("CHOWDER_MOE_GATE_TABLE", str(prereg))

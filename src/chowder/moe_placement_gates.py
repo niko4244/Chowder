@@ -606,7 +606,13 @@ def assert_declaration_allowed(
             f"{declarations[0]} declares expert_placement={EXPERT_PLACEMENT!r} but the prereg "
             "has no gate table; run chowder_batch/moe_int8_gates.py against the artifact first"
         )
-    unmeasured = [gate for gate, verdict in parsed["verdicts"].items() if verdict.startswith("not measured")]
+    # "harness-bound" is a diagnostic that the total step exceeded the frozen
+    # VRAM gate and needs a smaller scoring head to settle. It is not a PASS,
+    # even though it contains a measured number.
+    unmeasured = [
+        gate for gate, verdict in parsed["verdicts"].items()
+        if verdict.startswith("not measured") or verdict == "harness-bound"
+    ]
     failed = [gate for gate, verdict in parsed["verdicts"].items() if verdict == "FAIL"]
     missing = [gate for gate in ALL_GATES if gate not in parsed["verdicts"]]
     if unmeasured or failed or missing:
