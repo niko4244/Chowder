@@ -4,8 +4,18 @@
   "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
   "moe_pr_268_sha": "184291fb1dfba921ced254bfe4e7fcd148c37ae6",
   "journal_pr_269_sha": "cf544801af525826c5bd507581b27580feff23f2",
-  "evidence_basis": "Local Windows Python 3.11 CPU pytest at pinned 1960b7a241 (0 passed, 0 skipped); GitHub CI PENDING; historical GPU results remain archived, no new GPU qualification",
-  "session_test_runs": [],
+  "evidence_basis": "Local Windows Python 3.11 CPU pytest at pinned 1960b7a241 (4073 passed, 78 skipped); GitHub CI SIX_SUCCESS; historical GPU results remain archived, no new GPU qualification",
+  "session_test_runs": [
+    {
+      "revision": "1960b7a241cdbd136affe63534e4fc23b738875c",
+      "command": "CHOWDER_NO_GPU=1 python -m pytest -q --tb=short",
+      "environment": "Windows Python 3.11, CPU-focused complete suite",
+      "passed": 4073,
+      "skipped": 78,
+      "failed": 0,
+      "execution": "FRESH_PINNED"
+    }
+  ],
   "historical_reported_runs": [
     {
       "origin": "#268",
@@ -65,7 +75,7 @@
     "test_bad_witness_args_refuse_before_model_load",
     "test_unusable_calibration_refuses_before_model_load"
   ],
-  "new_test_status": "FINAL_PINNED_FULL_SUITE_UNVERIFIED",
+  "new_test_status": "PINNED_FULL_PASS_4073_SKIPPED_78",
   "blocked_tests": [
     "Windows CUDA and WDDM",
     "real MoE sharded checkpoint/load",
@@ -363,7 +373,7 @@
       "human_approval_sha": "ef866b2d05f54a15e6b9d0b7c1bb19ddc1ac17ce",
       "readiness_regression_fix_sha": "d6e378a7bcb0f570c05dc36d87453eeb2bdaa15d",
       "all_changes_merged_to_main": false,
-      "new_ci": "PENDING"
+      "new_ci": "SIX_SUCCESS"
     },
     "initial_full_ci_on_53ebcab": {
       "linux_py311_passed": 3485,
@@ -387,11 +397,11 @@
       "passed": 71,
       "failed": 0
     },
-    "full_final_ci": "PENDING",
+    "full_final_ci": "SIX_SUCCESS",
     "head": "1960b7a241cdbd136affe63534e4fc23b738875c",
     "draft_pr": 277,
     "main_merged": false,
-    "new_ci": "PENDING",
+    "new_ci": "SIX_SUCCESS",
     "targeted_cpu_pass": 24
   },
   "active_finalization_20261022": {
@@ -410,19 +420,19 @@
       "committed_lineage_terminal_fence": "13ef42eba33ad0e88246a5b3924d0baa32a64cb8",
       "remote_cost_completion_and_streaming_hash": "9ec9985ac8165812d79fefd5ee12d946eea1e5a2",
       "portable_legacy_dense_fixture": "c88f8593b1c250360a94627fb35d4e77353b0256",
-      "promotion_parent_ancestry_binding": "d62b07a",
-      "reap_model_path_alias_gate": "fba03d2",
-      "native_vs_remote_attempt_proof_binding": "eb9dd7b",
-      "inspectable_campaign_model_fixture": "a1a1754",
+      "promotion_parent_ancestry_binding": "d62b07a2cb8dbd380c15c89fb38cd74eaae6bd7a",
+      "reap_model_path_alias_gate": "fba03d2a044517b226dbdcc4c779f6f2a9cba2c3",
+      "native_vs_remote_attempt_proof_binding": "eb9dd7b0aea8f8c39ce7853e80e7ba1ab18ace2f",
+      "inspectable_campaign_model_fixture": "a1a1754337bdc574bb45a644d181f1e4658018f7",
       "native_zero_spend_preflight_refusal": "c7c1b60f7d3cb419fcf4388d6a7fbbd8be1a541f",
       "certification_fixture_model_identity": "1960b7a241cdbd136affe63534e4fc23b738875c"
     },
-    "ci_at_head": "PENDING",
+    "ci_at_head": "SIX_SUCCESS",
     "targeted_cpu_pass": 24,
     "full_cpu_at_head": {
-      "passed": 0,
-      "skipped": 0,
-      "status": "UNVERIFIED"
+      "passed": 4073,
+      "skipped": 78,
+      "status": "COMPLETED"
     },
     "earlier_full_cpu_baseline": {
       "head": "a0a678dfa13a2d15f2b3176fb668eebbb8335728",
@@ -430,6 +440,16 @@
       "skipped": 78,
       "failed": 0,
       "ci_6_of_6": "SUCCESS",
+      "not_current_head": true
+    },
+    "last_prior_green_checkpoint": {
+      "head": "c88f8593b1c250360a94627fb35d4e77353b0256",
+      "windows_cpu": {
+        "passed": 4055,
+        "skipped": 78,
+        "failed": 0
+      },
+      "github_ci": "SIX_OF_SIX_SUCCESS",
       "not_current_head": true
     },
     "fresh_gguf_sha256": "8c840461752e1343e81bc12ab9b95d422a4b45c0b0048f00938fe882f299f8f5",
