@@ -991,6 +991,12 @@ def test_an_unparsable_train_summary_never_becomes_synthetic_metrics(tmp_path: P
     assert evidence["status"] == "FAILED"
     assert evidence["summary"] is None
     assert evidence["measured_gpu_hours"] is None
+    assert evidence["train_started"] is True
+    assert evidence["actual_cost"]["wall_gpu_hours"] == pytest.approx(
+        evidence["train"]["seconds"] / 3600.0
+    )
+    assert evidence["actual_cost"]["device_measured"] is False
+    assert "subprocess elapsed" in evidence["actual_cost"]["measurement_method"]
 
 
 # --------------------------------------------------------------------------

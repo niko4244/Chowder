@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
 import sys
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -94,6 +96,82 @@ from chowder.growth.compute_cost import ComputeCost
 from chowder.growth.lineage import GenerationLedger
 from chowder.growth.training_binding import directory_digest
 from chowder.local_model_manifest import model_content_digest
+
+
+def test_spent_failed_training_without_a_summary_uses_observed_wall_clock():
+    """A paid failed trainer is not charged zero because its summary vanished."""
+    failed = {
+        "attempt": "attempt-01",
+        "status": "FAILED",
+        "train_started": True,
+        "measured_gpu_hours": None,
+        "actual_cost": ComputeCost(
+            device_gpu_hours=0.0,
+            wall_gpu_hours=1.0,
+            source="attempt:attempt-01:subprocess-wall",
+            measurement_method="observed subprocess elapsed wall time",
+        ).to_dict(),
+    }
+    charged = campaign_runner._attempt_cost(failed)
+    assert charged.wall_gpu_hours == pytest.approx(1.0)
+    assert charged.device_measured is False
+    assert charged.source.endswith(":subprocess-wall")
+
+
+def test_trained_attempt_with_no_cost_is_unknown_not_zero():
+    """No trusted summary or process clock means campaign spend is unknown."""
+    with pytest.raises(CampaignRunRefusal, match="ACTUAL_WALL_GPU_HOURS_UNMEASURED"):
+        campaign_runner._attempt_cost(
+            {"status": "FAILED", "train_started": True, "measured_gpu_hours": None}
+        )
+
+
+def test_concurrent_campaign_writers_cannot_share_a_root(tmp_path: Path):
+    """A second process/handle must never journal over an active campaign."""
+    root = tmp_path / "state"
+    with campaign_runner._campaign_writer_lock(root):
+        with pytest.raises(CampaignRunRefusal, match="CAMPAIGN_WRITER_BUSY"):
+            with campaign_runner._campaign_writer_lock(root):
+                pytest.fail("a simultaneous writer acquired the campaign lock")
+    # The kernel releases the lock even though the lock file stays on disk.
+    with campaign_runner._campaign_writer_lock(root):
+        assert (root / ".campaign-writer.lock").is_file()
+
+
+def test_failed_training_elapsed_cost_stops_next_recipe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A failed trainer with no summary must exhaust the actual budget, not run twice."""
+    manifest, runner, _document = _campaign(tmp_path)
+    _patch_seams(monkeypatch, runner)
+    calls: list[str] = []
+
+    class _NoSummaryTrainer:
+        firewall = campaign_runner.ContaminationFirewall()
+
+        def admit(self, recipe: Any) -> None:
+            return None
+
+        def __call__(self, recipe: Any, items: Any) -> Mapping[str, Any]:
+            calls.append(recipe.recipe_id)
+            return {
+                "status": "FAILED",
+                "attempt": f"attempt-{len(calls):02d}",
+                "train_started": True,
+                "measured_gpu_hours": None,
+                "actual_cost": ComputeCost(
+                    device_gpu_hours=0,
+                    wall_gpu_hours=1.0,
+                    source="observed subprocess:3600 seconds",
+                    measurement_method="observed subprocess elapsed wall time",
+                ).to_dict(),
+            }
+
+    run = run_campaign(manifest, train_fn=_NoSummaryTrainer())
+    assert run.verdict == "REFUSED"
+    assert len(calls) == 1, "a failed hour-long attempt may not be considered free"
+    assert run.cost["wall_gpu_hours"] == pytest.approx(1.0)
+    assert "campaign ceiling reached" in _refusal(run)
+    ledger = json.loads(Path(run.cost["accounting_path"]).read_text(encoding="utf-8"))
+    assert "1.0" in json.dumps(ledger), "the paid attempt remains in durable accounting"
 
 from test_growth_training_binding import _RecordingRunner, _source, _template
 
@@ -2162,3 +2240,202 @@ def test_a_caller_supplied_executor_is_recorded_as_such_in_lineage(
     for phase in run.phases:
         if phase.get("phase") == "training-backend":
             assert phase["backend"]["provider"] is None
+
+
+# --------------------------------------------------------------------------
+# the campaign journal survives an interrupted run (FORENSICS run 11, D1)
+# --------------------------------------------------------------------------
+
+
+def _interrupted_run(tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    """Run one campaign whose first attempt dies hard, in a subprocess.
+
+    The child loads the same fixture manifest and passes an
+    ``_InterruptingTrainer`` as the execution seam: it admits everything, then
+    calls ``os._exit(1)`` from inside the first attempt. That is the signature
+    of an external tree kill -- no Python exit path runs, no exception unwinds,
+    no ``finally`` executes, nothing after it is ever computed.
+
+    ``PYTHONPATH`` is rebuilt from the installed module rather than trusted
+    from the environment, so the child imports the same code pytest is testing.
+    """
+    manifest, _runner, _document = _campaign(tmp_path)
+    states = Path(manifest.state_root)
+    manifest_path = tmp_path / "inputs" / "campaign.json"
+    assert manifest_path.is_file()  # the fixture wrote it just above
+    script = tmp_path / "dead-campaign.py"
+    script.write_text(
+        "import os, sys\n"
+        "from chowder.growth.campaign import CampaignManifest\n"
+        "from chowder.growth.campaign_runner import run_campaign\n"
+        "\n"
+        "\n"
+        "class _InterruptingTrainer:\n"
+        "    \"\"\"Admit everything, then die hard inside the first attempt.\"\"\"\n"
+        "\n"
+        "    def admit(self, recipe):\n"
+        "        return None\n"
+        "\n"
+        "    def __call__(self, recipe, items):\n"
+        "        os._exit(1)\n"
+        "\n"
+        "\n"
+        "manifest = CampaignManifest.from_file(sys.argv[1])\n"
+        "run = run_campaign(manifest, train_fn=_InterruptingTrainer())\n"
+        "print(f'unexpected: the run returned {run.verdict}', flush=True)\n",
+        encoding="utf-8",
+    )
+    src = Path(campaign_runner.__file__).resolve().parents[2]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(src), env.get("PYTHONPATH"))))
+    env["CHOWDER_NO_GPU"] = "1"
+    return subprocess.run(
+        [sys.executable, str(script), str(manifest_path)],
+        capture_output=True,
+        cwd=str(tmp_path),
+        env=env,
+        text=True,
+        timeout=120,
+    )
+
+
+def _journal_records(journal: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+
+
+def test_an_interrupted_run_leaves_a_durable_attempt_journal(tmp_path: Path):
+    """A campaign killed inside its first attempt still leaves a record.
+
+    The subprocess dies with no Python exit path running, so nothing after the
+    attempt's start line could ever be computed. The journal it kept as it went
+    is the only durable account of what happened: the attempted recipe is
+    there, with a non-terminal status, and no terminal outcome exists.
+    """
+    manifest, _runner, _document = _campaign(tmp_path)
+    states = Path(manifest.state_root)
+    result = _interrupted_run(tmp_path)
+
+    assert result.returncode == 1, result.stderr or result.stdout
+    # The child must have died *hard*: no traceback (a fixture failure would
+    # print one) and no "unexpected" line (the run finishing would print one).
+    assert result.stderr == ""
+    assert result.stdout == ""
+
+    journal = states / "campaign-journal.jsonl"
+    assert journal.is_file()
+    records = _journal_records(journal)
+    assert records[0]["phase"] == "campaign_start"
+    # The attempted recipe is on the journal with a non-terminal status: the
+    # start line went down before the executor was invoked, the end never
+    # happened because the process died inside it.
+    attempted = [record for record in records if record["phase"] == "attempt"]
+    assert [record["recipe_id"] for record in attempted] == [manifest.recipe_ids[0]]
+    assert attempted[0]["status"] == "started"
+    assert attempted[0]["recipe_id"] == manifest.recipe_ids[0]
+    assert not any(record["phase"] == "terminal" for record in records)
+    # The terminal record was the run's only durable artifact -- its absence
+    # after death is exactly what D1 is about. Nothing else claims a verdict.
+    assert not (states / "campaign-run.json").exists()
+
+
+def test_reentry_on_an_interrupted_journal_refuses_and_starts_nothing(tmp_path: Path):
+    """A state root whose journal never reached a verdict refuses re-entry.
+
+    The interrupting subprocess from the previous scenario leaves a journal
+    with no terminal record; entering that state root again must refuse with
+    CAMPAIGN_INTERRUPTED, write that refusal where campaign-run.json lives,
+    journal it -- and, because it deliberately writes no terminal record, keep
+    refusing every later entry too. It must not silently start from the top
+    and re-spend the attempts the killed run already made.
+    """
+    manifest, _runner, _document = _campaign(tmp_path)
+    interrupted_child = _interrupted_run(tmp_path)
+    assert interrupted_child.returncode == 1
+
+    started: list[Any] = []
+
+    class _ProhibitedExecutor:
+        """Admits, but any attempt it starts is a test failure."""
+
+        def admit(self, recipe: Any) -> None:
+            return None
+
+        def __call__(self, recipe: Any, items: Any) -> Mapping[str, Any]:
+            started.append(recipe.recipe_id)
+            raise AssertionError("no attempt may start on an interrupted root")
+
+    run = run_campaign(manifest, train_fn=_ProhibitedExecutor())
+
+    assert started == []
+    assert run.verdict == "REFUSED"
+    assert run.refused_by == "entry_check"
+    assert run.refusal_reason.startswith("CAMPAIGN_INTERRUPTED:")
+    record = json.loads(
+        (Path(manifest.state_root) / "campaign-run.json").read_text(encoding="utf-8")
+    )
+    assert record["verdict"] == "REFUSED"
+    assert record["refused_by"] == "entry_check"
+    assert record["refusal_reason"].startswith("CAMPAIGN_INTERRUPTED:")
+    # The refusal is in the journal, and the journal is still open: the entry
+    # check that produced it was *about* an interruption, so it must not close
+    # the record it refuses to start over.
+    records = _journal_records(Path(manifest.state_root) / "campaign-journal.jsonl")
+    assert any(
+        entry["phase"] == "entry_check" and entry["status"] == "CAMPAIGN_INTERRUPTED"
+        for entry in records
+    )
+    assert not any(entry["phase"] == "terminal" for entry in records)
+    # And a third entry against the same state root refuses the same way.
+    again = run_campaign(manifest, train_fn=_ProhibitedExecutor())
+    assert again.refused_by == "entry_check"
+
+
+def test_a_later_interrupted_start_cannot_borrow_an_old_terminal(tmp_path: Path):
+    """A second run's start invalidates the earlier run's terminal marker."""
+    journal = tmp_path / "campaign-journal.jsonl"
+    (tmp_path / "campaign-run.json").write_text(
+        json.dumps({"verdict": "REFUSED"}), encoding="utf-8"
+    )
+    records = [
+        {"phase": "campaign_start", "status": "started"},
+        {"phase": "terminal", "status": "REFUSED"},
+    ]
+
+    def write_records() -> None:
+        journal.write_text(
+            "".join(json.dumps(row) + "\n" for row in records), encoding="utf-8"
+        )
+
+    write_records()
+    assert campaign_runner._journal_outcome(journal) == "REFUSED"
+
+    records.append({"phase": "campaign_start", "status": "started"})
+    write_records()
+    assert campaign_runner._journal_outcome(journal) is None
+
+    # A matching, stale verdict file cannot turn a second run's incomplete
+    # journal back into a successful or refused terminal run.
+    records.append({"phase": "attempt", "status": "started", "recipe_id": "r0"})
+    write_records()
+    assert campaign_runner._journal_outcome(journal) is None
+
+
+def test_corrupt_or_unverified_terminal_journal_fails_closed(tmp_path: Path):
+    """No torn/corrupt terminal marker or mismatched verdict authorizes entry."""
+    journal = tmp_path / "campaign-journal.jsonl"
+    verdict = tmp_path / "campaign-run.json"
+    terminal = json.dumps({"phase": "terminal", "status": "REFUSED"})
+    verdict.write_text(json.dumps({"verdict": "REFUSED"}), encoding="utf-8")
+
+    journal.write_text(terminal, encoding="utf-8")  # missing final LF
+    assert campaign_runner._journal_outcome(journal) is None
+
+    journal.write_text(terminal + "\n" + '{"phase":"attempt"', encoding="utf-8")
+    assert campaign_runner._journal_outcome(journal) is None
+
+    journal.write_text(terminal + "\n", encoding="utf-8")
+    verdict.write_text(json.dumps({"verdict": "PROMOTED"}), encoding="utf-8")
+    assert campaign_runner._journal_outcome(journal) is None
+
+    verdict.unlink()
+    assert campaign_runner._journal_outcome(journal) is None
