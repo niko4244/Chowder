@@ -59,11 +59,14 @@ def test_rejected_reap_cannot_be_revised_to_promoted_without_n5(tmp_path):
 def test_downgraded_generation_cannot_repromote_via_revision(tmp_path):
     root = tmp_path / "ledger"
     root.mkdir()
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    (primary / "config.json").write_text(json.dumps({"model_type": "llama"}), encoding="utf-8")
     # Explicit legacy non-REAP record, predating transactional promotion.
     # The new record() API must not mint such a record without PREPARED.
     (root / "generations.json").write_text(json.dumps([{
         "version": "gen2", "parent_version": "gen1", "cycle_id": "N5-test",
-        "base_model": {"path": str(tmp_path / "primary"), "revision": "legacy-primary"},
+        "base_model": {"path": str(primary), "revision": "legacy-primary"},
         "promotion": _decision("PROMOTED").to_dict(),
     }]), encoding="utf-8")
     ledger = GenerationLedger(root)
@@ -125,6 +128,31 @@ def test_legacy_reap_promoted_without_transaction_is_not_readable(tmp_path):
     (root / "generations.json").write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="PROMOTION_UNCOMMITTED"):
         GenerationLedger(root).effective_verdict("gen2")
+
+
+@pytest.mark.parametrize("variant", ["nonexistent", "configless", "unknown_config", "disguised_reap", "relative"])
+def test_markerless_promoted_history_cannot_fake_nonreap_model_path(tmp_path, variant):
+    base = tmp_path / "claimed-primary"
+    if variant not in ("nonexistent", "relative"):
+        base.mkdir()
+    if variant == "unknown_config":
+        (base / "config.json").write_text("{}", encoding="utf-8")
+    if variant == "disguised_reap":
+        (base / "config.json").write_text(json.dumps({
+            "model_type": "qwen3_5_moe", "text_config": {"num_experts": 128}
+        }), encoding="utf-8")
+    ledger_dir = tmp_path / "ledger"
+    ledger_dir.mkdir()
+    (ledger_dir / "generations.json").write_text(json.dumps([{
+        "version": "gen2", "parent_version": "gen1", "cycle_id": "N5-test",
+        "base_model": {"path": "claimed-primary" if variant == "relative" else str(base),
+                       "lineage": "unknown"},
+        "promotion": _decision("PROMOTED").to_dict(),
+    }]), encoding="utf-8")
+    ledger = GenerationLedger(ledger_dir)
+    with pytest.raises(ValueError, match="PROMOTION_UNCOMMITTED"):
+        ledger.get("gen2")
+    assert "gen2" not in ledger.versions()
 
 
 def test_manually_written_upward_revision_does_not_change_effective_verdict(tmp_path):
