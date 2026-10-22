@@ -117,6 +117,8 @@ def test_full_synthetic_raw_evidence_blocks_missing_mandatory_v2(tmp_path):
     assert result["gates"]["reap128"]["gates"]["gate1"]["status"] == "FAIL"
     assert result["decision"]["status"] == "BLOCKED"
     assert "both REAP128_v2 and REAP160" in result["decision"]["reason"]
+    assert result["input_sha256"][str(tmp_path / "dense" / "gsm8k.jsonl")]
+    assert result["release_approved"] is False
 
 
 def test_sha_tampered_raw_baseline_refuses_before_selection(tmp_path):

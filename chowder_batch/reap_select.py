@@ -114,9 +114,26 @@ def _paired(eval_dir: Path) -> dict | None:
     return pairs
 
 
+def _input_digests(eval_dir: Path, observation: Path) -> dict[str, str]:
+    """Pin every evaluation input actually present; absent files remain absent."""
+    paths = [observation]
+    for arm in ("dense", "dense_q4", "random128", "reap128",
+                "reap128_q4", "reap128_v2", "reap128_v2_q4",
+                "reap160", "reap160_q4", "reap160_v2", "reap160_v2_q4"):
+        directory = eval_dir / arm
+        for name in ("summary.json", "gsm8k.jsonl", "humaneval.jsonl", "serve.json"):
+            path = directory / name
+            if path.is_file():
+                paths.append(path)
+    return {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in paths if path.is_file()}
+
+
 def evaluate(eval_dir: str | Path, observation: str | Path) -> dict:
     """Compute gates from raw, SHA-attested full-size evaluation rows."""
     root = Path(eval_dir)
+    observation_path = Path(observation)
+    input_sha256 = _input_digests(root, observation_path)
     # The shared dense/control inputs must be authenticated *before* any arm
     # computation reads them. Otherwise an altered baseline could trigger a
     # parser exception or influence a gate before its summary SHA was checked.
@@ -139,8 +156,12 @@ def evaluate(eval_dir: str | Path, observation: str | Path) -> dict:
                                speed_arm, "dense_q4", observation)
     paired = _paired(root) if "reap128_v2" in present else None
     decision = select(present, paired)
+    if _input_digests(root, observation_path) != input_sha256:
+        raise GateError("REAP evaluation inputs changed while frozen gates were computed")
     return {"schema": "reap-frozen-amendment4-selection-v1", "gates": present,
-            "paired_v2_minus_v1": paired, "decision": decision}
+            "paired_v2_minus_v1": paired, "decision": decision,
+            "input_sha256": input_sha256, "release_approved": False,
+            "scope": "frozen selection score only; human approval and hardware gates separate"}
 
 
 def main(argv: list[str] | None = None) -> int:
