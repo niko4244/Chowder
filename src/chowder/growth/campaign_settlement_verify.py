@@ -172,6 +172,32 @@ def verified_settlement_total(
     charged_attempts = [
         row for row in paid if row["kind"] in ("training", "failed_attempt")
     ]
+    # This is a separately persisted fact from campaign admission, not a
+    # choice made by each mutable completion event. Both local and Unsloth
+    # execute through native SubprocessTrainingFn and MUST produce receipts;
+    # Kaggle and explicitly caller-supplied executors use cost-bound terminal
+    # completions instead.
+    backend_phases = [
+        phase for phase in run.get("phases", ())
+        if isinstance(phase, dict) and phase.get("phase") == "training-backend"
+    ]
+    _require(
+        len(backend_phases) == 1
+        and isinstance(backend_phases[0].get("backend"), dict),
+        "terminal campaign has no unique recorded executor identity",
+    )
+    backend = backend_phases[0]["backend"]
+    if backend.get("executor") == "caller-supplied":
+        required_proof_mode = "completion"
+    elif backend.get("provider") in ("local", "unsloth"):
+        required_proof_mode = "receipt"
+    elif backend.get("provider") == "kaggle":
+        required_proof_mode = "completion"
+    else:
+        raise ValueError(
+            "CAMPAIGN_SETTLEMENT_UNVERIFIED: terminal run's execution "
+            "provider cannot establish its mandatory attempt proof"
+        )
     _require(bool(started), "journal contains no paid training invocation")
     _require(
         len(charged_attempts) == len(started),
@@ -202,6 +228,13 @@ def verified_settlement_total(
         if isinstance(row, dict) and row.get("phase") == "attempt"
         and row.get("status") not in (None, "started")
     ]
+    attempt_records = run.get("attempts")
+    _require(isinstance(attempt_records, list), "terminal attempt summary is malformed")
+    if attempt_records:
+        _require(
+            len(attempt_records) == len(indexed_starts),
+            "terminal attempt summary disagrees with journaled starts",
+        )
     receipt_dir = root / "campaign-attempt-receipts"
     receipt_paths = set(receipt_dir.glob("*.json")) if receipt_dir.is_dir() else set()
     # Exactly one terminal proof per charged attempt. Native local execution
@@ -236,6 +269,35 @@ def verified_settlement_total(
                  or position < indexed_starts[expected_index + 1][0]),
             "terminal attempt proof is not ordered after its matching start",
         )
+        _require(
+            started_row.get("proof_mode") == required_proof_mode
+            and kind == required_proof_mode,
+            "attempt proof type disagrees with the pre-execution contract "
+            "and terminal run's recorded executor",
+        )
+        if attempt_records:
+            recorded_attempt = attempt_records[expected_index]
+            _require(
+                isinstance(recorded_attempt, dict)
+                and recorded_attempt.get("recipe_id") == started_row.get("recipe_id")
+                and recorded_attempt.get("attempt") == row.get("attempt")
+                and recorded_attempt.get("status") == row.get("status"),
+                "terminal run attempt summary differs from ordered completion",
+            )
+            stamped_backend = recorded_attempt.get("backend")
+            if isinstance(stamped_backend, dict):
+                provider = stamped_backend.get("provider")
+                _require(
+                    (
+                        required_proof_mode == "receipt"
+                        if provider in ("local", "unsloth")
+                        else required_proof_mode == "completion"
+                        if provider == "kaggle"
+                        else False
+                    ),
+                    "terminal attempt's independently recorded backend "
+                    "disagrees with mandatory native/remote proof",
+                )
         billed = charged_attempts[index]
         _require(
             billed.get("recipe_id") == started_row.get("recipe_id"),
@@ -249,7 +311,7 @@ def verified_settlement_total(
             _require(
                 row.get("identity") == started_row.get("identity")
                 and row.get("recipe_id") == started_row.get("recipe_id")
-                and isinstance(row.get("status"), str)
+                and row.get("status") in {"SUCCEEDED", "FAILED", "REFUSED"}
                 and billed.get("kind") == (
                     "training" if row.get("status") == "SUCCEEDED" else "failed_attempt"
                 ),
