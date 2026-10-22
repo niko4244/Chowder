@@ -204,6 +204,23 @@ def assert_committed(ledger_root: Path, record: Mapping[str, Any]) -> None:
     path = transaction_path(ledger_root, str(record["version"]))
     marker = load_transaction(path)
     if marker is None:  # Historical/non-campaign generation.
+        # Historical REAP promotions cannot acquire N5 authority merely by
+        # omitting the transaction: require explicit provenance migration and
+        # owner release instead of making a legacy row visible as PROMOTED.
+        if isinstance(record.get("promotion"), Mapping) and record["promotion"].get("verdict") == "PROMOTED":
+            from .owner_approval import requires_owner_approval
+
+            identity = record.get("base_model")
+            if not isinstance(identity, Mapping):
+                raise ValueError("PROMOTION_UNCOMMITTED: promoted model identity is missing")
+            path_value = str(identity.get("base_model_path") or identity.get("path") or "")
+            if not path_value:
+                raise ValueError("PROMOTION_UNCOMMITTED: promoted model has no verifiable base path")
+            if identity.get("lineage") == "reap-moe" or requires_owner_approval(path_value):
+                raise ValueError(
+                    "PROMOTION_UNCOMMITTED: REAP N5 release lacks a committed "
+                    "promotion transaction and human approval evidence"
+                )
         return
     if (
         marker.get("state") != "COMMITTED"

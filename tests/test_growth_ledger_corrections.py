@@ -67,9 +67,9 @@ def _append_two_revisions(path: Path) -> Path:
     assert first.supersedes_adjudication_id == "original"
     second = ledger.append_adjudication_revision(
         generation_version="gen1",
-        reason_codes=["FRESH_CANDIDATE_MEASUREMENT"],
+        reason_codes=["AUDIT_CONFIRMED_BREACH"],
         policy_version="v2",
-        new_verdict="PROMOTED",
+        new_verdict="REJECTED",
     )
     assert second.supersedes_adjudication_id == first.revision_id
     revisions = GenerationLedger(path).revisions_for("gen1")
@@ -82,7 +82,7 @@ def _append_two_revisions(path: Path) -> Path:
 
 def test_revision_appends_and_chains(tmp_path: Path) -> None:
     path = _append_two_revisions(tmp_path)
-    assert GenerationLedger(path).effective_verdict("gen1") == "PROMOTED"
+    assert GenerationLedger(path).effective_verdict("gen1") == "REJECTED"
 
 
 def test_effective_verdict_is_deterministic(tmp_path: Path) -> None:
@@ -90,7 +90,7 @@ def test_effective_verdict_is_deterministic(tmp_path: Path) -> None:
     # Reload from disk each time: resolution is a function of the file, not
     # of any in-memory state.
     for _ in range(3):
-        assert GenerationLedger(path).effective_verdict("gen1") == "PROMOTED"
+        assert GenerationLedger(path).effective_verdict("gen1") == "REJECTED"
 
 
 def test_effective_verdict_falls_back_to_original(tmp_path: Path) -> None:

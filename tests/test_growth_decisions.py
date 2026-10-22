@@ -264,7 +264,7 @@ def test_generation_ledger_roundtrip_and_duplicate_refusal(tmp_path):
         version="v0.2",
         parent_version="v0.1",
         cycle_id="cycle-001",
-        base_model={"revision": "Qwen/Qwen3-9B@abc123", "quantization": "bf16"},
+        base_model={"path": str(tmp_path / "primary-model"), "revision": "Qwen/Qwen3-9B@abc123", "quantization": "bf16"},
         dataset_manifest_ref="growth/data-manifest.json#cycle-001",
         curriculum_manifest_ref="growth/curriculum-cycle-001.json",
         recipe={"objective": "sft", "lora_rank": 64},
