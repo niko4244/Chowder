@@ -401,7 +401,9 @@ def _declaration(
     inputs.mkdir(parents=True, exist_ok=True)
     parent = tmp_path / "parent-model"
     parent.mkdir(exist_ok=True)
-    (parent / "config.json").write_text("{}", encoding="utf-8")
+    # A valid non-REAP base has an inspectable model_type. An empty config is
+    # unclassifiable and must not be treated as an N5 exemption on release.
+    (parent / "config.json").write_text('{"model_type":"llama"}', encoding="utf-8")
     # The base is pinned to its *model-content* digest (payload files only), not
     # its whole-tree directory digest: a real base tree grows a HuggingFace
     # download cache after it is fetched, and a whole-tree digest would move with
