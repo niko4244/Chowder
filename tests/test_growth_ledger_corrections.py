@@ -25,6 +25,16 @@ def _decision(verdict: str) -> PromotionDecision:
 
 
 def _record(ledger: GenerationLedger, verdict: str = "PROMOTED") -> None:
+    if verdict == "PROMOTED":
+        # Exercise append-only corrections on a pre-transaction historical
+        # non-REAP ledger. New promoted writes require a PREPARED intent.
+        ledger._path.parent.mkdir(parents=True, exist_ok=True)
+        ledger._path.write_text(json.dumps([{
+            "version": "gen1", "parent_version": "gen0", "cycle_id": "c1",
+            "base_model": {"path": "F:/llm-models/tiny"},
+            "promotion": _decision(verdict).to_dict(),
+        }]), encoding="utf-8")
+        return
     ledger.record(
         version="gen1",
         parent_version="gen0",

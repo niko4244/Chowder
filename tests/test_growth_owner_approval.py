@@ -81,12 +81,17 @@ def test_direct_cycle_finalize_without_base_identity_cannot_promote():
 
 def test_direct_lineage_record_refuses_reap_without_approval(tmp_path):
     from chowder.growth.lineage import GenerationLedger
+    from chowder.growth.promotion_transaction import prepare_transaction
+    from chowder.growth.promotion import PromotionDecision
 
     base = tmp_path / "base"
     base.mkdir()
     (base / "reap-prune.json").write_text('{"method":"reap"}', encoding="utf-8")
-    fake_decision = SimpleNamespace(verdict="PROMOTED")
+    fake_decision = PromotionDecision(verdict="PROMOTED", reasons=(), checks={})
     ledger = GenerationLedger(tmp_path / "ledger")
+    prepare_transaction(tmp_path, cycle_id="c", candidate_version="gen2",
+                        run_document={"cycle_id": "c"},
+                        promotion=fake_decision.to_dict(), manifest_digest="a" * 64)
     with pytest.raises(ValueError, match="HUMAN_APPROVAL_REQUIRED"):
         ledger.record(
             version="gen2", parent_version="gen1", cycle_id="c",

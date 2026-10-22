@@ -13,6 +13,7 @@ import pytest
 from chowder.growth.lineage import GenerationLedger
 from chowder.growth.owner_approval import _grant
 from chowder.growth.promotion import PromotionDecision
+from chowder.growth.promotion_transaction import prepare_transaction
 
 
 SHA = "a" * 64
@@ -56,8 +57,16 @@ def test_rejected_reap_cannot_be_revised_to_promoted_without_n5(tmp_path):
 
 
 def test_downgraded_generation_cannot_repromote_via_revision(tmp_path):
-    ledger = GenerationLedger(tmp_path / "ledger")
-    _record(ledger, model={"path": str(tmp_path / "primary"), "revision": "synthetic-primary@sha"}, verdict="PROMOTED")
+    root = tmp_path / "ledger"
+    root.mkdir()
+    # Explicit legacy non-REAP record, predating transactional promotion.
+    # The new record() API must not mint such a record without PREPARED.
+    (root / "generations.json").write_text(json.dumps([{
+        "version": "gen2", "parent_version": "gen1", "cycle_id": "N5-test",
+        "base_model": {"path": str(tmp_path / "primary"), "revision": "legacy-primary"},
+        "promotion": _decision("PROMOTED").to_dict(),
+    }]), encoding="utf-8")
+    ledger = GenerationLedger(root)
     ledger.append_adjudication_revision(
         generation_version="gen2", reason_codes=("AUDIT",),
         policy_version="synthetic", new_verdict="INCONCLUSIVE",
@@ -87,6 +96,10 @@ def test_promoted_direct_record_with_only_revision_refuses(tmp_path):
 def test_forged_in_process_grant_not_sufficient_without_frozen_judge(tmp_path):
     model = _reap(tmp_path)
     ledger = GenerationLedger(tmp_path / "ledger")
+    prepare_transaction(tmp_path, cycle_id="N5-test", candidate_version="gen2",
+                        run_document={"cycle_id": "N5-test"},
+                        promotion=_decision("PROMOTED").to_dict(),
+                        manifest_digest="a" * 64)
     # The old in-process _grant helper can mint an apparently valid MAC without
     # showing anyone a TTY. N5 release must independently refuse this token.
     forged = _grant("N5-test", "gen2", SHA, judge_certified=True)
@@ -127,3 +140,28 @@ def test_manually_written_upward_revision_does_not_change_effective_verdict(tmp_
     }]), encoding="utf-8")
     with pytest.raises(ValueError, match="ADJUDICATION_PROMOTION_UNAUTHORIZED"):
         GenerationLedger(tmp_path / "ledger").effective_verdict("gen2")
+
+
+@pytest.mark.parametrize("model", [
+    {"path": "Z:/not-real/primary", "revision": "spoofed-primary"},
+    {"base_model_path": "Z:/not-real/primary", "lineage": "unknown"},
+])
+def test_new_promoted_record_cannot_claim_nonreap_path_to_bypass_transaction(tmp_path, model):
+    ledger = GenerationLedger(tmp_path / "ledger")
+    with pytest.raises(ValueError, match="PROMOTION_TRANSACTION_REQUIRED"):
+        _record(ledger, model=model, verdict="PROMOTED")
+    assert not (tmp_path / "ledger" / "generations.json").exists()
+
+
+def test_prepared_transaction_alone_never_makes_promoted_record_readable(tmp_path):
+    ledger = GenerationLedger(tmp_path / "ledger")
+    model = {"path": "Z:/not-real/nonreap", "revision": "synthetic-primary"}
+    decision = _decision("PROMOTED")
+    prepare_transaction(
+        tmp_path, cycle_id="N5-test", candidate_version="gen2",
+        run_document={"cycle_id": "N5-test"}, promotion=decision.to_dict(),
+        manifest_digest="a" * 64,
+    )
+    _record(ledger, model=model, verdict="PROMOTED")
+    with pytest.raises(ValueError, match="PROMOTION_UNCOMMITTED"):
+        ledger.get("gen2")

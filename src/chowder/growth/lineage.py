@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .promotion import PromotionDecision
-from .promotion_transaction import assert_committed, atomic_json
+from .promotion_transaction import (
+    assert_committed, atomic_json, content_digest, load_transaction, transaction_path,
+)
 
 
 def _utc_now() -> str:
@@ -196,6 +198,31 @@ class GenerationLedger:
                 raise ValueError(
                     "PROMOTION_BASE_UNDECLARED: a PROMOTED ledger record must name "
                     "its base model path; a bare revision is insufficient"
+                )
+
+            # All *new* promoted generations must arise from a durable
+            # campaign PREPARED intent, regardless of claimed model family.
+            # A caller-chosen path or editable config cannot safely classify
+            # an unknown parent as exempt from REAP N5. Historical non-REAP
+            # rows are loaded independently, not minted through this API.
+            marker = load_transaction(transaction_path(self._path.parent, version))
+            if not callable(getattr(promotion, "to_dict", None)):
+                raise ValueError("PROMOTION_DECISION_INVALID: promotion decision must be serializable")
+            expected_decision = content_digest(promotion.to_dict())
+            if (
+                not isinstance(marker, dict)
+                or marker.get("state") != "PREPARED"
+                or marker.get("candidate_version") != version
+                or marker.get("cycle_id") != cycle_id
+                or marker.get("promotion_digest") != expected_decision
+                or not isinstance(marker.get("manifest_digest"), str)
+                or len(marker["manifest_digest"]) != 64
+                or not isinstance(marker.get("run_digest"), str)
+                or len(marker["run_digest"]) != 64
+            ):
+                raise ValueError(
+                    "PROMOTION_TRANSACTION_REQUIRED: new promoted generations "
+                    "need an exact-candidate durable PREPARED campaign intent"
                 )
 
             n5 = base_model.get("lineage") == "reap-moe" or requires_owner_approval(model_path)
