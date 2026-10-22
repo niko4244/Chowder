@@ -117,6 +117,13 @@ def _paired(eval_dir: Path) -> dict | None:
 def evaluate(eval_dir: str | Path, observation: str | Path) -> dict:
     """Compute gates from raw, SHA-attested full-size evaluation rows."""
     root = Path(eval_dir)
+    # The shared dense/control inputs must be authenticated *before* any arm
+    # computation reads them. Otherwise an altered baseline could trigger a
+    # parser exception or influence a gate before its summary SHA was checked.
+    for arm, suite, n in (("dense", "gsm8k", 1319), ("dense", "humaneval", 164),
+                          ("random128", "gsm8k", 1319), ("dense_q4", "gsm8k", 200)):
+        if _attested_rows(root, arm, suite, n) is None:
+            raise GateError(f"missing frozen baseline {arm}/{suite}")
     present = {}
     for arm in ("reap128", "reap128_v2", "reap160", "reap160_v2"):
         # A partially present arm is explicitly unresolved, not silently absent.
@@ -130,10 +137,6 @@ def evaluate(eval_dir: str | Path, observation: str | Path) -> dict:
         _attested_rows(root, speed_arm, "gsm8k", 200)
         present[arm] = compute(root, arm, "dense", "random128",
                                speed_arm, "dense_q4", observation)
-    for arm, suite, n in (("dense", "gsm8k", 1319), ("dense", "humaneval", 164),
-                          ("random128", "gsm8k", 1319), ("dense_q4", "gsm8k", 200)):
-        if _attested_rows(root, arm, suite, n) is None:
-            raise GateError(f"missing frozen baseline {arm}/{suite}")
     paired = _paired(root) if "reap128_v2" in present else None
     decision = select(present, paired)
     return {"schema": "reap-frozen-amendment4-selection-v1", "gates": present,
