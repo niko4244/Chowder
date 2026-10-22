@@ -2463,3 +2463,165 @@ def test_interrupted_entry_does_not_destroy_an_unclosed_original_verdict(tmp_pat
     assert (root / "campaign-run.json").read_bytes() == original
     assert json.loads((root / "campaign-entry-refusal.json").read_text())["verdict"] == "REFUSED"
     assert campaign_runner._journal_outcome(root / "campaign-journal.jsonl") is None
+
+
+@pytest.mark.parametrize(
+    "crash_boundary",
+    ["prepared_intent", "lineage_written", "verdict_published", "terminal_written"],
+)
+def test_promotion_transaction_fails_closed_across_crash_boundaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crash_boundary: str
+):
+    """A killed promoter may not surface a ledger-only PROMOTED generation.
+
+    If the final verdict and terminal marker were both persisted, recovery can
+    commit their matching lineage once without re-evaluating or re-training.
+    Earlier crashes preserve their forensic records and refuse re-entry.
+    """
+    from chowder.growth.promotion_transaction import (
+        load_transaction,
+        transaction_path,
+    )
+
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    root = Path(manifest.state_root)
+    marker_path = transaction_path(root / "ledger", CANDIDATE_VERSION)
+
+    def killed(*_args: Any, **_kwargs: Any) -> None:
+        raise SystemExit("simulated process death at " + crash_boundary)
+
+    with monkeypatch.context() as fault:
+        if crash_boundary == "prepared_intent":
+            original = campaign_runner.prepare_transaction
+
+            def after_prepare(*args: Any, **kwargs: Any) -> None:
+                original(*args, **kwargs)
+                killed()
+
+            fault.setattr(campaign_runner, "prepare_transaction", after_prepare)
+        elif crash_boundary == "lineage_written":
+            original = campaign_runner._finalize
+
+            def after_lineage(*args: Any, **kwargs: Any) -> None:
+                original(*args, **kwargs)
+                killed()
+
+            fault.setattr(campaign_runner, "_finalize", after_lineage)
+        elif crash_boundary == "verdict_published":
+            original = campaign_runner._journal_event
+
+            def before_terminal(*args: Any, **kwargs: Any) -> None:
+                if kwargs.get("phase") == "terminal":
+                    killed()
+                original(*args, **kwargs)
+
+            fault.setattr(campaign_runner, "_journal_event", before_terminal)
+        else:
+            original = campaign_runner.reconcile_transaction
+
+            def before_commit(*args: Any, **kwargs: Any) -> None:
+                killed()
+
+            fault.setattr(campaign_runner, "reconcile_transaction", before_commit)
+
+        with pytest.raises(SystemExit, match="simulated process death"):
+            run_campaign(manifest)
+
+    assert load_transaction(marker_path)["state"] == "PREPARED"
+    generation_ledger = GenerationLedger(root / "ledger")
+    assert CANDIDATE_VERSION not in generation_ledger.versions()
+    if crash_boundary != "prepared_intent":
+        with pytest.raises(ValueError, match="PROMOTION_UNCOMMITTED"):
+            generation_ledger.effective_verdict(CANDIDATE_VERSION)
+    journal = root / "campaign-journal.jsonl"
+    attempts_before_recovery = _verbs(runner).count("train")
+    journal_bytes_before = journal.read_bytes()
+
+    class _NoCompute:
+        def __call__(self, *_args: Any) -> None:
+            raise AssertionError("crash recovery must never train again")
+
+    recovered = run_campaign(manifest, train_fn=_NoCompute())
+    if crash_boundary == "terminal_written":
+        assert recovered.verdict == "PROMOTED"
+        assert load_transaction(marker_path)["state"] == "COMMITTED"
+        assert GenerationLedger(root / "ledger").effective_verdict(CANDIDATE_VERSION) == "PROMOTED"
+        assert journal.read_bytes() == journal_bytes_before
+        repeated = run_campaign(manifest, train_fn=_NoCompute())
+        assert repeated.to_dict() == recovered.to_dict()
+        assert journal.read_bytes() == journal_bytes_before
+    else:
+        assert recovered.verdict == "REFUSED"
+        assert load_transaction(marker_path)["state"] == "PREPARED"
+        assert CANDIDATE_VERSION not in GenerationLedger(root / "ledger").versions()
+        expected = (
+            "campaign-entry-refusal.json"
+            if crash_boundary == "verdict_published"
+            else "campaign-run.json"
+        )
+        assert recovered.record_path.endswith(expected)
+    assert _verbs(runner).count("train") == attempts_before_recovery
+
+
+def test_promotion_transaction_rejects_tampered_lineage_even_after_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """After commitment, changing the ledger cannot silently retain promotion."""
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    run = run_campaign(manifest)
+    assert run.verdict == "PROMOTED"
+
+    root = Path(manifest.state_root)
+    path = root / "ledger" / "generations.json"
+    generations = json.loads(path.read_text(encoding="utf-8"))
+    generations[0]["promotion"]["verdict"] = "REJECTED"
+    path.write_text(json.dumps(generations), encoding="utf-8")
+    ledger = GenerationLedger(root / "ledger")
+    assert CANDIDATE_VERSION not in ledger.versions()
+    with pytest.raises(ValueError, match="PROMOTION_UNCOMMITTED"):
+        ledger.get(CANDIDATE_VERSION)
+    result = run_campaign(manifest)
+    assert result.verdict == "REFUSED"
+
+
+@pytest.mark.parametrize("tampered_file", ["campaign-run.json", "ledger/generations.json"])
+def test_promotion_recovery_refuses_tampered_precommit_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tampered_file: str
+):
+    """A terminal marker alone cannot commit altered verdict or lineage bytes."""
+    from chowder.growth.promotion_transaction import (
+        load_transaction,
+        transaction_path,
+    )
+
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    root = Path(manifest.state_root)
+
+    def before_commit(*_args: Any, **_kwargs: Any) -> None:
+        raise SystemExit("crash before commit")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(campaign_runner, "reconcile_transaction", before_commit)
+        with pytest.raises(SystemExit, match="crash before commit"):
+            run_campaign(manifest)
+
+    changed = root / tampered_file
+    content = json.loads(changed.read_text(encoding="utf-8"))
+    if isinstance(content, list):
+        content[0]["promotion"]["verdict"] = "REJECTED"
+    else:
+        content["selection"]["artifact_sha256"] = "0" * 64
+    changed.write_text(json.dumps(content), encoding="utf-8")
+
+    attempted_before = _verbs(runner).count("train")
+    result = run_campaign(manifest)
+    assert result.verdict == "REFUSED"
+    assert "PROMOTION_TRANSACTION_UNRESOLVED" in result.phases[0]["detail"]
+    assert _verbs(runner).count("train") == attempted_before
+    assert load_transaction(
+        transaction_path(root / "ledger", CANDIDATE_VERSION)
+    )["state"] == "PREPARED"
+    assert CANDIDATE_VERSION not in GenerationLedger(root / "ledger").versions()

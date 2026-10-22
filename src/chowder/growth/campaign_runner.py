@@ -103,6 +103,12 @@ from .frontier_reference import SnapshotStore
 from .lineage import GenerationLedger, RegressionMemory
 from .metric_binding import MetricBinder, PromotionAssembly
 from .recipe_planner import HardwareBudget, RecipePlanner, TrainingRecipe
+from .promotion_transaction import (
+    load_transaction,
+    prepare_transaction,
+    reconcile_transaction,
+    transaction_path,
+)
 
 from .training_binding import (
     STATUS_SUCCEEDED,
@@ -403,6 +409,26 @@ class CampaignRun:
         return ""
 
 
+def _restored_run(document: Mapping[str, Any], root: Path) -> CampaignRun:
+    """Return an already completed campaign; never run its evaluator twice."""
+    return CampaignRun(
+        cycle_id=str(document["cycle_id"]),
+        parent_version=str(document["parent_version"]),
+        candidate_version=str(document["candidate_version"]),
+        verdict=str(document["verdict"]),
+        phases=tuple(document["phases"]),
+        admission=tuple(document["admission"]),
+        cost=document["cost"],
+        settlement=document["settlement"],
+        ceiling_enforcement=document["ceiling_enforcement"],
+        certification=document["certification"],
+        selection=document["selection"],
+        promotion=document["promotion"],
+        attempts=tuple(document["attempts"]),
+        record_path=str(root / "campaign-run.json"),
+    )
+
+
 def assert_every_field_enforced(manifest_cls: type = CampaignManifest) -> None:
     """The schema and the enforcement table must describe the same fields."""
     schema = set(getattr(manifest_cls, "__dataclass_fields__"))
@@ -523,7 +549,9 @@ def _journal_outcome(journal: Path) -> str | None:
     return outcome
 
 
-def _refuse_interrupted(manifest: CampaignManifest, root: Path) -> CampaignRun:
+def _refuse_interrupted(
+    manifest: CampaignManifest, root: Path, *, promotion_unresolved: bool = False
+) -> CampaignRun:
     """Refuse entry on a state root whose journal never reached a verdict.
 
     A journal without a terminal record means a previous run on this state
@@ -537,14 +565,22 @@ def _refuse_interrupted(manifest: CampaignManifest, root: Path) -> CampaignRun:
     deliberately -- archive or delete the journal and ``campaign-run.json``.
     """
     journal = _journal_path(root)
-    detail = (
-        f"{CAMPAIGN_INTERRUPTED}: {journal} exists and records no terminal "
-        "outcome -- a previous run on this state root did not reach a "
-        "verdict, so its attempts are already spent and recorded there. "
-        "Resolve that state deliberately (archive or delete the journal and "
-        "campaign-run.json) before starting a campaign here; refusing rather "
-        "than silently starting from the top."
-    )
+    if promotion_unresolved:
+        detail = (
+            "PROMOTION_TRANSACTION_UNRESOLVED: a PREPARED or inconsistent "
+            "promotion transaction exists. Its lineage is not admitted; "
+            "inspect the campaign-run.json, journal and ledger together. "
+            "The attempted compute is already spent and cannot be replayed."
+        )
+    else:
+        detail = (
+            f"{CAMPAIGN_INTERRUPTED}: {journal} exists and records no terminal "
+            "outcome -- a previous run on this state root did not reach a "
+            "verdict, so its attempts are already spent and recorded there. "
+            "Resolve that state deliberately (archive or delete the journal and "
+            "campaign-run.json) before starting a campaign here; refusing rather "
+            "than silently starting from the top."
+        )
     _journal_event(root, phase="entry_check", status=CAMPAIGN_INTERRUPTED, detail=detail)
     run = CampaignRun(
         cycle_id=manifest.cycle_id,
@@ -689,6 +725,27 @@ def _run_campaign_locked(
     assert_every_field_enforced()
     require_declared_inputs(manifest, phase="run")
     root = Path(state_root or manifest.state_root)
+    # A crash after the durable promotion intent may have left a committed
+    # verdict, an unfinished ledger write, or only the PREPARED marker. Replay
+    # only a fully verified terminal decision; otherwise preserve forensic
+    # evidence and refuse re-entry before training spends anything.
+    marker_path = transaction_path(
+        root / "ledger", manifest.resolved_candidate_version()
+    )
+    if marker_path.exists():
+        try:
+            marker = load_transaction(marker_path)
+            recovered = reconcile_transaction(
+                root,
+                cycle_id=manifest.cycle_id,
+                candidate_version=manifest.resolved_candidate_version(),
+                journal_verdict=_journal_outcome(_journal_path(root)),
+            )
+        except ValueError:
+            recovered = None
+        if recovered is None or marker is None or recovered.get("parent_version") != manifest.parent_version:
+            return _refuse_interrupted(manifest, root, promotion_unresolved=True)
+        return _restored_run(recovered, root)
     # Entry check: a journal with no terminal record means a previous run on
     # this state root never reached a verdict. Refuse rather than silently
     # starting from the top over its spent attempts (fail-closed, like every
@@ -1313,20 +1370,6 @@ def _run_campaign_locked(
             }
         )
 
-    outcome = _finalize(
-        manifest,
-        cycle=cycle,
-        decision=_with_resource_veto(decision, settlement),
-        selected=selected,
-        root=root,
-        # The report this run produced, at the path the judge reads: the lineage
-        # names the measurement that decided it, not an input it was handed.
-        evaluation_report_ref=str(root / CERTIFICATION_EVIDENCE["candidate"]),
-        # The ledger entry itself names the backend that produced the
-        # generation: a reader sees which generator produced it without
-        # joining this run record.
-        backend_record=backend_record,
-    )
     run = CampaignRun(
         cycle_id=manifest.cycle_id,
         parent_version=manifest.parent_version,
@@ -1352,7 +1395,44 @@ def _run_campaign_locked(
         promotion=assembly.to_dict(),
         record_path="",
     )
-    return _write_record(run, root, outcome=outcome)
+    finalized_decision = _with_resource_veto(decision, settlement)
+    if run.verdict == "PROMOTED":
+        if finalized_decision.verdict != "PROMOTED":
+            raise CampaignRunRefusal("PROMOTION_TRANSACTION_MISMATCH: resource veto not reflected in run")
+        # This fsynced PREPARED intent precedes every lineage mutation. A raw
+        # ledger entry written afterward stays invisible until the campaign's
+        # own terminal journal and matching JSON verdict are durably published.
+        prepare_transaction(
+            root, cycle_id=manifest.cycle_id, candidate_version=candidate_version,
+            run_document=run.to_dict(), promotion=finalized_decision.to_dict(),
+        )
+        _journal_event(root, phase="promotion_prepare", status="PREPARED")
+    outcome = _finalize(
+        manifest,
+        cycle=cycle,
+        decision=finalized_decision,
+        selected=selected,
+        root=root,
+        # The report this run produced, at the path the judge reads: the lineage
+        # names the measurement that decided it, not an input it was handed.
+        evaluation_report_ref=str(root / CERTIFICATION_EVIDENCE["candidate"]),
+        # The ledger entry itself names the backend that produced the
+        # generation: a reader sees which generator produced it without
+        # joining this run record.
+        backend_record=backend_record,
+    )
+    saved = _write_record(run, root, outcome=outcome)
+    if run.verdict == "PROMOTED":
+        committed = reconcile_transaction(
+            root, cycle_id=manifest.cycle_id, candidate_version=candidate_version,
+            journal_verdict=_journal_outcome(_journal_path(root)),
+        )
+        if committed is None:
+            raise CampaignRunRefusal(
+                "PROMOTION_TRANSACTION_UNRESOLVED: campaign terminal and lineage "
+                "could not be bound; promotion remains unavailable"
+            )
+    return saved
 
 
 # --------------------------------------------------------------------------
