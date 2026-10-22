@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -1136,10 +1137,33 @@ def _run_campaign_locked(
     # written out as evidence before the run stops.
     try:
         _verify_selected_artifact(selected, purpose="before it is measured")
+        evaluation_started = time.perf_counter()
         request, evaluation = _evaluate_candidate(
             manifest, root=root, selected=selected, eval_fn=evaluator
         )
     except CampaignRunRefusal as refusal:
+        if "evaluation_started" in locals():
+            # The evaluator may have performed partial real work before failing
+            # to emit a trustworthy cost/result. Charge the observed wall
+            # interval conservatively, mark device-hours unmeasured, and refuse.
+            # A missing evaluation summary is NEVER evidence of free compute.
+            elapsed = max(0.0, time.perf_counter() - evaluation_started)
+            ledger.add(
+                "failed candidate evaluation (observed wall fallback)",
+                "evaluation",
+                ComputeCost.from_wall_only(
+                    elapsed / 3600.0,
+                    source="failed-candidate-evaluation:subprocess-wall-fallback",
+                ),
+                notes="partial evaluation elapsed wall time; device use unmeasured",
+            )
+            _journal_event(
+                root,
+                phase="candidate_evaluation_cost",
+                status="fallback_unmeasured_device",
+                gpu_hours=elapsed / 3600.0,
+                detail="elapsed wall charged conservatively; no promotion allowed",
+            )
         accounting_digest = ledger.write(accounting_path)
         total = ledger.total()
         if stopped_by:

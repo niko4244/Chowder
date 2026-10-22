@@ -2463,3 +2463,29 @@ def test_interrupted_entry_does_not_destroy_an_unclosed_original_verdict(tmp_pat
     assert (root / "campaign-run.json").read_bytes() == original
     assert json.loads((root / "campaign-entry-refusal.json").read_text())["verdict"] == "REFUSED"
     assert campaign_runner._journal_outcome(root / "campaign-journal.jsonl") is None
+
+
+def test_failed_candidate_evaluation_charges_observed_elapsed_wall_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A crashing evaluator still has a nonzero, explicitly unmeasured-device charge."""
+    manifest, runner, _document = _campaign(tmp_path)
+
+    class _FailedEvaluator:
+        def __call__(self, _request):
+            raise CampaignRunRefusal("controlled failure after evaluator invocation")
+
+    _patch_seams(monkeypatch, runner, evaluator=_FailedEvaluator())
+    run = run_campaign(manifest)
+    assert run.verdict == "REFUSED"
+    assert "controlled failure" in _refusal(run)
+    assert run.cost["wall_gpu_hours"] > 2 * ATTEMPT_WALL_GPU_HOURS
+    ledger = json.loads(Path(run.cost["accounting_path"]).read_text(encoding="utf-8"))
+    assert "failed candidate evaluation" in json.dumps(ledger)
+    assert "subprocess-wall-fallback" in json.dumps(ledger)
+    journal = _journal_records(Path(manifest.state_root) / "campaign-journal.jsonl")
+    assert any(
+        item["phase"] == "candidate_evaluation_cost"
+        and item["status"] == "fallback_unmeasured_device"
+        for item in journal
+    )
