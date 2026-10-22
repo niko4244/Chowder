@@ -130,42 +130,75 @@
     {
       "suite": "recovery + growth + kaggle + MoE plumbing",
       "passed": 90,
-      "failed": 0
+      "failed": 0,
+      "command": "python -m pytest tests/test_growth_campaign_runner.py tests/test_growth_campaign.py tests/test_growth_kaggle_campaign.py tests/test_moe_campaign_plumbing.py -q",
+      "code_revision": "e3f0fbd7",
+      "environment": "Windows Python 3.11.9; CHOWDER_NO_GPU=1; CUDA visible but no CUDA workload"
     },
     {
       "suite": "int8 preflight and experts",
       "passed": 54,
-      "failed": 0
+      "failed": 0,
+      "command": "python -m pytest tests/test_moe_int8_witness_preflight.py tests/test_moe_int8_experts.py -q --tb=short",
+      "code_revision": "24f2f886",
+      "environment": "Windows Python 3.11.9; CHOWDER_NO_GPU=1; CUDA visible but no CUDA workload"
     },
     {
       "suite": "placement witnesses/gates/preflight",
       "passed": 75,
-      "failed": 0
+      "failed": 0,
+      "command": "python -m pytest tests/test_placement_witnesses.py tests/test_moe_int8_gates.py tests/test_moe_int8_witness_preflight.py -q --tb=short",
+      "code_revision": "108f9322",
+      "environment": "Windows Python 3.11.9; CHOWDER_NO_GPU=1; CUDA visible but no CUDA workload"
     },
     {
       "suite": "harness-bound gate followup",
       "passed": 66,
-      "failed": 0
+      "failed": 0,
+      "command": "python -m pytest tests/test_moe_int8_gates.py tests/test_placement_witnesses.py -q --tb=short",
+      "code_revision": "184291fb",
+      "environment": "Windows Python 3.11.9; CHOWDER_NO_GPU=1; CUDA visible but no CUDA workload"
     },
     {
       "suite": "CLI/TUI autonomous integration",
       "passed": 111,
-      "failed": 0
+      "failed": 0,
+      "command": "python -m pytest tests/test_tui_growth.py tests/test_tui.py tests/test_growth_evals_and_cli.py tests/test_growth_loop_cli.py tests/test_growth_autonomous_integration.py -q --tb=short",
+      "code_revision": "108f9322",
+      "environment": "Windows Python 3.11.9; CHOWDER_NO_GPU=1; CUDA visible but no CUDA workload"
     },
     {
       "suite": "integrity/adversarial",
       "passed": 160,
-      "failed": 0
+      "failed": 0,
+      "command": "python -m pytest tests/test_growth_budget_settlement.py tests/test_growth_certification.py tests/test_growth_measurement_provenance.py tests/test_growth_promotion_adversarial.py tests/test_growth_settlement_adversarial.py tests/test_growth_contamination_and_data.py tests/test_growth_gen2_judge_agreement.py -q --tb=short",
+      "code_revision": "e3f0fbd7",
+      "environment": "Windows Python 3.11.9; CHOWDER_NO_GPU=1; CUDA visible but no CUDA workload"
     },
     {
       "suite": "REAP D0/count/selection fixes",
       "passed": 15,
-      "failed": 0
+      "failed": 0,
+      "command": "python -m pytest tests/test_reap_gates.py -q",
+      "code_revision": "73f15938",
+      "environment": "Windows Python 3.11.9; CHOWDER_NO_GPU=1; CUDA visible but no CUDA workload"
     },
     {
       "suite": "targeted wall-cost and exclusive writer/kill tests",
       "passed": 4,
-      "failed": 0
+      "failed": 0,
+      "command": "python -m pytest tests/test_growth_campaign_runner.py::test_concurrent_campaign_writers_cannot_share_a_root tests/test_growth_campaign_runner.py::test_an_interrupted_run_leaves_a_durable_attempt_journal tests/test_growth_campaign_runner.py::test_reentry_on_an_interrupted_journal_refuses_and_starts_nothing tests/test_growth_campaign_runner.py::test_failed_training_elapsed_cost_stops_next_recipe -q --tb=short",
+      "code_revision": "cf544801",
+      "environment": "Windows Python 3.11.9; CHOWDER_NO_GPU=1; CUDA visible but no CUDA workload"
+    },
+    {
+      "suite": "recovery trainer binding and campaign suite after writer lock",
+      "passed": 82,
+      "failed": 0,
+      "warnings": 14,
+      "command": "python -m pytest tests/test_growth_campaign_runner.py tests/test_growth_training_binding.py -q --tb=short",
+      "code_revision": "cf544801",
+      "environment": "Windows Python 3.11.9; CHOWDER_NO_GPU=1"
     }
   ],
   "recovery_ci_after_fix": "SUCCESS: linux py3.10/11/12, windows py3.12, lint/build, real ML CPU smoke",
@@ -180,5 +213,21 @@
     "os": "Windows",
     "python": "3.11.9",
     "head_sha": "cf544801af525826c5bd507581b27580feff23f2"
-  }
+  },
+  "independent_dataset_checks": {
+    "dataset_path": "C:\\llm-work\\train-sets\\moe-gen1-v1",
+    "control_rows": 647,
+    "fable_rows": 767,
+    "ordered_subsequence": true,
+    "extra_fable_rows": 120,
+    "both_sha256_match_manifest": true,
+    "template_validated": true,
+    "max_length": 2048,
+    "source_shortfalls": {
+      "nemotron": 120,
+      "ot3_code": 141,
+      "ornith": 1
+    }
+  },
+  "all_assertions_are_mutually_nonexclusive": "The listed suites overlap, so their passed counts must NOT be summed into a unique test count."
 }
