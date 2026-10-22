@@ -112,10 +112,35 @@ def _reap_approval_in_record(root: Path, document: Mapping[str, Any], generation
     base_model = generation.get("base_model") or {}
     if not isinstance(base_model, Mapping):
         return False
-    model_path = str(base_model.get("base_model_path") or "")
-    if base_model.get("lineage") != "reap-moe" and (
-        not model_path or not requires_owner_approval(model_path)
+    # Keep the exact path precedence used by GenerationLedger.record. A
+    # transaction-backed generation may legitimately use the historical
+    # `path` alias; ignoring it would silently exempt a later REAP checkpoint.
+    model_path = base_model.get("base_model_path") or base_model.get("path")
+    if not isinstance(model_path, str) or not model_path.strip():
+        return False
+    base = Path(model_path)
+    if not base.is_absolute() or not base.is_dir():
+        return False
+    # `requires_owner_approval` returns False for missing/invalid configs,
+    # which means "unknown", not proof that a promoted generation is non-REAP.
+    # Classify non-REAP only from an inspectable checkpoint config. This local
+    # consistency check is not independent cryptographic model provenance.
+    try:
+        config = json.loads((base / "config.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return False
+    if (
+        not isinstance(config, Mapping)
+        or not isinstance(config.get("model_type"), str)
+        or not config["model_type"].strip()
     ):
+        return False
+    if config["model_type"] == "qwen3_5_moe":
+        text = config.get("text_config")
+        experts = text.get("num_experts") if isinstance(text, Mapping) else None
+        if not isinstance(experts, int) or isinstance(experts, bool) or experts <= 0:
+            return False
+    if base_model.get("lineage") != "reap-moe" and not requires_owner_approval(base):
         return True
     selection = document.get("selection")
     if not isinstance(selection, Mapping):
