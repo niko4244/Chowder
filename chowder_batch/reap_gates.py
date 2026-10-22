@@ -6,8 +6,8 @@ from per-arm reap_eval.py output.
 
 Thresholds are the pre-registered ones; nothing here is tunable. Absent
 speed/fit data is UNKNOWN, never PASS. Mismatched ids between arms refuse.
-Gate D0 (observer perplexity) is not computable from eval output and is not
-checked here.
+Gate D0 uses the separately captured 40-layer observation. If it is absent,
+the whole result remains undecided (never an implicit PASS).
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ G1_THRESH = -0.03
 G2_THRESH = -0.10
 SPEEDUP = 1.3
 DEGENERATE_TRIGRAM = 0.5
+FROZEN_SUITE_SIZES = {"gsm8k": 1319, "humaneval": 164}
 
 
 class GateError(Exception):
@@ -39,16 +40,44 @@ def lower_bound(d: list[float]) -> float | None:
     return statistics.fmean(d) - Z * statistics.stdev(d) / math.sqrt(n)
 
 
-def _load(eval_dir, arm: str, suite: str):
+def _load(eval_dir, arm: str, suite: str, *, expected_n: int | None = None):
     path = Path(eval_dir) / arm / f"{suite}.jsonl"
     if not path.exists():
         return None
     rows = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if line.strip():
             row = json.loads(line)
-            rows[row["id"]] = row
+            ident = row["id"]
+            if ident in rows:
+                raise GateError(f"{path}:{line_number}: duplicate item id {ident!r}")
+            rows[ident] = row
+    required = expected_n if expected_n is not None else FROZEN_SUITE_SIZES.get(suite)
+    if required is not None and len(rows) != required:
+        raise GateError(f"{path}: {suite} has {len(rows)} rows, but frozen gate requires {required}")
     return rows
+
+
+def _d0(observation: str | Path | None):
+    """Frozen observation sanity gate, which must precede quality evidence."""
+    if not observation:
+        return _g("UNKNOWN", None, 20.0, None, reason="full observer record not supplied")
+    path = Path(observation)
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as error:
+        return _g("UNKNOWN", None, 20.0, None, reason=f"observer unreadable: {error}")
+    if not isinstance(report, dict) or not isinstance(report.get("layers"), list):
+        return _g("FAIL", None, 20.0, None, reason="observer has no layer census")
+    layers = report["layers"]
+    indexes = [row.get("layer") if isinstance(row, dict) else None for row in layers]
+    ppl = report.get("calibration_ppl")
+    valid_ppl = isinstance(ppl, (int, float)) and not isinstance(ppl, bool) and math.isfinite(ppl)
+    valid_indexes = all(isinstance(i, int) and not isinstance(i, bool) for i in indexes)
+    passed = (len(layers) == 40 and valid_indexes and set(indexes) == set(range(40))
+              and valid_ppl and 0.0 < ppl < 20.0)
+    return _g("PASS" if passed else "FAIL", ppl if valid_ppl else None, 20.0, len(layers),
+              reason=None if passed else "observer needs 40 distinct layers and 0 < perplexity < 20")
 
 
 def _pair(a: dict, b: dict, names: str):
@@ -95,34 +124,51 @@ def _gate0(arm_rows, base_rows):
 
 
 def _mean_pps(eval_dir, arm):
-    rows = _load(eval_dir, arm, "gsm8k")
+    # The preregistered speed comparison uses 200 GSM8K items, not the
+    # 1,319-item quality arm; never pass from an arbitrarily short sample.
+    rows = _load(eval_dir, arm, "gsm8k", expected_n=200)
     vals = [r["predicted_per_second"] for r in (rows or {}).values() if r.get("predicted_per_second") is not None]
     return (statistics.fmean(vals), len(vals)) if vals else (None, 0)
 
 
-def _speed(eval_dir, speed_arm, speed_dense):
-    thr = {"experts_offloaded": 0, "speed_ratio_min": SPEEDUP}
+def _speed(eval_dir, speed_arm, speed_dense, *, arm):
+    # Amendment 2 + §5 permit partial offload for the REAP160 fallback;
+    # REAP128 must still fit with zero routed experts offloaded.
+    partial_allowed = arm in {"reap160", "reap160_v2"}
+    thr = {"experts_offloaded": "partial permitted" if partial_allowed else 0,
+           "speed_ratio_min": SPEEDUP}
     if not speed_arm or not speed_dense:
         return _g("UNKNOWN", None, thr, None, reason="speed arms not given")
     serve_path = Path(eval_dir) / speed_arm / "serve.json"
     offloaded = None
     if serve_path.exists():
         offloaded = json.loads(serve_path.read_text(encoding="utf-8")).get("experts_offloaded")
+    if offloaded is not None and (
+        isinstance(offloaded, bool) or not isinstance(offloaded, int) or offloaded < 0
+    ):
+        return _g("FAIL", {"experts_offloaded": offloaded}, thr, None,
+                  reason="invalid negative or noninteger expert offload count")
     a, na = _mean_pps(eval_dir, speed_arm)
     b, nb = _mean_pps(eval_dir, speed_dense)
     ratio = a / b if a is not None and b else None
     stat = {"experts_offloaded": offloaded, "pps_arm": a, "pps_dense": b, "ratio": ratio}
-    if offloaded is not None and offloaded != 0:
+    if offloaded is not None and offloaded != 0 and not partial_allowed:
         return _g("FAIL", stat, thr, na)  # offload alone fails the gate whatever the speed
     if offloaded is None or ratio is None:
         return _g("UNKNOWN", stat, thr, na, reason="missing serve.json or predicted_per_second")
     return _g("PASS" if ratio >= SPEEDUP - EPS else "FAIL", stat, thr, na)
 
 
-def _decide(g):
+def _decide(g, arm):
     st = {k: v["status"] for k, v in g.items()}
+    if st["d0"] == "FAIL":
+        return "observer D0 failed — no model may be selected"
+    if st["d0"] != "PASS":
+        return "undecided — UNKNOWN: d0"
     if "FAIL" in (st["gate0"], st["gate1"]):
-        return "build reap160"
+        if arm == "reap128":
+            return "v1 failed: score both reap128_v2 and reap160 (amendment 4)"
+        return f"{arm} failed a quality gate — do not select it"
     if st["gate2"] == "FAIL":
         return "coding regression — do not promote"
     if st["control"] == "FAIL":
@@ -132,28 +178,33 @@ def _decide(g):
         return "undecided — UNKNOWN: " + ", ".join(unknown)
     if st["speed"] == "FAIL":
         return "speed/fit gate failed — do not promote"
+    if arm == "reap128_v2":
+        return "reap128_v2 passes gates; still requires paired noninferiority versus v1"
+    if arm in {"reap160", "reap160_v2"}:
+        return f"{arm} passes gates; selection still requires amendment 4's ordered arms"
     return "reap128 is the custom MoE"
 
 
-def compute(eval_dir, arm, dense, control, speed_arm=None, speed_dense=None) -> dict:
+def compute(eval_dir, arm, dense, control, speed_arm=None, speed_dense=None, observation=None) -> dict:
     gsm = {a: _load(eval_dir, a, "gsm8k") for a in (arm, dense, control)}
     he = {a: _load(eval_dir, a, "humaneval") for a in (arm, dense)}
     computed = {
+        "d0": _d0(observation),
         "gate0": _gate0(gsm[arm], gsm[dense]),
         "gate1": _lb_gate(gsm[arm], gsm[dense], G1_THRESH, "gsm8k arm/dense"),
         "gate2": _lb_gate(he[arm], he[dense], G2_THRESH, "humaneval arm/dense"),
         "control": _lb_gate(gsm[arm], gsm[control], 0.0, "gsm8k arm/control"),
-        "speed": _speed(eval_dir, speed_arm, speed_dense),
+        "speed": _speed(eval_dir, speed_arm, speed_dense, arm=arm),
     }
     gates, failed = {}, False
-    for name in ("gate0", "gate1", "gate2", "control", "speed"):
+    for name in ("d0", "gate0", "gate1", "gate2", "control", "speed"):
         res = computed[name]
         if failed:
             res = {**res, "status": "NOT_EVALUATED", "after_failure": True, "computed_status": res["status"]}
         gates[name] = res
         failed = failed or computed[name]["status"] == "FAIL"
     return {"arm": arm, "dense": dense, "control": control, "gates": gates,
-            "decision": _decide(gates)}
+            "decision": _decide(gates, arm)}
 
 
 def main() -> None:
@@ -164,10 +215,11 @@ def main() -> None:
     p.add_argument("--control", required=True)
     p.add_argument("--speed-arm")
     p.add_argument("--speed-dense")
+    p.add_argument("--observation", help="full 40-layer observer JSON; absent means D0 UNKNOWN")
     p.add_argument("--out", required=True)
     a = p.parse_args()
     try:
-        result = compute(a.eval_dir, a.arm, a.dense, a.control, a.speed_arm, a.speed_dense)
+        result = compute(a.eval_dir, a.arm, a.dense, a.control, a.speed_arm, a.speed_dense, a.observation)
     except GateError as e:
         sys.exit(f"reap_gates: refusing: {e}")
     Path(a.out).write_text(json.dumps(result, indent=2), encoding="utf-8")
