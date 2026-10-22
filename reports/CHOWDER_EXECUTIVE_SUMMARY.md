@@ -1,6 +1,6 @@
 # Chowder engineering and custom MoE — executive verdict
 
-> Audit snapshot: 2026-10-22 UTC. Main 0bc566c5db052b90e3aa1223fef94445d1045dc5; PR #268 fe94342c1073eb39e69be01ba224c63b38057b95; recovery PR #269 e3f0fbd77bc679ea9a856461294cd26b40316562. GitHub code and published evidence were inspected; local Windows workspace inaccessible (Chat On Steroids Core root /strata invalid). Source claims below are **historical reports**, not rerun hardware measurements. No model weights or protected local evidence were accessed in this audit.
+> Audit snapshot: 2026-10-22 UTC. Main 0bc566c5db052b90e3aa1223fef94445d1045dc5; PR #268 24f2f8865b215b477796364b1ec30e944d5ec087; recovery PR #269 e3f0fbd77bc679ea9a856461294cd26b40316562. GitHub code and published evidence were inspected; local Windows workspace inaccessible (Chat On Steroids Core root /strata invalid). Source claims below are **historical reports**, not rerun hardware measurements. No model weights or protected local evidence were accessed in this audit.
 
 ## Answer first
 
@@ -10,8 +10,9 @@
 
 1. Reconciled main HEAD, open PRs and current #268 test/benchmark documentation; did not equate PR content with merged software.
 2. Found and patched journal stale-terminal/torn-verdict fail-open behavior on PR #269; fsynced tmp verdict and added regression tests. CI started for the new head; final result not yet available at audit snapshot.
-3. Created an audit branch with all twelve user-specified deliverables, including machine-readable status/finding/model manifests.
-4. Corrected stale MoE Gen-1 dataset documentation to match the merged 2,048-token drop-not-truncate builder and optional Self-OSS source.
+3. Added pre-load witness input validation and CPU-only negative tests to int8 PR #268 (commit 24f2f886, CI started).
+4. Created an audit branch with all twelve user-specified deliverables, including machine-readable status/finding/model manifests.
+5. Corrected stale MoE Gen-1 dataset documentation to match the merged 2,048-token drop-not-truncate builder and optional Self-OSS source.
 
 ## Principal blockers
 

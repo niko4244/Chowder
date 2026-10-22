@@ -2,7 +2,7 @@
   "schema": "chowder.audit-test-results.v1",
   "date": "2026-10-22",
   "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
-  "moe_pr_268_sha": "fe94342c1073eb39e69be01ba224c63b38057b95",
+  "moe_pr_268_sha": "24f2f8865b215b477796364b1ec30e944d5ec087",
   "journal_pr_269_sha": "e3f0fbd77bc679ea9a856461294cd26b40316562",
   "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
   "session_test_runs": [],
@@ -50,11 +50,20 @@
     "workflow_run_id": 39750310076,
     "status_at_last_query": "in_progress",
     "conclusion": null,
-    "url": "https://github.com/niko4244/Chowder/actions/runs/39750310076"
+    "url": "https://github.com/niko4244/Chowder/actions/runs/39750310076",
+    "completed_jobs_at_last_query": [
+      "linux_py3.10_success",
+      "linux_py3.11_success",
+      "linux_py3.12_success",
+      "windows_py3.12_success",
+      "lint_build_success"
+    ]
   },
   "new_regression_tests": [
     "test_a_later_interrupted_start_cannot_borrow_an_old_terminal",
-    "test_corrupt_or_unverified_terminal_journal_fails_closed"
+    "test_corrupt_or_unverified_terminal_journal_fails_closed",
+    "test_bad_witness_args_refuse_before_model_load",
+    "test_unusable_calibration_refuses_before_model_load"
   ],
   "new_test_status": "committed, not yet independently run in this session",
   "blocked_tests": [
@@ -68,5 +77,11 @@
     "python -m pytest tests/test_growth_campaign_runner.py tests/test_growth_campaign.py tests/test_growth_kaggle_campaign.py tests/test_moe_campaign_plumbing.py -q",
     "ruff check src tests",
     "python chowder_batch/moe_int8_gates.py --base-model <artifact> --arms int8 --steps 3 --seq-len 2048 --out <new-result.json>"
-  ]
+  ],
+  "new_int8_preflight_commit": "24f2f8865b215b477796364b1ec30e944d5ec087",
+  "new_int8_preflight_ci": {
+    "workflow_run_id": 39751860841,
+    "status_at_last_query": "in_progress",
+    "conclusion": null
+  }
 }

@@ -1,6 +1,6 @@
 # Custom Qwen MoE completion register
 
-> Audit snapshot: 2026-10-22 UTC. Main 0bc566c5db052b90e3aa1223fef94445d1045dc5; PR #268 fe94342c1073eb39e69be01ba224c63b38057b95; recovery PR #269 e3f0fbd77bc679ea9a856461294cd26b40316562. GitHub code and published evidence were inspected; local Windows workspace inaccessible (Chat On Steroids Core root /strata invalid). Source claims below are **historical reports**, not rerun hardware measurements. No model weights or protected local evidence were accessed in this audit.
+> Audit snapshot: 2026-10-22 UTC. Main 0bc566c5db052b90e3aa1223fef94445d1045dc5; PR #268 24f2f8865b215b477796364b1ec30e944d5ec087; recovery PR #269 e3f0fbd77bc679ea9a856461294cd26b40316562. GitHub code and published evidence were inspected; local Windows workspace inaccessible (Chat On Steroids Core root /strata invalid). Source claims below are **historical reports**, not rerun hardware measurements. No model weights or protected local evidence were accessed in this audit.
 
 ## Scope and lineage
 
@@ -9,7 +9,7 @@ The custom MoE in active engineering is Qwen3.6-35B-A3B REAP pruned to 128 route
 ## Verified via committed code or PR evidence
 
 - Main contains REAP observation/pruning, eval and serving programs, full REAP promotion judge specification, Gen-1 training-data provider, BF16 layer-bulk transfer code, and preservation of model/evidence lineage.
-- #268 contains int8 fused expert loader and quantization, placement instrumentation, real REAP160 26-shard census, 20-step RTX 5060 Ti training history, throughput A/B, router/gradient/smoke witness collectors and Kaggle capacity/real-load attempts.
+- #268 contains int8 fused expert loader and quantization, placement instrumentation, real REAP160 26-shard census, 20-step RTX 5060 Ti training history, throughput A/B, router/gradient/smoke witness collectors and Kaggle capacity/real-load attempts. Audit commit 24f2f886 adds early calibration/flag validation; full CI not yet reported complete.
 - #268 reports 40 expert layers, top-8 routing, approximately 18.82 GiB int8 expert grid plus scales and 4.55 GiB BF16 non-expert parameters, but live full-file hashes cannot be verified here.
 
 ## Incomplete for finished model

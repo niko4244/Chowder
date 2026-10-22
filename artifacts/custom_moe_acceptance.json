@@ -2,7 +2,7 @@
   "schema": "chowder.custom-moe-acceptance.v1",
   "date": "2026-10-22",
   "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
-  "moe_pr_268_sha": "fe94342c1073eb39e69be01ba224c63b38057b95",
+  "moe_pr_268_sha": "24f2f8865b215b477796364b1ec30e944d5ec087",
   "journal_pr_269_sha": "e3f0fbd77bc679ea9a856461294cd26b40316562",
   "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
   "overall": "BLOCKED",

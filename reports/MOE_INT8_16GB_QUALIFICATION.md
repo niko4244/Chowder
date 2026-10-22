@@ -1,6 +1,6 @@
 # REAP-MoE int8 / 16 GB qualification
 
-> Audit snapshot: 2026-10-22 UTC. Main 0bc566c5db052b90e3aa1223fef94445d1045dc5; PR #268 fe94342c1073eb39e69be01ba224c63b38057b95; recovery PR #269 e3f0fbd77bc679ea9a856461294cd26b40316562. GitHub code and published evidence were inspected; local Windows workspace inaccessible (Chat On Steroids Core root /strata invalid). Source claims below are **historical reports**, not rerun hardware measurements. No model weights or protected local evidence were accessed in this audit.
+> Audit snapshot: 2026-10-22 UTC. Main 0bc566c5db052b90e3aa1223fef94445d1045dc5; PR #268 24f2f8865b215b477796364b1ec30e944d5ec087; recovery PR #269 e3f0fbd77bc679ea9a856461294cd26b40316562. GitHub code and published evidence were inspected; local Windows workspace inaccessible (Chat On Steroids Core root /strata invalid). Source claims below are **historical reports**, not rerun hardware measurements. No model weights or protected local evidence were accessed in this audit.
 
 ## Artifact and measured evidence
 
@@ -37,6 +37,7 @@ References: [PR #268](https://github.com/niko4244/Chowder/pull/268), `docs/quals
 
 ## Work remaining / precise acceptance
 
+0. Review #268's added preflight tests: malformed/empty/too-short calibration now refuses before expensive full-checkpoint load; verify this in CI.
 1. When explicitly authorized and card is idle, rerun sanctioned 3-step placement under the *current retention default*; capture both allocator figures and OS WDDM shared-memory basis.
 2. Record 20+ optimizer steps and independent adapter reload with loss windows; collect LoRA-leaf gradients on required layers and entropy windows from real router data, then import its signed/config-matched witness into the generated prereg table.
 3. Run BF16 bulk / int8 bulk A/B under matched model/config/seq; preserve noise floor, first-touch, link measurement, RSS and PCIe capacity. Do not confuse per-layer synthetic numbers with whole training-step time.
