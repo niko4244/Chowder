@@ -501,22 +501,51 @@ def _log_load(message: str) -> None:
 
 def _shard_files(base: Path) -> list[Path]:
     """Every safetensors shard of a local checkpoint, in index order when there
-    is an index (a sharded checkpoint's order is the index's, not the name's)."""
+    is an index (a sharded checkpoint's order is the index's, not the name's).
+
+    Reject malformed index entries and any unindexed shard: silently reading a
+    different set of weight files is not a valid checkpoint load. Membership is
+    kept in a set rather than an O(shards) scan for every tensor in weight_map.
+    """
     index_path = base / "model.safetensors.index.json"
     shards: list[Path] = []
     if index_path.is_file():
         index = json.loads(index_path.read_text(encoding="utf-8"))
-        for name in (index.get("weight_map") or {}).values():
-            path = base / str(name)
-            if path not in shards:
-                shards.append(path)
-    if not shards:
+        weight_map = index.get("weight_map") if isinstance(index, dict) else None
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError(f"invalid or empty safetensors weight_map in {index_path}")
+        seen: set[str] = set()
+        for name in weight_map.values():
+            # Shard names in the HF index are flat basenames, never a path to
+            # arbitrary data. In particular, reject '..', absolute paths and
+            # Windows-style separators even when running on POSIX.
+            if (
+                not isinstance(name, str)
+                or not name
+                or name in (".", "..")
+                or "/" in name or "\\" in name or ":" in name
+                or not name.endswith(".safetensors")
+            ):
+                raise ValueError(f"unsafe or invalid safetensors shard name {name!r} in {index_path}")
+            if name not in seen:
+                seen.add(name)
+                shards.append(base / name)
+        actual = {path.name for path in base.glob("*.safetensors")}
+        if actual != seen:
+            raise ValueError(
+                f"safetensors index disagrees with files in {base}: "
+                f"unindexed={sorted(actual - seen)[:3]}, missing={sorted(seen - actual)[:3]}"
+            )
+    else:
         shards = sorted(base.glob("*.safetensors"))
     if not shards:
         raise FileNotFoundError(f"no safetensors shards under {str(base)!r}")
     missing = [str(path) for path in shards if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"the safetensors index names shards that are missing: {missing[:3]}")
+    linked = [str(path) for path in shards if path.is_symlink()]
+    if linked:
+        raise ValueError(f"safetensors shards must be local regular files, not symlinks: {linked[:3]}")
     return shards
 
 
