@@ -967,5 +967,86 @@
       "independent frozen judge and postjudge owner N5 absent",
       "derivative and Fable/Ornith redistribution licensing unverified"
     ]
+  },
+  "review_model_build_followup_20261022": {
+    "schema": "chowder.review-model-build.v1",
+    "date": "2026-10-22",
+    "engineering_pr": 277,
+    "engineering_head": "4cdc17c51dde11aeb144b88799d60dcdb382d8c3",
+    "draft_unmerged": true,
+    "main_head": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+    "engineering_ci": {
+      "head": "4cdc17c51dde11aeb144b88799d60dcdb382d8c3",
+      "status": "SIX_SUCCESS",
+      "successful_checks": 6,
+      "total_checks": 6,
+      "run_id": "39905287669"
+    },
+    "cpu_focus": {
+      "head": "4cdc17c51dde11aeb144b88799d60dcdb382d8c3",
+      "passed": 462,
+      "skipped": 0,
+      "failed": 0,
+      "test_files": [
+        "tests/test_reap_prune.py",
+        "tests/test_reap_build_preflight.py",
+        "tests/test_reap_gates.py",
+        "tests/test_reap_select.py",
+        "tests/test_reap_calibration.py",
+        "tests/test_growth_campaign_runner.py",
+        "tests/test_growth_cli_settlement_auth.py",
+        "tests/test_growth_gen2_judge.py",
+        "tests/test_reap_moe_judge.py",
+        "tests/test_growth_compute_cost_json.py",
+        "tests/test_growth_budget_settlement.py",
+        "tests/test_growth_settlement_adversarial.py"
+      ],
+      "includes_previous_ten_file_regressions": true
+    },
+    "historical_only": {
+      "previous_ten_file_head": "05117214ba49326749e98a255d4e86dc242c49ca",
+      "previous_ten_file_passed": 425,
+      "previous_full_head": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "previous_full_passed": 4117,
+      "previous_full_skipped": 78,
+      "do_not_add_or_transfer_counts": true
+    },
+    "fixes": {
+      "CH-072": "fa345f3",
+      "CH-073": "a4ce956",
+      "direct_script_correction": "4cdc17c"
+    },
+    "real_readonly_v1_preflight": {
+      "arm": "reap160",
+      "status": "PREREQUISITES_VALIDATED_NOT_BUILT",
+      "frozen_v1_calibration_rows": 384,
+      "full_observer_layers": 40,
+      "observed_calibration_ppl": 10.646096340629155,
+      "calibration_sha256": "d43c1f8d49d8d7c70872367ba8a56e7052a3dd49351463eed292fd122a631725",
+      "observer_sha256": "3d5446d58316d085240eb3561e2ca87352faf92222f827110ebd17799e8098c0",
+      "original_model_config_sha256": "93a4693fa9d8392fbfccd4b3c9873f4bfdcb14fdede978b123d07d19675efe99",
+      "original_model_index_sha256": "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
+      "source_shard_index_files": 26,
+      "no_shards_read_or_written": true
+    },
+    "real_v2_preflight": {
+      "arm": "reap128_v2",
+      "status": "REFUSED",
+      "reason": "no genuine v2 observer matching the supplied calibration",
+      "existing_ornith_calibration_render": "worked",
+      "frozen_prereg_ornith_render": "bare",
+      "no_output_written": true
+    },
+    "model_release_verdict": "BLOCKED",
+    "remaining": [
+      "mandatory REAP128_v2 checkpoint and full D0 and paired frozen evaluations absent",
+      "existing 717-row Ornith worked calibration not frozen registered bare",
+      "REAP160 frozen fit/speed still UNKNOWN without accepted native evidence",
+      "real VRAM/WDDM/LoRA training and <=2.5 GPU-hour budget unqualified",
+      "independent frozen judge, postjudge N5 and derivative/data license release authority absent"
+    ],
+    "frozen_gate_changes": false,
+    "new_gpu_operations": false,
+    "production_merge_or_release": false
   }
 }

@@ -1,7 +1,7 @@
 # Custom Qwen MoE release qualification (not a release)
 
 <!-- CHOWDER_LATEST_VERIFIED_20261022 -->
-> **Latest pinned review evidence:** PR #277 `05117214ba49326749e98a255d4e86dc242c49ca` (SIX_SUCCESS, draft/unmerged). See latest Gate0 follow-up at end. Earlier results remain historical.
+> **Latest pinned review evidence:** PR #277 `4cdc17c51dde11aeb144b88799d60dcdb382d8c3` (SIX_SUCCESS, draft/unmerged). See final model-build preflight addendum; prior evidence retained at its measured revisions.
 
 > Final audit 2026-10-22. Main 0bc566c5; MoE PR268 184291f; recovery PR269 cf54480 with local 82-test verification; REAP PR271 73f1593. GitHub and read-only Windows workspaces inspected, 39 model files independently SHA-256 verified twice. No GPU training was started in this audit. Frozen gates and required approvals remain binding.
 
@@ -205,3 +205,15 @@ These are **CPU-proven code safeguards**, not a successful REAP128_v2 build, fro
 
 This remains **review-branch CPU-only** assurance. Missing REAP128_v2, registration-eligible Ornith calibration and D0, actual paired benchmarks, GPU throughput/budget evidence, independent frozen judge, N5 approval and derivative rights keep Gen-0 selection, Gen-1 certification and release **BLOCKED**. No GPU run, release, main merge or protected model edit occurred.
 <!-- CHOWDER_GATE0_FOLLOWUP_20261022_END -->
+
+<!-- CHOWDER_MODEL_BUILD_FOLLOWUP_20261022_BEGIN -->
+## Subsequent frozen REAP model-build readiness
+
+**Current pinned engineering review:** [PR #277](https://github.com/niko4244/Chowder/pull/277) at `4cdc17c51dde11aeb144b88799d60dcdb382d8c3`; **SIX_SUCCESS** CI, draft and not merged. Current exact-commit CPU regression across twelve named files: **462 passed, 0 skipped, zero failed**. Previous 425 focused passes were measured at `0511721` only; the earlier complete 4,117-pass/78-skip suite belongs to `84dbb2e` only and is not a new full-suite run.
+
+**CH-072 (P1):** Fail-closed REAP pruning now verifies the exact indexed-versus-present tensor census and source saliency shape/values, refuses pre-existing output directories, records 40-layer observation hashes when supplied, and atomically publishes a complete checkpoint from a temporary directory. Adversarial tests reproduced overwrites, extra/missing tensor admission and partially published checkpoints in older code.
+
+**CH-073 (P1):** A new read-only arm-aware preflight validates the original 40-layer/256-expert/top-8 model index, v1 or v2 SHA-matched calibration/Ornith evidence, all forty small CPU observer tensor files and full D0 before emitting a deterministic unexecuted prune command. An integrated direct-script import defect was reproduced and corrected before this review checkpoint. Real v1 REAP160 preflight passed (384 sequences, D0 PPL 10.646); the unmatched v2 observer was refused. No model shards were opened, changed or produced by these preflights.
+
+**Release qualification remains BLOCKED:** frozen REAP128_v2 build, full D0, the registered paired evaluations, 14.5 GiB/WDDM/20-step LoRA and 2.5-hour budget, independent judge/N5 and derivative/data licensing have not been established. Neither an input preflight nor CPU regression constitutes selection, training or promotion. Frozen thresholds, main, rescue, weights and Qwen3.8 Native Sparse are untouched.
+<!-- CHOWDER_MODEL_BUILD_FOLLOWUP_20261022_END -->
