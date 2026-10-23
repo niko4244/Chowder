@@ -1,7 +1,7 @@
 # Custom Qwen MoE completion register
 
 <!-- CHOWDER_LATEST_VERIFIED_20261022 -->
-> **Latest pinned review evidence:** PR #277 `84dbb2e9151a0cd9be70a00f167271953ca38d92` (SIX_SUCCESS, draft/unmerged); continuation addendum at end. The earlier 10a0044 evidence is preserved as a separate historical checkpoint.
+> **Latest pinned review evidence:** PR #277 `0522b688e525852c6bb18ecb613a92b39b963fe0` (SIX_SUCCESS, draft/unmerged). See the latest safety follow-up at end. All earlier review results remain separately pinned historical checkpoints.
 
 > Final audit 2026-10-22. Main 0bc566c5; MoE PR268 184291f; recovery PR269 cf54480 with local 82-test verification; REAP PR271 73f1593. GitHub and read-only Windows workspaces inspected, 39 model files independently SHA-256 verified twice. No GPU training was started in this audit. Frozen gates and required approvals remain binding.
 
@@ -169,3 +169,15 @@ The v2 calibration manifest exists but its worked Ornith variant is not eligible
 
 This is **review-only CPU evidence**, not proof of model speed, selection, device-resident training or budget feasibility. Existing v2 Ornith `worked` is outside frozen preregistration, REAP128_v2 and full D0 are absent, v1 Gate1 failed, frozen judge/N5 approval is absent, licensing is unverified, and no release or GPU qualification is authorized. `main`, rescue and the independent Qwen3.8 Native Sparse project are unchanged.
 <!-- CHOWDER_CONTINUATION_20261022_END -->
+
+<!-- CHOWDER_SAFETY_FOLLOWUP_20261022_BEGIN -->
+## Subsequent CPU safety follow-up
+
+**Current engineering review:** [PR #277](https://github.com/niko4244/Chowder/pull/277) at `0522b688e525852c6bb18ecb613a92b39b963fe0`, **SIX_SUCCESS** CI, draft and not merged. Fresh exact-head CPU regression across ten named files: **411 passed, 0 skipped, zero failed**. Previous complete suite (4,117 passed, 78 skipped) was measured at old `84dbb2e` only, never silently attributed to this updated head.
+
+- **CH-068 (P1):** REAP per-item GSM8K/HumanEval quality requires boolean `correct`; downstream float conversion cannot inflate the frozen paired bound.
+- **CH-069 (P2):** Paid native attempt replay must match its original pre-run receipt mode, strictly typed index, recipe, and terminal status.
+- **CH-070 (P1):** Frozen REAP/Gen2 judges compare the cycle, parent and candidate record identity to the declared campaign before certifying cost.
+
+These are **CPU-proven code safeguards**, not a successful REAP128_v2 build, frozen paired evaluation, GPU LoRA training, independent frozen judge, owner N5 attestation or licensing clearance. The existing release, Gen-0 selection and Gen-1 certification gates remain **BLOCKED**. Frozen thresholds, weight/data inputs, main, rescue and independent Qwen3.8 Native Sparse program are unchanged.
+<!-- CHOWDER_SAFETY_FOLLOWUP_20261022_END -->

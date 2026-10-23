@@ -549,5 +549,69 @@
       "includes_targeted_tests": true,
       "do_not_add_pass_counts_to_targeted_suites": true
     }
+  },
+  "review_safety_followup_20261022": {
+    "schema": "chowder.review-safety-followup.v1",
+    "date": "2026-10-22",
+    "engineering_pr": 277,
+    "engineering_head": "0522b688e525852c6bb18ecb613a92b39b963fe0",
+    "main_merged": false,
+    "main_head": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+    "ci": {
+      "engineering_head": "0522b688e525852c6bb18ecb613a92b39b963fe0",
+      "status": "SIX_SUCCESS",
+      "successful_checks": 6,
+      "total_checks": 6
+    },
+    "cpu_focus": {
+      "head": "0522b688e525852c6bb18ecb613a92b39b963fe0",
+      "passed": 411,
+      "skipped": 0,
+      "failed": 0,
+      "files": [
+        "tests/test_reap_gates.py",
+        "tests/test_reap_select.py",
+        "tests/test_reap_calibration.py",
+        "tests/test_reap_moe_judge.py",
+        "tests/test_growth_gen2_judge.py",
+        "tests/test_growth_compute_cost_json.py",
+        "tests/test_growth_budget_settlement.py",
+        "tests/test_growth_campaign_runner.py",
+        "tests/test_growth_cli_settlement_auth.py",
+        "tests/test_growth_settlement_adversarial.py"
+      ]
+    },
+    "fixes": [
+      {
+        "id": "CH-068",
+        "isolated_commit": "48db204aaa46d6ca27021157ae8249729b056d9f",
+        "status": "COMPLETED_DRAFT"
+      },
+      {
+        "id": "CH-069",
+        "isolated_commit": "5177b9c896ec3092cbabfeded34c39e989115438",
+        "status": "COMPLETED_DRAFT"
+      },
+      {
+        "id": "CH-070",
+        "isolated_commit": "798d21e3fe856865674a557dfcf729faf803a2ff",
+        "status": "COMPLETED_DRAFT"
+      }
+    ],
+    "previous_full_suite_only": {
+      "head": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "passed": 4117,
+      "skipped": 78,
+      "is_current_head": false
+    },
+    "release_status": "BLOCKED",
+    "frozen_prerequisites": [
+      "REAP128 v1 GSM8K Gate1 failed, mandatory v2/fallback evaluation absent",
+      "existing Ornith worked render is not preregistered",
+      "REAP128_v2 checkpoint and genuine full D0 observation absent",
+      "2.5 GPU-hour recipe and real 14.5 GB/20-step hardware qualification unverified",
+      "independent frozen judge and explicit postjudge owner N5 absent",
+      "Fable/Ornith/derivative redistribution licenses unresolved"
+    ]
   }
 }
