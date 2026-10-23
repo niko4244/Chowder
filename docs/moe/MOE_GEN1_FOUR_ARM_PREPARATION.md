@@ -63,3 +63,10 @@ checkpoint/adapter reload, execution-verified evaluations, cross-arm comparison,
 cumulative budget settlement, lineage ancestry, frozen judge, and N5 owner
 approval remain independent mandatory evidence. Do not use the project files
 to bypass campaign admission or promote any candidate.
+
+Checkpoint provenance is fail-closed: a pre-existing `trainer/checkpoint-*`
+without its original `chowder-checkpoint-manifest.json` cannot be claimed by a
+new training run. When checkpoints already exist, a manifest cannot gain
+previously absent recipe, dataset, parent-adapter, base or expert-arithmetic
+bindings retroactively. Use a fresh trial directory instead; merely rewriting
+an old manifest would not prove the optimizer state came from those inputs.

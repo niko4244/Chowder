@@ -872,24 +872,35 @@ class TransformersPeftExecutor:
         manifest_path = trainer_dir / _CHECKPOINT_MANIFEST_NAME
         payload_dict = dict(bound_inputs)
         payload = json.dumps(payload_dict, sort_keys=True, indent=2) + "\n"
+        # The manifest certifies the inputs under which *existing* checkpoint
+        # state was produced. It must precede the first checkpoint: writing a
+        # fresh manifest into an orphaned legacy trainer directory otherwise
+        # launders its pre-existing optimizer/RNG state into today's recipe.
+        # A checkpoint-* entry may also be an incomplete/crashed write; that
+        # is not evidence for retroactively claiming an input identity.
+        has_checkpoint = any(child.name.startswith("checkpoint-")
+                             for child in trainer_dir.iterdir())
+        if has_checkpoint and not manifest_path.is_file():
+            raise RuntimeError(
+                f"cannot create checkpoint manifest in {trainer_dir}: pre-existing "
+                "checkpoint state has no original input witness; start a fresh "
+                "trainer directory or use an already authenticated checkpoint"
+            )
         if manifest_path.is_file():
             recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
             if not isinstance(recorded, Mapping):
                 raise RuntimeError(f"checkpoint manifest {manifest_path} is not a JSON object")
-            if ("expert_numeric_mode" in payload_dict
-                    and "expert_numeric_mode" not in recorded
-                    and any(child.is_dir() and child.name.startswith("checkpoint-")
-                            for child in trainer_dir.iterdir())):
+            missing = [key for key in payload_dict if key not in recorded]
+            if has_checkpoint and missing:
                 raise RuntimeError(
-                    f"cannot retroactively certify expert_numeric_mode on existing "
-                    f"checkpoint state in {trainer_dir}; the original numeric mode "
-                    "was not recorded"
+                    f"cannot retroactively certify missing bound inputs {sorted(missing)} "
+                    f"on existing checkpoint state in {trainer_dir}; the original "
+                    "manifest never recorded those input identities"
                 )
-            # A strictly-subset manifest (written before a binding existed) is
-            # upgraded in place: the new manifest is strictly more evidence
-            # about the same inputs, never less. Any recorded value that
-            # disagrees, or any recorded binding the current spec cannot
-            # reproduce, is still a refusal.
+            # Subset manifests may only be upgraded before any checkpoint was
+            # written: additions to a historical checkpoint are *claims* about
+            # old computation, not additional contemporaneous evidence. Any
+            # recorded disagreement or lost binding is likewise a refusal.
             conflicts = {
                 key: {"existing": value, "requested": payload_dict[key]}
                 for key, value in recorded.items()
