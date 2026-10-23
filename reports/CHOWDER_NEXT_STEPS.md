@@ -1,5 +1,11 @@
 # Chowder prioritized engineering backlog
 
+<!-- CHOWDER_CURRENT_20261023_677531b -->
+> **Current engineering evidence:** Draft PR #277 at `677531b26d83c73fd04e63a1cb3dd8c7c0f6d888`. Exact-head focused CPU tests: 207 passed, zero failed; Ruff PASS. Exact-head GitHub CI run `39997361954` was QUEUED at audit capture; no new six-success claim. Earlier f9317e3 six-success remains historical.
+>
+> **Scientific decision:** Real registered Gen-0 selector at 44b244f remains **BLOCKED**, no selected model. Frozen REAP128_v2 D0 and 35B local inference were NOT run. Gen-1 full 2048-token screening passed, but the real historical 1000-step INT8 timing projects ~7.63 GPU-hours vs the 2.5 GPU-hour per-trial limit; no four trained adapters or improvement exists. CH-094 through CH-096 record evaluator identity, observer CUDA lifetime and honest trial-budget hardening. No N5 promotion, rights clearance, or release.
+
+
 <!-- CHOWDER_CURRENT_20261023_f9317e3 -->
 > **Current engineering evidence (2026-10-23):** draft PR #277 at `f9317e369ede7bf1fa738a52014762377d83dc0e`. Selected Windows CPU tests: 146 passed, zero failed, Ruff pass. GitHub Actions run 39982686639 was **IN_PROGRESS** when recorded; no six-success claim for this revision. Prior `f36b458` six-success belongs to its earlier HEAD.
 >

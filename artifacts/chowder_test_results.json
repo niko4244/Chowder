@@ -1292,5 +1292,71 @@
       "right_to_redistribute": "UNVERIFIED",
       "reap160_5060_ti_inference": "NOT_DEMONSTRATED"
     }
+  },
+  "review_20261023_677531b": {
+    "source": "Windows connected workspace, registered source receipts and exact git commits",
+    "engineering_pr": 277,
+    "engineering_head": "677531b26d83c73fd04e63a1cb3dd8c7c0f6d888",
+    "engineering_ci": {
+      "run_id": 39997361954,
+      "head": "677531b26d83c73fd04e63a1cb3dd8c7c0f6d888",
+      "status_at_capture": "QUEUED",
+      "conclusion_at_capture": null
+    },
+    "engineering_local_tests": {
+      "revision": "677531b26d83c73fd04e63a1cb3dd8c7c0f6d888",
+      "selected_test_modules": 9,
+      "passed": 207,
+      "failed": 0,
+      "warnings": 1,
+      "ruff": "PASS",
+      "scope": "REAP observer, eval resumability, gates and Gen1 input/budget tests"
+    },
+    "changes": {
+      "reap_eval_resume": {
+        "commit": "44b244f0177e870eb42e2991dc52e115567143e4",
+        "state": "FIXED_CPU_TESTED",
+        "limitation": "Existing unbound historical evaluations not retroactively model-attested"
+      },
+      "reap_observer_memory": {
+        "commit": "776f377",
+        "state": "FIXED_CPU_TESTED",
+        "limitation": "No real 35B VRAM/runtime/D0 trial after code change"
+      },
+      "gen1_budget_admission": {
+        "commit": "677531b",
+        "state": "FIXED_CPU_TESTED",
+        "required_steps": 1000,
+        "per_arm_gpu_hour_ceiling": 2.5,
+        "historical_int8_step_seconds": 27.48,
+        "historical_1000_step_gpu_hours_projection": 7.63,
+        "historical_receipt_admission": "REFUSED_MISSING_MODEL_METADATA_IDENTITY"
+      }
+    },
+    "real_registered_selector": {
+      "revision": "44b244f0177e870eb42e2991dc52e115567143e4",
+      "status": "BLOCKED",
+      "chosen": null,
+      "reason": "amendment 4 requires both REAP128_v2 and REAP160 full gates",
+      "receipt_sha256": "44ef1d17ef3da04e0183bf162209d72ec547d4bb345403ad9c5dd8b29d66c5e5"
+    },
+    "gen0": {
+      "reap128_v2_model_exists": false,
+      "full_v2_d0": "NOT_MEASURED",
+      "registered_704_row_input_admission": "PASS_ONLY_INPUTS",
+      "selected": false
+    },
+    "gen1": {
+      "screening_2048": "READY_INPUT_ONLY",
+      "four_trained_adapters": false,
+      "independent_improvement": "NOT_MEASURED",
+      "per_arm_budget_feasibility": "NOT_DEMONSTRATED"
+    },
+    "runtime": {
+      "reap160_rtx5060ti_inference": "NOT_DEMONSTRATED",
+      "production_main_merged": false,
+      "N5_approved": false,
+      "weight_rights_cleared": false
+    }
   }
 }
