@@ -14,18 +14,31 @@ from chowder_batch.reap_observe import (
 )
 
 
+def _assert_finite_exact_parity(reference, assigned):
+    assert torch.isfinite(reference).all(), "reference decoder output is nonfinite"
+    assert torch.isfinite(assigned).all(), "assigned decoder output is nonfinite"
+    torch.testing.assert_close(assigned, reference, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("block_type", ["linear_attention", "full_attention"])
 def test_qwen_moe_bf16_forward_parity_and_shared_weight_storage(block_type):
     tc = Qwen3_5MoeTextConfig(
-        hidden_size=32, num_hidden_layers=1, num_attention_heads=4,
+        vocab_size=64, hidden_size=32, num_hidden_layers=1, num_attention_heads=4,
         num_key_value_heads=2, head_dim=8, linear_key_head_dim=8,
         linear_value_head_dim=8, linear_num_key_heads=2,
         linear_num_value_heads=2, moe_intermediate_size=16,
         shared_expert_intermediate_size=16, num_experts=4,
         num_experts_per_tok=2, layer_types=[block_type],
     )
-    original = M.Qwen3_5MoeDecoderLayer(tc, 0).to(torch.bfloat16).eval()
+    # A bare decoder has torch.empty expert projections. Construct the tiny
+    # model so its post_init() initializes those weights like a real checkpoint.
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(20261023)
+        original = M.Qwen3_5MoeTextModel(tc).layers[0].to(torch.bfloat16).eval()
     checkpoint = {key: value.clone() for key, value in original.state_dict().items()}
+    assert checkpoint
+    assert all(torch.isfinite(tensor).all() for tensor in checkpoint.values())
+    assert checkpoint["mlp.experts.gate_up_proj"].abs().sum() > 0
     assigned = _load_layer_without_duplicate_weights(
         M.Qwen3_5MoeDecoderLayer, tc, 0, torch.bfloat16, checkpoint,
     ).eval()
@@ -48,7 +61,13 @@ def test_qwen_moe_bf16_forward_parity_and_shared_weight_storage(block_type):
     with torch.inference_mode():
         expected = original(x, position_embeddings=pe, attention_mask=mask, position_ids=pos)
         got = assigned(x, position_embeddings=pe, attention_mask=mask, position_ids=pos)
-    torch.testing.assert_close(got, expected, rtol=0, atol=0)
+    _assert_finite_exact_parity(expected, got)
+
+
+def test_matching_nan_outputs_are_not_accepted_as_parity():
+    poisoned = torch.full((1, 7, 32), float("nan"), dtype=torch.bfloat16)
+    with pytest.raises(AssertionError, match="reference decoder output is nonfinite"):
+        _assert_finite_exact_parity(poisoned, poisoned.clone())
 
 
 def test_assignment_refuses_implicit_checkpoint_dtype_change():
