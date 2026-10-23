@@ -521,6 +521,40 @@ def test_the_predicted_input_paths_are_exactly_what_preparation_writes(
     assert prepared_input_paths(out_dir) == dict(prepared.inputs)
 
 
+def test_declared_gen1_length_reaches_actual_trainer_template(tmp_path: Path) -> None:
+    """The 2,048-token admitted REAP mix must not be trained at legacy 512."""
+    document = _manifest_document(tmp_path)
+    document["training_backend"] = {
+        "provider": "local", "config": {"max_length": 2048}
+    }
+    manifest = _load_manifest(tmp_path, document)
+    out_dir = tmp_path / "prepared"
+    prepare_campaign(
+        manifest, out_dir=out_dir, parent_evidence=_parent_evidence(tmp_path / "gen1"),
+        probe=_probe, slice_source=_slice_source(),
+    )
+    project = json.loads((out_dir / "project-template.json").read_text(encoding="utf-8"))
+    assert project["config"]["backend"]["max_length"] == 2048
+
+
+@pytest.mark.parametrize("invalid", [True, False, 0, -1, "2048", 2048.0])
+def test_declared_invalid_training_length_refuses_before_project_write(
+    tmp_path: Path, invalid: object,
+) -> None:
+    document = _manifest_document(tmp_path)
+    document["training_backend"] = {
+        "provider": "local", "config": {"max_length": invalid}
+    }
+    manifest = _load_manifest(tmp_path, document)
+    out_dir = tmp_path / "prepared"
+    with pytest.raises(CampaignPrepareRefusal, match="max_length"):
+        prepare_campaign(
+            manifest, out_dir=out_dir, parent_evidence=_parent_evidence(tmp_path / "gen1"),
+            probe=_probe, slice_source=_slice_source(),
+        )
+    assert not (out_dir / "project-template.json").exists()
+
+
 def test_the_prepared_corpus_records_its_providers_and_passes_the_gate(
     tmp_path: Path,
 ) -> None:

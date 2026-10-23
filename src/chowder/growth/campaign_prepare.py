@@ -1427,6 +1427,15 @@ def _write_project_template(
     dataset_format = str(training_settings.get("dataset_format", "text"))
     messages_field = str(training_settings.get("messages_field", "messages"))
     tools_field = str(training_settings.get("tools_field", ""))
+    declared_max_length = training_settings.get("max_length")
+    if declared_max_length is not None and (
+        type(declared_max_length) is not int or declared_max_length <= 0
+    ):
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: the project template derived from "
+            f"{manifest.cycle_id} declares invalid training_backend.config.max_length "
+            f"{declared_max_length!r}; expected a positive integer token limit"
+        )
     # Unset means "today's value": the in-run evaluation has always been
     # declared ``offload``, and only a declaration that says otherwise moves it.
     evaluation_placement = (
@@ -1507,6 +1516,7 @@ def _write_project_template(
                 dataset_format=dataset_format,
                 messages_field=messages_field,
                 tools_field=tools_field,
+                max_length=declared_max_length,
             ),
             "evaluation": {
                 "type": "transformers-text",
@@ -1549,6 +1559,7 @@ def _trainer_backend(
     messages_field: str,
     tools_field: str,
     expert_pinning: str = "none",
+    max_length: int | None = None,
 ) -> dict[str, Any]:
     """The project template's trainer backend, with the declared MoE settings.
 
@@ -1564,7 +1575,10 @@ def _trainer_backend(
         "base_model": str(manifest.base_model_path),
         "dataset": "{corpus}",
         "dataset_format": dataset_format,
-        "max_length": 512,
+        # Preserve 512 for legacy declarations, but carry an explicit frozen
+        # Gen-1 length through to the actual Trainer. A corpus screened at
+        # 2,048 must not silently train at 512 and clip its answer spans.
+        "max_length": 512 if max_length is None else max_length,
         "precision": "bf16",
         "quantization": "none",
         "trust_remote_code": False,
