@@ -1430,5 +1430,71 @@
       "N5_approved": false,
       "weight_rights_cleared": false
     }
+  },
+  "review_20261023_ac93f8c": {
+    "engineering_pr": 277,
+    "engineering_head": "ac93f8cc236e09308dc15783ef881e9af3857bf8",
+    "local_tests": {
+      "head": "ac93f8cc236e09308dc15783ef881e9af3857bf8",
+      "selected": 215,
+      "skipped": 0,
+      "failed": 0,
+      "warnings": 1,
+      "ruff": "PASS",
+      "scope": "ten CPU-only selected REAP/Gen1 suites"
+    },
+    "ci_at_capture": {
+      "run_id": 40025442552,
+      "head": "ac93f8cc236e09308dc15783ef881e9af3857bf8",
+      "status": "QUEUED",
+      "conclusion": null
+    },
+    "historical_ci_failure": {
+      "head": "677531b26d83c73fd04e63a1cb3dd8c7c0f6d888",
+      "run_id": 39997361954,
+      "status": "COMPLETED",
+      "conclusion": "FAILURE",
+      "jobs_success": 5,
+      "failed_job": "real transformers peft cpu smoke",
+      "failure": "test_reap_observe_layer_assignment.py linear_attention synthetic bare decoder held uninitialized torch.empty expert parameters which could produce NaNs on Linux",
+      "fix_commit": "ac93f8c",
+      "fix_explanation": "Tiny seeded Qwen3_5MoeTextModel performs post_init; reference and assigned BF16 outputs must both be finite and match exactly; NaN-vs-NaN is explicitly rejected"
+    },
+    "observer_calibration": {
+      "commit": "31a45dbde69da483a72b6ee44e06403e45450371",
+      "status": "CPU_TESTED_NOT_RUN_ON_FULL_MODEL",
+      "source": "704-row registered bare v2 calibration",
+      "change": "Initial calibration bytes are SHA-bound to tokenized rows; source changes refuse layer/final publication. Old experiment outputs are not overwritten or reused.",
+      "token_census": {
+        "declared": 1192636,
+        "retokenized": 1192632,
+        "changed_rows": 4,
+        "cpu_receipt_sha256": "33cc21beda78293bec99a1856b888a4812bb4e10a398603d9ba1a63a6fb74e34"
+      }
+    },
+    "resource_headroom": {
+      "admission": "NO_GPU_ADMISSION",
+      "host_free_ram_gib_observed_range": [
+        6.97,
+        10.35
+      ],
+      "cpu_hidden_state_required_gib": 4.55,
+      "max_decoder_layer_weight_gib_approx": 1.57,
+      "resident_workloads_preserved": true,
+      "full_704_row_cuda_peak": "UNKNOWN",
+      "reap128_v2_full_d0": "NOT_MEASURED",
+      "v1_observation_layer_seconds": 6960.5,
+      "v2_projected_layer_seconds_context_only": 11904
+    },
+    "scientific_release": {
+      "gen0_selected": false,
+      "four_gen1_trained_adapters": false,
+      "independently_measured_model_improvement": false,
+      "local_reap160_inference_acceptance": false,
+      "gen2_authorized": false,
+      "N5_approved": false,
+      "license_rights_clearance": false,
+      "main_merged": false
+    }
   }
 }

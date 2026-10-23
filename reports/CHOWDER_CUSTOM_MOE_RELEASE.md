@@ -1,5 +1,11 @@
 # Custom Qwen MoE release qualification (not a release)
 
+<!-- CHOWDER_CURRENT_20261023_ac93f8c -->
+> **Latest engineering head (2026-10-23):** PR #277 `ac93f8cc236e09308dc15783ef881e9af3857bf8`, 215 selected CPU tests passed and Ruff clean. Hosted CI run `40025442552` was QUEUED at audit capture; do not claim six-success at this head. Prior head `677531b` CI **failed** one Linux real-ML CPU parity test (5/6 jobs passed), corrected in `ac93f8c`.
+>
+> **Frozen scientific status:** REAP128_v2 full D0 NOT MEASURED, 704-row full registered observer NOT RUN, Gen-0 SELECTOR BLOCKED, Gen-1 four-arm training NOT RUN. Current free physical memory fell as low as ~6.97 GiB versus ~4.55 GiB persistent observer hidden state alone; no proven safe resident-workload margin. New initial calibration SHA snapshot and non-overwriting output policy are tested, not a D0 pass. No measured independent improvement, 5060 Ti REAP160 decode acceptance, Gen-2 approval, N5 promotion, redistribution approval or main merge.
+
+
 <!-- CHOWDER_CURRENT_20261023_677531b -->
 > **Current engineering evidence:** Draft PR #277 at `677531b26d83c73fd04e63a1cb3dd8c7c0f6d888`. Exact-head focused CPU tests: 207 passed, zero failed; Ruff PASS. Exact-head GitHub CI run `39997361954` was QUEUED at audit capture; no new six-success claim. Earlier f9317e3 six-success remains historical.
 >
