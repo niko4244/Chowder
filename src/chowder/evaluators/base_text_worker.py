@@ -18,6 +18,7 @@ from ..lifecycle import (
 )
 from .base_text import BaseTextEvalSpec
 from .adapter_identity import verify_adapter_reload
+from .adapter_attach import attach_verified_adapter
 from .generation import observed_generation, resolve_eos_token_ids
 from .rendering import render_prompt
 from .scoring import (
@@ -194,7 +195,14 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
     if spec.adapter_dir is not None:
         from peft import PeftModel
 
-        model = PeftModel.from_pretrained(model, spec.adapter_dir, is_trainable=False)
+        model, verified_adapter_sha256 = attach_verified_adapter(
+            model, adapter_dir=spec.adapter_dir, adapter_sha256=spec.adapter_sha256,
+            base_model=spec.base_model,
+            loader=lambda parent: PeftModel.from_pretrained(
+                parent, spec.adapter_dir, is_trainable=False,
+            ),
+            label="parent baseline worker",
+        )
         adapter_liveness = assert_adapter_is_live(model, spec.adapter_dir)
         if spec.placement == "offload":
             model = placement_after_adapter(model, spec=spec, device_name=device_name)

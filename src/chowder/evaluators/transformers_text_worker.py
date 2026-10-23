@@ -41,6 +41,7 @@ from .transformers_text import (
     suite_execution_evidence,
 )
 from .adapter_identity import verify_adapter_reload
+from .adapter_attach import attach_verified_adapter
 
 
 def _package_version(name: str) -> str:
@@ -228,7 +229,11 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
     if spec.adapter_dir is None:
         model = base
     else:
-        model = load_adapter(base, spec)
+        model, verified_adapter_sha256 = attach_verified_adapter(
+            base, adapter_dir=spec.adapter_dir, adapter_sha256=spec.adapter_sha256,
+            base_model=spec.base_model, loader=lambda loaded_base: load_adapter(loaded_base, spec),
+            label="candidate worker",
+        )
         # Refuse to score an adapter that cannot change the model. PEFT only
         # warns when no saved key matches, leaving every LoRA B at zero.
         adapter_liveness = assert_adapter_is_live(model, spec.adapter_dir)

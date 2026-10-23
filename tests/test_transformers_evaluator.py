@@ -80,6 +80,9 @@ def _fake_payload(
     chat_template_sha256: str | None = None,
     runtime: dict | None = None,
 ):
+    spec_path = result_path.parent / "eval-spec.json"
+    spec = json.loads(spec_path.read_text(encoding="utf-8")) if spec_path.is_file() else {}
+    adapter_digest = spec.get("adapter_sha256")
     fingerprint_path = result_path.parent / "holdout-fingerprints-quality.jsonl"
     fingerprint_digest = write_holdout_fingerprint_index([("2+2?", "4")], fingerprint_path)
     suite: dict = {
@@ -100,6 +103,10 @@ def _fake_payload(
         "suites": {"quality": suite},
         "runtime": runtime_payload,
         "versions": {"transformers": "5.test"},
+        "model_provenance": (
+            {"adapter_worker_verified_sha256": adapter_digest}
+            if adapter_digest is not None else {}
+        ),
     }
 
 
@@ -245,6 +252,31 @@ def test_evaluator_returns_named_metrics_and_verified_holdout_index(tmp_path, mo
     assert result.evidence["artifact_sha256"] == artifact.evidence["artifact_sha256"]
     assert len(result.evidence["evaluation_dataset_sha256"]["quality"]) == 64
     assert len(result.evidence["holdout_fingerprint_sha256"]["quality"]) == 64
+
+
+def test_candidate_controller_refuses_missing_worker_postattach_attestation(tmp_path, monkeypatch):
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"2+2?","expected":"4"}\n', encoding="utf-8")
+    artifact = _artifact(tmp_path)
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=_config("eval.jsonl"))
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            result_path = Path(command[command.index("--result") + 1])
+            payload = _fake_payload(result_path, metric=0.75, device="cpu", gpu_count=0)
+            payload["model_provenance"].pop("adapter_worker_verified_sha256")
+            result_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr("chowder.evaluators.transformers_text.subprocess.Popen", FakeProcess)
+    with pytest.raises(RuntimeError, match="did not attest the exact exported adapter"):
+        TransformersTextEvaluator().evaluate(
+            experiment=_experiment(), artifact=artifact, context=context,
+        )
 
 
 def test_evaluator_rejects_tampered_holdout_fingerprint_index(tmp_path, monkeypatch):

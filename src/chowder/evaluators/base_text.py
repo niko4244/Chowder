@@ -320,6 +320,13 @@ class BaseModelTextEvaluator:
             for value in (metrics, suite_evidence, versions, runtime, provenance)
         ):
             raise RuntimeError("baseline evaluation result has invalid evidence payload")
+        if spec.adapter_dir is not None and (
+            provenance.get("adapter_worker_verified_sha256") != spec.adapter_sha256
+        ):
+            raise RuntimeError(
+                "parent baseline worker did not attest the exact exported adapter "
+                "after PEFT attachment"
+            )
 
         gpu_count = int(runtime.get("gpu_count", 0))
         if gpu_count < 0:

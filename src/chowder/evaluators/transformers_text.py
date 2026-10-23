@@ -488,6 +488,13 @@ class TransformersTextEvaluator:
             or not isinstance(model_provenance, Mapping)
         ):
             raise RuntimeError("evaluation result contains invalid metrics/evidence payload")
+        if spec.adapter_dir is not None and (
+            model_provenance.get("adapter_worker_verified_sha256") != spec.adapter_sha256
+        ):
+            raise RuntimeError(
+                "candidate evaluation worker did not attest the exact exported adapter "
+                "after PEFT attachment"
+            )
         gpu_count = int(runtime.get("gpu_count", 0))
         if gpu_count < 0:
             raise RuntimeError("evaluation runtime reported a negative gpu_count")
