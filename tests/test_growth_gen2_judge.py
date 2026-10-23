@@ -1494,6 +1494,25 @@ def test_gen2_recorded_overrun_must_keep_production_failure_reasons(tmp_path: Pa
     assert " FAIL " in _threshold_row(output, "T23"), output
 
 
+@pytest.mark.parametrize("field", ["parent_version", "candidate_version", "cycle_id", "missing_parent"])
+def test_gen2_accounting_record_must_belong_to_declared_generations(
+    tmp_path: Path, field: str,
+) -> None:
+    root = _run_root(tmp_path)
+    path = root / "campaign-run.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if field == "missing_parent":
+        del record["parent_version"]
+    else:
+        record[field] = f"different-{field}"
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+    code, output = _judge_output(root)
+    assert code != 0, output
+    assert " PASS " in _threshold_row(output, "T13"), output
+    assert (" UNKNOWN " if field == "missing_parent" else " FAIL ") in _threshold_row(output, "T23"), output
+
+
 def test_a_wall_overrun_is_a_hard_failure_not_an_unknown(tmp_path: Path) -> None:
     # One GPU-hour over whatever the declaration's campaign ceiling is, so the
     # pin follows a re-derived envelope (amendment 21) instead of a literal.

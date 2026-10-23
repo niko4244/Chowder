@@ -532,6 +532,34 @@ def _accounting_digest_gate(
             "cannot be recomputed",
         )
         return
+    # A matching ledger hash alone cannot attest a record from a different
+    # parent/candidate generation. R5 checks the cycle, but not those two
+    # identities, so the wrong run could otherwise certify as PROMOTED.
+    expected_identity = {
+        "cycle_id": campaign.cycle_id,
+        "parent_version": campaign.parent_version,
+        "candidate_version": campaign.resolved_candidate_version(),
+    }
+    missing = sorted(set(expected_identity) - set(record))
+    if missing:
+        verdict.add(
+            "R3", requirement, UNKNOWN,
+            f"historical run record lacks identity fields {missing}; its "
+            "accounting settlement cannot be attributed to this campaign",
+        )
+        return
+    mismatches = [
+        f"{key}: recorded {record[key]!r}, declared {expected!r}"
+        for key, expected in expected_identity.items()
+        if record[key] != expected
+    ]
+    if mismatches:
+        verdict.add(
+            "R3", requirement, FAIL,
+            "accounting record belongs to another campaign generation: "
+            + "; ".join(mismatches),
+        )
+        return
     try:
         total = _ledger_total(document, campaign.cycle_id)
     except LookupError as error:

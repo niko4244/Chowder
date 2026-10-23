@@ -635,6 +635,26 @@ def test_reap_recorded_overrun_must_keep_production_failure_reasons(
     assert _rows(output)["R3"] == ["FAIL"], output
 
 
+@pytest.mark.parametrize("field", ["parent_version", "candidate_version", "cycle_id", "missing_parent"])
+def test_reap_accounting_record_must_belong_to_declared_generations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], field: str,
+) -> None:
+    root = _run_root(tmp_path, monkeypatch)
+    path = root / "campaign-run.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if field == "missing_parent":
+        del record["parent_version"]
+    else:
+        record[field] = f"different-{field}"
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+    code, output = _judge(root, capsys)
+    assert code != 0, output
+    assert _rows(output)["R2"] == ["PASS"], output
+    assert _rows(output)["R3"] == (["UNKNOWN"] if field == "missing_parent" else ["FAIL"]), output
+
+
 def test_retention_regression_fails_and_the_run_coupled_refusal_agrees(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -1520,6 +1520,33 @@ def _settlement_artifact_gate(
             "be recomputed",
         )
         return
+    # The ledger may be internally consistent while the run that pinned it
+    # names a different parent/candidate. T21 checks only the cycle identity.
+    expected_identity = {
+        "cycle_id": campaign.cycle_id,
+        "parent_version": campaign.parent_version,
+        "candidate_version": campaign.resolved_candidate_version(),
+    }
+    missing = sorted(set(expected_identity) - set(record))
+    if missing:
+        verdict.add(
+            "T23", requirement, UNKNOWN,
+            f"historical run record lacks identity fields {missing}; its "
+            "accounting settlement cannot be attributed to this campaign",
+        )
+        return
+    mismatches = [
+        f"{key}: recorded {record[key]!r}, declared {expected!r}"
+        for key, expected in expected_identity.items()
+        if record[key] != expected
+    ]
+    if mismatches:
+        verdict.add(
+            "T23", requirement, FAIL,
+            "accounting record belongs to another campaign generation: "
+            + "; ".join(mismatches),
+        )
+        return
     try:
         total = _ledger_total(document, campaign.cycle_id)
     except LookupError as error:
