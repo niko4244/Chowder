@@ -714,9 +714,9 @@
     "draft_unmerged": true,
     "ci": {
       "run_id": "39946078033",
-      "status": "PENDING",
+      "status": "SIX_SUCCESS",
       "head": "95eff6bc737a9c72fa507053464787cc45765b03",
-      "successes": null
+      "successes": 6
     },
     "exact_head_cpu": {
       "head": "95eff6bc737a9c72fa507053464787cc45765b03",

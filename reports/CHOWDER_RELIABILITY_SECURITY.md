@@ -1,7 +1,7 @@
 # Chowder reliability and security assessment
 
 <!-- CHOWDER_LATEST_VERIFIED_20261022 -->
-> **Latest verified review:** PR #277 `95eff6bc737a9c72fa507053464787cc45765b03` (PENDING). See Gen-0/Gen-1 addendum. Older evidence retained under original revisions.
+> **Latest verified review:** PR #277 `95eff6bc737a9c72fa507053464787cc45765b03` (SIX_SUCCESS). See Gen-0/Gen-1 addendum. Older evidence retained under original revisions.
 
 > Final audit 2026-10-22. Main 0bc566c5; MoE PR268 184291f; recovery PR269 cf54480 with local 82-test verification; REAP PR271 73f1593. GitHub and read-only Windows workspaces inspected, 39 model files independently SHA-256 verified twice. No GPU training was started in this audit. Frozen gates and required approvals remain binding.
 
@@ -198,7 +198,7 @@ This remains **review-branch CPU-only** assurance. Missing REAP128_v2, registrat
 <!-- CHOWDER_GEN0_GEN1_20261023_BEGIN -->
 ## Gen-0/Gen-1 scientific qualification continuation
 
-**Current code review:** [PR #277](https://github.com/niko4244/Chowder/pull/277) at `95eff6bc737a9c72fa507053464787cc45765b03` (PENDING CI), unmerged draft. At this exact revision, **796 focused CPU tests passed, zero failed**, Ruff passed. The older 462 focused passes and 4,117-pass full suite are at their earlier SHAs, not newly measured here. A superseded 144bd2f CI run failed because a committed MoE test expected the old trainer-template dictionary; the new required 2,048 field is now asserted in the generation and parsed worker spec.
+**Current code review:** [PR #277](https://github.com/niko4244/Chowder/pull/277) at `95eff6bc737a9c72fa507053464787cc45765b03` (SIX_SUCCESS CI), unmerged draft. At this exact revision, **796 focused CPU tests passed, zero failed**, Ruff passed. The older 462 focused passes and 4,117-pass full suite are at their earlier SHAs, not newly measured here. A superseded 144bd2f CI run failed because a committed MoE test expected the old trainer-template dictionary; the new required 2,048 field is now asserted in the generation and parsed worker spec.
 
 **CH-074:** REAP v2 preflight now requires the *actual* registered 704-row base SHA and only a declared, digest-verified bare Ornith suffix, in addition to complete D0/saliency and model shape checks. The previous self-consistent three-row substitute was reproducibly admitted before repair.
 
