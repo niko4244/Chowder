@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 import pytest
-import torch
+torch = pytest.importorskip("torch")
 import torch.nn.functional as F
 
 from chowder_batch import reap_observe
