@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -121,3 +123,59 @@ def test_cli_refuses_substituted_tokenizer_before_loading_model_files(tmp_path, 
         main(["--mix", str(tmp_path / "mix"), "--tokenizer", str(alternate)])
     assert exc.value.code == 2
     assert "tokenizer path differs" in capsys.readouterr().err
+
+
+def test_cpu_cli_receipt_pins_tokenizer_config_and_template_bytes(tmp_path, monkeypatch):
+    common = _row("q", "answer")
+    mix = tmp_path / "mix"
+    _write_mix(mix, fable=[common, _row("tool", "yes")], control=[common])
+    tokenizer = tmp_path / "tokenizer"
+    tokenizer.mkdir()
+    (tokenizer / "tokenizer.json").write_text('{"version":"1.0"}', encoding="utf-8")
+    (tokenizer / "tokenizer_config.json").write_text(
+        '{"chat_template":"{{ messages }}"}', encoding="utf-8"
+    )
+    (tokenizer / "chat_template.jinja").write_text("{{ messages }}", encoding="utf-8")
+    manifest_path = mix / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["tokenizer"]["path"] = str(tokenizer)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(
+        AutoTokenizer=SimpleNamespace(from_pretrained=lambda *args, **kwargs: Tokenizer())
+    ))
+    report = tmp_path / "admission.json"
+    assert main(["--mix", str(mix), "--tokenizer", str(tokenizer),
+                 "--max-length", "2048", "--report", str(report)]) == 0
+    receipt = json.loads(report.read_text(encoding="utf-8"))
+    assert receipt["ready"] is True
+    assert receipt["tokenizer_assets_sha256"] == {
+        name: hashlib.sha256((tokenizer / name).read_bytes()).hexdigest()
+        for name in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja")
+    }
+
+
+def test_cli_refuses_tokenizer_file_mutated_during_admission(tmp_path, monkeypatch):
+    common = _row("q", "yes")
+    mix = tmp_path / "mix"
+    _write_mix(mix, fable=[common, _row("tool", "yes")], control=[common])
+    tokenizer = tmp_path / "tokenizer"
+    tokenizer.mkdir()
+    (tokenizer / "tokenizer.json").write_text('{"version":"1.0"}', encoding="utf-8")
+    manifest_path = mix / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["tokenizer"]["path"] = str(tokenizer)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def changing_tokenizer(*args, **kwargs):
+        (tokenizer / "tokenizer.json").write_text('{"version":"changed"}', encoding="utf-8")
+        return Tokenizer()
+
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(
+        AutoTokenizer=SimpleNamespace(from_pretrained=changing_tokenizer)
+    ))
+    report = tmp_path / "receipt.json"
+    with pytest.raises(SystemExit) as exc:
+        main(["--mix", str(mix), "--tokenizer", str(tokenizer),
+              "--report", str(report)])
+    assert exc.value.code == 2
+    assert not report.exists()

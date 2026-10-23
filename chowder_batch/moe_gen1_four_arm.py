@@ -30,6 +30,7 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from chowder.project import project_from_mapping  # noqa: E402
+from chowder.backends.tokenizer_assets import tokenizer_asset_digests  # noqa: E402
 from chowder.growth.campaign_prepare import (  # noqa: E402
     CampaignPrepareRefusal,
     placement_gate_refusal,
@@ -106,6 +107,16 @@ def _check_sources(mix: Path, receipt: Path) -> tuple[dict[str, Any], dict[str, 
     tokenizer_json = tokenizer_path / "tokenizer.json"
     _require(tokenizer_json.is_file() and checked.get("tokenizer_json_sha256") == _sha(tokenizer_json),
              "trainer screening tokenizer bytes are missing or have changed")
+    # The training worker loads AutoTokenizer from backend.base_model. A READY
+    # receipt for a different tokenizer can hide 2048-token answer truncation.
+    try:
+        screened_assets = tokenizer_asset_digests(tokenizer_path)
+    except (OSError, ValueError) as exc:
+        raise FourArmRefusal(f"screened tokenizer assets unavailable: {exc}") from exc
+    _require(checked.get("tokenizer_assets_sha256") == screened_assets,
+             "trainer receipt does not bind current tokenizer files; regenerate 2048 preflight")
+    _require(checked.get("tokenizer_config_sha256") == screened_assets.get("tokenizer_config.json"),
+             "trainer preflight chat template configuration differs from tokenizer")
     _require(checked.get("ready") is True and type(checked.get("max_length")) is int
              and checked["max_length"] == FROZEN_LENGTH,
              "full 2048-token trainer preflight is not READY")
@@ -152,6 +163,7 @@ def _check_sources(mix: Path, receipt: Path) -> tuple[dict[str, Any], dict[str, 
     _require(checked.get("fable_only_rows") == len(hashes["fable"]) - len(hashes["control"]),
              "Fable-only row count differs from screened evidence")
     return {"manifest_sha256": _sha(manifest_path), "receipt_sha256": _sha(receipt),
+            "tokenizer_assets_sha256": screened_assets,
             "tokenizer_json_sha256": _sha(tokenizer_json)}, sources
 
 
@@ -187,6 +199,12 @@ def plan_four_arms(*, project_template: Path, mix: Path, train_preflight: Path,
              "prepared project does not declare MoE frozen-expert LoRA targets")
     _require(backend.get("base_model") and "<TODO" not in str(backend["base_model"]),
              "prepared project does not name the actual REAP base model")
+    try:
+        training_assets = tokenizer_asset_digests(Path(backend["base_model"]).resolve())
+    except (OSError, ValueError) as exc:
+        raise FourArmRefusal(f"training model tokenizer unavailable: {exc}") from exc
+    _require(training_assets == provenance["tokenizer_assets_sha256"],
+             "training model tokenizer differs from 2048-token screened tokenizer")
     try:
         placement_gate_refusal(
             expert_placement=str(backend["expert_placement"]),

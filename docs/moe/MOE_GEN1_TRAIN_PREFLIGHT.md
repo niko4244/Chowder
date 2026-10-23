@@ -23,6 +23,14 @@ files, altered hashes, an unvalidated template, or a different tokenizer path
 fail before the result can be marked ready. The report includes the manifest
 hash, tokenizer file hashes, examples of refused rows, and both arms' counts.
 The checker is CPU-only and does not load model weights.
+The receipt now pins all relevant local tokenizer and chat-template files in
+`tokenizer_assets_sha256`. The four-arm preparer checks these bytes again and
+requires identical tokenizer files under the actual local REAP base-model path:
+the Transformers trainer loads its tokenizer from `backend.base_model`, so
+screening with a different tokenizer would invalidate the 2,048-token result.
+Regenerate older receipts that lack `tokenizer_assets_sha256` using the command
+above; manually adding the field cannot demonstrate that old screening ran
+against those bytes.
 
 ## Observed local mix (2026-10-23)
 

@@ -18,7 +18,10 @@ not four candidates eligible for a single automatic promotion verdict.
 3. A **READY** `moe_gen1_train_preflight.py --max-length 2048` report for the
    exact mix and tokenizer. The builder's historical 4096-token screening does
    **not** satisfy this requirement. A rejected report is a blocker, not a
-   reason to disable the screening or raise the frozen training length.
+   reason to disable the screening or raise the frozen training length. The
+   receipt must include `tokenizer_assets_sha256` from the current preflight;
+   the preparer checks that the actual local `backend.base_model` carries the
+   identical tokenizer and chat-template files used in screening.
 4. For `cpu-transient-grad-int8`, all recorded placement gates, including the
    WDDM operator gate, must be qualified **for the exact base checkpoint**.
    Preparation uses the authoritative placement gate; it cannot waive it.

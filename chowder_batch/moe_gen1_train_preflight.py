@@ -33,6 +33,7 @@ from chowder.backends.training_data import (  # noqa: E402
     _validate_chat_messages,
     parse_tools,
 )
+from chowder.backends.tokenizer_assets import tokenizer_asset_digests  # noqa: E402
 
 ARMS = ("train-fable.jsonl", "train-control.jsonl")
 
@@ -200,11 +201,16 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("local tokenizer.json is required to check complete answer spans")
     from transformers import AutoTokenizer
 
+    assets_before = tokenizer_asset_digests(args.tokenizer)
     tokenizer = AutoTokenizer.from_pretrained(str(args.tokenizer), trust_remote_code=False, local_files_only=True)
     result = inspect_mix(args.mix, tokenizer, max_length=args.max_length)
+    assets_after = tokenizer_asset_digests(args.tokenizer)
+    if assets_after != assets_before:
+        parser.error("tokenizer assets changed during admission; rerun the 2048-token preflight")
     result["tokenizer_json_sha256"] = _sha256_file(args.tokenizer / "tokenizer.json")
     if (args.tokenizer / "tokenizer_config.json").is_file():
         result["tokenizer_config_sha256"] = _sha256_file(args.tokenizer / "tokenizer_config.json")
+    result["tokenizer_assets_sha256"] = assets_after
     serialized = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.report:
         args.report.write_text(serialized, encoding="utf-8")

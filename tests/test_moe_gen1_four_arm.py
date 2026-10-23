@@ -33,6 +33,13 @@ def _fixture(tmp_path: Path):
     tokenizer = tmp_path / "tokenizer"
     tokenizer.mkdir()
     (tokenizer / "tokenizer.json").write_text('{"version":"1.0"}', encoding="utf-8")
+    (tokenizer / "tokenizer_config.json").write_text(
+        '{"chat_template":"{{ messages }}"}', encoding="utf-8"
+    )
+    base = tmp_path / "base-model"
+    base.mkdir()
+    for asset in ("tokenizer.json", "tokenizer_config.json"):
+        (base / asset).write_bytes((tokenizer / asset).read_bytes())
     shared = [
         {"messages": [{"role": "user", "content": f"shared {i}"},
                       {"role": "assistant", "content": f"answer {i}"}], "tools": ""}
@@ -60,6 +67,11 @@ def _fixture(tmp_path: Path):
         "ready": True, "max_length": 2048, "manifest_sha256": _sha(mix / "manifest.json"),
         "tokenizer_manifest_path": str(tokenizer),
         "tokenizer_json_sha256": _sha(tokenizer / "tokenizer.json"),
+        "tokenizer_config_sha256": _sha(tokenizer / "tokenizer_config.json"),
+        "tokenizer_assets_sha256": {
+            name: _sha(tokenizer / name)
+            for name in ("tokenizer.json", "tokenizer_config.json")
+        },
         "fable_only_rows": 1,
         "arms": {filename: {"rows": len(rows), "over_length": 0, "invalid_chat": 0,
                             "answer_span_truncated": 0, "answer_span_completely_removed": 0}
@@ -83,7 +95,7 @@ def _fixture(tmp_path: Path):
             "goal_lifecycle": {"mode": "bounded"},
             "seed": 7, "backend": {
                 "schema_version": 1, "type": "transformers-peft",
-                "base_model": str(tmp_path / "base-model"), "dataset": "{corpus}",
+                "base_model": str(base), "dataset": "{corpus}",
                 "dataset_format": "chat", "messages_field": "messages", "tools_field": "tools",
                 "max_length": 2048, "precision": "bf16", "quantization": "none",
                 "trust_remote_code": False, "expert_placement": "cpu-transient-grad",
@@ -172,7 +184,10 @@ def test_explicit_direction_only_lifecycle_keeps_native_semantics_but_still_caps
     "other_tokenizer", "tokenizer_changed", "over_budget", "nan_budget", "infinite_budget",
     "boolean_budget", "estimate_over_budget", "missing_lifecycle",
     "unknown_lifecycle", "bad_lifecycle", "direction_only_goal", "nan_goal_target",
-    "legacy_with_numeric_target",
+    "legacy_with_numeric_target", "different_training_tokenizer", "changed_chat_template",
+    "different_training_chat_template",
+    "extra_training_tokenizer_file", "missing_tokenizer_assets_receipt",
+    "missing_training_model",
 ])
 def test_four_arm_preparation_refuses_changed_inputs_before_writing(tmp_path, damage):
     paths = _fixture(tmp_path)
@@ -248,6 +263,26 @@ def test_four_arm_preparation_refuses_changed_inputs_before_writing(tmp_path, da
         receipt["tokenizer_manifest_path"] = str(tmp_path / "wrong-tokenizer")
     elif damage == "tokenizer_changed":
         (tmp_path / "tokenizer" / "tokenizer.json").write_text('{"version":"changed"}', encoding="utf-8")
+    elif damage == "changed_chat_template":
+        (tmp_path / "tokenizer" / "tokenizer_config.json").write_text(
+            '{"chat_template":"changed"}', encoding="utf-8"
+        )
+    elif damage == "different_training_tokenizer":
+        (tmp_path / "base-model" / "tokenizer.json").write_text(
+            '{"version":"different"}', encoding="utf-8"
+        )
+    elif damage == "different_training_chat_template":
+        (tmp_path / "base-model" / "tokenizer_config.json").write_text(
+            '{"chat_template":"{{ changed }}"}', encoding="utf-8"
+        )
+    elif damage == "extra_training_tokenizer_file":
+        (tmp_path / "base-model" / "chat_template.jinja").write_text(
+            "{{ changed }}", encoding="utf-8"
+        )
+    elif damage == "missing_tokenizer_assets_receipt":
+        receipt.pop("tokenizer_assets_sha256")
+    elif damage == "missing_training_model":
+        template["config"]["backend"]["base_model"] = str(tmp_path / "not-present")
     if manifest != json.loads(manifest_path.read_text()):
         _write(manifest_path, manifest)
     if receipt != json.loads(receipt_path.read_text()):
