@@ -38,6 +38,11 @@ def _fixture(tmp_path: Path):
     )
     base = tmp_path / "base-model"
     base.mkdir()
+    (base / "config.json").write_text('{"model_type":"synthetic"}', encoding="utf-8")
+    (base / "model.safetensors.index.json").write_text(
+        '{"weight_map":{"model.embed_tokens.weight":"model-00001-of-00001.safetensors"}}',
+        encoding="utf-8",
+    )
     for asset in ("tokenizer.json", "tokenizer_config.json"):
         (base / asset).write_bytes((tokenizer / asset).read_bytes())
     shared = [
@@ -80,6 +85,16 @@ def _fixture(tmp_path: Path):
 
     eval_path = tmp_path / "prepared-eval.jsonl"
     eval_path.write_text('{"prompt":"hi","expected":"yes"}\n', encoding="utf-8")
+    timing_receipt = tmp_path / "measured-optimizer-steps.json"
+    _write(timing_receipt, {
+        "schema": "chowder.moe-gen1-step-timing.v1", "base_model": str(base),
+        "placement": "cpu-transient-grad", "gpu": "synthetic test GPU", "seq": 2048,
+        "batch_size": 1, "gradient_accumulation_steps": 1,
+        "gradient_checkpointing": True, "load_seconds": 500.0,
+        "step_seconds": [6.0, 6.25, 6.5, 6.0],
+        "base_config_sha256": _sha(base / "config.json"),
+        "base_index_sha256": _sha(base / "model.safetensors.index.json"),
+    })
     project_path = tmp_path / "prepared" / "project-template.json"
     _write(project_path, {
         "schema_version": 1, "name": "gen1-reap-moe", "seed": 7,
@@ -99,21 +114,24 @@ def _fixture(tmp_path: Path):
                 "dataset_format": "chat", "messages_field": "messages", "tools_field": "tools",
                 "max_length": 2048, "precision": "bf16", "quantization": "none",
                 "trust_remote_code": False, "expert_placement": "cpu-transient-grad",
-                "training": {"epochs": 1.0, "max_steps": 20, "learning_rate": 2e-4,
+                "training": {"epochs": 1.0, "max_steps": 1000, "learning_rate": 2e-4,
                              "lr_scheduler_type": "cosine", "batch_size": 1,
                              "gradient_accumulation_steps": 1,
-                             "gradient_checkpointing": True},
+                         "gradient_checkpointing": True},
+                "runtime": {"timeout_seconds": 7200},
                 "lora": {"r": 16, "alpha": 32, "dropout": 0.05,
                          "target_preset": "moe_frozen_experts"},
             },
             "evaluation": {"type": "transformers-text", "precision": "bf16",
+                           "estimated_gpu_hours": 0.1,
                            "quantization": "none", "placement": "experts-cpu",
                            "suites": [{"name": "tool-use", "dataset": str(eval_path),
                                        "prompt_field": "prompt", "expected_field": "expected",
                                        "scoring": "normalized_exact_match"}]},
         },
     })
-    return {"mix": mix, "project_template": project_path, "train_preflight": receipt,
+    return {"mix": mix, "project_template": project_path,
+            "train_preflight": receipt, "timing_receipt": timing_receipt,
             "out_dir": tmp_path / "four-arms"}
 
 
@@ -125,6 +143,11 @@ def test_four_distinct_executable_production_projects_have_bound_source_and_lr(t
     paths = _fixture(tmp_path)
     record = _prepare(paths)
     assert record["status"] == "PREPARED_ONLY_NOT_EXECUTED"
+    assert record["measured_cost"]["registered_steps"] == 1000
+    assert record["measured_cost"]["projected_training_gpu_hours"] == pytest.approx(7000/3600)
+    assert set(record["measured_cost"]["model_metadata_sha256"]) == {
+        "config.json", "model.safetensors.index.json",
+    }
     assert len(record["arms"]) == 4
     assert [(arm["dataset_arm"], arm["learning_rate"]) for arm in record["arms"]] == [
         ("fable", 5e-5), ("fable", 1e-4), ("control", 5e-5), ("control", 1e-4),
@@ -142,6 +165,7 @@ def test_four_distinct_executable_production_projects_have_bound_source_and_lr(t
         assert backend["dataset"] == str(paths["mix"] / f"train-{arm['dataset_arm']}.jsonl")
         assert backend["training"]["learning_rate"] == arm["learning_rate"]
         assert backend["max_length"] == 2048
+        assert backend["training"]["max_steps"] == 1000
         assert backend["tools_field"] == "tools"
         assert raw["goal"]["gpu_hour_budget"] == 2.5
         assert raw["goal"]["metrics"][0]["minimum"] == 0.5
@@ -188,6 +212,12 @@ def test_explicit_direction_only_lifecycle_keeps_native_semantics_but_still_caps
     "different_training_chat_template",
     "extra_training_tokenizer_file", "missing_tokenizer_assets_receipt",
     "missing_training_model",
+    "wrong_steps", "missing_steps", "boolean_steps", "overlong_steps",
+    "slow_timing", "wrong_timing_base", "wrong_timing_placement", "missing_timing",
+    "wrong_timing_seq", "bogus_timing_steps", "nan_timing", "low_estimate",
+    "missing_evaluation_reserve", "reserve_over_budget", "short_training_timeout",
+    "wrong_batch_size", "changed_gradient_checkpointing",
+    "missing_model_digest", "changed_model_index", "changed_model_config",
 ])
 def test_four_arm_preparation_refuses_changed_inputs_before_writing(tmp_path, damage):
     paths = _fixture(tmp_path)
@@ -197,6 +227,8 @@ def test_four_arm_preparation_refuses_changed_inputs_before_writing(tmp_path, da
     manifest = json.loads(manifest_path.read_text())
     receipt = json.loads(receipt_path.read_text())
     template = json.loads(template_path.read_text())
+    timing_path = paths["timing_receipt"]
+    timing = json.loads(timing_path.read_text())
     if damage == "not_ready":
         receipt["ready"] = False
     elif damage == "wrong_length":
@@ -283,12 +315,59 @@ def test_four_arm_preparation_refuses_changed_inputs_before_writing(tmp_path, da
         receipt.pop("tokenizer_assets_sha256")
     elif damage == "missing_training_model":
         template["config"]["backend"]["base_model"] = str(tmp_path / "not-present")
+    elif damage == "wrong_steps":
+        template["config"]["backend"]["training"]["max_steps"] = 20
+    elif damage == "missing_steps":
+        template["config"]["backend"]["training"].pop("max_steps")
+    elif damage == "boolean_steps":
+        template["config"]["backend"]["training"]["max_steps"] = True
+    elif damage == "overlong_steps":
+        template["config"]["backend"]["training"]["max_steps"] = 1001
+    elif damage == "slow_timing":
+        timing["step_seconds"] = [27.48] * 4
+    elif damage == "wrong_timing_base":
+        timing["base_model"] = str(tmp_path / "different-base")
+    elif damage == "wrong_timing_placement":
+        timing["placement"] = "cpu-transient-grad-int8"
+    elif damage == "missing_timing":
+        timing_path.unlink()
+    elif damage == "wrong_timing_seq":
+        timing["seq"] = 1024
+    elif damage == "bogus_timing_steps":
+        timing["step_seconds"] = [6.5]
+    elif damage == "nan_timing":
+        timing["step_seconds"] = [6.5, float("nan"), 6.0]
+    elif damage == "low_estimate":
+        template["experiment"]["estimated_gpu_hours"] = 1.8
+    elif damage == "missing_evaluation_reserve":
+        template["config"]["evaluation"].pop("estimated_gpu_hours")
+    elif damage == "reserve_over_budget":
+        template["config"]["evaluation"]["estimated_gpu_hours"] = 0.4
+    elif damage == "short_training_timeout":
+        template["config"]["backend"]["runtime"]["timeout_seconds"] = 6900
+    elif damage == "wrong_batch_size":
+        template["config"]["backend"]["training"]["batch_size"] = 2
+    elif damage == "changed_gradient_checkpointing":
+        template["config"]["backend"]["training"]["gradient_checkpointing"] = False
+    elif damage == "missing_model_digest":
+        timing.pop("base_index_sha256")
+    elif damage == "changed_model_index":
+        (tmp_path / "base-model" / "model.safetensors.index.json").write_text(
+            '{"weight_map":{"changed":"model-00001-of-00001.safetensors"}}',
+            encoding="utf-8",
+        )
+    elif damage == "changed_model_config":
+        (tmp_path / "base-model" / "config.json").write_text(
+            '{"model_type":"modified"}', encoding="utf-8",
+        )
     if manifest != json.loads(manifest_path.read_text()):
         _write(manifest_path, manifest)
     if receipt != json.loads(receipt_path.read_text()):
         _write(receipt_path, receipt)
     if template != json.loads(template_path.read_text()):
         _write(template_path, template)
+    if timing_path.exists() and timing != json.loads(timing_path.read_text()):
+        _write(timing_path, timing)
     with pytest.raises((FourArmRefusal, ValueError)):
         _prepare(paths)
     if damage != "existing_output":
@@ -304,6 +383,7 @@ def test_direct_script_cli_from_repository_root_uses_no_pythonpath_or_gpu(tmp_pa
         [sys.executable, "-B", "chowder_batch/moe_gen1_four_arm.py",
          "--project-template", str(paths["project_template"]),
          "--mix", str(paths["mix"]), "--train-preflight", str(paths["train_preflight"]),
+         "--timing-receipt", str(paths["timing_receipt"]),
          "--out", str(paths["out_dir"])],
         cwd=repo, env=env, capture_output=True, text=True, check=False,
     )
@@ -328,3 +408,29 @@ def test_int8_placement_must_pass_authoritative_gate_before_projects_are_written
         _prepare(paths)
     assert len(seen) == 1 and seen[0][0] == "cpu-transient-grad-int8"
     assert not paths["out_dir"].exists()
+
+
+def test_real_int8_ab_receipt_shape_refuses_measured_1000_step_budget(tmp_path):
+    """A matching 27.48s/step measurement cannot admit a 2.5 GPU-hour arm."""
+    paths = _fixture(tmp_path)
+    template = json.loads(paths["project_template"].read_text())
+    backend = template["config"]["backend"]
+    backend["expert_placement"] = "cpu-transient-grad-int8"
+    base = Path(backend["base_model"])
+    timing = {
+        "base": str(base), "gpu": "synthetic 5060 Ti test GPU", "seq": 2048,
+        "steps_per_phase": 4, "load_seconds": 1277.8,
+        "load_census": {"expert_int8_buffers": 160},
+        "base_config_sha256": _sha(base / "config.json"),
+        "base_index_sha256": _sha(base / "model.safetensors.index.json"),
+        "phases": [{"name": "loop", "grouped": False, "retain": False,
+                    "step_seconds": [32.63, 32.4, 32.3, 32.0]},
+                   {"name": "grouped+retain", "grouped": True, "retain": True,
+                    "step_seconds": [27.57, 27.49, 27.20, 27.75]}],
+    }
+    _write(paths["timing_receipt"], timing)
+    with pytest.raises(FourArmRefusal, match="measured 1000-step projection"):
+        moe_gen1_four_arm._admit_measured_cost(
+            backend, template["config"]["evaluation"], paths["timing_receipt"],
+            2.5, 2.25,
+        )

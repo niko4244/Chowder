@@ -34,6 +34,25 @@ not four candidates eligible for a single automatic promotion verdict.
    GPU-hour budgets). This preparation never inserts the legacy mode, changes
    an objective threshold, or invents a budget. A missing/unknown lifecycle
    declaration is a refusal.
+6. The concrete production template must declare **exactly 1,000 optimizer
+   steps**, batch size 1, accumulation 1, gradient checkpointing enabled,
+   BF16 and 2,048 tokens. A measured optimizer-step/load receipt for the
+   same `backend.base_model`, expert placement, and sequence length is required.
+   Both `config.json` and `model.safetensors.index.json` SHA-256 digests must
+   match current local files. These are inexpensive **metadata** identities;
+   they are not full model-weight hashes. The preparer uses the slowest
+   measured step × 1,000 plus measured model loading, with a separate
+   evaluation reserve, and checks the trainer timeout. It refuses an estimate
+   that cannot fit the unchanged 2.5 GPU-hour cap.
+
+The existing int8 A/B receipt at `C:\llm-work\moe-gates\ab-int8-seq2048.json`
+does **not** qualify these trials. It predates the metadata identity fields,
+and its recorded 27.48 seconds/step implies at least 7.63 GPU-hours for
+1,000 steps **before loading and evaluation**, well beyond the 2.5-hour
+ceiling. The source base and current GPU must be remeasured if a different
+placement or host is proposed; copying favorable figures into a receipt is
+not a measurement. The historical campaign-prepared default of 30 steps
+also fails the registered 1,000-step check.
 
 ```powershell
 python -B chowder_batch/moe_gen1_train_preflight.py `
@@ -46,8 +65,18 @@ python -B chowder_batch/moe_gen1_four_arm.py `
   --project-template C:\llm-work\gen1-prepared\project-template.json `
   --mix C:\llm-work\train-sets\moe-gen1-v1 `
   --train-preflight C:\llm-work\train-sets\moe-gen1-2048-admission.json `
+  --timing-receipt C:\llm-work\moe-gates\measured-gen1-2048.json `
   --out C:\llm-work\gen1-four-independent-trials
 ```
+
+The timing-receipt path above is an **example destination for a new real
+measurement**, not evidence that this file exists or qualifies. Supported
+generic receipts declare `schema: chowder.moe-gen1-step-timing.v1`,
+`base_model`, `base_config_sha256`, `base_index_sha256`, `placement`, `gpu`,
+`seq: 2048`, `batch_size: 1`, `gradient_accumulation_steps: 1`,
+`gradient_checkpointing: true`, `load_seconds`, and at least three measured
+positive `step_seconds`. The existing int8 A/B phase schema is also parsed,
+but is refused without metadata identity and qualifying measured cost.
 
 Preparation performs **no** GPU training and does not load model shards. It
 refuses an existing output root. On success, `four-arm-plan.json` contains four
@@ -56,6 +85,9 @@ commands. Run those commands **only** after reviewing the real budget and
 material provenance. The 2048-token horizon, LoRA preset, base, placement,
 evaluation protocol, measured baseline, objective lifecycle, and independently
 enforced per-trial GPU-hour budget are preserved in every project.
+Admission establishes a necessary measured cost condition. An unrun 1,000-step
+training job can still incur additional overhead, so preparation never claims
+that a complete GPU run is already proven to fit.
 Every project uses a distinct dataset SHA, experiment ID, working directory,
 and registry; the two LRs are `5e-5` and `1e-4` in both data arms.
 
