@@ -50,6 +50,13 @@ def _config(dataset: str):
 def _artifact(tmp_path, *, resolved_commit="resolved123"):
     adapter = tmp_path / "adapter"
     adapter.mkdir()
+    # Evaluation now admits only a content-bound PEFT LoRA directory. Keep the
+    # fake subprocess but make its input structurally valid: otherwise the
+    # stronger controller guard correctly refuses this old partial fixture.
+    (adapter / "adapter_config.json").write_text(
+        json.dumps({"peft_type": "LORA", "base_model_name_or_path": "example/model"}),
+        encoding="utf-8",
+    )
     (adapter / "adapter_model.safetensors").write_bytes(b"adapter")
     return TrainingArtifact(
         run_id="run-1",
