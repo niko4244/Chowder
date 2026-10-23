@@ -67,22 +67,36 @@ def verify_adapter_reload(
     if not isinstance(config, dict) or config.get("peft_type") != "LORA":
         raise AdapterIdentityRefusal(f"{label}: expected an exported PEFT LoRA adapter")
     if base_model is not None:
-        # No model shards are read. A saved local path can contradict the very
-        # parent model the worker is about to load, even if someone rehashes
-        # the altered adapter directory. This catches that incompatibility.
+        # A matching export digest identifies adapter BYTES, not the model
+        # those bytes were trained against. When the requested parent actually
+        # exists locally, its PEFT declaration must name the same local model
+        # through an absolute, resolvable path. Otherwise relative, drive-
+        # relative, missing, and Hub-style declarations could bypass the
+        # wrong-parent check even after the adapter was re-enrolled under a
+        # fresh digest. Nonlocal Hub identifiers retain their existing flow.
         declared_base = config.get("base_model_name_or_path")
         requested = Path(base_model)
-        if (
-            requested.is_dir()
-            and isinstance(declared_base, str)
-            and declared_base.strip()
-            and Path(declared_base).is_absolute()
-            and Path(declared_base).resolve() != requested.resolve()
-        ):
-            raise AdapterIdentityRefusal(
-                f"{label}: PEFT adapter declares local base {declared_base!r}, "
-                f"but worker requested {str(requested)!r}; refusing wrong-parent reload"
-            )
+        if requested.is_dir():
+            if (not isinstance(declared_base, str) or not declared_base.strip()
+                    or not Path(declared_base).is_absolute()):
+                raise AdapterIdentityRefusal(
+                    f"{label}: wrong-parent reload: local worker model {str(requested)!r} "
+                    "requires an absolute local PEFT base_model_name_or_path; "
+                    f"got {declared_base!r}"
+                )
+            try:
+                declared_resolved = Path(declared_base).resolve(strict=True)
+                requested_resolved = requested.resolve(strict=True)
+            except (OSError, RuntimeError, ValueError) as error:
+                raise AdapterIdentityRefusal(
+                    f"{label}: wrong-parent reload: cannot resolve absolute "
+                    f"local PEFT base {declared_base!r}: {error}"
+                ) from error
+            if declared_resolved != requested_resolved:
+                raise AdapterIdentityRefusal(
+                    f"{label}: PEFT adapter declares local base {declared_base!r}, "
+                    f"but worker requested {str(requested)!r}; refusing wrong-parent reload"
+                )
     try:
         actual = sha256_directory(directory)
     except (OSError, ValueError) as error:

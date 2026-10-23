@@ -205,6 +205,58 @@ def test_peft_declared_local_parent_must_be_the_exact_local_base_reloaded(tmp_pa
                                  base_model=expected_base) == sha256_directory(adapter)
 
 
+@pytest.mark.parametrize("declared_base", [
+    None,
+    "",
+    "../REAP128",
+    r"C:REAP128",
+    r"\REAP128",
+    "org/REAP128",
+    123,
+])
+def test_local_checkpoint_requires_absolute_matching_peft_parent(tmp_path, declared_base):
+    requested = tmp_path / "REAP160"
+    requested.mkdir()
+    (tmp_path / "REAP128").mkdir()
+    adapter = _adapter(tmp_path)
+    config = adapter / "adapter_config.json"
+    record = json.loads(config.read_text(encoding="utf-8"))
+    if declared_base is not None:
+        record["base_model_name_or_path"] = declared_base
+    config.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    # Re-enroll the altered adapter to prove its own directory SHA cannot
+    # substitute for the exact parent it was trained against.
+    enrolled = sha256_directory(adapter)
+    with pytest.raises(AdapterIdentityRefusal, match="wrong-parent reload"):
+        verify_adapter_reload(adapter, enrolled, label="Gen1 adapter", base_model=requested)
+
+
+def test_local_checkpoint_accepts_absolute_path_resolving_to_same_parent(tmp_path):
+    expected = tmp_path / "REAP160"
+    expected.mkdir()
+    adapter = _adapter(tmp_path)
+    config = adapter / "adapter_config.json"
+    record = json.loads(config.read_text(encoding="utf-8"))
+    record["base_model_name_or_path"] = str(expected.resolve())
+    config.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    enrolled = sha256_directory(adapter)
+    assert verify_adapter_reload(adapter, enrolled, label="Gen1 adapter",
+                                 base_model=expected) == enrolled
+
+
+def test_hub_model_id_is_not_mistaken_for_existing_local_checkpoint(tmp_path):
+    adapter = _adapter(tmp_path)
+    config = adapter / "adapter_config.json"
+    record = json.loads(config.read_text(encoding="utf-8"))
+    record["base_model_name_or_path"] = "example-org/REAP160"
+    config.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    enrolled = sha256_directory(adapter)
+    assert verify_adapter_reload(adapter, enrolled, label="Gen1 hub candidate",
+                                 base_model="example-org/REAP160") == enrolled
+    assert verify_adapter_reload(None, None, label="base-only",
+                                 base_model=tmp_path / "nonexistent-base") is None
+
+
 def test_symlinked_artifact_file_is_refused_even_if_hash_were_reenrolled(tmp_path):
     adapter = _adapter(tmp_path)
     target = tmp_path / "other.safetensors"
