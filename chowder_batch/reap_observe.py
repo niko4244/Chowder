@@ -29,6 +29,7 @@ import hashlib
 import json
 import math
 import time
+import weakref
 from pathlib import Path
 
 import torch
@@ -65,18 +66,24 @@ class ShardReader:
 
 def observing_experts_forward(experts, stats: dict[str, torch.Tensor]):
     """The library's Qwen3_5MoeExperts.forward, plus REAP accumulation."""
+    # This closure is installed as experts.forward. Capturing the module itself
+    # would form a reference cycle, retaining a CUDA layer after ``del layer``.
+    expert_ref = weakref.ref(experts)
 
     def forward(hidden_states, top_k_index, top_k_weights):
+        module = expert_ref()
+        if module is None:
+            raise RuntimeError("observer expert layer was released")
         final = torch.zeros_like(hidden_states)
         with torch.no_grad():
-            mask = F.one_hot(top_k_index, num_classes=experts.num_experts).permute(2, 1, 0)
+            mask = F.one_hot(top_k_index, num_classes=module.num_experts).permute(2, 1, 0)
             hit = torch.greater(mask.sum(dim=(-1, -2)), 0).nonzero()
         for expert_idx in hit:
             e = int(expert_idx[0])
             top_k_pos, token_idx = torch.where(mask[e])
             state = hidden_states[token_idx]
-            gate, up = F.linear(state, experts.gate_up_proj[e]).chunk(2, dim=-1)
-            out = F.linear(experts.act_fn(gate) * up, experts.down_proj[e])
+            gate, up = F.linear(state, module.gate_up_proj[e]).chunk(2, dim=-1)
+            out = F.linear(module.act_fn(gate) * up, module.down_proj[e])
             weight = top_k_weights[token_idx, top_k_pos, None]
             norm = out.float().norm(dim=-1)
             g = weight.float().squeeze(-1)
@@ -88,6 +95,26 @@ def observing_experts_forward(experts, stats: dict[str, torch.Tensor]):
         return final
 
     return forward
+
+
+def _load_layer_without_duplicate_weights(layer_class, config, layer_id, dtype, state):
+    """Assign checkpoint storage to a meta layer, avoiding a second GPU copy.
+
+    Regular ``to_empty(device='cuda')`` followed by ``load_state_dict`` holds
+    both the allocated destination parameters and the full CUDA checkpoint
+    state during loading. ``assign=True`` preserves the checkpoint tensors.
+    """
+    with torch.device("meta"):
+        layer = layer_class(config, layer_id)
+    layer = layer.to(dtype)
+    expected = layer.state_dict()
+    for name, tensor in state.items():
+        if name in expected and tensor.dtype != expected[name].dtype:
+            raise TypeError(f"observer layer {layer_id} checkpoint dtype mismatch: {name}")
+    layer.load_state_dict(state, strict=True, assign=True)
+    if any(t.is_meta for t in (*layer.parameters(), *layer.buffers())):
+        raise RuntimeError(f"observer layer {layer_id} contains unmaterialized tensors")
+    return layer
 
 
 @torch.inference_mode()
@@ -174,10 +201,10 @@ def main() -> None:
     timings = []
     for i in layer_ids:
         t0 = time.time()
-        with torch.device("meta"):
-            layer = M.Qwen3_5MoeDecoderLayer(tc, i)
-        layer = layer.to(dtype).to_empty(device=dev)
-        layer.load_state_dict(reader.load(f"{PREFIX}layers.{i}.", dev), strict=True)
+        layer = _load_layer_without_duplicate_weights(
+            M.Qwen3_5MoeDecoderLayer, tc, i, dtype,
+            reader.load(f"{PREFIX}layers.{i}.", dev),
+        )
         layer.eval()
         E = tc.num_experts
         stats = {k: torch.zeros(E, dtype=torch.float64, device=dev) for k in ("count", "gate_sum", "norm_sum", "reap_sum")}
