@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -120,17 +121,40 @@ def test_valid_v1_reap160_plan_uses_frozen_v1_calibration(tmp_path, monkeypatch)
 def test_cli_emits_json_without_writing_output_or_model_shards(tmp_path):
     paths = _fixture(tmp_path)
     script = Path(preflight.__file__)
-    command = [sys.executable, str(script), "--arm", "reap128_v2",
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    # Exercise the documented script entry point, not the import-friendly
+    # test runner's current sys.path or an inherited PYTHONPATH.
+    command = [sys.executable, "-B", "chowder_batch/reap_build_preflight.py", "--arm", "reap128_v2",
                "--model-dir", str(paths["model"]), "--weights-dir", str(paths["weights"]),
                "--calibration", str(paths["calibration"]),
                "--observations", str(paths["observations"]), "--out", str(paths["out"])]
-    first = subprocess.run(command, cwd=script.parents[1], capture_output=True, text=True, check=False)
-    second = subprocess.run(command, cwd=script.parents[1], capture_output=True, text=True, check=False)
+    first = subprocess.run(command, cwd=script.parents[1], env=environment,
+                           capture_output=True, text=True, check=False)
+    second = subprocess.run(command, cwd=script.parents[1], env=environment,
+                            capture_output=True, text=True, check=False)
     assert first.returncode == second.returncode == 0, first.stderr
     assert first.stdout == second.stdout
     assert json.loads(first.stdout)["keep_experts_per_layer"] == 128
     assert not paths["out"].exists()
     assert (paths["weights"] / "model-00001-of-00001.safetensors").read_bytes().startswith(b"metadata-only")
+
+
+@pytest.mark.parametrize("entry", [
+    ["chowder_batch/reap_build_preflight.py"],
+    ["-m", "chowder_batch.reap_build_preflight"],
+])
+def test_preflight_direct_script_and_module_help_without_pythonpath(entry):
+    repo = Path(preflight.__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [sys.executable, "-B", *entry, "--help"], cwd=repo, env=environment,
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "--observations" in completed.stdout
+    assert "--out" in completed.stdout
 
 
 @pytest.mark.parametrize("damage", [

@@ -19,8 +19,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from chowder_batch.reap_gates import GateError, _d0
-from chowder_batch.reap_select import _validate_v2_observation
+try:
+    from chowder_batch.reap_gates import GateError, _d0
+    from chowder_batch.reap_select import _validate_v2_observation
+except ModuleNotFoundError as exc:
+    if exc.name != "chowder_batch":
+        raise
+    # `python -B chowder_batch/reap_build_preflight.py` puts this script's
+    # directory (not its repository parent) on sys.path. Match reap_select's
+    # direct-script imports while keeping package imports when run with -m.
+    from reap_gates import GateError, _d0
+    from reap_select import _validate_v2_observation
 
 ARM_SPEC = {
     "reap128_v2": (128, "v2", ("reap128",)),
