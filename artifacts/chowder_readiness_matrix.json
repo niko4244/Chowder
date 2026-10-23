@@ -482,8 +482,8 @@
     "main_sha_unchanged": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
     "github_ci": {
       "revision": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
-      "status": "PENDING",
-      "successful_checks": null,
+      "status": "SIX_SUCCESS",
+      "successful_checks": 6,
       "total_checks": 6
     },
     "cpu_combined_regression": {
@@ -502,6 +502,19 @@
         "tests/test_growth_budget_settlement.py"
       ]
     },
+    "cpu_followup_regression": {
+      "revision": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "passed": 110,
+      "skipped": 0,
+      "failed": 0,
+      "test_files": [
+        "tests/test_growth_campaign_runner.py",
+        "tests/test_growth_settlement_adversarial.py"
+      ],
+      "disjoint_from_combined": true
+    },
+    "cpu_final_head_distinct_test_files": 10,
+    "cpu_final_head_total_passed": 391,
     "integrated_commits": {
       "speed_complete_200": "893cdff648b44a1e62e43e90429bf2c5d7c9bc02",
       "judge_settlement_reasons": "59aa70c89c2343e184167869f6e21b4e81ea1f47",

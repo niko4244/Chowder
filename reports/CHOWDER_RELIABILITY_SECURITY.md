@@ -1,7 +1,7 @@
 # Chowder reliability and security assessment
 
 <!-- CHOWDER_LATEST_VERIFIED_20261022 -->
-> **Latest pinned review evidence:** PR #277 `84dbb2e9151a0cd9be70a00f167271953ca38d92` (PENDING, draft/unmerged); continuation addendum at end. The earlier 10a0044 evidence is preserved as a separate historical checkpoint.
+> **Latest pinned review evidence:** PR #277 `84dbb2e9151a0cd9be70a00f167271953ca38d92` (SIX_SUCCESS, draft/unmerged); continuation addendum at end. The earlier 10a0044 evidence is preserved as a separate historical checkpoint.
 
 > Final audit 2026-10-22. Main 0bc566c5; MoE PR268 184291f; recovery PR269 cf54480 with local 82-test verification; REAP PR271 73f1593. GitHub and read-only Windows workspaces inspected, 39 model files independently SHA-256 verified twice. No GPU training was started in this audit. Frozen gates and required approvals remain binding.
 
@@ -150,7 +150,7 @@ CH-062, CH-063 and CH-064 are remediated in the draft PR with adversarial regres
 <!-- CHOWDER_CONTINUATION_20261022_BEGIN -->
 ## Current engineering continuation
 
-**New pinned continuation (2026-10-22):** Draft [engineering PR #277](https://github.com/niko4244/Chowder/pull/277) at `84dbb2e9151a0cd9be70a00f167271953ca38d92` (PENDING); not merged to `main`. Exact integrated Windows CPU eight-file suite: **281 PASS / 0 SKIP / 0 FAIL**. Older CPU tests cited elsewhere are separate checkpoints, not additional final-head passes.
+**New pinned continuation (2026-10-22):** Draft [engineering PR #277](https://github.com/niko4244/Chowder/pull/277) at `84dbb2e9151a0cd9be70a00f167271953ca38d92` (SIX_SUCCESS); not merged to `main`. Exact integrated Windows CPU eight-file suite: **281 PASS / 0 SKIP / 0 FAIL**. Two additional disjoint campaign-runner and settlement adversarial test files: **110 PASS / 0 SKIP / 0 FAIL**, for **391 passes across ten distinct files** at the identical integration HEAD. Older CPU tests cited elsewhere are separate checkpoints, not additional final-head passes.
 
 - **CH-065, P1:** Frozen REAP speed gate now requires every one of 200 eligible GSM8K request speed measurements for both candidate and dense arms, refusing 1-of-200 false PASS and nonfinite/malformed values.
 - **CH-066, P2:** Frozen R3/T23 judges now validate the complete recorded budget failure-reason list against the recomputed production settlement. Historical absent reasons remain UNKNOWN, not promoted.
