@@ -24,6 +24,18 @@ except ImportError:  # direct script mode outside the repository package path
 
 REQUIRED = ("d0", "gate0", "gate1", "gate2", "control", "speed")
 MARGIN = -0.02  # frozen strict lower bound for paired v2-v1 comparisons
+# §4 explicitly defines LB = mean(d) - 1.645 * sd(d)/sqrt(n), whereas
+# Amendment 4 §2 calls for "paired McNemar" one-sided 95% noninferiority at
+# -0.02. McNemar's equality test does not uniquely determine a lower CI for
+# the paired marginal risk difference at a nonzero margin. In particular,
+# Wald, Tango score, Newcombe and exact-compatible limits can disagree.
+# Keep the originally coded §4 Wald output as a diagnostic, NOT evidence
+# sufficient to certify optional v2 replacement before method adjudication.
+PAIRED_METHOD_DISCREPANCY = (
+    "frozen Amendment 4 paired McNemar one-sided noninferiority CI "
+    "is not uniquely specified against the frozen Section 4 Wald LB; "
+    "prospective documented statistical-method resolution required"
+)
 
 
 def _status(result: dict, key: str) -> str:
@@ -80,9 +92,12 @@ def select(gates: dict[str, dict | None], paired: dict | None = None) -> dict:
         if paired is None or any(paired.get(suite) is None for suite in ("gsm8k", "humaneval")):
             return {"status": "BLOCKED", "chosen": None,
                     "reason": "v2-v1 paired GSM8K and HumanEval bounds missing"}
-        if all(paired[suite] > MARGIN for suite in ("gsm8k", "humaneval")):
-            return {"status": "SELECTED", "chosen": "reap128_v2",
-                    "reason": "v2 passes every gate and both strict paired bounds"}
+        # These paired Wald bounds remain observable, but cannot by
+        # themselves certify the separately named McNemar noninferiority
+        # method. This affects only OPTIONAL replacement of passing v1;
+        # the frozen Gate0/1-failure fallback order above is a distinct rule.
+        return {"status": "BLOCKED", "chosen": None,
+                "reason": PAIRED_METHOD_DISCREPANCY}
     return {"status": "SELECTED", "chosen": "reap128", "reason": "v1 retained under amendment 4"}
 
 
@@ -105,6 +120,7 @@ def _attested_rows(eval_dir: Path, arm: str, suite: str, expected: int) -> dict 
 
 
 def _paired(eval_dir: Path) -> dict | None:
+    """Diagnostic §4 paired-difference Wald bounds; NOT a McNemar NI CI."""
     pairs = {}
     for suite, n in (("gsm8k", 1319), ("humaneval", 164)):
         arm = _attested_rows(eval_dir, "reap128_v2", suite, n)
@@ -263,6 +279,14 @@ def evaluate(
         raise GateError("REAP evaluation inputs changed while frozen gates were computed")
     return {"schema": "reap-frozen-amendment4-selection-v1", "gates": present,
             "paired_v2_minus_v1": paired, "decision": decision,
+            "paired_method": {
+                "status": "UNRESOLVED" if "reap128_v2" in present else "NOT_EVALUATED",
+                "scope": "optional v2 replacement of passing v1; frozen mandatory fallback unchanged",
+                "reported_statistic": "Section 4 paired-difference Wald one-sided 95% LB",
+                "frozen_margin": MARGIN,
+                "amendment_4_method": "paired McNemar one-sided 95% LB",
+                "qualification": "NOT_CERTIFIED: " + PAIRED_METHOD_DISCREPANCY,
+            },
             "input_sha256": input_sha256, "release_approved": False,
             "scope": "frozen selection score only; human approval and hardware gates separate"}
 

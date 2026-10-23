@@ -2,15 +2,20 @@
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import statistics
 import subprocess
 import sys
 
 import pytest
 
 from chowder_batch.reap_gates import GateError
-from chowder_batch.reap_select import REQUIRED, _validate_v2_observation, evaluate, select
+from chowder_batch.reap_select import (
+    PAIRED_METHOD_DISCREPANCY, REQUIRED, _paired, _validate_v2_observation,
+    evaluate, select,
+)
 from chowder_batch import reap_v2_source_identity as identity
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,9 +74,35 @@ def test_third_fallback_is_conditional():
 def test_v2_normal_replacement_requires_both_strict_noninferiority_bounds():
     current = {"reap128": arm(), "reap128_v2": arm()}
     assert select(current)["status"] == "BLOCKED"
-    assert select(current, {"gsm8k": -0.019, "humaneval": -0.019})["chosen"] == "reap128_v2"
-    assert select(current, {"gsm8k": -0.02, "humaneval": -0.019})["chosen"] == "reap128"
-    assert select(current, {"gsm8k": -0.019, "humaneval": -0.02})["chosen"] == "reap128"
+    # The §4 Wald bound is still reported, but the amendment also requires
+    # a "paired McNemar" margin CI without specifying its CI construction.
+    # Neither a Wald PASS nor a Wald FAIL adjudicates that separate method.
+    for bounds in (
+        {"gsm8k": 0.0, "humaneval": 0.0},
+        {"gsm8k": -0.019, "humaneval": -0.019},
+        {"gsm8k": -0.02, "humaneval": -0.019},
+        {"gsm8k": -0.019, "humaneval": -0.02},
+        {"gsm8k": -0.2, "humaneval": -0.2},
+    ):
+        verdict = select(current, bounds)
+        assert verdict["status"] == "BLOCKED"
+        assert verdict["chosen"] is None
+        assert verdict["reason"] == PAIRED_METHOD_DISCREPANCY
+
+
+def test_ambiguity_does_not_halt_valid_v1_or_frozen_fallback_decisions():
+    # Optional v2 replacement and mandatory Gate0/1-failure fallback have
+    # separate requirements in Amendment 4 §2 vs §3.
+    passing_v1 = {"reap128": arm()}
+    assert select(passing_v1)["chosen"] == "reap128"
+    assert select({**passing_v1, "reap128_v2": arm(gate2="FAIL")})["chosen"] == "reap128"
+    needs_fallback = {"reap128": arm(gate1="FAIL", speed="NOT_EVALUATED"),
+                      "reap128_v2": arm(), "reap160": arm()}
+    assert select(needs_fallback)["chosen"] == "reap128_v2"
+    needs_fallback["reap128_v2"] = arm(gate1="FAIL")
+    assert select(needs_fallback)["chosen"] == "reap160"
+    del needs_fallback["reap160"]
+    assert select(needs_fallback)["status"] == "BLOCKED"
 
 
 def test_v1_coding_regression_does_not_authorize_fallback():
@@ -118,12 +149,32 @@ def _evidence(root):
     return observation
 
 
+def test_paired_wald_statistic_remains_exactly_frozen_but_not_certified(tmp_path):
+    _attest(tmp_path, "reap128", "gsm8k", 1319, fail=10)
+    _attest(tmp_path, "reap128_v2", "gsm8k", 1319, fail=4)
+    _attest(tmp_path, "reap128", "humaneval", 164, fail=3)
+    _attest(tmp_path, "reap128_v2", "humaneval", 164, fail=1)
+    observed = _paired(tmp_path)
+    assert observed is not None
+    for suite, n, improvements in (("gsm8k", 1319, 6), ("humaneval", 164, 2)):
+        differences = [1.0] * improvements + [0.0] * (n - improvements)
+        registered = (statistics.fmean(differences)
+                      - 1.645 * statistics.stdev(differences) / math.sqrt(n))
+        assert observed[suite] == pytest.approx(registered, abs=1e-14)
+        assert observed[suite] > -0.02
+    selection = select({"reap128": arm(), "reap128_v2": arm()}, observed)
+    assert selection["status"] == "BLOCKED"
+    assert selection["reason"] == PAIRED_METHOD_DISCREPANCY
+
+
 def test_full_synthetic_raw_evidence_blocks_missing_mandatory_v2(tmp_path):
     obs = _evidence(tmp_path)
     result = evaluate(tmp_path, obs)
     assert result["gates"]["reap128"]["gates"]["gate1"]["status"] == "FAIL"
     assert result["decision"]["status"] == "BLOCKED"
     assert "both REAP128_v2 and REAP160" in result["decision"]["reason"]
+    assert result["paired_method"]["status"] == "NOT_EVALUATED"
+    assert "mandatory fallback unchanged" in result["paired_method"]["scope"]
     assert result["input_sha256"][str(tmp_path / "dense" / "gsm8k.jsonl")]
     assert result["release_approved"] is False
 
@@ -188,6 +239,11 @@ def test_v2_cannot_borrow_v1_observer_d0(tmp_path, monkeypatch):
     report = evaluate(tmp_path, obs)
     assert report["gates"]["reap128_v2"]["gates"]["d0"]["status"] == "UNKNOWN"
     assert report["decision"]["status"] == "BLOCKED"
+    assert report["paired_method"]["status"] == "UNRESOLVED"
+    assert report["paired_method"]["frozen_margin"] == -0.02
+    assert "Wald" in report["paired_method"]["reported_statistic"]
+    assert "McNemar" in report["paired_method"]["amendment_4_method"]
+    assert report["release_approved"] is False
     v2 = tmp_path / "observation-v2.json"
     v2.write_text(obs.read_text(encoding="utf-8"), encoding="utf-8")
     assert evaluate(tmp_path, obs, v2)["gates"]["reap128_v2"]["gates"]["d0"]["status"] == "UNKNOWN"
