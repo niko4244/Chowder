@@ -56,6 +56,18 @@ def _load(eval_dir, arm: str, suite: str, *, expected_n: int | None = None):
             ident = row["id"]
             if ident in rows:
                 raise GateError(f"{path}:{line_number}: duplicate item id {ident!r}")
+            # reap_eval emits a boolean termination and the unique-trigram
+            # count divided by the number of trigrams, bounded to [0, 1].
+            # bool("false") is True, while NaN < 0.5 is False; either value
+            # could hide an actual Gate0 termination/degeneracy regression.
+            if not isinstance(row.get("terminated"), bool):
+                raise GateError(f"{path}:{line_number}: terminated must be boolean")
+            ratio = row.get("trigram_ratio")
+            if (isinstance(ratio, bool) or not isinstance(ratio, (int, float))
+                    or not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0):
+                raise GateError(
+                    f"{path}:{line_number}: trigram_ratio must be finite within [0, 1]"
+                )
             rows[ident] = row
     required = expected_n if expected_n is not None else FROZEN_SUITE_SIZES.get(suite)
     if required is not None and len(rows) != required:

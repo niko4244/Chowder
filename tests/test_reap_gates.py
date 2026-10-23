@@ -207,6 +207,42 @@ def test_frozen_quality_rejects_nonbinary_correct_values(tmp_path, forged_correc
         run(tmp_path)
 
 
+@pytest.mark.parametrize("forged_terminated", ["false", "true", 0, 1, None])
+def test_gate0_rejects_nonboolean_termination_even_when_quality_is_binary(
+    tmp_path, forged_terminated,
+):
+    # 27/1319 missed terminations breach the frozen 2% Gate0 tolerance;
+    # the GSM8K paired-quality lower bound still passes at about -0.0269.
+    build(tmp_path, arm_gsm=[0] * 27 + [1] * (1319 - 27),
+          terminated=[0] * 27 + [1] * (1319 - 27))
+    original = run(tmp_path)
+    assert original["gates"]["gate0"]["status"] == "FAIL"
+    assert original["gates"]["gate1"]["computed_status"] == "PASS"
+    path = tmp_path / "reap128" / "gsm8k.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    for row in rows[:27]:
+        row["terminated"] = forged_terminated
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    with pytest.raises(rg.GateError, match="terminated.*boolean"):
+        run(tmp_path)
+
+
+@pytest.mark.parametrize("forged_trigram", [
+    float("nan"), float("inf"), -0.01, 1.01, "0.9", True, None,
+])
+def test_gate0_rejects_nonfinite_or_out_of_range_trigram_ratio(tmp_path, forged_trigram):
+    # Production computes unique trigrams / all trigrams: always finite [0, 1].
+    build(tmp_path, trigram=[0.1] * 40 + [0.9] * (1319 - 40))
+    assert run(tmp_path)["gates"]["gate0"]["status"] == "FAIL"
+    path = tmp_path / "reap128" / "gsm8k.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    for row in rows[:40]:
+        row["trigram_ratio"] = forged_trigram
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    with pytest.raises(rg.GateError, match="trigram_ratio.*finite.*\[0, 1\]"):
+        run(tmp_path)
+
+
 @pytest.mark.parametrize(("incomplete", "bad_value"), [
     ("arm", None),
     ("dense", None),
