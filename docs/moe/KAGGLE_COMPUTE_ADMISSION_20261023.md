@@ -32,6 +32,30 @@ On the existing, authenticated nikmarco account:
      metadata alone.
    - Downloaded receipt:
      C:/Users/nikma/_audit/chowder-kaggle-primary-tpu-receipt-20261023/chowder-hardware-receipt.json
+   - This reproduces known open Kaggle CLI issue #1197:
+     https://github.com/Kaggle/kaggle-cli/issues/1197 .
+     The official push API accepts a TPU request but silently schedules CPU.
+     The supported operational workaround is to open the notebook in Kaggle's
+     interactive editor, explicitly select TPU v5e-8 in Settings / Accelerator,
+     then Save & Run All. The available read-only browser connector cannot
+     perform that interactive click in this session. Never use the API-generated
+     CPU receipt as if it were a TPU BF16 test.
+
+3. Private CPU-only mounted checkpoint I/O probe:
+   https://www.kaggle.com/code/nikmarco/chowder-dataset-stream-cpu-20261023
+   - Status COMPLETE, mounted existing private
+     nikmarco/qwen36-reap160-bf16 (REAP160, not original dense parent).
+   - Read exactly 64 MiB sequentially from the first mounted safetensors
+     shard in 1.2034 sec: **53.18186 MiB/sec** measured short sample.
+     Sample bytes SHA256 6803608593644f37d1190aff5a3a432acc77c4b92bb8c07e5f1c01f53f409a49.
+   - Saved receipt:
+     C:/Users/nikma/_audit/chowder-kaggle-primary-stream-receipt-20261023/chowder-checkpoint-stream-sample.json
+   - Previous DIFFERENT 46 GB REAP160 run recorded effective ~0.69 MB/sec
+     for tensor-by-tensor reads and timed out after 12 hours before
+     training. This new sequential sample is promising for a bounded
+     staging-to-/tmp implementation. It does **not** establish full-shard
+     or original 72 GB throughput, model loading speed or frozen D0.
+     The measured Kaggle /tmp free space was ~1048.8 GiB on that worker.
 
 ## Reproducible hardware probes
 
