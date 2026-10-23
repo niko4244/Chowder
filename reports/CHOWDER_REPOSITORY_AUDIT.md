@@ -1,7 +1,7 @@
 # Chowder repository audit
 
 <!-- CHOWDER_LATEST_VERIFIED_20261022 -->
-> **Latest verified review:** PR #277 `056225d94ed3f897ea6c01993c2e7d8419062f80` (PENDING). See Gen-0/Gen-1 addendum. Older evidence retained under original revisions.
+> **Latest verified review:** PR #277 `b027d78cc2fe9cba67f4dd0ddc1de84de3d3ec49` (PENDING). See Gen-0/Gen-1 addendum. Older evidence retained under original revisions.
 
 > Final audit 2026-10-22. Main 0bc566c5; MoE PR268 184291f; recovery PR269 cf54480 with local 82-test verification; REAP PR271 73f1593. GitHub and read-only Windows workspaces inspected, 39 model files independently SHA-256 verified twice. No GPU training was started in this audit. Frozen gates and required approvals remain binding.
 
@@ -200,9 +200,19 @@ This remains **review-branch CPU-only** assurance. Missing REAP128_v2, registrat
 <!-- CHOWDER_GEN0_GEN1_20261023_BEGIN -->
 ## Gen-0/Gen-1 scientific qualification continuation
 
-**Current code review:** [PR #277](https://github.com/niko4244/Chowder/pull/277) at `056225d94ed3f897ea6c01993c2e7d8419062f80` (PENDING CI), unmerged draft. At this exact revision, **229 focused CPU tests passed, zero failed**, Ruff passed. The older 462 focused passes and 4,117-pass full suite are at their earlier SHAs, not newly measured here. A superseded 144bd2f CI run failed because a committed MoE test expected the old trainer-template dictionary; the new required 2,048 field is now asserted in the generation and parsed worker spec.
+**Current code review:** [PR #277](https://github.com/niko4244/Chowder/pull/277) at `b027d78cc2fe9cba67f4dd0ddc1de84de3d3ec49` (PENDING CI), unmerged draft. At this exact revision, **354 focused CPU tests passed, zero failed**, Ruff passed. The older 462 focused passes and 4,117-pass full suite are at their earlier SHAs, not newly measured here. A superseded 144bd2f CI run failed because a committed MoE test expected the old trainer-template dictionary; the new required 2,048 field is now asserted in the generation and parsed worker spec.
 
 **CH-074:** REAP v2 preflight now requires the *actual* registered 704-row base SHA and only a declared, digest-verified bare Ornith suffix, in addition to complete D0/saliency and model shape checks. The previous self-consistent three-row substitute was reproducibly admitted before repair.
+
+**CH-078 — corrected forged optional suffix:** After the initial base SHA guard, both the direct selector and build preflight still accepted a self-consistent fake 717-row v2 corpus with invented Ornith bare rows. The integrated common validator now enforces the actual pinned source and its zero eligible rows; both entrypoints reject that forgery. This does not produce a full v2 D0 witness.
+
+**CH-079 — observer memory engineering:** The old final 2048-token perplexity step allocated a roughly 2047-by-248320 FP32 vocabulary matrix plus BF16 logits. The new 64-position streaming equivalent reduces the worst projection shape approximately 32-fold without dropping any calibration examples or layers. CPU numerical equivalence was tested; GPU peak and qualifying v2 D0 remain UNMEASURED. A bounded real CUDA one-layer smoke was not started because only 7007 MiB GPU was free at the 8192 MiB conservative launch guard.
+
+**CH-080 — independent Gen-1 2×2 production preparation:** The frozen candidate planner has two learning-rate recipes and rejects dataset identity as an admissible search axis. New strict CPU materialization prepares four *separate* projects for Fable/control crossed with 5e-5/1e-4, pins actual 2048-ready mix/tokenizer/input hashes and preserves the enforced <=2.5 GPU-hour per-recipe budget and hardware refusal. Genuine 767/647-row source files and exact 2048 readiness receipt passed the new independent source check. Production config admission now recognizes declared MoE tools and placement keys. These are prepared independent trial inputs, NOT completed training, a registered four-candidate search or a certified model comparison.
+
+**CH-081 — unresolved paired statistic:** Frozen Amendment 4 names a one-sided 95% paired McNemar noninferiority bound. The current selector calculates a normal paired-difference mean/stdev lower bound without a preregistered McNemar construction. Genuine v2-v1 paired observations do not yet exist; no statistic has been substituted or selection certified. This must be adjudicated before a future v2 replacement verdict.
+
+**CH-082 — corrected lean-CI collection:** The first consolidated review at `2ae2d70` failed lean CI because new observer CPU tests unconditionally imported optional `torch`; the new `b027d78` revision skips only those tests when Torch is absent and exercises them when it is installed. Historical CI failure `39928158887` remains a failure and is not attributed to this new head.
 
 **CH-077 — unresolved registered-data contradiction:** The exact offline bare-render builder with SHA-pinned admitted Ornith input wrote 704 rows (SHA `f6a09b694ae43a6d8b44b5180a861856501295eabf3d5297eb9749a008cdd929`), identical to the registered base. All 39 admitted SFT items render at 40–173 tokens, so none reach the frozen 256-token minimum. The historical 717-row corpus uses an unregistered worked render. No registered 717-row bare D0 exists; we did not pad, change a threshold or invent it. Distinct REAP128_v2 weights and paired scores remain absent; McNemar wording needs prospective clarification.
 

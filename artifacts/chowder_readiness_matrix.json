@@ -751,24 +751,28 @@
   "review_gen0_gen1_20261023": {
     "schema": "chowder.review-gen0-gen1-20261023.v1",
     "engineering_pr": 277,
-    "engineering_head": "056225d94ed3f897ea6c01993c2e7d8419062f80",
+    "engineering_head": "b027d78cc2fe9cba67f4dd0ddc1de84de3d3ec49",
     "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
     "draft_unmerged": true,
     "ci": {
-      "run_id": "39921336121",
+      "run_id": "39929171488",
       "status": "PENDING",
-      "head": "056225d94ed3f897ea6c01993c2e7d8419062f80",
+      "head": "b027d78cc2fe9cba67f4dd0ddc1de84de3d3ec49",
       "successes": null
     },
     "exact_head_cpu": {
-      "head": "056225d94ed3f897ea6c01993c2e7d8419062f80",
-      "passed": 229,
+      "head": "b027d78cc2fe9cba67f4dd0ddc1de84de3d3ec49",
+      "passed": 354,
       "failed": 0,
       "test_files": [
         "tests/test_reap_build_preflight.py",
         "tests/test_reap_calibration.py",
         "tests/test_reap_select.py",
+        "tests/test_reap_gates.py",
+        "tests/test_reap_observe_nll.py",
         "tests/test_moe_gen1_train_preflight.py",
+        "tests/test_moe_gen1_four_arm.py",
+        "tests/test_config_validation.py",
         "tests/test_moe_gen1_mix.py",
         "tests/test_training_data.py",
         "tests/test_growth_campaign_prepare.py",
@@ -795,6 +799,13 @@
       "correction_commit": "056225d",
       "must_not_claim_success_for_earlier_run": true
     },
+    "superseded_observer_torch_collection_ci": {
+      "head": "2ae2d7081f6184db7e701a1681b924ddf36ac0d4",
+      "run_id": 39928158887,
+      "cause": "minimal Linux and Windows pytest collection imported optional torch in new REAP observer equivalence tests",
+      "correction_commit": "b027d78",
+      "must_not_claim_success_for_earlier_run": true
+    },
     "reap_v2_calibration": {
       "frozen_base_rows": 704,
       "frozen_base_sha256": "f6a09b694ae43a6d8b44b5180a861856501295eabf3d5297eb9749a008cdd929",
@@ -806,10 +817,16 @@
       "frozen_min_tokens": 256,
       "bare_ornith_kept": 0,
       "worked_unregistered_rows": 717,
+      "forged_bare_717_accepted_before_shared_fix": true,
+      "forged_bare_717_refused_by_selector_and_build_after_fix": true,
+      "frozen_source_identity_shared": true,
+      "nll_vocab_projection_positions_before": 2047,
+      "nll_vocab_projection_positions_after_max": 64,
+      "observer_gpu_peak_after_nll_change": "NOT_MEASURED",
       "distinct_v2_checkpoint": "ABSENT",
       "genuine_v2_d0": "ABSENT",
       "paired_v2_quality_and_speed": "NOT_MEASURED",
-      "paired_mcnemar_method": "requires prereg method clarification",
+      "paired_mcnemar_method": "UNRESOLVED: selector uses normal paired-difference LB, not a specified McNemar confidence construction",
       "reap160_frozen_speed_offload": "UNKNOWN"
     },
     "gen1_real_input": {
@@ -859,9 +876,27 @@
       "projected_1000_step_gpu_hours": 7.63,
       "registered_train_budget_hours": 2.5,
       "new_training_gpu_hours": 0.0,
-      "new_real_optimizer_steps": 0
+      "new_real_optimizer_steps": 0,
+      "bounded_cuda_observer_smoke": "NOT_LAUNCHED_RESOURCE_GUARD",
+      "observer_smoke_gpu_free_at_guard_mib": 7007,
+      "observer_smoke_required_free_mib": 8192
     },
-    "four_arm_campaign_status": "PREPARED_INPUTS_ONLY_NOT_EXECUTED",
+    "four_arm_campaign_status": "FOUR_SEPARATE_PRODUCTION_PROJECTS_PREPARABLE_NOT_EXECUTED",
+    "four_arm_search_axis_limit": "dataset_manifest_not_safe_in_frozen_two_recipe_campaign",
+    "four_arm_expected_learning_rates": [
+      5e-05,
+      0.0001
+    ],
+    "four_arm_source_ids": [
+      "Fable",
+      "control"
+    ],
+    "four_arm_real_gpu_executions": 0,
+    "four_arm_real_source_admission_rechecked": true,
+    "four_arm_real_fable_jsonl_sha256": "384b6f10ae579af10ce36cbbe5278716b681d3223beab7343742b51c1857024d",
+    "four_arm_real_control_jsonl_sha256": "681b2aa957d042028db8fa8710be6538b23f6563e088b9f752410bf5da174c9e",
+    "four_arm_training_per_recipe_gpu_hour_ceiling": 2.5,
+    "four_arm_actual_projects_materialized": 0,
     "inference_status": "REAP160_Q4_EXISTS_NO_NEW_DECODE_OR_ADAPTER_RELOAD",
     "judge_n5_rights": "NOT_CERTIFIED",
     "release": "BLOCKED",
@@ -869,7 +904,12 @@
       "768d0c6",
       "32390b1",
       "144bd2f",
-      "056225d"
+      "056225d",
+      "f1a41d0",
+      "156ecc4",
+      "ebd4e14",
+      "2ae2d70",
+      "b027d78"
     ],
     "protected_main_rescue_qwen38_models_untouched": true
   }
