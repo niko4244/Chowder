@@ -1,7 +1,7 @@
 # Chowder engineering and custom MoE — executive verdict
 
 <!-- CHOWDER_LATEST_VERIFIED_20261022 -->
-> **Latest pinned review evidence:** PR #277 `05117214ba49326749e98a255d4e86dc242c49ca` (PENDING, draft/unmerged). See latest Gate0 follow-up at end. Earlier results remain historical.
+> **Latest pinned review evidence:** PR #277 `05117214ba49326749e98a255d4e86dc242c49ca` (SIX_SUCCESS, draft/unmerged). See latest Gate0 follow-up at end. Earlier results remain historical.
 
 > Final audit 2026-10-22. Main 0bc566c5; MoE PR268 184291f; recovery PR269 cf54480 with local 82-test verification; REAP PR271 73f1593. GitHub and read-only Windows workspaces inspected, 39 model files independently SHA-256 verified twice. No GPU training was started in this audit. Frozen gates and required approvals remain binding.
 
@@ -193,7 +193,7 @@ These are **CPU-proven code safeguards**, not a successful REAP128_v2 build, fro
 <!-- CHOWDER_GATE0_FOLLOWUP_20261022_BEGIN -->
 ## Subsequent Gate0 frozen evidence repair
 
-**Current reviewed engineering:** [PR #277](https://github.com/niko4244/Chowder/pull/277) at `05117214ba49326749e98a255d4e86dc242c49ca`, **PENDING** CI, unmerged draft. Exact-head ten-file CPU regression: **425 passed, 0 skipped, 0 failed**. The 411-pass run at `0522b68` and the 4,117-pass / 78-skip full suite at `84dbb2e` are earlier evidence, **not** current-head full-suite results.
+**Current reviewed engineering:** [PR #277](https://github.com/niko4244/Chowder/pull/277) at `05117214ba49326749e98a255d4e86dc242c49ca`, **SIX_SUCCESS** CI, unmerged draft. Exact-head ten-file CPU regression: **425 passed, 0 skipped, 0 failed**. The 411-pass run at `0522b68` and the 4,117-pass / 78-skip full suite at `84dbb2e` are earlier evidence, **not** current-head full-suite results.
 
 **CH-071 (P1):** Frozen GSM8K Gate0 wrongly treated string `terminated='false'` as a true termination and nonfinite `trigram_ratio=NaN` as nondegenerate. The adversarial reproductions flipped genuine Gate0 FAIL to PASS. The shared score loader now requires literal Boolean termination and a finite nonboolean numeric trigram ratio from 0 through 1, matching the real evaluator. Adversarial tests also cover self-rehashed summary attestations; existing correct Boolean/finite examples remain admissible. Frozen thresholds are unchanged.
 

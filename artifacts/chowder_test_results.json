@@ -852,8 +852,8 @@
     "draft_unmerged": true,
     "ci": {
       "head": "05117214ba49326749e98a255d4e86dc242c49ca",
-      "status": "PENDING",
-      "successful_checks": null,
+      "status": "SIX_SUCCESS",
+      "successful_checks": 6,
       "total_checks": 6
     },
     "cpu_focus": {
