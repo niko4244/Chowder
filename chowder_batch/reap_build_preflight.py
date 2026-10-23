@@ -40,6 +40,12 @@ LAYERS = 40
 EXPERTS = 256
 TOP_K = 8
 FROZEN_V1_SHA256 = "d43c1f8d49d8d7c70872367ba8a56e7052a3dd49351463eed292fd122a631725"
+# Amendment 4 pins the 704-row --mix v2 base. An optional admitted Ornith
+# bare-render slot may append rows; it must not replace/alter those 704 rows.
+FROZEN_V2_BASE_ROWS = 704
+FROZEN_V2_BASE_SHA256 = "f6a09b694ae43a6d8b44b5180a861856501295eabf3d5297eb9749a008cdd929"
+ORNITH_QUOTA = 64
+MAX_ADMITTED_BYTES = 16 * 1024 * 1024
 # The real observer writes four 256-element double vectors (~11 KiB/pt).
 # This limit prevents an adversarial or wrong checkpoint from becoming an
 # unbounded CPU load through torch.load even with weights_only=True.
@@ -115,6 +121,47 @@ def _model_metadata(model: Path, weights: Path) -> dict[str, str]:
             "shard_count": len(shards)}
 
 
+def _frozen_v2_source_identity(calibration: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Authenticate the preregistered 704-row base before accepting an Ornith suffix."""
+    calibration_bytes = (calibration / "calibration.jsonl").read_bytes()
+    lines = calibration_bytes.splitlines(keepends=True)
+    base_sha = hashlib.sha256(b"".join(lines[:FROZEN_V2_BASE_ROWS])).hexdigest()
+    _require(
+        len(lines) >= FROZEN_V2_BASE_ROWS and base_sha == FROZEN_V2_BASE_SHA256,
+        "frozen v2 base identity mismatch: requires the preregistered "
+        f"{FROZEN_V2_BASE_ROWS}-row calibration SHA256 {FROZEN_V2_BASE_SHA256}",
+    )
+    ornith = manifest.get("ornith")
+    tail = lines[FROZEN_V2_BASE_ROWS:]
+    if isinstance(ornith, dict):
+        _require(ornith.get("render") == "bare", "frozen v2 Ornith requires bare rendering")
+        _require(len(tail) <= ORNITH_QUOTA, "frozen v2 Ornith suffix exceeds declared quota")
+        for line in tail:
+            try:
+                row = json.loads(line)
+            except (UnicodeError, ValueError) as exc:
+                raise PreflightError("frozen v2 Ornith suffix contains malformed JSON") from exc
+            _require(isinstance(row, dict) and row.get("source") == "ornith_curriculum",
+                     "frozen v2 calibration may append only Ornith curriculum rows")
+        admitted = ornith.get("path")
+        pinned = ornith.get("sha256")
+        _require(isinstance(admitted, str) and bool(admitted)
+                 and isinstance(pinned, str) and len(pinned) == 64
+                 and all(char in "0123456789abcdef" for char in pinned),
+                 "frozen v2 Ornith admission file/path/digest invalid")
+        admitted_path = Path(admitted)
+        _require(admitted_path.is_file(), "frozen v2 admitted Ornith file missing")
+        _require(admitted_path.stat().st_size <= MAX_ADMITTED_BYTES,
+                 "frozen v2 admitted Ornith file exceeds safe metadata bound")
+        _require(_digest(admitted_path) == pinned,
+                 "frozen v2 admitted Ornith file differs from pinned SHA256")
+    else:
+        _require(ornith == "absent: no admitted Ornith curriculum supplied"
+                 and not tail, "frozen v2 absent-Ornith arm must be exact 704-row base")
+    return {"frozen_base_sha256": base_sha, "frozen_base_rows": FROZEN_V2_BASE_ROWS,
+            "ornith_suffix_rows": len(tail)}
+
+
 def _calibration_provenance(calibration: Path, observation: Path, mix: str) -> dict[str, Any]:
     manifest = _json(calibration / "calibration-manifest.json")
     rows_path = calibration / "calibration.jsonl"
@@ -132,6 +179,7 @@ def _calibration_provenance(calibration: Path, observation: Path, mix: str) -> d
         except (GateError, OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
             raise PreflightError(f"v2 full calibration/Ornith census invalid: {exc}") from exc
         _require(manifest.get("mix") == "v2", "v2 arm requires frozen v2 calibration")
+        identity = _frozen_v2_source_identity(calibration, manifest)
     else:
         _require(manifest.get("mix") in (None, "v1"), "reap160 must use v1, never v2")
         _require("ornith" not in manifest, "v1 calibration must not declare Ornith")
@@ -166,7 +214,8 @@ def _calibration_provenance(calibration: Path, observation: Path, mix: str) -> d
         _require(type(row.get("routed_tokens")) is int and row["routed_tokens"] > 0,
                  f"observer layer {index} missing positive routed-token total")
     return {"calibration_sha256": sha, "observer_sha256": _digest(observation / "observation.json"),
-            "observed_sequences": observed["n_seqs"], "calibration_ppl": d0["statistic"]}
+            "observed_sequences": observed["n_seqs"], "calibration_ppl": d0["statistic"],
+            **(identity if mix == "v2" else {})}
 
 
 def _saliency(observation: Path, reported_layers: list[dict[str, Any]]) -> str:

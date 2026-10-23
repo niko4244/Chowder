@@ -16,6 +16,20 @@ torch = pytest.importorskip("torch")
 from chowder_batch import reap_build_preflight as preflight  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _synthetic_frozen_base_identity(monkeypatch):
+    # The three-row fixture stands in for the frozen 704-row base ONLY inside
+    # this test process. Production CLI has no pin override.
+    rows = "".join(
+        json.dumps({"source": "swe_smith_trajectories", "n_tokens": 256,
+                    "text": f"synthetic calibration line {i}"}) + "\n"
+        for i in range(3)
+    )
+    monkeypatch.setattr(preflight, "FROZEN_V2_BASE_ROWS", 3)
+    monkeypatch.setattr(preflight, "FROZEN_V2_BASE_SHA256",
+                        hashlib.sha256(rows.encode("utf-8")).hexdigest())
+
+
 def _save(path: Path, document: object) -> None:
     path.write_text(json.dumps(document), encoding="utf-8")
 
@@ -106,6 +120,84 @@ def test_valid_v2_plan_is_deterministic_and_never_builds(tmp_path, arm, keep, pr
     assert plan["qualification"].startswith("NOT_EVALUATED")
 
 
+def test_self_consistent_unregistered_v2_is_not_frozen_identity(tmp_path, monkeypatch):
+    paths = _fixture(tmp_path)
+    # Even a perfectly consistent observer is inadmissible against the
+    # production frozen 704-row SHA, with no production override.
+    monkeypatch.setattr(preflight, "FROZEN_V2_BASE_ROWS", 704)
+    monkeypatch.setattr(preflight, "FROZEN_V2_BASE_SHA256",
+                        "f6a09b694ae43a6d8b44b5180a861856501295eabf3d5297eb9749a008cdd929")
+    with pytest.raises(preflight.PreflightError, match="frozen v2 base"):
+        _plan(paths)
+
+
+def _append_ornith(paths: dict[str, Path], n: int = 2) -> Path:
+    admitted = paths["calibration"] / "admitted.jsonl"
+    admitted.write_text('{"admitted":true,"lane":"sft","prompt":"p","expected_answer":"42"}\n')
+    rows_path = paths["calibration"] / "calibration.jsonl"
+    with rows_path.open("a", encoding="utf-8", newline="\n") as stream:
+        for i in range(n):
+            stream.write(json.dumps({"source": "ornith_curriculum", "n_tokens": 256,
+                                     "text": f"synthetic bare Ornith row {i}"}) + "\n")
+    manifest_path = paths["calibration"] / "calibration-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["sources"]["ornith_curriculum"] = {"kept": n}
+    manifest["ornith"] = {"render": "bare", "path": str(admitted),
+                          "sha256": hashlib.sha256(admitted.read_bytes()).hexdigest()}
+    manifest["rows"] += n
+    manifest["tokens"] += 256 * n
+    manifest["calibration_sha256"] = hashlib.sha256(rows_path.read_bytes()).hexdigest()
+    _save(manifest_path, manifest)
+    observer_path = paths["observations"] / "observation.json"
+    observer = json.loads(observer_path.read_text(encoding="utf-8"))
+    observer["n_seqs"] += n
+    observer["n_tokens"] += 256 * n
+    observer["calibration_sha256"] = manifest["calibration_sha256"]
+    _save(observer_path, observer)
+    return admitted
+
+
+@pytest.mark.parametrize("added_rows", [0, 2])
+def test_registered_base_accepts_optional_bare_admission_suffix(tmp_path, added_rows):
+    paths = _fixture(tmp_path)
+    admitted = _append_ornith(paths, n=added_rows)
+    plan = _plan(paths)
+    assert plan["calibration"]["frozen_base_rows"] == 3
+    assert plan["calibration"]["ornith_suffix_rows"] == added_rows
+    assert admitted.exists() and not paths["out"].exists()
+
+
+@pytest.mark.parametrize("damage", ["forged_base", "forged_suffix", "bad_admission_sha",
+                                    "overquota"])
+def test_registered_base_refuses_unattested_changes_even_with_selfconsistent_manifest(
+    tmp_path, damage
+):
+    paths = _fixture(tmp_path)
+    _append_ornith(paths, n=65 if damage == "overquota" else 2)
+    rows_path = paths["calibration"] / "calibration.jsonl"
+    manifest_path = paths["calibration"] / "calibration-manifest.json"
+    observer_path = paths["observations"] / "observation.json"
+    manifest = json.loads(manifest_path.read_text())
+    if damage == "bad_admission_sha":
+        manifest["ornith"]["sha256"] = "0" * 64
+    elif damage != "overquota":
+        rows = [json.loads(line) for line in rows_path.read_text().splitlines()]
+        if damage == "forged_base":
+            rows[0]["text"] = "replaced original frozen corpus"
+        else:
+            rows[-1]["source"] = "swe_smith_trajectories"
+            manifest["sources"]["swe_smith_trajectories"]["kept"] += 1
+            manifest["sources"]["ornith_curriculum"]["kept"] -= 1
+        rows_path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        manifest["calibration_sha256"] = hashlib.sha256(rows_path.read_bytes()).hexdigest()
+        observed = json.loads(observer_path.read_text())
+        observed["calibration_sha256"] = manifest["calibration_sha256"]
+        _save(observer_path, observed)
+    _save(manifest_path, manifest)
+    with pytest.raises(preflight.PreflightError, match="frozen v2"):
+        _plan(paths)
+
+
 def test_valid_v1_reap160_plan_uses_frozen_v1_calibration(tmp_path, monkeypatch):
     paths = _fixture(tmp_path, mix="v1")
     # The fixture is synthetic, so substitute only its preregistered digest;
@@ -118,7 +210,7 @@ def test_valid_v1_reap160_plan_uses_frozen_v1_calibration(tmp_path, monkeypatch)
     assert plan["frozen_order_predecessors"] == ["reap128", "reap128_v2"]
 
 
-def test_cli_emits_json_without_writing_output_or_model_shards(tmp_path):
+def test_production_cli_refuses_synthetic_base_without_writing_outputs_or_weights(tmp_path):
     paths = _fixture(tmp_path)
     script = Path(preflight.__file__)
     environment = os.environ.copy()
@@ -133,9 +225,9 @@ def test_cli_emits_json_without_writing_output_or_model_shards(tmp_path):
                            capture_output=True, text=True, check=False)
     second = subprocess.run(command, cwd=script.parents[1], env=environment,
                             capture_output=True, text=True, check=False)
-    assert first.returncode == second.returncode == 0, first.stderr
-    assert first.stdout == second.stdout
-    assert json.loads(first.stdout)["keep_experts_per_layer"] == 128
+    assert first.returncode == second.returncode == 2
+    assert first.stdout == second.stdout == ""
+    assert "frozen v2 base identity mismatch" in first.stderr
     assert not paths["out"].exists()
     assert (paths["weights"] / "model-00001-of-00001.safetensors").read_bytes().startswith(b"metadata-only")
 
@@ -246,5 +338,7 @@ def test_cli_refuses_without_writing_or_claiming_gate_pass(tmp_path):
         check=False,
     )
     assert completed.returncode == 2
-    assert "layer-00.pt" in completed.stderr
+    # Production has the real 704-row pin, so this deliberately synthetic
+    # corpus is refused before the missing saliency layer is even inspected.
+    assert "frozen v2 base identity mismatch" in completed.stderr
     assert completed.stdout == "" and not paths["out"].exists()
