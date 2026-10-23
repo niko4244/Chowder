@@ -840,6 +840,15 @@
       "measured 14.5 GB / 20-step LoRA and 2.5 GPU-hour recipe unqualified",
       "independent frozen judge and postjudge owner N5 approval absent",
       "redistribution licenses unresolved"
-    ]
+    ],
+    "cpu_full_suite": {
+      "revision": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "passed": 4117,
+      "skipped": 78,
+      "failed": 0,
+      "execution": "FRESH_PINNED_WINDOWS_PYTEST",
+      "includes_targeted_tests": true,
+      "do_not_add_pass_counts_to_targeted_suites": true
+    }
   }
 }
