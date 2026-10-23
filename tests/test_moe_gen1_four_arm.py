@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from chowder.project import load_project
+from chowder.project_runner import _legacy_unbounded_lifecycle
 
 from chowder_batch import moe_gen1_four_arm
 from chowder_batch.moe_gen1_four_arm import FourArmRefusal, prepare_four_arms
@@ -70,15 +71,16 @@ def _fixture(tmp_path: Path):
     project_path = tmp_path / "prepared" / "project-template.json"
     _write(project_path, {
         "schema_version": 1, "name": "gen1-reap-moe", "seed": 7,
-        "goal": {"metrics": [{"name": "tool-use", "direction": "maximize"}],
-                 "gpu_hour_budget": 9.0, "max_parallel_candidates": 1,
+        "goal": {"metrics": [{"name": "tool-use", "direction": "maximize", "minimum": 0.5}],
+                 "gpu_hour_budget": 2.5, "max_parallel_candidates": 1,
                  "minimum_promotion_gain": 0, "require_protocol_match": False},
         "baseline": {"mode": "fixed", "experiment_id": "baseline",
                      "metrics": {"tool-use": 0.42}, "gpu_hours": 0.0},
-        "experiment": {"experiment_id": "gen1-reap-moe", "estimated_gpu_hours": 8.0,
+        "experiment": {"experiment_id": "gen1-reap-moe", "estimated_gpu_hours": 2.25,
                        "hypothesis": {"observation": "measured failure",
                                       "suspected_cause": "tool calls", "intervention": "LoRA"}},
         "config": {
+            "goal_lifecycle": {"mode": "bounded"},
             "seed": 7, "backend": {
                 "schema_version": 1, "type": "transformers-peft",
                 "base_model": str(tmp_path / "base-model"), "dataset": "{corpus}",
@@ -129,6 +131,11 @@ def test_four_distinct_executable_production_projects_have_bound_source_and_lr(t
         assert backend["training"]["learning_rate"] == arm["learning_rate"]
         assert backend["max_length"] == 2048
         assert backend["tools_field"] == "tools"
+        assert raw["goal"]["gpu_hour_budget"] == 2.5
+        assert raw["goal"]["metrics"][0]["minimum"] == 0.5
+        assert raw["config"]["goal_lifecycle"] == {"mode": "bounded"}
+        assert raw["experiment"]["estimated_gpu_hours"] == 2.25
+        assert _legacy_unbounded_lifecycle(spec) is False
         assert spec.experiment.experiment_id == arm["id"]
         assert arm["validate_command"][-1] == str(path)
         assert arm["train_command"][-1] == str(path)
@@ -138,12 +145,34 @@ def test_four_distinct_executable_production_projects_have_bound_source_and_lr(t
                    for arm in record["arms"])
 
 
+def test_explicit_direction_only_lifecycle_keeps_native_semantics_but_still_caps_gpu(tmp_path):
+    paths = _fixture(tmp_path)
+    template = json.loads(paths["project_template"].read_text(encoding="utf-8"))
+    template["config"]["goal_lifecycle"] = {"mode": "legacy_unbounded"}
+    template["goal"]["metrics"][0].pop("minimum")
+    _write(paths["project_template"], template)
+
+    plan = _prepare(paths)
+    assert len(plan["arms"]) == 4
+    for arm in plan["arms"]:
+        project_path = Path(arm["project_path"])
+        result = json.loads(project_path.read_text(encoding="utf-8"))
+        assert result["config"]["goal_lifecycle"] == {"mode": "legacy_unbounded"}
+        assert result["goal"]["metrics"][0].get("minimum") is None
+        assert result["goal"]["gpu_hour_budget"] == 2.5
+        assert result["experiment"]["estimated_gpu_hours"] == 2.25
+        assert _legacy_unbounded_lifecycle(load_project(project_path)) is True
+
+
 @pytest.mark.parametrize("damage", [
     "not_ready", "wrong_length", "screened_tails", "changed_manifest",
     "changed_fable", "changed_control", "control_not_subset", "untrusted_tool_instrument",
     "wrong_chat", "no_tools", "wrong_preset", "wrong_max_length", "missing_budget",
     "mixed_dataset", "existing_output", "no_fable_only", "missing_source",
-    "other_tokenizer", "tokenizer_changed",
+    "other_tokenizer", "tokenizer_changed", "over_budget", "nan_budget", "infinite_budget",
+    "boolean_budget", "estimate_over_budget", "missing_lifecycle",
+    "unknown_lifecycle", "bad_lifecycle", "direction_only_goal", "nan_goal_target",
+    "legacy_with_numeric_target",
 ])
 def test_four_arm_preparation_refuses_changed_inputs_before_writing(tmp_path, damage):
     paths = _fixture(tmp_path)
@@ -185,6 +214,28 @@ def test_four_arm_preparation_refuses_changed_inputs_before_writing(tmp_path, da
         template["config"]["backend"]["max_length"] = 4096
     elif damage == "missing_budget":
         template["goal"]["gpu_hour_budget"] = 0
+    elif damage == "over_budget":
+        template["goal"]["gpu_hour_budget"] = 2.500001
+    elif damage == "nan_budget":
+        template["goal"]["gpu_hour_budget"] = float("nan")
+    elif damage == "infinite_budget":
+        template["goal"]["gpu_hour_budget"] = float("inf")
+    elif damage == "boolean_budget":
+        template["goal"]["gpu_hour_budget"] = True
+    elif damage == "estimate_over_budget":
+        template["experiment"]["estimated_gpu_hours"] = 2.500001
+    elif damage == "missing_lifecycle":
+        template["config"].pop("goal_lifecycle")
+    elif damage == "legacy_with_numeric_target":
+        template["config"]["goal_lifecycle"] = {"mode": "legacy_unbounded"}
+    elif damage == "unknown_lifecycle":
+        template["config"]["goal_lifecycle"] = {"mode": "other"}
+    elif damage == "bad_lifecycle":
+        template["config"]["goal_lifecycle"] = {"mode": "bounded", "legacy_unbounded": True}
+    elif damage == "direction_only_goal":
+        template["goal"]["metrics"][0].pop("minimum")
+    elif damage == "nan_goal_target":
+        template["goal"]["metrics"][0]["minimum"] = float("nan")
     elif damage == "mixed_dataset":
         template["config"]["backend"]["dataset"] = str(paths["mix"] / "train-fable.jsonl")
     elif damage == "existing_output":

@@ -19,6 +19,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -36,6 +37,7 @@ from chowder.growth.campaign_prepare import (  # noqa: E402
 
 FROZEN_LENGTH = 2048
 FROZEN_LRS = (5e-5, 1e-4)
+FROZEN_GPU_HOURS_PER_ARM = 2.5
 ARM_DATA = (("fable", "train-fable.jsonl"), ("control", "train-control.jsonl"))
 ALLOWED_PLACEMENTS = frozenset({"cpu-transient-grad", "cpu-transient-grad-bulk", "cpu-transient-grad-int8"})
 
@@ -195,9 +197,43 @@ def plan_four_arms(*, project_template: Path, mix: Path, train_preflight: Path,
         raise FourArmRefusal(f"frozen hardware placement gate refused: {exc}") from exc
     _require(prepared.get("baseline", {}).get("mode") == "fixed",
              "a trusted measured parent baseline must remain fixed across arms")
-    _require(type(prepared.get("goal", {}).get("gpu_hour_budget")) in (int, float)
-             and prepared["goal"]["gpu_hour_budget"] > 0,
-             "a real per-recipe GPU budget is required")
+    goal = prepared.get("goal")
+    _require(isinstance(goal, dict), "prepared project has no valid goal")
+    per_arm_budget = goal.get("gpu_hour_budget")
+    _require(type(per_arm_budget) in (int, float) and math.isfinite(per_arm_budget)
+             and 0 < per_arm_budget <= FROZEN_GPU_HOURS_PER_ARM,
+             "goal.gpu_hour_budget must be finite and positive and <=2.5 GPU-hours per arm")
+    experiment = prepared.get("experiment")
+    estimate = experiment.get("estimated_gpu_hours") if isinstance(experiment, dict) else None
+    _require(type(estimate) in (int, float) and math.isfinite(estimate)
+             and 0 < estimate <= per_arm_budget,
+             "experiment.estimated_gpu_hours must fit the frozen per-arm GPU budget")
+    configuration = prepared.get("config")
+    lifecycle = configuration.get("goal_lifecycle") if isinstance(configuration, dict) else None
+    # The canonical runner uses `legacy_unbounded` only for direction-only
+    # target *assessment*. It does not waive the separate measured GPU budget.
+    # Honor that explicitly frozen protocol, but never invent that opt-in:
+    # missing/unknown modes may mean silently changing an objective's semantics.
+    _require(isinstance(lifecycle, dict)
+             and lifecycle in ({"mode": "bounded"}, {"mode": "legacy_unbounded"}),
+             "config.goal_lifecycle must explicitly declare bounded or "
+             "legacy_unbounded; missing and unknown modes are refused")
+    metrics = goal.get("metrics")
+    _require(isinstance(metrics, list) and bool(metrics), "bounded goal requires metric targets")
+    for metric in metrics:
+        _require(isinstance(metric, dict), "bounded goal contains a non-object metric")
+        targets = [metric.get(bound) for bound in ("minimum", "maximum")
+                   if metric.get(bound) is not None]
+        _require(all(type(target) in (int, float) and math.isfinite(target)
+                     for target in targets), "numeric goal targets must be finite")
+        if lifecycle["mode"] == "bounded":
+            _require(bool(targets),
+                     "mode='bounded' needs an explicit target on every metric; "
+                     "a direction-only goal could terminate without improvement")
+        else:
+            _require(not targets,
+                     "mode='legacy_unbounded' is only effective for direction-only "
+                     "metrics; numerical goal bounds would change its semantics")
     arms: list[dict[str, Any]] = []
     for data_arm, filename in ARM_DATA:
         for lr, label in zip(FROZEN_LRS, ("lr5e-05", "lr0.0001")):
@@ -211,7 +247,8 @@ def plan_four_arms(*, project_template: Path, mix: Path, train_preflight: Path,
             project["config"]["backend"]["dataset"] = str(mix / filename)
             project["config"]["backend"]["dataset_sha256"] = sources[data_arm][0]
             project["config"]["backend"]["training"]["learning_rate"] = lr
-            project["config"].setdefault("goal_lifecycle", {"mode": "legacy_unbounded"})
+            # Keep the source's explicitly declared objective semantics as-is;
+            # never manufacture the runner's legacy_unbounded opt-in.
             # Exercise the same strict spec parsing the production project loader
             # runs, on each concrete arm. This never materializes a model.
             project_from_mapping(project, source_dir=project_dir)

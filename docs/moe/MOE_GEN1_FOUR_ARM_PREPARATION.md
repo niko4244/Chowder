@@ -22,6 +22,15 @@ not four candidates eligible for a single automatic promotion verdict.
 4. For `cpu-transient-grad-int8`, all recorded placement gates, including the
    WDDM operator gate, must be qualified **for the exact base checkpoint**.
    Preparation uses the authoritative placement gate; it cannot waive it.
+5. Every prepared project must declare a **finite, positive `goal.gpu_hour_budget`
+   no greater than 2.5 GPU-hours per trial**, and its experiment estimate must
+   fit inside that same budget. The project's `config.goal_lifecycle` must be
+   explicit: `mode: bounded` with finite numerical target(s), or the existing
+   `mode: legacy_unbounded` **only for direction-only assessment goals**. The
+   latter is a native objective-assessment protocol (not an exemption from
+   GPU-hour budgets). This preparation never inserts the legacy mode, changes
+   an objective threshold, or invents a budget. A missing/unknown lifecycle
+   declaration is a refusal.
 
 ```powershell
 python -B chowder_batch/moe_gen1_train_preflight.py `
@@ -42,10 +51,13 @@ refuses an existing output root. On success, `four-arm-plan.json` contains four
 independently verifiable `chowder project-validate` and `chowder train`
 commands. Run those commands **only** after reviewing the real budget and
 material provenance. The 2048-token horizon, LoRA preset, base, placement,
-evaluation protocol, and measured baseline are preserved in every project.
+evaluation protocol, measured baseline, objective lifecycle, and independently
+enforced per-trial GPU-hour budget are preserved in every project.
 Every project uses a distinct dataset SHA, experiment ID, working directory,
 and registry; the two LRs are `5e-5` and `1e-4` in both data arms.
 
+The **2.5-hour cap applies separately** to each of four trials; it is NOT
+evidence that a four-trial total/campaign ceiling has been measured or settled.
 The four trials are **not** proof of a successful Gen-1 campaign. Their
 checkpoint/adapter reload, execution-verified evaluations, cross-arm comparison,
 cumulative budget settlement, lineage ancestry, frozen judge, and N5 owner
