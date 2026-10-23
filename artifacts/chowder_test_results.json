@@ -980,13 +980,13 @@
   "review_gen0_gen1_20261023": {
     "schema": "chowder.review-gen0-gen1-20261023.v1",
     "engineering_pr": 277,
-    "engineering_head": "95eff6bc737a9c72fa507053464787cc45765b03",
+    "engineering_head": "f36b4587eb34f05c47406e73cc8125253c51ce5c",
     "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
     "draft_unmerged": true,
     "ci": {
-      "run_id": "39946078033",
+      "run_id": "39957291698",
       "status": "SIX_SUCCESS",
-      "head": "95eff6bc737a9c72fa507053464787cc45765b03",
+      "head": "f36b4587eb34f05c47406e73cc8125253c51ce5c",
       "successes": 6
     },
     "exact_head_cpu": {
@@ -1205,8 +1205,37 @@
       "933a05c",
       "8d41e63",
       "a39913b",
-      "95eff6b"
+      "95eff6b",
+      "f36b458"
     ],
-    "protected_main_rescue_qwen38_models_untouched": true
+    "protected_main_rescue_qwen38_models_untouched": true,
+    "resume_manifest_orphan_checkpoint_preflight": {
+      "finding": "CH-090",
+      "source_head": "f36b4587eb34f05c47406e73cc8125253c51ce5c",
+      "isolated_commit": "652f5a8094b6c82954083d11a72957a62db0af2d",
+      "reproduced_failed_adversarial_tests_at_old_head": 3,
+      "exact_head_cpu_checkpoint_suite": {
+        "passed": 246,
+        "skipped": 25,
+        "failed": 0,
+        "test_files": [
+          "tests/test_transformers_backend.py",
+          "tests/test_checkpoint_manifest_unclaimed_state.py",
+          "tests/test_checkpoint_discovery.py",
+          "tests/test_ddp_acceptance.py",
+          "tests/test_base_identity.py",
+          "tests/test_moe_gen1_four_arm.py"
+        ]
+      },
+      "exact_head_cpu_evaluator_runtime_suite": {
+        "passed": 70,
+        "skipped": 1,
+        "failed": 0
+      },
+      "ruff": "PASS",
+      "read_existing_checkpoint_payload_bytes": false,
+      "new_gpu_training": false,
+      "gen0_gen1_selection_or_release_proof": false
+    }
   }
 }
