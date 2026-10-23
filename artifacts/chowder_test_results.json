@@ -985,9 +985,9 @@
     "draft_unmerged": true,
     "ci": {
       "run_id": "39929171488",
-      "status": "PENDING",
+      "status": "SIX_SUCCESS",
       "head": "b027d78cc2fe9cba67f4dd0ddc1de84de3d3ec49",
-      "successes": null
+      "successes": 6
     },
     "exact_head_cpu": {
       "head": "b027d78cc2fe9cba67f4dd0ddc1de84de3d3ec49",
@@ -1009,6 +1009,17 @@
         "tests/test_moe_campaign_plumbing.py"
       ],
       "ruff": "PASS"
+    },
+    "exact_head_github_linux_py312": {
+      "head": "b027d78cc2fe9cba67f4dd0ddc1de84de3d3ec49",
+      "run_id": 39929171488,
+      "job_id": 120332880915,
+      "result": "SUCCESS",
+      "passed": 3738,
+      "skipped": 225,
+      "warnings": 4,
+      "duration_seconds": 333.51,
+      "not_a_local_test_count": true
     },
     "older_cpu_full_suite": {
       "head": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
@@ -1099,7 +1110,7 @@
       "kaggle_tpu_remaining_hours": 20.0,
       "tpu_model_backend_qualification": "NOT_MEASURED",
       "local_5060ti_total_mib": 16311,
-      "local_5060ti_free_mib_at_probe": 10836,
+      "local_5060ti_free_mib_at_probe": 7007,
       "local_other_gpu_residents": true,
       "historical_real_step_seconds": 27.48,
       "projected_1000_step_gpu_hours": 7.63,
