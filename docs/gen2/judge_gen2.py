@@ -1554,6 +1554,23 @@ def _settlement_artifact_gate(
             ),
         )
         return
+    if "budget_failure_reasons" not in recorded:
+        verdict.add(
+            "T23", requirement, UNKNOWN,
+            "the historical run recorded no budget failure reasons, so its "
+            "settlement cannot be completely reconciled",
+        )
+        return
+    if (
+        not isinstance(recorded["budget_failure_reasons"], list)
+        or recorded["budget_failure_reasons"] != list(settlement.failure_reasons)
+    ):
+        verdict.add(
+            "T23", requirement, FAIL,
+            "the run's recorded budget failure reasons disagree with the "
+            "recomputed production settlement",
+        )
+        return
     verdict.add(
         "T23", requirement, PASS,
         f"the artifact is the one the run pinned ({pinned[:12]}) and it settles as "

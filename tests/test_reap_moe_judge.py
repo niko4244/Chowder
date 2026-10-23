@@ -595,6 +595,46 @@ def test_reap_recorded_settlement_flag_must_be_boolean(
     assert _rows(output)["R3"] == ["FAIL"], output
 
 
+@pytest.mark.parametrize("tamper", ["forged_reasons", "nonnumeric_reasons", "missing_reasons"])
+def test_reap_recorded_settlement_must_match_production_reasons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], tamper: str,
+) -> None:
+    root = _run_root(tmp_path, monkeypatch)
+    path = root / "campaign-run.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["settlement"]["budget_compliant"] is True
+    if tamper == "forged_reasons":
+        record["settlement"]["budget_failure_reasons"] = [
+            "RESOURCE_OVERRUN: this did not come from production settlement"
+        ]
+    elif tamper == "nonnumeric_reasons":
+        record["settlement"]["budget_failure_reasons"] = ""
+    else:
+        del record["settlement"]["budget_failure_reasons"]
+    path.write_text(json.dumps(record), encoding="utf-8")
+    code, output = _judge(root, capsys)
+    assert code != 0, output
+    assert _rows(output)["R2"] == ["PASS"], output
+    assert _rows(output)["R3"] == (["UNKNOWN"] if tamper == "missing_reasons" else ["FAIL"]), output
+
+
+def test_reap_recorded_overrun_must_keep_production_failure_reasons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _run_root(tmp_path, monkeypatch, wall_gpu_hours=25.0)
+    path = root / "campaign-run.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["settlement"]["budget_compliant"] is False
+    assert record["settlement"]["budget_failure_reasons"]
+    record["settlement"]["budget_failure_reasons"] = []
+    path.write_text(json.dumps(record), encoding="utf-8")
+    _, output = _judge(root, capsys)
+    assert _rows(output)["R2"] == ["FAIL"], output
+    assert _rows(output)["R3"] == ["FAIL"], output
+
+
 def test_retention_regression_fails_and_the_run_coupled_refusal_agrees(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

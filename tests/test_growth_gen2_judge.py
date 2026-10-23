@@ -1455,6 +1455,45 @@ def test_gen2_run_settlement_boolean_cannot_be_string(tmp_path: Path) -> None:
     assert " FAIL " in _threshold_row(output, "T23"), output
 
 
+@pytest.mark.parametrize("tamper", ["forged_reasons", "nonnumeric_reasons", "missing_reasons"])
+def test_gen2_run_settlement_reasons_must_match_production(
+    tmp_path: Path, tamper: str,
+) -> None:
+    root = _run_root(tmp_path)
+    path = root / "campaign-run.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["settlement"]["budget_compliant"] is True
+    if tamper == "forged_reasons":
+        record["settlement"]["budget_failure_reasons"] = [
+            "RESOURCE_OVERRUN: forged instead of production's empty list"
+        ]
+    elif tamper == "nonnumeric_reasons":
+        record["settlement"]["budget_failure_reasons"] = ""
+    else:
+        del record["settlement"]["budget_failure_reasons"]
+    path.write_text(json.dumps(record), encoding="utf-8")
+    code, output = _judge_output(root)
+    assert code != 0, output
+    assert " PASS " in _threshold_row(output, "T13"), output
+    assert (" UNKNOWN " if tamper == "missing_reasons" else " FAIL ") in _threshold_row(output, "T23"), output
+
+
+def test_gen2_recorded_overrun_must_keep_production_failure_reasons(tmp_path: Path) -> None:
+    campaign = CampaignManifest.from_file(judge_gen2.CAMPAIGN_MANIFEST)
+    root = _run_root(tmp_path, accounting=_accounting(
+        wall=campaign.budget.wall_gpu_hours_ceiling_campaign + 1.0,
+    ))
+    path = root / "campaign-run.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["settlement"]["budget_compliant"] is False
+    assert record["settlement"]["budget_failure_reasons"]
+    record["settlement"]["budget_failure_reasons"] = []
+    path.write_text(json.dumps(record), encoding="utf-8")
+    _, output = _judge_output(root)
+    assert " FAIL " in _threshold_row(output, "T13"), output
+    assert " FAIL " in _threshold_row(output, "T23"), output
+
+
 def test_a_wall_overrun_is_a_hard_failure_not_an_unknown(tmp_path: Path) -> None:
     # One GPU-hour over whatever the declaration's campaign ceiling is, so the
     # pin follows a re-derived envelope (amendment 21) instead of a literal.
