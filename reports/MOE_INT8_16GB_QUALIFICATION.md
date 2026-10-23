@@ -1,7 +1,7 @@
 # REAP-MoE int8 / 16 GB qualification
 
 <!-- CHOWDER_LATEST_VERIFIED_20261022 -->
-> **Latest pinned review evidence:** PR #277 at `10a0044df73d71a7c40313082f524d13acc8fa1d` (SIX_SUCCESS, draft/unmerged); see the supplemental 2026-10-22 qualification at the end. Prior sections are retained as dated historical checkpoints.
+> **Latest pinned review evidence:** PR #277 `84dbb2e9151a0cd9be70a00f167271953ca38d92` (PENDING, draft/unmerged); continuation addendum at end. The earlier 10a0044 evidence is preserved as a separate historical checkpoint.
 
 > Final audit 2026-10-22. Main 0bc566c5; MoE PR268 184291f; recovery PR269 cf54480 with local 82-test verification; REAP PR271 73f1593. GitHub and read-only Windows workspaces inspected, 39 model files independently SHA-256 verified twice. No GPU training was started in this audit. Frozen gates and required approvals remain binding.
 
@@ -164,3 +164,15 @@ gh pr checks 277 --repo niko4244/Chowder
 
 This change qualifies CPU metadata/evidence integrity only. It does not establish stable GPU residency, optimizer/LoRA backward, 20-step learning, no WDDM spill, adapter round-trip or transfer-throughput improvements.
 <!-- CHOWDER_POSTFINAL_20261022_END -->
+
+<!-- CHOWDER_CONTINUATION_20261022_BEGIN -->
+## Current engineering continuation
+
+**New pinned continuation (2026-10-22):** Draft [engineering PR #277](https://github.com/niko4244/Chowder/pull/277) at `84dbb2e9151a0cd9be70a00f167271953ca38d92` (PENDING); not merged to `main`. Exact integrated Windows CPU eight-file suite: **281 PASS / 0 SKIP / 0 FAIL**. Older CPU tests cited elsewhere are separate checkpoints, not additional final-head passes.
+
+- **CH-065, P1:** Frozen REAP speed gate now requires every one of 200 eligible GSM8K request speed measurements for both candidate and dense arms, refusing 1-of-200 false PASS and nonfinite/malformed values.
+- **CH-066, P2:** Frozen R3/T23 judges now validate the complete recorded budget failure-reason list against the recomputed production settlement. Historical absent reasons remain UNKNOWN, not promoted.
+- **CH-067, P2:** Campaign cost settlement now binds a populated terminal attempt summary to every charged training start; the legitimate paid-failure/no-selection path now writes that summary.
+
+This is **review-only CPU evidence**, not proof of model speed, selection, device-resident training or budget feasibility. Existing v2 Ornith `worked` is outside frozen preregistration, REAP128_v2 and full D0 are absent, v1 Gate1 failed, frozen judge/N5 approval is absent, licensing is unverified, and no release or GPU qualification is authorized. `main`, rescue and the independent Qwen3.8 Native Sparse project are unchanged.
+<!-- CHOWDER_CONTINUATION_20261022_END -->

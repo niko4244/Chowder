@@ -430,5 +430,60 @@
     "draft": true,
     "main_merged": false,
     "release_certification": false
+  },
+  "review_continuation_20261022": {
+    "schema": "chowder.review-continuation.v1",
+    "date": "2026-10-22",
+    "review_pr": 277,
+    "review_head": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+    "draft_unmerged": true,
+    "main_sha_unchanged": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+    "github_ci": {
+      "revision": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "status": "PENDING",
+      "successful_checks": null,
+      "total_checks": 6
+    },
+    "cpu_combined_regression": {
+      "revision": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "passed": 281,
+      "skipped": 0,
+      "failed": 0,
+      "test_files": [
+        "tests/test_reap_gates.py",
+        "tests/test_reap_select.py",
+        "tests/test_reap_calibration.py",
+        "tests/test_growth_cli_settlement_auth.py",
+        "tests/test_growth_gen2_judge.py",
+        "tests/test_reap_moe_judge.py",
+        "tests/test_growth_compute_cost_json.py",
+        "tests/test_growth_budget_settlement.py"
+      ]
+    },
+    "integrated_commits": {
+      "speed_complete_200": "893cdff648b44a1e62e43e90429bf2c5d7c9bc02",
+      "judge_settlement_reasons": "59aa70c89c2343e184167869f6e21b4e81ea1f47",
+      "terminal_paid_attempts": "84dbb2e9151a0cd9be70a00f167271953ca38d92"
+    },
+    "findings": [
+      "CH-065",
+      "CH-066",
+      "CH-067"
+    ],
+    "separate_isolated_cpu": {
+      "reap": 57,
+      "growth_judges": 193,
+      "campaign_settlement": 31,
+      "do_not_add_to_combined_run": true
+    },
+    "release_verdict": "BLOCKED",
+    "unresolved": [
+      "frozen v2 Ornith render worked unregistered",
+      "REAP128_v2 checkpoint and actual D0 and paired frozen evaluation absent",
+      "REAP128 v1 GSM8K strict Gate1 failed; both fallback arms mandatory",
+      "measured 14.5 GB / 20-step LoRA and 2.5 GPU-hour recipe unqualified",
+      "independent frozen judge and postjudge owner N5 approval absent",
+      "redistribution licenses unresolved"
+    ]
   }
 }
