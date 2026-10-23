@@ -6,6 +6,7 @@ import pytest
 from chowder.canonical_chat_template import canonical_template_sha256
 from chowder.contamination import write_holdout_fingerprint_index
 from chowder.evaluators.base_text import BaseModelTextEvaluator, BaseTextEvalSpec
+from chowder.provenance import sha256_directory
 from chowder.executors import ExecutionContext
 from chowder.memory import HardwareProfile
 
@@ -320,9 +321,13 @@ def test_adapter_dir_is_not_protocol_but_is_spec_bound(tmp_path, monkeypatch):
     data = tmp_path / "eval.jsonl"
     data.write_text('{"prompt":"x","expected":"y"}\n')
     config = _config(str(data))
+    parent = tmp_path / "parent-adapter"
+    parent.mkdir()
+    (parent / "adapter_config.json").write_text('{"peft_type":"LORA"}\n')
+    (parent / "adapter_model.safetensors").write_bytes(b"synthetic-evaluator-fixture")
     config["backend"]["parent_adapter"] = {
-        "path": str(tmp_path / "parent-adapter"),
-        "sha256": "a" * 64,
+        "path": str(parent),
+        "sha256": sha256_directory(parent),
     }
     with_parent = _evaluate(config, tmp_path, monkeypatch)
     without = _evaluate(_config(str(data)), tmp_path, monkeypatch)

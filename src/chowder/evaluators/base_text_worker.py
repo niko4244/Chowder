@@ -17,6 +17,7 @@ from ..lifecycle import (
     sampling_device,
 )
 from .base_text import BaseTextEvalSpec
+from .adapter_identity import verify_adapter_reload
 from .generation import observed_generation, resolve_eos_token_ids
 from .rendering import render_prompt
 from .scoring import (
@@ -94,6 +95,11 @@ def _rows(suite: EvalSuiteSpec) -> list[dict[str, Any]]:
 
 
 def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
+    # Fail before importing torch, loading the REAP parent, or touching a GPU.
+    verified_adapter_sha256 = verify_adapter_reload(
+        spec.adapter_dir, spec.adapter_sha256,
+        label="parent baseline worker", base_model=spec.base_model,
+    )
     try:
         import torch
         from transformers import (
@@ -340,6 +346,7 @@ def evaluate(spec: BaseTextEvalSpec) -> dict[str, Any]:
             "requested_revision": spec.revision,
             "model_cache_status": model_cache_status,
             "resolved_model_commit": resolved_commit,
+            "adapter_worker_verified_sha256": verified_adapter_sha256,
         },
         "versions": {
             "torch": _package_version("torch"),

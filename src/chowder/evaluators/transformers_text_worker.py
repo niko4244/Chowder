@@ -40,6 +40,7 @@ from .transformers_text import (
     TransformersTextEvalSpec,
     suite_execution_evidence,
 )
+from .adapter_identity import verify_adapter_reload
 
 
 def _package_version(name: str) -> str:
@@ -112,6 +113,12 @@ def _load_rows(suite: EvalSuiteSpec) -> list[dict[str, Any]]:
 
 
 def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
+    # Recheck in the actual worker, before any model/torch import. The adapter
+    # may have changed since the controller attested it or the spec was saved.
+    verified_adapter_sha256 = verify_adapter_reload(
+        spec.adapter_dir, spec.adapter_sha256,
+        label="candidate worker", base_model=spec.base_model,
+    )
     try:
         import torch
         from peft import PeftModel
@@ -446,6 +453,7 @@ def evaluate(spec: TransformersTextEvalSpec) -> dict[str, Any]:
             "adapter_requested": spec.adapter_dir is not None,
             "adapter_loaded": adapter_liveness is not None,
             "adapter_liveness": adapter_liveness,
+            "adapter_worker_verified_sha256": verified_adapter_sha256,
         },
         "versions": {
             "torch": _package_version("torch"),

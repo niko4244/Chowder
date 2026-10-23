@@ -21,6 +21,7 @@ from ..protocol import protocol_fingerprint
 from ..provenance import sha256_file
 from ..local_model_compat import verify_local_custom_code
 from .transformers_text import EvalSuiteSpec
+from .adapter_identity import verify_adapter_reload
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,9 @@ class BaseTextEvalSpec:
     # the *treatment* being measured, so it is deliberately excluded from
     # the protocol fingerprint.
     adapter_dir: str | None = None
+    #: The exact exported parent adapter bound by backend.parent_adapter.sha256.
+    #: Never infer parent identity from a directory path alone.
+    adapter_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not self.base_model.strip():
@@ -63,6 +67,10 @@ class BaseTextEvalSpec:
                 "baseline evaluation adapter_dir must be None or a non-empty path; "
                 "an empty string would silently request nothing"
             )
+        if self.adapter_dir is not None and self.adapter_sha256 is None:
+            raise ValueError("parent baseline adapter requires bound adapter_sha256")
+        if self.adapter_dir is None and self.adapter_sha256 is not None:
+            raise ValueError("base-only baseline must not declare adapter_sha256")
         if len({suite.name for suite in self.suites}) != len(self.suites):
             raise ValueError("baseline evaluation suite names must be unique")
         if self.precision not in {"auto", "bf16", "fp16", "fp32"}:
@@ -79,6 +87,8 @@ class BaseTextEvalSpec:
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
+        if payload["adapter_sha256"] is None:
+            payload.pop("adapter_sha256")  # legacy base-only spec identity unchanged
         payload["suites"] = [asdict(suite) for suite in self.suites]
         return payload
 
@@ -171,6 +181,10 @@ class BaseTextEvalSpec:
             ),
             offline=bool(evaluation.get("offline", backend.get("offline", False))),
             adapter_dir=cls._parent_adapter_dir(backend),
+            adapter_sha256=(
+                str(backend["parent_adapter"]["sha256"])
+                if isinstance(backend.get("parent_adapter"), Mapping) else None
+            ),
         )
 
     @staticmethod
@@ -245,6 +259,8 @@ class BaseModelTextEvaluator:
             output_dir=eval_dir,
             seed=context.seed,
         )
+        verify_adapter_reload(spec.adapter_dir, spec.adapter_sha256, label="parent baseline",
+                              base_model=spec.base_model)
         for suite in spec.suites:
             if not Path(suite.dataset).is_file():
                 raise FileNotFoundError(f"evaluation dataset not found: {suite.dataset}")
