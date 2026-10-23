@@ -980,18 +980,18 @@
   "review_gen0_gen1_20261023": {
     "schema": "chowder.review-gen0-gen1-20261023.v1",
     "engineering_pr": 277,
-    "engineering_head": "a39913bb77f1e29d488aed4d70a8e9623a3b565b",
+    "engineering_head": "95eff6bc737a9c72fa507053464787cc45765b03",
     "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
     "draft_unmerged": true,
     "ci": {
-      "run_id": "39941249348",
+      "run_id": "39946078033",
       "status": "PENDING",
-      "head": "a39913bb77f1e29d488aed4d70a8e9623a3b565b",
+      "head": "95eff6bc737a9c72fa507053464787cc45765b03",
       "successes": null
     },
     "exact_head_cpu": {
-      "head": "a39913bb77f1e29d488aed4d70a8e9623a3b565b",
-      "passed": 774,
+      "head": "95eff6bc737a9c72fa507053464787cc45765b03",
+      "passed": 796,
       "failed": 0,
       "skipped": 22,
       "warnings": 17,
@@ -1002,6 +1002,7 @@
         "tests/test_reap_gates.py",
         "tests/test_reap_observe_nll.py",
         "tests/test_reap_gguf_header_preflight.py",
+        "tests/test_reap_runtime_preflight.py",
         "tests/test_wddm_process_memory.py",
         "tests/test_moe_gen1_train_preflight.py",
         "tests/test_moe_gen1_four_arm.py",
@@ -1178,6 +1179,12 @@
     "inference_header_receipt_sha256": "6a84e783799157032d8d14366cc317f64ca47958b261f416e9e060480202634d",
     "inference_gguf_weights_sha256_reverified": false,
     "inference_actual_prompt_decode_run": "NOT_MEASURED",
+    "inference_endpoint_exact_loaded_model_admission": "REFUSED_BOTH_CURRENT_ENDPOINTS",
+    "inference_existing_port_8766": "ZERO_MATCHES_UNRELATED_UNLOADED_PRESETS",
+    "inference_existing_port_8767": "ZERO_MATCHES_SHARP_SPARK_4B",
+    "inference_port_8766_receipt_sha256": "a0bddeb55575a25611f84124cfc2c1320718dfa562bfb7f4cce520b3bbd87166",
+    "inference_port_8767_receipt_sha256": "00605ba02e33baae17be621ab9b16312247ddc457ce6682a960161bebb054e66",
+    "inference_existing_endpoint_generation_requests": 0,
     "judge_n5_rights": "NOT_CERTIFIED",
     "release": "BLOCKED",
     "changes": [
@@ -1197,7 +1204,8 @@
       "1184b52",
       "933a05c",
       "8d41e63",
-      "a39913b"
+      "a39913b",
+      "95eff6b"
     ],
     "protected_main_rescue_qwen38_models_untouched": true
   }
