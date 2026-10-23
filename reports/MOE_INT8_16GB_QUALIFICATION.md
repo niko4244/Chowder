@@ -1,7 +1,7 @@
 # REAP-MoE int8 / 16 GB qualification
 
 <!-- CHOWDER_LATEST_VERIFIED_20261022 -->
-> **Latest verified review:** PR #277 `2be95ceb28afdc4aa0d4b4787bc70c3c801e1194` (PENDING). See Gen-0/Gen-1 addendum. Older evidence retained under original revisions.
+> **Latest verified review:** PR #277 `933a05cd4e1bf2be5a08c58daf75c7b9adeaf59b` (PENDING). See Gen-0/Gen-1 addendum. Older evidence retained under original revisions.
 
 > Final audit 2026-10-22. Main 0bc566c5; MoE PR268 184291f; recovery PR269 cf54480 with local 82-test verification; REAP PR271 73f1593. GitHub and read-only Windows workspaces inspected, 39 model files independently SHA-256 verified twice. No GPU training was started in this audit. Frozen gates and required approvals remain binding.
 
@@ -216,7 +216,7 @@ This remains **review-branch CPU-only** assurance. Missing REAP128_v2, registrat
 <!-- CHOWDER_GEN0_GEN1_20261023_BEGIN -->
 ## Gen-0/Gen-1 scientific qualification continuation
 
-**Current code review:** [PR #277](https://github.com/niko4244/Chowder/pull/277) at `2be95ceb28afdc4aa0d4b4787bc70c3c801e1194` (PENDING CI), unmerged draft. At this exact revision, **446 focused CPU tests passed, zero failed**, Ruff passed. The older 462 focused passes and 4,117-pass full suite are at their earlier SHAs, not newly measured here. A superseded 144bd2f CI run failed because a committed MoE test expected the old trainer-template dictionary; the new required 2,048 field is now asserted in the generation and parsed worker spec.
+**Current code review:** [PR #277](https://github.com/niko4244/Chowder/pull/277) at `933a05cd4e1bf2be5a08c58daf75c7b9adeaf59b` (PENDING CI), unmerged draft. At this exact revision, **460 focused CPU tests passed, zero failed**, Ruff passed. The older 462 focused passes and 4,117-pass full suite are at their earlier SHAs, not newly measured here. A superseded 144bd2f CI run failed because a committed MoE test expected the old trainer-template dictionary; the new required 2,048 field is now asserted in the generation and parsed worker spec.
 
 **CH-074:** REAP v2 preflight now requires the *actual* registered 704-row base SHA and only a declared, digest-verified bare Ornith suffix, in addition to complete D0/saliency and model shape checks. The previous self-consistent three-row substitute was reproducibly admitted before repair.
 
@@ -233,6 +233,10 @@ This remains **review-branch CPU-only** assurance. Missing REAP128_v2, registrat
 **CH-083 — passive WDDM witness, not an INT8 gate:** A new Windows tool records per-PID process identity and dedicated/shared GPU memory counter samples. A real two-sample llama-server witness captured zero shared bytes but this does NOT establish a no-spill verdict for a REAP160 training step; Windows counters can undercount CUDA usage. Real placement-step instrumentation and operator review remain due.
 
 **CH-084 — exact exported adapter reload identity:** Parent baseline and candidate controller/worker paths now compare PEFT LoRA directory bytes to the exported SHA before touching torch/model/GPU, rather than accepting a mutable path or mismatched local base. CPU adversarial tests exercise tampered or missing adapters. No Gen-1 trained adapter or independent real-model reload was executed.
+
+**CH-085 — PEFT local-parent loophole closed:** An independently reproduced relative/drive-relative PEFT declaration could bypass local REAP parent mismatch checks despite a correct adapter SHA. Local adapter admission now requires the exact existing absolute parent path. Relative, absent and mismatched declarations are refused.
+
+**CH-086 — attach-time source fences:** The worker now verifies the adapter immediately before and after PEFT attach, and both evaluation controllers check worker-returned SHA evidence. This narrows the initial-check/slow-parent-load substitution window; there is no atomic immutable snapshot guarantee. CPU mutation and spoofed-worker tests passed; real large-parent adapter load remains unmeasured.
 
 **Exact-head GitHub Linux Python 3.12 broad suite:** At `b027d78`, run `39929171488` job `120332880915` recorded 3,738 passed, 225 skipped and four warnings. This is a GitHub runner result, distinct from the locally measured 354 focused CPU passes.
 

@@ -1052,18 +1052,18 @@
   "review_gen0_gen1_20261023": {
     "schema": "chowder.review-gen0-gen1-20261023.v1",
     "engineering_pr": 277,
-    "engineering_head": "2be95ceb28afdc4aa0d4b4787bc70c3c801e1194",
+    "engineering_head": "933a05cd4e1bf2be5a08c58daf75c7b9adeaf59b",
     "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
     "draft_unmerged": true,
     "ci": {
-      "run_id": "39933663687",
+      "run_id": "39937162702",
       "status": "PENDING",
-      "head": "2be95ceb28afdc4aa0d4b4787bc70c3c801e1194",
+      "head": "933a05cd4e1bf2be5a08c58daf75c7b9adeaf59b",
       "successes": null
     },
     "exact_head_cpu": {
-      "head": "2be95ceb28afdc4aa0d4b4787bc70c3c801e1194",
-      "passed": 446,
+      "head": "933a05cd4e1bf2be5a08c58daf75c7b9adeaf59b",
+      "passed": 460,
       "failed": 0,
       "test_files": [
         "tests/test_reap_build_preflight.py",
@@ -1082,6 +1082,7 @@
         "tests/test_moe_campaign_plumbing.py",
         "tests/test_evaluator_adapter_identity.py",
         "tests/test_base_text_evaluator.py",
+        "tests/test_evaluator_adapter_attach.py",
         "tests/test_transformers_evaluator.py",
         "tests/test_transformers_parent_adapter.py",
         "tests/test_parent_adapter_repair.py",
@@ -1225,6 +1226,10 @@
     "four_arm_training_per_recipe_gpu_hour_ceiling": 2.5,
     "four_arm_actual_projects_materialized": 0,
     "adapter_identity_cpu_admission": "CONTROLLER_AND_WORKER_SHA_CHECKS",
+    "adapter_local_base_declaration": "ABSOLUTE_SAME_LOCAL_MODEL_REQUIRED",
+    "adapter_attach_identity_fences": "WORKER_PRE_AND_POST_PEFT_SHA",
+    "adapter_controller_worker_sha_binding": "REQUIRED_FOR_ADAPTER_EVALUATIONS",
+    "adapter_directory_immutable_snapshot": "NOT_IMPLEMENTED",
     "trained_gen1_adapter_exists": false,
     "exact_parent_real_adapter_reload": "NOT_MEASURED",
     "inference_status": "REAP160_Q4_EXISTS_NO_NEW_DECODE_OR_ADAPTER_RELOAD",
@@ -1243,7 +1248,9 @@
       "c7de696",
       "24a8c78",
       "141a610",
-      "2be95ce"
+      "2be95ce",
+      "1184b52",
+      "933a05c"
     ],
     "protected_main_rescue_qwen38_models_untouched": true
   }
