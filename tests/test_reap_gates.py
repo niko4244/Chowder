@@ -194,6 +194,19 @@ def test_reap160_fallback_allows_partial_offload_only_when_fast_enough(tmp_path)
     assert "selection still requires amendment 4" in result["decision"]
 
 
+@pytest.mark.parametrize("forged_correct", [2, -1, 1.0, "1", None])
+def test_frozen_quality_rejects_nonbinary_correct_values(tmp_path, forged_correct):
+    # The evaluator writes bool; numerical/string truthiness must not be
+    # interpreted as a fractional or arbitrarily large benchmark score.
+    build(tmp_path, arm_gsm=[0] * 90 + [1] * (1319 - 90))
+    path = tmp_path / "reap128" / "gsm8k.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    rows[0]["correct"] = forged_correct
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    with pytest.raises(rg.GateError, match="correct.*boolean"):
+        run(tmp_path)
+
+
 @pytest.mark.parametrize(("incomplete", "bad_value"), [
     ("arm", None),
     ("dense", None),

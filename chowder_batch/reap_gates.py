@@ -48,6 +48,11 @@ def _load(eval_dir, arm: str, suite: str, *, expected_n: int | None = None):
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if line.strip():
             row = json.loads(line)
+            # The frozen per-item quality outcome is binary, as reap_eval emits.
+            # float() in the downstream paired gate must never turn a forged
+            # value such as 2 into a score beyond one correct answer.
+            if not isinstance(row, dict) or not isinstance(row.get("correct"), bool):
+                raise GateError(f"{path}:{line_number}: correct must be boolean")
             ident = row["id"]
             if ident in rows:
                 raise GateError(f"{path}:{line_number}: duplicate item id {ident!r}")

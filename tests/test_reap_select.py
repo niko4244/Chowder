@@ -135,6 +135,21 @@ def test_sha_tampered_raw_baseline_refuses_before_selection(tmp_path):
         evaluate(tmp_path, obs)
 
 
+def test_attested_quality_must_reject_forged_nonbinary_correct(tmp_path):
+    obs = _evidence(tmp_path)
+    path = tmp_path / "reap128" / "gsm8k.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    for row in rows[:90]:
+        row["correct"] = 2  # fake out-of-range results can conceal 90 actual failures
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    summary_path = path.parent / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["gsm8k"]["file_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    with pytest.raises(GateError, match="correct.*boolean"):
+        evaluate(tmp_path, obs)
+
+
 def test_missing_quality_arm_is_not_silently_equivalent(tmp_path):
     obs = _evidence(tmp_path)
     _attest(tmp_path, "reap128_v2", "gsm8k", 1319)
