@@ -709,18 +709,18 @@
   "review_gen0_gen1_20261023": {
     "schema": "chowder.review-gen0-gen1-20261023.v1",
     "engineering_pr": 277,
-    "engineering_head": "b027d78cc2fe9cba67f4dd0ddc1de84de3d3ec49",
+    "engineering_head": "2be95ceb28afdc4aa0d4b4787bc70c3c801e1194",
     "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
     "draft_unmerged": true,
     "ci": {
-      "run_id": "39929171488",
-      "status": "SIX_SUCCESS",
-      "head": "b027d78cc2fe9cba67f4dd0ddc1de84de3d3ec49",
-      "successes": 6
+      "run_id": "39933663687",
+      "status": "PENDING",
+      "head": "2be95ceb28afdc4aa0d4b4787bc70c3c801e1194",
+      "successes": null
     },
     "exact_head_cpu": {
-      "head": "b027d78cc2fe9cba67f4dd0ddc1de84de3d3ec49",
-      "passed": 354,
+      "head": "2be95ceb28afdc4aa0d4b4787bc70c3c801e1194",
+      "passed": 446,
       "failed": 0,
       "test_files": [
         "tests/test_reap_build_preflight.py",
@@ -728,6 +728,7 @@
         "tests/test_reap_select.py",
         "tests/test_reap_gates.py",
         "tests/test_reap_observe_nll.py",
+        "tests/test_wddm_process_memory.py",
         "tests/test_moe_gen1_train_preflight.py",
         "tests/test_moe_gen1_four_arm.py",
         "tests/test_config_validation.py",
@@ -735,7 +736,13 @@
         "tests/test_training_data.py",
         "tests/test_growth_campaign_prepare.py",
         "tests/test_growth_training_backends.py",
-        "tests/test_moe_campaign_plumbing.py"
+        "tests/test_moe_campaign_plumbing.py",
+        "tests/test_evaluator_adapter_identity.py",
+        "tests/test_base_text_evaluator.py",
+        "tests/test_transformers_evaluator.py",
+        "tests/test_transformers_parent_adapter.py",
+        "tests/test_parent_adapter_repair.py",
+        "tests/test_evaluator_adapter_placement.py"
       ],
       "ruff": "PASS"
     },
@@ -796,6 +803,8 @@
       "genuine_v2_d0": "ABSENT",
       "paired_v2_quality_and_speed": "NOT_MEASURED",
       "paired_mcnemar_method": "UNRESOLVED: selector uses normal paired-difference LB, not a specified McNemar confidence construction",
+      "optional_v2_selection_on_ambiguous_paired_method": "FAIL_CLOSED",
+      "paired_wald_diagnostic_preserved": true,
       "reap160_frozen_speed_offload": "UNKNOWN"
     },
     "gen1_real_input": {
@@ -846,6 +855,12 @@
       "registered_train_budget_hours": 2.5,
       "new_training_gpu_hours": 0.0,
       "new_real_optimizer_steps": 0,
+      "wddm_collector": "PASSIVE_PER_PID_SAMPLING_ONLY_NOT_A_TRAINING_GATE",
+      "wddm_baseline_source": "existing_llama_server_not_reap_trainer",
+      "wddm_baseline_samples": 2,
+      "wddm_baseline_max_shared_bytes": 0,
+      "wddm_baseline_receipt_sha256": "F250D55B8264A1734F8346BC6AB42507D0471DB0B68461D3D2B3A5F64415B05D",
+      "wddm_counters_can_undercount_cuda": true,
       "bounded_cuda_observer_smoke": "NOT_LAUNCHED_RESOURCE_GUARD",
       "observer_smoke_gpu_free_at_guard_mib": 7007,
       "observer_smoke_required_free_mib": 8192
@@ -866,6 +881,9 @@
     "four_arm_real_control_jsonl_sha256": "681b2aa957d042028db8fa8710be6538b23f6563e088b9f752410bf5da174c9e",
     "four_arm_training_per_recipe_gpu_hour_ceiling": 2.5,
     "four_arm_actual_projects_materialized": 0,
+    "adapter_identity_cpu_admission": "CONTROLLER_AND_WORKER_SHA_CHECKS",
+    "trained_gen1_adapter_exists": false,
+    "exact_parent_real_adapter_reload": "NOT_MEASURED",
     "inference_status": "REAP160_Q4_EXISTS_NO_NEW_DECODE_OR_ADAPTER_RELOAD",
     "judge_n5_rights": "NOT_CERTIFIED",
     "release": "BLOCKED",
@@ -878,7 +896,11 @@
       "156ecc4",
       "ebd4e14",
       "2ae2d70",
-      "b027d78"
+      "b027d78",
+      "c7de696",
+      "24a8c78",
+      "141a610",
+      "2be95ce"
     ],
     "protected_main_rescue_qwen38_models_untouched": true
   }
