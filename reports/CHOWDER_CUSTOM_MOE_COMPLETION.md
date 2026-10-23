@@ -1,7 +1,13 @@
 # Custom Qwen MoE completion register
 
+<!-- CHOWDER_CURRENT_20261023_f9317e3 -->
+> **Current engineering evidence (2026-10-23):** draft PR #277 at `f9317e369ede7bf1fa738a52014762377d83dc0e`. Selected Windows CPU tests: 146 passed, zero failed, Ruff pass. GitHub Actions run 39982686639 was **IN_PROGRESS** when recorded; no six-success claim for this revision. Prior `f36b458` six-success belongs to its earlier HEAD.
+>
+> Frozen REAP128_v2 **704-row input admission passed**, but its D0 observer has **not run** and no Gen-0 arm is selected. A new exact-tokenizer Gen-1 2048-token receipt is **READY** (767 Fable/647 control, no clipped assistant answers), but no four-arm training, selected parent, measured improvement, REAP160 local inference, model promotion, or release occurred. Audit findings CH-091–CH-093 capture the three changes.
+
+
 <!-- CHOWDER_LATEST_VERIFIED_20261022 -->
-> **Latest verified review:** PR #277 `f36b4587eb34f05c47406e73cc8125253c51ce5c` (SIX_SUCCESS). See Gen-0/Gen-1 addendum. Older evidence retained under original revisions.
+> **Earlier exact-head verified review:** PR #277 `f36b4587eb34f05c47406e73cc8125253c51ce5c` (SIX_SUCCESS). See Gen-0/Gen-1 addendum. Older evidence retained under original revisions.
 
 > Final audit 2026-10-22. Main 0bc566c5; MoE PR268 184291f; recovery PR269 cf54480 with local 82-test verification; REAP PR271 73f1593. GitHub and read-only Windows workspaces inspected, 39 model files independently SHA-256 verified twice. No GPU training was started in this audit. Frozen gates and required approvals remain binding.
 

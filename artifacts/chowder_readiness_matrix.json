@@ -1008,5 +1008,60 @@
       "new_gpu_training": false,
       "gen0_gen1_selection_or_release_proof": false
     }
+  },
+  "review_20261023_f9317e3": {
+    "engineering_pr": 277,
+    "engineering_head": "f9317e369ede7bf1fa738a52014762377d83dc0e",
+    "engineering_commits": [
+      "794fd92e32811939b6cb03561f12f9ca75fdff9d",
+      "745603d7dc6303bb2de9eb776c9349965c767704",
+      "f9317e369ede7bf1fa738a52014762377d83dc0e"
+    ],
+    "engineering_ci": {
+      "run_id": 39982686639,
+      "status_at_audit": "IN_PROGRESS",
+      "conclusion_at_audit": null,
+      "head": "f9317e369ede7bf1fa738a52014762377d83dc0e"
+    },
+    "previous_completed_head": "f36b4587eb34f05c47406e73cc8125253c51ce5c",
+    "previous_completed_ci": {
+      "run_id": 39957291698,
+      "result": "SIX_SUCCESS"
+    },
+    "local_exact_head_cpu": {
+      "revision": "f9317e369ede7bf1fa738a52014762377d83dc0e",
+      "passed": 146,
+      "failed": 0,
+      "warnings": 1,
+      "skipped": 0,
+      "scope": "six overlapping REAP/Gen1 selected test modules",
+      "ruff": "PASS"
+    },
+    "gen0_v2": {
+      "state": "INPUTS_ADMITTED_OBSERVATION_NOT_RUN",
+      "calibration_rows": 704,
+      "tokens": 1192636,
+      "calibration_sha256": "f6a09b694ae43a6d8b44b5180a861856501295eabf3d5297eb9749a008cdd929",
+      "admission_receipt_sha256": "02a068aac2674a284a2e3a79d4746babf88238062949dbfdf364350407ffdbce",
+      "d0": "NOT_MEASURED",
+      "weight_payloads_hashed": false
+    },
+    "gen1": {
+      "2048_screening": "READY_INPUT_ONLY",
+      "Fable_rows": 767,
+      "control_rows": 647,
+      "truncated_assistant_answers": 0,
+      "screening_receipt_sha256": "372b15ae1cc37e0027c1bace69651956c5cd200e0e5efac77ae765d32fccc822",
+      "four_trained_adapters": false,
+      "independently_measured_improvement": false
+    },
+    "release": {
+      "main_merged": false,
+      "gen0_selected": false,
+      "gen2_approved": false,
+      "owner_N5_approved": false,
+      "right_to_redistribute": "UNVERIFIED",
+      "reap160_5060_ti_inference": "NOT_DEMONSTRATED"
+    }
   }
 }
