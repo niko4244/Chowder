@@ -1496,5 +1496,63 @@
       "license_rights_clearance": false,
       "main_merged": false
     }
+  },
+  "review_20261023_70951d9": {
+    "engineering_head": "70951d98733912f1e66453dbdfa127bbeadffb7c",
+    "engineering_pr": 277,
+    "ci_at_capture": {
+      "run_id": 40033091564,
+      "head": "70951d98733912f1e66453dbdfa127bbeadffb7c",
+      "status": "IN_PROGRESS",
+      "conclusion": null
+    },
+    "focused_tests": {
+      "selected": 129,
+      "passed": 129,
+      "failed": 0,
+      "ruff": "PASS",
+      "scope": "Kaggle integration and new hardware/I-O regression; new final doc commit only had 21 focused tests"
+    },
+    "remote_cpu": {
+      "kernel": "nikmarco/chowder-cpu-hardware-preflight",
+      "status": "COMPLETE",
+      "free_ram_gib": 30.265,
+      "free_tmp_gib": 1048.801,
+      "saved_output_free_gib": 19.502,
+      "model_loaded": false,
+      "gate_d0": "NOT_MEASURED"
+    },
+    "remote_tpu": {
+      "kernel": "nikmarco/chowder-tpu-bf16-hardware-20261023",
+      "status": "COMPLETE_CPU_ONLY",
+      "requested": "TpuV5E8",
+      "persisted": "enable_tpu=true",
+      "actual_jax_devices": [
+        "cpu"
+      ],
+      "native_bf16_proven": false,
+      "provider_issue": "https://github.com/Kaggle/kaggle-cli/issues/1197"
+    },
+    "remote_mounted_stream": {
+      "kernel": "nikmarco/chowder-dataset-stream-cpu-20261023",
+      "status": "COMPLETE",
+      "sample_bytes": 67108864,
+      "sample_seconds": 1.2034,
+      "sample_mib_per_s": 53.18186,
+      "sample_sha256": "6803608593644f37d1190aff5a3a432acc77c4b92bb8c07e5f1c01f53f409a49",
+      "full_checkpoint_staged": false,
+      "original_parent_bf16_d0": "NOT_MEASURED"
+    },
+    "frozen_status": {
+      "registered_704_d0": "NOT_MEASURED",
+      "gen0_selector": "BLOCKED",
+      "gen1_four_trained_adapters": false,
+      "gen2_authorized": false,
+      "N5_authorized": false,
+      "measured_quality_improvement": false,
+      "redistribution_rights_cleared": false,
+      "main_merged": false
+    },
+    "policy_note": "Kaggle terms prohibit individual operation of more than one active account. Remote jobs used existing primary account only."
   }
 }

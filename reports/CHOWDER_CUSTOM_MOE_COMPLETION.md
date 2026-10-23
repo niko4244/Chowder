@@ -1,5 +1,8 @@
 # Custom Qwen MoE completion register
 
+> **Current Kaggle hardware execution (2026-10-23, engineering PR #277 70951d9):** 129 focused Kaggle CPU tests and Ruff passed. New exact-head hosted CI run 40033091564 IN PROGRESS at audit capture. Actual private Kaggle CPU job COMPLETE (30.265 GiB free RAM, ~1.05 TiB scratch). Actual 64 MiB mounted checkpoint streaming sample: 53.18186 MiB/s, not a full-shard benchmark. TPU requested via API but remotely ran CPU despite persisted TpuV5E8 settings (Kaggle CLI issue #1197). Frozen 704-row BF16 D0 NOT MEASURED; no Gen1 training, quality improvement or selection; rights and account-policy constraints preserved.
+
+
 <!-- CHOWDER_CURRENT_20261023_ac93f8c -->
 > **Latest engineering head (2026-10-23):** PR #277 `ac93f8cc236e09308dc15783ef881e9af3857bf8`, 215 selected CPU tests passed and Ruff clean. Hosted CI run `40025442552` was QUEUED at audit capture; do not claim six-success at this head. Prior head `677531b` CI **failed** one Linux real-ML CPU parity test (5/6 jobs passed), corrected in `ac93f8c`.
 >
