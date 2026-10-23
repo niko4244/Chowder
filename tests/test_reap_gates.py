@@ -192,3 +192,45 @@ def test_reap160_fallback_allows_partial_offload_only_when_fast_enough(tmp_path)
                         "reap160_q4", "dense_q4", tmp_path / "observation.json")
     assert result["gates"]["speed"]["status"] == "PASS"
     assert "selection still requires amendment 4" in result["decision"]
+
+
+@pytest.mark.parametrize(("incomplete", "bad_value"), [
+    ("arm", None),
+    ("dense", None),
+    ("both", None),
+    ("arm", float("nan")),
+    ("arm", float("inf")),
+    ("dense", True),
+    ("arm", -3.0),
+])
+def test_speed_gate_refuses_one_sample_or_invalid_samples(tmp_path, incomplete, bad_value):
+    build(tmp_path)
+    arm_pps = [100.0] * 200
+    dense_pps = [10.0] * 200
+    for side, samples in (("arm", arm_pps), ("dense", dense_pps)):
+        if incomplete in (side, "both"):
+            if bad_value is None:
+                samples[1:] = [None] * 199
+            else:
+                samples[0] = bad_value
+    write_arm(tmp_path, "reap128_q4", "gsm8k", [1] * 200, pps=arm_pps,
+              serve={"experts_offloaded": 0})
+    write_arm(tmp_path, "dense_q4", "gsm8k", [1] * 200, pps=dense_pps)
+    speed = run(tmp_path, speed_arm="reap128_q4", speed_dense="dense_q4")["gates"]["speed"]
+    assert speed["status"] == "UNKNOWN"
+    assert "speed samples" in speed["reason"]
+    if incomplete in ("arm", "both"):
+        assert speed["n"] < 200
+    else:
+        assert speed["n"] == 200
+
+
+def test_speed_gate_requires_and_accepts_all_200_valid_samples(tmp_path):
+    build(tmp_path)
+    write_arm(tmp_path, "reap128_q4", "gsm8k", [1] * 200, pps=[25.0] * 200,
+              serve={"experts_offloaded": 0})
+    write_arm(tmp_path, "dense_q4", "gsm8k", [1] * 200, pps=[10.0] * 200)
+    speed = run(tmp_path, speed_arm="reap128_q4", speed_dense="dense_q4")["gates"]["speed"]
+    assert speed["status"] == "PASS"
+    assert speed["n"] == 200
+    assert speed["statistic"]["ratio"] == pytest.approx(2.5)

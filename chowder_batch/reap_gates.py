@@ -125,10 +125,13 @@ def _gate0(arm_rows, base_rows):
 
 def _mean_pps(eval_dir, arm):
     # The preregistered speed comparison uses 200 GSM8K items, not the
-    # 1,319-item quality arm; never pass from an arbitrarily short sample.
+    # 1,319-item quality arm. All 200 must have finite measurements:
+    # filtering absent/invalid values must not turn one fast item into a PASS.
     rows = _load(eval_dir, arm, "gsm8k", expected_n=200)
-    vals = [r["predicted_per_second"] for r in (rows or {}).values() if r.get("predicted_per_second") is not None]
-    return (statistics.fmean(vals), len(vals)) if vals else (None, 0)
+    vals = [r.get("predicted_per_second") for r in (rows or {}).values()]
+    measured = [v for v in vals if isinstance(v, (int, float)) and not isinstance(v, bool)
+                and math.isfinite(v) and v >= 0]
+    return (statistics.fmean(measured), 200) if len(measured) == 200 else (None, len(measured))
 
 
 def _speed(eval_dir, speed_arm, speed_dense, *, arm):
@@ -155,7 +158,9 @@ def _speed(eval_dir, speed_arm, speed_dense, *, arm):
     if offloaded is not None and offloaded != 0 and not partial_allowed:
         return _g("FAIL", stat, thr, na)  # offload alone fails the gate whatever the speed
     if offloaded is None or ratio is None:
-        return _g("UNKNOWN", stat, thr, na, reason="missing serve.json or predicted_per_second")
+        return _g("UNKNOWN", stat, thr, na,
+                  reason=f"missing serve.json or complete finite speed samples "
+                         f"(arm {na}/200, dense {nb}/200)")
     return _g("PASS" if ratio >= SPEEDUP - EPS else "FAIL", stat, thr, na)
 
 
