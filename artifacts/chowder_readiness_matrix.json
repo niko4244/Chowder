@@ -747,5 +747,130 @@
     "frozen_gate_changes": false,
     "new_gpu_operations": false,
     "production_merge_or_release": false
+  },
+  "review_gen0_gen1_20261023": {
+    "schema": "chowder.review-gen0-gen1-20261023.v1",
+    "engineering_pr": 277,
+    "engineering_head": "056225d94ed3f897ea6c01993c2e7d8419062f80",
+    "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+    "draft_unmerged": true,
+    "ci": {
+      "run_id": "39921336121",
+      "status": "PENDING",
+      "head": "056225d94ed3f897ea6c01993c2e7d8419062f80",
+      "successes": null
+    },
+    "exact_head_cpu": {
+      "head": "056225d94ed3f897ea6c01993c2e7d8419062f80",
+      "passed": 229,
+      "failed": 0,
+      "test_files": [
+        "tests/test_reap_build_preflight.py",
+        "tests/test_reap_calibration.py",
+        "tests/test_reap_select.py",
+        "tests/test_moe_gen1_train_preflight.py",
+        "tests/test_moe_gen1_mix.py",
+        "tests/test_training_data.py",
+        "tests/test_growth_campaign_prepare.py",
+        "tests/test_growth_training_backends.py",
+        "tests/test_moe_campaign_plumbing.py"
+      ],
+      "ruff": "PASS"
+    },
+    "older_cpu_full_suite": {
+      "head": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "passed": 4117,
+      "skipped": 78,
+      "historical_only": true
+    },
+    "previous_current_review": {
+      "head": "4cdc17c51dde11aeb144b88799d60dcdb382d8c3",
+      "passed": 462,
+      "historical_only": true
+    },
+    "superseded_failed_ci": {
+      "head": "144bd2fc407dc78b531f3112124ee0e072cc4950",
+      "run_id": 39912464415,
+      "cause": "committed MoE template test expected old missing max_length field",
+      "correction_commit": "056225d",
+      "must_not_claim_success_for_earlier_run": true
+    },
+    "reap_v2_calibration": {
+      "frozen_base_rows": 704,
+      "frozen_base_sha256": "f6a09b694ae43a6d8b44b5180a861856501295eabf3d5297eb9749a008cdd929",
+      "registered_bare_rebuild_rows": 704,
+      "registered_bare_rebuild_sha256": "f6a09b694ae43a6d8b44b5180a861856501295eabf3d5297eb9749a008cdd929",
+      "admitted_ornith_sft_rows": 39,
+      "bare_min_tokens": 40,
+      "bare_max_tokens": 173,
+      "frozen_min_tokens": 256,
+      "bare_ornith_kept": 0,
+      "worked_unregistered_rows": 717,
+      "distinct_v2_checkpoint": "ABSENT",
+      "genuine_v2_d0": "ABSENT",
+      "paired_v2_quality_and_speed": "NOT_MEASURED",
+      "paired_mcnemar_method": "requires prereg method clarification",
+      "reap160_frozen_speed_offload": "UNKNOWN"
+    },
+    "gen1_real_input": {
+      "manifest_sha256": "9ac93c3763427605cdb0a51d3bb08e70e4278011663800dbdd98622b86df710c",
+      "tokenizer": "Qwen3.6-35B-A3B",
+      "fable_rows": 767,
+      "control_rows": 647,
+      "fable_exclusive_rows": 120,
+      "admitted_max_length": 2048,
+      "fable_max_rendered_tokens": 1906,
+      "control_max_rendered_tokens": 1855,
+      "partial_assistant_answer_at_2048": 0,
+      "former_512_fable_answer_truncations": 198,
+      "former_512_control_answer_truncations": 151,
+      "former_512_completely_lost_fable": 20,
+      "former_512_completely_lost_control": 6,
+      "real_2048_receipt_sha256": "16fa2b780942ef03a56421f28ce27dbc9d678c449e303beb4df82829f45c4c19",
+      "real_512_refusal_receipt_sha256": "a8d96f4aa624bf0753dbb7360c6b00561fb2e70fec00be706c7c19ffe5186891",
+      "source_rows_kept": {
+        "nemotron": 0,
+        "ot3_code": 9,
+        "ornith": 38,
+        "openr1_math": 400,
+        "gsm8k_train": 200,
+        "fable": 120
+      },
+      "source_caps": {
+        "nemotron": 120,
+        "ot3_code": 150,
+        "ornith": 39,
+        "openr1_math": 400,
+        "gsm8k_train": 200,
+        "fable": 120
+      }
+    },
+    "compute": {
+      "kaggle_gpu_remaining_hours": 0.0,
+      "kaggle_gpu_quota_hours": 30.0,
+      "kaggle_gpu_reported_used_hours": 31.32,
+      "kaggle_refresh": "2026-10-24T00:00:00",
+      "kaggle_tpu_remaining_hours": 20.0,
+      "tpu_model_backend_qualification": "NOT_MEASURED",
+      "local_5060ti_total_mib": 16311,
+      "local_5060ti_free_mib_at_probe": 10836,
+      "local_other_gpu_residents": true,
+      "historical_real_step_seconds": 27.48,
+      "projected_1000_step_gpu_hours": 7.63,
+      "registered_train_budget_hours": 2.5,
+      "new_training_gpu_hours": 0.0,
+      "new_real_optimizer_steps": 0
+    },
+    "four_arm_campaign_status": "PREPARED_INPUTS_ONLY_NOT_EXECUTED",
+    "inference_status": "REAP160_Q4_EXISTS_NO_NEW_DECODE_OR_ADAPTER_RELOAD",
+    "judge_n5_rights": "NOT_CERTIFIED",
+    "release": "BLOCKED",
+    "changes": [
+      "768d0c6",
+      "32390b1",
+      "144bd2f",
+      "056225d"
+    ],
+    "protected_main_rescue_qwen38_models_untouched": true
   }
 }

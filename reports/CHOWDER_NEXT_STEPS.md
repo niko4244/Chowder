@@ -1,7 +1,7 @@
 # Chowder prioritized engineering backlog
 
 <!-- CHOWDER_LATEST_VERIFIED_20261022 -->
-> **Latest pinned review evidence:** PR #277 `4cdc17c51dde11aeb144b88799d60dcdb382d8c3` (SIX_SUCCESS, draft/unmerged). See final model-build preflight addendum; prior evidence retained at its measured revisions.
+> **Latest verified review:** PR #277 `056225d94ed3f897ea6c01993c2e7d8419062f80` (PENDING). See Gen-0/Gen-1 addendum. Older evidence retained under original revisions.
 
 > Final audit 2026-10-22. Main 0bc566c5; MoE PR268 184291f; recovery PR269 cf54480 with local 82-test verification; REAP PR271 73f1593. GitHub and read-only Windows workspaces inspected, 39 model files independently SHA-256 verified twice. No GPU training was started in this audit. Frozen gates and required approvals remain binding.
 
@@ -183,3 +183,17 @@ This remains **review-branch CPU-only** assurance. Missing REAP128_v2, registrat
 
 **Release qualification remains BLOCKED:** frozen REAP128_v2 build, full D0, the registered paired evaluations, 14.5 GiB/WDDM/20-step LoRA and 2.5-hour budget, independent judge/N5 and derivative/data licensing have not been established. Neither an input preflight nor CPU regression constitutes selection, training or promotion. Frozen thresholds, main, rescue, weights and Qwen3.8 Native Sparse are untouched.
 <!-- CHOWDER_MODEL_BUILD_FOLLOWUP_20261022_END -->
+
+<!-- CHOWDER_GEN0_GEN1_20261023_BEGIN -->
+## Gen-0/Gen-1 scientific qualification continuation
+
+**Current code review:** [PR #277](https://github.com/niko4244/Chowder/pull/277) at `056225d94ed3f897ea6c01993c2e7d8419062f80` (PENDING CI), unmerged draft. At this exact revision, **229 focused CPU tests passed, zero failed**, Ruff passed. The older 462 focused passes and 4,117-pass full suite are at their earlier SHAs, not newly measured here. A superseded 144bd2f CI run failed because a committed MoE test expected the old trainer-template dictionary; the new required 2,048 field is now asserted in the generation and parsed worker spec.
+
+**CH-074:** REAP v2 preflight now requires the *actual* registered 704-row base SHA and only a declared, digest-verified bare Ornith suffix, in addition to complete D0/saliency and model shape checks. The previous self-consistent three-row substitute was reproducibly admitted before repair.
+
+**CH-077 — unresolved registered-data contradiction:** The exact offline bare-render builder with SHA-pinned admitted Ornith input wrote 704 rows (SHA `f6a09b694ae43a6d8b44b5180a861856501295eabf3d5297eb9749a008cdd929`), identical to the registered base. All 39 admitted SFT items render at 40–173 tokens, so none reach the frozen 256-token minimum. The historical 717-row corpus uses an unregistered worked render. No registered 717-row bare D0 exists; we did not pad, change a threshold or invent it. Distinct REAP128_v2 weights and paired scores remain absent; McNemar wording needs prospective clarification.
+
+**CH-075/076:** The real current Gen-1 manifest is SHA-pinned and the 2,048-token preflight accepts 767 Fable and 647 control rows (120 Fable-exclusive), no clipped assistant answers, max 1,906/1,855 tokens. By contrast the prior generated 512-token Trainer would clip 198 and 151 answers, fully removing 20 and 6. Preparation now carries the declared `max_length: 2048` end to end; legacy undeclared campaigns retain 512. Historic 4,096-screened 1,028-row text is not this mix. Source caps are NOT complete: 0/120 Nemotron, 9/150 OT3 code and 38/39 Ornith survived the declared validation. Do not claim that the requested Nemotron material is present in a trained model.
+
+**Real compute availability:** Kaggle GPU quota 0.00 hours remaining (reported used 31.32 of 30.00, refresh October 24); local RTX 5060 Ti only 10,836 MiB free with unrelated residents, under the target placement. No new GPU training, optimizer steps, LoRA export, adapter reload or paired decode measurement. Historical 27.48 s/step projects 7.63 h for 1,000 steps versus the frozen 2.5 h ceiling. Four-arm Gen-1, independent evaluation, Gen-2 and quantized deployability remain blocked by selection, resources, frozen judge/N5 and derivative rights. PR #273 is an ancestor of newer PR #277; protected main unchanged.
+<!-- CHOWDER_GEN0_GEN1_20261023_END -->
