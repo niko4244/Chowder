@@ -14,6 +14,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from chowder_batch import reap_build_preflight as preflight  # noqa: E402
+from chowder_batch import reap_v2_source_identity as identity  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -25,8 +26,8 @@ def _synthetic_frozen_base_identity(monkeypatch):
                     "text": f"synthetic calibration line {i}"}) + "\n"
         for i in range(3)
     )
-    monkeypatch.setattr(preflight, "FROZEN_V2_BASE_ROWS", 3)
-    monkeypatch.setattr(preflight, "FROZEN_V2_BASE_SHA256",
+    monkeypatch.setattr(identity, "FROZEN_V2_BASE_ROWS", 3)
+    monkeypatch.setattr(identity, "FROZEN_V2_BASE_SHA256",
                         hashlib.sha256(rows.encode("utf-8")).hexdigest())
 
 
@@ -124,16 +125,18 @@ def test_self_consistent_unregistered_v2_is_not_frozen_identity(tmp_path, monkey
     paths = _fixture(tmp_path)
     # Even a perfectly consistent observer is inadmissible against the
     # production frozen 704-row SHA, with no production override.
-    monkeypatch.setattr(preflight, "FROZEN_V2_BASE_ROWS", 704)
-    monkeypatch.setattr(preflight, "FROZEN_V2_BASE_SHA256",
+    monkeypatch.setattr(identity, "FROZEN_V2_BASE_ROWS", 704)
+    monkeypatch.setattr(identity, "FROZEN_V2_BASE_SHA256",
                         "f6a09b694ae43a6d8b44b5180a861856501295eabf3d5297eb9749a008cdd929")
     with pytest.raises(preflight.PreflightError, match="frozen v2 base"):
         _plan(paths)
 
 
-def _append_ornith(paths: dict[str, Path], n: int = 2) -> Path:
+def _append_ornith(paths: dict[str, Path], monkeypatch, n: int = 2) -> Path:
     admitted = paths["calibration"] / "admitted.jsonl"
     admitted.write_text('{"admitted":true,"lane":"sft","prompt":"p","expected_answer":"42"}\n')
+    monkeypatch.setattr(identity, "FROZEN_ORNITH_ADMITTED_SHA256",
+                        hashlib.sha256(admitted.read_bytes()).hexdigest())
     rows_path = paths["calibration"] / "calibration.jsonl"
     with rows_path.open("a", encoding="utf-8", newline="\n") as stream:
         for i in range(n):
@@ -141,7 +144,7 @@ def _append_ornith(paths: dict[str, Path], n: int = 2) -> Path:
                                      "text": f"synthetic bare Ornith row {i}"}) + "\n")
     manifest_path = paths["calibration"] / "calibration-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["sources"]["ornith_curriculum"] = {"kept": n}
+    manifest["sources"]["ornith_curriculum"] = {"kept": n, "quota": 64, "pool": 39}
     manifest["ornith"] = {"render": "bare", "path": str(admitted),
                           "sha256": hashlib.sha256(admitted.read_bytes()).hexdigest()}
     manifest["rows"] += n
@@ -157,23 +160,23 @@ def _append_ornith(paths: dict[str, Path], n: int = 2) -> Path:
     return admitted
 
 
-@pytest.mark.parametrize("added_rows", [0, 2])
-def test_registered_base_accepts_optional_bare_admission_suffix(tmp_path, added_rows):
+def test_registered_base_accepts_bare_admission_with_zero_retained(tmp_path, monkeypatch):
     paths = _fixture(tmp_path)
-    admitted = _append_ornith(paths, n=added_rows)
+    admitted = _append_ornith(paths, monkeypatch, n=0)
     plan = _plan(paths)
     assert plan["calibration"]["frozen_base_rows"] == 3
-    assert plan["calibration"]["ornith_suffix_rows"] == added_rows
+    assert plan["calibration"]["ornith_suffix_rows"] == 0
     assert admitted.exists() and not paths["out"].exists()
 
 
 @pytest.mark.parametrize("damage", ["forged_base", "forged_suffix", "bad_admission_sha",
                                     "overquota"])
 def test_registered_base_refuses_unattested_changes_even_with_selfconsistent_manifest(
-    tmp_path, damage
+    tmp_path, damage, monkeypatch
 ):
     paths = _fixture(tmp_path)
-    _append_ornith(paths, n=65 if damage == "overquota" else 2)
+    _append_ornith(paths, monkeypatch,
+                   n=65 if damage == "overquota" else (0 if damage in {"forged_base", "bad_admission_sha"} else 2))
     rows_path = paths["calibration"] / "calibration.jsonl"
     manifest_path = paths["calibration"] / "calibration-manifest.json"
     observer_path = paths["observations"] / "observation.json"

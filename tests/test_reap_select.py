@@ -11,6 +11,7 @@ import pytest
 
 from chowder_batch.reap_gates import GateError
 from chowder_batch.reap_select import REQUIRED, _validate_v2_observation, evaluate, select
+from chowder_batch import reap_v2_source_identity as identity
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -176,7 +177,7 @@ def test_missing_quality_arm_is_not_silently_equivalent(tmp_path):
         evaluate(tmp_path, obs)
 
 
-def test_v2_cannot_borrow_v1_observer_d0(tmp_path):
+def test_v2_cannot_borrow_v1_observer_d0(tmp_path, monkeypatch):
     obs = _evidence(tmp_path)
     _attest(tmp_path, "reap128_v2", "gsm8k", 1319)
     _attest(tmp_path, "reap128_v2", "humaneval", 164)
@@ -193,14 +194,17 @@ def test_v2_cannot_borrow_v1_observer_d0(tmp_path):
     calib = tmp_path / "calib-v2"
     calib.mkdir()
     raw = calib / "calibration.jsonl"
-    raw.write_text('{"source":"ornith_curriculum","n_tokens":256,"text":"test one"}\n'
-                   '{"source":"ornith_curriculum","n_tokens":256,"text":"test two"}\n',
+    raw.write_text('{"source":"swe_smith_trajectories","n_tokens":256,"text":"test one"}\n'
+                   '{"source":"swe_smith_trajectories","n_tokens":256,"text":"test two"}\n',
                    encoding="utf-8")
     digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+    monkeypatch.setattr(identity, "FROZEN_V2_BASE_ROWS", 2)
+    monkeypatch.setattr(identity, "FROZEN_V2_BASE_SHA256", digest)
     (calib / "calibration-manifest.json").write_text(json.dumps(
         {"mix": "v2", "rows": 2, "tokens": 512, "max_tokens": 2048,
-         "sources": {"ornith_curriculum": {"kept": 2}}, "calibration_sha256": digest,
-         "ornith": {"render": "bare"}}),
+         "sources": {"swe_smith_trajectories": {"kept": 2}},
+         "calibration_sha256": digest,
+         "ornith": "absent: no admitted Ornith curriculum supplied"}),
         encoding="utf-8")
     cloned_observer = json.loads(v2.read_text(encoding="utf-8"))
     cloned_observer.update(calibration_sha256=digest, n_seqs=2, n_tokens=512)
@@ -215,8 +219,9 @@ def test_v2_cannot_borrow_v1_observer_d0(tmp_path):
         evaluate(tmp_path, obs, v2, calib)
     (calib / "calibration-manifest.json").write_text(json.dumps(
         {"mix": "v2", "rows": 3, "tokens": 512, "max_tokens": 2048,
-         "sources": {"ornith_curriculum": {"kept": 2}}, "calibration_sha256": digest,
-         "ornith": {"render": "bare"}}),
+         "sources": {"swe_smith_trajectories": {"kept": 2}},
+         "calibration_sha256": digest,
+         "ornith": "absent: no admitted Ornith curriculum supplied"}),
         encoding="utf-8")
     with pytest.raises(GateError, match="row/token/source census"):
         evaluate(tmp_path, obs, v2, calib)
@@ -231,21 +236,23 @@ def test_v2_cannot_borrow_v1_observer_d0(tmp_path):
     ("rewritten_row_source", "invalid source"),
     ("rewritten_row_token_count", "token total"),
 ])
-def test_v2_d0_refuses_incomplete_or_rewritten_calibration_census(tmp_path, tamper, reason):
+def test_v2_d0_refuses_incomplete_or_rewritten_calibration_census(tmp_path, monkeypatch, tamper, reason):
     calib = tmp_path / "calib"
     calib.mkdir()
     rows_path = calib / "calibration.jsonl"
     manifest_path = calib / "calibration-manifest.json"
     obs_path = tmp_path / "observed.json"
-    rows = [{"source": "ornith_curriculum", "n_tokens": 256, "text": f"sample {i}"}
+    rows = [{"source": "swe_smith_trajectories", "n_tokens": 256, "text": f"sample {i}"}
             for i in range(2)]
     def save_rows():
         rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         return hashlib.sha256(rows_path.read_bytes()).hexdigest()
     digest = save_rows()
+    monkeypatch.setattr(identity, "FROZEN_V2_BASE_ROWS", 2)
+    monkeypatch.setattr(identity, "FROZEN_V2_BASE_SHA256", digest)
     manifest = {"mix": "v2", "rows": 2, "tokens": 512, "max_tokens": 2048,
-                "sources": {"ornith_curriculum": {"kept": 2}},
-                "ornith": {"render": "bare"},
+                "sources": {"swe_smith_trajectories": {"kept": 2}},
+                "ornith": "absent: no admitted Ornith curriculum supplied",
                 "calibration_sha256": digest}
     observed = {"calibration_sha256": digest, "n_seqs": 2, "n_tokens": 512,
                 "calibration_ppl": 10, "layers": [{"layer": i} for i in range(40)]}
@@ -259,7 +266,7 @@ def test_v2_d0_refuses_incomplete_or_rewritten_calibration_census(tmp_path, tamp
     elif tamper == "manifest_token_total":
         manifest["tokens"] = 513
     elif tamper == "manifest_source_total":
-        manifest["sources"]["ornith_curriculum"]["kept"] = 1
+        manifest["sources"]["swe_smith_trajectories"]["kept"] = 1
     elif tamper == "rewritten_row_source":
         rows[0]["source"] = "undeclared"
     elif tamper == "rewritten_row_token_count":
@@ -278,19 +285,30 @@ def test_v2_d0_refuses_incomplete_or_rewritten_calibration_census(tmp_path, tamp
 
 
 @pytest.mark.parametrize(("ornith", "source"), [
-    ({"render": "bare"}, "ornith_curriculum"),
+    ({"render": "bare"}, "swe_smith_trajectories"),
     ("absent: no admitted Ornith curriculum supplied", "swe_smith_trajectories"),
 ])
-def test_v2_accepts_only_preregistered_bare_or_declared_absent_ornith(tmp_path, ornith, source):
+def test_v2_accepts_only_preregistered_bare_or_declared_absent_ornith(
+    tmp_path, monkeypatch, ornith, source
+):
     calib = tmp_path / "calib"
     calib.mkdir()
     text = json.dumps({"source": source, "n_tokens": 256, "text": "valid calibration"}) + "\n"
     raw = calib / "calibration.jsonl"
     raw.write_text(text, encoding="utf-8")
     digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+    monkeypatch.setattr(identity, "FROZEN_V2_BASE_ROWS", 1)
+    monkeypatch.setattr(identity, "FROZEN_V2_BASE_SHA256", digest)
     manifest = {"mix": "v2", "rows": 1, "tokens": 256, "max_tokens": 2048,
                 "sources": {source: {"kept": 1}}, "ornith": ornith,
                 "calibration_sha256": digest}
+    if isinstance(ornith, dict):
+        admitted = calib / "admitted.jsonl"
+        admitted.write_text('{"admitted":true}\n', encoding="utf-8")
+        pinned = hashlib.sha256(admitted.read_bytes()).hexdigest()
+        monkeypatch.setattr(identity, "FROZEN_ORNITH_ADMITTED_SHA256", pinned)
+        manifest["ornith"] = {"render": "bare", "path": str(admitted), "sha256": pinned}
+        manifest["sources"]["ornith_curriculum"] = {"kept": 0, "pool": 39, "quota": 64}
     manifest_path = calib / "calibration-manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     observed = tmp_path / "observation.json"
@@ -354,8 +372,41 @@ def test_v2_worked_is_refused_by_both_selector_entrypoints(tmp_path, entrypoint)
 
     manifest["ornith"]["render"] = "bare"
     manifest_path.write_text(json.dumps(manifest))
-    allowed = invoke("bare-selection.json")
-    assert allowed.returncode == 1, allowed.stderr  # still BLOCKED by mandatory REAP160
-    result = json.loads((tmp_path / "bare-selection.json").read_text())
-    assert result["gates"]["reap128_v2"]["gates"]["d0"]["status"] == "PASS"
-    assert result["decision"]["status"] == "BLOCKED"
+    refused_bare = invoke("bare-unregistered.json")
+    assert refused_bare.returncode == 2
+    assert "frozen v2 base identity mismatch" in refused_bare.stderr
+    assert not (tmp_path / "bare-unregistered.json").exists()
+
+
+def test_v2_selector_refuses_forged_13_bare_suffix_with_selfconsistent_observer(
+    tmp_path, monkeypatch
+):
+    calib = tmp_path / "calibration"
+    calib.mkdir()
+    admitted = calib / "admitted.jsonl"
+    admitted.write_text('{"admitted":true,"lane":"sft","expected_answer":"42"}\n')
+    admitted_sha = hashlib.sha256(admitted.read_bytes()).hexdigest()
+    monkeypatch.setattr(identity, "FROZEN_ORNITH_ADMITTED_SHA256", admitted_sha)
+    base = "".join(json.dumps({"source": "swe_smith_trajectories", "n_tokens": 256,
+                               "text": f"base {i}"}) + "\n" for i in range(3))
+    monkeypatch.setattr(identity, "FROZEN_V2_BASE_ROWS", 3)
+    monkeypatch.setattr(identity, "FROZEN_V2_BASE_SHA256",
+                        hashlib.sha256(base.encode()).hexdigest())
+    suffix = "".join(json.dumps({"source": "ornith_curriculum", "n_tokens": 256,
+                                 "text": f"FAKED bare content {i}"}) + "\n"
+                     for i in range(13))
+    raw = calib / "calibration.jsonl"
+    raw.write_bytes((base + suffix).encode("utf-8"))
+    digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+    (calib / "calibration-manifest.json").write_text(json.dumps({
+        "mix": "v2", "rows": 16, "tokens": 16 * 256, "max_tokens": 2048,
+        "calibration_sha256": digest,
+        "sources": {"swe_smith_trajectories": {"kept": 3},
+                    "ornith_curriculum": {"kept": 13, "quota": 64, "pool": 39}},
+        "ornith": {"render": "bare", "path": str(admitted), "sha256": admitted_sha},
+    }))
+    observer = tmp_path / "observer.json"
+    observer.write_text(json.dumps({"calibration_sha256": digest,
+                                   "n_seqs": 16, "n_tokens": 4096}))
+    with pytest.raises(GateError, match="zero eligible rows"):
+        _validate_v2_observation(calib, observer)

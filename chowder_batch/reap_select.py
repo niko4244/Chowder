@@ -15,8 +15,12 @@ from pathlib import Path
 
 try:
     from chowder_batch.reap_gates import GateError, _load, compute, lower_bound
+    from chowder_batch.reap_v2_source_identity import (
+        V2SourceIdentityError, frozen_v2_source_identity,
+    )
 except ImportError:  # direct script mode outside the repository package path
     from reap_gates import GateError, _load, compute, lower_bound
+    from reap_v2_source_identity import V2SourceIdentityError, frozen_v2_source_identity
 
 REQUIRED = ("d0", "gate0", "gate1", "gate2", "control", "speed")
 MARGIN = -0.02  # frozen strict lower bound for paired v2-v1 comparisons
@@ -206,6 +210,12 @@ def _validate_v2_observation(calibration: Path, observation: Path) -> None:
             or not integer(observed.get("n_tokens"))
             or observed["n_tokens"] < declared_rows):
         raise GateError("v2 D0 observer did not process the full calibration sequence census")
+    # SHA-consistency alone cannot establish preregistration: otherwise a
+    # rehashed 3-row corpus or invented 13-row bare Ornith suffix could pass.
+    try:
+        frozen_v2_source_identity(calibration, manifest)
+    except V2SourceIdentityError as exc:
+        raise GateError(str(exc)) from exc
 
 
 def evaluate(
