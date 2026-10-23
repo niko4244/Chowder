@@ -2700,7 +2700,12 @@ def test_completed_attempt_receipts_resume_without_duplicate_training_or_cost(
 
 @pytest.mark.parametrize(
     "damage",
-    ["receipt", "checkpoint", "spend", "extra_receipt", "manifest", "training_input"],
+    [
+        "receipt", "checkpoint", "spend", "extra_receipt", "manifest",
+        "training_input", "start_wrong_proof_mode", "start_missing_proof_mode",
+        "start_boolean_index", "receipt_boolean_index", "receipt_wrong_status",
+        "start_wrong_recipe",
+    ],
 )
 def test_recovery_refuses_corrupted_or_unpriced_attempt_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
@@ -2741,6 +2746,42 @@ def test_recovery_refuses_corrupted_or_unpriced_attempt_receipt(
     elif damage == "training_input":
         source = Path(manifest.training_material_path)
         source.write_text(source.read_text(encoding="utf-8") + "\nnew dataset", encoding="utf-8")
+    elif damage in {
+        "start_wrong_proof_mode", "start_missing_proof_mode",
+        "start_boolean_index", "receipt_boolean_index", "receipt_wrong_status",
+        "start_wrong_recipe",
+    }:
+        # A receipt hash cannot supply a missing immutable pre-execution
+        # proof choice, and JSON bool must not masquerade as an integer index.
+        journal = root / "campaign-journal.jsonl"
+        events = [json.loads(row) for row in journal.read_text(encoding="utf-8").splitlines()]
+        start = next(e for e in events if e.get("phase") == "attempt" and e.get("status") == "started")
+        if damage == "start_wrong_proof_mode":
+            start["proof_mode"] = "completion"
+        elif damage == "start_missing_proof_mode":
+            start.pop("proof_mode")
+        elif damage == "start_boolean_index":
+            start["index"] = False
+        elif damage == "start_wrong_recipe":
+            start["recipe_id"] = "unregistered-forged-recipe"
+        elif damage == "receipt_wrong_status":
+            complete = next(e for e in events if e.get("phase") == "attempt_receipt")
+            complete["status"] = "FAILED" if complete["status"] == "SUCCEEDED" else "SUCCEEDED"
+        else:
+            complete = next(e for e in events if e.get("phase") == "attempt_receipt")
+            complete["index"] = False
+            payload = json.loads(receipt.read_text(encoding="utf-8"))
+            payload["index"] = False
+            complete["detail"] = campaign_runner.content_digest(payload)
+            receipt.write_text(json.dumps(payload), encoding="utf-8")
+        journal.write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+        from chowder.growth.campaign_resume import ResumeRefusal, load_receipts
+
+        admission = next(e for e in events if e.get("phase") == "campaign_start")
+        with pytest.raises(ResumeRefusal, match="CAMPAIGN_RESUME_UNVERIFIED"):
+            load_receipts(root, manifest_digest=admission["identity"])
+        assert _verbs(runner).count("train") == 1
+        return
     trained_before = _verbs(runner).count("train")
     refused = run_campaign(manifest)
     assert refused.verdict == "REFUSED"

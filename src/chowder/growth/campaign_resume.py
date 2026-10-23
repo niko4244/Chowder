@@ -182,8 +182,17 @@ def load_receipts(root: Path, *, manifest_digest: str) -> list[dict[str, Any]]:
             if row.get("status") == "started":
                 if started is not None:
                     raise _refuse("another attempt started before the prior one settled")
-                if row.get("index") != len(receipts) or not isinstance(row.get("identity"), str):
+                if (
+                    type(row.get("index")) is not int
+                    or row["index"] != len(receipts)
+                    or not isinstance(row.get("identity"), str)
+                ):
                     raise _refuse("attempt start has no unique invocation identity")
+                # Automatic replay is restricted to a native, priced receipt.
+                # The pre-execution choice cannot be missing or downgraded to
+                # a remote completion after GPU work has already happened.
+                if row.get("proof_mode") != "receipt":
+                    raise _refuse("attempt start has no immutable native receipt proof mode")
                 started = row
             elif row.get("status") not in (None, "started"):
                 # Legacy event or unbound completion is inadmissible.
@@ -192,8 +201,10 @@ def load_receipts(root: Path, *, manifest_digest: str) -> list[dict[str, Any]]:
             index = len(receipts)
             if (
                 started is None
-                or row.get("index") != index
+                or type(row.get("index")) is not int
+                or row["index"] != index
                 or row.get("identity") != started.get("identity")
+                or row.get("recipe_id") != started.get("recipe_id")
             ):
                 raise _refuse("receipt does not match exactly one attempt start")
             path = receipt_path(root, index)
@@ -204,7 +215,8 @@ def load_receipts(root: Path, *, manifest_digest: str) -> list[dict[str, Any]]:
             if (
                 not isinstance(payload, dict)
                 or payload.get("protocol") != 1
-                or payload.get("index") != index
+                or type(payload.get("index")) is not int
+                or payload["index"] != index
                 or payload.get("spec_digest") != started.get("identity")
                 or content_digest(payload) != row.get("detail")
             ):
@@ -214,6 +226,7 @@ def load_receipts(root: Path, *, manifest_digest: str) -> list[dict[str, Any]]:
                 not isinstance(evidence, dict)
                 or evidence.get("attempt") != row.get("attempt")
                 or evidence.get("recipe_id") != row.get("recipe_id")
+                or evidence.get("status") != row.get("status")
             ):
                 raise _refuse("receipt attempt/recipe identity differs")
             validate_evidence(root, evidence)
