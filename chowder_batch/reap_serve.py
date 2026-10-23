@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -91,6 +92,49 @@ def _vram_used_mib() -> int | None:
         return None
 
 
+def _verify_eval_target(eval_args: list[str], *, port: int, arm: str, out: Path) -> None:
+    """Bind evaluation to the just-launched server and its output identity.
+
+    The evaluation CLI accepts its own independent ``--port``/``--arm``/``--out``.
+    Without this check, serving one GGUF can silently score a different resident
+    endpoint or append results under an unrelated arm.  Empty args are left to
+    reap_eval's required-argument validation for backward compatibility.
+    """
+    if not eval_args:
+        return
+    for name in ("--port", "--arm", "--out"):
+        count = sum(value == name or value.startswith(name + "=") for value in eval_args)
+        if count != 1:
+            raise ValueError(f"eval {name} must be supplied exactly once; found {count}")
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--arm", required=True)
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--suites")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--parallel", type=int)
+    try:
+        parsed, unknown = parser.parse_known_args(eval_args)
+    except (argparse.ArgumentError, SystemExit) as exc:
+        raise ValueError("eval argument syntax is invalid") from exc
+    if unknown:
+        raise ValueError(f"eval has unrecognized arguments: {unknown!r}")
+    if (parsed.port != port or parsed.arm != arm or
+            parsed.out.resolve() != out.resolve()):
+        raise ValueError("eval --port/--arm/--out must match the launched REAP server and output")
+
+
+def _require_free_loopback_port(port: int) -> None:
+    """Reject an existing listener before startup (not a post-start PID proof)."""
+    if not 1 <= port <= 65535:
+        raise ValueError("server port must be in 1..65535")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError as exc:
+            raise RuntimeError(f"server port {port} is in use or unavailable; refusing foreign health endpoint") from exc
+
+
 def _stop(proc) -> None:
     proc.terminate()
     try:
@@ -110,6 +154,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--server", default=DEFAULT_SERVER)
     p.add_argument("--timeout", type=int, default=HEALTH_TIMEOUT)
     args = p.parse_args(ours)
+
+    _verify_eval_target(eval_args, port=args.port, arm=args.arm, out=Path(args.out))
+    _require_free_loopback_port(args.port)
 
     arm_dir = Path(args.out) / args.arm
     arm_dir.mkdir(parents=True, exist_ok=True)

@@ -1,7 +1,10 @@
 import io
 import json
+import socket
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -207,3 +210,34 @@ def test_full_fit_with_expert_override_counts_layers():
 
 def test_all_layers_without_fit_line_stays_unknown():
     assert reap_serve.parse_offload("load_tensors: offloaded 41/41 layers to GPU\n")[1] is None
+
+
+@pytest.mark.parametrize("eval_args", [
+    ["--port", "8767", "--arm", "reap160", "--out", "{out}"],
+    ["--port", "8790", "--arm", "dense", "--out", "{out}"],
+    ["--port", "8790", "--arm", "reap160", "--out", "{other}"],
+    ["--port", "8790", "--port", "8767", "--arm", "reap160", "--out", "{out}"],
+])
+def test_serve_refuses_mismatched_or_ambiguous_eval_target_before_launch(tmp_path, monkeypatch, eval_args):
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"small")
+    monkeypatch.setattr(reap_serve.subprocess, "Popen", lambda *a, **k: pytest.fail("must not launch"))
+    args = [str(tmp_path / "evaluation") if token == "{out}" else
+            str(tmp_path / "different") if token == "{other}" else token for token in eval_args]
+    with pytest.raises(ValueError, match="eval"):
+        reap_serve.main(["--gguf", str(gguf), "--arm", "reap160", "--port", "8790",
+                         "--out", str(tmp_path / "evaluation"), "--", *args])
+
+
+def test_serve_refuses_foreign_listener_before_launch(tmp_path, monkeypatch):
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"small")
+    monkeypatch.setattr(reap_serve.subprocess, "Popen", lambda *a, **k: pytest.fail("must not launch"))
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        port = occupied.getsockname()[1]
+        with pytest.raises(RuntimeError, match="port.*in use"):
+            reap_serve.main(["--gguf", str(gguf), "--arm", "reap160", "--port", str(port),
+                             "--out", str(tmp_path / "evaluation"), "--",
+                             "--port", str(port), "--arm", "reap160", "--out", str(tmp_path / "evaluation")])
