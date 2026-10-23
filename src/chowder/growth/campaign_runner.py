@@ -1477,6 +1477,7 @@ def _run_campaign_locked(
                 "accounting_path": str(accounting_path),
                 "accounting_digest": accounting_digest,
             },
+            attempts=_attempt_summary(attempted),
         )
 
     # The candidate arm is produced here, from the artifact this run selected,

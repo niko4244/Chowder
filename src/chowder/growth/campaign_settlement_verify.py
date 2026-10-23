@@ -230,11 +230,13 @@ def verified_settlement_total(
     ]
     attempt_records = run.get("attempts")
     _require(isinstance(attempt_records, list), "terminal attempt summary is malformed")
-    if attempt_records:
-        _require(
-            len(attempt_records) == len(indexed_starts),
-            "terminal attempt summary disagrees with journaled starts",
-        )
+    # A completed paid campaign always writes one durable terminal summary per
+    # invocation. Treat an empty summary as missing evidence rather than as an
+    # invitation to skip the independent journal/record comparison entirely.
+    _require(
+        len(attempt_records) == len(indexed_starts),
+        "terminal attempt summary disagrees with journaled starts",
+    )
     receipt_dir = root / "campaign-attempt-receipts"
     receipt_paths = set(receipt_dir.glob("*.json")) if receipt_dir.is_dir() else set()
     # Exactly one terminal proof per charged attempt. Native local execution
@@ -275,29 +277,28 @@ def verified_settlement_total(
             "attempt proof type disagrees with the pre-execution contract "
             "and terminal run's recorded executor",
         )
-        if attempt_records:
-            recorded_attempt = attempt_records[expected_index]
+        recorded_attempt = attempt_records[expected_index]
+        _require(
+            isinstance(recorded_attempt, dict)
+            and recorded_attempt.get("recipe_id") == started_row.get("recipe_id")
+            and recorded_attempt.get("attempt") == row.get("attempt")
+            and recorded_attempt.get("status") == row.get("status"),
+            "terminal run attempt summary differs from ordered completion",
+        )
+        stamped_backend = recorded_attempt.get("backend")
+        if isinstance(stamped_backend, dict):
+            provider = stamped_backend.get("provider")
             _require(
-                isinstance(recorded_attempt, dict)
-                and recorded_attempt.get("recipe_id") == started_row.get("recipe_id")
-                and recorded_attempt.get("attempt") == row.get("attempt")
-                and recorded_attempt.get("status") == row.get("status"),
-                "terminal run attempt summary differs from ordered completion",
+                (
+                    required_proof_mode == "receipt"
+                    if provider in ("local", "unsloth")
+                    else required_proof_mode == "completion"
+                    if provider == "kaggle"
+                    else False
+                ),
+                "terminal attempt's independently recorded backend "
+                "disagrees with mandatory native/remote proof",
             )
-            stamped_backend = recorded_attempt.get("backend")
-            if isinstance(stamped_backend, dict):
-                provider = stamped_backend.get("provider")
-                _require(
-                    (
-                        required_proof_mode == "receipt"
-                        if provider in ("local", "unsloth")
-                        else required_proof_mode == "completion"
-                        if provider == "kaggle"
-                        else False
-                    ),
-                    "terminal attempt's independently recorded backend "
-                    "disagrees with mandatory native/remote proof",
-                )
         billed = charged_attempts[index]
         _require(
             billed.get("recipe_id") == started_row.get("recipe_id"),

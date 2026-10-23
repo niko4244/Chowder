@@ -73,6 +73,30 @@ def test_real_terminal_campaign_accounting_settles_under_budget(
     assert _verbs(runner).count("train") == trained  # CLI is read-only
 
 
+@pytest.mark.parametrize("tamper", ["clear", "omit_one"])
+def test_settlement_requires_terminal_attempt_summary_for_each_paid_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], tamper: str,
+) -> None:
+    """The independently written terminal run must name every paid attempt."""
+    manifest, runner, _ = _campaign(tmp_path, recipe_count=2, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    run = run_campaign(manifest)
+    root = Path(manifest.state_root)
+    run_path = root / "campaign-run.json"
+    saved = json.loads(run_path.read_text(encoding="utf-8"))
+    assert len(saved["attempts"]) == 2
+    saved["attempts"] = [] if tamper == "clear" else saved["attempts"][:1]
+    run_path.write_text(json.dumps(saved), encoding="utf-8")
+    code, result = settle(
+        monkeypatch, capsys, tmp_path / "inputs" / "campaign.json",
+        Path(run.cost["accounting_path"]),
+    )
+    assert code == 1, result
+    assert result["budget_compliant"] is False
+    assert "terminal attempt summary" in result["refusal_reason"]
+
+
 @pytest.mark.parametrize("tamper", ["duplicate_first", "drop_all", "out_of_order"])
 def test_settlement_refuses_nonbijective_or_unordered_attempt_receipts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -185,6 +209,7 @@ def test_nonreplayable_executor_has_cost_bound_completion_not_native_receipt(
     run = run_campaign(manifest, train_fn=RemoteFixture())
     root = Path(manifest.state_root)
     assert run.verdict == "REFUSED"
+    assert len(run.attempts) == 1, "failed paid invocations retain terminal provenance"
     assert not (root / "campaign-attempt-receipts").exists()
     journal = root / "campaign-journal.jsonl"
     rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
