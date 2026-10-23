@@ -43,6 +43,49 @@ PREFIX = "model.language_model."
 NLL_CHUNK_POSITIONS = 64
 
 
+def _calibration_snapshot(calibration: Path) -> tuple[list[dict], str]:
+    """Retain the exact bytes supplying an expensive registered observation.
+
+    The prior observer read the rows before running but re-read the path *only
+    after* 40 CUDA layers to record its SHA. A changed file could therefore
+    falsely attribute the observed activations to later, different inputs.
+    """
+    raw = calibration.read_bytes()
+    sha = hashlib.sha256(raw).hexdigest()
+    try:
+        rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("observer calibration JSONL is invalid") from exc
+    if not rows or any(not isinstance(row, dict)
+                       or not isinstance(row.get("text"), str)
+                       or not row["text"]
+                       or not isinstance(row.get("source"), str)
+                       or not row["source"] for row in rows):
+        raise ValueError("observer calibration contains invalid/empty sequence or source")
+    return rows, sha
+
+
+def _assert_calibration_unchanged(calibration: Path, witnessed_sha256: str) -> None:
+    """Refuse new observation attribution if calibration bytes changed."""
+    if hashlib.sha256(calibration.read_bytes()).hexdigest() != witnessed_sha256:
+        raise RuntimeError("observer calibration bytes changed during measurement; "
+                           "partial layer output is not qualified evidence")
+
+
+def _prepare_observation_destination(
+    out: Path, *, calibration: Path, model_dir: Path, weights_dir: Path,
+) -> None:
+    """Require a new disjoint experiment directory without erasing evidence."""
+    intended = out.resolve()
+    protected = [calibration.resolve(), model_dir.resolve(), weights_dir.resolve()]
+    for item in protected:
+        if intended == item or intended.is_relative_to(item) or item.is_relative_to(intended):
+            raise ValueError("observer output overlaps immutable calibration or model inputs")
+    if intended.exists():
+        raise FileExistsError("observer output directory already exists; refusing overwrite/reuse")
+    intended.mkdir(parents=True, exist_ok=False)
+
+
 class ShardReader:
     def __init__(self, model_dir: Path) -> None:
         index = json.loads((model_dir / "model.safetensors.index.json").read_text(encoding="utf-8"))
@@ -168,7 +211,12 @@ def main() -> None:
 
     model_dir = Path(args.model_dir)
     out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    calibration = Path(args.calibration)
+    rows, calibration_sha256 = _calibration_snapshot(calibration)
+    _prepare_observation_destination(
+        out, calibration=calibration, model_dir=model_dir,
+        weights_dir=Path(args.weights_dir or args.model_dir),
+    )
     config = AutoConfig.from_pretrained(model_dir)
     tc = config.text_config
     tc._attn_implementation = "sdpa"
@@ -179,7 +227,6 @@ def main() -> None:
     dev = "cuda"
     dtype = torch.bfloat16
 
-    rows = [json.loads(l) for l in Path(args.calibration).read_text(encoding="utf-8").splitlines() if l.strip()]
     if args.limit_seqs:
         rows = rows[: args.limit_seqs]
     seqs = [torch.tensor(tokenizer(r["text"], add_special_tokens=False)["input_ids"]) for r in rows]
@@ -225,6 +272,7 @@ def main() -> None:
                 if not torch.isfinite(y).all():
                     raise SystemExit(f"non-finite hidden state at layer {i}, sequence {s}")
                 hidden[s] = y.to("cpu")
+        _assert_calibration_unchanged(calibration, calibration_sha256)
         torch.save({k: v.cpu() for k, v in stats.items()}, out / f"layer-{i:02d}.pt")
         del layer
         torch.cuda.empty_cache()
@@ -234,7 +282,7 @@ def main() -> None:
         print(json.dumps(timings[-1]), flush=True)
 
     result = {"layers": timings, "n_seqs": len(seqs), "n_tokens": n_tokens,
-              "calibration_sha256": hashlib.sha256(Path(args.calibration).read_bytes()).hexdigest()}
+              "calibration_sha256": calibration_sha256}
     if not args.layers:
         norm_w = reader.load(PREFIX + "norm.", dev)["weight"]
         norm = M.Qwen3_5MoeRMSNorm(tc.hidden_size, eps=tc.rms_norm_eps).to(dev)
@@ -253,6 +301,7 @@ def main() -> None:
         result["calibration_ppl"] = math.exp(nll_sum / count)
         result["calibration_ppl_by_source"] = {k: math.exp(v[0] / v[1]) for k, v in per_source.items()}
         print("calibration perplexity", result["calibration_ppl"], result["calibration_ppl_by_source"], flush=True)
+    _assert_calibration_unchanged(calibration, calibration_sha256)
     (out / "observation.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 
 
