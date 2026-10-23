@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -61,6 +62,10 @@ def test_reap_keeps_top_k_by_score_with_aligned_router_rows(tmp_path: Path) -> N
     _run(model, obs, out)
     pruned = load_file(str(out / "model-00001-of-00001.safetensors"))
     record = json.loads((out / "reap-prune.json").read_text(encoding="utf-8"))
+    assert record["observation_layer_sha256"] == {
+        str(i): hashlib.sha256((obs / f"layer-{i:02d}.pt").read_bytes()).hexdigest()
+        for i in range(LAYERS)
+    }
     assert record["kept_experts"]["0"] == [4, 5, 6, 7]
     # Layer 1 scores fall with index, and expert 0 was never routed, so it is dropped first.
     assert record["kept_experts"]["1"] == [1, 2, 3, 4]
@@ -87,3 +92,97 @@ def test_random_control_keeps_the_same_count_per_layer_and_is_seeded(tmp_path: P
     b = json.loads((tmp_path / "r2" / "reap-prune.json").read_text(encoding="utf-8"))["kept_experts"]
     assert a == b
     assert all(len(v) == 4 for v in a.values())
+
+
+def _attempt(model: Path, obs: Path, out: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(ROOT / "chowder_batch" / "reap_prune.py"),
+         "--model-dir", str(model), "--observations", str(obs),
+         "--keep", "4", "--method", "reap", "--out", str(out)],
+        capture_output=True, text=True, check=False,
+    )
+
+
+def test_pruner_never_overwrites_an_existing_checkpoint(tmp_path: Path) -> None:
+    model, obs = _fixture(tmp_path)
+    out = tmp_path / "existing-output"
+    _run(model, obs, out)
+    sentinel = out / "owner-note.txt"
+    sentinel.write_text("keep my preexisting model", encoding="utf-8")
+    before = (out / "model-00001-of-00001.safetensors").read_bytes()
+    result = _attempt(model, obs, out)
+    assert result.returncode != 0, result.stdout
+    assert sentinel.read_text(encoding="utf-8") == "keep my preexisting model"
+    assert (out / "model-00001-of-00001.safetensors").read_bytes() == before
+
+
+def test_pruner_rejects_indexed_tensor_missing_from_shard_before_publication(tmp_path: Path) -> None:
+    model, obs = _fixture(tmp_path)
+    index_path = model / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["weight_map"]["model.language_model.layers.0.mlp.missing"] = (
+        "model-00001-of-00001.safetensors"
+    )
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    out = tmp_path / "not-created"
+    result = _attempt(model, obs, out)
+    assert result.returncode != 0, result.stdout
+    assert not out.exists(), "invalid index must not publish an apparently usable checkpoint"
+
+
+def test_pruner_rejects_unindexed_shard_tensor(tmp_path: Path) -> None:
+    model, obs = _fixture(tmp_path)
+    shard = model / "model-00001-of-00001.safetensors"
+    tensors = load_file(str(shard))
+    tensors["unexpected.weight"] = torch.ones(2, 2)
+    save_file(tensors, str(shard))
+    out = tmp_path / "not-created"
+    result = _attempt(model, obs, out)
+    assert result.returncode != 0, result.stdout
+    assert not out.exists()
+
+
+def test_pruner_does_not_publish_partial_checkpoint_after_later_shard_fails(tmp_path: Path) -> None:
+    model, obs = _fixture(tmp_path)
+    index_path = model / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["weight_map"]["later.missing.weight"] = "model-00002-of-00002.safetensors"
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+    out = tmp_path / "not-created"
+    result = _attempt(model, obs, out)
+    assert result.returncode != 0, result.stdout
+    assert not out.exists(), "an incomplete checkpoint must never occupy its final path"
+
+
+@pytest.mark.parametrize("malformation", ["nan", "wrong_shape", "negative", "all_unrouted"])
+def test_pruner_rejects_invalid_observation_statistics_before_model_io(
+    tmp_path: Path, malformation: str,
+) -> None:
+    model, obs = _fixture(tmp_path)
+    path = obs / "layer-01.pt"
+    stats = torch.load(path, map_location="cpu", weights_only=True)
+    if malformation == "nan":
+        stats["reap_sum"][1] = float("nan")
+    elif malformation == "wrong_shape":
+        stats["count"] = stats["count"][:-1]
+    elif malformation == "negative":
+        stats["count"][1] = -1
+    else:
+        stats["count"].zero_()
+    torch.save(stats, path)
+    out = tmp_path / "invalid-model"
+    result = _attempt(model, obs, out)
+    assert result.returncode != 0, result.stdout
+    assert not out.exists()
+
+
+def test_pruner_refuses_out_of_tree_source_shard_paths(tmp_path: Path) -> None:
+    model, obs = _fixture(tmp_path)
+    path = model / "model.safetensors.index.json"
+    index = json.loads(path.read_text(encoding="utf-8"))
+    index["weight_map"]["lm_head.weight"] = "../model-00001-of-00001.safetensors"
+    path.write_text(json.dumps(index), encoding="utf-8")
+    out = tmp_path / "invalid-model"
+    result = _attempt(model, obs, out)
+    assert result.returncode != 0, result.stdout
+    assert not out.exists()
