@@ -613,5 +613,58 @@
       "independent frozen judge and explicit postjudge owner N5 absent",
       "Fable/Ornith/derivative redistribution licenses unresolved"
     ]
+  },
+  "review_gate0_followup_20261022": {
+    "schema": "chowder.review-gate0-followup.v1",
+    "date": "2026-10-22",
+    "engineering_pr": 277,
+    "engineering_head": "05117214ba49326749e98a255d4e86dc242c49ca",
+    "main_head": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+    "draft_unmerged": true,
+    "ci": {
+      "head": "05117214ba49326749e98a255d4e86dc242c49ca",
+      "status": "PENDING",
+      "successful_checks": null,
+      "total_checks": 6
+    },
+    "cpu_focus": {
+      "head": "05117214ba49326749e98a255d4e86dc242c49ca",
+      "passed": 425,
+      "skipped": 0,
+      "failed": 0,
+      "test_files": [
+        "tests/test_reap_gates.py",
+        "tests/test_reap_select.py",
+        "tests/test_reap_calibration.py",
+        "tests/test_growth_campaign_runner.py",
+        "tests/test_growth_cli_settlement_auth.py",
+        "tests/test_growth_gen2_judge.py",
+        "tests/test_reap_moe_judge.py",
+        "tests/test_growth_compute_cost_json.py",
+        "tests/test_growth_budget_settlement.py",
+        "tests/test_growth_settlement_adversarial.py"
+      ]
+    },
+    "previous_exact_head_focus": {
+      "head": "0522b688e525852c6bb18ecb613a92b39b963fe0",
+      "passed": 411,
+      "must_not_attribute_to_current_head": true
+    },
+    "historical_full_suite": {
+      "head": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "passed": 4117,
+      "skipped": 78,
+      "must_not_attribute_to_current_head": true
+    },
+    "finding": "CH-071",
+    "isolated_commit": "aa6499c6cbcffab3c4c3a09599700d1760cc067e",
+    "release_verdict": "BLOCKED",
+    "blocked_prerequisites": [
+      "mandatory frozen REAP128_v2 checkpoint and D0/paired evaluation absent",
+      "existing Ornith worked render is not preregistered bare",
+      "14.5 GiB/20-step LoRA and 2.5-hour GPU budget unqualified",
+      "independent frozen judge and postjudge owner N5 absent",
+      "derivative and Fable/Ornith redistribution licensing unverified"
+    ]
   }
 }
