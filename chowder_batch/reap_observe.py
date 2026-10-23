@@ -36,6 +36,10 @@ import torch.nn.functional as F
 from safetensors import safe_open
 
 PREFIX = "model.language_model."
+# Bound the final vocabulary projection, not the observed calibration census.
+# Qwen's 248,320-word head otherwise allocates ~1.9 GiB for the fp32 logits
+# of a single 2,048-token sequence, on top of its bf16 projection and weights.
+NLL_CHUNK_POSITIONS = 64
 
 
 class ShardReader:
@@ -84,6 +88,42 @@ def observing_experts_forward(experts, stats: dict[str, torch.Tensor]):
         return final
 
     return forward
+
+
+@torch.inference_mode()
+def _next_token_nll_chunked(
+    norm: torch.nn.Module,
+    hidden_states: torch.Tensor,
+    tokens: torch.Tensor,
+    lm_head: torch.Tensor,
+    *,
+    chunk_positions: int = NLL_CHUNK_POSITIONS,
+) -> tuple[float, int]:
+    """Same next-token cross-entropy as the full projection, in position chunks.
+
+    Only positions [0, length-1) predict labels [1, length). Normalization is
+    token-local; slicing before RMSNorm and F.linear therefore leaves the
+    frozen loss definition unchanged. Each float32 vocabulary-logit matrix is
+    at most chunk_positions x vocab_size, rather than length x vocab_size.
+    """
+    if type(chunk_positions) is not int or chunk_positions <= 0:
+        raise ValueError("NLL chunk_positions must be a positive integer")
+    if (hidden_states.ndim != 3 or hidden_states.shape[0] != 1
+            or tokens.ndim != 1 or hidden_states.shape[1] != tokens.numel()):
+        raise ValueError("NLL requires one hidden-state sequence and aligned token ids")
+    positions = tokens.numel() - 1
+    if positions <= 0:
+        return 0.0, 0
+    total = torch.zeros((), dtype=torch.float64, device=lm_head.device)
+    for start in range(0, positions, chunk_positions):
+        stop = min(start + chunk_positions, positions)
+        # The observer retains hidden states on the CPU. Never move the full
+        # sequence to CUDA while projecting through the large vocabulary head.
+        states = hidden_states[:, start:stop].to(device=lm_head.device, dtype=lm_head.dtype)
+        logits = F.linear(norm(states)[0], lm_head).float()
+        targets = tokens[start + 1:stop + 1].to(device=lm_head.device)
+        total += F.cross_entropy(logits, targets, reduction="sum").double()
+    return total.item(), positions
 
 
 def main() -> None:
@@ -177,13 +217,12 @@ def main() -> None:
         per_source: dict[str, list[float]] = {}
         with torch.inference_mode():
             for row, s, h in zip(rows, seqs, hidden):
-                logits = F.linear(norm(h.to(dev, dtype))[0, :-1], lm_head).float()
-                nll = F.cross_entropy(logits, s[1:].to(dev), reduction="sum").item()
+                nll, predicted = _next_token_nll_chunked(norm, h, s, lm_head)
                 nll_sum += nll
-                count += len(s) - 1
+                count += predicted
                 per_source.setdefault(row["source"], [0.0, 0])
                 per_source[row["source"]][0] += nll
-                per_source[row["source"]][1] += len(s) - 1
+                per_source[row["source"]][1] += predicted
         result["calibration_ppl"] = math.exp(nll_sum / count)
         result["calibration_ppl_by_source"] = {k: math.exp(v[0] / v[1]) for k, v in per_source.items()}
         print("calibration perplexity", result["calibration_ppl"], result["calibration_ppl_by_source"], flush=True)
