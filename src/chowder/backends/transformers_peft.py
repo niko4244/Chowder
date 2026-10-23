@@ -668,6 +668,9 @@ _BINDINGS_ADDED_AFTER_INITIAL_RELEASE: tuple[str, ...] = (
     "base_content_sha256",
     "base_weight_binding",
 )
+# Unlike the legacy base identity keys above, expert_numeric_mode must never
+# be backfilled onto an existing checkpoint: the original record cannot
+# establish whether its frozen experts were dequantized from row-wise INT8.
 
 
 class TransformersPeftExecutor:
@@ -798,7 +801,7 @@ class TransformersPeftExecutor:
             "max_steps",
             "activation_offload",
             "frozen_layer_streaming",
-            "expert_placement",  # value-transparent, like frozen_layer_streaming
+            "expert_placement",  # transfer placement is transparent; INT8 numerical mode is bound below
             "expert_pinning",  # value-transparent: pinning changes where host memory sits, not what is computed
             "detailed_timing_telemetry",
         ):
@@ -823,6 +826,18 @@ class TransformersPeftExecutor:
             "dataset_sha256": spec.dataset_sha256,
             "replay_dataset_sha256": spec.replay_sha256,
             "parent_adapter_sha256": spec.parent_adapter_sha256,
+            # Moving unquantized BF16 frozen experts between host/device is
+            # value-transparent. Row-wise INT8 quantization is NOT: rounding
+            # the frozen expert weights changes forward outputs and LoRA
+            # gradients, so its optimizer state cannot silently resume under
+            # BF16 (or vice versa). This must be a required recorded binding,
+            # not an optional legacy key: an old checkpoint that omitted the
+            # mode cannot prove it used the currently requested arithmetic.
+            "expert_numeric_mode": (
+                "rowwise-int8-dequant"
+                if spec.expert_placement == "cpu-transient-grad-int8"
+                else "unquantized"
+            ),
         }
         if not local_base:
             bound["base_model"] = spec.base_model
@@ -861,6 +876,15 @@ class TransformersPeftExecutor:
             recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
             if not isinstance(recorded, Mapping):
                 raise RuntimeError(f"checkpoint manifest {manifest_path} is not a JSON object")
+            if ("expert_numeric_mode" in payload_dict
+                    and "expert_numeric_mode" not in recorded
+                    and any(child.is_dir() and child.name.startswith("checkpoint-")
+                            for child in trainer_dir.iterdir())):
+                raise RuntimeError(
+                    f"cannot retroactively certify expert_numeric_mode on existing "
+                    f"checkpoint state in {trainer_dir}; the original numeric mode "
+                    "was not recorded"
+                )
             # A strictly-subset manifest (written before a binding existed) is
             # upgraded in place: the new manifest is strictly more evidence
             # about the same inputs, never less. Any recorded value that

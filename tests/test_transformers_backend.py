@@ -912,6 +912,115 @@ def test_bound_inputs_keep_external_bases_on_revision_binding_only(tmp_path):
     assert bound["base_model"] == "example/model"
 
 
+def test_resume_numeric_expert_mode_must_bind_int8_vs_bf16_at_2048(tmp_path):
+    """Row-wise INT8 roundoff changes forward/gradients; it is not a placement-only change."""
+    from dataclasses import replace
+
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"2048-token training fixture"}\n', encoding="utf-8")
+    config = _config(str(data))
+    spec = _spec_bound_to(config, "example/REAP160", tmp_path)
+    bf16 = replace(spec, max_length=2048, target_preset="moe_frozen_experts",
+                   target_modules=(), quantization="none",
+                   parent_adapter=str(tmp_path / "parent-lora"),
+                   parent_adapter_sha256="c" * 64,
+                   expert_placement="cpu-transient-grad")
+    int8 = replace(bf16, expert_placement="cpu-transient-grad-int8")
+    original = TransformersPeftExecutor._bound_inputs(bf16)
+    changed = TransformersPeftExecutor._bound_inputs(int8)
+    # Both arms may move experts between CPU and GPU; only the INT8 lane
+    # changes their numerical values. The frozen 2048/parent/data remain equal.
+    assert original["checkpoint_recipe_sha256"] == changed["checkpoint_recipe_sha256"]
+    assert original["dataset_sha256"] == changed["dataset_sha256"]
+    assert original["parent_adapter_sha256"] == changed["parent_adapter_sha256"] == "c" * 64
+    assert original["expert_numeric_mode"] != changed["expert_numeric_mode"]
+    checkpoint = _write_checkpoint_state(tmp_path / "prior" / "trainer" / "checkpoint-50")
+    parent_manifest = checkpoint.parent / "chowder-checkpoint-manifest.json"
+    parent_manifest.write_text(json.dumps(original), encoding="utf-8")
+    with pytest.raises(ValueError, match="expert_numeric_mode"):
+        TransformersPeftExecutor._verify_resume_checkpoint(
+            replace(int8, resume_from_checkpoint=str(checkpoint)), changed
+        )
+    parent_manifest.write_text(json.dumps(changed), encoding="utf-8")
+    with pytest.raises(ValueError, match="expert_numeric_mode"):
+        TransformersPeftExecutor._verify_resume_checkpoint(
+            replace(bf16, resume_from_checkpoint=str(checkpoint)), original
+        )
+    # Exact matching INT8 resume is still allowed and has a full state witness.
+    state = TransformersPeftExecutor._verify_resume_checkpoint(
+        replace(int8, resume_from_checkpoint=str(checkpoint)), changed
+    )
+    assert state.state == "complete"
+
+
+def test_resume_refuses_legacy_manifest_without_numerical_mode_evidence(tmp_path):
+    """A manifest from before this binding cannot prove it was not INT8."""
+    from dataclasses import replace
+
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text":"same data"}\n', encoding="utf-8")
+    spec = _spec_bound_to(_config(str(data)), "example/REAP160", tmp_path)
+    spec = replace(spec, max_length=2048, target_preset="moe_frozen_experts",
+                   target_modules=(), quantization="none",
+                   parent_adapter=str(tmp_path / "parent-lora"),
+                   parent_adapter_sha256="c" * 64,
+                   expert_placement="cpu-transient-grad-int8")
+    bound = TransformersPeftExecutor._bound_inputs(spec)
+    legacy = {key: value for key, value in bound.items() if key != "expert_numeric_mode"}
+    checkpoint = _write_checkpoint_state(tmp_path / "prior" / "trainer" / "checkpoint-50")
+    (checkpoint.parent / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps(legacy), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="expert_numeric_mode"):
+        TransformersPeftExecutor._verify_resume_checkpoint(
+            replace(spec, resume_from_checkpoint=str(checkpoint)), bound
+        )
+
+
+def test_existing_checkpoint_cannot_be_retroactively_labeled_with_unobserved_numeric_mode(
+    tmp_path,
+):
+    trainer = tmp_path / "trainer"
+    _write_checkpoint_state(trainer / "checkpoint-50")
+    spec = TransformersPeftRunSpec(
+        base_model="example/REAP160", dataset="synthetic.jsonl",
+        output_dir=str(tmp_path / "out"), max_length=2048,
+        target_preset="moe_frozen_experts", expert_placement="cpu-transient-grad-int8",
+        parent_adapter=str(tmp_path / "parent"), parent_adapter_sha256="a" * 64,
+    )
+    bound = TransformersPeftExecutor._bound_inputs(spec)
+    manifest = trainer / "chowder-checkpoint-manifest.json"
+    manifest.write_text(json.dumps({key: value for key, value in bound.items()
+                                    if key != "expert_numeric_mode"}), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="cannot retroactively"):
+        TransformersPeftExecutor._write_checkpoint_manifest(trainer, bound)
+    assert "expert_numeric_mode" not in json.loads(manifest.read_text(encoding="utf-8"))
+    # An ordinary fresh directory without checkpoint state can still be
+    # upgraded to the more complete bound-input schema.
+    other = tmp_path / "empty-trainer"
+    other.mkdir()
+    (other / "chowder-checkpoint-manifest.json").write_text(
+        json.dumps({"revision": None}), encoding="utf-8"
+    )
+    TransformersPeftExecutor._write_checkpoint_manifest(other, bound)
+    assert json.loads((other / "chowder-checkpoint-manifest.json").read_text())[
+        "expert_numeric_mode"
+    ] == "rowwise-int8-dequant"
+
+
+def test_value_transparent_bf16_expert_transfer_preserves_resume_identity(tmp_path):
+    from dataclasses import replace
+
+    spec = _spec_bound_to(_config(str(tmp_path / "train.jsonl")), "example/REAP160", tmp_path)
+    bf16 = replace(spec, max_length=2048, target_preset="moe_frozen_experts",
+                   target_modules=(), quantization="none",
+                   expert_placement="cpu-transient-grad")
+    bulk = replace(bf16, expert_placement="cpu-transient-grad-bulk")
+    resident = replace(bf16, expert_placement="resident")
+    assert TransformersPeftExecutor._bound_inputs(bf16) == TransformersPeftExecutor._bound_inputs(bulk)
+    assert TransformersPeftExecutor._bound_inputs(bf16) == TransformersPeftExecutor._bound_inputs(resident)
+
+
 def test_resume_is_rejected_when_the_local_base_content_changed(tmp_path, monkeypatch):
     """Same size, different bytes: only a content digest can see this, and a
     checkpoint whose optimizer state was produced against other weights must
