@@ -1253,5 +1253,53 @@
       "main_merged": false
     },
     "policy_note": "Kaggle terms prohibit individual operation of more than one active account. Remote jobs used existing primary account only."
+  },
+  "review_20261023_09867b9": {
+    "engineering_head": "09867b9ff66f88c5080c2727c97ee0f74eea1d9c",
+    "engineering_pr": 277,
+    "ci_at_capture": {
+      "run_id": 40055076469,
+      "head": "09867b9ff66f88c5080c2727c97ee0f74eea1d9c",
+      "status": "IN_PROGRESS",
+      "conclusion": null
+    },
+    "selected_cpu_tests": {
+      "passed": 152,
+      "skipped": 1,
+      "failed": 0,
+      "ruff": "PASS",
+      "suites": "Kaggle CLI transport/compute+new hardware/mount copy/staging witness tests"
+    },
+    "actual_remote_stage": {
+      "kernel": "nikmarco/chowder-cpu-stage-prefix-20261023",
+      "status": "COMPLETE",
+      "bytes": 134217728,
+      "copy_wall_seconds": 3.0434,
+      "copy_mib_per_s": 42.0585,
+      "source_read_seconds": 2.0133,
+      "local_write_fsync_seconds": 0.613,
+      "local_readback_seconds": 0.4381,
+      "sha256_prefix": "889d77217c656b5e6af3fbe20c72650058e5f5502a6af12dacf65cadfb0654cb",
+      "source_and_local_sha256_match": true,
+      "scratch_temp_deleted": true,
+      "entire_model_staged": false,
+      "gpu_used": false,
+      "registered_gate_d0": "NOT_MEASURED"
+    },
+    "witness_stale_reuse_repro": {
+      "previous_behavior": "accepted wrong pre-existing checkpoint bytes as reused",
+      "fixed": "reject any nonempty stage and validate size+sha256 per file, new scratch reserve",
+      "tests": "hermetic no full model loads"
+    },
+    "scientific_status": {
+      "frozen_704_d0": "NOT_MEASURED",
+      "gen0_model_selected": false,
+      "four_gen1_adapters_trained": false,
+      "gen2_trained": false,
+      "local_5060_ti_qualified": false,
+      "independent_improvement_measured": false,
+      "main_merged": false
+    },
+    "policy": "No duplicate-account compute pooling. Secondary user-saved notebook checked read-only and remained queued without TPU device evidence."
   }
 }

@@ -1,5 +1,8 @@
 # Chowder prioritized engineering backlog
 
+> **Kaggle staged-copy proof and runtime protection (2026-10-23, PR #277 09867b9):** Real primary-account private Kaggle CPU run copied and SHA256-verified 128 MiB at 42.0585 MiB/s, deleted temporary bytes. Local regression reproduced a stale/wrong checkpoint silently reused by the actual Kaggle int8 witness; runtime now refuses reuse and validates SHA256+size per copied file. 152 focused CPU tests passed, 1 Windows symlink-privilege skip, Ruff clean; exact-head hosted CI run 40055076469 IN PROGRESS at audit capture. Frozen 704-row BF16 D0 NOT RUN; original 71.9 GB checkpoint NOT STAGED; no Gen1 training/qualified improvement. Secondary-account quotas not pooled.
+
+
 > **Current Kaggle hardware execution (2026-10-23, engineering PR #277 70951d9):** 129 focused Kaggle CPU tests and Ruff passed. New exact-head hosted CI run 40033091564 IN PROGRESS at audit capture. Actual private Kaggle CPU job COMPLETE (30.265 GiB free RAM, ~1.05 TiB scratch). Actual 64 MiB mounted checkpoint streaming sample: 53.18186 MiB/s, not a full-shard benchmark. TPU requested via API but remotely ran CPU despite persisted TpuV5E8 settings (Kaggle CLI issue #1197). Frozen 704-row BF16 D0 NOT MEASURED; no Gen1 training, quality improvement or selection; rights and account-policy constraints preserved.
 
 
