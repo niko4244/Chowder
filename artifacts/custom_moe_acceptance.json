@@ -1,0 +1,1311 @@
+{
+  "schema": "chowder.custom-moe-acceptance.v1",
+  "date": "2026-10-22",
+  "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+  "moe_pr_268_sha": "184291fb1dfba921ced254bfe4e7fcd148c37ae6",
+  "journal_pr_269_sha": "cf544801af525826c5bd507581b27580feff23f2",
+  "evidence_basis": "GitHub connector inspection; Windows /strata root unavailable; no fresh local GPU or test execution",
+  "overall": "BLOCKED",
+  "frozen_gates_preserved": true,
+  "gate_status": [
+    {
+      "gate": "reap_d0_observation",
+      "status": "LOCAL_PASS_40_LAYERS_PPL_10_646096"
+    },
+    {
+      "gate": "reap_generation_health",
+      "status": "HISTORICAL_REAP160_PASS"
+    },
+    {
+      "gate": "reap_gsm8k",
+      "status": "REAP128_FAIL_REAP160_PASS"
+    },
+    {
+      "gate": "reap_humaneval",
+      "status": "HISTORICAL_REAP160_PASS"
+    },
+    {
+      "gate": "reap_random128_control",
+      "status": "HISTORICAL_REAP160_PASS"
+    },
+    {
+      "gate": "q4_fit_speed",
+      "status": "HISTORICAL_REAP160_PASS"
+    },
+    {
+      "gate": "load_census",
+      "status": "HISTORICAL_MEASURED"
+    },
+    {
+      "gate": "memory_vram_14_5_gib",
+      "status": "HISTORICAL_PASS_OLD_REVISION"
+    },
+    {
+      "gate": "host_rss",
+      "status": "HISTORICAL_MEASURED"
+    },
+    {
+      "gate": "throughput_2_5gpuh",
+      "status": "HISTORICAL_RECIPE_FAIL"
+    },
+    {
+      "gate": "lora_gradient",
+      "status": "WITNESS_IMPORTED_PASS"
+    },
+    {
+      "gate": "smoke_20_steps_loss_drop",
+      "status": "WITNESS_IMPORTED_PASS"
+    },
+    {
+      "gate": "router_entropy_20pct",
+      "status": "WITNESS_IMPORTED_PASS"
+    },
+    {
+      "gate": "wddm_no_spill_operator",
+      "status": "NOT_MEASURED"
+    },
+    {
+      "gate": "fable_free_control",
+      "status": "LOCAL_MANIFEST_HASH_MATCH"
+    },
+    {
+      "gate": "license_N2",
+      "status": "BLOCKED"
+    },
+    {
+      "gate": "approval_N5",
+      "status": "BLOCKED"
+    }
+  ],
+  "promotion_allowed": false,
+  "gen1_training_authorized": false,
+  "expensive_gpu_requires_approval": true,
+  "selection_note": "REAP160 candidate is not automatically eligible: apply REAP128 and fallback gates first",
+  "int8_table": "7 of 8 measured, WDDM spill not measured, admission refused",
+  "selection_status": "BLOCKED_REAP128_V2_REQUIRED",
+  "moe_placement_measured_gates": 7,
+  "moe_placement_total_gates": 8,
+  "all_checkpoint_shards_sha256_verified": true,
+  "model_package_digest": "06aaa74bab80d6a025e25428eacfe8006d0d43fad2406370e563ff1a0c2f1c36",
+  "gen1_data_control": {
+    "fable_rows": 767,
+    "control_rows": 647,
+    "subset_order_verified": true,
+    "fable_extra_rows": 120,
+    "nemotron_rows": 0,
+    "nemotron_shortfall": 120,
+    "ot3_rows": 9,
+    "ot3_shortfall": 141,
+    "ornith_rows": 38,
+    "ornith_license_declared": false,
+    "license_release_ready": false
+  },
+  "q4_inference_artifact_sha256_verified": true,
+  "q4_speed_gate": "HISTORICALLY_RESOLVED_REAP160_3_852X",
+  "current_integration": {
+    "draft_pr": 273,
+    "branch": "integration/chowder-recovery-moe-20261022",
+    "head": "f099d3a",
+    "main_merged": false,
+    "source_prs": {
+      "moe": 268,
+      "recovery": 269,
+      "reap": 271,
+      "moe_integrity": 272
+    },
+    "conflict_free_merge": true,
+    "current_ci": "PENDING_VERIFICATION"
+  },
+  "current_release_verdict": "BLOCKED",
+  "frozen_selection_v2": "UNVERIFIED_REQUIRED",
+  "wddm_spill_current": "NOT_MEASURED",
+  "full_auto_resume": "SCOPED_COMPLETED_RECEIPT_REPLAY_PASS; UNPRICED_INFLIGHT_CHECKPOINT_REFUSED",
+  "promotion_human_approved": false,
+  "checkpoint_sha_inventory": {
+    "schema": "chowder.moe-checkpoint-sha256.v1",
+    "inventory_path": "C:\\Users\\nikma\\_audit\\reap160_content_inventory_verified_20261022.json",
+    "checkpoint_path": "G:\\llm-cold\\bf16\\Qwen3.6-REAP160",
+    "file_count": 36,
+    "weight_shards": 26,
+    "content_sha256": "a1ba0e434eea76fdfc4b85843ab90d7957fa2ffd08ac319c2d2f8aed3ae4aa92",
+    "inventory_sha256": "ece6b1c359c357450539826d4183edc5b80182ca6aeaa703d7ce091b9c142b41",
+    "third_pass_matches_two_prior_hashes": true,
+    "fast_identity_check": "PASS",
+    "other_package_files_hashed_previously": [
+      "LICENSE",
+      "dataset-metadata.json",
+      "reap-prune.json"
+    ],
+    "accepted_as_full_training_gate": false,
+    "reason": "Existing VRAM/WDDM/witness records must be remeasured or explicitly content-pinned by sanctioned gates."
+  },
+  "weight_and_derivative_redistribution_rights": "UNVERIFIED_LICENSE_TEXT_METADATA_CONFLICT",
+  "latest_integration_ci": {
+    "pr": 277,
+    "head_sha": "10a0044df73d71a7c40313082f524d13acc8fa1d",
+    "overall": "SUCCESS_6_OF_6",
+    "linux_py310": "SUCCESS",
+    "linux_py311": "SUCCESS",
+    "linux_py312": "SUCCESS",
+    "windows_py312": "SUCCESS",
+    "lint_build": "SUCCESS",
+    "transformers_peft_cpu": "SUCCESS",
+    "draft": true,
+    "main_merged": false,
+    "release_certification": false
+  },
+  "engineering_followup_20261022": {
+    "reap128_gate1_lb": -0.0378074119723426,
+    "reap128_v2": "BLOCKED",
+    "wddm": "UNVERIFIED",
+    "current_vram": "UNVERIFIED",
+    "recipe_budget": "FAILED_HISTORICAL",
+    "human_approval": "REQUIRES_OWNER",
+    "release": false
+  },
+  "owner_approval_N5": {
+    "code_pr": 278,
+    "sha": "ef866b2d05f54a15e6b9d0b7c1bb19ddc1ac17ce",
+    "frozen_judge_manifest_present": false,
+    "production_judge_certified": false,
+    "owner_release_approved": false,
+    "lineage_promotion": "BLOCKED",
+    "N5_safety_guard": "IMPLEMENTED_DRAFT_NOT_MAIN"
+  },
+  "owner_approval_after_frozen_judge": "BLOCKED_NO_VALID_PRECOMMIT_JUDGE_EVIDENCE",
+  "active_finalization_20261022": {
+    "date": "2026-10-22",
+    "draft_pr": 277,
+    "head": "1960b7a241cdbd136affe63534e4fc23b738875c",
+    "main_merged": false,
+    "patch_revisions": {
+      "accounting_validation": "96701b9dd03c00be0c5188847997cd2cf6dbf0f6",
+      "n5_ledger_fences": "cce44112275f5ab22d6295dec281bae5c3dd35a1",
+      "terminal_root_readiness": "55a110911e66da89ac8ff3bcd0cc225aa76e26ac",
+      "authenticated_cli_settlement": "9a14f73c5224e6ef7640583331ad9d0b0ff511d6",
+      "all_new_promotions_require_transaction": "6f35d09584f614164542318f27b080b076ef4a43",
+      "frozen_judge_accounting_parity": "8d30dde25679b9f23d4151a4118120d93473f8be",
+      "complete_receipt_settlement": "878950bc246527c05d91a9ceb2eb05874a2fb2be",
+      "committed_lineage_terminal_fence": "13ef42eba33ad0e88246a5b3924d0baa32a64cb8",
+      "remote_cost_completion_and_streaming_hash": "9ec9985ac8165812d79fefd5ee12d946eea1e5a2",
+      "portable_legacy_dense_fixture": "c88f8593b1c250360a94627fb35d4e77353b0256",
+      "promotion_parent_ancestry_binding": "d62b07a2cb8dbd380c15c89fb38cd74eaae6bd7a",
+      "reap_model_path_alias_gate": "fba03d2a044517b226dbdcc4c779f6f2a9cba2c3",
+      "native_vs_remote_attempt_proof_binding": "eb9dd7b0aea8f8c39ce7853e80e7ba1ab18ace2f",
+      "inspectable_campaign_model_fixture": "a1a1754337bdc574bb45a644d181f1e4658018f7",
+      "native_zero_spend_preflight_refusal": "c7c1b60f7d3cb419fcf4388d6a7fbbd8be1a541f",
+      "certification_fixture_model_identity": "1960b7a241cdbd136affe63534e4fc23b738875c"
+    },
+    "ci_at_head": "SIX_SUCCESS",
+    "targeted_cpu_pass": 24,
+    "full_cpu_at_head": {
+      "passed": 4073,
+      "skipped": 78,
+      "status": "COMPLETED"
+    },
+    "earlier_full_cpu_baseline": {
+      "head": "a0a678dfa13a2d15f2b3176fb668eebbb8335728",
+      "passed": 3960,
+      "skipped": 78,
+      "failed": 0,
+      "ci_6_of_6": "SUCCESS",
+      "not_current_head": true
+    },
+    "last_prior_green_checkpoint": {
+      "head": "c88f8593b1c250360a94627fb35d4e77353b0256",
+      "windows_cpu": {
+        "passed": 4055,
+        "skipped": 78,
+        "failed": 0
+      },
+      "github_ci": "SIX_OF_SIX_SUCCESS",
+      "not_current_head": true
+    },
+    "fresh_gguf_sha256": "8c840461752e1343e81bc12ab9b95d422a4b45c0b0048f00938fe882f299f8f5",
+    "inventory_file_sha256": "be8bc1c36156a2d7f82823f961fa2f8f583d027fa63d7174ce31be2460e7750c",
+    "frozen_selection": "BLOCKED_REAP128_V2_MISSING",
+    "human_promoted": false,
+    "expensive_gpu_performed": false,
+    "verdicts": {
+      "repository_implementation_review_branch": "COMPLETED",
+      "main_merge": "BLOCKED",
+      "verified_settled_attempt_replay": "COMPLETED",
+      "unknown_cost_partial_training_restart": "BLOCKED",
+      "duplicate_terminal_campaign_compute_guard": "COMPLETED",
+      "new_ledger_promotion_transaction_admission": "COMPLETED",
+      "authenticated_offline_settlement_cli": "COMPLETED",
+      "receipt_index_bijection_and_native_evidence_revalidation": "COMPLETED",
+      "non_native_executor_cost_bound_completion": "COMPLETED",
+      "bounded_memory_checkpoint_sha256": "COMPLETED",
+      "cross_platform_legacy_lineage_fixture": "COMPLETED",
+      "transaction_parent_identity_consistency": "COMPLETED",
+      "reap_approval_legacy_path_alias_gate": "COMPLETED",
+      "native_attempt_proof_downgrade_prevention": "COMPLETED",
+      "native_precompute_refusal_recording": "COMPLETED",
+      "gen2_certification_fixture_digest_alignment": "COMPLETED",
+      "offline_terminal_settlement_parity": "COMPLETED",
+      "committed_lineage_terminal_revalidation": "COMPLETED",
+      "unknown_historical_promoted_model_identity": "BLOCKED",
+      "frozen_judge_recomputed_accounting": "COMPLETED",
+      "atomic_promotion_and_recovery_cpu_coverage": "COMPLETED",
+      "independent_frozen_REAP_judge_certification": "BLOCKED",
+      "cryptographically_attributable_owner_approval": "UNVERIFIED",
+      "production_REAP_promotion": "BLOCKED",
+      "reap160_checkpoint_tokenizer_integrity": "COMPLETED",
+      "reap160_gguf_sha256": "COMPLETED",
+      "mandatory_REAP128_v2_checkpoint_and_evaluation": "BLOCKED",
+      "frozen_Gen0_selection": "BLOCKED",
+      "historical_1000_step_training_budget": "FAILED",
+      "fresh_training_step_performance": "UNVERIFIED",
+      "current_14_5_GB_VRAM_and_WDDM_gate": "UNVERIFIED",
+      "full_20_step_real_GPU_smoke": "UNVERIFIED",
+      "complete_Gen1_LoRA_adapter": "BLOCKED",
+      "derivative_and_N2_Fable_data_rights": "UNVERIFIED"
+    },
+    "known_limits": [
+      "Entire untrusted local evidence tree can be erased without externally anchored append-only digest",
+      "In-process Python caller can monkeypatch owner/judge predicates; no cryptographic owner identity",
+      "Frozen judge cannot certify without missing prepromotion declaration/receipt",
+      "No fresh 14.5GB VRAM, 20-step or 2.5 GPU-hour hardware qualification",
+      "Fast stat/inode checkpoint identity after a one-time SHA inventory is not an adversarial in-place rewrite defense if an attacker can restore timestamps; strict boundary rehash for release is unverified"
+    ]
+  },
+  "validated_increment_20261022": {
+    "schema": "chowder.postfinalization-evidence.v1",
+    "date": "2026-10-22",
+    "pr": 277,
+    "head": "10a0044df73d71a7c40313082f524d13acc8fa1d",
+    "main_merged": false,
+    "main_head": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+    "ci": {
+      "head": "10a0044df73d71a7c40313082f524d13acc8fa1d",
+      "status": "SIX_SUCCESS",
+      "jobs_success": 6,
+      "jobs_total": 6
+    },
+    "cpu_targeted": {
+      "head": "10a0044df73d71a7c40313082f524d13acc8fa1d",
+      "passed": 380,
+      "skipped": 0,
+      "failed": 0,
+      "runs": [
+        {
+          "passed": 49,
+          "skipped": 0,
+          "seconds": 2.28,
+          "focus": "reap selector, gates, calibration, module/script guard"
+        },
+        {
+          "passed": 331,
+          "skipped": 0,
+          "seconds": 104.69,
+          "focus": "settlement, ledger, budget, owner, campaign and frozen judges"
+        }
+      ],
+      "overlaps_previous_suites": true
+    },
+    "preceding_c73ed0a_cpu": {
+      "head": "c73ed0a1e8c33da3ce2024d0a6051bc3bd5b748e",
+      "passed": 556,
+      "skipped": 1,
+      "failed": 0,
+      "runs": [
+        {
+          "passed": 420,
+          "skipped": 1,
+          "seconds": 208.57,
+          "focus": "reap, accounting, campaign, judges, moe loader"
+        },
+        {
+          "passed": 136,
+          "skipped": 0,
+          "seconds": 22.38,
+          "focus": "readiness, budget, promotion, manifest, TUI"
+        }
+      ]
+    },
+    "preceding_c73ed0a_ci": {
+      "head": "c73ed0a1e8c33da3ce2024d0a6051bc3bd5b748e",
+      "status": "SIX_SUCCESS",
+      "jobs_success": 6
+    },
+    "historical_full_cpu": {
+      "head": "1960b7a241cdbd136affe63534e4fc23b738875c",
+      "passed": 4073,
+      "skipped": 78,
+      "is_current_head": false
+    },
+    "cost_hardening": {
+      "integrated_commit": "71883c2a6f940d6b2dbf9da9e34a29c9bd13f0f2",
+      "isolated_commit": "5f636dfdcda72f30e06b28cbed1f9daa525bf46d",
+      "status": "COMPLETED_DRAFT",
+      "isolated_cpu_passed": 118,
+      "integrated_cpu_passed": 331,
+      "affected_failed_before_fix": 13
+    },
+    "v2_d0_hardening": {
+      "integrated_commit": "c73ed0a1e8c33da3ce2024d0a6051bc3bd5b748e",
+      "isolated_commit": "dd1c4284b240d857b112491c6ba3965867f4a401",
+      "status": "COMPLETED_DRAFT",
+      "worker_reap_cpu_passed": 45,
+      "worker_loader_cpu_passed": 25,
+      "worker_loader_skipped": 1,
+      "real_v2_observation_complete": false
+    },
+    "frozen_ornith_render_guard": {
+      "integrated_commit": "10a0044df73d71a7c40313082f524d13acc8fa1d",
+      "isolated_commit": "3dce236541d5e30afc25f0619427752df662aa8d",
+      "status": "COMPLETED_DRAFT",
+      "preregistered_render": "bare",
+      "existing_calibration_render": "worked",
+      "existing_calibration_eligible_for_frozen_selection": false,
+      "actual_manifest_synthetic_observer_negative_test": "EXPECTED_REFUSAL",
+      "real_gpu_d0_observation": false,
+      "isolated_reap_cpu_passed": 49
+    },
+    "calibration": {
+      "rows": 717,
+      "packed_tokens": 1197289,
+      "sources": 9,
+      "all_source_counts_verified": true,
+      "per_row_token_bounds_verified": true,
+      "fresh_readonly_sha256_matches_manifest": true,
+      "manifest_file_sha256": "d3f8733769a060a924db395b00d3c7c3acf65655ed6ed30a118df3dd58373f81",
+      "ornith_admitted_source_sha256": "92c35137658ca212fb5783eb1b1087929a889f1ae5a6eaf9a584866a3373d01a",
+      "ornith_render": "worked",
+      "ornith_frozen_eligibility": "BLOCKED_UNREGISTERED_VARIANT",
+      "calibration_jsonl_sha256": "516f2e4a931fd3f025c6206e1f7e96b53ed68801ec503cb3d3367ca43f540c9f"
+    },
+    "reap160_inventory": {
+      "bf16_shards": 26,
+      "bf16_bytes": 46039573000,
+      "indexed_tensors": 1026,
+      "router_layers_verified": 40,
+      "routed_experts_per_layer": 160,
+      "top_k": 8,
+      "checkpoint_content_pin": "a1ba0e434eea76fdfc4b85843ab90d7957fa2ffd08ac319c2d2f8aed3ae4aa92",
+      "tokenizer_json_sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+      "gguf_bytes": 13821482880,
+      "gguf_prior_complete_sha256": "8c840461752e1343e81bc12ab9b95d422a4b45c0b0048f00938fe882f299f8f5",
+      "gguf_full_rehash_this_increment": false,
+      "gen1_adapter_qualified": false
+    },
+    "model_status": "BLOCKED_V2_UNREGISTERED_CALIBRATION_AND_MISSING_MODEL_EVALUATION",
+    "frozen_judge_certified": false,
+    "owner_n5_release_approved": false,
+    "actual_gpu_qualification_current_head": "UNVERIFIED",
+    "historical_recipe_budget": "FAILED",
+    "licensing": "UNVERIFIED",
+    "autonomous_model_improvement": "UNVERIFIED",
+    "workstream_verdicts": {
+      "campaign_journal_recovery": "COMPLETED_DRAFT_CPU_TESTED",
+      "verified_completed_attempt_resume": "COMPLETED_DRAFT_CPU_TESTED",
+      "exclusive_writer_and_cli_tui_admission": "COMPLETED_DRAFT_CPU_TESTED",
+      "authenticated_accounting_and_exactly_once_settlement": "COMPLETED_DRAFT_CPU_TESTED",
+      "promotion_lineage_and_n5_guards": "COMPLETED_DRAFT_CPU_TESTED",
+      "frozen_judge_production_certification": "BLOCKED",
+      "qwen36_v2_calibration_integrity": "HASH_VERIFIED_VARIANT_BLOCKED_FROZEN_INELIGIBLE",
+      "qwen36_reap128_v2_checkpoint_and_d0": "BLOCKED",
+      "qwen36_gen0_frozen_selector": "BLOCKED",
+      "reap160_bf16_and_q4_candidate_inventory": "COMPLETED_FILE_METADATA_NOT_SELECTION",
+      "int8_lora_real_current_gpu_smoke": "UNVERIFIED",
+      "frozen_2_5_gpu_hour_training_recipe": "FAILED_HISTORICAL_UNVERIFIED_NEW_CODE",
+      "contamination_and_fable_free_controls": "PARTIAL_UNVERIFIED_FULL_CONTROLS",
+      "derivative_license_and_redistribution": "UNVERIFIED",
+      "autonomous_model_improvement": "UNVERIFIED",
+      "merge_to_main_and_release": "BLOCKED_REVIEW_ONLY"
+    }
+  },
+  "historical_integration_ci_before_postfinal_20261022": {
+    "pr": 273,
+    "head_sha": "f099d3ac7d7bc09ef071acb6efd09994ede19667",
+    "overall": "SUCCESS_6_OF_6",
+    "linux_py310": "SUCCESS",
+    "linux_py311": "SUCCESS",
+    "linux_py312": "SUCCESS",
+    "windows_py312": "SUCCESS",
+    "lint_build": "SUCCESS",
+    "transformers_peft_cpu": "SUCCESS",
+    "mergeable": true,
+    "draft": true,
+    "main_merged": false,
+    "release_certification": false
+  },
+  "review_continuation_20261022": {
+    "schema": "chowder.review-continuation.v1",
+    "date": "2026-10-22",
+    "review_pr": 277,
+    "review_head": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+    "draft_unmerged": true,
+    "main_sha_unchanged": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+    "github_ci": {
+      "revision": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "status": "SIX_SUCCESS",
+      "successful_checks": 6,
+      "total_checks": 6
+    },
+    "cpu_combined_regression": {
+      "revision": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "passed": 281,
+      "skipped": 0,
+      "failed": 0,
+      "test_files": [
+        "tests/test_reap_gates.py",
+        "tests/test_reap_select.py",
+        "tests/test_reap_calibration.py",
+        "tests/test_growth_cli_settlement_auth.py",
+        "tests/test_growth_gen2_judge.py",
+        "tests/test_reap_moe_judge.py",
+        "tests/test_growth_compute_cost_json.py",
+        "tests/test_growth_budget_settlement.py"
+      ]
+    },
+    "cpu_followup_regression": {
+      "revision": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "passed": 110,
+      "skipped": 0,
+      "failed": 0,
+      "test_files": [
+        "tests/test_growth_campaign_runner.py",
+        "tests/test_growth_settlement_adversarial.py"
+      ],
+      "disjoint_from_combined": true
+    },
+    "cpu_final_head_distinct_test_files": 10,
+    "cpu_final_head_total_passed": 391,
+    "integrated_commits": {
+      "speed_complete_200": "893cdff648b44a1e62e43e90429bf2c5d7c9bc02",
+      "judge_settlement_reasons": "59aa70c89c2343e184167869f6e21b4e81ea1f47",
+      "terminal_paid_attempts": "84dbb2e9151a0cd9be70a00f167271953ca38d92"
+    },
+    "findings": [
+      "CH-065",
+      "CH-066",
+      "CH-067"
+    ],
+    "separate_isolated_cpu": {
+      "reap": 57,
+      "growth_judges": 193,
+      "campaign_settlement": 31,
+      "do_not_add_to_combined_run": true
+    },
+    "release_verdict": "BLOCKED",
+    "unresolved": [
+      "frozen v2 Ornith render worked unregistered",
+      "REAP128_v2 checkpoint and actual D0 and paired frozen evaluation absent",
+      "REAP128 v1 GSM8K strict Gate1 failed; both fallback arms mandatory",
+      "measured 14.5 GB / 20-step LoRA and 2.5 GPU-hour recipe unqualified",
+      "independent frozen judge and postjudge owner N5 approval absent",
+      "redistribution licenses unresolved"
+    ],
+    "cpu_full_suite": {
+      "revision": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "passed": 4117,
+      "skipped": 78,
+      "failed": 0,
+      "execution": "FRESH_PINNED_WINDOWS_PYTEST",
+      "includes_targeted_tests": true,
+      "do_not_add_pass_counts_to_targeted_suites": true
+    }
+  },
+  "review_safety_followup_20261022": {
+    "schema": "chowder.review-safety-followup.v1",
+    "date": "2026-10-22",
+    "engineering_pr": 277,
+    "engineering_head": "0522b688e525852c6bb18ecb613a92b39b963fe0",
+    "main_merged": false,
+    "main_head": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+    "ci": {
+      "engineering_head": "0522b688e525852c6bb18ecb613a92b39b963fe0",
+      "status": "SIX_SUCCESS",
+      "successful_checks": 6,
+      "total_checks": 6
+    },
+    "cpu_focus": {
+      "head": "0522b688e525852c6bb18ecb613a92b39b963fe0",
+      "passed": 411,
+      "skipped": 0,
+      "failed": 0,
+      "files": [
+        "tests/test_reap_gates.py",
+        "tests/test_reap_select.py",
+        "tests/test_reap_calibration.py",
+        "tests/test_reap_moe_judge.py",
+        "tests/test_growth_gen2_judge.py",
+        "tests/test_growth_compute_cost_json.py",
+        "tests/test_growth_budget_settlement.py",
+        "tests/test_growth_campaign_runner.py",
+        "tests/test_growth_cli_settlement_auth.py",
+        "tests/test_growth_settlement_adversarial.py"
+      ]
+    },
+    "fixes": [
+      {
+        "id": "CH-068",
+        "isolated_commit": "48db204aaa46d6ca27021157ae8249729b056d9f",
+        "status": "COMPLETED_DRAFT"
+      },
+      {
+        "id": "CH-069",
+        "isolated_commit": "5177b9c896ec3092cbabfeded34c39e989115438",
+        "status": "COMPLETED_DRAFT"
+      },
+      {
+        "id": "CH-070",
+        "isolated_commit": "798d21e3fe856865674a557dfcf729faf803a2ff",
+        "status": "COMPLETED_DRAFT"
+      }
+    ],
+    "previous_full_suite_only": {
+      "head": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "passed": 4117,
+      "skipped": 78,
+      "is_current_head": false
+    },
+    "release_status": "BLOCKED",
+    "frozen_prerequisites": [
+      "REAP128 v1 GSM8K Gate1 failed, mandatory v2/fallback evaluation absent",
+      "existing Ornith worked render is not preregistered",
+      "REAP128_v2 checkpoint and genuine full D0 observation absent",
+      "2.5 GPU-hour recipe and real 14.5 GB/20-step hardware qualification unverified",
+      "independent frozen judge and explicit postjudge owner N5 absent",
+      "Fable/Ornith/derivative redistribution licenses unresolved"
+    ]
+  },
+  "review_gate0_followup_20261022": {
+    "schema": "chowder.review-gate0-followup.v1",
+    "date": "2026-10-22",
+    "engineering_pr": 277,
+    "engineering_head": "05117214ba49326749e98a255d4e86dc242c49ca",
+    "main_head": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+    "draft_unmerged": true,
+    "ci": {
+      "head": "05117214ba49326749e98a255d4e86dc242c49ca",
+      "status": "SIX_SUCCESS",
+      "successful_checks": 6,
+      "total_checks": 6
+    },
+    "cpu_focus": {
+      "head": "05117214ba49326749e98a255d4e86dc242c49ca",
+      "passed": 425,
+      "skipped": 0,
+      "failed": 0,
+      "test_files": [
+        "tests/test_reap_gates.py",
+        "tests/test_reap_select.py",
+        "tests/test_reap_calibration.py",
+        "tests/test_growth_campaign_runner.py",
+        "tests/test_growth_cli_settlement_auth.py",
+        "tests/test_growth_gen2_judge.py",
+        "tests/test_reap_moe_judge.py",
+        "tests/test_growth_compute_cost_json.py",
+        "tests/test_growth_budget_settlement.py",
+        "tests/test_growth_settlement_adversarial.py"
+      ]
+    },
+    "previous_exact_head_focus": {
+      "head": "0522b688e525852c6bb18ecb613a92b39b963fe0",
+      "passed": 411,
+      "must_not_attribute_to_current_head": true
+    },
+    "historical_full_suite": {
+      "head": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "passed": 4117,
+      "skipped": 78,
+      "must_not_attribute_to_current_head": true
+    },
+    "finding": "CH-071",
+    "isolated_commit": "aa6499c6cbcffab3c4c3a09599700d1760cc067e",
+    "release_verdict": "BLOCKED",
+    "blocked_prerequisites": [
+      "mandatory frozen REAP128_v2 checkpoint and D0/paired evaluation absent",
+      "existing Ornith worked render is not preregistered bare",
+      "14.5 GiB/20-step LoRA and 2.5-hour GPU budget unqualified",
+      "independent frozen judge and postjudge owner N5 absent",
+      "derivative and Fable/Ornith redistribution licensing unverified"
+    ]
+  },
+  "review_model_build_followup_20261022": {
+    "schema": "chowder.review-model-build.v1",
+    "date": "2026-10-22",
+    "engineering_pr": 277,
+    "engineering_head": "4cdc17c51dde11aeb144b88799d60dcdb382d8c3",
+    "draft_unmerged": true,
+    "main_head": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+    "engineering_ci": {
+      "head": "4cdc17c51dde11aeb144b88799d60dcdb382d8c3",
+      "status": "SIX_SUCCESS",
+      "successful_checks": 6,
+      "total_checks": 6,
+      "run_id": "39905287669"
+    },
+    "cpu_focus": {
+      "head": "4cdc17c51dde11aeb144b88799d60dcdb382d8c3",
+      "passed": 462,
+      "skipped": 0,
+      "failed": 0,
+      "test_files": [
+        "tests/test_reap_prune.py",
+        "tests/test_reap_build_preflight.py",
+        "tests/test_reap_gates.py",
+        "tests/test_reap_select.py",
+        "tests/test_reap_calibration.py",
+        "tests/test_growth_campaign_runner.py",
+        "tests/test_growth_cli_settlement_auth.py",
+        "tests/test_growth_gen2_judge.py",
+        "tests/test_reap_moe_judge.py",
+        "tests/test_growth_compute_cost_json.py",
+        "tests/test_growth_budget_settlement.py",
+        "tests/test_growth_settlement_adversarial.py"
+      ],
+      "includes_previous_ten_file_regressions": true
+    },
+    "historical_only": {
+      "previous_ten_file_head": "05117214ba49326749e98a255d4e86dc242c49ca",
+      "previous_ten_file_passed": 425,
+      "previous_full_head": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "previous_full_passed": 4117,
+      "previous_full_skipped": 78,
+      "do_not_add_or_transfer_counts": true
+    },
+    "fixes": {
+      "CH-072": "fa345f3",
+      "CH-073": "a4ce956",
+      "direct_script_correction": "4cdc17c"
+    },
+    "real_readonly_v1_preflight": {
+      "arm": "reap160",
+      "status": "PREREQUISITES_VALIDATED_NOT_BUILT",
+      "frozen_v1_calibration_rows": 384,
+      "full_observer_layers": 40,
+      "observed_calibration_ppl": 10.646096340629155,
+      "calibration_sha256": "d43c1f8d49d8d7c70872367ba8a56e7052a3dd49351463eed292fd122a631725",
+      "observer_sha256": "3d5446d58316d085240eb3561e2ca87352faf92222f827110ebd17799e8098c0",
+      "original_model_config_sha256": "93a4693fa9d8392fbfccd4b3c9873f4bfdcb14fdede978b123d07d19675efe99",
+      "original_model_index_sha256": "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
+      "source_shard_index_files": 26,
+      "no_shards_read_or_written": true
+    },
+    "real_v2_preflight": {
+      "arm": "reap128_v2",
+      "status": "REFUSED",
+      "reason": "no genuine v2 observer matching the supplied calibration",
+      "existing_ornith_calibration_render": "worked",
+      "frozen_prereg_ornith_render": "bare",
+      "no_output_written": true
+    },
+    "model_release_verdict": "BLOCKED",
+    "remaining": [
+      "mandatory REAP128_v2 checkpoint and full D0 and paired frozen evaluations absent",
+      "existing 717-row Ornith worked calibration not frozen registered bare",
+      "REAP160 frozen fit/speed still UNKNOWN without accepted native evidence",
+      "real VRAM/WDDM/LoRA training and <=2.5 GPU-hour budget unqualified",
+      "independent frozen judge, postjudge N5 and derivative/data license release authority absent"
+    ],
+    "frozen_gate_changes": false,
+    "new_gpu_operations": false,
+    "production_merge_or_release": false
+  },
+  "review_gen0_gen1_20261023": {
+    "schema": "chowder.review-gen0-gen1-20261023.v1",
+    "engineering_pr": 277,
+    "engineering_head": "f36b4587eb34f05c47406e73cc8125253c51ce5c",
+    "main_sha": "0bc566c5db052b90e3aa1223fef94445d1045dc5",
+    "draft_unmerged": true,
+    "ci": {
+      "run_id": "39957291698",
+      "status": "SIX_SUCCESS",
+      "head": "f36b4587eb34f05c47406e73cc8125253c51ce5c",
+      "successes": 6
+    },
+    "exact_head_cpu": {
+      "head": "95eff6bc737a9c72fa507053464787cc45765b03",
+      "passed": 796,
+      "failed": 0,
+      "skipped": 22,
+      "warnings": 17,
+      "test_files": [
+        "tests/test_reap_build_preflight.py",
+        "tests/test_reap_calibration.py",
+        "tests/test_reap_select.py",
+        "tests/test_reap_gates.py",
+        "tests/test_reap_observe_nll.py",
+        "tests/test_reap_gguf_header_preflight.py",
+        "tests/test_reap_runtime_preflight.py",
+        "tests/test_wddm_process_memory.py",
+        "tests/test_moe_gen1_train_preflight.py",
+        "tests/test_moe_gen1_four_arm.py",
+        "tests/test_config_validation.py",
+        "tests/test_moe_gen1_mix.py",
+        "tests/test_training_data.py",
+        "tests/test_growth_campaign_prepare.py",
+        "tests/test_growth_training_backends.py",
+        "tests/test_moe_campaign_plumbing.py",
+        "tests/test_evaluator_adapter_identity.py",
+        "tests/test_base_text_evaluator.py",
+        "tests/test_evaluator_adapter_attach.py",
+        "tests/test_transformers_backend.py",
+        "tests/test_moe_checkpoint_inventory.py",
+        "tests/test_checkpoint_discovery.py",
+        "tests/test_growth_campaign_runner.py",
+        "tests/test_transformers_evaluator.py",
+        "tests/test_transformers_parent_adapter.py",
+        "tests/test_parent_adapter_repair.py",
+        "tests/test_evaluator_adapter_placement.py"
+      ],
+      "ruff": "PASS"
+    },
+    "exact_head_github_linux_py312": {
+      "head": "b027d78cc2fe9cba67f4dd0ddc1de84de3d3ec49",
+      "run_id": 39929171488,
+      "job_id": 120332880915,
+      "result": "SUCCESS",
+      "passed": 3738,
+      "skipped": 225,
+      "warnings": 4,
+      "duration_seconds": 333.51,
+      "not_a_local_test_count": true
+    },
+    "older_cpu_full_suite": {
+      "head": "84dbb2e9151a0cd9be70a00f167271953ca38d92",
+      "passed": 4117,
+      "skipped": 78,
+      "historical_only": true
+    },
+    "previous_current_review": {
+      "head": "4cdc17c51dde11aeb144b88799d60dcdb382d8c3",
+      "passed": 462,
+      "historical_only": true
+    },
+    "superseded_failed_ci": {
+      "head": "144bd2fc407dc78b531f3112124ee0e072cc4950",
+      "run_id": 39912464415,
+      "cause": "committed MoE template test expected old missing max_length field",
+      "correction_commit": "056225d",
+      "must_not_claim_success_for_earlier_run": true
+    },
+    "superseded_observer_torch_collection_ci": {
+      "head": "2ae2d7081f6184db7e701a1681b924ddf36ac0d4",
+      "run_id": 39928158887,
+      "cause": "minimal Linux and Windows pytest collection imported optional torch in new REAP observer equivalence tests",
+      "correction_commit": "b027d78",
+      "must_not_claim_success_for_earlier_run": true
+    },
+    "reap_v2_calibration": {
+      "frozen_base_rows": 704,
+      "frozen_base_sha256": "f6a09b694ae43a6d8b44b5180a861856501295eabf3d5297eb9749a008cdd929",
+      "registered_bare_rebuild_rows": 704,
+      "registered_bare_rebuild_sha256": "f6a09b694ae43a6d8b44b5180a861856501295eabf3d5297eb9749a008cdd929",
+      "admitted_ornith_sft_rows": 39,
+      "bare_min_tokens": 40,
+      "bare_max_tokens": 173,
+      "frozen_min_tokens": 256,
+      "bare_ornith_kept": 0,
+      "worked_unregistered_rows": 717,
+      "forged_bare_717_accepted_before_shared_fix": true,
+      "forged_bare_717_refused_by_selector_and_build_after_fix": true,
+      "frozen_source_identity_shared": true,
+      "nll_vocab_projection_positions_before": 2047,
+      "nll_vocab_projection_positions_after_max": 64,
+      "observer_gpu_peak_after_nll_change": "NOT_MEASURED",
+      "distinct_v2_checkpoint": "ABSENT",
+      "genuine_v2_d0": "ABSENT",
+      "paired_v2_quality_and_speed": "NOT_MEASURED",
+      "paired_mcnemar_method": "UNRESOLVED: selector uses normal paired-difference LB, not a specified McNemar confidence construction",
+      "optional_v2_selection_on_ambiguous_paired_method": "FAIL_CLOSED",
+      "paired_wald_diagnostic_preserved": true,
+      "reap160_frozen_speed_offload": "UNKNOWN"
+    },
+    "gen1_real_input": {
+      "manifest_sha256": "9ac93c3763427605cdb0a51d3bb08e70e4278011663800dbdd98622b86df710c",
+      "tokenizer": "Qwen3.6-35B-A3B",
+      "fable_rows": 767,
+      "control_rows": 647,
+      "fable_exclusive_rows": 120,
+      "admitted_max_length": 2048,
+      "fable_max_rendered_tokens": 1906,
+      "control_max_rendered_tokens": 1855,
+      "partial_assistant_answer_at_2048": 0,
+      "former_512_fable_answer_truncations": 198,
+      "former_512_control_answer_truncations": 151,
+      "former_512_completely_lost_fable": 20,
+      "former_512_completely_lost_control": 6,
+      "real_2048_receipt_sha256": "16fa2b780942ef03a56421f28ce27dbc9d678c449e303beb4df82829f45c4c19",
+      "real_512_refusal_receipt_sha256": "a8d96f4aa624bf0753dbb7360c6b00561fb2e70fec00be706c7c19ffe5186891",
+      "source_rows_kept": {
+        "nemotron": 0,
+        "ot3_code": 9,
+        "ornith": 38,
+        "openr1_math": 400,
+        "gsm8k_train": 200,
+        "fable": 120
+      },
+      "source_caps": {
+        "nemotron": 120,
+        "ot3_code": 150,
+        "ornith": 39,
+        "openr1_math": 400,
+        "gsm8k_train": 200,
+        "fable": 120
+      }
+    },
+    "compute": {
+      "kaggle_gpu_remaining_hours": 0.0,
+      "kaggle_gpu_quota_hours": 30.0,
+      "kaggle_gpu_reported_used_hours": 31.32,
+      "kaggle_refresh": "2026-10-24T00:00:00",
+      "kaggle_tpu_remaining_hours": 20.0,
+      "tpu_model_backend_qualification": "NOT_MEASURED",
+      "local_5060ti_total_mib": 16311,
+      "local_5060ti_free_mib_at_probe": 7007,
+      "local_other_gpu_residents": true,
+      "historical_real_step_seconds": 27.48,
+      "projected_1000_step_gpu_hours": 7.63,
+      "registered_train_budget_hours": 2.5,
+      "new_training_gpu_hours": 0.0,
+      "new_real_optimizer_steps": 0,
+      "wddm_collector": "PASSIVE_PER_PID_SAMPLING_ONLY_NOT_A_TRAINING_GATE",
+      "wddm_baseline_source": "existing_llama_server_not_reap_trainer",
+      "wddm_baseline_samples": 2,
+      "wddm_baseline_max_shared_bytes": 0,
+      "wddm_baseline_receipt_sha256": "F250D55B8264A1734F8346BC6AB42507D0471DB0B68461D3D2B3A5F64415B05D",
+      "wddm_counters_can_undercount_cuda": true,
+      "bounded_cuda_observer_smoke": "NOT_LAUNCHED_RESOURCE_GUARD",
+      "observer_smoke_gpu_free_at_guard_mib": 7007,
+      "observer_smoke_required_free_mib": 8192
+    },
+    "four_arm_campaign_status": "FOUR_SEPARATE_PRODUCTION_PROJECTS_PREPARABLE_NOT_EXECUTED",
+    "four_arm_search_axis_limit": "dataset_manifest_not_safe_in_frozen_two_recipe_campaign",
+    "four_arm_expected_learning_rates": [
+      5e-05,
+      0.0001
+    ],
+    "four_arm_source_ids": [
+      "Fable",
+      "control"
+    ],
+    "four_arm_real_gpu_executions": 0,
+    "four_arm_real_source_admission_rechecked": true,
+    "four_arm_real_fable_jsonl_sha256": "384b6f10ae579af10ce36cbbe5278716b681d3223beab7343742b51c1857024d",
+    "four_arm_real_control_jsonl_sha256": "681b2aa957d042028db8fa8710be6538b23f6563e088b9f752410bf5da174c9e",
+    "four_arm_training_per_recipe_gpu_hour_ceiling": 2.5,
+    "four_arm_actual_projects_materialized": 0,
+    "gen1_resume_expert_numeric_mode_required": true,
+    "gen1_resume_legacy_numeric_mode_backfill": "REFUSED_IF_CHECKPOINT_STATE_EXISTS",
+    "gen1_resume_real_model_checkpoint_recovery": "NOT_EXECUTED",
+    "adapter_identity_cpu_admission": "CONTROLLER_AND_WORKER_SHA_CHECKS",
+    "adapter_local_base_declaration": "ABSOLUTE_SAME_LOCAL_MODEL_REQUIRED",
+    "adapter_attach_identity_fences": "WORKER_PRE_AND_POST_PEFT_SHA",
+    "adapter_controller_worker_sha_binding": "REQUIRED_FOR_ADAPTER_EVALUATIONS",
+    "adapter_directory_immutable_snapshot": "NOT_IMPLEMENTED",
+    "trained_gen1_adapter_exists": false,
+    "exact_parent_real_adapter_reload": "NOT_MEASURED",
+    "inference_status": "REAP160_Q4_EXISTS_NO_NEW_DECODE_OR_ADAPTER_RELOAD",
+    "inference_header_preflight_status": "GGUF_METADATA_TOPOLOGY_MATCH_ONLY",
+    "inference_header_gguf_size_bytes": 13821482880,
+    "inference_header_tensor_count": 733,
+    "inference_header_checked_essential_shapes": 162,
+    "inference_header_receipt_sha256": "6a84e783799157032d8d14366cc317f64ca47958b261f416e9e060480202634d",
+    "inference_gguf_weights_sha256_reverified": false,
+    "inference_actual_prompt_decode_run": "NOT_MEASURED",
+    "inference_endpoint_exact_loaded_model_admission": "REFUSED_BOTH_CURRENT_ENDPOINTS",
+    "inference_existing_port_8766": "ZERO_MATCHES_UNRELATED_UNLOADED_PRESETS",
+    "inference_existing_port_8767": "ZERO_MATCHES_SHARP_SPARK_4B",
+    "inference_port_8766_receipt_sha256": "a0bddeb55575a25611f84124cfc2c1320718dfa562bfb7f4cce520b3bbd87166",
+    "inference_port_8767_receipt_sha256": "00605ba02e33baae17be621ab9b16312247ddc457ce6682a960161bebb054e66",
+    "inference_existing_endpoint_generation_requests": 0,
+    "judge_n5_rights": "NOT_CERTIFIED",
+    "release": "BLOCKED",
+    "changes": [
+      "768d0c6",
+      "32390b1",
+      "144bd2f",
+      "056225d",
+      "f1a41d0",
+      "156ecc4",
+      "ebd4e14",
+      "2ae2d70",
+      "b027d78",
+      "c7de696",
+      "24a8c78",
+      "141a610",
+      "2be95ce",
+      "1184b52",
+      "933a05c",
+      "8d41e63",
+      "a39913b",
+      "95eff6b",
+      "f36b458"
+    ],
+    "protected_main_rescue_qwen38_models_untouched": true,
+    "resume_manifest_orphan_checkpoint_preflight": {
+      "finding": "CH-090",
+      "source_head": "f36b4587eb34f05c47406e73cc8125253c51ce5c",
+      "isolated_commit": "652f5a8094b6c82954083d11a72957a62db0af2d",
+      "reproduced_failed_adversarial_tests_at_old_head": 3,
+      "exact_head_cpu_checkpoint_suite": {
+        "passed": 246,
+        "skipped": 25,
+        "failed": 0,
+        "test_files": [
+          "tests/test_transformers_backend.py",
+          "tests/test_checkpoint_manifest_unclaimed_state.py",
+          "tests/test_checkpoint_discovery.py",
+          "tests/test_ddp_acceptance.py",
+          "tests/test_base_identity.py",
+          "tests/test_moe_gen1_four_arm.py"
+        ]
+      },
+      "exact_head_cpu_evaluator_runtime_suite": {
+        "passed": 70,
+        "skipped": 1,
+        "failed": 0
+      },
+      "ruff": "PASS",
+      "read_existing_checkpoint_payload_bytes": false,
+      "new_gpu_training": false,
+      "gen0_gen1_selection_or_release_proof": false
+    }
+  },
+  "review_20261023_f9317e3": {
+    "engineering_pr": 277,
+    "engineering_head": "f9317e369ede7bf1fa738a52014762377d83dc0e",
+    "engineering_commits": [
+      "794fd92e32811939b6cb03561f12f9ca75fdff9d",
+      "745603d7dc6303bb2de9eb776c9349965c767704",
+      "f9317e369ede7bf1fa738a52014762377d83dc0e"
+    ],
+    "engineering_ci": {
+      "run_id": 39982686639,
+      "status_at_audit": "IN_PROGRESS",
+      "conclusion_at_audit": null,
+      "head": "f9317e369ede7bf1fa738a52014762377d83dc0e"
+    },
+    "previous_completed_head": "f36b4587eb34f05c47406e73cc8125253c51ce5c",
+    "previous_completed_ci": {
+      "run_id": 39957291698,
+      "result": "SIX_SUCCESS"
+    },
+    "local_exact_head_cpu": {
+      "revision": "f9317e369ede7bf1fa738a52014762377d83dc0e",
+      "passed": 146,
+      "failed": 0,
+      "warnings": 1,
+      "skipped": 0,
+      "scope": "six overlapping REAP/Gen1 selected test modules",
+      "ruff": "PASS"
+    },
+    "gen0_v2": {
+      "state": "INPUTS_ADMITTED_OBSERVATION_NOT_RUN",
+      "calibration_rows": 704,
+      "tokens": 1192636,
+      "calibration_sha256": "f6a09b694ae43a6d8b44b5180a861856501295eabf3d5297eb9749a008cdd929",
+      "admission_receipt_sha256": "02a068aac2674a284a2e3a79d4746babf88238062949dbfdf364350407ffdbce",
+      "d0": "NOT_MEASURED",
+      "weight_payloads_hashed": false
+    },
+    "gen1": {
+      "2048_screening": "READY_INPUT_ONLY",
+      "Fable_rows": 767,
+      "control_rows": 647,
+      "truncated_assistant_answers": 0,
+      "screening_receipt_sha256": "372b15ae1cc37e0027c1bace69651956c5cd200e0e5efac77ae765d32fccc822",
+      "four_trained_adapters": false,
+      "independently_measured_improvement": false
+    },
+    "release": {
+      "main_merged": false,
+      "gen0_selected": false,
+      "gen2_approved": false,
+      "owner_N5_approved": false,
+      "right_to_redistribute": "UNVERIFIED",
+      "reap160_5060_ti_inference": "NOT_DEMONSTRATED"
+    }
+  },
+  "review_20261023_677531b": {
+    "source": "Windows connected workspace, registered source receipts and exact git commits",
+    "engineering_pr": 277,
+    "engineering_head": "677531b26d83c73fd04e63a1cb3dd8c7c0f6d888",
+    "engineering_ci": {
+      "run_id": 39997361954,
+      "head": "677531b26d83c73fd04e63a1cb3dd8c7c0f6d888",
+      "status_at_capture": "QUEUED",
+      "conclusion_at_capture": null
+    },
+    "engineering_local_tests": {
+      "revision": "677531b26d83c73fd04e63a1cb3dd8c7c0f6d888",
+      "selected_test_modules": 9,
+      "passed": 207,
+      "failed": 0,
+      "warnings": 1,
+      "ruff": "PASS",
+      "scope": "REAP observer, eval resumability, gates and Gen1 input/budget tests"
+    },
+    "changes": {
+      "reap_eval_resume": {
+        "commit": "44b244f0177e870eb42e2991dc52e115567143e4",
+        "state": "FIXED_CPU_TESTED",
+        "limitation": "Existing unbound historical evaluations not retroactively model-attested"
+      },
+      "reap_observer_memory": {
+        "commit": "776f377",
+        "state": "FIXED_CPU_TESTED",
+        "limitation": "No real 35B VRAM/runtime/D0 trial after code change"
+      },
+      "gen1_budget_admission": {
+        "commit": "677531b",
+        "state": "FIXED_CPU_TESTED",
+        "required_steps": 1000,
+        "per_arm_gpu_hour_ceiling": 2.5,
+        "historical_int8_step_seconds": 27.48,
+        "historical_1000_step_gpu_hours_projection": 7.63,
+        "historical_receipt_admission": "REFUSED_MISSING_MODEL_METADATA_IDENTITY"
+      }
+    },
+    "real_registered_selector": {
+      "revision": "44b244f0177e870eb42e2991dc52e115567143e4",
+      "status": "BLOCKED",
+      "chosen": null,
+      "reason": "amendment 4 requires both REAP128_v2 and REAP160 full gates",
+      "receipt_sha256": "44ef1d17ef3da04e0183bf162209d72ec547d4bb345403ad9c5dd8b29d66c5e5"
+    },
+    "gen0": {
+      "reap128_v2_model_exists": false,
+      "full_v2_d0": "NOT_MEASURED",
+      "registered_704_row_input_admission": "PASS_ONLY_INPUTS",
+      "selected": false
+    },
+    "gen1": {
+      "screening_2048": "READY_INPUT_ONLY",
+      "four_trained_adapters": false,
+      "independent_improvement": "NOT_MEASURED",
+      "per_arm_budget_feasibility": "NOT_DEMONSTRATED"
+    },
+    "runtime": {
+      "reap160_rtx5060ti_inference": "NOT_DEMONSTRATED",
+      "production_main_merged": false,
+      "N5_approved": false,
+      "weight_rights_cleared": false
+    }
+  },
+  "review_20261023_ac93f8c": {
+    "engineering_pr": 277,
+    "engineering_head": "ac93f8cc236e09308dc15783ef881e9af3857bf8",
+    "local_tests": {
+      "head": "ac93f8cc236e09308dc15783ef881e9af3857bf8",
+      "selected": 215,
+      "skipped": 0,
+      "failed": 0,
+      "warnings": 1,
+      "ruff": "PASS",
+      "scope": "ten CPU-only selected REAP/Gen1 suites"
+    },
+    "ci_at_capture": {
+      "run_id": 40025442552,
+      "head": "ac93f8cc236e09308dc15783ef881e9af3857bf8",
+      "status": "QUEUED",
+      "conclusion": null
+    },
+    "historical_ci_failure": {
+      "head": "677531b26d83c73fd04e63a1cb3dd8c7c0f6d888",
+      "run_id": 39997361954,
+      "status": "COMPLETED",
+      "conclusion": "FAILURE",
+      "jobs_success": 5,
+      "failed_job": "real transformers peft cpu smoke",
+      "failure": "test_reap_observe_layer_assignment.py linear_attention synthetic bare decoder held uninitialized torch.empty expert parameters which could produce NaNs on Linux",
+      "fix_commit": "ac93f8c",
+      "fix_explanation": "Tiny seeded Qwen3_5MoeTextModel performs post_init; reference and assigned BF16 outputs must both be finite and match exactly; NaN-vs-NaN is explicitly rejected"
+    },
+    "observer_calibration": {
+      "commit": "31a45dbde69da483a72b6ee44e06403e45450371",
+      "status": "CPU_TESTED_NOT_RUN_ON_FULL_MODEL",
+      "source": "704-row registered bare v2 calibration",
+      "change": "Initial calibration bytes are SHA-bound to tokenized rows; source changes refuse layer/final publication. Old experiment outputs are not overwritten or reused.",
+      "token_census": {
+        "declared": 1192636,
+        "retokenized": 1192632,
+        "changed_rows": 4,
+        "cpu_receipt_sha256": "33cc21beda78293bec99a1856b888a4812bb4e10a398603d9ba1a63a6fb74e34"
+      }
+    },
+    "resource_headroom": {
+      "admission": "NO_GPU_ADMISSION",
+      "host_free_ram_gib_observed_range": [
+        6.97,
+        10.35
+      ],
+      "cpu_hidden_state_required_gib": 4.55,
+      "max_decoder_layer_weight_gib_approx": 1.57,
+      "resident_workloads_preserved": true,
+      "full_704_row_cuda_peak": "UNKNOWN",
+      "reap128_v2_full_d0": "NOT_MEASURED",
+      "v1_observation_layer_seconds": 6960.5,
+      "v2_projected_layer_seconds_context_only": 11904
+    },
+    "scientific_release": {
+      "gen0_selected": false,
+      "four_gen1_trained_adapters": false,
+      "independently_measured_model_improvement": false,
+      "local_reap160_inference_acceptance": false,
+      "gen2_authorized": false,
+      "N5_approved": false,
+      "license_rights_clearance": false,
+      "main_merged": false
+    }
+  },
+  "review_20261023_70951d9": {
+    "engineering_head": "70951d98733912f1e66453dbdfa127bbeadffb7c",
+    "engineering_pr": 277,
+    "ci_at_capture": {
+      "run_id": 40033091564,
+      "head": "70951d98733912f1e66453dbdfa127bbeadffb7c",
+      "status": "IN_PROGRESS",
+      "conclusion": null
+    },
+    "focused_tests": {
+      "selected": 129,
+      "passed": 129,
+      "failed": 0,
+      "ruff": "PASS",
+      "scope": "Kaggle integration and new hardware/I-O regression; new final doc commit only had 21 focused tests"
+    },
+    "remote_cpu": {
+      "kernel": "nikmarco/chowder-cpu-hardware-preflight",
+      "status": "COMPLETE",
+      "free_ram_gib": 30.265,
+      "free_tmp_gib": 1048.801,
+      "saved_output_free_gib": 19.502,
+      "model_loaded": false,
+      "gate_d0": "NOT_MEASURED"
+    },
+    "remote_tpu": {
+      "kernel": "nikmarco/chowder-tpu-bf16-hardware-20261023",
+      "status": "COMPLETE_CPU_ONLY",
+      "requested": "TpuV5E8",
+      "persisted": "enable_tpu=true",
+      "actual_jax_devices": [
+        "cpu"
+      ],
+      "native_bf16_proven": false,
+      "provider_issue": "https://github.com/Kaggle/kaggle-cli/issues/1197"
+    },
+    "remote_mounted_stream": {
+      "kernel": "nikmarco/chowder-dataset-stream-cpu-20261023",
+      "status": "COMPLETE",
+      "sample_bytes": 67108864,
+      "sample_seconds": 1.2034,
+      "sample_mib_per_s": 53.18186,
+      "sample_sha256": "6803608593644f37d1190aff5a3a432acc77c4b92bb8c07e5f1c01f53f409a49",
+      "full_checkpoint_staged": false,
+      "original_parent_bf16_d0": "NOT_MEASURED"
+    },
+    "frozen_status": {
+      "registered_704_d0": "NOT_MEASURED",
+      "gen0_selector": "BLOCKED",
+      "gen1_four_trained_adapters": false,
+      "gen2_authorized": false,
+      "N5_authorized": false,
+      "measured_quality_improvement": false,
+      "redistribution_rights_cleared": false,
+      "main_merged": false
+    },
+    "policy_note": "Kaggle terms prohibit individual operation of more than one active account. Remote jobs used existing primary account only."
+  },
+  "review_20261023_09867b9": {
+    "engineering_head": "09867b9ff66f88c5080c2727c97ee0f74eea1d9c",
+    "engineering_pr": 277,
+    "ci_at_capture": {
+      "run_id": 40055076469,
+      "head": "09867b9ff66f88c5080c2727c97ee0f74eea1d9c",
+      "status": "IN_PROGRESS",
+      "conclusion": null
+    },
+    "selected_cpu_tests": {
+      "passed": 152,
+      "skipped": 1,
+      "failed": 0,
+      "ruff": "PASS",
+      "suites": "Kaggle CLI transport/compute+new hardware/mount copy/staging witness tests"
+    },
+    "actual_remote_stage": {
+      "kernel": "nikmarco/chowder-cpu-stage-prefix-20261023",
+      "status": "COMPLETE",
+      "bytes": 134217728,
+      "copy_wall_seconds": 3.0434,
+      "copy_mib_per_s": 42.0585,
+      "source_read_seconds": 2.0133,
+      "local_write_fsync_seconds": 0.613,
+      "local_readback_seconds": 0.4381,
+      "sha256_prefix": "889d77217c656b5e6af3fbe20c72650058e5f5502a6af12dacf65cadfb0654cb",
+      "source_and_local_sha256_match": true,
+      "scratch_temp_deleted": true,
+      "entire_model_staged": false,
+      "gpu_used": false,
+      "registered_gate_d0": "NOT_MEASURED"
+    },
+    "witness_stale_reuse_repro": {
+      "previous_behavior": "accepted wrong pre-existing checkpoint bytes as reused",
+      "fixed": "reject any nonempty stage and validate size+sha256 per file, new scratch reserve",
+      "tests": "hermetic no full model loads"
+    },
+    "scientific_status": {
+      "frozen_704_d0": "NOT_MEASURED",
+      "gen0_model_selected": false,
+      "four_gen1_adapters_trained": false,
+      "gen2_trained": false,
+      "local_5060_ti_qualified": false,
+      "independent_improvement_measured": false,
+      "main_merged": false
+    },
+    "policy": "No duplicate-account compute pooling. Secondary user-saved notebook checked read-only and remained queued without TPU device evidence."
+  },
+  "review_20261023_692b4cc": {
+    "engineering_head": "692b4cc781904d1195c2340e4344fdaf46033b41",
+    "engineering_pr": 277,
+    "ci_at_capture": {
+      "run_id": 40063500319,
+      "status": "IN_PROGRESS",
+      "conclusion": null
+    },
+    "host_observer_first_attempt": {
+      "schema": "frozen-704x40",
+      "GPU": "RTX5060Ti",
+      "BF16": true,
+      "full_result": false,
+      "completed_layers": 1,
+      "first_layer_wall_seconds": 220.3,
+      "routed_assignments": 9541056,
+      "watchdog_reason": "RESOURCE_SAFETY_ABORT",
+      "commit_free_GiB": 1.41,
+      "gpu_free_GiB": 0.72,
+      "sharp_spark_restored": true,
+      "D0": "NOT_MEASURED"
+    },
+    "exact_low_memory": {
+      "code_commit": "692b4cc781904d1195c2340e4344fdaf46033b41",
+      "CPU_regression_pass": 62,
+      "memmap_raw_uint16_BF16_bits": true,
+      "last_cuda_temps_explicitly_released": true,
+      "actual_2_seq_2_layer_smoke": "PASS",
+      "torch_cuda_after_cleanup_MiB": 8.1,
+      "global_CUDA_free_after_cleanup_MiB": 14162,
+      "actual_same_model_layer_0_stat_bitwise_equal": {
+        "count": true,
+        "gate_sum": true,
+        "norm_sum": true,
+        "reap_sum": true
+      },
+      "registered_704x40_D0": "NOT_MEASURED",
+      "source_model_payload_all_sha256": "NOT_MEASURED"
+    },
+    "frozen_status": {
+      "D0": "NOT_MEASURED",
+      "Gen1_arms_trained": 0,
+      "Gen2": "NOT_RUN",
+      "independent_improvement": "NOT_MEASURED",
+      "main_merged": false
+    },
+    "services_note": "User authorized temporary local model service pauses; Hermes and Chat On Steroids bridge preserved, service restoration scripts retained. Exact paused state may change after this audit snapshot."
+  }
+}

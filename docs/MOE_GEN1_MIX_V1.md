@@ -4,8 +4,9 @@ Two files under `C:\llm-work\train-sets\moe-gen1-v1\`, built by
 `chowder_batch/build_moe_gen1_mix.py`, implementing the approved mix in
 `docs/PLAN-MOE-FINETUNE-BEAT-BASELINES-2026-10-19.md` §3:
 
-- **`train-fable.jsonl`** — all six sources (the four math/code sources, the
-  Nemotron tool-use block, and the Fable tool-use block).
+- **`train-fable.jsonl`** — available approved math/code sources, the
+  Nemotron tool-use block, and the Fable tool-use block, subject to per-source
+  caps, screening, and documented shortfalls.
 - **`train-control.jsonl`** — the same rows with **no** Fable row: a strict
   subsequence of the arm file, identical row order, identical Nemotron block.
 
@@ -24,9 +25,12 @@ open; `docs/REAP_MOE_LINEAGE.md` requires a Fable-free arm until N2 is recorded.
 | OpenThoughts-3 code reasoning (`ot3_sft.jsonl`) | 150 | Apache-2.0 |
 | Nemotron-Agentic `interactive_agent` (from `agentic-v1/train-control.jsonl`) | 120 | CC BY 4.0 |
 | Fable sets (rows in `agentic-v1/train-fable.jsonl` not in its control) | 120 | **AGPL-3.0** (N2 open) |
+| Self-OSS-Instruct-SC2 execution-filtered Python (`selfoss_code`, optional) | 250 | ODC-BY (verify source terms before release) |
 
-About 1,030 rows in the arm and 910 in the control. A source with fewer clean
-rows than its cap contributes all of them and the shortfall is recorded in the
+The earlier ~1,030-row Fable arm / ~910-row control estimates are historical,
+not guarantees for current builds. The optional Self-OSS code source and stricter
+length screening change available row counts. A source with fewer clean rows
+than its cap contributes all of them and the shortfall is recorded in the
 manifest — never padded, never swapped for another source.
 
 ## Row shape
@@ -56,16 +60,25 @@ Selection is a seeded permutation of each source's deduplicated pool, then the
 first `cap` clean rows; a uniform sample without replacement where the pool is
 large enough, and every row examined where it is not.
 
-## Sequence length: built at 4,096, plan §4 trains at 2,048
+## Sequence-length handling (corrected 2026-10-22)
 
-The mix is screened at `--max-length 4096`, the length the agentic-v1 block was
-validated at. The plan §4 recipe uses 2,048, and the two numbers matter:
-screened at 2,048, Nemotron's long agentic rows collapse — 757 of 873 unique
-rows render with no assistant tokens left (`empty_label_span`) and the block
-yields nothing at cap 120. Screening at 4,096 keeps the block whole; the trainer
-then truncates. On the 1,028-row arm, 136 rows exceed 2,048 tokens and will be
-truncated by §4's recipe, of which some lose their answer span. Either raise §4
-to 4,096 or accept the truncated tail — this mix does not silently choose.
+The merged builder now defaults to `--max-length 2048`, matching the
+Gen-1 training recipe. When tokenizer/template validation is available, it
+measures each complete rendered example and **drops** an overlength row
+(`drops.over_length`) rather than truncating it and losing a worked
+answer or assistant label span. The source pool is scanned for another
+eligible row until the cap is reached or the pool is exhausted; shortfalls
+remain explicit. The earlier 4,096-screened 1,028-row arm and the report
+that 136 examples would be truncated describe a **superseded build**, not
+the currently committed default.
+
+Long Nemotron and OpenThoughts-3 reasoning rows may produce significant
+shortfalls at 2,048. The optional, execution-filtered `selfoss_code`
+source provides shorter code examples without silently substituting
+for those sources. If the tokenizer cannot be loaded, template/length
+validation is skipped with a warning; such a build is **not qualified**
+to claim the 2,048-token screen was enforced. Retain the generated
+manifest, actual row counts and source hashes for every arm.
 
 ## Rebuild
 
