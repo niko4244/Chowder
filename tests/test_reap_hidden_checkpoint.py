@@ -405,3 +405,54 @@ def test_full_d0_never_accepts_wrong_model_or_retokenized_census():
             _require_frozen_d0_model(
                 SimpleNamespace(**dict(config, **{attribute: bad})), 1_192_632,
             )
+
+
+def test_runtime_identity_serializes_cuda_uuid_object(monkeypatch):
+    """Regression: a non-serializable CUDA uuid aborted the checkpoint constructor.
+
+    torch returns ``torch._C._CUuuid`` from ``get_device_properties().uuid``.
+    Embedding it raw made ``_canonical(identity)`` raise
+    ``TypeError: Object of type _CUuuid is not JSON serializable`` -- but only
+    after the observer had already streamed the full ~72 GB 26-shard digest, so
+    every supervised launch discarded ~20 minutes of hashing at that line.
+    """
+
+    class FakeUuid:
+        """Stands in for _CUuuid: has a stable text form, is not JSON-native."""
+
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def __str__(self) -> str:
+            return self._text
+
+        def __repr__(self) -> str:
+            return f"<FakeUuid {self._text}>"
+
+    class FakeDevice:
+        name = "Fake CUDA device"
+        uuid = FakeUuid("1f8a38ab-03e6-b417-324d-d10c326803c5")
+
+        def __str__(self) -> str:
+            return "Fake CUDA device properties"
+
+    monkeypatch.setattr(cp, "_driver_gpu_identity", lambda: "580.88, GPU-1f8a38ab")
+    identity = cp.runtime_identity(FakeDevice())
+
+    assert identity["gpu_uuid"] == "1f8a38ab-03e6-b417-324d-d10c326803c5"
+    assert identity["device_name"] == "Fake CUDA device"
+    # Must not raise; this is the exact call that used to abort a real run.
+    assert cp._canonical(identity)
+
+
+def test_runtime_identity_keeps_missing_uuid_as_none(monkeypatch):
+    class FakeDevice:
+        name = "No-uuid device"
+
+        def __str__(self) -> str:
+            return "No-uuid device properties"
+
+    monkeypatch.setattr(cp, "_driver_gpu_identity", lambda: "580.88, GPU-none")
+    identity = cp.runtime_identity(FakeDevice())
+    assert identity["gpu_uuid"] is None
+    assert cp._canonical(identity)

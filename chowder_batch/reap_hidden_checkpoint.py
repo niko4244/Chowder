@@ -32,6 +32,51 @@ def _canonical(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
 
 
+def runtime_identity(device) -> dict:
+    """JSON-serializable runtime fingerprint of the device that will compute.
+
+    ``torch.cuda.get_device_properties().uuid`` is a ``torch._C._CUuuid``
+    object, not a string (torch 2.11 / CUDA 12.8). Returning it directly made
+    ``_canonical(identity)`` raise ``TypeError: Object of type _CUuuid is not
+    JSON serializable`` only *after* the observer had already streamed the full
+    26-shard, ~72 GB source digest -- roughly twenty minutes of work discarded at
+    the checkpoint constructor. Coerce it to its stable textual form.
+    """
+    device_uuid = getattr(device, "uuid", None)
+    return {
+        "python": sys.version, "platform": platform.platform(),
+        "torch": torch.__version__, "numpy": np.__version__,
+        "transformers": __import__("transformers").__version__,
+        "cuda": torch.version.cuda,
+        "device": str(device), "device_name": device.name,
+        "gpu_uuid": str(device_uuid) if device_uuid is not None else None,
+        "driver_gpu_identity": _driver_gpu_identity(),
+        "allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+        "cudnn_version": torch.backends.cudnn.version(),
+        "matmul_precision": torch.get_float32_matmul_precision(),
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "flash_sdpa": torch.backends.cuda.flash_sdp_enabled(),
+        "efficient_sdpa": torch.backends.cuda.mem_efficient_sdp_enabled(),
+        "math_sdpa": torch.backends.cuda.math_sdp_enabled(),
+        "CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+    }
+
+
+def _driver_gpu_identity() -> str:
+    try:
+        info = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version,uuid",
+             "--format=csv,noheader"],
+            check=True, capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("cannot fingerprint NVIDIA driver/GPU identity") from exc
+    if not info:
+        raise RuntimeError("empty NVIDIA driver/GPU identity")
+    return info
+
+
 def _digest_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -112,16 +157,6 @@ def fingerprint_inputs(
     )
     if reference is None or reference.origin is None:
         raise RuntimeError("cannot fingerprint reference Qwen decoder implementation")
-    try:
-        gpu_info = subprocess.run(
-            ["nvidia-smi", "--query-gpu=driver_version,uuid",
-             "--format=csv,noheader"],
-            check=True, capture_output=True, text=True, timeout=10,
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise RuntimeError("cannot fingerprint NVIDIA driver/GPU identity") from exc
-    if not gpu_info:
-        raise RuntimeError("empty NVIDIA driver/GPU identity")
     source_paths = [
         Path(__file__), Path(__file__).with_name("reap_observe.py"),
         Path(reference.origin),
@@ -139,24 +174,7 @@ def fingerprint_inputs(
         "artifacts": artifacts,
         "trusted_upstream_pin": trusted_upstream,
         "source_sha256": {p.name: sha256_file(p) for p in source_paths},
-        "runtime": {
-            "python": sys.version, "platform": platform.platform(),
-            "torch": torch.__version__, "numpy": np.__version__,
-            "transformers": transformers.__version__,
-            "cuda": torch.version.cuda,
-            "device": str(device), "device_name": device.name,
-            "gpu_uuid": getattr(device, "uuid", None),
-            "driver_gpu_identity": gpu_info,
-            "allow_tf32": torch.backends.cuda.matmul.allow_tf32,
-            "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
-            "cudnn_version": torch.backends.cudnn.version(),
-            "matmul_precision": torch.get_float32_matmul_precision(),
-            "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
-            "flash_sdpa": torch.backends.cuda.flash_sdp_enabled(),
-            "efficient_sdpa": torch.backends.cuda.mem_efficient_sdp_enabled(),
-            "math_sdpa": torch.backends.cuda.math_sdp_enabled(),
-            "CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
-        },
+        "runtime": runtime_identity(device),
     }
 
 
