@@ -175,29 +175,52 @@ def stage_model(source: Path, dest: Path = SCRATCH) -> dict:
     different access pattern, so the copy is timed and reported here: if it is
     not faster, the next run knows staging bought nothing.
     """
-    if dest.is_dir() and any(dest.iterdir()):
-        log(f"staging: reusing {dest} from an earlier session")
-        return {"staged": str(dest), "reused": True}
+    # A populated target is NOT proof the prior transfer completed. Kaggle
+    # kernels can be interrupted mid-shard; the previous fast-path silently
+    # returned success for an incomplete, corrupted or different checkpoint.
+    if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
+        raise RuntimeError(
+            f"checkpoint staging target already contains data: {dest}; "
+            "refusing unverified reuse; select a NEW empty scratch directory"
+        )
+    resolved_source = source.resolve(strict=True)
+    resolved_dest = dest.resolve()
+    if (resolved_source == resolved_dest or
+            resolved_dest.is_relative_to(resolved_source) or
+            resolved_source.is_relative_to(resolved_dest)):
+        raise RuntimeError("checkpoint staging destination must not overlap source")
     dest.mkdir(parents=True, exist_ok=True)
     files = sorted(p for p in source.iterdir() if p.is_file())
+    if not files:
+        raise RuntimeError("source checkpoint has no files to stage")
     total = sum(p.stat().st_size for p in files)
+    remaining = shutil.disk_usage(dest).free
+    if remaining < total + GIB:
+        raise RuntimeError(
+            f"insufficient scratch for staged checkpoint: {remaining} free bytes, "
+            f"{total + GIB} required (including one GiB reserve)"
+        )
     log(f"staging {len(files)} files, {total / 1e9:.2f} GB, from {source} to {dest}")
     started = time.time()
     copied = 0
     next_report = 5e9
     for path in files:
         target = dest / path.name
-        with path.open("rb") as reader, target.open("wb") as writer:
+        source_digest = hashlib.sha256()
+        with path.open("rb") as reader, target.open("xb") as writer:
             while True:
                 chunk = reader.read(1 << 24)
                 if not chunk:
                     break
                 writer.write(chunk)
+                source_digest.update(chunk)
                 copied += len(chunk)
                 if copied >= next_report:
                     rate = copied / MIB / (time.time() - started)
                     log(f"staged {copied / 1e9:.1f} GB, {rate:.1f} MB/s")
                     next_report += 5e9
+        if target.stat().st_size != path.stat().st_size or sha256(target) != source_digest.hexdigest():
+            raise RuntimeError(f"staged checkpoint file failed SHA256/size validation: {path.name}")
         target.chmod(path.stat().st_mode)
     seconds = time.time() - started
     rate = total / MIB / seconds if seconds else 0.0

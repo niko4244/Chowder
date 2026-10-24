@@ -81,6 +81,35 @@ remote session as the model**, because Kaggle /tmp is ephemeral and not
 shared across subsequent notebook sessions. The 20 GB /kaggle/working
 saved-output limit does not accommodate the original 71.9 GB checkpoint.
 
+### Actual completed 128 MiB mounted-to-scratch copy
+
+Private primary-account Kaggle notebook:
+https://www.kaggle.com/code/nikmarco/chowder-cpu-stage-prefix-20261023
+
+The executed notebook returned status SAMPLE_COPY_VERIFIED after copying
+134,217,728 bytes from the first mounted REAP160 shard into local /tmp;
+source and staged-prefix SHA256 both equaled
+889d77217c656b5e6af3fbe20c72650058e5f5502a6af12dacf65cadfb0654cb.
+Measured 3.0434 seconds copy wall time (42.0585 MiB/s), 2.0133 seconds
+source reads, 0.613 seconds local write/fsync, and 0.4381 seconds reading
+back and verifying the staged sample. Temporary content was deleted.
+Actual receipt saved at
+C:/Users/nikma/_audit/chowder-kaggle-stage-prefix-receipt-20261023/chowder-stage-verified-prefix.json.
+This is a real **bounded** 128 MiB copy, not a full checkpoint staging
+measurement and not a frozen REAP128_v2 D0 result.
+
+### Actual int8 witness runtime fail-closed correction
+
+An adversarial local fixture reproduced a material defect in
+kaggle/int8_witness/run_step.py: stage_model() previously saw ANY nonempty
+/tmp/chowder-model and claimed reused=True even if its checkpoint shard
+contained wrong bytes. This could misattribute a partially copied model
+after interruption. The runner now refuses any nonempty staging destination,
+enforces a one GiB free scratch reserve before copying, and verifies every
+staged file's size and SHA256 against bytes read from its mounted source.
+All changes are exercised using tiny CPU fixture shards without model loads.
+This only improves staging correctness and does not qualify Gen1 or D0.
+
 ## Reproducible hardware probes
 
 Source: chowder_batch/kaggle_hardware_probe.py.
