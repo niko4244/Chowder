@@ -66,6 +66,77 @@ def test_guard_replay_cli_never_requires_or_invokes_launch(tmp_path):
     assert "--launch" in not_launched.stderr
 
 
+def test_doctor_only_reads_snapshot_never_starts_any_worker_or_writes(tmp_path, monkeypatch, capsys):
+    from chowder_batch import reap_v2_observer_preflight as preflight
+
+    monkeypatch.setattr(supervised, "_validate_paths", lambda _: None)
+    monkeypatch.setattr(preflight, "admit", lambda **kwargs: {
+        "bounds": {"sequences": 704, "full_layers": 40},
+        "model": {"source_weight_bytes_not_hashed": 71_903_776_776},
+    })
+    monkeypatch.setattr(supervised.guard, "collect_snapshot",
+                        lambda: _sample(1000, ram=11, commit=22, gpu=2, services=True))
+    def forbidden(*args, **kwargs):
+        raise AssertionError("doctor must not launch any process or write artifacts")
+    monkeypatch.setattr(supervised.subprocess, "Popen", forbidden)
+    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(
+        CONN_LISTEN="LISTEN", net_connections=lambda kind: [],
+    ))
+    args = SimpleNamespace(
+        model_dir=tmp_path / "model", weights_dir=None, calibration=tmp_path / "cal",
+        out=tmp_path / "out", scratch=tmp_path / "scratch",
+        log_dir=tmp_path / "logs", resume=False,
+    )
+    assert supervised._doctor(args) == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output["gate_d0"] == "NOT_MEASURED"
+    assert output["mode"] == "READ_ONLY_NO_MODEL_LOAD_NO_SERVICE_ACTIONS"
+    assert output["frozen_inputs"]["status"] == "METADATA_ADMITTED_FULL_SHARD_HASH_NOT_PERFORMED"
+    assert {"physical_ram_below_16_gib", "free_commit_below_24_gib",
+            "gpu_free_below_12_gib", "protected_model_services_listening"}.issubset(
+        set(output["blockers"])
+    )
+    assert output["host"]["additional_free_gpu_required_gib"] == 10
+    assert not args.out.exists() and not args.scratch.exists() and not args.log_dir.exists()
+
+
+def test_doctor_snapshot_ready_is_only_prescreen_not_launch_admission(tmp_path, monkeypatch, capsys):
+    from chowder_batch import reap_v2_observer_preflight as preflight
+
+    monkeypatch.setattr(supervised, "_validate_paths", lambda _: None)
+    monkeypatch.setattr(preflight, "admit", lambda **kwargs: {
+        "bounds": {"sequences": 704, "full_layers": 40},
+        "model": {"source_weight_bytes_not_hashed": 71_903_776_776},
+    })
+    monkeypatch.setattr(supervised.guard, "collect_snapshot", lambda: _sample(1000))
+    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(
+        CONN_LISTEN="LISTEN", net_connections=lambda kind: [],
+    ))
+    args = SimpleNamespace(
+        model_dir=tmp_path / "model", weights_dir=None, calibration=tmp_path / "cal",
+        out=tmp_path / "out", scratch=tmp_path / "scratch",
+        log_dir=tmp_path / "logs", resume=False,
+    )
+    assert supervised._doctor(args) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert not output["safe_to_launch_now"]
+    assert output["result"] == "INSTANTANEOUS_PRESCREEN_PASS_STILL_REQUIRES_60S_ADMISSION"
+    assert "60 seconds" in output["remaining_prelaunch_requirement"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows monitored C:/F: drive letters")
+def test_supervisor_rejects_scratch_on_unmonitored_drive():
+    args = SimpleNamespace(
+        out=Path("C:/llm-work/reap/unique-observer"),
+        scratch=Path("F:/unique-checkpoint"),
+        log_dir=Path("C:/llm-work/reap/unique-supervisor"),
+    )
+    supervised._require_monitored_volumes(args)
+    args.scratch = Path("I:/unique-checkpoint")
+    with pytest.raises(supervised.Refused, match="unsafe unmonitored volume"):
+        supervised._require_monitored_volumes(args)
+
+
 def test_three_stable_30_second_prelaunch_samples_admit_only_when_healthy():
     history = [_sample(1000), _sample(1030), _sample(1060)]
     assert guard.assess_admission(history).action == "ADMIT"

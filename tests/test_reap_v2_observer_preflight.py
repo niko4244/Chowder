@@ -81,9 +81,11 @@ def test_frozen_v2_input_admitted_without_gpu_or_output_creation(sources):
     assert report["model"]["indexed_tensors"] == 123
     assert report["gate_d0"].startswith("NOT_MEASURED")
     assert report["gpu_work_started"] is False
-    assert report["observation_command_not_executed"][0:3] == [
-        "python", "-B", "chowder_batch/reap_observe.py",
+    assert report["observation_command_not_executed"][0:5] == [
+        "python", "-B", "-m", "chowder_batch.reap_observe_supervised", "--launch",
     ]
+    assert "--scratch" in report["observation_command_not_executed"]
+    assert "--log-dir" in report["observation_command_not_executed"]
     assert not sources[2].exists()
 
 

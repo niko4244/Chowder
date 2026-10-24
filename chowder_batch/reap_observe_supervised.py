@@ -200,6 +200,19 @@ def _observation_command(args: argparse.Namespace) -> list[str]:
     ]
 
 
+def _require_monitored_volumes(args: argparse.Namespace) -> None:
+    """Do not silently check F: while writing 9.10 GiB of slabs elsewhere."""
+    if sys.platform == "win32" and (
+        args.out.drive.upper() != "C:"
+        or args.scratch.drive.upper() != "F:"
+        or args.log_dir.drive.upper() != "C:"
+    ):
+        raise Refused(
+            "this Windows supervisor guards C: output/log and F: BF16 scratch "
+            "only; unsafe unmonitored volume refused"
+        )
+
+
 def _validate_paths(args: argparse.Namespace) -> None:
     if not args.model_dir.is_dir() or not args.calibration.is_file():
         raise Refused("model or frozen calibration source does not exist")
@@ -226,6 +239,7 @@ def _validate_paths(args: argparse.Namespace) -> None:
         or args.scratch.resolve().is_relative_to(args.out.resolve())
     ):
         raise Refused("observation and scratch paths must be disjoint")
+    _require_monitored_volumes(args)
     if args.log_dir.exists() or not args.log_dir.parent.is_dir():
         raise Refused("supervisor logs require a new directory with existing parent")
     protected = (args.model_dir, args.calibration.parent,
@@ -234,6 +248,128 @@ def _validate_paths(args: argparse.Namespace) -> None:
         a, b = args.log_dir.resolve(), source.resolve()
         if a == b or a.is_relative_to(b) or b.is_relative_to(a):
             raise Refused("supervisor logs overlap protected inputs/outputs")
+
+
+def _doctor(args: argparse.Namespace) -> int:
+    """Read-only exact-input/resource readiness, never create run artifacts.
+
+    This is an instantaneous *pre-screen*, not the three-sample 60-second
+    supervised admission. It must never start a model, job, or service.
+    """
+    report: dict = {
+        "schema": "chowder.reap-v2-full-experiment-doctor.v1",
+        "mode": "READ_ONLY_NO_MODEL_LOAD_NO_SERVICE_ACTIONS",
+        "gate_d0": "NOT_MEASURED",
+        "safe_to_launch_now": False,
+        "remaining_prelaunch_requirement": "three stable host snapshots over 60 seconds",
+    }
+    blockers: list[str] = []
+    try:
+        _validate_paths(args)
+        from chowder_batch.reap_v2_observer_preflight import admit
+
+        source = admit(
+            calibration=args.calibration.parent,
+            model_dir=args.model_dir,
+            weights_dir=args.weights_dir,
+            out=args.out,
+        )
+        report["frozen_inputs"] = {
+            "status": "METADATA_ADMITTED_FULL_SHARD_HASH_NOT_PERFORMED",
+            "calibration_rows": source["bounds"]["sequences"],
+            "layers": source["bounds"]["full_layers"],
+            "upstream_source": "Qwen/Qwen3.6-35B-A3B@995ad96eacd98c81ed38be0c5b274b04031597b0",
+            "payload_bytes_not_hashed": source["model"]["source_weight_bytes_not_hashed"],
+        }
+    except Exception as exc:
+        blockers.append("frozen_paths_or_source_invalid")
+        report["input_error"] = f"{type(exc).__name__}: {exc}"
+    try:
+        snapshot = guard.collect_snapshot()
+        instant: list[str] = []
+        if snapshot.ram_free_gib < guard.MIN_ADMIT_RAM_GIB:
+            instant.append("physical_ram_below_16_gib")
+        if snapshot.virtual_free_gib < guard.MIN_ADMIT_COMMIT_GIB:
+            instant.append("free_commit_below_24_gib")
+        if snapshot.gpu_free_gib is None or snapshot.gpu_free_gib < guard.MIN_ADMIT_GPU_FREE_GIB:
+            instant.append("gpu_free_below_12_gib")
+        if snapshot.gpu_temp_c is None or snapshot.gpu_temp_c >= guard.MAX_RUNTIME_GPU_TEMP_C:
+            instant.append("gpu_telemetry_missing_or_hot")
+        if snapshot.diskC_free_gib < 2 or snapshot.diskF_free_gib < 14:
+            instant.append("insufficient_checkpoint_or_log_disk")
+        if snapshot.services_conflict:
+            instant.append("protected_model_services_listening")
+        if snapshot.census_errors >= 25:
+            instant.append("process_census_unreliable")
+        blockers.extend(instant)
+        report["host"] = {
+            "ram_free_gib": round(snapshot.ram_free_gib, 3),
+            "commit_free_gib": round(snapshot.virtual_free_gib, 3),
+            "gpu_free_gib": snapshot.gpu_free_gib,
+            "gpu_temp_c": snapshot.gpu_temp_c,
+            "disk_c_free_gib": round(snapshot.diskC_free_gib, 3),
+            "disk_f_free_gib": round(snapshot.diskF_free_gib, 3),
+            "processes_censused": len(snapshot.processes),
+            "census_errors": snapshot.census_errors,
+            "process_births_visible_in_last_60s": sum(
+                0 <= snapshot.timestamp - proc.started <= 60
+                for proc in snapshot.processes
+            ),
+            "largest_private_processes_readonly": [
+                {
+                    "pid": proc.pid,
+                    "name": proc.name,
+                    "private_gib": round(proc.private_bytes / guard.GIB, 3),
+                }
+                for proc in sorted(
+                    snapshot.processes,
+                    key=lambda proc: proc.private_bytes,
+                    reverse=True,
+                )[:8]
+            ],
+            "additional_free_ram_required_gib": round(
+                max(0, guard.MIN_ADMIT_RAM_GIB - snapshot.ram_free_gib), 3,
+            ),
+            "additional_free_commit_required_gib": round(
+                max(0, guard.MIN_ADMIT_COMMIT_GIB - snapshot.virtual_free_gib), 3,
+            ),
+            "additional_free_gpu_required_gib": (
+                round(max(0, guard.MIN_ADMIT_GPU_FREE_GIB - snapshot.gpu_free_gib), 3)
+                if snapshot.gpu_free_gib is not None else None
+            ),
+        }
+        try:
+            import psutil
+
+            processes = {proc.pid: proc for proc in snapshot.processes}
+            protected = []
+            for conn in psutil.net_connections(kind="tcp"):
+                if (conn.status != psutil.CONN_LISTEN or not conn.laddr
+                        or conn.laddr.port not in (8766, 8767, 11434)):
+                    continue
+                proc = processes.get(conn.pid)
+                protected.append({
+                    "port": conn.laddr.port,
+                    "bound_address": conn.laddr.ip,
+                    "pid": conn.pid,
+                    "process_name": proc.name if proc else "unknown",
+                })
+            report["protected_listeners"] = sorted(
+                protected, key=lambda item: (item["port"], item["bound_address"]),
+            )
+        except Exception as exc:
+            blockers.append("protected_service_owner_telemetry_unavailable")
+            report["protected_listener_error"] = type(exc).__name__
+    except Exception as exc:
+        blockers.append("host_telemetry_unavailable")
+        report["host_error"] = f"{type(exc).__name__}: {exc}"
+    report["blockers"] = sorted(set(blockers))
+    report["result"] = (
+        "INSTANTANEOUS_PRESCREEN_PASS_STILL_REQUIRES_60S_ADMISSION"
+        if not report["blockers"] else "NOT_READY_DO_NOT_LAUNCH"
+    )
+    print(json.dumps(report, indent=2, sort_keys=True, allow_nan=False))
+    return 0 if not report["blockers"] else 2
 
 
 def _owned_only_stop(worker: subprocess.Popen, *, grace_seconds: int = 15) -> None:
@@ -382,6 +518,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="pure offline historic resource replay, no launch")
     parser.add_argument("--launch", action="store_true",
                         help="explicit authorization to run an observer")
+    parser.add_argument("--doctor", action="store_true",
+                        help="one-shot read-only full-run readiness pre-screen; NO launch")
     parser.add_argument("--model-dir", type=Path)
     parser.add_argument("--weights-dir", type=Path)
     parser.add_argument("--calibration", type=Path)
@@ -390,18 +528,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log-dir", type=Path)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args(argv)
+    if sum(bool(x) for x in (args.replay, args.launch, args.doctor)) > 1:
+        parser.error("--replay --launch and --doctor are mutually exclusive")
     if args.replay:
-        if args.launch:
-            parser.error("--replay and --launch cannot be combined")
         print(json.dumps(guard.replay_timeline(args.replay), indent=2))
         return 0
-    if not args.launch:
-        parser.error("observer requires explicit --launch (use --replay for offline tests)")
+    if not args.launch and not args.doctor:
+        parser.error("observer requires --launch, --doctor or --replay")
     if any(getattr(args, name) is None for name in (
         "model_dir", "calibration", "out", "scratch", "log_dir",
     )):
-        parser.error("--launch requires --model-dir --calibration --out --scratch --log-dir")
+        parser.error("--launch/--doctor requires --model-dir --calibration --out --scratch --log-dir")
     try:
+        if args.doctor:
+            return _doctor(args)
         return _run(args)
     except Exception as exc:
         print(f"OBSERVER_NOT_LAUNCHED: {exc}", file=sys.stderr)
