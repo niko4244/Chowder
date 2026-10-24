@@ -22,8 +22,8 @@ Ollama, Hermes, Claude, other agents, or unrelated processes.
 - Admission requires three ordered snapshots spanning about 60 seconds with
   free physical RAM >=16 GiB, available system commit >=24 GiB, less than
   1 GiB RAM decline in 60 seconds, fewer than 12 competing process births,
-  at least 12 GiB free on the selected first GPU, usable GPU counters, no
-  8767/11434 service-listener conflict, and sufficient
+  at least 12 GiB free on the selected GPU, usable GPU counters, no
+  8766/8767/11434 protected service listener, and sufficient
   C:/F: log and BF16 scratch space. These headrooms are **conservative
   operational choices**, not measured hardware guarantees.
 - Once launched, sample about every 30 seconds. Abort the owned observer when
@@ -31,12 +31,29 @@ Ollama, Hermes, Claude, other agents, or unrelated processes.
   >=2.5 GiB 60-second decline; also abort for a 12-process burst plus
   concurrent RAM pressure/decline. Existing low-commit, disk, GPU memory,
   temperature and unexpected service reactivation remain fail-closed.
+- On a multi-GPU host, set `CUDA_VISIBLE_DEVICES` to **one explicitly chosen
+  full `GPU-...` UUID** returned by `nvidia-smi --query-gpu=uuid,name
+  --format=csv`; numeric selection or an unset variable refuses admission.
+  The observer inherits the same GPU selection. This prevents monitoring one
+  GPU while CUDA loads the model onto another.
 - Keep per-process PID, creation time, parent PID, private/working-set bytes
   for the largest recent competing process births (not command arguments or
   secrets). Process identity uses PID **and start time**, not PID alone.
   Inaccessible process metadata is counted; substantial census failure is
   an admission/continuation failure.
 - Resource sensors that raise during monitoring abort only the owned observer.
+  A single Windows CIM process-table query replaces ~1,000 individual process
+  calls; any sample exceeding a 25-second budget aborts safely instead of
+  silently degrading the 30-second cadence.
+  The observer begins behind a lightweight readiness barrier, after it is
+  attached to a Windows Job Object with kill-on-job-close. An unexpected
+  supervisor-process death then terminates the owned observer through Windows,
+  without touching any other process or model service.
+  The final observer exit is followed by a **fresh host-resource sample**
+  before the supervised completion status can be accepted.
+- Registered **704-row** REAP128_v2 downstream selection now requires a
+  sealed BF16 checkpoint receipt. Stripping both receipt-identifying fields
+  cannot quietly downgrade the frozen v2 gate to a legacy D0 JSON.
   Supervisor final state cannot mark D0 PASS from a worker exit code alone:
   the full 704x40 sealed observer receipt and measured perplexity are checked.
   PPL >=20 remains a measured D0 **FAIL**, not a missing or passing gate.
@@ -87,6 +104,9 @@ The launcher enforces an eight-hour elapsed safety limit. Its fresh
 preflight rehashes approximately 72 GiB of source BF16 shards and the
 observer rechecks those payloads again on resume and completion; this costs
 read I/O and time. Plan admission with ample headroom.
+Only the observed local source bytes are hashed: a separate **trusted pinned
+original model-weight manifest** is still needed to establish provenance
+against adversarial replacement of the entire original-shaped checkpoint.
 
 ## Release gates still blocked
 

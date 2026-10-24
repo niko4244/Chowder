@@ -466,3 +466,32 @@ def test_v2_selector_refuses_forged_13_bare_suffix_with_selfconsistent_observer(
                                    "n_seqs": 16, "n_tokens": 4096}))
     with pytest.raises(GateError, match="zero eligible rows"):
         _validate_v2_observation(calib, observer)
+
+
+def test_registered_704_v2_refuses_silent_legacy_checkpoint_downgrade(tmp_path, monkeypatch):
+    calib = tmp_path / "calibration"
+    calib.mkdir()
+    rows = "".join(
+        json.dumps({"source": "swe_smith_trajectories", "n_tokens": 256,
+                    "text": f"frozen-test-row-{i}"}) + "\n"
+        for i in range(704)
+    )
+    source = calib / "calibration.jsonl"
+    source.write_text(rows, encoding="utf-8")
+    sha = hashlib.sha256(source.read_bytes()).hexdigest()
+    monkeypatch.setattr(identity, "FROZEN_V2_BASE_SHA256", sha)
+    (calib / "calibration-manifest.json").write_text(json.dumps({
+        "mix": "v2", "rows": 704, "tokens": 704 * 256, "max_tokens": 2048,
+        "calibration_sha256": sha,
+        "sources": {"swe_smith_trajectories": {"kept": 704}},
+        "ornith": "absent: no admitted Ornith curriculum supplied",
+    }))
+    observer = tmp_path / "observation.json"
+    observer.write_text(json.dumps({
+        "calibration_sha256": sha, "n_seqs": 704, "n_tokens": 1_192_632,
+        "layers": [{"layer": i, "routed_tokens": 9_541_056} for i in range(40)],
+        "calibration_ppl": 10.0,
+        # Both self-identifying fields deliberately stripped.
+    }))
+    with pytest.raises(GateError, match="requires sealed BF16 checkpoint receipt"):
+        _validate_v2_observation(calib, observer)

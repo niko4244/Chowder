@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from chowder_batch import reap_host_guard as guard
+from chowder_batch import reap_observer_bootstrap as bootstrap
 from chowder_batch import reap_observe_supervised as supervised
 
 ARCHIVE = Path(__file__).parent / "data" / "reap_r2_host_126.jsonl"
@@ -80,6 +81,10 @@ def test_three_stable_30_second_prelaunch_samples_admit_only_when_healthy():
     assert "protected_service_ports_listening" in guard.assess_admission(history).reasons
     history = [_sample(1000), _sample(1030, gpu=11.9), _sample(1060)]
     assert "gpu_free_below_12_gib" in guard.assess_admission(history).reasons
+    # A transient RAM cliff may recover by the end. It still refuses admission.
+    history = [_sample(1000, ram=30), _sample(1032, ram=16.2),
+               _sample(1064, ram=30)]
+    assert "physical_ram_falling_over_60s" in guard.assess_admission(history).reasons
 
 
 def test_foreign_process_fanout_counted_by_pid_and_start_time():
@@ -91,10 +96,12 @@ def test_foreign_process_fanout_counted_by_pid_and_start_time():
     assert verdict.new_foreign_processes_60s == 12
     assert "foreign_process_fanout_over_60s" in verdict.reasons
     # A producer subprocess of our own observer is NOT a competing actor.
-    descendants = (_proc(200, 1059, parent=44), _proc(201, 1059, parent=200))
+    descendants = (_proc(44, 900), _proc(200, 1059, parent=44),
+                   _proc(201, 1059, parent=200))
     verdict = guard.assess_admission(
         [_sample(1000), _sample(1030),
-         _sample(1060, births=descendants)], owner_pids=frozenset({44}),
+         _sample(1060, births=descendants)],
+        owner_keys=frozenset({(44, 900)}),
     )
     assert verdict.new_foreign_processes_60s == 0
     # A reused PID born within the interval is a new process identity.
@@ -103,6 +110,101 @@ def test_foreign_process_fanout_counted_by_pid_and_start_time():
     assert old.key != new.key
     assert guard._foreign_births(_sample(1060, births=(old, new)),
                                  frozenset()) == [new]
+    # A recycled former owner PID must NOT inherit the old owner's exclusion.
+    assert guard._foreign_births(_sample(1060, births=(new,)),
+                                 frozenset({(200, 600)})) == [new]
+    # A birth seen mid-window still counts when its age is 63s at the final
+    # sample (sampling time jitter and intermediate process exits).
+    born = tuple(_proc(pid, 1001) for pid in range(400, 412))
+    samples = [_sample(1000), _sample(1032, births=born),
+               _sample(1064, births=born)]
+    result = guard.assess_admission(samples)
+    assert result.action == "REFUSE"
+    assert result.new_foreign_processes_60s == 12
+
+
+def test_passive_protected_listener_scan_covers_ipv4_ipv6_without_connecting(monkeypatch):
+    class FakePsutil:
+        CONN_LISTEN = "LISTEN"
+        @staticmethod
+        def net_connections(kind):
+            assert kind == "tcp"
+            return [SimpleNamespace(status="LISTEN",
+                                    laddr=SimpleNamespace(ip="::1", port=11434))]
+    monkeypatch.setitem(sys.modules, "psutil", FakePsutil)
+    assert guard._services_conflict() is True
+    assert guard._services_conflict((8767,)) is False
+
+
+def test_gpu_selection_requires_explicit_single_uuid_in_multi_gpu(monkeypatch):
+    text = "GPU-123, 14336, 55\nGPU-456, 1024, 60\n"
+    monkeypatch.setattr(guard.subprocess, "run",
+                        lambda *args, **kwargs: SimpleNamespace(stdout=text))
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    with pytest.raises(RuntimeError, match="multiple GPUs"):
+        guard._gpu_snapshot()
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-123")
+    assert guard._gpu_snapshot() == (14.0, 55.0)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-456")
+    assert guard._gpu_snapshot() == (1.0, 60.0)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-invalid")
+    with pytest.raises(RuntimeError, match="unique physical GPU"):
+        guard._gpu_snapshot()
+
+
+def test_new_supervisor_replay_preserves_recorded_abort_and_labels_limit(tmp_path):
+    source = tmp_path / "new-supervisor.jsonl"
+    source.write_text(json.dumps({
+        "timestamp_utc": "2026-10-24T10:00:00Z",
+        "ram_free_gib": 12, "virtual_free_gib": 25,
+        "diskC_free_gib": 9, "diskF_free_gib": 80,
+        "gpu_free_gib": 14, "gpu_temp_c": 53,
+        "services_conflict": True, "process_census_errors": 27,
+        "foreign_birth_count_60s": 30,
+        "decision": {"action": "ABORT", "reasons": ["protected_services_reactivated"]},
+    }) + "\n")
+    report = guard.replay_timeline(source)
+    assert report["first_abort"]["sample"] == 1
+    assert report["evidence_mode"] == "supervisor_decisions_recorded_not_independently_recomputed"
+
+
+def test_bootstrap_refuses_unrelated_script_and_does_not_load_observer(tmp_path):
+    with pytest.raises(SystemExit, match="refusing non-observer"):
+        bootstrap.main([str(tmp_path / "ready"), str(tmp_path / "other.py"), "--whatever"])
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-owned process guard only")
+def test_windows_cim_process_keys_match_self_process_start():
+    entries, missing = guard._process_census()
+    assert missing < 25
+    assert guard.process_identity(os.getpid()) in {p.key for p in entries}
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object only")
+def test_windows_kill_on_job_close_stops_only_owned_dummy_child():
+    # CPU idle helper, never a model or service. Tests real kernel job
+    # assignment/kill-on-close behavior rather than only a fake API.
+    child = subprocess.Popen(
+        [sys.executable, "-B", "-c", "import time; time.sleep(60)"],
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    job = None
+    try:
+        started = time.monotonic()
+        job = supervised._WindowsObserverJob()
+        job.attach(child)
+        job.close()
+        job = None
+        # Windows kill-on-job-close may assign exit code 0. What matters is
+        # that a child whose only action was to sleep for 60s ends immediately.
+        child.wait(timeout=12)
+        assert time.monotonic() - started < 12
+    finally:
+        if job is not None:
+            job.close()
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=12)
 
 
 def test_birth_alarm_alone_not_destructive_without_ram_decline():
@@ -181,6 +283,104 @@ def test_live_supervisor_refuses_unhealthy_prelaunch_without_starting_any_worker
     assert state["stage"] == "INCOMPLETE_D0"
     assert "physical_ram_below_16_gib" in state["reason"]
     assert len((args.log_dir / "resources.jsonl").read_text().splitlines()) == 3
+
+
+def test_observer_exit_zero_cannot_skip_final_unsafe_resource_sample(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(supervised.sys, "platform", "win32")
+    monkeypatch.setattr(supervised, "_validate_paths", lambda _: None)
+    monkeypatch.setattr(supervised.time, "sleep", lambda _: None)
+    own_pid = os.getpid()
+    owner = _proc(own_pid, 900)
+    samples = iter((
+        _sample(1000, births=(owner,)),
+        _sample(1030, births=(owner,)),
+        _sample(1060, births=(owner,)),
+        _sample(1061, births=(owner,)),  # immediate admission recheck
+        _sample(1062, ram=0.1, commit=0.1, births=(owner,)),  # final exit check
+    ))
+    consumed = []
+    def sample():
+        value = next(samples)
+        consumed.append(value)
+        return value
+    monkeypatch.setattr(supervised.guard, "collect_snapshot", sample)
+    monkeypatch.setattr(supervised.guard, "process_identity",
+                        lambda pid: (pid, 900 if pid == own_pid else 1055))
+    class FakeJob:
+        def attach(self, worker): pass
+        def close(self): pass
+    monkeypatch.setattr(supervised, "_WindowsObserverJob", FakeJob)
+    class FakeWorker:
+        pid = 17177
+        def poll(self): return 0
+        def wait(self, timeout=None): return 0
+    monkeypatch.setattr(supervised.subprocess, "Popen",
+                        lambda *args, **kwargs: FakeWorker())
+    def impossible_check(*args, **kwargs):
+        raise AssertionError("unsafe final state reached D0 success verification")
+    monkeypatch.setattr(supervised, "_check_observation_complete", impossible_check)
+    args = SimpleNamespace(
+        log_dir=tmp_path / "logs", model_dir=tmp_path / "model", weights_dir=None,
+        calibration=tmp_path / "cal.jsonl", out=tmp_path / "out",
+        scratch=tmp_path / "scratch", resume=False,
+    )
+    assert supervised._run(args) == 2
+    assert len(consumed) == 5
+    report = json.loads((args.log_dir / "supervisor-state.json").read_text())
+    assert report["stage"] == "INCOMPLETE_D0"
+    assert "final host-resource witness unsafe" in report["reason"]
+    assert report["registered_d0_proven"] is False
+
+
+@pytest.mark.parametrize("final_safe", [False, True])
+def test_last_moment_service_reactivation_blocks_launch_but_healthy_final_can_pass(
+    tmp_path, monkeypatch, final_safe,
+):
+    monkeypatch.setattr(supervised.sys, "platform", "win32")
+    monkeypatch.setattr(supervised, "_validate_paths", lambda _: None)
+    monkeypatch.setattr(supervised.time, "sleep", lambda _: None)
+    own_pid = os.getpid()
+    own = _proc(own_pid, 900)
+    readings = [
+        _sample(1000, births=(own,)), _sample(1030, births=(own,)),
+        _sample(1060, births=(own,)),
+        _sample(1061, births=(own,), services=not final_safe),
+        _sample(1062, births=(own,)),
+    ]
+    emitted = []
+    def next_sample():
+        emitted.append(len(emitted))
+        return readings[len(emitted) - 1]
+    monkeypatch.setattr(supervised.guard, "collect_snapshot", next_sample)
+    monkeypatch.setattr(supervised.guard, "process_identity",
+                        lambda pid: (pid, 900 if pid == own_pid else 1055))
+    class Job:
+        def attach(self, child): pass
+        def close(self): pass
+    monkeypatch.setattr(supervised, "_WindowsObserverJob", Job)
+    class Child:
+        pid = 17177
+        def poll(self): return 0
+        def wait(self, timeout=None): return 0
+    launches = []
+    def create_child(*args, **kwargs):
+        launches.append(1)
+        return Child()
+    monkeypatch.setattr(supervised.subprocess, "Popen", create_child)
+    monkeypatch.setattr(supervised, "_check_observation_complete",
+                        lambda *args: {"status": "D0_PASS", "calibration_ppl": 10})
+    args = SimpleNamespace(
+        log_dir=tmp_path / "logs", model_dir=tmp_path / "model",
+        weights_dir=None, calibration=tmp_path / "cal",
+        out=tmp_path / "out", scratch=tmp_path / "scratch", resume=False,
+    )
+    assert supervised._run(args) == (0 if final_safe else 2)
+    assert len(launches) == (1 if final_safe else 0)
+    state = json.loads((args.log_dir / "supervisor-state.json").read_text())
+    assert state["stage"] == ("D0_PASS" if final_safe else "INCOMPLETE_D0")
+    assert state["registered_d0_proven"] is final_safe
 
 
 @pytest.mark.parametrize("crash_phase,expected_generation", [

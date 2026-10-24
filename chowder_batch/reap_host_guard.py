@@ -11,7 +11,6 @@ import ctypes
 import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -109,55 +108,103 @@ def _memory_windows() -> tuple[float, float]:
 
 def _gpu_snapshot() -> tuple[float, float]:
     result = subprocess.run(
-        ["nvidia-smi", "--query-gpu=memory.free,temperature.gpu",
+        ["nvidia-smi", "--query-gpu=uuid,memory.free,temperature.gpu",
          "--format=csv,noheader,nounits"],
         capture_output=True, text=True, check=True, timeout=8,
     )
-    line = result.stdout.splitlines()[0]
-    free, temp = (float(v.strip()) for v in line.split(","))
+    devices = [tuple(v.strip() for v in line.split(","))
+               for line in result.stdout.splitlines() if line.strip()]
+    if not devices or any(len(device) != 3 for device in devices):
+        raise RuntimeError("unable to identify GPU telemetry by UUID")
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if len(devices) > 1 and not visible.startswith("GPU-"):
+        raise RuntimeError(
+            "multiple GPUs require one explicit CUDA_VISIBLE_DEVICES=GPU-UUID"
+        )
+    if visible.startswith("GPU-"):
+        matches = [device for device in devices if device[0] == visible]
+        if len(matches) != 1:
+            raise RuntimeError("CUDA_VISIBLE_DEVICES UUID is not a unique physical GPU")
+        device = matches[0]
+    elif visible in ("", "0") and len(devices) == 1:
+        device = devices[0]
+    else:
+        raise RuntimeError("ambiguous CUDA_VISIBLE_DEVICES GPU mapping")
+    _, free, temp = device
+    free, temp = float(free), float(temp)
     return free / 1024, temp
 
 
-def _services_conflict(ports: Iterable[int] = (8767, 11434)) -> bool:
-    for port in ports:
-        with socket.socket() as sock:
-            sock.settimeout(0.3)
-            if sock.connect_ex(("127.0.0.1", port)) == 0:
-                return True
-    return False
+def _services_conflict(ports: Iterable[int] = (8766, 8767, 11434)) -> bool:
+    """Passive IPv4/IPv6 listening-table inspection; never contact services."""
+    try:
+        import psutil
+        listeners = psutil.net_connections(kind="tcp")
+        protected = set(ports)
+        return any(
+            entry.status == psutil.CONN_LISTEN
+            and entry.laddr and entry.laddr.port in protected
+            for entry in listeners
+        )
+    except Exception as exc:
+        raise RuntimeError("cannot safely inspect protected service listeners") from exc
 
 
 def _process_census() -> tuple[tuple[ProcessInfo, ...], int]:
-    """Read-only best-effort census; no process handle remains open."""
-    try:
-        import psutil
-    except ImportError as exc:
-        raise RuntimeError("psutil required for per-PID resource supervision") from exc
+    """One passive Windows CIM query, not 1,000 slow per-process API calls."""
+    if sys.platform != "win32":
+        raise RuntimeError("Win32_Process census requires Windows")
+    script = (
+        "$ErrorActionPreference='Stop';"
+        "@(Get-CimInstance Win32_Process | ForEach-Object {"
+        "$p=$_;"
+        "[ordered]@{"
+        "pid=[int]$p.ProcessId;"
+        "ppid=[int]$p.ParentProcessId;"
+        "started=if($null -ne $p.CreationDate){"
+        "[math]::Round(([DateTimeOffset]$p.CreationDate).ToUnixTimeMilliseconds()/1000.0,2)"
+        "}else{$null};"
+        "name=[string]$p.Name;"
+        "private=[int64]$p.PrivatePageCount;"
+        "working=[int64]$p.WorkingSetSize"
+        "}}) | ConvertTo-Json -Compress -Depth 3"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, check=True, timeout=15,
+    )
+    raw = json.loads(result.stdout.lstrip("\ufeff"))
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list) or len(raw) > _MAX_PROCESS_RECORDS:
+        raise RuntimeError("Win32_Process census returned invalid/bounded records")
     records: list[ProcessInfo] = []
     inaccessible = 0
-    for proc in psutil.process_iter(["pid", "ppid", "name", "create_time",
-                                    "memory_info"]):
+    for info in raw:
         try:
-            info = proc.info
-            if info["create_time"] is None or info["ppid"] is None:
+            if not isinstance(info, dict) or info.get("started") is None:
                 inaccessible += 1
                 continue
-            memory = info["memory_info"]
-            if memory is None:
-                inaccessible += 1
-                continue
+            started = round(float(info["started"]), 2)
             records.append(ProcessInfo(
                 pid=int(info["pid"]), parent_pid=int(info["ppid"]),
-                started=float(info["create_time"]),
+                started=started,
                 name=str(info["name"] or "?")[:80],
-                private_bytes=int(getattr(memory, "private", getattr(memory, "vms", 0))),
-                working_set_bytes=int(getattr(memory, "rss", 0)),
+                private_bytes=int(info["private"]),
+                working_set_bytes=int(info["working"]),
             ))
-        except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError, TypeError):
+        except (ValueError, KeyError, TypeError):
             inaccessible += 1
-        if len(records) > _MAX_PROCESS_RECORDS:
-            raise RuntimeError("process census exceeded safe bounded limit")
     return tuple(records), inaccessible
+
+
+def process_identity(pid: int) -> tuple[int, float]:
+    """Identify a process by PID AND process creation time (PID reuse safe)."""
+    try:
+        import psutil
+        return pid, round(float(psutil.Process(pid).create_time()), 2)
+    except Exception as exc:
+        raise RuntimeError("unable to establish observer process identity") from exc
 
 
 def collect_snapshot(*, now: float | None = None) -> Snapshot:
@@ -176,26 +223,54 @@ def collect_snapshot(*, now: float | None = None) -> Snapshot:
 
 
 def _excluded_pids(processes: tuple[ProcessInfo, ...],
-                   owner_pids: frozenset[int]) -> set[int]:
-    excluded = set(owner_pids)
-    by_parent: dict[int, list[int]] = {}
-    for p in processes:
-        by_parent.setdefault(p.parent_pid, []).append(p.pid)
-    stack = list(owner_pids)
-    while stack:
-        for child in by_parent.get(stack.pop(), []):
-            if child not in excluded:
-                excluded.add(child)
-                stack.append(child)
+                   owner_keys: frozenset[tuple[int, float]]) -> set[int]:
+    # A missing parent cannot establish ancestry. A recycled parent PID with
+    # a later creation time cannot have spawned an earlier child.
+    by_pid = {p.pid: p for p in processes}
+    excluded = {p.pid for p in processes if p.key in owner_keys}
+    for candidate in processes:
+        chain: set[int] = set()
+        current = candidate
+        while current.parent_pid not in chain:
+            chain.add(current.pid)
+            parent = by_pid.get(current.parent_pid)
+            if parent is None or parent.started > current.started:
+                break
+            if parent.pid in excluded or parent.key in owner_keys:
+                excluded.add(candidate.pid)
+                break
+            current = parent
     return excluded
 
 
-def _foreign_births(snapshot: Snapshot, owner_pids: frozenset[int]) -> list[ProcessInfo]:
-    excluded = _excluded_pids(snapshot.processes, owner_pids)
+def _foreign_births(snapshot: Snapshot,
+                    owner_keys: frozenset[tuple[int, float]]) -> list[ProcessInfo]:
+    excluded = _excluded_pids(snapshot.processes, owner_keys)
     return [
         p for p in snapshot.processes
         if p.pid not in excluded and 0 <= snapshot.timestamp - p.started <= 60
     ]
+
+
+def _foreign_births_recent(samples: list[Snapshot],
+                           owner_keys: frozenset[tuple[int, float]]) -> list[ProcessInfo]:
+    """Union identities from snapshots over 60s; retain recently exited PIDs."""
+    now = samples[-1].timestamp
+    # A 30-second poll can drift several seconds; retain all births witnessed
+    # in the prelaunch window (which can span ~64s) or recent 75s of runtime.
+    cutoff = min(now - 75, samples[0].timestamp)
+    seen: dict[tuple[int, float], ProcessInfo] = {}
+    for snapshot in samples:
+        if snapshot.timestamp < cutoff:
+            continue
+        for process in _foreign_births(snapshot, owner_keys):
+            if cutoff <= process.started <= now:
+                seen[process.key] = process
+    return list(seen.values())
+
+
+def _owners_present(sample: Snapshot, owner_keys: frozenset[tuple[int, float]]) -> bool:
+    return owner_keys <= {p.key for p in sample.processes}
 
 
 def _ram_decline(samples: list[Snapshot], *, seconds: float) -> float:
@@ -211,7 +286,7 @@ def _ram_decline(samples: list[Snapshot], *, seconds: float) -> float:
 
 
 def assess_admission(samples: list[Snapshot],
-                     *, owner_pids: frozenset[int] = frozenset()) -> Decision:
+                     *, owner_keys: frozenset[tuple[int, float]] = frozenset()) -> Decision:
     if len(samples) != 3 or samples[0].timestamp >= samples[1].timestamp or (
         samples[1].timestamp >= samples[2].timestamp
     ):
@@ -223,15 +298,18 @@ def assess_admission(samples: list[Snapshot],
         reasons.append("physical_ram_below_16_gib")
     if min(s.virtual_free_gib for s in samples) < MIN_ADMIT_COMMIT_GIB:
         reasons.append("free_commit_below_24_gib")
-    if samples[0].ram_free_gib - samples[-1].ram_free_gib > MAX_ADMIT_RAM_DECLINE_GIB:
+    if (max(s.ram_free_gib for s in samples) - min(s.ram_free_gib for s in samples)
+            > MAX_ADMIT_RAM_DECLINE_GIB):
         reasons.append("physical_ram_falling_over_60s")
-    foreign = _foreign_births(samples[-1], owner_pids)
+    foreign = _foreign_births_recent(samples, owner_keys)
     if len(foreign) > MAX_FOREIGN_BIRTHS_60S:
         reasons.append("foreign_process_fanout_over_60s")
     if any(s.services_conflict for s in samples):
         reasons.append("protected_service_ports_listening")
     if any(s.census_errors >= 25 for s in samples):
         reasons.append("process_telemetry_substantially_incomplete")
+    if owner_keys and not all(_owners_present(s, owner_keys) for s in samples):
+        reasons.append("owner_process_identity_missing")
     if any(s.gpu_free_gib is None or s.gpu_temp_c is None for s in samples):
         reasons.append("gpu_telemetry_unavailable")
     if any(s.gpu_free_gib is not None and s.gpu_free_gib < MIN_ADMIT_GPU_FREE_GIB
@@ -245,11 +323,11 @@ def assess_admission(samples: list[Snapshot],
 
 
 def assess_runtime(samples: list[Snapshot],
-                   *, owner_pids: frozenset[int] = frozenset()) -> Decision:
+                   *, owner_keys: frozenset[tuple[int, float]] = frozenset()) -> Decision:
     if not samples:
         return Decision("ABORT", ("host_telemetry_missing",))
     current = samples[-1]
-    foreign = _foreign_births(current, owner_pids)
+    foreign = _foreign_births_recent(samples, owner_keys)
     private_gib = sum(p.private_bytes for p in foreign) / GIB
     decline60 = _ram_decline(samples, seconds=60)
     decline30 = _ram_decline(samples, seconds=30)
@@ -279,6 +357,8 @@ def assess_runtime(samples: list[Snapshot],
         reasons.append("protected_services_reactivated")
     if current.census_errors >= 25:
         reasons.append("process_telemetry_substantially_incomplete")
+    if owner_keys and not _owners_present(current, owner_keys):
+        reasons.append("owner_process_identity_missing")
     return Decision("ABORT" if reasons else "CONTINUE", tuple(reasons),
                     len(foreign), private_gib, decline60, tuple(warnings))
 
@@ -292,6 +372,7 @@ def replay_timeline(path: Path) -> dict:
     from datetime import datetime
     history: list[Snapshot] = []
     first_abort = None
+    evidence = "legacy_global_only_recomputed"
     for i, raw in enumerate(items, 1):
         stamp = raw["timestamp_utc"]
         timestamp = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
@@ -302,9 +383,25 @@ def replay_timeline(path: Path) -> dict:
             diskF_free_gib=float(raw["diskF_free_gib"]),
             gpu_free_gib=raw.get("gpu_free_gib"),
             gpu_temp_c=raw.get("gpu_temp_c"),
+            services_conflict=bool(raw.get("services_conflict", False)),
+            census_errors=int(raw.get("process_census_errors", 0)),
         ))
         decision = assess_runtime(history[-4:])
+        recorded = raw.get("decision")
+        if isinstance(recorded, dict):
+            # New supervisor logs contain an actual process-birth decision
+            # but not the full historic process tree. Preserve what was
+            # recorded without pretending it can be independently replayed.
+            evidence = "supervisor_decisions_recorded_not_independently_recomputed"
+            if recorded.get("action") == "ABORT":
+                decision = Decision(
+                    "ABORT", tuple(recorded.get("reasons", ())),
+                    int(raw.get("foreign_birth_count_60s", 0)),
+                    float(raw.get("foreign_birth_private_gib_60s", 0)),
+                    float(raw.get("host_ram_decline_60s_gib", 0)),
+                )
         if first_abort is None and decision.action == "ABORT":
             first_abort = {"sample": i, "timestamp_utc": stamp,
                            "decision": decision.as_record()}
-    return {"samples": len(history), "first_abort": first_abort}
+    return {"samples": len(history), "first_abort": first_abort,
+            "evidence_mode": evidence}

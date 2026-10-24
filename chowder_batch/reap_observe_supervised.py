@@ -11,6 +11,7 @@ new unique paths and request --launch. A resume requires existing checkpoint.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import math
 import os
@@ -28,6 +29,77 @@ except ImportError:
 
 class Refused(RuntimeError):
     pass
+
+
+class _WindowsObserverJob:
+    """Kill the *owned* observer automatically if supervisor exits/dies."""
+
+    def __init__(self) -> None:
+        if sys.platform != "win32":
+            raise Refused("Windows observer Job Object unavailable")
+        kernel = ctypes.windll.kernel32
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", ctypes.c_uint32),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", ctypes.c_uint32),
+                ("SchedulingClass", ctypes.c_uint32),
+            ]
+
+        class IOCounters(ctypes.Structure):
+            _fields_ = [(field, ctypes.c_uint64) for field in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+            )]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimits),
+                ("IoInfo", IOCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        kernel.CreateJobObjectW.restype = ctypes.c_void_p
+        kernel.SetInformationJobObject.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32,
+        ]
+        kernel.SetInformationJobObject.restype = ctypes.c_int
+        kernel.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        kernel.AssignProcessToJobObject.restype = ctypes.c_int
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel.CloseHandle.restype = ctypes.c_int
+        self.kernel = kernel
+        self.handle = kernel.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise Refused("cannot create kill-on-close observer Job Object")
+        limits = ExtendedLimits()
+        limits.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+        if not kernel.SetInformationJobObject(
+            self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits),
+        ):
+            self.close()
+            raise Refused("cannot configure kill-on-close observer Job Object")
+
+    def attach(self, worker: subprocess.Popen) -> None:
+        if not self.kernel.AssignProcessToJobObject(
+            self.handle, ctypes.c_void_p(int(worker._handle)),
+        ):
+            raise Refused("cannot attach observer to kill-on-close Job Object")
+
+    def close(self) -> None:
+        if self.handle:
+            self.kernel.CloseHandle(self.handle)
+            self.handle = None
 
 
 def _atomic_json(path: Path, data: dict) -> None:
@@ -51,8 +123,8 @@ def _append_jsonl(path: Path, data: dict) -> None:
 
 
 def _sample_record(snapshot: guard.Snapshot, decision: guard.Decision,
-                   *, owned_pids: frozenset[int]) -> dict:
-    foreign = guard._foreign_births(snapshot, owned_pids)
+                   *, owner_keys: frozenset[tuple[int, float]]) -> dict:
+    foreign = guard._foreign_births(snapshot, owner_keys)
     largest = sorted(foreign, key=lambda process: process.private_bytes, reverse=True)[:12]
     return {
         "timestamp_utc": snapshot.as_record()["timestamp_utc"],
@@ -108,7 +180,7 @@ def _check_observation_complete(out: Path, calibration: Path) -> dict:
 def _observation_command(args: argparse.Namespace) -> list[str]:
     root = Path(__file__).resolve().parents[1]
     command = [
-        sys.executable, "-u", "-B", str(root / "chowder_batch" / "reap_observe.py"),
+        str(root / "chowder_batch" / "reap_observe.py"),
         "--model-dir", str(args.model_dir),
         "--calibration", str(args.calibration),
         "--out", str(args.out),
@@ -119,7 +191,11 @@ def _observation_command(args: argparse.Namespace) -> list[str]:
         "--resume-hidden-disk-dir" if args.resume else "--hidden-disk-dir",
         str(args.scratch),
     ))
-    return command
+    return [
+        sys.executable, "-u", "-B",
+        str(root / "chowder_batch" / "reap_observer_bootstrap.py"),
+        str(args.log_dir / "JOB_ATTACHED.ready"), *command,
+    ]
 
 
 def _validate_paths(args: argparse.Namespace) -> None:
@@ -173,26 +249,44 @@ def _run(args: argparse.Namespace) -> int:
     args.log_dir.mkdir(exist_ok=False)
     state_file = args.log_dir / "supervisor-state.json"
     timeline = args.log_dir / "resources.jsonl"
-    owned = frozenset({os.getpid()})
+    owner_keys = frozenset({guard.process_identity(os.getpid())})
     worker: subprocess.Popen | None = None
+    job: _WindowsObserverJob | None = None
     verdict = {"stage": "PRELAUNCH", "reason": "NOT_ADMITTED",
                "observer_pid": None, "registered_d0_proven": False}
     _atomic_json(state_file, verdict)
     try:
         snapshots: list[guard.Snapshot] = []
+        admission_started = time.monotonic()
         for index in range(3):
-            if index:
-                time.sleep(30)
+            delay = admission_started + index * 30 - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            sample_started = time.monotonic()
             snap = guard.collect_snapshot()
+            if time.monotonic() - sample_started > 25:
+                raise Refused("prelaunch resource census exceeded 25-second sampling budget")
             snapshots.append(snap)
-            interim = guard.assess_admission(snapshots, owner_pids=owned)
-            _append_jsonl(timeline, _sample_record(snap, interim, owned_pids=owned))
-        admission = guard.assess_admission(snapshots, owner_pids=owned)
+            interim = guard.assess_admission(snapshots, owner_keys=owner_keys)
+            _append_jsonl(timeline, _sample_record(snap, interim, owner_keys=owner_keys))
+        admission = guard.assess_admission(snapshots, owner_keys=owner_keys)
         if admission.action != "ADMIT":
             raise Refused(f"host prelaunch refusal: {', '.join(admission.reasons)}")
+        # Close the sensor/port TOCTOU between 60s admission and Popen.
+        last_sample_started = time.monotonic()
+        recent = guard.collect_snapshot()
+        if time.monotonic() - last_sample_started > 25:
+            raise Refused("last-moment host census exceeded 25-second budget")
+        renewed = guard.assess_admission(
+            [snapshots[0], snapshots[1], recent], owner_keys=owner_keys,
+        )
+        _append_jsonl(timeline, _sample_record(recent, renewed, owner_keys=owner_keys))
+        if renewed.action != "ADMIT":
+            raise Refused("last-moment host admission refusal: " + ", ".join(renewed.reasons))
         command = _observation_command(args)
         verdict.update(stage="ADMITTED", reason="60s_RAM_COMMIT_PROCESS_GATE_PASS")
         _atomic_json(state_file, verdict)
+        job = _WindowsObserverJob()
         with (args.log_dir / "observer.stdout.log").open("wb") as stdout, (
             args.log_dir / "observer.stderr.log"
         ).open("wb") as stderr:
@@ -201,47 +295,78 @@ def _run(args: argparse.Namespace) -> int:
                 stdout=stdout, stderr=stderr,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-            owned = frozenset({os.getpid(), worker.pid})
+            # The tiny bootstrap remains idle until a successfully configured
+            # Job Object owns it. A supervisor crash closes the OS job handle.
+            job.attach(worker)
+            owner_keys = frozenset({*owner_keys, guard.process_identity(worker.pid)})
+            _atomic_json(args.log_dir / "JOB_ATTACHED.ready", {
+                "schema": "chowder.reap-observer-job-attachment.v1",
+                "worker_pid": worker.pid,
+            })
             verdict.update(stage="RUNNING", reason="INCOMPLETE_D0",
                            observer_pid=worker.pid)
             _atomic_json(state_file, verdict)
             history: list[guard.Snapshot] = []
             start = time.monotonic()
+            next_tick = start + 30
             while worker.poll() is None:
                 try:
-                    worker.wait(timeout=30)
+                    worker.wait(timeout=max(0.01, next_tick - time.monotonic()))
                 except subprocess.TimeoutExpired:
                     pass
                 if worker.poll() is not None:
                     break
+                sample_started = time.monotonic()
                 try:
                     snap = guard.collect_snapshot()
                 except Exception as exc:
                     raise Refused(f"resource telemetry failed closed: {type(exc).__name__}") from exc
+                if time.monotonic() - sample_started > 25:
+                    raise Refused("resource census exceeded 25-second monitoring budget")
                 history.append(snap)
                 history = history[-4:]
-                decision = guard.assess_runtime(history, owner_pids=owned)
-                _append_jsonl(timeline, _sample_record(snap, decision, owned_pids=owned))
+                decision = guard.assess_runtime(history, owner_keys=owner_keys)
+                _append_jsonl(timeline, _sample_record(snap, decision, owner_keys=owner_keys))
                 if decision.action == "ABORT":
                     raise Refused("RESOURCE_SAFETY_ABORT: " + ", ".join(decision.reasons))
                 if (args.log_dir / "STOP").exists():
                     raise Refused("operator STOP file in supervisor log directory")
                 if time.monotonic() - start >= 8 * 60 * 60:
                     raise Refused("8-hour observer safety limit reached")
+                next_tick += 30
+                if time.monotonic() > next_tick + 5:
+                    raise Refused("runtime resource samples could not maintain 30s cadence")
             exit_code = worker.wait()
             if exit_code != 0:
                 raise Refused(f"observer process failed with exit code {exit_code}")
+            # Never publish a supervised PASS based only on a just-exited child:
+            # a final memory cliff could have happened between poll intervals.
+            final_started = time.monotonic()
+            final_sample = guard.collect_snapshot()
+            if time.monotonic() - final_started > 25:
+                raise Refused("final host-resource witness exceeded sampling budget")
+            # Worker has exited and may no longer appear in process census.
+            supervisor_key = frozenset({guard.process_identity(os.getpid())})
+            final_history = [*history, final_sample][-4:]
+            final_safety = guard.assess_runtime(final_history, owner_keys=supervisor_key)
+            _append_jsonl(timeline, _sample_record(
+                final_sample, final_safety, owner_keys=supervisor_key,
+            ))
+            if final_safety.action == "ABORT":
+                raise Refused("final host-resource witness unsafe: " + ", ".join(final_safety.reasons))
             final = _check_observation_complete(args.out, args.calibration)
             verdict.update(stage=final["status"], reason="complete_frozen_observation",
                            measured=final, registered_d0_proven=(final["status"] == "D0_PASS"))
             return 0 if final["status"] == "D0_PASS" else 3
-    except (Refused, OSError, ValueError, RuntimeError) as exc:
+    except Exception as exc:
         verdict.update(stage="INCOMPLETE_D0", reason=str(exc),
                        registered_d0_proven=False)
         return 2
     finally:
         if worker is not None:
             _owned_only_stop(worker)
+        if job is not None:
+            job.close()
         _atomic_json(state_file, verdict)
 
 
@@ -272,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--launch requires --model-dir --calibration --out --scratch --log-dir")
     try:
         return _run(args)
-    except (Refused, OSError, ValueError, RuntimeError) as exc:
+    except Exception as exc:
         print(f"OBSERVER_NOT_LAUNCHED: {exc}", file=sys.stderr)
         return 2
 
