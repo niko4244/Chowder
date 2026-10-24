@@ -345,3 +345,17 @@ def test_cli_refuses_without_writing_or_claiming_gate_pass(tmp_path):
     # corpus is refused before the missing saliency layer is even inspected.
     assert "frozen v2 base identity mismatch" in completed.stderr
     assert completed.stdout == "" and not paths["out"].exists()
+
+
+def test_checkpointed_observation_cannot_strip_receipt_to_pass_d0(tmp_path):
+    paths = _fixture(tmp_path)
+    report = paths["observations"] / "observation.json"
+    observed = json.loads(report.read_text(encoding="utf-8"))
+    observed["hidden_storage"] = {
+        "type": "dual file-backed CPU BF16 bits, atomic layer checkpoint",
+        "last_committed_generation": 40,
+    }
+    _save(report, observed)
+    with pytest.raises(preflight.PreflightError, match="checkpoint provenance"):
+        _plan(paths)
+    assert not paths["out"].exists()
