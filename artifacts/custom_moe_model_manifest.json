@@ -1602,5 +1602,53 @@
       "main_merged": false
     },
     "policy": "No duplicate-account compute pooling. Secondary user-saved notebook checked read-only and remained queued without TPU device evidence."
+  },
+  "review_20261023_692b4cc": {
+    "engineering_head": "692b4cc781904d1195c2340e4344fdaf46033b41",
+    "engineering_pr": 277,
+    "ci_at_capture": {
+      "run_id": 40063500319,
+      "status": "IN_PROGRESS",
+      "conclusion": null
+    },
+    "host_observer_first_attempt": {
+      "schema": "frozen-704x40",
+      "GPU": "RTX5060Ti",
+      "BF16": true,
+      "full_result": false,
+      "completed_layers": 1,
+      "first_layer_wall_seconds": 220.3,
+      "routed_assignments": 9541056,
+      "watchdog_reason": "RESOURCE_SAFETY_ABORT",
+      "commit_free_GiB": 1.41,
+      "gpu_free_GiB": 0.72,
+      "sharp_spark_restored": true,
+      "D0": "NOT_MEASURED"
+    },
+    "exact_low_memory": {
+      "code_commit": "692b4cc781904d1195c2340e4344fdaf46033b41",
+      "CPU_regression_pass": 62,
+      "memmap_raw_uint16_BF16_bits": true,
+      "last_cuda_temps_explicitly_released": true,
+      "actual_2_seq_2_layer_smoke": "PASS",
+      "torch_cuda_after_cleanup_MiB": 8.1,
+      "global_CUDA_free_after_cleanup_MiB": 14162,
+      "actual_same_model_layer_0_stat_bitwise_equal": {
+        "count": true,
+        "gate_sum": true,
+        "norm_sum": true,
+        "reap_sum": true
+      },
+      "registered_704x40_D0": "NOT_MEASURED",
+      "source_model_payload_all_sha256": "NOT_MEASURED"
+    },
+    "frozen_status": {
+      "D0": "NOT_MEASURED",
+      "Gen1_arms_trained": 0,
+      "Gen2": "NOT_RUN",
+      "independent_improvement": "NOT_MEASURED",
+      "main_merged": false
+    },
+    "services_note": "User authorized temporary local model service pauses; Hermes and Chat On Steroids bridge preserved, service restoration scripts retained. Exact paused state may change after this audit snapshot."
   }
 }
