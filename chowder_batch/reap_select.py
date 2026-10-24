@@ -232,6 +232,12 @@ def _validate_v2_observation(calibration: Path, observation: Path) -> None:
         frozen_v2_source_identity(calibration, manifest)
     except V2SourceIdentityError as exc:
         raise GateError(str(exc)) from exc
+    if "hidden_storage" in observed or "checkpoint_receipt" in observed:
+        from chowder_batch.reap_hidden_checkpoint import validate_observation_receipt
+        try:
+            validate_observation_receipt(observation.parent, observed)
+        except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
+            raise GateError(f"v2 BF16 checkpoint provenance invalid: {exc}") from exc
 
 
 def evaluate(
