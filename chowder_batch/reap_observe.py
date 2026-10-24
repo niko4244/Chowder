@@ -243,6 +243,10 @@ def main() -> None:
     checkpoint_dir = args.hidden_disk_dir or args.resume_hidden_disk_dir
     if checkpoint_dir and not args.layers:
         _require_frozen_d0_calibration(calibration_sha256, len(rows), args.limit_seqs)
+        from chowder_batch.reap_original_bf16_pin import validate_registered_source_metadata
+        validate_registered_source_metadata(
+            model_dir, Path(args.weights_dir or args.model_dir),
+        )
     if args.hidden_disk_dir and args.resume_hidden_disk_dir:
         raise ValueError("choose either NEW checkpoint or resume, not both")
     resuming = bool(args.resume_hidden_disk_dir)
@@ -297,6 +301,7 @@ def main() -> None:
                                        int(args.layers.split("-")[1]) + 1))),
             out=out,
             num_experts=tc.num_experts, top_k=tc.num_experts_per_tok,
+            require_registered_original=not bool(args.layers),
         )
         disk_hidden = BF16CheckpointHidden(
             [len(s) for s in seqs], tc.hidden_size, Path(checkpoint_dir),
@@ -444,6 +449,7 @@ def main() -> None:
             calibration_sha256=calibration_sha256, seqs=seqs,
             layer_ids=layer_ids, out=out,
             num_experts=tc.num_experts, top_k=tc.num_experts_per_tok,
+            require_registered_original=not bool(args.layers),
         ) != identity:
             raise RuntimeError("frozen checkpoint/model/runtime identity changed")
         from reap_hidden_checkpoint import _atomic_bytes

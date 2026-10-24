@@ -52,12 +52,19 @@ def fingerprint_inputs(
     *, model_dir: Path, weights_dir: Path, calibration_sha256: str,
     seqs: list[torch.Tensor], layer_ids: list[int], out: Path,
     num_experts: int | None = None, top_k: int | None = None,
+    require_registered_original: bool = False,
 ) -> dict:
     """Hash actual weight payloads, token IDs, executable and numeric policy.
 
     Deliberately reads all source shards at admission and again on resume.
     Config/index-only digests cannot detect a changed tensor payload.
     """
+    # This is an INDEPENDENT preregistered upstream identity, not a digest
+    # derived from the currently supplied source files.
+    trusted_upstream = None
+    if require_registered_original:
+        from chowder_batch.reap_original_bf16_pin import validate_registered_source_metadata
+        validate_registered_source_metadata(model_dir, weights_dir)
     index = model_dir / "model.safetensors.index.json"
     weight_map = json.loads(index.read_text(encoding="utf-8"))["weight_map"]
     shards = sorted(set(weight_map.values()))
@@ -70,9 +77,10 @@ def fingerprint_inputs(
             raise ValueError("unsafe or unavailable BF16 weight shard")
         artifacts[f"weights/{name}"] = sha256_file(p)
     for name in (
-        "config.json", "model.safetensors.index.json", "tokenizer.json",
-        "tokenizer_config.json", "special_tokens_map.json", "added_tokens.json",
-        "generation_config.json", "chat_template.jinja",
+        "config.json", "configuration.json", "model.safetensors.index.json",
+        "tokenizer.json", "tokenizer_config.json", "chat_template.jinja",
+        "generation_config.json", "merges.txt", "vocab.json",
+        "preprocessor_config.json", "video_preprocessor_config.json",
     ):
         p = model_dir / name
         if p.exists():
@@ -84,6 +92,19 @@ def fingerprint_inputs(
         ids = seq.detach().cpu().to(torch.int64).contiguous().numpy()
         tokens_hash.update(struct.pack("<Q", ids.size))
         tokens_hash.update(ids.astype("<i8", copy=False).tobytes())
+    if require_registered_original:
+        from chowder_batch.reap_original_bf16_pin import (
+            validate_registered_source_artifacts, validate_registered_token_identity,
+        )
+        trusted_upstream = validate_registered_source_artifacts(artifacts)
+        validate_registered_token_identity(
+            {
+                "calibration_sha256": calibration_sha256,
+                "lengths": [int(s.numel()) for s in seqs],
+                "token_ids_sha256": tokens_hash.hexdigest(),
+            },
+            n_seqs=len(seqs), n_tokens=sum(int(s.numel()) for s in seqs),
+        )
     import transformers
     device = torch.cuda.get_device_properties(0)
     reference = importlib.util.find_spec(
@@ -116,6 +137,7 @@ def fingerprint_inputs(
         "model_dir": str(model_dir.resolve()),
         "weights_dir": str(weights_dir.resolve()),
         "artifacts": artifacts,
+        "trusted_upstream_pin": trusted_upstream,
         "source_sha256": {p.name: sha256_file(p) for p in source_paths},
         "runtime": {
             "python": sys.version, "platform": platform.platform(),
@@ -520,6 +542,7 @@ class BF16CheckpointHidden:
 
 def validate_observation_receipt(
     observation: Path, observed: dict, *, expected_generation: int = 40,
+    require_registered_original: bool = False,
 ) -> None:
     """Consumer-side validation without requiring the original scratch volume.
 
@@ -531,6 +554,8 @@ def validate_observation_receipt(
     checkpointed = isinstance(hidden, dict) and hidden.get("type") == (
         "dual file-backed CPU BF16 bits, atomic layer checkpoint"
     )
+    if require_registered_original and not checkpointed:
+        raise ValueError("registered BF16 D0 requires checkpointed original evidence")
     if not checkpointed and receipt is None:
         return
     if not checkpointed or not isinstance(receipt, dict):
@@ -547,6 +572,31 @@ def validate_observation_receipt(
             or observed.get("calibration_sha256") != identity.get("calibration_sha256")
             or observed.get("n_tokens") != sum(identity.get("lengths", []))):
         raise ValueError("BF16 observation checkpoint receipt identity/census mismatch")
+    if require_registered_original:
+        from chowder_batch.reap_original_bf16_pin import (
+            OriginalBF16PinError, validate_registered_source_artifacts,
+            validate_registered_token_identity,
+        )
+        try:
+            pinned = validate_registered_source_artifacts(identity.get("artifacts"))
+            validate_registered_token_identity(
+                identity,
+                n_seqs=observed.get("n_seqs"),
+                n_tokens=observed.get("n_tokens"),
+            )
+        except OriginalBF16PinError as exc:
+            raise ValueError(f"unregistered BF16 original source: {exc}") from exc
+        lengths = identity.get("lengths")
+        if (identity.get("trusted_upstream_pin") != pinned
+                or identity.get("output_dir") != str(observation.resolve())
+                or observed.get("n_seqs") != 704
+                or identity.get("num_experts") != 256
+                or identity.get("top_k") != 8
+                or identity.get("layers") != list(range(40))
+                or type(lengths) is not list or len(lengths) != 704
+                or not all(type(n) is int and 1 <= n <= 2048 for n in lengths)
+                or sum(lengths) != 1_192_632):
+            raise ValueError("registered BF16 source identity/token census mismatch")
     reported_layers = observed.get("layers")
     if not isinstance(reported_layers, list) or len(reported_layers) != expected_generation:
         raise ValueError("BF16 observation has incomplete committed layer timings")
@@ -571,6 +621,39 @@ def validate_observation_receipt(
                     or sha256_file(path) != manifest.get("stats_sha256")
                     or manifest.get("timing") != reported_layers[layer]):
                 raise ValueError("BF16 observation layer stats/timings are not committed")
+            if require_registered_original:
+                if path.stat().st_size > 4 * 1024 * 1024:
+                    raise ValueError("registered BF16 layer statistics exceed size limit")
+                try:
+                    stats = torch.load(path, map_location="cpu", weights_only=True)
+                except Exception as exc:
+                    raise ValueError(
+                        f"registered BF16 layer {layer} statistics cannot be decoded"
+                    ) from exc
+                if not isinstance(stats, dict) or set(stats) != {
+                    "count", "gate_sum", "norm_sum", "reap_sum",
+                }:
+                    raise ValueError("registered BF16 layer statistics missing fields")
+                for name, tensor in stats.items():
+                    if (not isinstance(tensor, torch.Tensor)
+                            or tensor.dtype != torch.float64
+                            or tuple(tensor.shape) != (256,)
+                            or not bool(torch.isfinite(tensor).all())
+                            or not bool((tensor >= 0).all())):
+                        raise ValueError(f"registered BF16 layer invalid {name} tensor")
+                count = stats["count"]
+                if (not bool(torch.equal(count, count.round()))
+                        or int(count.sum().item()) != 1_192_632 * 8
+                        or not bool((stats["gate_sum"] <= count + 1e-6).all())
+                        or not bool((stats["reap_sum"] <= stats["norm_sum"] + 1e-6).all())
+                        or abs(float(stats["gate_sum"].sum()) - 1_192_632) > 1_192_632 * .005
+                        or manifest["timing"].get("layer") != layer
+                        or manifest["timing"].get("routed_tokens") != 1_192_632 * 8):
+                    raise ValueError("registered BF16 layer router census or saliency inconsistent")
+                empty = count == 0
+                if any(bool((stats[name][empty] != 0).any())
+                       for name in ("gate_sum", "norm_sum", "reap_sum")):
+                    raise ValueError("registered BF16 layer has nonzero unrouted saliency")
         previous = sha
     if (receipt.get("root_sha256") != previous
             or receipt.get("active_state_sha256") != chain[-1]["manifest"].get("state_sha256")):

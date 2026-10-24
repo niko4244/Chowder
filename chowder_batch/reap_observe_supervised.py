@@ -163,7 +163,9 @@ def _check_observation_complete(out: Path, calibration: Path) -> dict:
             or len(observed["layers"]) != 40
             or not isinstance(observed.get("checkpoint_receipt"), dict)):
         raise Refused("observation lacks the complete frozen checkpoint receipt")
-    validate_observation_receipt(out, observed, expected_generation=40)
+    validate_observation_receipt(
+        out, observed, expected_generation=40, require_registered_original=True,
+    )
     _validate_v2_observation(calibration.parent, receipt)
     value = observed.get("calibration_ppl")
     if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
@@ -208,6 +210,10 @@ def _validate_paths(args: argparse.Namespace) -> None:
 
     if sha256(args.calibration.read_bytes()).hexdigest() != FROZEN_V2_BASE_SHA256:
         raise Refused("frozen 704-row calibration SHA256 mismatch")
+    from chowder_batch.reap_original_bf16_pin import validate_registered_source_metadata
+    validate_registered_source_metadata(
+        args.model_dir, args.weights_dir or args.model_dir,
+    )
     if args.resume:
         if (not args.out.is_dir() or not args.scratch.is_dir()
                 or not (args.scratch / "CURRENT").is_file()

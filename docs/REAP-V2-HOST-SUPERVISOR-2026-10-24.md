@@ -104,9 +104,11 @@ The launcher enforces an eight-hour elapsed safety limit. Its fresh
 preflight rehashes approximately 72 GiB of source BF16 shards and the
 observer rechecks those payloads again on resume and completion; this costs
 read I/O and time. Plan admission with ample headroom.
-Only the observed local source bytes are hashed: a separate **trusted pinned
-original model-weight manifest** is still needed to establish provenance
-against adversarial replacement of the entire original-shaped checkpoint.
+Original-source identity is now separately pinned against the publisher's
+exact Hugging Face revision in
+`REAP-V2-ORIGINAL-BF16-PROVENANCE-2026-10-24.md`. Runtime full-shard SHA-256
+must match those hashes. Independent proof that every claimed layer actually
+ran is **still missing**; no self-hashed JSON receipt can establish that alone.
 
 ## Release gates still blocked
 
