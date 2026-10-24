@@ -204,6 +204,10 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     parser.add_argument("--limit-seqs", type=int, default=0)
     parser.add_argument("--layers", default="", help="e.g. 0-3 for a smoke run (skips the NLL check)")
+    parser.add_argument(
+        "--hidden-disk-dir", default="",
+        help="NEW empty scratch directory for file-backed lossless BF16 hidden states",
+    )
     args = parser.parse_args()
 
     from transformers import AutoConfig, AutoTokenizer
@@ -213,6 +217,16 @@ def main() -> None:
     out = Path(args.out)
     calibration = Path(args.calibration)
     rows, calibration_sha256 = _calibration_snapshot(calibration)
+    if args.hidden_disk_dir:
+        scratch = Path(args.hidden_disk_dir)
+        candidate = scratch.resolve()
+        for protected in (calibration, model_dir, Path(args.weights_dir or args.model_dir), out):
+            existing = protected.resolve()
+            if (candidate == existing or candidate.is_relative_to(existing)
+                    or existing.is_relative_to(candidate)):
+                raise ValueError("hidden scratch overlaps source or output evidence")
+        if scratch.exists():
+            raise FileExistsError("hidden scratch already exists; refusing reuse")
     _prepare_observation_destination(
         out, calibration=calibration, model_dir=model_dir,
         weights_dir=Path(args.weights_dir or args.model_dir),
@@ -232,8 +246,25 @@ def main() -> None:
     seqs = [torch.tensor(tokenizer(r["text"], add_special_tokens=False)["input_ids"]) for r in rows]
     n_tokens = sum(len(s) for s in seqs)
 
+    disk_hidden = None
+    if args.hidden_disk_dir:
+        # When invoked as an ordinary script the sibling module is on sys.path.
+        # It imports NumPy only for file-backed mode; default RAM mode retains
+        # the original scheduling and numerical operations.
+        from reap_hidden_memmap import BF16DiskHidden
+
+        disk_hidden = BF16DiskHidden(
+            [len(s) for s in seqs], tc.hidden_size, Path(args.hidden_disk_dir),
+        )
     embed = reader.load(PREFIX + "embed_tokens.", dev)["weight"]
-    hidden = [F.embedding(s.to(dev), embed).unsqueeze(0).to("cpu") for s in seqs]
+    hidden = [] if disk_hidden is None else disk_hidden
+    for index, tokens in enumerate(seqs):
+        row_hidden = F.embedding(tokens.to(dev), embed).unsqueeze(0).to("cpu")
+        if disk_hidden is None:
+            hidden.append(row_hidden)
+        else:
+            hidden[index] = row_hidden
+        del row_hidden
     del embed
     rotary = M.Qwen3_5MoeTextRotaryEmbedding(tc).to(dev)
 
@@ -248,6 +279,7 @@ def main() -> None:
     timings = []
     for i in layer_ids:
         t0 = time.time()
+        torch.cuda.reset_peak_memory_stats()
         layer = _load_layer_without_duplicate_weights(
             M.Qwen3_5MoeDecoderLayer, tc, i, dtype,
             reader.load(f"{PREFIX}layers.{i}.", dev),
@@ -258,7 +290,8 @@ def main() -> None:
         layer.mlp.experts.forward = observing_experts_forward(layer.mlp.experts, stats)
         t_load = time.time() - t0
         with torch.inference_mode():
-            for s, h in enumerate(hidden):
+            for s in range(len(seqs)):
+                h = hidden[s]
                 x = h.to(dev, dtype)
                 L = x.shape[1]
                 pos = torch.arange(L, device=dev).view(1, -1)
@@ -272,17 +305,36 @@ def main() -> None:
                 if not torch.isfinite(y).all():
                     raise SystemExit(f"non-finite hidden state at layer {i}, sequence {s}")
                 hidden[s] = y.to("cpu")
+                # The last sequence's CUDA x/y/PE/attention tensors must not
+                # survive into the next decoder's checkpoint allocation.
+                # The former loop retained those bindings across del layer
+                # and empty_cache, increasing peak GPU memory unnecessarily.
+                del x, y, pos, pe, mask, h
         _assert_calibration_unchanged(calibration, calibration_sha256)
+        if disk_hidden is not None:
+            disk_hidden.flush()
         torch.save({k: v.cpu() for k, v in stats.items()}, out / f"layer-{i:02d}.pt")
+        routed = int(stats["count"].sum().item())
+        experts_hit = int((stats["count"] > 0).sum().item())
         del layer
         torch.cuda.empty_cache()
         dt = time.time() - t0
+        global_free, _global_total = torch.cuda.mem_get_info()
         timings.append({"layer": i, "block_type": tc.layer_types[i], "load_s": round(t_load, 1), "total_s": round(dt, 1),
-                        "routed_tokens": int(stats["count"].sum().item()), "experts_hit": int((stats["count"] > 0).sum().item())})
+                        "routed_tokens": routed, "experts_hit": experts_hit,
+                        "torch_cuda_peak_allocated_mib": round(torch.cuda.max_memory_allocated() / 2**20, 1),
+                        "torch_cuda_allocated_after_mib": round(torch.cuda.memory_allocated() / 2**20, 1),
+                        "torch_cuda_reserved_after_mib": round(torch.cuda.memory_reserved() / 2**20, 1),
+                        "global_cuda_free_after_mib": round(global_free / 2**20, 1)})
         print(json.dumps(timings[-1]), flush=True)
 
     result = {"layers": timings, "n_seqs": len(seqs), "n_tokens": n_tokens,
               "calibration_sha256": calibration_sha256}
+    if disk_hidden is not None:
+        result["hidden_storage"] = {
+            "type": "file-backed CPU BF16 bits without numerical conversion",
+            "bytes": disk_hidden.required_bytes,
+        }
     if not args.layers:
         norm_w = reader.load(PREFIX + "norm.", dev)["weight"]
         norm = M.Qwen3_5MoeRMSNorm(tc.hidden_size, eps=tc.rms_norm_eps).to(dev)
@@ -302,6 +354,8 @@ def main() -> None:
         result["calibration_ppl_by_source"] = {k: math.exp(v[0] / v[1]) for k, v in per_source.items()}
         print("calibration perplexity", result["calibration_ppl"], result["calibration_ppl_by_source"], flush=True)
     _assert_calibration_unchanged(calibration, calibration_sha256)
+    if disk_hidden is not None:
+        disk_hidden.flush()
     (out / "observation.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 
 
