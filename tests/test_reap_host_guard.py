@@ -244,6 +244,38 @@ def test_bootstrap_refuses_unrelated_script_and_does_not_load_observer(tmp_path)
         bootstrap.main([str(tmp_path / "ready"), str(tmp_path / "other.py"), "--whatever"])
 
 
+def test_bootstrap_restores_package_root_for_script_path_launch(tmp_path, monkeypatch):
+    """Regression: a script-path launch must still import the package.
+
+    The supervisor starts the bootstrap by script path, so CPython puts only
+    ``<repo>/chowder_batch`` on ``sys.path``. The observer's cross-module
+    imports are package-qualified, so every real supervised launch aborted at
+    startup with ``ModuleNotFoundError: No module named 'chowder_batch'``
+    before layer 0 ever ran. Module-form invocation hid the defect.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "chowder_batch" / "reap_observe.py"
+    (tmp_path / "ready").write_text("{}", encoding="utf-8")
+
+    # Reproduce the script-path shape: the repository root is not importable.
+    monkeypatch.setattr(
+        sys, "path", [p for p in sys.path if Path(p or ".").resolve() != repo_root],
+    )
+    observed: dict[str, object] = {}
+
+    def fake_run_path(path, run_name):
+        observed["path"] = path
+        observed["run_name"] = run_name
+        observed["repo_root_on_path"] = str(repo_root) in sys.path
+        raise SystemExit(0)  # never actually load torch or the model
+
+    monkeypatch.setattr(bootstrap.runpy, "run_path", fake_run_path)
+    with pytest.raises(SystemExit):
+        bootstrap.main([str(tmp_path / "ready"), str(script), "--model-dir", "unused"])
+    assert observed["repo_root_on_path"] is True
+    assert observed["run_name"] == "__main__"
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-owned process guard only")
 def test_windows_cim_process_keys_match_self_process_start():
     entries, missing = guard._process_census()
