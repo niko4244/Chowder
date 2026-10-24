@@ -89,6 +89,10 @@ class ComputeCost:
     def __post_init__(self) -> None:
         _checked(self.device_gpu_hours, "device_gpu_hours")
         _checked(self.wall_gpu_hours, "wall_gpu_hours")
+        if not isinstance(self.incremental, bool):
+            raise ValueError(
+                f"incremental must be a bool, got {self.incremental!r}"
+            )
         if not isinstance(self.device_measured, bool):
             raise ValueError(
                 f"device_measured must be a bool, got {self.device_measured!r}"
@@ -161,16 +165,30 @@ class ComputeCost:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ComputeCost":
+        # Do not coerce untrusted JSON flags through bool(...): bool("false")
+        # is True, which fabricates measured device time and bypasses the
+        # non-incremental-spend guard during receipt recovery. Stored flags
+        # must be actual JSON booleans, not strings or integer surrogates.
+        incremental = data.get("incremental", True)
+        device_measured = data.get("device_measured", False)
+        if not isinstance(incremental, bool) or not isinstance(device_measured, bool):
+            raise ValueError("compute cost flags must be JSON booleans")
+        device = data["device_gpu_hours"]
+        wall = data["wall_gpu_hours"]
+        if isinstance(device, bool) or isinstance(wall, bool):
+            raise ValueError("GPU-hour amounts must be numeric, not booleans")
+        if not isinstance(device, (int, float)) or not isinstance(wall, (int, float)):
+            raise ValueError("GPU-hour amounts must be JSON numbers")
         return cls(
-            device_gpu_hours=float(data["device_gpu_hours"]),
-            wall_gpu_hours=float(data["wall_gpu_hours"]),
+            device_gpu_hours=float(device),
+            wall_gpu_hours=float(wall),
             source=str(data.get("source", "unspecified")),
-            incremental=bool(data.get("incremental", True)),
+            incremental=incremental,
             measurement_method=str(data.get("measurement_method", "")),
             # Absent in a record written before the field existed, and absent
             # means unmeasured -- a stored row does not become a device
             # measurement by being read back.
-            device_measured=bool(data.get("device_measured", False)),
+            device_measured=device_measured,
         )
 
 
@@ -409,3 +427,51 @@ class CycleCostLedger:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(document, indent=2, sort_keys=True), encoding="utf-8")
         return document["digest_sha256"]
+
+
+def checked_ledger_total(
+    document: Mapping[str, Any], *, cycle_id: str,
+    allow_zero_evaluation: bool = False,
+) -> ComputeCost:
+    """Read an accounting artifact without trusting editable claimed totals.
+
+    An embedded digest detects accidental/casual alteration but is not an
+    independent signature: production release readers must additionally bind
+    it to the campaign's journal/lineage digest. The entries are reaggregated
+    here so even a self-consistently edited ``totals`` field cannot settle.
+    """
+    if not isinstance(document, Mapping) or document.get("cycle_id") != cycle_id:
+        raise ValueError("accounting cycle identity is missing or mismatched")
+    if document.get("digest_sha256") != ledger_digest(document):
+        raise ValueError("accounting digest is missing or mismatched")
+    rows = document.get("entries")
+    if not isinstance(rows, list):
+        raise ValueError("accounting entry ledger is missing")
+    ledger = CycleCostLedger(cycle_id)
+    try:
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("accounting entry must be a dictionary")
+            parsed_cost = ComputeCost.from_dict(row["cost"])
+            # Only references to *previously paid* measurements may be free.
+            # A paid training/evaluation row marked non-incremental would
+            # disappear from budget settlement despite consuming compute.
+            if row["kind"] == "baseline_reference":
+                if parsed_cost.incremental or parsed_cost.wall_gpu_hours or parsed_cost.device_gpu_hours:
+                    raise ValueError("baseline reference must have zero non-incremental cost")
+            elif not parsed_cost.incremental and not (
+                allow_zero_evaluation
+                and row["kind"] in {"evaluation", "load_probe"}
+                and parsed_cost.wall_gpu_hours == 0
+                and parsed_cost.device_gpu_hours == 0
+            ):
+                raise ValueError("paid accounting entry cannot be non-incremental")
+            ledger.add(
+                row["label"], row["kind"], parsed_cost,
+                recipe_id=row["recipe_id"], notes=row["notes"],
+            )
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError("accounting entry is malformed") from exc
+    if ledger.render() != document:
+        raise ValueError("accounting totals or entry fields do not match recomputed spend")
+    return ledger.total()

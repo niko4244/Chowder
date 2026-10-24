@@ -320,6 +320,7 @@ def test_the_committed_moe_template_parses_and_prepares_to_a_valid_spec(
     config = template["training_backend"]["config"]
     assert config == {
         "expert_placement": "cpu-transient-grad",
+        "max_length": 2048,
         "target_preset": "moe_frozen_experts",
         "dataset_format": "chat",
         "messages_field": "messages",
@@ -348,7 +349,9 @@ def test_the_committed_moe_template_parses_and_prepares_to_a_valid_spec(
         Path(prepared.inputs["project_template_path"]).read_text(encoding="utf-8")
     )
     assert project["config"]["evaluation"]["placement"] == "experts-cpu"
+    assert project["config"]["backend"]["max_length"] == 2048
     spec = _worker_spec(project, tmp_path)
+    assert spec.max_length == 2048
     assert spec.expert_placement == "cpu-transient-grad"
     assert spec.target_preset == "moe_frozen_experts"
     assert spec.dataset_format == "chat"

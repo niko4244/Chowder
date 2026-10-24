@@ -35,9 +35,112 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 MAX_TOKENS = {"gsm8k": 1024, "humaneval": 768, "math500": 2048}
 SYSTEM = "You are a helpful assistant."
+IDENTITY_SCHEMA = "chowder.reap-eval-input-identity.v1"
+
+
+def _digest(value: Any) -> str:
+    """Hash the frozen rendered test prompts, answers and scoring inputs."""
+    encoded = json.dumps(value, sort_keys=True, ensure_ascii=False,
+                         separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _bind_evaluation_inputs(out_dir: Path, suite: str, items: list[dict]) -> dict:
+    """Refuse resuming outputs from an unclaimed model, prompt or decode policy.
+
+    The serving wrapper previously hashes its GGUF once while creating
+    serve.json. Reuse that model witness rather than hashing huge weight
+    files again. This is not independently verified process/weight attestation.
+    """
+    serving = out_dir / "serve.json"
+    if not serving.is_file():
+        raise ValueError("REAP evaluation needs a bound serve.json from reap_serve; "
+                         "standalone unverified evaluation cannot certify a model")
+    try:
+        model = json.loads(serving.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise ValueError("REAP serving model identity is unreadable") from exc
+    if (not isinstance(model, dict) or not isinstance(model.get("gguf"), str)
+            or not model["gguf"].strip() or not isinstance(model.get("flags"), list)
+            or not all(isinstance(v, str) for v in model["flags"])
+            or not isinstance(model.get("gguf_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", model["gguf_sha256"])):
+        raise ValueError("REAP serving model identity lacks valid GGUF content digest/flags")
+    ids = [item.get("id") if isinstance(item, dict) else None for item in items]
+    if any(not isinstance(ident, str) or not ident for ident in ids) or len(set(ids)) != len(ids):
+        raise ValueError("REAP benchmark source has missing/duplicate item ids")
+    context = {
+        "schema": IDENTITY_SCHEMA,
+        "model": {"gguf": model["gguf"], "gguf_sha256": model["gguf_sha256"],
+                  "flags": model["flags"]},
+        "suite": suite,
+        "source_items_sha256": _digest(items),
+        "source_items_n": len(items),
+        "decode": {"system": SYSTEM, "temperature": 0.0, "top_k": 1,
+                   "seed": 7, "max_tokens": MAX_TOKENS[suite],
+                   "enable_thinking": False},
+        "scoring": "frozen reap_eval production scoring: final_number_match/boxed/HumanEval",
+    }
+    witness = out_dir / f"{suite}.inputs.json"
+    results = out_dir / f"{suite}.jsonl"
+    if witness.is_file():
+        try:
+            recorded = json.loads(witness.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ValueError("REAP resume identity witness is unreadable") from exc
+        if recorded != context:
+            raise ValueError("REAP resume identity or frozen source/decode inputs changed; "
+                             "use a new experiment output directory")
+    else:
+        if results.exists():
+            raise ValueError("REAP unclaimed existing results have no original resume identity; "
+                             "use a new experiment output directory")
+        # Exclusive creation preserves an earlier interrupted experiment witness.
+        with witness.open("x", encoding="utf-8") as stream:
+            json.dump(context, stream, sort_keys=True, indent=2)
+            stream.write("\n")
+    return context
+
+
+def _read_resume_rows(path: Path, allowed_ids: set[str], summary_path: Path,
+                      suite: str) -> dict[str, dict]:
+    """Reject duplicate, unrelated and post-summary edited outputs."""
+    if not path.is_file():
+        return {}
+    raw = path.read_bytes()
+    summary = {}
+    if summary_path.is_file():
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ValueError("REAP saved evaluation summary cannot be parsed") from exc
+        if not isinstance(summary, dict):
+            raise ValueError("REAP saved evaluation summary is malformed")
+    earlier = summary.get(suite)
+    if earlier is not None and (
+        not isinstance(earlier, dict)
+        or earlier.get("file_sha256") != hashlib.sha256(raw).hexdigest()
+    ):
+        raise ValueError("REAP existing result SHA256 disagrees with earlier summary")
+    done: dict[str, dict] = {}
+    for index, line in enumerate(raw.splitlines(), 1):
+        try:
+            row = json.loads(line)
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError(f"REAP existing result row {index} is malformed") from exc
+        ident = row.get("id") if isinstance(row, dict) else None
+        if not isinstance(ident, str) or ident not in allowed_ids:
+            raise ValueError(f"REAP existing result row {index} has unexpected item id")
+        if ident in done:
+            raise ValueError(f"REAP existing result contains duplicate id {ident!r}")
+        done[ident] = row
+    if isinstance(earlier, dict) and earlier.get("n") != len(done):
+        raise ValueError("REAP existing summary row count differs from recorded results")
+    return done
 
 
 def _load(suite: str):
@@ -144,14 +247,14 @@ def main() -> None:
     summary = {}
     for suite in args.suites.split(","):
         items = _load(suite)
+        # Bind the complete source population, not just an optional limited
+        # first batch, so legitimate partial runs can resume full evaluation.
+        input_witness = _bind_evaluation_inputs(out_dir, suite, items)
         if args.limit:
             items = items[: args.limit]
         path = out_dir / f"{suite}.jsonl"
-        done = {}
-        if path.exists():  # resumable: keep already-scored items
-            for line in path.read_text(encoding="utf-8").splitlines():
-                row = json.loads(line)
-                done[row["id"]] = row
+        done = _read_resume_rows(path, {str(it["id"]) for it in items},
+                                 out_dir / "summary.json", suite)
         todo = [it for it in items if it["id"] not in done]
         t0 = time.time()
         with path.open("a", encoding="utf-8") as handle, cf.ThreadPoolExecutor(args.parallel) as pool:
@@ -165,6 +268,8 @@ def main() -> None:
                 if n % 50 == 0:
                     print(f"{args.arm}/{suite}: {len(done)}/{len(items)} ({time.time() - t0:.0f}s)", flush=True)
         rows = [done[it["id"]] for it in items]
+        if _bind_evaluation_inputs(out_dir, suite, _load(suite)) != input_witness:
+            raise ValueError("REAP evaluation source identity changed while scoring")
         summary[suite] = {
             "n": len(rows),
             "accuracy": sum(r["correct"] for r in rows) / len(rows),

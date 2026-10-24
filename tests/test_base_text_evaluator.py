@@ -6,6 +6,7 @@ import pytest
 from chowder.canonical_chat_template import canonical_template_sha256
 from chowder.contamination import write_holdout_fingerprint_index
 from chowder.evaluators.base_text import BaseModelTextEvaluator, BaseTextEvalSpec
+from chowder.provenance import sha256_directory
 from chowder.executors import ExecutionContext
 from chowder.memory import HardwareProfile
 
@@ -40,6 +41,8 @@ def _fake_process(rendering="raw", chat_template_sha256=None, runtime_extra=None
 
         def __init__(self, command, **kwargs):
             result_path = Path(command[command.index("--result") + 1])
+            spec = json.loads((result_path.parent / "eval-spec.json").read_text(encoding="utf-8"))
+            adapter_digest = spec.get("adapter_sha256")
             fingerprint_path = result_path.parent / "holdout-fingerprints-quality.jsonl"
             digest = write_holdout_fingerprint_index([("x", "y")], fingerprint_path)
             suite = {
@@ -62,7 +65,10 @@ def _fake_process(rendering="raw", chat_template_sha256=None, runtime_extra=None
                         "suites": {"quality": suite},
                         "runtime": runtime,
                         "versions": {"transformers": "5.test"},
-                        "model_provenance": {},
+                        "model_provenance": (
+                            {"adapter_worker_verified_sha256": adapter_digest}
+                            if adapter_digest is not None else {}
+                        ),
                     }
                 )
             )
@@ -87,6 +93,37 @@ def _evaluate(config, tmp_path, monkeypatch, **payload_kwargs):
         "chowder.evaluators.base_text.subprocess.Popen", _fake_process(**payload_kwargs)
     )
     return BaseModelTextEvaluator().evaluate(config=config, context=context)
+
+
+def test_parent_controller_refuses_wrong_worker_postattach_attestation(tmp_path, monkeypatch):
+    folder = tmp_path / "parent-adapter"
+    folder.mkdir()
+    (folder / "adapter_config.json").write_text(
+        json.dumps({"peft_type": "LORA", "base_model_name_or_path": "example/model"}),
+        encoding="utf-8",
+    )
+    (folder / "adapter_model.safetensors").write_bytes(b"parent-adapter")
+    config = _with_dataset(_config("eval.jsonl"), tmp_path)
+    config["backend"]["parent_adapter"] = {
+        "path": str(folder), "sha256": sha256_directory(folder),
+    }
+
+    parent_fake = _fake_process()
+
+    class FakeProcess(parent_fake):
+        def __init__(self, command, **kwargs):
+            super().__init__(command, **kwargs)
+            result = Path(command[command.index("--result") + 1])
+            payload = json.loads(result.read_text(encoding="utf-8"))
+            payload["model_provenance"]["adapter_worker_verified_sha256"] = "0" * 64
+            result.write_text(json.dumps(payload), encoding="utf-8")
+
+    data = tmp_path / "eval.jsonl"
+    data.write_text('{"prompt":"x","expected":"y"}\n', encoding="utf-8")
+    context = ExecutionContext(_hardware(), str(tmp_path), 1, resolved_config=config)
+    monkeypatch.setattr("chowder.evaluators.base_text.subprocess.Popen", FakeProcess)
+    with pytest.raises(RuntimeError, match="did not attest the exact exported adapter"):
+        BaseModelTextEvaluator().evaluate(config=config, context=context)
 
 
 def _chat_config(dataset: str, *, canonical: bool):
@@ -320,9 +357,13 @@ def test_adapter_dir_is_not_protocol_but_is_spec_bound(tmp_path, monkeypatch):
     data = tmp_path / "eval.jsonl"
     data.write_text('{"prompt":"x","expected":"y"}\n')
     config = _config(str(data))
+    parent = tmp_path / "parent-adapter"
+    parent.mkdir()
+    (parent / "adapter_config.json").write_text('{"peft_type":"LORA"}\n')
+    (parent / "adapter_model.safetensors").write_bytes(b"synthetic-evaluator-fixture")
     config["backend"]["parent_adapter"] = {
-        "path": str(tmp_path / "parent-adapter"),
-        "sha256": "a" * 64,
+        "path": str(parent),
+        "sha256": sha256_directory(parent),
     }
     with_parent = _evaluate(config, tmp_path, monkeypatch)
     without = _evaluate(_config(str(data)), tmp_path, monkeypatch)

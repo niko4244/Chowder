@@ -34,7 +34,7 @@ from ..adapter_guard import assert_adapter_is_live
 from ..hf_resilience import cache_status, resolve_model_commit, with_hub_retries
 from ..local_model_compat import patch_transformers5_custom_model
 from .activation_offload_hooks import offload_pack, offload_unpack
-from .moe_transient_grad import TRANSIENT_PLACEMENTS
+from .moe_transient_grad import INT8_PLACEMENTS, TRANSIENT_PLACEMENTS
 from .training_data import (
     _build_chat_example,
     _chat_digest,
@@ -602,6 +602,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         )
         model_kwargs["device_map"] = 0
     expert_placement = getattr(spec, "expert_placement", "resident")
+    int8_experts = expert_placement in INT8_PLACEMENTS
     if expert_placement in TRANSIENT_PLACEMENTS:
         from .moe_transient_grad import split_device_map
 
@@ -610,13 +611,39 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         model_kwargs["device_map"] = split_device_map(
             spec.base_model, revision=spec.revision, local_files_only=spec.offline
         )
+    if int8_experts:
+        if not torch.cuda.is_available():
+            raise RuntimeError(f"expert_placement={expert_placement!r} requires a CUDA device")
+        if getattr(spec, "expert_pinning", "none") == "registered":
+            raise RuntimeError(
+                "expert_pinning='registered' is not supported with "
+                f"expert_placement={expert_placement!r}: the int8 expert buffers are not "
+                "page-locked, so the copies stay synchronous; use expert_pinning='none'"
+            )
 
-    base_model = with_hub_retries(
-        lambda: AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs),
-        label=f"model download for {spec.base_model}",
-    )
+    if int8_experts:
+        # Not ``from_pretrained``: that materialises every bf16 expert on the host
+        # before anything can be quantised, which is the peak this placement removes.
+        from .moe_int8_experts import load_model_int8_experts
+
+        base_model, int8_census = load_model_int8_experts(
+            spec.base_model,
+            device=0,
+            dtype=dtype,
+            local_files_only=spec.offline,
+        )
+    else:
+        base_model = with_hub_retries(
+            lambda: AutoModelForCausalLM.from_pretrained(spec.base_model, **model_kwargs),
+            label=f"model download for {spec.base_model}",
+        )
     expert_placement_evidence: dict[str, Any] = {"placement": expert_placement}
-    if expert_placement in TRANSIENT_PLACEMENTS:
+    if int8_experts:
+        from .moe_int8_experts import prepare_int8_placement
+
+        expert_placement_evidence.update(int8_census)
+        expert_placement_evidence.update(prepare_int8_placement(base_model, device_type="cuda"))
+    elif expert_placement in TRANSIENT_PLACEMENTS:
         from .moe_transient_grad import pin_expert_memory, prepare_split_model
 
         expert_placement_evidence.update(
@@ -640,7 +667,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         def attach(base: Any) -> Any:
             return PeftModel.from_pretrained(base, spec.parent_adapter, is_trainable=True)
 
-        if expert_placement in TRANSIENT_PLACEMENTS:
+        if expert_placement in TRANSIENT_PLACEMENTS or int8_experts:
             from .moe_transient_grad import attach_preserving_split
 
             model = attach_preserving_split(base_model, attach)
@@ -685,6 +712,20 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
         component_paths = component_path_report(
             intended, adapted_module_paths(model), unknown_suffixes=unknown_targets
         ).to_dict()
+
+    # The placement's prereg has four gates no loader can answer (gradient on
+    # every LoRA leaf, loss over 20 steps, router balance, device spill). This
+    # callback collects their evidence while the run happens; it never fails a
+    # run, and a gate it could not observe is recorded as not measured.
+    placement_witness_callback: Any = None
+    if expert_placement in TRANSIENT_PLACEMENTS or int8_experts:
+        from ..placement_witnesses import build_witness_callback
+
+        # Routing is audited on the base model (the adapter wrapper has no
+        # ``.model.layers`` of its own); gradients are read from the wrapped one.
+        placement_witness_callback = build_witness_callback(
+            TrainerCallback, model, router_model=base_model
+        )
 
     if spec.gradient_checkpointing:
         model.config.use_cache = False
@@ -821,6 +862,8 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
     if spec.detailed_timing_telemetry:
         timer_callback = _TrainingPhaseTimerCallback()
         callbacks.append(timer_callback)
+    if placement_witness_callback is not None:
+        callbacks.append(placement_witness_callback)
     trainer = Trainer(
         model=model,
         args=args,
@@ -1025,6 +1068,35 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
 
     peak_values = list(resource_snapshot["peak_vram_gb_by_accelerator"].values())
     peak_vram_gb = max(peak_values, default=0.0)
+
+    placement_witness_report: dict[str, Any] | None = None
+    if placement_witness_callback is not None:
+        from ..placement_witnesses import derive, gpu_snapshot, witness_record
+
+        evidence = placement_witness_callback.evidence()
+        gates = derive(
+            gradient=evidence.get("gradient"),
+            router=evidence.get("router"),
+            step_log=step_log,
+            gpu=gpu_snapshot(torch),
+        )
+        placement_witness_report = witness_record(
+            gates,
+            base_model=spec.base_model,
+            device=str(trainer.args.device),
+            steps=int(trainer.state.global_step),
+            run=output_dir.name,
+        )
+        # Written beside the adapter so the operator can record it into the
+        # prereg table without grepping this run's result JSON. Best-effort by
+        # design: the telemetry copy below is the authoritative one.
+        try:
+            (output_dir / "placement-witnesses.json").write_text(
+                json.dumps(placement_witness_report, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as error:
+            placement_witness_report["write_error"] = str(error)
     return {
         "telemetry": {
             "train_loss": float(train_output.training_loss),
@@ -1052,6 +1124,7 @@ def train(spec: TransformersPeftRunSpec) -> dict[str, Any] | None:
             # The live census behind expert_placement (moe_transient_grad), so a
             # run that claims CPU-resident experts carries the counts that show it.
             "expert_placement": expert_placement_evidence,
+            "placement_witnesses": placement_witness_report,
             "memory_sampling": memory_sampling,
             "first_step_seconds": first_step_seconds,
             "resume": resume_report,

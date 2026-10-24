@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .promotion import PromotionDecision
+from .promotion_transaction import (
+    assert_committed, atomic_json, content_digest, load_transaction, transaction_path,
+)
 
 
 def _utc_now() -> str:
@@ -178,9 +181,70 @@ class GenerationLedger:
         frontier_snapshot_id: str | None = None,
         notes: str = "",
         backend: Mapping[str, Any] | None = None,
+        owner_approval: Any = None,
+        candidate_artifact_sha256: str = "",
     ) -> GenerationRecord:
         if version in self._records:
             raise ValueError(f"generation {version} already recorded")
+        if promotion.verdict == "PROMOTED":
+            from .owner_approval import judge_certifies_candidate, requires_owner_approval, verify_grant
+
+            # This is a public low-level mutation API: do not let a caller
+            # omit the on-disk model path to make an otherwise REAP promotion
+            # look like a historical primary generation. A bare revision
+            # string cannot identify whether a local REAP checkpoint is in use.
+            model_path = base_model.get("base_model_path") or base_model.get("path")
+            if not isinstance(model_path, str) or not model_path.strip():
+                raise ValueError(
+                    "PROMOTION_BASE_UNDECLARED: a PROMOTED ledger record must name "
+                    "its base model path; a bare revision is insufficient"
+                )
+
+            # All *new* promoted generations must arise from a durable
+            # campaign PREPARED intent, regardless of claimed model family.
+            # A caller-chosen path or editable config cannot safely classify
+            # an unknown parent as exempt from REAP N5. Historical non-REAP
+            # rows are loaded independently, not minted through this API.
+            marker = load_transaction(transaction_path(self._path.parent, version))
+            if not callable(getattr(promotion, "to_dict", None)):
+                raise ValueError("PROMOTION_DECISION_INVALID: promotion decision must be serializable")
+            expected_decision = content_digest(promotion.to_dict())
+            if (
+                not isinstance(marker, dict)
+                or marker.get("state") != "PREPARED"
+                or marker.get("candidate_version") != version
+                or marker.get("cycle_id") != cycle_id
+                or marker.get("promotion_digest") != expected_decision
+                or not isinstance(marker.get("manifest_digest"), str)
+                or len(marker["manifest_digest"]) != 64
+                or not isinstance(marker.get("run_digest"), str)
+                or len(marker["run_digest"]) != 64
+            ):
+                raise ValueError(
+                    "PROMOTION_TRANSACTION_REQUIRED: new promoted generations "
+                    "need an exact-candidate durable PREPARED campaign intent"
+                )
+
+            n5 = base_model.get("lineage") == "reap-moe" or requires_owner_approval(model_path)
+            if n5 and not verify_grant(
+                owner_approval,
+                cycle_id=cycle_id,
+                candidate_version=version,
+                artifact_sha256=candidate_artifact_sha256,
+            ):
+                raise ValueError(
+                    "HUMAN_APPROVAL_REQUIRED: direct lineage.record cannot write "
+                    "a REAP PROMOTED generation without a bound owner grant"
+                )
+            if n5 and not judge_certifies_candidate(self._path.parent.parent):
+                # A local `_grant(..., judge_certified=True)` is importable and
+                # not proof that the frozen REAP judge ran. Until an immutable
+                # independently verified judge receipt exists, this also
+                # refuses directly forged approvals at the ledger boundary.
+                raise ValueError(
+                    "FROZEN_REAP_JUDGE_REQUIRED: REAP lineage promotion needs "
+                    "independent frozen-judge evidence before ledger mutation"
+                )
         record = GenerationRecord(
             version=version,
             parent_version=parent_version,
@@ -206,7 +270,9 @@ class GenerationLedger:
     def get(self, version: str) -> GenerationRecord:
         if version not in self._records:
             raise KeyError(f"unknown generation: {version}")
-        return self._records[version]
+        record = self._records[version]
+        assert_committed(self._path.parent, record.to_dict())
+        return record
 
     # ---------------- superseding adjudications (append-only) ----------------
 
@@ -231,6 +297,14 @@ class GenerationLedger:
         if generation_version not in self._records:
             raise KeyError(
                 f"cannot adjudicate unknown generation: {generation_version!r}"
+            )
+        # A recovery-period PREPARED record must never accept a revision that
+        # could later become the effective decision after recovery.
+        self.get(generation_version)
+        if new_verdict == "PROMOTED" and self.effective_verdict(generation_version) != "PROMOTED":
+            raise ValueError(
+                "ADJUDICATION_PROMOTION_UNAUTHORIZED: revisions cannot restore or "
+                "create a PROMOTED generation without a new independently authorized release"
             )
         prior = [r for r in self._revisions if r.generation_version == generation_version]
         if prior:
@@ -267,10 +341,22 @@ class GenerationLedger:
         consulted for its verdict once superseded, but remains fully intact
         and inspectable for audit.
         """
+        # Even a superseding adjudication cannot make an unfinished campaign
+        # appear admitted. The terminal transaction gate always runs first.
+        original = self.get(version)
         revisions = self.revisions_for(version)
-        if revisions:
-            return revisions[-1].new_verdict
-        return self.get(version).promotion.get("verdict", "UNKNOWN")
+        verdict = original.promotion.get("verdict", "UNKNOWN")
+        for revision in revisions:
+            # Apply the same promotion fence on reload: a hand-edited revision
+            # file must not bypass the writer's check. Historical upward
+            # revisions lacking release attestations are no longer admitted.
+            if revision.new_verdict == "PROMOTED" and verdict != "PROMOTED":
+                raise ValueError(
+                    "ADJUDICATION_PROMOTION_UNAUTHORIZED: unverified upward "
+                    "revision cannot establish a promoted generation"
+                )
+            verdict = revision.new_verdict
+        return verdict
 
     def _flush_revisions(self) -> None:
         self._revisions_path.parent.mkdir(parents=True, exist_ok=True)
@@ -287,20 +373,28 @@ class GenerationLedger:
         while current and current in self._records and current not in seen:
             seen.add(current)
             record = self._records[current]
+            self.get(record.version)
             chain.append(record)
             current = record.parent_version
         chain.reverse()
         return chain
 
     def versions(self) -> list[str]:
-        return list(self._records)
+        # PREPARED campaign lineage is forensic evidence, not an admitted
+        # generation. Exposing it as a candidate version would bypass the
+        # terminal-verdict transaction fence used by get/effective_verdict.
+        visible: list[str] = []
+        for version in self._records:
+            try:
+                self.get(version)
+            except ValueError:
+                continue
+            visible.append(version)
+        return visible
 
     def _flush(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = [record.to_dict() for record in self._records.values()]
-        self._path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
-        )
+        atomic_json(self._path, payload)
 
 
 @dataclass(frozen=True)

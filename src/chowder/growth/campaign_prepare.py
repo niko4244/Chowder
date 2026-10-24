@@ -1417,11 +1417,25 @@ def _write_project_template(
     # byte-identical to before these keys existed.
     training_settings = dict(getattr(manifest.training_backend, "config", {}) or {})
     expert_placement = str(training_settings.get("expert_placement", "resident"))
+    placement_gate_refusal(
+        expert_placement=expert_placement,
+        where=f"the project template derived from {manifest.cycle_id}",
+        base_model=manifest.base_model_path,
+    )
     expert_pinning = str(training_settings.get("expert_pinning", "none"))
     target_preset = str(training_settings.get("target_preset", "auto"))
     dataset_format = str(training_settings.get("dataset_format", "text"))
     messages_field = str(training_settings.get("messages_field", "messages"))
     tools_field = str(training_settings.get("tools_field", ""))
+    declared_max_length = training_settings.get("max_length")
+    if declared_max_length is not None and (
+        type(declared_max_length) is not int or declared_max_length <= 0
+    ):
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: the project template derived from "
+            f"{manifest.cycle_id} declares invalid training_backend.config.max_length "
+            f"{declared_max_length!r}; expected a positive integer token limit"
+        )
     # Unset means "today's value": the in-run evaluation has always been
     # declared ``offload``, and only a declaration that says otherwise moves it.
     evaluation_placement = (
@@ -1502,6 +1516,7 @@ def _write_project_template(
                 dataset_format=dataset_format,
                 messages_field=messages_field,
                 tools_field=tools_field,
+                max_length=declared_max_length,
             ),
             "evaluation": {
                 "type": "transformers-text",
@@ -1544,6 +1559,7 @@ def _trainer_backend(
     messages_field: str,
     tools_field: str,
     expert_pinning: str = "none",
+    max_length: int | None = None,
 ) -> dict[str, Any]:
     """The project template's trainer backend, with the declared MoE settings.
 
@@ -1559,7 +1575,10 @@ def _trainer_backend(
         "base_model": str(manifest.base_model_path),
         "dataset": "{corpus}",
         "dataset_format": dataset_format,
-        "max_length": 512,
+        # Preserve 512 for legacy declarations, but carry an explicit frozen
+        # Gen-1 length through to the actual Trainer. A corpus screened at
+        # 2,048 must not silently train at 512 and clip its answer spans.
+        "max_length": 512 if max_length is None else max_length,
         "precision": "bf16",
         "quantization": "none",
         "trust_remote_code": False,
@@ -1598,6 +1617,48 @@ def _trainer_backend(
     if expert_pinning != "none":
         backend["expert_pinning"] = expert_pinning
     return backend
+
+
+def placement_gate_refusal(
+    *, expert_placement: str, where: str, base_model: str | Path
+) -> None:
+    """Refuse a placement its prereg's gate table cannot back.
+
+    ``cpu-transient-grad-int8`` is pre-registered in
+    ``docs/quals/MOE_INT8_PLACEMENT_PREREG_2026-10-20.md``, which owns one
+    generated gate table (``chowder.moe_placement_gates``). The rule that table
+    states is enforced here rather than trusted to the reader: a campaign may
+    not declare the placement while a gate is unmeasured, a gate is in FAIL, or
+    the numbers on record were measured on a different artifact -- declaring on
+    stale numbers was the whole thing the prereg existed to prevent.
+
+    Placements without a gate table (``resident``, and the bf16 transient
+    placements, which keep the 2026-10-18 prereg's own prose rule) pass through.
+    """
+    from chowder.backends.moe_transient_grad import INT8_PLACEMENTS
+    from chowder.moe_placement_gates import (
+        PlacementGateError,
+        assert_declaration_allowed,
+        resolve_prereg_path,
+    )
+
+    if expert_placement not in INT8_PLACEMENTS:
+        return
+    prereg = resolve_prereg_path()
+    if prereg is None or not prereg.is_file():
+        raise CampaignPrepareRefusal(
+            f"{PREPARE_SCHEMA}: {where} declares expert_placement={expert_placement!r}, whose "
+            f"pre-registration (and its measured gate table) is missing at "
+            f"{prereg or 'docs/quals/MOE_INT8_PLACEMENT_PREREG_2026-10-20.md'}; run "
+            "chowder_batch/moe_int8_gates.py against the base model and commit the table "
+            "before this placement is declared"
+        )
+    try:
+        assert_declaration_allowed(
+            prereg.read_text(encoding="utf-8"), [where], base_model=base_model
+        )
+    except PlacementGateError as error:
+        raise CampaignPrepareRefusal(f"{PREPARE_SCHEMA}: {where}: {error}") from error
 
 
 def trainer_spec_refusal(

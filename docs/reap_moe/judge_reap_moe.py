@@ -83,7 +83,7 @@ from chowder.growth.candidate_evaluation import (  # noqa: E402
     CandidateEvaluationRefusal,
 )
 from chowder.growth.certification import ArmError, MeasuredArm  # noqa: E402
-from chowder.growth.compute_cost import ComputeCost, ledger_digest  # noqa: E402
+from chowder.growth.compute_cost import checked_ledger_total, ledger_digest  # noqa: E402
 from chowder.growth.cycle import retention_values  # noqa: E402
 from chowder.growth.evaluation_binding import (  # noqa: E402
     EvaluationMaterial,
@@ -403,6 +403,27 @@ def _identity_gate(
 # ---------------------------------------------------------------------------
 
 
+def _ledger_total(document: Mapping[str, Any], cycle_id: str):
+    """Reconcile a complete accounting artifact against its paid entries.
+
+    Old totals-only artifacts contain too little evidence for certification.
+    Distinguish that absence (UNKNOWN) from a contradictory modern ledger
+    (FAIL) without changing the frozen settlement rule.
+    """
+    totals = document.get("totals")
+    if (
+        not isinstance(totals, Mapping)
+        or not isinstance(totals.get("incremental"), Mapping)
+        or not isinstance(document.get("entries"), list)
+        or not isinstance(document.get("digest_sha256"), str)
+        or not document.get("cycle_id")
+    ):
+        raise LookupError("incremental totals, entry ledger, cycle identity or embedded digest missing")
+    # The judge independently validates the run/accounting bindings; only
+    # then may an explicitly recorded *zero* evaluation or probe be free.
+    return checked_ledger_total(document, cycle_id=cycle_id, allow_zero_evaluation=True)
+
+
 def _settlement_gate(
     verdict: Verdict, run_root: Path, campaign: CampaignManifest | None
 ) -> None:
@@ -411,7 +432,8 @@ def _settlement_gate(
     if not isinstance(document, Mapping):
         verdict.add("R2", requirement, UNKNOWN, f"{ACCOUNTING} missing or unreadable")
         return
-    totals = (document.get("totals") or {}).get("incremental")
+    declared_totals = document.get("totals")
+    totals = declared_totals.get("incremental") if isinstance(declared_totals, Mapping) else None
     if not isinstance(totals, Mapping):
         verdict.add(
             "R2", requirement, UNKNOWN,
@@ -425,11 +447,17 @@ def _settlement_gate(
         )
         return
     try:
-        total = ComputeCost.from_dict(totals)
-    except (KeyError, TypeError, ValueError) as error:
+        total = _ledger_total(document, campaign.cycle_id)
+    except LookupError as error:
         verdict.add(
             "R2", requirement, UNKNOWN,
-            f"incremental totals are not a readable ComputeCost: {error}",
+            f"accounting evidence is incomplete: {error}",
+        )
+        return
+    except (KeyError, TypeError, ValueError) as error:
+        verdict.add(
+            "R2", requirement, FAIL,
+            f"accounting entries, flags or totals are inconsistent: {error}",
         )
         return
     settlement = settle_campaign(campaign, total=total)
@@ -452,13 +480,13 @@ def _accounting_digest_gate(
     """The artifact must be the one the run settled, and settle the same way.
 
     Same shape as the gen2 judge's T23: the record pins ``cost.accounting_digest``
-    when it writes the ledger, so an edited total moves a number the record
-    already carries. Without this row a candidate the run refused on its
-    envelope could be certified by editing one file in the run root.
+    when it writes the ledger, so an edit to paid entries or totals moves a
+    number the record already carries. R2 independently checks internal ledger
+    consistency; R3 also detects a replaced, internally consistent artifact.
     """
     requirement = "the run's recorded settlement is the settlement of the artifact it pinned"
     record = _load_json(run_root / RUN_RECORD)
-    if record is None:
+    if not isinstance(record, Mapping):
         verdict.add(
             "R3", requirement, UNKNOWN,
             f"{RUN_RECORD_ABSENT}: {RUN_RECORD} is absent or unreadable, so the "
@@ -471,7 +499,8 @@ def _accounting_digest_gate(
             "R3", requirement, UNKNOWN, f"{ACCOUNTING} missing or unreadable"
         )
         return
-    pinned = str((record.get("cost") or {}).get("accounting_digest") or "")
+    record_cost = record.get("cost")
+    pinned = str(record_cost.get("accounting_digest") or "") if isinstance(record_cost, Mapping) else ""
     if not pinned:
         verdict.add(
             "R3", requirement, UNKNOWN,
@@ -503,16 +532,56 @@ def _accounting_digest_gate(
             "cannot be recomputed",
         )
         return
-    try:
-        total = ComputeCost.from_dict((document.get("totals") or {}).get("incremental"))
-    except (KeyError, TypeError, ValueError) as error:
+    # A matching ledger hash alone cannot attest a record from a different
+    # parent/candidate generation. R5 checks the cycle, but not those two
+    # identities, so the wrong run could otherwise certify as PROMOTED.
+    expected_identity = {
+        "cycle_id": campaign.cycle_id,
+        "parent_version": campaign.parent_version,
+        "candidate_version": campaign.resolved_candidate_version(),
+    }
+    missing = sorted(set(expected_identity) - set(record))
+    if missing:
         verdict.add(
             "R3", requirement, UNKNOWN,
-            f"incremental totals are not a readable ComputeCost: {error}",
+            f"historical run record lacks identity fields {missing}; its "
+            "accounting settlement cannot be attributed to this campaign",
+        )
+        return
+    mismatches = [
+        f"{key}: recorded {record[key]!r}, declared {expected!r}"
+        for key, expected in expected_identity.items()
+        if record[key] != expected
+    ]
+    if mismatches:
+        verdict.add(
+            "R3", requirement, FAIL,
+            "accounting record belongs to another campaign generation: "
+            + "; ".join(mismatches),
+        )
+        return
+    try:
+        total = _ledger_total(document, campaign.cycle_id)
+    except LookupError as error:
+        verdict.add(
+            "R3", requirement, UNKNOWN,
+            f"accounting evidence is incomplete: {error}",
+        )
+        return
+    except (KeyError, TypeError, ValueError) as error:
+        verdict.add(
+            "R3", requirement, FAIL,
+            f"accounting entries, flags or totals are inconsistent: {error}",
         )
         return
     settlement = settle_campaign(campaign, total=total)
-    if bool(recorded["budget_compliant"]) != settlement.compliant:
+    if not isinstance(recorded["budget_compliant"], bool):
+        verdict.add(
+            "R3", requirement, FAIL,
+            "recorded budget_compliant must be a JSON boolean",
+        )
+        return
+    if recorded["budget_compliant"] != settlement.compliant:
         verdict.add(
             "R3", requirement, FAIL,
             f"{SETTLEMENT_DISAGREES_WITH_RECORD}: the run recorded "
@@ -523,6 +592,23 @@ def _accounting_digest_gate(
                 if settlement.compliant
                 else "non-compliant; " + "; ".join(settlement.failure_reasons)
             ),
+        )
+        return
+    if "budget_failure_reasons" not in recorded:
+        verdict.add(
+            "R3", requirement, UNKNOWN,
+            "the historical run recorded no budget failure reasons, so its "
+            "settlement cannot be completely reconciled",
+        )
+        return
+    if (
+        not isinstance(recorded["budget_failure_reasons"], list)
+        or recorded["budget_failure_reasons"] != list(settlement.failure_reasons)
+    ):
+        verdict.add(
+            "R3", requirement, FAIL,
+            "the run's recorded budget failure reasons disagree with the "
+            "recomputed production settlement",
         )
         return
     verdict.add(

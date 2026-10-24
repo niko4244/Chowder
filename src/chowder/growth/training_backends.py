@@ -223,6 +223,10 @@ _LOCAL_CONFIG_KEYS = frozenset(
         # local executor trains from. Absent, every one keeps the template's
         # historical value, so no existing declaration moves.
         "dataset_format",
+        # The admitted REAP Gen-1 corpus is screened at 2,048 tokens. Carry
+        # its declared horizon into the local project template; otherwise the
+        # legacy 512-token default silently clips supervised answer spans.
+        "max_length",
         "messages_field",
         "tools_field",
         "target_preset",

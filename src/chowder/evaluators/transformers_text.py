@@ -21,6 +21,7 @@ from ..protocol import protocol_fingerprint
 from .placement import validate_placement
 from ..provenance import sha256_directory, sha256_file
 from ..local_model_compat import verify_local_custom_code
+from .adapter_identity import verify_adapter_reload
 from .scoring import OBSERVED_SCORINGS, SAMPLE_SEPARATOR
 
 # final_number_match compares the LAST number on each side, for arithmetic word
@@ -185,6 +186,9 @@ class TransformersTextEvalSpec:
     trust_remote_code: bool = False
     local_custom_code_digests: dict[str, str] | None = None
     offline: bool = False
+    #: Bound exporter directory hash. Never let a worker reload a different
+    #: adapter after the controller verified the artifact.
+    adapter_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not self.base_model.strip():
@@ -195,6 +199,8 @@ class TransformersTextEvalSpec:
                 "base-only measurement (adapter_dir=None); an empty string names "
                 "no model"
             )
+        if self.adapter_dir is None and self.adapter_sha256 is not None:
+            raise ValueError("base-only evaluation must not declare adapter_sha256")
         if not self.suites:
             raise ValueError("at least one evaluation suite is required")
         names = [suite.name for suite in self.suites]
@@ -216,6 +222,8 @@ class TransformersTextEvalSpec:
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
+        if payload["adapter_sha256"] is None:
+            payload.pop("adapter_sha256")  # historical explicitly base-only eval unchanged
         payload["suites"] = [asdict(suite) for suite in self.suites]
         return payload
 
@@ -316,6 +324,7 @@ class TransformersTextEvalSpec:
                 else None
             ),
             offline=bool(evaluation.get("offline", backend.get("offline", False))),
+            adapter_sha256=str(artifact.evidence["artifact_sha256"]),
         )
 
 
@@ -411,6 +420,8 @@ class TransformersTextEvaluator:
             output_dir=eval_dir,
             seed=context.seed,
         )
+        verify_adapter_reload(spec.adapter_dir, spec.adapter_sha256, label="candidate controller",
+                              base_model=spec.base_model)
         for suite in spec.suites:
             if not Path(suite.dataset).is_file():
                 raise FileNotFoundError(f"evaluation dataset not found: {suite.dataset}")
@@ -477,6 +488,13 @@ class TransformersTextEvaluator:
             or not isinstance(model_provenance, Mapping)
         ):
             raise RuntimeError("evaluation result contains invalid metrics/evidence payload")
+        if spec.adapter_dir is not None and (
+            model_provenance.get("adapter_worker_verified_sha256") != spec.adapter_sha256
+        ):
+            raise RuntimeError(
+                "candidate evaluation worker did not attest the exact exported adapter "
+                "after PEFT attachment"
+            )
         gpu_count = int(runtime.get("gpu_count", 0))
         if gpu_count < 0:
             raise RuntimeError("evaluation runtime reported a negative gpu_count")

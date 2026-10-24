@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import subprocess
 import sys
 import time
@@ -210,7 +211,14 @@ def _sha256_text(text: str) -> str:
 
 
 def _sha256_file(path: Path) -> str:
-    return _sha256_bytes(path.read_bytes())
+    # Checkpoints can contain individual shards larger than available RAM.
+    # Verification must use bounded memory, especially when settlement calls
+    # directory_digest on a previously completed native training artifact.
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def directory_digest(root: Path) -> tuple[str, tuple[dict[str, str], ...]]:
@@ -545,6 +553,35 @@ class SubprocessTrainingFn:
         train = self._run_cli("train", project_path, attempt_dir, "train")
         evidence["train"] = self._process_record(train, attempt_dir)
         evidence["commands"].append(list(train.command))
+
+        # A hard timeout or missing summary is still paid compute. Preserve
+        # the observed subprocess wall interval as a *fallback* charge before
+        # parsing its output: the campaign must never settle a failed attempt
+        # as zero merely because the child could not print its final summary.
+        # This is not device-utilisation telemetry, so device_measured stays
+        # false. A successful normal summary replaces the fallback below.
+        if (
+            isinstance(train.seconds, (int, float))
+            and not isinstance(train.seconds, bool)
+            and math.isfinite(train.seconds)
+            and train.seconds >= 0
+        ):
+            from .compute_cost import ComputeCost
+
+            observed = ComputeCost(
+                device_gpu_hours=0.0,
+                wall_gpu_hours=float(train.seconds) / 3600.0,
+                source=f"attempt:{attempt}:subprocess-wall",
+                measurement_method=(
+                    "observed subprocess elapsed wall time; trainer summary "
+                    "not yet trusted; device time not separated"
+                ),
+            )
+            evidence["actual_cost"] = observed.to_dict()
+        else:
+            evidence["cost_unmeasured_reason"] = (
+                f"trainer subprocess elapsed time is invalid: {train.seconds!r}"
+            )
 
         summary = last_json_object(train.stdout)
         evidence["summary"] = summary
@@ -909,7 +946,19 @@ class SubprocessTrainingFn:
         # the registry records is already inside it. Adding it again charged
         # Gen-2 attempt-20 3.77 GPU-h for a 2.47 h attempt. The evaluation
         # leg is charged on its own only when the summary reports no cost.
-        wall_total = actual_wall if actual_wall is not None else (actual_eval or 0.0)
+        fallback = evidence.get("actual_cost")
+        fallback_wall = (
+            ComputeCost.from_dict(fallback).wall_gpu_hours
+            if isinstance(fallback, Mapping)
+            else None
+        )
+        # An incomplete trainer summary must not erase the independently
+        # observed subprocess wall-time charge captured before parsing.
+        wall_total = (
+            actual_wall
+            if actual_wall is not None
+            else fallback_wall if fallback_wall is not None else (actual_eval or 0.0)
+        )
         cost_source = f"attempt:{evidence.get('experiment_id', 'unknown')}"
         if device_measured:
             device_total = summary_device or 0.0

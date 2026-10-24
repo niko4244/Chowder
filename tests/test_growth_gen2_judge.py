@@ -34,7 +34,7 @@ from chowder.evals.result import (
     EvalReport,
 )
 from chowder.growth.campaign import CampaignManifest, settle_campaign
-from chowder.growth.compute_cost import ComputeCost, ledger_digest
+from chowder.growth.compute_cost import ComputeCost, CycleCostLedger, ledger_digest
 from chowder.growth.statistics import compare
 from chowder.growth.training_binding import directory_digest
 
@@ -318,21 +318,21 @@ def _build_artifact(root: Path) -> tuple[Path, str]:
 
 def _accounting(wall: float = 1.1, *, device: float = 0.40, device_measured: bool = False) -> dict:
     first, second = DECLARED_RECIPE_IDS[0], DECLARED_RECIPE_IDS[1]
-    return {
-        "totals": {
-            "incremental": {
-                "device_gpu_hours": device,
-                "wall_gpu_hours": wall,
-                "device_measured": device_measured,
-                "source": "total",
-            }
-        },
-        "entries": [
-            {"kind": "training", "recipe_id": first},
-            {"kind": "training", "recipe_id": second},
-            {"kind": "evaluation", "recipe_id": second},
-        ],
-    }
+    ledger = CycleCostLedger(cycle_id=CampaignManifest.from_file(FROZEN_CAMPAIGN_MANIFEST).cycle_id)
+    for index, (kind, recipe_id) in enumerate(
+        (("training", first), ("training", second), ("evaluation", second))
+    ):
+        ledger.add(
+            f"test-{index}", kind,
+            ComputeCost(
+                device_gpu_hours=device / 3,
+                wall_gpu_hours=wall / 3,
+                source="fixture",
+                device_measured=device_measured,
+            ),
+            recipe_id=recipe_id,
+        )
+    return ledger.render()
 
 
 def _contamination(*, benchmarks: dict | None = None, training_sources: dict | None = None) -> dict:
@@ -1392,6 +1392,125 @@ def test_the_judge_and_production_settlement_agree(tmp_path: Path) -> None:
             f"wall {wall}: judge certified={judge_ok}, production compliant="
             f"{production.compliant} ({production.failure_reasons})"
         )
+
+
+@pytest.mark.parametrize("tamper", ["totals", "device_flag", "paid_flag", "entry_cost", "zero_rows", "other_cycle", "string_flag"])
+def test_gen2_settlement_rejects_self_hashed_inconsistent_ledger(
+    tmp_path: Path, tamper: str,
+) -> None:
+    root = _run_root(tmp_path)
+    path = root / "cycle_compute_accounting.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if tamper == "totals":
+        document["totals"]["incremental"]["wall_gpu_hours"] = 0.0
+    elif tamper == "device_flag":
+        document["totals"]["incremental"]["device_measured"] = True
+    elif tamper == "paid_flag":
+        document["entries"][0]["cost"]["incremental"] = False
+    elif tamper == "entry_cost":
+        document["entries"][0]["cost"]["wall_gpu_hours"] = 0.0
+    elif tamper == "zero_rows":
+        document["entries"] = []
+    elif tamper == "other_cycle":
+        document["cycle_id"] = "unrelated-cycle"
+    else:
+        document["entries"][0]["cost"]["incremental"] = "false"
+    document["digest_sha256"] = ledger_digest(document)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    record_path = root / "campaign-run.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["cost"]["accounting_digest"] = document["digest_sha256"]
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    code, output = _judge_output(root)
+    assert code == 1, output
+    assert " FAIL " in _threshold_row(output, "T13"), output
+    assert " FAIL " in _threshold_row(output, "T23"), output
+
+
+def test_gen2_legacy_totals_without_entries_is_inconclusive(tmp_path: Path) -> None:
+    root = _run_root(tmp_path)
+    path = root / "cycle_compute_accounting.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document.pop("entries")
+    document.pop("digest_sha256")
+    path.write_text(json.dumps(document), encoding="utf-8")
+    record_path = root / "campaign-run.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["cost"]["accounting_digest"] = ledger_digest(document)
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    code, output = _judge_output(root)
+    assert code == 1, output
+    assert " UNKNOWN " in _threshold_row(output, "T13"), output
+    assert " UNKNOWN " in _threshold_row(output, "T23"), output
+
+
+def test_gen2_run_settlement_boolean_cannot_be_string(tmp_path: Path) -> None:
+    root = _run_root(tmp_path)
+    path = root / "campaign-run.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["settlement"]["budget_compliant"] = "false"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    code, output = _judge_output(root)
+    assert code == 1, output
+    assert " FAIL " in _threshold_row(output, "T23"), output
+
+
+@pytest.mark.parametrize("tamper", ["forged_reasons", "nonnumeric_reasons", "missing_reasons"])
+def test_gen2_run_settlement_reasons_must_match_production(
+    tmp_path: Path, tamper: str,
+) -> None:
+    root = _run_root(tmp_path)
+    path = root / "campaign-run.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["settlement"]["budget_compliant"] is True
+    if tamper == "forged_reasons":
+        record["settlement"]["budget_failure_reasons"] = [
+            "RESOURCE_OVERRUN: forged instead of production's empty list"
+        ]
+    elif tamper == "nonnumeric_reasons":
+        record["settlement"]["budget_failure_reasons"] = ""
+    else:
+        del record["settlement"]["budget_failure_reasons"]
+    path.write_text(json.dumps(record), encoding="utf-8")
+    code, output = _judge_output(root)
+    assert code != 0, output
+    assert " PASS " in _threshold_row(output, "T13"), output
+    assert (" UNKNOWN " if tamper == "missing_reasons" else " FAIL ") in _threshold_row(output, "T23"), output
+
+
+def test_gen2_recorded_overrun_must_keep_production_failure_reasons(tmp_path: Path) -> None:
+    campaign = CampaignManifest.from_file(judge_gen2.CAMPAIGN_MANIFEST)
+    root = _run_root(tmp_path, accounting=_accounting(
+        wall=campaign.budget.wall_gpu_hours_ceiling_campaign + 1.0,
+    ))
+    path = root / "campaign-run.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["settlement"]["budget_compliant"] is False
+    assert record["settlement"]["budget_failure_reasons"]
+    record["settlement"]["budget_failure_reasons"] = []
+    path.write_text(json.dumps(record), encoding="utf-8")
+    _, output = _judge_output(root)
+    assert " FAIL " in _threshold_row(output, "T13"), output
+    assert " FAIL " in _threshold_row(output, "T23"), output
+
+
+@pytest.mark.parametrize("field", ["parent_version", "candidate_version", "cycle_id", "missing_parent"])
+def test_gen2_accounting_record_must_belong_to_declared_generations(
+    tmp_path: Path, field: str,
+) -> None:
+    root = _run_root(tmp_path)
+    path = root / "campaign-run.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if field == "missing_parent":
+        del record["parent_version"]
+    else:
+        record[field] = f"different-{field}"
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+    code, output = _judge_output(root)
+    assert code != 0, output
+    assert " PASS " in _threshold_row(output, "T13"), output
+    assert (" UNKNOWN " if field == "missing_parent" else " FAIL ") in _threshold_row(output, "T23"), output
 
 
 def test_a_wall_overrun_is_a_hard_failure_not_an_unknown(tmp_path: Path) -> None:

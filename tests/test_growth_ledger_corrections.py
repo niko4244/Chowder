@@ -25,11 +25,30 @@ def _decision(verdict: str) -> PromotionDecision:
 
 
 def _record(ledger: GenerationLedger, verdict: str = "PROMOTED") -> None:
+    # Historical PROMOTED fixtures now need real, inspectable non-REAP model
+    # identity: a Windows-only F: path is not a valid Linux model provenance
+    # witness, and must not bypass the production fail-closed reader.
+    base = ledger._path.parent / "legacy-dense-base"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "config.json").write_text(
+        json.dumps({"model_type": "llama"}), encoding="utf-8"
+    )
+    base_path = str(base.resolve())
+    if verdict == "PROMOTED":
+        # Exercise append-only corrections on a pre-transaction historical
+        # non-REAP ledger. New promoted writes require a PREPARED intent.
+        ledger._path.parent.mkdir(parents=True, exist_ok=True)
+        ledger._path.write_text(json.dumps([{
+            "version": "gen1", "parent_version": "gen0", "cycle_id": "c1",
+            "base_model": {"path": base_path, "lineage": "dense"},
+            "promotion": _decision(verdict).to_dict(),
+        }]), encoding="utf-8")
+        return
     ledger.record(
         version="gen1",
         parent_version="gen0",
         cycle_id="c1",
-        base_model={"path": "F:/llm-models/tiny"},
+        base_model={"path": base_path, "lineage": "dense"},
         dataset_manifest_ref="d.json",
         curriculum_manifest_ref="c.json",
         recipe={"lr": 1e-4},
@@ -67,9 +86,9 @@ def _append_two_revisions(path: Path) -> Path:
     assert first.supersedes_adjudication_id == "original"
     second = ledger.append_adjudication_revision(
         generation_version="gen1",
-        reason_codes=["FRESH_CANDIDATE_MEASUREMENT"],
+        reason_codes=["AUDIT_CONFIRMED_BREACH"],
         policy_version="v2",
-        new_verdict="PROMOTED",
+        new_verdict="REJECTED",
     )
     assert second.supersedes_adjudication_id == first.revision_id
     revisions = GenerationLedger(path).revisions_for("gen1")
@@ -82,7 +101,7 @@ def _append_two_revisions(path: Path) -> Path:
 
 def test_revision_appends_and_chains(tmp_path: Path) -> None:
     path = _append_two_revisions(tmp_path)
-    assert GenerationLedger(path).effective_verdict("gen1") == "PROMOTED"
+    assert GenerationLedger(path).effective_verdict("gen1") == "REJECTED"
 
 
 def test_effective_verdict_is_deterministic(tmp_path: Path) -> None:
@@ -90,7 +109,7 @@ def test_effective_verdict_is_deterministic(tmp_path: Path) -> None:
     # Reload from disk each time: resolution is a function of the file, not
     # of any in-memory state.
     for _ in range(3):
-        assert GenerationLedger(path).effective_verdict("gen1") == "PROMOTED"
+        assert GenerationLedger(path).effective_verdict("gen1") == "REJECTED"
 
 
 def test_effective_verdict_falls_back_to_original(tmp_path: Path) -> None:

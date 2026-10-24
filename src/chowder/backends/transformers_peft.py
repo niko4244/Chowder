@@ -48,8 +48,20 @@ _ALLOWED_OPTIMIZER_TIERING_MODES = {"auto", "always", "off"}
 _ALLOWED_FROZEN_LAYER_STREAMING_MODES = {"auto", "always", "off"}
 _ALLOWED_PRECISION = {"auto", "bf16", "fp16", "fp32"}
 _ALLOWED_DATASET_FORMATS = {"text", "chat"}
-_ALLOWED_EXPERT_PLACEMENTS = {"resident", "cpu-transient-grad", "cpu-transient-grad-bulk"}
+_ALLOWED_EXPERT_PLACEMENTS = {
+    "resident",
+    "cpu-transient-grad",
+    "cpu-transient-grad-bulk",
+    "cpu-transient-grad-int8",
+}
 _ALLOWED_EXPERT_PINNING = {"none", "registered"}
+#: Every placement that keeps the routed experts frozen in host RAM, so the LoRA
+#: coverage must be ``moe_frozen_experts`` and bitsandbytes must stay out.
+_CPU_EXPERT_PLACEMENTS = {
+    "cpu-transient-grad",
+    "cpu-transient-grad-bulk",
+    "cpu-transient-grad-int8",
+}
 _ALLOWED_TARGET_PRESETS = {"auto", "attention_and_mlp", "moe_frozen_experts"}
 _ALLOWED_LR_SCHEDULER_TYPES = {
     "linear",
@@ -271,12 +283,15 @@ class TransformersPeftRunSpec:
     optimizer_tiering: bool = False
     frozen_layer_streaming: bool = False
     #: Where an MoE base's routed experts live while training: "resident"
-    #: (default) or "cpu-transient-grad"/"cpu-transient-grad-bulk" (frozen
-    #: experts on the CPU, copied per expert or once per layer; see
-    #: chowder.backends.moe_transient_grad).
+    #: (default), "cpu-transient-grad"/"cpu-transient-grad-bulk" (frozen experts
+    #: on the CPU as bf16, copied per expert or once per layer; see
+    #: chowder.backends.moe_transient_grad), or "cpu-transient-grad-int8" (the
+    #: same frozen experts as int8 + per-row scales, dequantized on the device;
+    #: see chowder.backends.moe_int8_experts).
     expert_placement: str = "resident"
     #: Page-lock the CPU-resident expert tensors in place so their copies can be
-    #: asynchronous: "none" (default) or "registered" (cpu-transient-grad only).
+    #: asynchronous: "none" (default) or "registered" (the bf16 CPU placements
+    #: only; int8 buffers are not page-locked).
     expert_pinning: str = "none"
     detailed_timing_telemetry: bool = False
     seed: int = 1
@@ -375,7 +390,7 @@ class TransformersPeftRunSpec:
             raise ValueError(f"unsupported expert_placement: {self.expert_placement}")
         if self.expert_pinning not in _ALLOWED_EXPERT_PINNING:
             raise ValueError(f"unsupported expert_pinning: {self.expert_pinning}")
-        if self.expert_placement in {"cpu-transient-grad", "cpu-transient-grad-bulk"}:
+        if self.expert_placement in _CPU_EXPERT_PLACEMENTS:
             # Frozen experts are the placement's premise, so the coverage must say so,
             # and bitsandbytes cannot quantise the 3-D expert parameters it moves.
             if self.target_preset != "moe_frozen_experts" or self.target_modules:
@@ -387,13 +402,19 @@ class TransformersPeftRunSpec:
                 raise ValueError(
                     f"expert_placement={self.expert_placement!r} requires quantization='none'"
                 )
+        if self.expert_pinning == "registered" and self.expert_placement == "cpu-transient-grad-int8":
+            raise ValueError(
+                "expert_pinning='registered' is not supported with expert_placement="
+                "'cpu-transient-grad-int8': the int8 expert buffers are not page-locked, so "
+                "the copies stay synchronous; use expert_pinning='none'"
+            )
         if self.expert_pinning == "registered" and self.expert_placement not in {
             "cpu-transient-grad",
             "cpu-transient-grad-bulk",
         }:
             raise ValueError(
                 "expert_pinning='registered' requires an expert_placement that keeps the "
-                "experts on the CPU ('cpu-transient-grad' or 'cpu-transient-grad-bulk')"
+                "experts on the CPU ('cpu-transient-grad', 'cpu-transient-grad-bulk')"
             )
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -647,6 +668,9 @@ _BINDINGS_ADDED_AFTER_INITIAL_RELEASE: tuple[str, ...] = (
     "base_content_sha256",
     "base_weight_binding",
 )
+# Unlike the legacy base identity keys above, expert_numeric_mode must never
+# be backfilled onto an existing checkpoint: the original record cannot
+# establish whether its frozen experts were dequantized from row-wise INT8.
 
 
 class TransformersPeftExecutor:
@@ -777,7 +801,7 @@ class TransformersPeftExecutor:
             "max_steps",
             "activation_offload",
             "frozen_layer_streaming",
-            "expert_placement",  # value-transparent, like frozen_layer_streaming
+            "expert_placement",  # transfer placement is transparent; INT8 numerical mode is bound below
             "expert_pinning",  # value-transparent: pinning changes where host memory sits, not what is computed
             "detailed_timing_telemetry",
         ):
@@ -802,6 +826,18 @@ class TransformersPeftExecutor:
             "dataset_sha256": spec.dataset_sha256,
             "replay_dataset_sha256": spec.replay_sha256,
             "parent_adapter_sha256": spec.parent_adapter_sha256,
+            # Moving unquantized BF16 frozen experts between host/device is
+            # value-transparent. Row-wise INT8 quantization is NOT: rounding
+            # the frozen expert weights changes forward outputs and LoRA
+            # gradients, so its optimizer state cannot silently resume under
+            # BF16 (or vice versa). This must be a required recorded binding,
+            # not an optional legacy key: an old checkpoint that omitted the
+            # mode cannot prove it used the currently requested arithmetic.
+            "expert_numeric_mode": (
+                "rowwise-int8-dequant"
+                if spec.expert_placement == "cpu-transient-grad-int8"
+                else "unquantized"
+            ),
         }
         if not local_base:
             bound["base_model"] = spec.base_model
@@ -836,15 +872,35 @@ class TransformersPeftExecutor:
         manifest_path = trainer_dir / _CHECKPOINT_MANIFEST_NAME
         payload_dict = dict(bound_inputs)
         payload = json.dumps(payload_dict, sort_keys=True, indent=2) + "\n"
+        # The manifest certifies the inputs under which *existing* checkpoint
+        # state was produced. It must precede the first checkpoint: writing a
+        # fresh manifest into an orphaned legacy trainer directory otherwise
+        # launders its pre-existing optimizer/RNG state into today's recipe.
+        # A checkpoint-* entry may also be an incomplete/crashed write; that
+        # is not evidence for retroactively claiming an input identity.
+        has_checkpoint = any(child.name.startswith("checkpoint-")
+                             for child in trainer_dir.iterdir())
+        if has_checkpoint and not manifest_path.is_file():
+            raise RuntimeError(
+                f"cannot create checkpoint manifest in {trainer_dir}: pre-existing "
+                "checkpoint state has no original input witness; start a fresh "
+                "trainer directory or use an already authenticated checkpoint"
+            )
         if manifest_path.is_file():
             recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
             if not isinstance(recorded, Mapping):
                 raise RuntimeError(f"checkpoint manifest {manifest_path} is not a JSON object")
-            # A strictly-subset manifest (written before a binding existed) is
-            # upgraded in place: the new manifest is strictly more evidence
-            # about the same inputs, never less. Any recorded value that
-            # disagrees, or any recorded binding the current spec cannot
-            # reproduce, is still a refusal.
+            missing = [key for key in payload_dict if key not in recorded]
+            if has_checkpoint and missing:
+                raise RuntimeError(
+                    f"cannot retroactively certify missing bound inputs {sorted(missing)} "
+                    f"on existing checkpoint state in {trainer_dir}; the original "
+                    "manifest never recorded those input identities"
+                )
+            # Subset manifests may only be upgraded before any checkpoint was
+            # written: additions to a historical checkpoint are *claims* about
+            # old computation, not additional contemporaneous evidence. Any
+            # recorded disagreement or lost binding is likewise a refusal.
             conflicts = {
                 key: {"existing": value, "requested": payload_dict[key]}
                 for key, value in recorded.items()

@@ -66,6 +66,11 @@ where = ["src"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "strict"
+# ``slow`` marks tests that cost tens of seconds and a few GB of scratch disk:
+# the int8 mid-size load fixture writes ~2.4 GB of shards to prove the load's
+# resident bytes. They still run by default -- nothing here deselects them --
+# the marker exists so a machine that cannot afford them can say so explicitly.
+markers = ["slow: takes tens of seconds and a few GB of scratch disk"]
 
 [tool.ruff]
 target-version = "py310"

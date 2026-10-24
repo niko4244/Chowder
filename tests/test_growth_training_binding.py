@@ -279,6 +279,17 @@ def test_s0_a_fake_training_fn_drives_the_cycle_to_a_recorded_promotion(tmp_path
     )
     assert decision.verdict == "PROMOTED", decision.reasons
 
+    # The positive cycle seam must now carry a PREPARED transaction before
+    # writing a new PROMOTED ledger row. A completed transaction is verified
+    # separately by the campaign runner; pending rows cannot be read.
+    from chowder.growth.promotion_transaction import prepare_transaction
+    prepare_transaction(
+        tmp_path, cycle_id=cycle.config.cycle_id,
+        candidate_version=cycle.config.candidate_version,
+        run_document={"cycle_id": cycle.config.cycle_id},
+        promotion=decision.to_dict(), manifest_digest="a" * 64,
+    )
+
     outcome = cycle.finalize(
         decision,
         base_model={"path": "F:/llm-models/tiny", "manifest_sha256": "0" * 64},
@@ -290,8 +301,8 @@ def test_s0_a_fake_training_fn_drives_the_cycle_to_a_recorded_promotion(tmp_path
     )
     assert outcome.verdict == "PROMOTED"
     assert [p.phase for p in outcome.phases] == ["promotion"]
-    assert cycle.ledger.get("gen1").parent_version == "gen0"
-    assert cycle.ledger.get("gen1").training_evidence_ref == results[0]["evidence_path"]
+    with pytest.raises(ValueError, match="PROMOTION_UNCOMMITTED"):
+        cycle.ledger.get("gen1")
 
 
 # --------------------------------------------------------------------------
@@ -991,6 +1002,12 @@ def test_an_unparsable_train_summary_never_becomes_synthetic_metrics(tmp_path: P
     assert evidence["status"] == "FAILED"
     assert evidence["summary"] is None
     assert evidence["measured_gpu_hours"] is None
+    assert evidence["train_started"] is True
+    assert evidence["actual_cost"]["wall_gpu_hours"] == pytest.approx(
+        evidence["train"]["seconds"] / 3600.0
+    )
+    assert evidence["actual_cost"]["device_measured"] is False
+    assert "subprocess elapsed" in evidence["actual_cost"]["measurement_method"]
 
 
 # --------------------------------------------------------------------------

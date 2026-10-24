@@ -259,12 +259,15 @@ def test_frontier_scores_never_decide_promotion():
 
 def test_generation_ledger_roundtrip_and_duplicate_refusal(tmp_path):
     ledger = GenerationLedger(tmp_path)
-    decision = evaluate_promotion(_promotion_input(0.45, 0.31))
+    # Direct nontransactional writes can retain rejected evidence, but cannot
+    # mint a new promoted generation outside PREPARED/COMMITTED coordination.
+    decision = evaluate_promotion(_promotion_input(0.45, 0.31, contamination="UNKNOWN"))
+    assert decision.verdict != "PROMOTED"
     ledger.record(
         version="v0.2",
         parent_version="v0.1",
         cycle_id="cycle-001",
-        base_model={"revision": "Qwen/Qwen3-9B@abc123", "quantization": "bf16"},
+        base_model={"path": str(tmp_path / "primary-model"), "revision": "Qwen/Qwen3-9B@abc123", "quantization": "bf16"},
         dataset_manifest_ref="growth/data-manifest.json#cycle-001",
         curriculum_manifest_ref="growth/curriculum-cycle-001.json",
         recipe={"objective": "sft", "lora_rank": 64},
@@ -288,7 +291,7 @@ def test_generation_ledger_roundtrip_and_duplicate_refusal(tmp_path):
     reloaded = GenerationLedger(tmp_path)
     record = reloaded.get("v0.2")
     assert record.parent_version == "v0.1"
-    assert record.promotion["verdict"] == "PROMOTED"
+    assert record.promotion["verdict"] == decision.verdict
     # ancestry() walks parents; v0.1 was never recorded so the chain is just v0.2.
     ancestry = reloaded.ancestry("v0.2")
     assert [r.version for r in ancestry] == ["v0.2"]

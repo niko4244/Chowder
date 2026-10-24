@@ -29,6 +29,8 @@ from chowder.growth.campaign_runner import (
     READINESS_DECLARED_INPUT,
     READINESS_EVALUATOR,
     READINESS_EVALUATOR_COVERAGE,
+    READINESS_CAMPAIGN_STATE,
+    READINESS_EXECUTOR_ADMISSION,
     READINESS_RECIPE_SET,
     CampaignRunRefusal,
     check_campaign_readiness,
@@ -191,13 +193,19 @@ def test_readiness_refuses_a_recipe_set_the_planner_did_not_propose(tmp_path: Pa
 
 
 def test_readiness_refuses_when_the_instrument_has_no_material(tmp_path: Path):
-    """A declared material path that does not exist is not an available evaluator."""
+    """Absent declared material is rejected by the same preflight as the runner."""
     _, _runner, document = _campaign(tmp_path)
     manifest = _redeclare(document, evaluation_material_path=str(tmp_path / "absent.json"))
 
     report = check_campaign_readiness(manifest)
 
-    assert READINESS_EVALUATOR in report.reason_codes
+    # The new verified-resume input-SHA preflight runs before instrument
+    # construction. Its precise failure code replaces the old evaluator-only
+    # reason; both paths must still refuse before training.
+    assert READINESS_DECLARED_INPUT in report.reason_codes
+    assert "evaluation_material_path" in next(
+        c.detail for c in report.checks if c.check == "declared_inputs"
+    )
     assert next(c for c in report.checks if c.check == "evaluator_coverage").status == "skipped"
 
 
@@ -316,6 +324,82 @@ def test_the_readiness_command_exits_non_zero_when_a_prerequisite_is_missing(
 
     assert payload["status"] == "REFUSED"
     assert READINESS_BASE_IDENTITY in payload["reason_codes"]
+
+
+def test_terminal_root_readiness_refuses_for_cli_and_growth_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    from types import SimpleNamespace
+    from chowder.growth.growth_loop import _production_readiness
+
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner, bind=False)
+    first = run_campaign(manifest)
+    assert first.verdict == "REFUSED"
+    trained = _verbs(runner).count("train")
+    assert trained
+    before = (Path(manifest.state_root) / "campaign-journal.jsonl").read_bytes()
+
+    report = check_campaign_readiness(manifest)
+    assert report.status == "REFUSED"
+    assert READINESS_CAMPAIGN_STATE in report.reason_codes
+    # Production autonomous growth and TUI both use this same report.
+    loop_report = _production_readiness(SimpleNamespace(manifest=manifest))
+    assert loop_report.status == report.status
+    assert loop_report.reason_codes == report.reason_codes
+
+    monkeypatch.setattr(
+        sys, "argv", ["chowder", "growth", "campaign", "readiness", str(_manifest_path(tmp_path))]
+    )
+    assert chowder_main() == 1
+    cli = json.loads(capsys.readouterr().out)
+    assert cli["status"] == "REFUSED"
+    assert READINESS_CAMPAIGN_STATE in cli["reason_codes"]
+    assert _verbs(runner).count("train") == trained
+    assert (Path(manifest.state_root) / "campaign-journal.jsonl").read_bytes() == before
+
+
+def test_readiness_uses_exact_training_executor_admission_without_running_it(
+    tmp_path: Path,
+):
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    calls: list[str] = []
+
+    class _DecliningTrainer:
+        def admit(self, recipe: Any):
+            calls.append(recipe.recipe_id)
+            return ("projection", "this trainer refuses the declared budget")
+
+        def __call__(self, *_args: Any):
+            raise AssertionError("readiness may not train")
+
+    report = check_campaign_readiness(manifest, train_fn=_DecliningTrainer())
+    assert report.status == "REFUSED"
+    assert READINESS_EXECUTOR_ADMISSION in report.reason_codes
+    assert calls
+    assert runner.commands == []
+
+
+def test_tampered_pending_root_remains_readiness_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    from chowder.growth import campaign_runner
+
+    manifest, runner, _ = _campaign(tmp_path, with_ancestor=True)
+    _patch_seams(monkeypatch, runner)
+    monkeypatch.setattr(campaign_runner, "requires_owner_approval", lambda _base: True)
+    monkeypatch.setattr(campaign_runner, "judge_certifies_candidate", lambda _root: False)
+    assert run_campaign(manifest).verdict == "INCONCLUSIVE"
+    path = Path(manifest.state_root) / "campaign-run.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["phases"] = [
+        item for item in record["phases"] if item.get("phase") != "human_approval"
+    ]
+    path.write_text(json.dumps(record), encoding="utf-8")
+    inspected = check_campaign_readiness(manifest)
+    assert inspected.status == "REFUSED"
+    assert READINESS_CAMPAIGN_STATE in inspected.reason_codes
 
 
 # --------------------------------------------------------------------------

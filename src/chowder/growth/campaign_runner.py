@@ -42,7 +42,11 @@ that table ever diverge, so a new field cannot land as decoration.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+import os
+import time
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -99,7 +103,27 @@ from .failure_bank import FailureBank
 from .frontier_reference import SnapshotStore
 from .lineage import GenerationLedger, RegressionMemory
 from .metric_binding import MetricBinder, PromotionAssembly
+from .owner_approval import (
+    authorize_promotion,
+    judge_certifies_candidate,
+    requires_owner_approval,
+    verify_grant,
+)
 from .recipe_planner import HardwareBudget, RecipePlanner, TrainingRecipe
+from .campaign_resume import (
+    ResumeRefusal,
+    commit_receipt,
+    declared_inputs_digest,
+    load_receipts,
+    validate_evidence as validate_resume_evidence,
+)
+from .promotion_transaction import (
+    content_digest,
+    load_transaction,
+    prepare_transaction,
+    reconcile_transaction,
+    transaction_path,
+)
 
 from .training_binding import (
     STATUS_SUCCEEDED,
@@ -387,7 +411,7 @@ class CampaignRun:
     def refused_by(self) -> str:
         """The phase that refused this run, or the empty string."""
         for phase in self.phases:
-            if str(phase.get("verdict")) == "refused":
+            if str(phase.get("verdict")) in ("refused", CAMPAIGN_INTERRUPTED):
                 return str(phase.get("phase"))
         return ""
 
@@ -395,9 +419,29 @@ class CampaignRun:
     def refusal_reason(self) -> str:
         """Why this run refused, in its own words, or the empty string."""
         for phase in self.phases:
-            if str(phase.get("verdict")) == "refused":
+            if str(phase.get("verdict")) in ("refused", CAMPAIGN_INTERRUPTED):
                 return str(phase.get("detail"))
         return ""
+
+
+def _restored_run(document: Mapping[str, Any], root: Path) -> CampaignRun:
+    """Return an already completed campaign; never run its evaluator twice."""
+    return CampaignRun(
+        cycle_id=str(document["cycle_id"]),
+        parent_version=str(document["parent_version"]),
+        candidate_version=str(document["candidate_version"]),
+        verdict=str(document["verdict"]),
+        phases=tuple(document["phases"]),
+        admission=tuple(document["admission"]),
+        cost=document["cost"],
+        settlement=document["settlement"],
+        ceiling_enforcement=document["ceiling_enforcement"],
+        certification=document["certification"],
+        selection=document["selection"],
+        promotion=document["promotion"],
+        attempts=tuple(document["attempts"]),
+        record_path=str(root / "campaign-run.json"),
+    )
 
 
 def assert_every_field_enforced(manifest_cls: type = CampaignManifest) -> None:
@@ -417,7 +461,400 @@ def assert_every_field_enforced(manifest_cls: type = CampaignManifest) -> None:
         raise CampaignManifestError("FIELD_ENFORCEMENT lists no behavioral fields")
 
 
+# --------------------------------------------------------------------------
+# the campaign journal: a crash record written at every boundary
+# --------------------------------------------------------------------------
+
+#: The append-only journal the runner writes as the campaign advances: one
+#: JSON line per boundary the runner computes, flushed **and fsynced** as the
+#: boundary happens. An external termination of the process tree cannot be
+#: intercepted by any Python exit path -- the only other durable record,
+#: ``campaign-run.json``, was terminal, so a kill before it destroyed the
+#: entire campaign record (phase list, admission decisions, budget spend,
+#: which recipes were attempted and why). The journal closes that hole.
+CAMPAIGN_JOURNAL_NAME = "campaign-journal.jsonl"
+
+#: The entry refusal for a state root whose journal records no terminal
+#: outcome: a previous run there never reached a verdict, and re-running it
+#: would silently start from the top and re-spend every attempt it already
+#: made.
+CAMPAIGN_INTERRUPTED = "CAMPAIGN_INTERRUPTED"
+
+
+def _journal_path(root: Path) -> Path:
+    return root / CAMPAIGN_JOURNAL_NAME
+
+
+def _journal_event(
+    root: Path,
+    *,
+    phase: str,
+    status: Any,
+    recipe_id: Any = None,
+    attempt: Any = None,
+    gpu_hours: Any = None,
+    detail: str | None = None,
+    identity: str | None = None,
+    index: int | None = None,
+    proof_mode: str | None = None,
+) -> None:
+    """Append one boundary to the campaign journal, durably.
+
+    The line is flushed **and fsynced** before the call returns: the journal
+    is written for the process that does not survive long enough to close the
+    file. Everything the runner has computed by that boundary is on disk
+    afterwards; everything it has not computed is, honestly, absent.
+    """
+    record: dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "phase": phase,
+        "attempt": attempt,
+        "recipe_id": recipe_id,
+        "status": status,
+        "gpu_hours": gpu_hours,
+    }
+    if detail is not None:
+        record["detail"] = detail
+    if identity is not None:
+        record["identity"] = identity
+    if index is not None:
+        record["index"] = index
+    if proof_mode is not None:
+        record["proof_mode"] = proof_mode
+    with open(_journal_path(root), "a", encoding="utf-8") as journal:
+        journal.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+        journal.flush()
+        os.fsync(journal.fileno())
+
+
+def _journal_outcome(journal: Path) -> str | None:
+    """Return only the latest run's durable terminal outcome, or None.
+
+    A terminal from an earlier run must not mask a newer interrupted start.
+    Any malformed or torn line is ambiguous and therefore refuses re-entry.
+    The terminal must be the final journal event and agree with the durable
+    verdict file; a journal marker alone cannot attest to a verdict.
+    """
+    try:
+        text = journal.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    outcome: str | None = None
+    last_phase = ""
+    for line in text.splitlines(keepends=True):
+        # Every _journal_event writes a trailing LF before fsync.
+        if not line.endswith("\n"):
+            return None
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(record, dict) or not isinstance(record.get("phase"), str):
+            return None
+        phase = record["phase"]
+        if phase == "campaign_start":
+            outcome = None
+        elif phase == "terminal":
+            status = record.get("status")
+            if not isinstance(status, str) or not status:
+                return None
+            outcome = status
+        last_phase = phase
+
+    if last_phase != "terminal" or outcome is None:
+        return None
+    try:
+        verdict = json.loads(journal.with_name("campaign-run.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(verdict, dict) or verdict.get("verdict") != outcome:
+        return None
+    return outcome
+
+
+def _refuse_interrupted(
+    manifest: CampaignManifest, root: Path, *, promotion_unresolved: bool = False,
+    approval_pending: bool = False,
+) -> CampaignRun:
+    """Refuse entry on a state root whose journal never reached a verdict.
+
+    A journal without a terminal record means a previous run on this state
+    root was killed mid-campaign: its attempts are spent and recorded. Rather
+    than silently starting from the top and re-spending them (the planner
+    reserves fresh attempt directories and selection re-runs from the first
+    recipe), the run refuses here and records the refusal. The refusal
+    deliberately writes **no** terminal journal record: it is a refusal about
+    an *open* record, not the verdict of a campaign, so the entry check below
+    keeps refusing every later entry until someone resolves that state
+    deliberately -- archive or delete the journal and ``campaign-run.json``.
+    """
+    journal = _journal_path(root)
+    if approval_pending:
+        detail = (
+            "HUMAN_APPROVAL_PENDING: this root contains a fully measured candidate "
+            "awaiting independent frozen REAP judge certification and owner N5 "
+            "approval. Its compute is already spent; do not rerun training as a "
+            "substitute for the missing release transaction. The original run "
+            "and evaluation evidence remain unchanged."
+        )
+    elif promotion_unresolved:
+        detail = (
+            "PROMOTION_TRANSACTION_UNRESOLVED: a PREPARED or inconsistent "
+            "promotion transaction exists. Its lineage is not admitted; "
+            "inspect the campaign-run.json, journal and ledger together. "
+            "The attempted compute is already spent and cannot be replayed."
+        )
+    else:
+        detail = (
+            f"{CAMPAIGN_INTERRUPTED}: {journal} exists and records no terminal "
+            "outcome -- a previous run on this state root did not reach a "
+            "verdict, so its attempts are already spent and recorded there. "
+            "Resolve that state deliberately (archive or delete the journal and "
+            "campaign-run.json) before starting a campaign here; refusing rather "
+            "than silently starting from the top."
+        )
+    _journal_event(root, phase="entry_check", status=CAMPAIGN_INTERRUPTED, detail=detail)
+    run = CampaignRun(
+        cycle_id=manifest.cycle_id,
+        parent_version=manifest.parent_version,
+        candidate_version=manifest.resolved_candidate_version(),
+        verdict="REFUSED",
+        phases=(
+            {
+                "phase": "entry_check",
+                "verdict": CAMPAIGN_INTERRUPTED,
+                "detail": detail,
+            },
+        ),
+        admission=(),
+        cost={},
+        settlement={},
+        ceiling_enforcement={},
+        certification={},
+        selection={},
+        promotion=None,
+        record_path="",
+    )
+    # An interrupted promotion can leave its original campaign-run.json
+    # published before the terminal journal marker. That original is forensic
+    # evidence and must never be overwritten by a later entry refusal: it may
+    # be needed to reconcile an already-persisted generation ledger entry.
+    # An initial hard kill (no verdict yet) keeps the historical location.
+    target = (
+        "campaign-entry-refusal.json"
+        if (root / "campaign-run.json").exists()
+        else "campaign-run.json"
+    )
+    # terminal=False: this refusal cannot close the interrupted journal.
+    return _write_record(run, root, outcome=None, terminal=False, record_name=target)
+
+
+def _campaign_root_state(
+    root: Path, *, replay_identity: str,
+) -> tuple[str, tuple[dict[str, Any], ...], str]:
+    """Read-only campaign admission: fresh, verified resume, or occupied.
+
+    A terminal verdict is the *end* of a state-root campaign, not authority
+    to overwrite that campaign's receipts or spend. Never infer permission
+    from an editable human-approval phase: its removal must not rearm compute.
+    """
+    run_record = root / "campaign-run.json"
+    if run_record.exists():
+        # The approval phase improves the diagnostic only. Occupancy derives
+        # from durable record existence, not from its editable JSON contents.
+        try:
+            previous = json.loads(run_record.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            previous = None
+        phases = previous.get("phases") if isinstance(previous, Mapping) else None
+        approval_pending = isinstance(previous, Mapping) and any(
+            isinstance(phase, Mapping)
+            and phase.get("phase") == "human_approval"
+            and phase.get("verdict") == "pending"
+            for phase in (phases if isinstance(phases, (list, tuple)) else ())
+        )
+        return (
+            "occupied", (),
+            (
+                "HUMAN_APPROVAL_PENDING: the qualified candidate awaits frozen "
+                "judge and owner approval; do not retrain it in this root."
+                if approval_pending else
+                "CAMPAIGN_STATE_OCCUPIED: campaign-run.json already exists; "
+                "its terminal/pending/ambiguous verdict and prior compute must "
+                "remain intact. Start an intentional new campaign in a new state root."
+            ),
+        )
+    journal = _journal_path(root)
+    receipts = root / "campaign-attempt-receipts"
+    refusal_record = root / "campaign-entry-refusal.json"
+    if not journal.exists():
+        attempts = root / "attempts"
+        orphaned_attempts = attempts.is_dir() and any(attempts.iterdir())
+        leftover_outputs = any(
+            (root / filename).exists()
+            for filename in (
+                "cycle_compute_accounting.json", "candidate_evaluation.json",
+                "chosen_candidate.json", "gen2_certification.json",
+            )
+        )
+        if (
+            receipts.exists() or refusal_record.exists()
+            or orphaned_attempts or leftover_outputs
+        ):
+            return (
+                "occupied", (),
+                "CAMPAIGN_STATE_OCCUPIED: durable attempts, cost/evaluation "
+                "artifacts, receipts or an entry refusal remain without their "
+                "campaign journal; "
+                "restarting could lose already-spent compute.",
+            )
+        return "fresh", (), "state root has no prior campaign"
+    if _journal_outcome(journal) is not None:
+        return (
+            "occupied", (),
+            "CAMPAIGN_STATE_OCCUPIED: the prior campaign has a terminal "
+            "journal verdict. Its state root may not be reused for training.",
+        )
+    # An otherwise valid terminal record whose campaign-run.json was deleted
+    # or corrupted is still evidence of concluded/spent work. Do not reinterpret
+    # that history as an in-progress campaign eligible for replay.
+    try:
+        past_rows = [
+            json.loads(line)
+            for line in journal.read_text(encoding="utf-8").splitlines()
+        ]
+    except (OSError, UnicodeError, ValueError):
+        past_rows = []
+    if any(
+        isinstance(row, Mapping) and row.get("phase") == "terminal"
+        for row in past_rows
+    ):
+        return (
+            "occupied", (),
+            "CAMPAIGN_STATE_OCCUPIED: terminal journal evidence remains but "
+            "its campaign verdict is missing or inconsistent; refuse replay.",
+        )
+    try:
+        replay = tuple(load_receipts(root, manifest_digest=replay_identity))
+    except ResumeRefusal as error:
+        return "unresolved", (), str(error)
+    return "resume", replay, f"{len(replay)} verified settled attempt(s) may replay"
+
+
+def _refuse_occupied(
+    manifest: CampaignManifest, root: Path, *, detail: str,
+) -> CampaignRun:
+    """Publish an entry refusal without modifying a prior terminal journal."""
+    run = CampaignRun(
+        cycle_id=manifest.cycle_id,
+        parent_version=manifest.parent_version,
+        candidate_version=manifest.resolved_candidate_version(),
+        verdict="REFUSED",
+        phases=({"phase": "entry_check", "verdict": "refused", "detail": detail},),
+        admission=(),
+        cost={},
+        settlement={},
+        ceiling_enforcement={},
+        certification={},
+        selection={},
+        promotion=None,
+        record_path="",
+    )
+    return _write_record(
+        run, root, outcome=None, terminal=False,
+        record_name="campaign-entry-refusal.json",
+    )
+
+
+@contextmanager
+def _campaign_writer_lock(root: Path):
+    """Hold one cross-process advisory writer lock for the entire campaign.
+
+    The lock file persists after a crash, but the *kernel lock* does not, so
+    the interrupted-journal refusal still determines recovery. A second
+    process cannot overwrite the first writer's journal/record/accounting.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / ".campaign-writer.lock"
+    with path.open("a+b") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+            os.fsync(handle.fileno())
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise CampaignRunRefusal(
+                "CAMPAIGN_WRITER_BUSY: another campaign owns the state root "
+                f"{root}; no execution or record write is authorized"
+            ) from error
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+class _JournalingPhases(list):
+    """The run's phase record, journaled: every append is one durable line.
+
+    A list subclass, so the run's own ``phases.append(...)`` sites carry the
+    journal with them: appending a phase *is* the moment the runner computed
+    that decision, and from here on that moment is also fsynced to the
+    journal -- a phase decision can no longer exist only in the memory of a
+    process that is about to be killed.
+    """
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self._root = root
+
+    def append(self, phase: Mapping[str, Any]) -> None:
+        super().append(phase)
+        detail = phase.get("detail")
+        _journal_event(
+            self._root,
+            phase=str(phase.get("phase")),
+            status=phase.get("verdict"),
+            detail=detail if isinstance(detail, str) else None,
+        )
+
+
 def run_campaign(
+    manifest: CampaignManifest,
+    *,
+    train_fn: Any = None,
+    eval_fn: CandidateEvaluator | None = None,
+    state_root: str | Path | None = None,
+) -> CampaignRun:
+    """Validate inputs, then serialize all writers against the state root."""
+    assert_every_field_enforced()
+    require_declared_inputs(manifest, phase="run")
+    root = Path(state_root or manifest.state_root)
+    with _campaign_writer_lock(root):
+        return _run_campaign_locked(
+            manifest, train_fn=train_fn, eval_fn=eval_fn, state_root=root
+        )
+
+
+def _run_campaign_locked(
     manifest: CampaignManifest,
     *,
     train_fn: Any = None,
@@ -438,8 +875,61 @@ def run_campaign(
     assert_every_field_enforced()
     require_declared_inputs(manifest, phase="run")
     root = Path(state_root or manifest.state_root)
-    root.mkdir(parents=True, exist_ok=True)
-    phases: list[Mapping[str, Any]] = []
+    declaration_digest = content_digest(asdict(manifest))
+    try:
+        from chowder.worker_env import chowder_source_identity
+
+        replay_identity = content_digest({
+            "declaration": declaration_digest,
+            "declared_files": declared_inputs_digest(manifest),
+            "source_sha256": chowder_source_identity()["source_sha256"],
+        })
+    except ResumeRefusal as error:
+        raise CampaignRunRefusal(str(error)) from error
+    # A crash after the durable promotion intent may have left a committed
+    # verdict, an unfinished ledger write, or only the PREPARED marker. Replay
+    # only a fully verified terminal decision; otherwise preserve forensic
+    # evidence and refuse re-entry before training spends anything.
+    marker_path = transaction_path(
+        root / "ledger", manifest.resolved_candidate_version()
+    )
+    if marker_path.exists():
+        try:
+            marker = load_transaction(marker_path)
+            recovered = reconcile_transaction(
+                root,
+                cycle_id=manifest.cycle_id,
+                candidate_version=manifest.resolved_candidate_version(),
+                journal_verdict=_journal_outcome(_journal_path(root)),
+                manifest_digest=declaration_digest,
+            )
+        except ValueError:
+            recovered = None
+        if recovered is None or marker is None or recovered.get("parent_version") != manifest.parent_version:
+            return _refuse_interrupted(manifest, root, promotion_unresolved=True)
+        return _restored_run(recovered, root)
+    state, verified, detail = _campaign_root_state(root, replay_identity=replay_identity)
+    if state == "occupied":
+        return _refuse_occupied(manifest, root, detail=detail)
+    if state == "unresolved":
+        return _refuse_interrupted(manifest, root)
+    interrupted = state == "resume"
+    replay = list(verified)
+    phases: list[Mapping[str, Any]] = _JournalingPhases(root)
+    if not interrupted:
+        _journal_event(
+            root,
+            phase="campaign_start",
+            status="started",
+            detail=f"campaign {manifest.cycle_id} (policy {PROMOTION_POLICY_VERSION})",
+            identity=replay_identity,
+        )
+    else:
+        _journal_event(
+            root, phase="campaign_resume", status="verified",
+            detail=f"resuming {len(replay)} settled attempt(s) from exact declared campaign",
+            identity=replay_identity,
+        )
 
     _verify_parent_identity(manifest)
     phases.append(
@@ -504,6 +994,16 @@ def run_campaign(
     cycle = _build_cycle(manifest, executor=executor, firewall=firewall, root=root)
     candidate_version = manifest.resolved_candidate_version()
 
+    def precompute_refusal(
+        phases: list[Mapping[str, Any]], admission: list[Mapping[str, Any]]
+    ) -> CampaignRun:
+        # A recovered run already spent and durably journaled training. A
+        # changed admission/readiness environment cannot publish a zero-cost
+        # terminal verdict over its prior receipt history.
+        if interrupted:
+            return _refuse_interrupted(manifest, root)
+        return _refuse(manifest, root, candidate_version, phases, admission)
+
     # Plan on the cycle that will execute, not a second assembly of it: one
     # owner of "what runs", so the ids planned are the ids run.
     items = cycle.plan_curriculum(_load_profile(manifest))
@@ -537,18 +1037,26 @@ def run_campaign(
         if refusal is not None:
             entry["refused_by"], entry["refusal_reason"] = refusal
         admission.append(entry)
+        _journal_event(
+            root,
+            phase="admission",
+            status="admitted" if refusal is None else "refused",
+            recipe_id=recipe.recipe_id,
+            gpu_hours=float(recipe.projected_wall_gpu_hours),
+            detail=(entry.get("refusal_reason") if refusal is not None else None),
+        )
     refused = [entry for entry in admission if not entry["admitted"]]
     detail = "; ".join(
         f"{entry['recipe_id']}: {entry['refusal_reason']}" for entry in refused
     )
     if refused and stops_on_admission_refusal(manifest.stopping_rules):
         phases.append({"phase": "admission", "verdict": "refused", "detail": detail})
-        return _refuse(manifest, root, candidate_version, phases, admission)
+        return precompute_refusal(phases, admission)
     admitted_ids = {entry["recipe_id"] for entry in admission if entry["admitted"]}
     recipes = tuple(recipe for recipe in recipes if recipe.recipe_id in admitted_ids)
     if not recipes:
         phases.append({"phase": "admission", "verdict": "refused", "detail": detail})
-        return _refuse(manifest, root, candidate_version, phases, admission)
+        return precompute_refusal(phases, admission)
     phases.append(
         {
             "phase": "admission",
@@ -571,7 +1079,7 @@ def run_campaign(
         phases.append(
             {"phase": "candidate_search", "verdict": "refused", "detail": str(refusal)}
         )
-        return _refuse(manifest, root, candidate_version, phases, admission)
+        return precompute_refusal(phases, admission)
     if search.declared:
         phases.append(
             {
@@ -620,7 +1128,7 @@ def run_campaign(
                 "detail": "; ".join(projection.failure_reasons),
             }
         )
-        return _refuse(manifest, root, candidate_version, phases, admission)
+        return precompute_refusal(phases, admission)
     phases.append(
         {
             "phase": "campaign_projection",
@@ -644,7 +1152,7 @@ def run_campaign(
         phases.append(
             {"phase": "readiness", "verdict": "refused", "detail": str(refusal)}
         )
-        return _refuse(manifest, root, candidate_version, phases, admission)
+        return precompute_refusal(phases, admission)
 
     try:
         evaluator = (
@@ -654,7 +1162,7 @@ def run_campaign(
         phases.append(
             {"phase": "readiness", "verdict": "refused", "detail": str(refusal)}
         )
-        return _refuse(manifest, root, candidate_version, phases, admission)
+        return precompute_refusal(phases, admission)
     if evaluator is None:
         phases.append(
             {
@@ -667,7 +1175,7 @@ def run_campaign(
                 ),
             }
         )
-        return _refuse(manifest, root, candidate_version, phases, admission)
+        return precompute_refusal(phases, admission)
 
     # The evaluator's own admission seam: material coverage, dataset existence
     # and slice length are all knowable before a GPU is touched, and the
@@ -686,7 +1194,7 @@ def run_campaign(
                     "detail": "; ".join(str(part) for part in evaluator_refusal),
                 }
             )
-            return _refuse(manifest, root, candidate_version, phases, admission)
+            return precompute_refusal(phases, admission)
     phases.append(
         {
             "phase": "readiness",
@@ -701,6 +1209,7 @@ def run_campaign(
     ledger = CycleCostLedger(cycle_id=manifest.cycle_id)
     results: list[Mapping[str, Any]] = []
     stopped_by: str | None = None
+    replay_index = 0
 
     def charge(evidence: Mapping[str, Any]) -> None:
         """Charge one attempt to the campaign's own ledger as it happens."""
@@ -727,6 +1236,140 @@ def run_campaign(
             return None
         return "campaign ceiling reached before the remaining candidates"
 
+    def run_one(recipe: Any) -> dict[str, Any]:
+        """Execute one attempt, journaling its start and its end.
+
+        The start line goes down *before* the executor is invoked: an attempt
+        that dies hard -- a killed subprocess tree, a killed process, a power
+        cut, anything no Python exit path can intercept -- still leaves who it
+        was and that it was running on the journal.
+        """
+        nonlocal replay_index
+        index = replay_index
+        spec_digest = content_digest({
+            "manifest_digest": replay_identity,
+            "recipe": asdict(recipe),
+            "curriculum_ids": [item.item_id for item in plan.items],
+            "index": index,
+        })
+        if index < len(replay):
+            receipt = replay[index]
+            if receipt.get("spec_digest") != spec_digest:
+                raise CampaignRunRefusal(
+                    "CAMPAIGN_RESUME_UNVERIFIED: planned recipe/round/checkpoint "
+                    "identity differs from the durable completed attempt"
+                )
+            evidence = dict(receipt["evidence"])
+            validate_resume_evidence(root, evidence)
+            if isinstance(executor, _BackendStampedTrainingFn):
+                expected_backend = {
+                    **executor.__dict__["_declared"],
+                    "version": executor.__dict__["_version"],
+                }
+                if evidence.get("backend") != expected_backend:
+                    raise CampaignRunRefusal(
+                        "CAMPAIGN_RESUME_UNVERIFIED: recorded attempt backend "
+                        "does not match the current declared backend"
+                    )
+            replay_index += 1
+            return evidence
+        if interrupted and index != len(replay):
+            raise CampaignRunRefusal("CAMPAIGN_RESUME_UNVERIFIED: attempt order changed")
+        if interrupted:
+            # Admission projected the *original* complete campaign before
+            # training. A resumed leg needs a fresh headroom check after the
+            # actual spend of its replayed attempts has been restored.
+            spent = ledger.total()
+            if (
+                spent.wall_gpu_hours + float(recipe.projected_wall_gpu_hours)
+                > manifest.budget.wall_gpu_hours_ceiling_campaign + 1e-12
+                or (
+                    manifest.budget.device_time_measured
+                    and spent.device_gpu_hours + float(recipe.projected_device_gpu_hours)
+                    > manifest.budget.device_gpu_hours_ceiling_campaign + 1e-12
+                )
+            ):
+                raise CampaignRunRefusal(
+                    "CAMPAIGN_RESUME_BUDGET: insufficient unspent declared "
+                    "campaign ceiling for another attempt"
+                )
+        # Choose the proof contract BEFORE executing any trainer. Never infer
+        # native-vs-remote proof from a mutable completion event afterward.
+        native_receipt = (
+            train_fn is None
+            and isinstance(getattr(executor, "_inner", None), SubprocessTrainingFn)
+        )
+        proof_mode = "receipt" if native_receipt else "completion"
+        _journal_event(
+            root, phase="attempt", status="started", recipe_id=recipe.recipe_id,
+            identity=spec_digest, index=index, proof_mode=proof_mode,
+        )
+        evidence = dict(executor(recipe, plan.items))
+        evidence["recipe_id"] = recipe.recipe_id
+        # Caller-provided executors are an open extension seam. Their records
+        # may lack the on-disk attempt evidence contract, so they continue to
+        # settle normally but never become replayable. A production attempt
+        # refused before training also has no GPU cost to checkpoint.
+        replayable = native_receipt and isinstance(evidence.get("actual_cost"), Mapping)
+        # A native executor can refuse during template/data/admission preflight
+        # *before* any trainer process is started. That legitimately has no
+        # paid native receipt and must remain recordable as REFUSED, not raise
+        # as though paid GPU evidence disappeared. It does not become an
+        # accepted native settlement proof or resumable trained attempt.
+        harmless_precompute_refusal = (
+            evidence.get("status") == "REFUSED"
+            and evidence.get("train_started") is False
+            and evidence.get("actual_cost") is None
+            and evidence.get("measured_gpu_hours") is None
+        )
+        if native_receipt and not replayable and not harmless_precompute_refusal:
+            # Local paid training cannot be relabeled as a remote completion
+            # when its durable native cost/evidence receipt is missing.
+            raise CampaignRunRefusal(
+                "CAMPAIGN_NATIVE_PROOF_MISSING: local training has no native "
+                "priced receipt; reconcile spend before any settlement"
+            )
+        if not replayable:
+            # Remote/custom executors have no native, byte-bound local
+            # checkpoint receipt. Give their terminal journal entry a distinct
+            # invocation identity and a digest of the charge actually settled,
+            # rather than pretending they have a replayable native receipt.
+            # An unpriced started attempt still raises and leaves an open
+            # journal; no fabricated zero-cost completion is recorded.
+            charged = _attempt_cost(evidence)
+            completion_digest = content_digest({
+                "identity": spec_digest,
+                "recipe_id": recipe.recipe_id,
+                "attempt": evidence.get("attempt"),
+                "status": evidence.get("status"),
+                "cost": charged.to_dict(),
+            })
+            _journal_event(
+                root, phase="attempt", status=evidence.get("status"),
+                recipe_id=recipe.recipe_id, attempt=evidence.get("attempt"),
+                gpu_hours=evidence.get("measured_gpu_hours"),
+                identity=spec_digest, index=index, detail=completion_digest,
+            )
+            replay_index += 1
+            return evidence
+        # Price the finished production invocation *before* its receipt
+        # becomes replayable. Unknown cost leaves it unpaired and blocks entry.
+        _attempt_cost(evidence)
+        try:
+            evidence_digest = commit_receipt(
+                root, index=index, spec_digest=spec_digest, evidence=evidence
+            )
+        except ResumeRefusal as error:
+            raise CampaignRunRefusal(str(error)) from error
+        _journal_event(
+            root, phase="attempt_receipt", status=evidence.get("status"),
+            recipe_id=recipe.recipe_id, attempt=evidence.get("attempt"),
+            gpu_hours=evidence.get("measured_gpu_hours"), identity=spec_digest,
+            index=index, detail=evidence_digest,
+        )
+        replay_index += 1
+        return evidence
+
     search_run = None
     if search.declared:
         # Bounded candidate search: cheap rounds first, only the final round's
@@ -738,7 +1381,7 @@ def run_campaign(
             declaration=manifest.candidate_search,
             recipes=recipes,
             project_cost=cycle.planner.project_cost,
-            run_attempt=lambda recipe: executor(recipe, plan.items),
+            run_attempt=run_one,
             on_attempt=lambda evidence, row: charge(evidence),  # noqa: ARG005
             should_stop=lambda _device, _wall: overrun(),  # noqa: ARG005
         )
@@ -760,13 +1403,17 @@ def run_campaign(
         )
     else:
         for recipe in recipes:
-            evidence = dict(executor(recipe, plan.items))
-            evidence["recipe_id"] = recipe.recipe_id
+            evidence = run_one(recipe)
             results.append(evidence)
             charge(evidence)
             stopped_by = overrun()
             if stopped_by:
                 break
+    if replay_index < len(replay) and interrupted:
+        raise CampaignRunRefusal(
+            "CAMPAIGN_RESUME_UNVERIFIED: journal holds attempts outside the "
+            "presently admitted plan or budget; refusing uncharged evidence"
+        )
     # Every attempt, from every round: a search's earlier, cheaper rounds are
     # real compute and real evidence, so they stay in the record even though
     # selection may only read the final round's results.
@@ -830,6 +1477,7 @@ def run_campaign(
                 "accounting_path": str(accounting_path),
                 "accounting_digest": accounting_digest,
             },
+            attempts=_attempt_summary(attempted),
         )
 
     # The candidate arm is produced here, from the artifact this run selected,
@@ -841,10 +1489,50 @@ def run_campaign(
     # written out as evidence before the run stops.
     try:
         _verify_selected_artifact(selected, purpose="before it is measured")
+        _journal_event(
+            root, phase="candidate_evaluation_started", status="started",
+            detail="external candidate evaluator may have spent compute",
+        )
+        evaluation_started = time.perf_counter()
         request, evaluation = _evaluate_candidate(
             manifest, root=root, selected=selected, eval_fn=evaluator
         )
     except CampaignRunRefusal as refusal:
+        if "evaluation_started" in locals():
+            # The evaluator may have performed partial real work before failing
+            # to emit a trustworthy cost/result. Charge the observed wall
+            # interval conservatively, mark device-hours unmeasured, and refuse.
+            # A missing evaluation summary is NEVER evidence of free compute.
+            elapsed = max(0.0, time.perf_counter() - evaluation_started)
+            declared_cost = getattr(refusal, "measured_evaluation_cost", None)
+            cost = (
+                declared_cost
+                if isinstance(declared_cost, ComputeCost)
+                else ComputeCost.from_wall_only(
+                    elapsed / 3600.0,
+                    source="failed-candidate-evaluation:subprocess-wall-fallback",
+                )
+            )
+            ledger.add(
+                "failed candidate evaluation (reported cost or observed wall fallback)",
+                "evaluation",
+                cost,
+                notes=(
+                    "the reported evaluation cost is independently valid"
+                    if declared_cost is not None
+                    else "partial evaluation elapsed wall time; device use unmeasured"
+                ),
+            )
+            _journal_event(
+                root,
+                phase="candidate_evaluation_cost",
+                status=(
+                    "reported_cost_before_refusal"
+                    if declared_cost is not None else "fallback_unmeasured_device"
+                ),
+                gpu_hours=cost.wall_gpu_hours,
+                detail="evaluation failure charged; no promotion allowed",
+            )
         accounting_digest = ledger.write(accounting_path)
         total = ledger.total()
         if stopped_by:
@@ -1018,20 +1706,47 @@ def run_campaign(
             }
         )
 
-    outcome = _finalize(
-        manifest,
-        cycle=cycle,
-        decision=_with_resource_veto(decision, settlement),
-        selected=selected,
-        root=root,
-        # The report this run produced, at the path the judge reads: the lineage
-        # names the measurement that decided it, not an input it was handed.
-        evaluation_report_ref=str(root / CERTIFICATION_EVIDENCE["candidate"]),
-        # The ledger entry itself names the backend that produced the
-        # generation: a reader sees which generator produced it without
-        # joining this run record.
-        backend_record=backend_record,
-    )
+    # The promotion policy's PROMOTED is *candidate qualification*, not Nik's
+    # permission to advance a generation. A denied/headless prompt preserves
+    # every measured arm and the mechanical verdict in `promotion`, but no
+    # promotion transaction or lineage record may be written. Never accept an
+    # environment variable as an approval switch, even during tests.
+    owner_grant = None
+    if verdict == "PROMOTED" and requires_owner_approval(manifest.base_model_path):
+        artifact_sha = str((selected or {}).get("artifact_sha256") or "")
+        judge_passed = judge_certifies_candidate(root)
+        if judge_passed:
+            owner_grant = authorize_promotion(
+                cycle_id=manifest.cycle_id,
+                candidate_version=candidate_version,
+                artifact_sha256=artifact_sha,
+                judge_certified=True,
+            )
+        approved = judge_passed and verify_grant(
+            owner_grant, cycle_id=manifest.cycle_id,
+            candidate_version=candidate_version, artifact_sha256=artifact_sha,
+        )
+        phases.append({
+            "phase": "human_approval",
+            "verdict": "approved" if approved else "pending",
+            "cycle_id": manifest.cycle_id,
+            "candidate_version": candidate_version,
+            "artifact_sha256": artifact_sha,
+            "frozen_judge_passed": judge_passed,
+            "detail": (
+                f"operator explicitly approved {candidate_version} artifact sha256 {artifact_sha}"
+                if approved else "HUMAN_APPROVAL_REQUIRED: qualified candidate is not authorized "
+                "for generation advancement; frozen REAP judge certification and subsequent "
+                "owner approval are both required; no lineage will be recorded"
+            ),
+        })
+        if not approved:
+            verdict = "INCONCLUSIVE"
+            decision = replace(
+                decision, verdict=verdict,
+                reasons=tuple(decision.reasons) + ("HUMAN_APPROVAL_REQUIRED",),
+            )
+
     run = CampaignRun(
         cycle_id=manifest.cycle_id,
         parent_version=manifest.parent_version,
@@ -1057,7 +1772,47 @@ def run_campaign(
         promotion=assembly.to_dict(),
         record_path="",
     )
-    return _write_record(run, root, outcome=outcome)
+    finalized_decision = _with_resource_veto(decision, settlement)
+    if run.verdict == "PROMOTED":
+        if finalized_decision.verdict != "PROMOTED":
+            raise CampaignRunRefusal("PROMOTION_TRANSACTION_MISMATCH: resource veto not reflected in run")
+        # This fsynced PREPARED intent precedes every lineage mutation. A raw
+        # ledger entry written afterward stays invisible until the campaign's
+        # own terminal journal and matching JSON verdict are durably published.
+        prepare_transaction(
+            root, cycle_id=manifest.cycle_id, candidate_version=candidate_version,
+            run_document=run.to_dict(), promotion=finalized_decision.to_dict(),
+            manifest_digest=declaration_digest,
+        )
+        _journal_event(root, phase="promotion_prepare", status="PREPARED")
+    outcome = _finalize(
+        manifest,
+        cycle=cycle,
+        decision=finalized_decision,
+        selected=selected,
+        root=root,
+        # The report this run produced, at the path the judge reads: the lineage
+        # names the measurement that decided it, not an input it was handed.
+        evaluation_report_ref=str(root / CERTIFICATION_EVIDENCE["candidate"]),
+        # The ledger entry itself names the backend that produced the
+        # generation: a reader sees which generator produced it without
+        # joining this run record.
+        backend_record=backend_record,
+        owner_approval=owner_grant,
+    )
+    saved = _write_record(run, root, outcome=outcome)
+    if run.verdict == "PROMOTED":
+        committed = reconcile_transaction(
+            root, cycle_id=manifest.cycle_id, candidate_version=candidate_version,
+            journal_verdict=_journal_outcome(_journal_path(root)),
+            manifest_digest=declaration_digest,
+        )
+        if committed is None:
+            raise CampaignRunRefusal(
+                "PROMOTION_TRANSACTION_UNRESOLVED: campaign terminal and lineage "
+                "could not be bound; promotion remains unavailable"
+            )
+    return saved
 
 
 # --------------------------------------------------------------------------
@@ -1917,6 +2672,16 @@ def _attempt_cost(evidence: Mapping[str, Any]) -> ComputeCost:
     if isinstance(recorded, Mapping):
         return ComputeCost.from_dict(recorded)
     measured = evidence.get("measured_gpu_hours")
+    if measured is None and evidence.get("train_started") is True:
+        # An executed trainer with no valid cost has UNKNOWN spend, not zero.
+        # Raising here leaves the durable campaign journal open, so re-entry
+        # refuses until an operator reconciles the actual GPU time. No further
+        # recipe or downstream promotion may run on unverifiable accounting.
+        raise CampaignRunRefusal(
+            "ACTUAL_WALL_GPU_HOURS_UNMEASURED: trainer started but neither "
+            "a trustworthy summary nor subprocess wall-time measurement "
+            "was available; reconcile this attempt before resuming"
+        )
     return ComputeCost.from_wall_only(
         float(measured or 0.0), source=f"attempt:{evidence.get('attempt', 'unknown')}"
     )
@@ -2088,7 +2853,16 @@ def _evaluate_candidate(
     try:
         return request, validate_candidate_report(coerce_evaluation(returned), request)
     except CandidateEvaluationRefusal as refusal:
-        raise CampaignRunRefusal(str(refusal)) from refusal
+        wrapped = CampaignRunRefusal(str(refusal))
+        # A report can be invalid for provenance/identity while its cost is
+        # still a valid measurement. Preserve that cost rather than replacing
+        # it with a second, timer-derived estimate.
+        if isinstance(returned, CandidateEvaluation):
+            try:
+                wrapped.measured_evaluation_cost = validate_evaluation_cost(returned)
+            except CandidateEvaluationRefusal:
+                pass
+        raise wrapped from refusal
 
 
 def _adjudicate(
@@ -2188,12 +2962,16 @@ def _finalize(
     root: Path,
     evaluation_report_ref: str,
     backend_record: Mapping[str, Any] | None = None,
+    owner_approval: Any = None,
 ) -> CycleOutcome:
     return cycle.finalize(
         decision,
         base_model={
             **manifest.model_identity(),
             "version": manifest.parent_version,
+            "lineage": (
+                "reap-moe" if requires_owner_approval(manifest.base_model_path) else "primary"
+            ),
         },
         dataset_manifest_ref=selected.get("evidence_path", "") if selected else "",
         curriculum_manifest_ref=str(root / "cycle_compute_accounting.json"),
@@ -2202,6 +2980,8 @@ def _finalize(
         evaluation_report_ref=evaluation_report_ref,
         notes=f"campaign {manifest.cycle_id} (policy {PROMOTION_POLICY_VERSION})",
         backend=_backend_lineage(backend_record),
+        owner_approval=owner_approval,
+        candidate_artifact_sha256=str((selected or {}).get("artifact_sha256") or ""),
     )
 
 
@@ -2396,6 +3176,8 @@ READINESS_CANDIDATE_SEARCH = "READINESS_CANDIDATE_SEARCH"
 READINESS_CAMPAIGN_PROJECTION = "READINESS_CAMPAIGN_PROJECTION"
 READINESS_EVALUATOR = "READINESS_EVALUATOR"
 READINESS_EVALUATOR_COVERAGE = "READINESS_EVALUATOR_COVERAGE"
+READINESS_CAMPAIGN_STATE = "READINESS_CAMPAIGN_STATE"
+READINESS_EXECUTOR_ADMISSION = "READINESS_EXECUTOR_ADMISSION"
 
 
 @dataclass(frozen=True)
@@ -2511,10 +3293,58 @@ def check_campaign_readiness(
         assert_every_field_enforced() or "schema matches FIELD_ENFORCEMENT"
     ))
 
-    check("declared_inputs", READINESS_DECLARED_INPUT, ("schema",), lambda: (
+    def declared_source_identity() -> str:
         require_declared_inputs(manifest, phase="run")
-        or "every input the run phase requires is declared"
-    ))
+        # The run hashes declared input files *before* starting any trainer.
+        # Readiness must perform that same preflight, otherwise it can report
+        # READY for a nonexistent file while run_campaign correctly refuses.
+        try:
+            digest = declared_inputs_digest(manifest)
+        except ResumeRefusal as error:
+            raise CampaignRunRefusal(str(error)) from error
+        return f"required inputs declared and source file SHA256 manifest {digest[:12]} verified"
+
+    check("declared_inputs", READINESS_DECLARED_INPUT, ("schema",), declared_source_identity)
+
+    def campaign_state_detail() -> str:
+        from chowder.worker_env import chowder_source_identity
+
+        replay_identity = content_digest({
+            "declaration": content_digest(asdict(manifest)),
+            "declared_files": declared_inputs_digest(manifest),
+            "source_sha256": chowder_source_identity()["source_sha256"],
+        })
+        state, receipts, detail = _campaign_root_state(
+            root, replay_identity=replay_identity,
+        )
+        if state not in ("fresh", "resume"):
+            raise CampaignRunRefusal(detail)
+        # The runner also holds a kernel lock throughout admission and
+        # execution. Probe an existing lock without creating/writing one:
+        # readiness is advisory, and the runner acquires it again atomically.
+        lock_path = root / ".campaign-writer.lock"
+        if lock_path.exists():
+            try:
+                with lock_path.open("r+b") as handle:
+                    handle.seek(0)
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError as error:
+                raise CampaignRunRefusal(
+                    f"CAMPAIGN_WRITER_BUSY: state root writer is locked: {error}"
+                ) from error
+        return detail
+
+    check(
+        "campaign_state", READINESS_CAMPAIGN_STATE,
+        ("declared_inputs",), campaign_state_detail,
+    )
 
     def base_identity() -> str:
         return _verify_base_identity(manifest)
@@ -2672,6 +3502,34 @@ def check_campaign_readiness(
         f"{len(recipes_of())} declared recipe(s) proposed by the planner"
     ))
 
+    def training_admission_detail() -> str:
+        # Mirror the run's provider and per-recipe admission seam before it
+        # journals campaign_start or touches an actual training subprocess.
+        if train_fn is not None:
+            executor = train_fn
+        else:
+            executor, _selection = build_executor_with_selection(
+                manifest, state_root=root, runner=runner,
+            )
+        admit = getattr(executor, "admit", None)
+        if not callable(admit):
+            raise CampaignRunRefusal("training executor has no admit(recipe) seam")
+        refusals = []
+        for recipe in recipes_of():
+            refusal = admit(recipe)
+            if refusal is not None:
+                refusals.append(f"{recipe.recipe_id}: {refusal}")
+        if refusals and stops_on_admission_refusal(manifest.stopping_rules):
+            raise CampaignRunRefusal("; ".join(refusals))
+        if len(refusals) == len(recipes_of()):
+            raise CampaignRunRefusal("every declared recipe was refused by its executor")
+        return f"{len(recipes_of()) - len(refusals)} recipe(s) admitted by training backend"
+
+    check(
+        "executor_admission", READINESS_EXECUTOR_ADMISSION,
+        ("recipe_set", "campaign_state"), training_admission_detail,
+    )
+
     def search_detail() -> str:
         plan = plan_of()
         if plan.search_refusal:
@@ -2784,13 +3642,40 @@ def check_campaign_readiness(
 
 
 def _write_record(
-    run: CampaignRun, root: Path, *, outcome: CycleOutcome | None
+    run: CampaignRun, root: Path, *, outcome: CycleOutcome | None,
+    terminal: bool = True, record_name: str = "campaign-run.json"
 ) -> CampaignRun:
     document = run.to_dict()
     if outcome is not None:
         document["cycle_outcome"] = outcome.to_dict()
-    path = root / "campaign-run.json"
-    path.write_text(json.dumps(document, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    if record_name not in ("campaign-run.json", "campaign-entry-refusal.json"):
+        raise ValueError("campaign record location is not an approved filename")
+    path = root / record_name
+    # Atomic: a kill mid-write must never leave a truncated JSON verdict
+    # behind; the terminal journal line below only goes down once the verdict
+    # file is complete.
+    tmp = path.with_name(path.name + ".tmp")
+    # Make the verdict file's bytes durable before publishing its name. The
+    # terminal journal marker must never follow an unflushed verdict file.
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(document, indent=2, sort_keys=True, default=str))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    if terminal:
+        # The journal record that closes the campaign: written *after* the
+        # verdict file it points at is durable, so a kill before this line
+        # leaves the journal open and the state root refusing rather than a
+        # verdict nobody's entry check trusts.
+        selection = dict(run.selection or {})
+        cost = dict(run.cost or {})
+        _journal_event(
+            root,
+            phase="terminal",
+            status=run.verdict,
+            recipe_id=selection.get("recipe_id"),
+            gpu_hours=cost.get("wall_gpu_hours"),
+        )
     return CampaignRun(
         cycle_id=run.cycle_id,
         parent_version=run.parent_version,

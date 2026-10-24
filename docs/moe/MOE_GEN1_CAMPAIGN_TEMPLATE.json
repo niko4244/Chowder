@@ -76,6 +76,7 @@
     "provider": "local",
     "config": {
       "expert_placement": "cpu-transient-grad",
+      "max_length": 2048,
       "target_preset": "moe_frozen_experts",
       "dataset_format": "chat",
       "messages_field": "messages",
