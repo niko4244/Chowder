@@ -57,6 +57,30 @@ On the existing, authenticated nikmarco account:
      or original 72 GB throughput, model loading speed or frozen D0.
      The measured Kaggle /tmp free space was ~1048.8 GiB on that worker.
 
+## Bounded mounted-shard to /tmp staging verification
+
+Source: chowder_batch/kaggle_checkpoint_stage_probe.py.
+CPU-only tests: tests/test_kaggle_checkpoint_stage_probe.py.
+
+The staging verifier copies **at most 128 MiB** from the first real
+mounted safetensors shard to a new temporary directory within /tmp,
+flushes and fsyncs the bytes, reads and verifies the local copy's SHA256
+against the sampled source, and deletes the temporary copy, even on
+exception. It emits elapsed read/write/verify times and a small exclusive
+JSON receipt. Missing mount, scratch, symlinked or escaped files,
+insufficient scratch and over-budget requests fail closed. This is NOT a
+full checkpoint copy, weight digest, training step, registered REAP128_v2
+observation or gate acceptance.
+
+The repository contains an observed old-model load that read 29.25 GiB
+in 707.7 minutes (~0.69 MB/sec effective tensor-by-tensor), versus a
+different CPU remote 64 MiB sequential mount sample at 53.18186 MiB/sec.
+The bounded copy proof targets the missing mount-to-scratch throughput and
+integrity link. A complete 46/72 GB copy needs a **separate run in the same
+remote session as the model**, because Kaggle /tmp is ephemeral and not
+shared across subsequent notebook sessions. The 20 GB /kaggle/working
+saved-output limit does not accommodate the original 71.9 GB checkpoint.
+
 ## Reproducible hardware probes
 
 Source: chowder_batch/kaggle_hardware_probe.py.
