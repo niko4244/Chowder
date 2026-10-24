@@ -7,9 +7,13 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
-import torch
+
+# The default all-Python CI matrix intentionally does not install the optional
+# heavyweight Torch runtime. Native BF16 parity is verified in the dedicated
+# Transformers/PEFT smoke job and on the owner's RTX 5060 Ti.
+np = pytest.importorskip("numpy")
+torch = pytest.importorskip("torch")
 
 from chowder_batch import reap_hidden_memmap as hidden_module
 
