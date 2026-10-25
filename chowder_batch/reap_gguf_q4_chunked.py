@@ -26,7 +26,11 @@ BINARY_SHA256 = "eeb75877bd41d8d7b51d18129d873e6220014613baea349fa18e6b5d36c987d
 FINALIZATION_SCHEMA = "chowder.reap128-v2-gguf-q4-durable-finalization.v1"
 MERGE_COPY_BLOCK = core.HASH_BLOCK
 ADMISSION_POLL_SECONDS = 5
-ADMISSION_MAX_WAIT_SECONDS = 600
+# Prolonged unrelated host memory pressure reached the former ten-minute
+# limit after seven fully certified production parts. Keep the *same* 12/16
+# GiB entry floors, but permit a bounded one-hour quiet wait before an
+# additional chunk, avoiding repeated 37-GB parent rehashes on recovery.
+ADMISSION_MAX_WAIT_SECONDS = 3600
 
 
 def _require_no_competing_quantizer() -> None:

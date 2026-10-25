@@ -69,6 +69,7 @@ def test_q4_transient_initial_ram_and_commit_wait_preserves_original_floors(
         return replies.pop(0)
 
     monkeypatch.setattr(supervisor, "resource_problems", resource)
+    assert q4.ADMISSION_MAX_WAIT_SECONDS == 3600
     monkeypatch.setattr(q4, "_require_no_competing_quantizer",
                         lambda: inspections.append(True))
     monkeypatch.setattr(q4.time, "sleep", lambda value: sleeps.append(value))

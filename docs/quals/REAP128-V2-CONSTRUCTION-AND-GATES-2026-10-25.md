@@ -994,3 +994,29 @@ under fresh recovered 12/16 GiB admission, using a new exclusive log at
 `F:\reap128-v2-q4-streaming-resume2-20261025.log`. It must revalidate
 the existing 2 original chunk receipts before any further conversion.
 **No full Q4 GGUF/quality-gate completion is claimed by this recovery.**
+
+### October 25 14:46 CDT — seven certified Q4 chunks, prolonged admission refusal
+
+The first resumed exclusive Q4 owner advanced production to **7/42**
+SHA-sealed Q4 chunk GGUFs, each with its intact per-chunk immutable
+receipt on G:. The next per-chunk start was correctly refused after the
+bounded ten-minute resource wait reached its deadline while host RAM and
+Windows free commit remained below **unchanged 12/16 GiB initial floors**.
+The original owner exited code 2; independent live process census found
+no competing quantizer or Q4 owner. All seven already-certified chunk
+files and receipts remain intact; the final full Q4 GGUF is **not built**.
+At recovery inspection the host independently had **16.30 GiB free RAM,
+23.44 GiB free Windows commit**, and F/G/I free space
+**37.52/31.83/15.95 GiB**. The prior timeout lost no certified tensor
+work, but required another expensive original BF16 identity pass.
+
+The next finite per-chunk admission wait is now **3600 seconds instead
+of 600 seconds** under the same original process owner, unchanged
+`resource_problems(initial=True)` and untouched 12/16 GiB entry,
+7/8 GiB runtime and 6 GiB disk floors. It holds the exclusive lock,
+launches no quantizer until admission passes, checks competing-process
+ownership throughout, and continues to refuse disk breaches, modified
+minis or uninspectable owners immediately. New CPU-only regression
+matrix: **33 passed, one real quantizer case intentionally deselected**,
+Ruff clean. No GSM8K/HumanEval, CUDA parity, fit/speed, REAP160 or Gen-0
+status is changed by this production recovery.
