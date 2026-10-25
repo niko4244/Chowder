@@ -181,6 +181,91 @@ def _synthetic_registered_v2_model(tmp_path, *, arm="reap128_v2_q4"):
     return gguf, sha, path, record
 
 
+def test_initial_serve_receipt_fsyncs_before_exclusive_visibility(tmp_path, monkeypatch):
+    final = tmp_path / "serve.json"
+    recorded = []
+    original_fsync = reap_serve.os.fsync
+
+    def fsync(fd):
+        files = list(tmp_path.glob(".serve.json.*.pending"))
+        assert len(files) == 1 and not final.exists()
+        recorded.append(json.loads(files[0].read_text(encoding="utf-8")))
+        return original_fsync(fd)
+
+    monkeypatch.setattr(reap_serve.os, "fsync", fsync)
+    expected = {"gguf_sha256": "a" * 64,
+                "experts_offloaded": None, "quality_gate": "NOT_EVALUATED"}
+    reap_serve._publish_initial_serve_exclusive(final, expected)
+    assert recorded == [expected]
+    assert json.loads(final.read_text(encoding="utf-8")) == expected
+    assert not list(tmp_path.glob(".serve.json.*.pending"))
+
+
+def test_partial_initial_serving_write_never_exposes_incomplete_receipt(
+    tmp_path, monkeypatch,
+):
+    final = tmp_path / "serve.json"
+    real_open = Path.open
+    partial = []
+
+    class Interrupted:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def write(self, bytestring):
+            self.stream.write(bytestring[:11])
+            partial.append(True)
+            raise OSError("injected partial original serving JSON")
+
+    def intercepted_open(self, mode="r", *args, **kwargs):
+        stream = real_open(self, mode, *args, **kwargs)
+        if self.parent == tmp_path and self.name.endswith(".pending") and mode == "xb":
+            return Interrupted(stream)
+        return stream
+
+    monkeypatch.setattr(Path, "open", intercepted_open)
+    with pytest.raises(OSError, match="partial original serving"):
+        reap_serve._publish_initial_serve_exclusive(final, {"model": "frozen"})
+    assert partial == [True]
+    assert not final.exists()
+    assert not list(tmp_path.glob(".serve.json.*.pending"))
+
+
+def test_existing_initial_serve_receipt_cannot_be_replaced_in_publication_race(
+    tmp_path, monkeypatch,
+):
+    final = tmp_path / "serve.json"
+    original = b"earlier source-bound serving session\n"
+    real_link = reap_serve.os.link
+    real_rename = Path.rename
+
+    def competing_link(source, target, *args, **kwargs):
+        if str(source).endswith(".pending") and Path(target) == final:
+            final.write_bytes(original)
+            raise FileExistsError("original serving receipt was just claimed")
+        return real_link(source, target, *args, **kwargs)
+
+    def competing_rename(self, target):
+        if self.name.endswith(".pending") and Path(target) == final:
+            final.write_bytes(original)
+            raise FileExistsError("original serving receipt was just claimed")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(reap_serve.os, "link", competing_link)
+    monkeypatch.setattr(Path, "rename", competing_rename)
+    with pytest.raises(FileExistsError, match="just claimed"):
+        reap_serve._publish_initial_serve_exclusive(final, {"source": "foreign"})
+    assert final.read_bytes() == original
+    assert not list(tmp_path.glob(".serve.json.*.pending"))
+
+
 def test_new_v2_serving_refuses_foreign_unpublished_gguf_before_model_launch(
     tmp_path, monkeypatch,
 ):

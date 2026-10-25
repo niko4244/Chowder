@@ -78,6 +78,30 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _publish_initial_serve_exclusive(path: Path, receipt: dict) -> None:
+    """Publish only an entirely fsynced, never-replaced initial serve receipt.
+
+    After a crash during JSON writing, an incomplete `.serve.json` could
+    otherwise masquerade as authoritative session evidence. Private pending
+    siblings may survive hard kills but cannot be mistaken for a receipt.
+    Re-entry with such an orphan still refuses, pending a manual owner audit.
+    """
+    pending = path.with_name(f".{path.name}.{uuid.uuid4().hex}.pending")
+    try:
+        raw = (json.dumps(receipt, sort_keys=True, indent=2,
+                          allow_nan=False) + "\n").encode("utf-8")
+        with pending.open("xb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.name == "nt":
+            pending.rename(path)
+        else:
+            os.link(pending, path)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
 def _verify_registered_v2_construction(gguf: Path, arm: str, digest: str) -> None:
     """Do not serve an unregistered/partial v2 GGUF merely because it hashes.
 
@@ -516,8 +540,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 if resumed:
                     receipt["session_log"] = log_path.name
-                with receipt_path.open("x", encoding="utf-8") as record:
-                    json.dump(receipt, record, indent=2)
+                _publish_initial_serve_exclusive(receipt_path, receipt)
                 eval_py = str(Path(__file__).with_name("reap_eval.py"))
                 code = _run_eval(proc, [sys.executable, eval_py, *eval_args])
                 if _model_stat(gguf) != model_stat:
@@ -545,6 +568,10 @@ def main(argv: list[str] | None = None) -> int:
                         try:
                             with pending.open("x", encoding="utf-8") as record:
                                 json.dump(receipt, record, indent=2)
+                                record.flush()
+                                os.fsync(record.fileno())
+                            if json.loads(receipt_path.read_text(encoding="utf-8")) != provisional_receipt:
+                                raise ValueError("REAP provisional serving receipt changed before atomic replacement")
                             os.replace(pending, receipt_path)
                         finally:
                             if pending.exists():

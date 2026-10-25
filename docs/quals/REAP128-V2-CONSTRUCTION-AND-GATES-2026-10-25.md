@@ -1528,3 +1528,39 @@ governed by unchanged original admission guards and current-process-only
 cache trim. No additional quantizer or GPU evaluation was launched.
 This real cached input proof is a *prerequisite*, not registered quality,
 same-session speed, CUDA parity, or deterministic Gen-0 selection.
+
+### October 25 16:45 CDT — initial serving identity and speed-promotion crash safety
+
+New source-bound model-serving sessions previously wrote their original
+`serve.json` directly to its authoritative destination using `open('x')`
+and `json.dump`. A truncated process write could strand an incomplete
+original serving receipt that prevents a sound new experiment, and cannot
+provide a valid model/source ancestry witness. The wrapper now first
+writes complete finite JSON to an exclusive same-directory private
+pending file, flushes and `fsync`s it, then publishes via Windows
+no-replace rename or POSIX exclusive hard link. It always removes only
+its own staged sibling on an ordinary error, never overwrites the first
+authoritative original serving receipt, and preserves fail-closed orphan
+admission on abrupt termination. The separate same-session, witnessed
+200-item Q4 speed certification still conditionally replaces only its
+own verified provisional receipt, now `fsync`s the full replacement
+before publication and rechecks original receipt identity immediately
+before replacement. Genuine server PIDs, original startup-log hashes,
+model SHA, frozen flags, source cohort/row witnesses and offload proofs
+remain required; no scientific threshold or measurement status changed.
+
+CPU adversarial tests prove whole JSON + `fsync` before first receipt
+visibility, interrupted partial write never exposes invalid authoritative
+bytes, and a second concurrent publishing actor cannot replace a prior
+session. The integrated offline serving/evaluator/gate suite passed
+**149 tests**, two harmless Python warnings, Ruff and Git diff checks
+clean. This is evidence publication integrity, **not** actual serving or
+GSM8K/HumanEval/throughput evidence.
+
+At this report's host read, fifth exclusive Q4 owner PID 46388 was still
+live revalidating the **27** existing source-bound part pairs. The actual
+registered offline dataset verification certificate from a parallel
+contribution was already committed as `ae4ad01` and is preserved; these
+new serving receipt changes do not alter its frozen content digests.
+Original Q4 output, numerical fidelity, hardware and Gen-0 gates remain
+`UNKNOWN`/`BLOCKED` until genuine experiments complete.
