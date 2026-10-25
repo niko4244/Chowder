@@ -52,6 +52,35 @@ def test_q4_refuses_a_running_q8_or_other_quantizer(monkeypatch):
         q4._require_no_competing_quantizer()
 
 
+def test_q4_census_does_not_misclassify_pytest_filename_as_constructor(monkeypatch):
+    """Reproduce the real production 27/42 safe-stop after broad CPU pytest.
+
+    A running `python -m pytest tests/test_reap_gguf_chunked.py` is not an
+    active quantizer, and must not force an expensive live Q4 exit. Exact
+    modules, direct script invocation and -c constructor wrappers remain
+    protected by the same fail-closed process census.
+    """
+    import psutil
+
+    proc = SimpleNamespace(info={"pid": os.getpid() + 1000, "name": "python.exe",
+                                 "cmdline": ["python", "-B", "-m", "pytest", "-q",
+                                             "tests/test_reap_gguf_q4_chunked.py",
+                                             "tests/test_reap_gguf_chunked.py",
+                                             "tests/test_reap_gguf_chunked_recover.py"]})
+    monkeypatch.setattr(psutil, "process_iter", lambda fields: [proc])
+    q4._require_no_competing_quantizer()
+
+    for argv in (
+        ["python", "-u", "-B", "-m", "chowder_batch.reap_gguf_q4_chunked", "--execute"],
+        ["python", "-m", "chowder_batch.reap_gguf_chunked", "--execute"],
+        ["python", "-B", "C:/repo/chowder_batch/reap_gguf_chunked.py", "--execute"],
+        ["python", "-c", "from chowder_batch.reap_gguf_q4_chunked import run_q4; run_q4()"],
+    ):
+        proc.info["cmdline"] = argv
+        with pytest.raises(ValueError, match="concurrent Q8/Q4"):
+            q4._require_no_competing_quantizer()
+
+
 def test_q4_transient_initial_ram_and_commit_wait_preserves_original_floors(
     tmp_path, monkeypatch,
 ):

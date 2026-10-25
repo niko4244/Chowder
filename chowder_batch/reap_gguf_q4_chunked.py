@@ -70,7 +70,7 @@ def _require_no_competing_quantizer() -> None:
             if info["pid"] == os.getpid():
                 continue
             name = (info.get("name") or "").lower()
-            argv = " ".join(info.get("cmdline") or []).lower()
+            argv = [str(arg).lower() for arg in (info.get("cmdline") or [])]
         except (psutil.NoSuchProcess, psutil.ZombieProcess):
             continue
         except psutil.AccessDenied:
@@ -81,12 +81,25 @@ def _require_no_competing_quantizer() -> None:
             if owner_name == "llama-quantize.exe" or owner_name.startswith("python"):
                 raise ValueError("another uninspectable Python/quantizer owner is active") from None
             continue
+        modules = {"chowder_batch.reap_gguf_chunked",
+                   "chowder_batch.reap_gguf_q4_chunked"}
+        scripts = {"reap_gguf_chunked.py", "reap_gguf_q4_chunked.py"}
+        # Do not substring-search the entire Python argv. Running a safe
+        # `pytest tests/test_reap_gguf_chunked.py` otherwise masquerades as
+        # another constructor and falsely aborts the sole production owner.
+        # Still deny actual -m modules, directly invoked script basenames,
+        # and explicit -c wrapper code importing a Q8/Q4 constructor.
+        executing_module = any(a == "-m" and i + 1 < len(argv)
+                               and argv[i + 1] in modules
+                               for i, a in enumerate(argv))
+        executing_script = any(a.replace("\\", "/").split("/")[-1] in scripts
+                               for a in argv[1:])
+        executing_code = any(a == "-c" and i + 1 < len(argv)
+                             and any(module in argv[i + 1] for module in modules)
+                             for i, a in enumerate(argv))
         if (name == "llama-quantize.exe"
-                or (name.startswith("python") and any(marker in argv for marker in (
-                    "chowder_batch.reap_gguf_chunked",
-                    "chowder_batch.reap_gguf_q4_chunked",
-                    "reap_gguf_chunked.py", "reap_gguf_q4_chunked.py",
-                )))):
+                or (name.startswith("python") and
+                    (executing_module or executing_script or executing_code))):
             raise ValueError("concurrent Q8/Q4 quantization owner detected; refusing Q4")
 
 

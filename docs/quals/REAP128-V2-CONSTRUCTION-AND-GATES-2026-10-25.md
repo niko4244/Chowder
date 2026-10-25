@@ -1351,3 +1351,42 @@ No final Q4 output or source-bound Q4 numerical results existed. Free
 physical RAM ~15.41 GiB, Windows commit ~17.56 GiB, F/G/I disk free
 ~36.68/26.89/12.75 GiB. Original resource floors and external GPU
 service ownership remain unchanged; all incomplete gates BLOCKED/UNKNOWN.
+
+### October 25 16:19 CDT — 27 certified Q4 chunks, conservative false-positive owner stop
+
+The original fourth source-bound Q4 supervisor (PID 72824, session 54281)
+progressed to **27 of 42** real SHA-sealed chunks, including the immutable
+chunk 027 GGUF SHA-256
+`d75ce4655d4d2803cd286de013a6ca721afe84383c5c3ef1820a7acf0f7e358a`.
+It then exited with guarded code 2 reporting
+`concurrent Q8/Q4 quantization owner detected; refusing Q4`. Independent
+process census verified **no second Q4 or Q8 constructor and no competing
+`llama-quantize` process**. Instead, the prime's own concurrent offline
+pytest executable was `python -B -m pytest ...
+tests/test_reap_gguf_chunked.py ...`; the production guard had
+substring-searched the *entire Python argument string*, incorrectly
+matching `reap_gguf_chunked.py` inside the harmless test filename
+`test_reap_gguf_chunked.py`. All 27 completed G: GGUF files and matching
+receipts survived; the F: mini scratch was empty and the final Q4 GGUF
+was not published. This was a deliberately conservative ownership
+refusal, **not** failed quantization mathematics or tensor-integrity loss.
+
+The census now matches exact module identities, directly executed Q8/Q4
+script basenames or explicit Python `-c` constructor-wrapper code; it
+continues to refuse *all* actual `llama-quantize.exe` processes and
+uninspectable potential Python/quantizer owners. It no longer confuses
+`python -m pytest tests/test_reap_gguf_chunked.py` for a constructor.
+Adversarial reproduction covers that actual false-positive command plus
+four genuine competing Q8/Q4 invocation forms; dedicated census,
+competing-process and unknown-owner CPU regression passed **3 tests**,
+Ruff and whitespace checks clean. The broader regression invocation
+completed **352 passed, 2 skipped, 1 real pinned quantizer deliberately
+excluded** (six warnings) but the standalone large-test invocation itself
+caused the old false-positive census before these guard changes.
+
+Original sealed chunks must be revalidated and **reused**, never deleted
+or requantized. Any fifth exclusive resume must first independently prove
+the old owner and all child quantizers are exited, scratch unsealed files
+absent, original source SHA/quantizer identity unchanged, host floors met
+and a fresh audit log path unused. No unrelated Ollama/llama.cpp services
+may be interrupted and all deployment/scientific gates remain BLOCKED.
