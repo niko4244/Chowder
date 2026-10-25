@@ -179,3 +179,94 @@ def test_production_gguf_stages_require_checked_moe_topology(tmp_path, monkeypat
     assert checked == [32, 7, 15]
     assert all(p["topology_receipt"]["status"] == "GGUF_METADATA_TOPOLOGY_MATCH_ONLY"
                for p in result["phases"])
+
+
+def test_q4_rescue_uses_published_bf16_without_claiming_q8_success(tmp_path, monkeypatch):
+    spec = _spec(tmp_path)
+    monkeypatch.setattr(supervise, "resource_problems", lambda *a, **k: [])
+    previous_calls = []
+
+    def fail_q8(command, **kwargs):
+        previous_calls.append(command)
+        return 0 if len(previous_calls) == 1 and _stub_command(command, **kwargs) == 0 else 3
+
+    monkeypatch.setattr(supervise, "_owned_stage", fail_q8)
+    with pytest.raises(RuntimeError, match="phase 1 returned 3"):
+        supervise.build(specification=spec, log_path=tmp_path / "first.log", execute=True)
+    assert (tmp_path / "new-original.gguf").is_file()
+    assert not (tmp_path / "new-q8.gguf").exists()
+    assert not (tmp_path / "new-q4.gguf").exists()
+    commands = []
+
+    def record_q4(command, **kwargs):
+        commands.append(command)
+        return _stub_command(command, **kwargs)
+
+    monkeypatch.setattr(supervise, "_owned_stage", record_q4)
+    result = supervise.build(
+        specification=spec, log_path=tmp_path / "only-q4.log",
+        execute=True, resume=True, only_q4=True,
+    )
+    assert result["status"] == "GGUF_Q4_ONLY_CPU_BUILD_NOT_QUALITY_QUALIFIED"
+    assert result["included_phases"] == [0, 2]
+    assert [stage["phase"] for stage in result["phases"]] == [0, 2]
+    assert len(commands) == 1 and "Q4_K_M" in commands[0]
+    assert (tmp_path / "new-q4.gguf").is_file()
+    assert not (tmp_path / "new-q8.gguf").exists()
+    assert "FROZEN_STAGE_INTENTIONALLY_SKIPPED" in (tmp_path / "only-q4.log").read_text()
+
+
+def test_q4_only_must_have_source_bound_completed_bf16_stage(tmp_path, monkeypatch):
+    spec = _spec(tmp_path)
+    monkeypatch.setattr(supervise, "resource_problems", lambda *a, **k: [])
+    with pytest.raises(ValueError, match="requires --resume"):
+        supervise.build(specification=spec, log_path=tmp_path / "bad.log",
+                        execute=True, only_q4=True)
+    with pytest.raises(ValueError, match="unbound/orphan"):
+        (tmp_path / "new-original.gguf").write_bytes(b"GGUF" + b"\x00" * 1048576)
+        supervise.build(specification=spec, log_path=tmp_path / "orphan.log",
+                        execute=True, resume=True, only_q4=True)
+
+
+def test_memory_slab_option_is_witnessed_and_frozen_quant_modes_unchanged(tmp_path, monkeypatch):
+    spec = _spec(tmp_path)
+    monkeypatch.setattr(supervise, "resource_problems", lambda *args, **kwargs: [])
+    commands = []
+
+    def capture(command, **kwargs):
+        commands.append(command)
+        fixture_command = (
+            [command[0], *command[3:]]
+            if "--max-buffer-size" in command else command
+        )
+        return _stub_command(fixture_command, **kwargs)
+
+    monkeypatch.setattr(supervise, "_owned_stage", capture)
+    produced = supervise.build(
+        specification=spec, log_path=tmp_path / "buffered.log",
+        execute=True, quant_buffer_mib=64,
+    )
+    assert len(commands) == 3
+    assert "--max-buffer-size" not in commands[0]
+    assert all(command[1:3] == ["--max-buffer-size", "64"]
+               for command in commands[1:])
+    assert commands[1][-2:] == ["Q8_0", "2"]
+    assert commands[2][-2:] == ["Q4_K_M", "2"]
+    assert produced["phases"][0]["quant_buffer_mib"] is None
+    assert [stage["quant_buffer_mib"] for stage in produced["phases"][1:]] == [64, 64]
+    reused = supervise.build(
+        specification=spec, log_path=tmp_path / "reused.log",
+        execute=True, resume=True, quant_buffer_mib=64,
+    )
+    assert len(commands) == 3  # all three stages reused without a new child
+    assert reused["status"] == "GGUF_CPU_BUILDS_COMPLETED_NOT_QUALITY_QUALIFIED"
+    with pytest.raises(ValueError, match="operational-buffer"):
+        supervise.build(
+            specification=spec, log_path=tmp_path / "wrong-buffer.log",
+            execute=True, resume=True, quant_buffer_mib=128,
+        )
+    with pytest.raises(ValueError, match="1..8192"):
+        supervise.build(
+            specification=spec, log_path=tmp_path / "invalid.log",
+            execute=True, quant_buffer_mib=0,
+        )

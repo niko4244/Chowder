@@ -301,6 +301,37 @@ quantized-model quality, Q4 fit/speed, or scientific selection.
    the verified source stage receipt and explicit
    `reap_gguf_supervised --resume`; original BF16 and the BF16 GGUF
    are not rebuilt.
+   If Q8 repeatedly fails host admission, the explicit
+   `--resume --only-q4` option can run frozen BF16→Q4_K_M
+   independently from the same exact-BF16 source while marking Q8
+   as skipped/unknown. It neither requantizes from Q8 nor promotes
+   a partial GGUF build to a complete scientific qualification.
+   This option must never run concurrently with another quantizer.
+   After **two** Q8_0 attempts were independently aborted by the same
+   unowned-physical-RAM safety floor (and neither published a file), the
+   pinned llama.cpp's documented `--max-buffer-size` *row-slab memory*
+   option was examined as a non-algorithmic resource workaround.
+   The pinned source in `src/llama-quant.cpp` applies that value only
+   to temporary per-tensor row-slab sizing; the original BF16 tensor
+   source, Q8_0/Q4_K_M types, quant kernel, thread count, and absence of
+   imatrix remain unchanged. A separate deterministic synthetic
+   **BF16 Qwen35 MoE** with 2 layers, 16 experts and large 256×256
+   expert rows verified that default buffering versus **1 MiB**
+   memory-bounded slabs produced **bitwise identical complete GGUF
+   outputs** for both Q8_0 and genuine Q4_K_M K-quant:
+   Q8_0 SHA-256
+   `4fad228106a6650fd32ddc97da895653ccb315bd6999ef682a10ae6819bd3887`;
+   Q4_K_M SHA-256
+   `605129350c854b104b64677d0fedb30fafb6d6539cd1327558fbfbea0782752b`.
+   Versioned oracle receipt
+   `docs/quals/reap128-v2-quant-buffer-equivalence-v3-20261025.json`,
+   SHA-256
+   `f9276dfed80571f949ed74925d7529c138a3b172238f53e0e3dc571261c2f333`.
+   This validates *that synthetic input*, not an unexecuted production
+   quantizer or a new scientific threshold. An explicit optional
+   `--quant-buffer-mib` is now bound to each individual quantized-stage
+   receipt as an operational parameter; resumption refuses a different
+   value. It does not alter the full-source BF16 stage's frozen recipe.
    Before the resumed quantizer launched, the exact abandoned private
    file (4,206,747,648 bytes) was removed after checking the original
    owned-child abort log and absence of an active quantizer, restoring

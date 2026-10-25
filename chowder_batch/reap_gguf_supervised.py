@@ -101,7 +101,7 @@ def _stable_spec_digest(spec: dict) -> str:
 
 
 def _verify_completed_stage(output: Path, *, phase: int, spec: dict,
-                            input_digest: str) -> dict:
+                            input_digest: str, quant_buffer_mib: int | None = None) -> dict:
     sidecar = _phase_manifest_path(output)
     if (output.is_symlink() or sidecar.is_symlink()
             or not output.is_file() or not sidecar.is_file()):
@@ -116,6 +116,8 @@ def _verify_completed_stage(output: Path, *, phase: int, spec: dict,
             or not isinstance(record.get("sha256"), str)
             or len(record["sha256"]) != 64):
         raise ValueError(f"GGUF resume witness does not match frozen recipe: {output}")
+    if phase in (1, 2) and record.get("quant_buffer_mib") != quant_buffer_mib:
+        raise ValueError("GGUF quantizer operational-buffer choice differs from sealed stage")
     _minimal_gguf_check(output)
     _verify_stage_topology(output, phase=phase, spec=spec)
     if _digest(output) != record["sha256"]:
@@ -181,7 +183,14 @@ def _owned_stage(command: list[str], *, drives: list[Path], log) -> int:
 
 
 def build(*, specification: dict, log_path: Path, execute: bool,
-          resume: bool = False) -> dict:
+          resume: bool = False, only_q4: bool = False,
+          quant_buffer_mib: int | None = None) -> dict:
+    if (quant_buffer_mib is not None and
+            (type(quant_buffer_mib) is not int or not 1 <= quant_buffer_mib <= 8192)):
+        raise ValueError("quantizer maximum slab buffer must be an integer in 1..8192 MiB")
+    if only_q4 and not resume:
+        raise ValueError("Q4-only rescue requires --resume and an existing source-bound BF16 stage")
+    included_phases = (0, 2) if only_q4 else (0, 1, 2)
     commands = [
         specification["conversion_command"],
         specification["q8_quality_command"],
@@ -191,11 +200,12 @@ def build(*, specification: dict, log_path: Path, execute: bool,
         Path(specification["capacity"][key]["intended"])
         for key in ("bf16", "q8_0", "q4_k_m")
     ]
-    reasons = resource_problems(destinations, initial=True)
+    active_destinations = [destinations[phase] for phase in included_phases]
+    reasons = resource_problems(active_destinations, initial=True)
     if reasons:
         raise ValueError("GGUF CPU conversion admission refused: " + "; ".join(reasons))
     if not execute:
-        return {"status": "ADMITTED_NOT_EXECUTED", "phases": 3,
+        return {"status": "ADMITTED_NOT_EXECUTED", "phases": list(included_phases),
                 "frozen_candidate": specification["candidate"]}
     if not log_path.parent.is_dir() or log_path.exists():
         raise ValueError("conversion audit log must be new with an existing parent")
@@ -210,6 +220,11 @@ def build(*, specification: dict, log_path: Path, execute: bool,
                              sort_keys=True) + "\n")
         log.flush()
         for phase, (original, out) in enumerate(zip(commands, destinations)):
+            if phase not in included_phases:
+                log.write(json.dumps({"event": "FROZEN_STAGE_INTENTIONALLY_SKIPPED",
+                                      "phase": phase, "not_a_quality_gate": True}) + "\n")
+                log.flush()
+                continue
             upstream_digest = (specification.get("candidate_verification_sha256", "")
                                if phase == 0 else phase_results[0]["sha256"])
             if out.exists() or _phase_manifest_path(out).exists():
@@ -218,13 +233,14 @@ def build(*, specification: dict, log_path: Path, execute: bool,
                 completed = _verify_completed_stage(
                     out, phase=phase, spec=specification,
                     input_digest=upstream_digest,
+                    quant_buffer_mib=quant_buffer_mib,
                 )
                 phase_results.append(completed)
                 log.write(json.dumps({"event": "FROZEN_GGUF_STAGE_REUSED",
                                       "phase": phase, "sha256": completed["sha256"]}) + "\n")
                 log.flush()
                 continue
-            if resource_problems(destinations, initial=True):
+            if resource_problems(active_destinations, initial=True):
                 raise ValueError(f"insufficient resources for conversion phase {phase}")
             temporary = out.with_name(f".{out.stem}.owned-{uuid.uuid4().hex}.gguf")
             if temporary.exists():
@@ -235,10 +251,15 @@ def build(*, specification: dict, log_path: Path, execute: bool,
                 command[position] = str(temporary)
             else:
                 command[2] = str(temporary)
+                if quant_buffer_mib is not None:
+                    # Pinned llama.cpp option controls temporary *row slabs*,
+                    # not the quantizer algorithm, quant type or imatrix.
+                    # Its exact value is bound into each quant stage receipt.
+                    command[1:1] = ["--max-buffer-size", str(quant_buffer_mib)]
             log.write(json.dumps({"event": "OWNED_STAGE_START", "phase": phase,
                                   "command": command}) + "\n")
             log.flush()
-            status = _owned_stage(command, drives=destinations, log=log)
+            status = _owned_stage(command, drives=active_destinations, log=log)
             if status:
                 raise RuntimeError(f"owned GGUF phase {phase} returned {status}; "
                                    f"private partial file retained at {temporary}")
@@ -256,6 +277,8 @@ def build(*, specification: dict, log_path: Path, execute: bool,
                 "spec_sha256": _stable_spec_digest(specification),
                 "input_sha256": upstream_digest,
                 "topology_receipt": topology,
+                "quant_buffer_mib": quant_buffer_mib if phase in (1, 2) else None,
+                "effective_command": command,
             }
             # Never overwrite a stage receipt. If publication succeeds but
             # the sidecar cannot be written, future resume fails closed on
@@ -266,7 +289,9 @@ def build(*, specification: dict, log_path: Path, execute: bool,
             log.write(json.dumps({"event": "OWNED_STAGE_PUBLISHED", **result}) + "\n")
             log.flush()
             print(json.dumps({"event": "OWNED_STAGE_PUBLISHED", **result}), flush=True)
-    return {"status": "GGUF_CPU_BUILDS_COMPLETED_NOT_QUALITY_QUALIFIED",
+    return {"status": ("GGUF_Q4_ONLY_CPU_BUILD_NOT_QUALITY_QUALIFIED"
+                       if only_q4 else "GGUF_CPU_BUILDS_COMPLETED_NOT_QUALITY_QUALIFIED"),
+            "included_phases": list(included_phases),
             "phases": phase_results}
 
 
@@ -279,6 +304,10 @@ def main(argv=None) -> int:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--resume", action="store_true",
                         help="reuse existing stages only with exact immutable SHA-linked receipts")
+    parser.add_argument("--only-q4", action="store_true",
+                        help="after Q8 resource refusal, source-bound BF16→Q4 without fabricating Q8 success")
+    parser.add_argument("--quant-buffer-mib", type=int,
+                        help="pinned llama.cpp row-slab RAM cap; source-bound witness records the value")
     args = parser.parse_args(argv)
     try:
         spec = plan(
@@ -287,12 +316,15 @@ def main(argv=None) -> int:
             quantizer=args.quantizer, bf16_out=args.bf16_out,
             q8_out=args.q8_out, q4_out=args.q4_out,
             allow_existing=args.resume,
+            selected_outputs=(frozenset(("bf16", "q4_k_m"))
+                              if args.only_q4 else None),
         )
         if args.execute and args.log is None:
             raise ValueError("--execute requires an exclusive --log path")
         result = build(specification=spec,
                        log_path=args.log if args.log is not None else Path("not-used.log"),
-                       execute=args.execute, resume=args.resume)
+                       execute=args.execute, resume=args.resume,
+                       only_q4=args.only_q4, quant_buffer_mib=args.quant_buffer_mib)
         print(json.dumps(result, sort_keys=True, allow_nan=False), flush=True)
         return 0
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as exc:

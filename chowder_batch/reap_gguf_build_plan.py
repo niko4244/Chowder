@@ -27,7 +27,13 @@ def _sha(path: Path) -> str:
 def plan(*, candidate: Path, verification: Path,
          converter: Path, llama_checkout: Path, quantizer: Path,
          bf16_out: Path, q8_out: Path, q4_out: Path,
-         allow_existing: bool = False) -> dict:
+         allow_existing: bool = False,
+         selected_outputs: frozenset[str] | None = None) -> dict:
+    if selected_outputs is None:
+        selected_outputs = frozenset(("bf16", "q8_0", "q4_k_m"))
+    if not selected_outputs or not selected_outputs.issubset(
+            {"bf16", "q8_0", "q4_k_m"}):
+        raise ValueError("invalid selected frozen GGUF output set")
     receipt = json.loads(verification.read_text(encoding="utf-8"))
     model = candidate.resolve()
     if (receipt.get("schema") != "chowder.reap128-v2-pruned-bf16-verification.v1"
@@ -85,7 +91,8 @@ def plan(*, candidate: Path, verification: Path,
     capacity = {}
     for kind, path in zip(estimates, outputs):
         disk = shutil.disk_usage(path.parent)
-        if (not (allow_existing and path.is_file())) and disk.free < estimates[kind]:
+        if (kind in selected_outputs and not (allow_existing and path.is_file())
+                and disk.free < estimates[kind]):
             raise ValueError(f"{kind} output has inadequate free disk+reserve")
         capacity[kind] = {
             "intended": str(path), "free_bytes": disk.free,
