@@ -301,6 +301,17 @@ quantized-model quality, Q4 fit/speed, or scientific selection.
    the verified source stage receipt and explicit
    `reap_gguf_supervised --resume`; original BF16 and the BF16 GGUF
    are not rebuilt.
+   Before the resumed quantizer launched, the exact abandoned private
+   file (4,206,747,648 bytes) was removed after checking the original
+   owned-child abort log and absence of an active quantizer, restoring
+   roughly 3.92 GiB of I: space. The full deletion/ownership audit is
+   frozen at
+   `docs/quals/reap128-v2-incomplete-q8-cleanup-20261025.json`
+   (SHA-256
+   `633a669c35d9ded407b8b326538df8bcb5f29eb3ddb98b2777320209e8f5ec16`).
+   No valid GGUF, pinned original weight, checkpoint, or receipt was
+   removed. The previously quoted incomplete-partial retention describes
+   the initial guard outcome, not its later audited cleanup.
 
    A bounded CPU-only `reap_gguf_quant_sample` probe is available
    after successful Q8_0 publication. It measures BF16 versus Q8_0
