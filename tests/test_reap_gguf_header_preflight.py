@@ -1,10 +1,13 @@
 """No-weight tests of the exact expert-axis GGUF topology contract."""
 
 from copy import deepcopy
+import json
 
 import pytest
 
-from chowder_batch.reap_gguf_header_preflight import GGUFHeaderRefusal, verify_header_topology
+from chowder_batch.reap_gguf_header_preflight import (
+    GGUFHeaderRefusal, run_preflight, verify_header_topology,
+)
 
 
 def _witness():
@@ -46,6 +49,35 @@ def test_frozen_bf16_q8_q4_topology_requires_exact_gguf_stage_type(file_type):
             fields, tensors, config, prune,
             expected_file_type={7: 15, 15: 32, 32: 7}[file_type],
         )
+
+
+@pytest.mark.parametrize("file_type", (7, 15, 32))
+def test_actual_tiny_gguf_reader_verifies_routed_moe_headers(tmp_path, file_type):
+    """Real gguf-py writer/reader, not mock dictionary-only validation."""
+    numpy = pytest.importorskip("numpy")
+    gguf = pytest.importorskip("gguf")
+    fields, tensors, config, prune = _witness()
+    model = tmp_path / "candidate"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps(config))
+    (model / "reap-prune.json").write_text(json.dumps(prune))
+    output = tmp_path / "fixture.gguf"
+    writer = gguf.GGUFWriter(str(output), "qwen35moe")
+    writer.add_file_type(file_type)
+    writer.add_quantization_version(2)
+    for key in fields:
+        if key.startswith("qwen35moe."):
+            writer.add_uint32(key, fields[key])
+    for key, shape in tensors.items():
+        writer.add_tensor(key, numpy.zeros(shape[::-1], dtype=numpy.float16))
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    receipt = run_preflight(output, model, expected_file_type=file_type)
+    assert receipt["status"] == "GGUF_METADATA_TOPOLOGY_MATCH_ONLY"
+    assert receipt["checked_tensor_shapes"] == 10
+    assert receipt["file_type"] == file_type
 
 
 @pytest.mark.parametrize("problem", ["wrong_architecture", "wrong_quant", "wrong_experts",
