@@ -8,7 +8,8 @@ torch = pytest.importorskip("torch")
 safetensors = pytest.importorskip("safetensors.torch")
 
 from chowder_batch.reap_verify_pruned import (
-    _equal_copied_tensor, _equal_source_row, _identical_bf16_bits, _indexed, inspect,
+    _equal_copied_tensor, _equal_expert_rows, _equal_source_row,
+    _identical_bf16_bits, _indexed, _source_runs, inspect,
 )
 
 
@@ -29,6 +30,7 @@ def test_checked_expert_mapping_and_full_unmodified_tensor_equivalence(tmp_path)
     ) as b:
         for i, j in enumerate(keep):
             _equal_source_row(a, b, "expert", j, i)
+        assert _equal_expert_rows(a, b, "expert", keep) == len(keep)
         _equal_copied_tensor(a, b, "untouched")
         with pytest.raises(ValueError, match="expert weight mismatch"):
             _equal_source_row(a, b, "expert", 0, 0)
@@ -52,6 +54,10 @@ def test_verifier_rejects_missing_unbuilt_candidate_without_source_io(tmp_path):
 def test_output_tensor_index_path_traversal_refused():
     with pytest.raises(ValueError, match="unsafe index"):
         _indexed({"weight_map": {"x": "../unsafe.safetensors"}})
+
+
+def test_full_expert_runs_preserve_source_and_destination_bijection():
+    assert _source_runs([1, 3, 4, 5, 7]) == [(0, 1, 1), (1, 3, 3), (4, 7, 1)]
 
 
 def test_bitwise_comparator_detects_signed_zero_and_preserves_nan_payloads():

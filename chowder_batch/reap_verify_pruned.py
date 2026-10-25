@@ -68,6 +68,40 @@ def _equal_source_row(
         raise ValueError(f"expert weight mismatch at {key} src={source_row} dst={destination_row}")
 
 
+def _source_runs(rows: list[int]) -> list[tuple[int, int, int]]:
+    """Consecutive source rows map to consecutive destination rows."""
+    if not rows:
+        return []
+    runs = []
+    start = last = rows[0]
+    destination = 0
+    for i, source_row in enumerate(rows[1:], 1):
+        if source_row == last + 1:
+            last = source_row
+            continue
+        runs.append((destination, start, last - start + 1))
+        destination, start, last = i, source_row, source_row
+    runs.append((destination, start, last - start + 1))
+    return runs
+
+
+def _equal_expert_rows(original, pruned, key: str, rows: list[int]) -> int:
+    """Compare ALL BF16 selected rows in contiguous ~8 MiB tensor chunks."""
+    source = original.get_slice(key)
+    chosen = pruned.get_slice(key)
+    stride = max(1, CHUNK_TARGET_BYTES // (math.prod(source.get_shape()[1:]) * 2))
+    verified = 0
+    for dst_start, src_start, length in _source_runs(rows):
+        for offset in range(0, length, stride):
+            n = min(stride, length - offset)
+            left = source[src_start + offset:src_start + offset + n]
+            right = chosen[dst_start + offset:dst_start + offset + n]
+            if not _identical_bf16_bits(left, right):
+                raise ValueError(f"expert block mismatch at {key}, src={src_start + offset}")
+            verified += n
+    return verified
+
+
 def _equal_copied_tensor(original, pruned, key: str) -> None:
     a, b = original.get_slice(key), pruned.get_slice(key)
     shape = a.get_shape()
@@ -170,10 +204,12 @@ def inspect(*, source: Path, observed: Path, selection: Path,
                 if transform:
                     touched += 1
                     rows = kept[int(transform[1])]
-                    indices = range(KEEP) if full_compare else sorted({0, 1, 63, 64, 126, 127})
-                    for j in indices:
-                        _equal_source_row(a, b, key, rows[j], j)
-                        compared += 1
+                    if full_compare:
+                        compared += _equal_expert_rows(a, b, key, rows)
+                    else:
+                        for j in sorted({0, 1, 63, 64, 126, 127}):
+                            _equal_source_row(a, b, key, rows[j], j)
+                            compared += 1
                 elif full_compare:
                     _equal_copied_tensor(a, b, key)
                     compared += 1
