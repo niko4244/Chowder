@@ -903,10 +903,26 @@ physical RAM and 20.13 GiB free Windows commit**, CUDA disabled and no
 competing quantizer. Child PID **32748**, audit log
 `F:\reap128-v2-q8-numeric-supervised-20261025.log`, intended report
 `F:\reap128-v2-q8-bf16-numeric-sample-20261025.json`.
-This real numerical test **has not published a result**; it cannot be
-promoted to a registered quality, original CUDA, model-fit or speed PASS.
+This real numerical test **completed with guarded exit 0**. The independent
+source-bound result is **120/120 expert tensors**, four 256-value windows
+per tensor, **122,880 actual BF16-vs-Q8 dequantized weights**, maximum
+absolute error **0.00028896331787109375**, mean absolute error
+**0.0000478359017317113**, root mean squared error
+**0.000058366718970777665**. Full result source SHA and final quantized
+GGUF SHA match immutable construction ancestry. Receipt copied byte-exact
+to `docs/quals/reap128-v2-q8-bf16-numeric-sample-20261025.json` with
+SHA-256 `a7d236af0fdad53b65f4b2271f895a05b14f84653bf40efef52c00aa18e0920c`.
+This is a **DESCRIPTIVE_QUANTIZATION_SAMPLE_NOT_QUALITY_GATE**; neither
+GSM8K nor HumanEval, original CUDA, model-fit or speed is measured here.
 
 Full Q4_K_M had been initially refused at 10.99 GiB available RAM, below
 the original **12 GiB minimum start threshold**. A later transient 12+
 GiB snapshot coincided with the guarded Q8 numeric child; Q4 cannot run
 concurrently, and no unrelated live Ollama/llama.cpp service was stopped.
+At the next post-audit snapshot (13:38:50 CDT), physical RAM was **14.07
+GiB**, free Windows commit **16.92 GiB**, and F/G/I free space
+**37.52/33.90/15.95 GiB**. A PowerShell command attempt failed argument
+parsing before any Q4 side effects, and subsequent admission fell to
+**15.25 GiB** free commit, below the unchanged 16-GiB start floor.
+Full production Q4 therefore remained **NOT STARTED**, and unrelated
+services were preserved.
