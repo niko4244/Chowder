@@ -1862,3 +1862,27 @@ Gen-0 PASS. Continue source-bound finalization and exclusive public
 publication, then separately run the full original-BF16/733-tensor
 independent audit and real Q4 numerical sampler, subject to fresh host
 admission. Gen-0 stays `BLOCKED`, draft PR #282 unmerged.
+
+### October 25 18:14 CDT — second verified-owner cache recovery during source check
+
+During the continued *original* PID 46388 finalization/source provenance
+recheck, read-only original BF16 GGUF mmap pages again grew resident RAM
+while the original resource safeguard was unchanged. After checking the
+exact process creation/command/source SHA/exclusive log and confirming
+no child or competing quantizer, all 42 sealed chunk GGUF/receipt pairs,
+the single 11,563,915,264-byte sealed private F: assembly with its
+correct receipt and no unsealed mini, Windows `EmptyWorkingSet` was used
+exclusively on that verified original Q4 owner handle one additional time.
+Measured host facts at execution:
+
+- Original parent working set **13.925 → 0.120 GiB**;
+- Windows available physical RAM **5.687 → 17.881 GiB**;
+- parent PID 46388 remained alive; no other process modified and no
+  model file, receipt, source mapping handle or registered resource floor
+  changed.
+
+The original parent then continued its CPU-active source and per-part
+integrity walk. This is *solely* evidence of protected-host liveness,
+not a full public Q4 publication, numerical accuracy result or any
+scientific/deployment gate. Original minimum physical RAM/commit/disk
+admission remains unchanged and Gen-0 stays `BLOCKED`.
