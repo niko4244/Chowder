@@ -340,6 +340,26 @@ quantized-model quality, Q4 fit/speed, or scientific selection.
    `d479f722881f61f339b815179b2286c80ec8430dece150514400cbc0e5db8e0c`).
    This restored I: disk headroom without touching any completed or
    published artifact.
+
+   **Experimental split-based Q8_0 recovery (not yet production
+   executed):** the pinned `llama-gguf-split` and `llama-quantize
+   --keep-split` path on a deterministic BF16 Qwen35-MoE fixture
+   produced a six-part Q8_0 and Q4_K_M merged GGUF whose entire tensor
+   inventories and every tensor payload matched separate monolithic
+   reference quantizations **bit-for-bit**, though the whole-file
+   metadata and file SHA differ due to split headers. A second
+   standalone-metadata experiment independently quantized three
+   disjoint mini-GGUF tensor groups and merged them in source order;
+   **all 10 Q8_0 tensors** again matched monolithic bytes. These two
+   fixtures demonstrate a promising bounded-memory alternative but do
+   **not** establish production equivalence, science, or deployability.
+   `chowder_batch.reap_gguf_chunked` implements a CPU-only source
+   chunk-layout planner, exact raw BF16 mini-GGUF preservation, the
+   pinned executable's per-mini quantization, and bitwise tensor
+   validation of a merged Q8_0 GGUF. The CLI is currently **read-only**
+   (its status is `READ_ONLY_CHUNK_PLAN_NOT_EXECUTED`); actual
+   production orchestration, durable per-chunk checkpointing and
+   multi-volume publication are not yet claimed.
    Before the resumed quantizer launched, the exact abandoned private
    file (4,206,747,648 bytes) was removed after checking the original
    owned-child abort log and absence of an active quantizer, restoring
