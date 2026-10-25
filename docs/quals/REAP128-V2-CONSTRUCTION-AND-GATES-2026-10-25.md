@@ -60,8 +60,46 @@ bitwise source/destination expert-row samples, the exact selection SHA-256,
 original BF16 observation identity, and the published pruning receipt.
 Receipt: `C:\llm-work\reap\reap128-v2-bf16-header-sample-verification-20261025.json`,
 status `HEADER_AND_EXPERT_SAMPLE_PASS`.
+An unmodified, byte-pinned duplicate is checked into
+`docs/quals/reap128-v2-bf16-header-sample-verification-20261025.json`
+with SHA-256
+`83c953825ada3787b22675a5b3ca5790a1971f92e133a24e2325306c67dd441a`.
 The stronger `--full-compare` result, an actual final-logits inference
 witness, GGUF results, and scientific scores must each be reported separately.
+
+### Runtime qualification interruption (approximately 03:56–04:02 local)
+
+A separate immutable full bitwise `--full-compare` verifier was launched,
+supervised under owned-child resource guards. During its run an **unowned
+Ollama llama-server** started at 03:56:15 (PID 59020, parent Ollama PID 15608,
+262144-token context), occupying nearly all GPU memory and substantial
+Windows commit. The supervisor ended the full compare with return code **3**
+because host-admission resources were depleted; **no full-equivalence
+receipt was published**. Do not label the full check PASS or FAIL on the
+science; it was **ABORTED BY RESOURCE GUARD**.
+
+A distinct real-model CPU-only streamed forward had already passed decoder
+layers 0, 9, 19, and 29 through both full and linear attention. Before
+final logits, the live host briefly reached effectively zero available
+physical RAM/commit. Its specific owned Python PID 77212 was then
+terminated, returning code 15, preserving all independent services.
+**No complete BF16 CPU inference receipt exists.** These intermediate
+layers prove a bounded load/execution prefix, not completed inference
+correctness or a quality score.
+
+The newly added `reap_streaming_smoke_supervised` prevents a repeat by
+requiring a full-equivalence receipt, 16 GiB free physical RAM, 24 GiB
+available Windows commit, model/report disk headroom, a new audit log,
+and an owned-child runtime guard. A subsequent host snapshot showed
+approximately 12.14 GiB RAM and 12.70 GiB commit available, confirming
+that a new substantial CPU or CUDA job is **not admitted**. GPU free memory
+was only about 611 MiB, with existing services retained. Recheck host
+state rather than assuming these transient values are permanent.
+
+**Frozen model remains completely published and untouched.** This
+interruption affects only scientific verification and downstream
+conversions, never the proven 26-shard source-bound construction or
+720 sampled bitwise expert-row checks.
 
 ## Required model and scientific gates (no automatic promotion)
 

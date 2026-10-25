@@ -1,0 +1,18 @@
+{
+  "candidate": "G:\\llm-cold\\bf16\\Qwen3.6-REAP128-V2",
+  "candidate_index_sha256": "26cb9190e4d1ca8c791da8af436e52c0b96c4e849274cd6d64978a5009bbfbfc",
+  "candidate_prune_receipt_sha256": "2dde3ea2de6bc3fd11308c9314b82993b2a57f13f03994b0fc10c8825533b2e1",
+  "candidate_shard_sha256": null,
+  "no_gpu_loaded": true,
+  "original_observation_sha256": "799cc170767f6b17b40c3b01eb3f95ec71310a1154a1ce0570fb07468dde76ed",
+  "original_source": "G:\\llm-cold\\bf16\\Qwen3.6-35B-A3B",
+  "pruned_tensor_bytes": 37981137632,
+  "qualifies_scientific_accuracy": false,
+  "routed_tensors": 120,
+  "row_or_tensor_checks": 720,
+  "schema": "chowder.reap128-v2-pruned-bf16-verification.v1",
+  "selection_sha256": "cff1138104455b51d09465e3eba4b98e3453203e09c24f6dafbe26f46d502082",
+  "shards": 26,
+  "source_non_mtp_tensor_bytes": 70214363872,
+  "status": "HEADER_AND_EXPERT_SAMPLE_PASS"
+}

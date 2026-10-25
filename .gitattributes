@@ -10,3 +10,4 @@ chowder_batch/reference/reap_v2_original_qwen36_bf16_995ad96e.json -text
 docs/quals/reap128-v2-bf16-selection-20261025.json -text
 docs/quals/reap160-historical-speed-reconciliation-20261025.json -text
 docs/quals/reap128-v2-frozen-gate-snapshot-prequality-20261025.json -text
+docs/quals/reap128-v2-bf16-header-sample-verification-20261025.json -text
