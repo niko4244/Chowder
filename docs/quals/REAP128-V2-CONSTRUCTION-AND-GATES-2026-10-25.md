@@ -1487,3 +1487,44 @@ chunk publication or complete final Q4 GGUF had been observed. Its
 revalidation is ongoing; never start a competing quantizer or convert
 this CPU preflight into a scientific PASS. Amendment4 Gen-0 `BLOCKED`,
 PR #282 draft, and external GPU workloads protected.
+
+### October 25 16:41 CDT — complete genuine offline benchmark-input certificate
+
+The independent `chowder_batch.reap_offline_dataset_verify` preflight
+loaded the **actual original cached Hugging Face** GSM8K test split and
+OpenAI HumanEval test split, with both HF hub and datasets explicitly
+OFFLINE and GPU disabled. It used the *registered production evaluator's*
+actual `_load` prompt/answer/test rendering and `_digest` canonical JSON
+algorithm, not synthesized questions or archived reported scores.
+
+- GSM8K: **1,319 of 1,319**, strictly ordered unique
+  `gsm8k-0` through `gsm8k-1318`, complete expected-answer prompts,
+  SHA-256 `913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89`.
+- HumanEval: **164 of 164**, strictly ordered unique
+  `HumanEval/0` through `HumanEval/163`, prompt/header/entry-point and
+  executable test content, SHA-256
+  `49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420`.
+
+Both independently recomputed hashes exactly matched the original frozen
+registered constants. The unique source certificate was exclusively,
+atomically and `fsync`-durably published at
+`docs/quals/reap128-v2-frozen-offline-inputs-20261025.json`, SHA-256
+`3216ea03f20661b91ab05fe76220bc43b255496886a9e7a05b814ab34746ab2e`.
+It includes the current evaluator and gate implementation SHAs,
+counts/first/last IDs, exact source fingerprints, explicitly
+`model_inference_performed:false`, `quality_gate:NOT_EVALUATED` and
+`release_approved:false`. It is reproducible by invoking the new module
+against the same cached dataset sources; no model/GPU/quantizer access.
+Adversarial CPU tests cover truncated, duplicate, reordered, altered
+answer or altered HumanEval test inputs, including exact-ID but changed
+content, and exclusive crash-safe receipt publication. Combined focused
+source/comparison/selector suite passed **90 tests**, Ruff clean.
+
+At 16:41 CDT the exclusive fifth Q4 owner PID 46388 remained alive with
+**27/42** source-bound immutable sealed chunks. The parent was still
+revalidating its full original GGUF before reuse; its own read-only
+mapped source could temporarily reduce free physical RAM, which is
+governed by unchanged original admission guards and current-process-only
+cache trim. No additional quantizer or GPU evaluation was launched.
+This real cached input proof is a *prerequisite*, not registered quality,
+same-session speed, CUDA parity, or deterministic Gen-0 selection.
