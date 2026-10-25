@@ -24,12 +24,18 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
+
+# The preregistered preflight prints a direct-script invocation. Ensure its
+# package imports remain available without relying on a caller's PYTHONPATH.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 EXPERT_KEY = re.compile(r"^model\.language_model\.layers\.(\d+)\.mlp\.(experts\.gate_up_proj|experts\.down_proj|gate\.weight)$")
 COPY_FILES = ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt", "chat_template.jinja",
@@ -94,6 +100,8 @@ def main() -> None:
     parser.add_argument("--observations", default="")
     parser.add_argument("--keep", type=int, required=True)
     parser.add_argument("--method", choices=("reap", "frequency", "random"), default="reap")
+    parser.add_argument("--selection", default="",
+                        help="source-bound REAP128_v2 selection.json (optional for older arms)")
     parser.add_argument("--seed", type=int, default=20261017)
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
@@ -114,16 +122,36 @@ def main() -> None:
         raise SystemExit("--observations is required for reap/frequency")
     if args.method != "random":
         evidence = Path(args.observations) / "observation.json"
+        if n_layers == 40 and n_experts == 256 and not evidence.is_file():
+            raise ValueError("original 40x256 REAP pruning requires observation.json")
         if evidence.is_file():
             observed = json.loads(evidence.read_text(encoding="utf-8"))
-            if "checkpoint_receipt" in observed or "hidden_storage" in observed:
+            if n_layers == 40 and n_experts == 256 and observed.get("n_seqs") not in (384, 704):
+                raise ValueError("original 40x256 REAP observation must match a frozen calibration")
+            if n_layers == 40 and n_experts == 256 and observed.get("n_seqs") == 384:
+                from chowder_batch.reap_build_preflight import FROZEN_V1_SHA256
+                if observed.get("calibration_sha256") != FROZEN_V1_SHA256:
+                    raise ValueError("original 40x256 v1 REAP observation has wrong frozen calibration")
+            registered_original = n_layers == 40 and observed.get("n_seqs") == 704
+            if registered_original or "checkpoint_receipt" in observed or "hidden_storage" in observed:
                 from chowder_batch.reap_hidden_checkpoint import validate_observation_receipt
                 validate_observation_receipt(Path(args.observations), observed,
                                              expected_generation=n_layers,
-                                             require_registered_original=(
-                                                 n_layers == 40 and observed.get("n_seqs") == 704
-                                             ))
+                                             require_registered_original=registered_original)
     kept = kept_experts(Path(args.observations), n_layers, n_experts, args.keep, args.method, args.seed)
+    selection_sha256 = None
+    if args.selection:
+        if args.method != "reap" or n_layers != 40 or n_experts != 256 or args.keep != 128:
+            raise ValueError("--selection is only for the registered REAP128_v2 build")
+        if not observed.get("checkpoint_receipt") or observed.get("n_seqs") != 704:
+            raise ValueError("--selection requires the registered 704-row sealed BF16 observation")
+        from chowder_batch.reap_rank_experts import validate_selection
+        selection_path = Path(args.selection)
+        selection_bytes = selection_path.read_bytes()
+        selection = json.loads(selection_bytes)
+        validate_selection(selection, model_dir=model_dir, weights_dir=weights_dir,
+                           observations=Path(args.observations), kept=kept)
+        selection_sha256 = hashlib.sha256(selection_bytes).hexdigest()
 
     index = json.loads((model_dir / "model.safetensors.index.json").read_text(encoding="utf-8"))
     shards = _indexed_shards(index, n_layers)
@@ -180,6 +208,7 @@ def main() -> None:
                 str(i): hashlib.sha256((observation_dir / f"layer-{i:02d}.pt").read_bytes()).hexdigest()
                 for i in range(n_layers)
             } if args.method != "random" else {},
+            "selection_sha256": selection_sha256,
             "kept_experts": {str(k): v for k, v in kept.items()},
             "total_bytes": total_bytes,
         }

@@ -15,6 +15,7 @@ torch = pytest.importorskip("torch")
 
 from chowder_batch import reap_build_preflight as preflight  # noqa: E402
 from chowder_batch import reap_v2_source_identity as identity  # noqa: E402
+from chowder_batch import reap_rank_experts as ranking  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -119,6 +120,35 @@ def test_valid_v2_plan_is_deterministic_and_never_builds(tmp_path, arm, keep, pr
     ]
     assert not paths["out"].exists()
     assert plan["qualification"].startswith("NOT_EVALUATED")
+
+
+def test_preflight_consumes_exact_source_bound_selection_without_building(tmp_path):
+    paths = _fixture(tmp_path)
+    selection_path = tmp_path / "selection.json"
+    selection = ranking.generate(
+        model_dir=paths["model"], weights_dir=paths["weights"],
+        calibration=paths["calibration"], observations=paths["observations"],
+        prune_out=paths["out"],
+    )
+    selection_path.write_text(json.dumps(selection), encoding="utf-8")
+    plan = preflight.build_plan(
+        arm="reap128_v2", model_dir=paths["model"], weights_dir=paths["weights"],
+        calibration=paths["calibration"], observations=paths["observations"],
+        out=paths["out"], selection=selection_path,
+    )
+    assert plan["selection_sha256"] == hashlib.sha256(selection_path.read_bytes()).hexdigest()
+    assert plan["prune_command_not_executed"][-4:] == [
+        "--selection", str(selection_path.resolve()), "--out", str(paths["out"].resolve()),
+    ]
+    assert not paths["out"].exists()
+    selection["layers"]["0"]["retained_source_experts"][0] = 255
+    selection_path.write_text(json.dumps(selection), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="selection does not match"):
+        preflight.build_plan(
+            arm="reap128_v2", model_dir=paths["model"], weights_dir=paths["weights"],
+            calibration=paths["calibration"], observations=paths["observations"],
+            out=paths["out"], selection=selection_path,
+        )
 
 
 def test_self_consistent_unregistered_v2_is_not_frozen_identity(tmp_path, monkeypatch):

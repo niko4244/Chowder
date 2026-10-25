@@ -19,6 +19,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 try:
     from chowder_batch.reap_gates import GateError, _d0
     from chowder_batch.reap_select import _validate_v2_observation
@@ -221,7 +224,8 @@ def _saliency(observation: Path, reported_layers: list[dict[str, Any]]) -> str:
 
 
 def build_plan(*, arm: str, calibration: Path, observations: Path,
-               model_dir: Path, out: Path, weights_dir: Path | None = None) -> dict[str, Any]:
+               model_dir: Path, out: Path, weights_dir: Path | None = None,
+               selection: Path | None = None) -> dict[str, Any]:
     _require(arm in ARM_SPEC, "arm must be reap128_v2, reap160, or reap160_v2")
     keep, mix, predecessors = ARM_SPEC[arm]
     model = _existing_dir(Path(model_dir), "model")
@@ -249,11 +253,32 @@ def build_plan(*, arm: str, calibration: Path, observations: Path,
         )
     saliency_sha = _saliency(observations, observed["layers"])
 
+    selection_sha = None
+    selection_path = None
+    if selection is not None:
+        _require(arm == "reap128_v2", "selection file is only supported for REAP128_v2")
+        selection_path = Path(selection).resolve()
+        _require(selection_path.is_file() and 0 < selection_path.stat().st_size <= 1024 * 1024,
+                 "REAP128_v2 selection file missing or oversized")
+        from chowder_batch.reap_rank_experts import validate_selection
+        from chowder_batch.reap_prune import kept_experts
+        try:
+            document = _json(selection_path)
+            selected = kept_experts(observations, LAYERS, EXPERTS, keep, "reap", 20261017)
+            validate_selection(document, model_dir=model, weights_dir=weights,
+                               observations=observations, kept=selected)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            raise PreflightError(f"selection does not match frozen input: {exc}") from exc
+        selection_sha = _digest(selection_path)
+
     command = ["python", "chowder_batch/reap_prune.py", "--model-dir", str(model)]
     if weights_dir is not None:
         command += ["--weights-dir", str(weights)]
     command += ["--observations", str(observations), "--keep", str(keep),
-                "--method", "reap", "--out", str(output)]
+                "--method", "reap"]
+    if selection_path is not None:
+        command += ["--selection", str(selection_path)]
+    command += ["--out", str(output)]
     return {
         "schema": "reap-frozen-build-preflight-v1",
         "status": "PREREQUISITES_VALIDATED_NOT_BUILT",
@@ -266,6 +291,7 @@ def build_plan(*, arm: str, calibration: Path, observations: Path,
         "model": {"directory": str(model), "weights_directory": str(weights), **config},
         "calibration": provenance,
         "saliency_layer_digest_sha256": saliency_sha,
+        "selection_sha256": selection_sha,
         "output_directory_intended_only": str(output),
         "prune_command_not_executed": command,
         "qualification": "NOT_EVALUATED: build preflight does not certify ordered fallback "
@@ -280,12 +306,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--observations", type=Path, required=True)
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--weights-dir", type=Path)
+    parser.add_argument("--selection", type=Path,
+                        help="optional registered REAP128_v2 selection manifest")
     parser.add_argument("--out", type=Path, required=True, help="intended prune output; never created")
     args = parser.parse_args(argv)
     try:
         plan = build_plan(
             arm=args.arm, calibration=args.calibration, observations=args.observations,
             model_dir=args.model_dir, weights_dir=args.weights_dir, out=args.out,
+            selection=args.selection,
         )
     except (PreflightError, OSError, UnicodeError, json.JSONDecodeError) as exc:
         print(f"REAP build preflight refused: {exc}", file=sys.stderr)

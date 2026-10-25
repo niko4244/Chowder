@@ -3,3 +3,8 @@
 # never rewrite their line endings (`core.autocrlf` would otherwise turn LF into
 # CRLF and make a clean clone look corrupt).
 src/chowder/growth/instruments/* -text
+
+# The registered original BF16 upstream pin is SHA-256 bound to exact bytes.
+# A Windows checkout with core.autocrlf=true must keep its LF bytes intact.
+chowder_batch/reference/reap_v2_original_qwen36_bf16_995ad96e.json -text
+docs/quals/reap128-v2-bf16-selection-20261025.json -text
