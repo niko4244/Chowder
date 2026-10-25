@@ -14,7 +14,8 @@ import pytest
 from chowder_batch.reap_gates import GateError
 from chowder_batch.reap_gates import FROZEN_SOURCE_SHA256
 from chowder_batch.reap_select import (
-    PAIRED_METHOD_DISCREPANCY, REQUIRED, _paired, _validate_v2_observation,
+    FROZEN_REFERENCE_MODEL_SHA256, PAIRED_METHOD_DISCREPANCY, REQUIRED,
+    _paired, _validate_v2_observation,
     evaluate, select,
 )
 from chowder_batch import reap_v2_source_identity as identity
@@ -28,6 +29,9 @@ def _synthetic_v2_source_pins(monkeypatch):
     # source pins only inside this test module; production keeps official SHAs.
     monkeypatch.setitem(FROZEN_SOURCE_SHA256, "gsm8k", "b" * 64)
     monkeypatch.setitem(FROZEN_SOURCE_SHA256, "humaneval", "b" * 64)
+    # Synthetic GGUFs are fixture-only: never weaken production model pins.
+    monkeypatch.setitem(FROZEN_REFERENCE_MODEL_SHA256, "dense_v2", "a" * 64)
+    monkeypatch.setitem(FROZEN_REFERENCE_MODEL_SHA256, "random128_v2", "a" * 64)
 
 
 def arm(**statuses):
@@ -286,6 +290,30 @@ def test_complete_new_v2_source_witnessed_quality_references_enable_only_quality
     assert gates["speed"]["status"] == "UNKNOWN"
     assert report["decision"]["status"] == "BLOCKED"
     assert report["release_approved"] is False
+
+
+@pytest.mark.parametrize("reference", ["dense_v2", "random128_v2"])
+def test_fresh_v2_controls_reject_foreign_model_with_consistent_resealed_witnesses(
+    tmp_path, reference,
+):
+    obs = _full_v2_rows(tmp_path)
+    for suite, n in (("gsm8k", 1319), ("humaneval", 164)):
+        _attest(tmp_path, "dense_v2", suite, n)
+    _attest(tmp_path, "random128_v2", "gsm8k", 1319, fail=1000)
+    # The foreign server and BOTH suite input witnesses agree on the same
+    # forged model SHA; all summary/result/source/decode attestations remain
+    # intact. This must not be admitted as the frozen dense/random control.
+    serve_path = tmp_path / reference / "serve.json"
+    serving = json.loads(serve_path.read_text(encoding="utf-8"))
+    serving["gguf_sha256"] = "c" * 64
+    serve_path.write_text(json.dumps(serving), encoding="utf-8")
+    for suite in (("gsm8k", "humaneval") if reference == "dense_v2" else ("gsm8k",)):
+        witness_path = tmp_path / reference / f"{suite}.inputs.json"
+        witness = json.loads(witness_path.read_text(encoding="utf-8"))
+        witness["model"]["gguf_sha256"] = "c" * 64
+        witness_path.write_text(json.dumps(witness), encoding="utf-8")
+    with pytest.raises(GateError, match="frozen original.*model SHA"):
+        evaluate(tmp_path, obs)
 
 
 def test_resealed_forged_fresh_negative_control_source_refuses_v2_selection(tmp_path):

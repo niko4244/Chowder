@@ -30,6 +30,13 @@ FROZEN_SCORING = "frozen reap_eval production scoring: final_number_match/boxed/
 FROZEN_INPUT_SCHEMA = "chowder.reap-eval-input-identity.v1"
 FROZEN_SOURCE_COUNTS = {"gsm8k": 1319, "humaneval": 164}
 FROZEN_MAX_TOKENS = {"gsm8k": 1024, "humaneval": 768}
+# SHA-256 digests of the original frozen models, recorded before Amendment 4.
+# Fresh v2 references must re-measure THESE model bytes, not arbitrarily
+# substituted dense/random models with mutually consistent JSON receipts.
+FROZEN_REFERENCE_MODEL_SHA256 = {
+    "dense_v2": "2ff57a74a36939c5baabf40a0d3eb06d4424ecc94cf7d4ef04b3ac02059097c2",
+    "random128_v2": "601871e00403658708eb4eebf3b05f9dc54a93b326e31f2f87b48cb59f92241b",
+}
 # §4 explicitly defines LB = mean(d) - 1.645 * sd(d)/sqrt(n), whereas
 # Amendment 4 §2 calls for "paired McNemar" one-sided 95% noninferiority at
 # -0.02. McNemar's equality test does not uniquely determine a lower CI for
@@ -156,6 +163,9 @@ def _v2_input_witness(eval_dir: Path, arm: str, suite: str) -> dict:
             or not re.fullmatch(r"[0-9a-f]{64}", model["gguf_sha256"])
             or any(serve.get(key) != model[key] for key in model)):
         raise GateError(f"{arm}/{suite}: input witness model identity disagrees with serving receipt")
+    original_sha = FROZEN_REFERENCE_MODEL_SHA256.get(arm)
+    if original_sha is not None and model["gguf_sha256"] != original_sha:
+        raise GateError(f"{arm}/{suite}: frozen original reference model SHA mismatch")
     return record
 
 
