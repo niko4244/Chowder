@@ -659,3 +659,26 @@ The integrated CPU-only construction/eval/gate/selection/serving/parity
 preflight regression matrix completed **290 passed, 3 intentionally
 skipped**, with Ruff clean and no Git whitespace errors. No model-quality
 PASS or GPU placement is inferred from these regression tests.
+
+### October 25 11:23 — guarded Q8 merger memory-floor interruption
+
+The exclusive original Q8 constructor finished and independently SHA-sealed
+all **42/42** source-bound mini-GGUF chunks on I:, covering exactly **733
+unique tensor names**. Its owned Python merge worker began full assembly
+but the unchanged runtime physical-memory floor triggered the monitored
+abort: `OWNED_CONVERSION_ABORT: insufficient unowned physical RAM`.
+Supervisor and worker exited. The 42 previously sealed GGUF chunks and
+receipts remain intact, with their saved file sizes and source identities
+rechecked after the abort. **No F: merged assembly or I: final Q8 model
+exists; there is no Q8 numerical or quality PASS.** This was an
+admission/supervision abort, not an established GGUF payload mismatch.
+
+The new immutable post-abort witness is
+`docs/quals/reap128-v2-q8-merge-memory-guard-abort-20261025.json`, SHA-256
+`72c95cce6eaef7a3d7dff37e7ad72b2fa54e2ac691a6f9e00b43a2435e001e29`.
+Its 42 file/receipt size and identity checks **do not claim a fresh full
+20-GB chunk payload rehash**; the original verified per-part digests are
+stored, and any admitted exclusive restart must rehash them before reuse.
+No identical merge was relaunched; the corrective work is a one-reader,
+bounded-memory streaming GGUF assembly with synthetic byte-for-byte and
+adversarial regressions, subject to the same unchanged safety floors.
