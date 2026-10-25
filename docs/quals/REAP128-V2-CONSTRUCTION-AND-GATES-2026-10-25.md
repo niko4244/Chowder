@@ -92,6 +92,23 @@ expert-offload count. Because the probe was separately executed and is not
 fully bound to the earlier session, it **corroborates** a fit but cannot
 silently convert the canonical speed gate from UNKNOWN into PASS.
 
+## Deterministic frozen-gate snapshot before REAP128_v2 scoring
+
+The canonical frozen `reap_select` command was run against the unchanged
+historical full evaluation corpus and the newly D0-qualified original v2
+observation, saving an immutable evidence snapshot:
+
+`docs/quals/reap128-v2-frozen-gate-snapshot-prequality-20261025.json`
+
+SHA-256
+`7043980b1a5551131c348d720704382eeee42b63001afcccd9f031b7528bb42e`.
+The selector deliberately exits nonzero with
+`{"status":"BLOCKED","chosen":null,"reason":"amendment 4 requires both REAP128_v2 and REAP160 full gates"}`.
+Current historical arm computations: REAP128 v1 D0 PASS, Gate0 PASS,
+Gate1 **FAIL**, Gate2 PASS, control PASS, speed UNKNOWN; REAP160 D0,
+Gate0, Gate1, Gate2 and control PASS, speed UNKNOWN. The new REAP128_v2
+has not been scored on GSM8K/HumanEval/Q4 hardware, so no candidate is selected.
+
 **Release decision until all required evidence exists: BLOCKED, no Gen-0
 promotion or owner approval implied.** Neither frozen thresholds nor the
 predeclared arm-selection order may be weakened.
