@@ -109,6 +109,24 @@ Gate1 **FAIL**, Gate2 PASS, control PASS, speed UNKNOWN; REAP160 D0,
 Gate0, Gate1, Gate2 and control PASS, speed UNKNOWN. The new REAP128_v2
 has not been scored on GSM8K/HumanEval/Q4 hardware, so no candidate is selected.
 
+## Preserved historical evaluation and clean v2 workspace
+
+An **independent** copy of the SHA-attested historical baselines was
+atomically created at
+`C:\llm-work\reap\eval-v2-isolated-20261025` using
+`chowder_batch.reap_eval_workspace`. The new workspace contains 26 small
+frozen reference/serve/evaluation files for `dense`, `dense_q4`,
+`random128`, `reap128`, `reap128_q4`, `reap160`, and
+`reap160_q4`, each checked byte-for-byte against its original. The
+workspace includes `frozen-historical-baselines.json` with SHA-256
+`06c1b562fd9e655b464b82ef52fe60d0d971f9314cd40cac38485069fcdf5463`.
+The original `C:\llm-work\reap\eval` is unchanged.
+The canonical selector was executed on the copied root and returned the
+same intentional `BLOCKED` decision with only historical REAP128/REAP160
+present. Future v2 scoring can use this isolated root with independently
+witnessed `reap128_v2` / `reap128_v2_q4` directories; historical
+artifacts are never resumed or appended in place.
+
 **Release decision until all required evidence exists: BLOCKED, no Gen-0
 promotion or owner approval implied.** Neither frozen thresholds nor the
 predeclared arm-selection order may be weakened.
