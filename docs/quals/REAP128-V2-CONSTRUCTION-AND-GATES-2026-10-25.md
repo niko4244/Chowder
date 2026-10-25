@@ -1564,3 +1564,38 @@ contribution was already committed as `ae4ad01` and is preserved; these
 new serving receipt changes do not alter its frozen content digests.
 Original Q4 output, numerical fidelity, hardware and Gen-0 gates remain
 `UNKNOWN`/`BLOCKED` until genuine experiments complete.
+
+### October 25 16:47 CDT — controlled original-owner read-only mmap cache reclamation
+
+While source/chunk revalidation continued in **the same fifth Q4 owner
+PID 46388**, the mapped original BF16 GGUF's reclaimable read-only pages
+grew its measured resident working set to **20.156 GiB**, compared with
+~1.58 GiB of private memory. Physical RAM available to the rest of the
+host fell to **0.999 GiB**, below the unchanged 7-GiB runtime safeguard;
+the parent itself was not launching a quantizer, but did not yet reach
+its later per-chunk admission stage where built-in current-process-only
+working-set reclamation runs.
+
+Before intervention, an independent Windows process check verified the
+**exact Q4 supervisor PID, command line, frozen BF16 source SHA, and
+unique `resume5` audit log**. It verified **no active child**, no source
+mini GGUF in private scratch and no unrelated process identity. A single
+Windows `psapi.EmptyWorkingSet` was then applied **exclusively to the
+verified original supervisor handle**, not to Ollama, llama-server or
+any user workload. The immediate direct before/after measurements were:
+
+- Owned Q4 parent resident working set **20.156 → 2.711 GiB**.
+- Windows available physical RAM **0.999 → 18.393 GiB**.
+- Owner stayed alive at exact PID 46388; every certified Q4 chunk/receipt
+  remained in place, and no external GPU/process was touched.
+
+This operation discards reclaimable read-only process working-set pages;
+any needed mapped source pages can subsequently be faulted in from the
+same frozen GGUF bytes. No disk model bytes, published receipts, locks,
+original 12/16 GiB chunk-entry floors or 7/8 GiB runtime floors were
+changed. A subsequent independently queried host snapshot reported
+~17.257 GiB physical RAM free and the same Q4 PID/registered command.
+The still-live source-bound recovery has **27/42** immutable chunk pairs
+and no Q4 final model or sidecar; later model/numeric/quality/GPU gates
+remain `UNKNOWN`/`BLOCKED`. Reclamation is a host-liveness safeguard,
+not proof of model quality or completed Q4 conversion.
