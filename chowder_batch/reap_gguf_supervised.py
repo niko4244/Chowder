@@ -67,6 +67,21 @@ def _minimal_gguf_check(path: Path) -> None:
         raise ValueError(f"GGUF stage header magic/version invalid: {path}")
 
 
+def _verify_stage_topology(path: Path, *, phase: int, spec: dict) -> dict | None:
+    """Use exact MoE GGUF header inventory for real frozen production stages."""
+    if spec.get("schema") != "chowder.reap128-v2-gguf-prebuild-v1":
+        return None  # synthetic supervisor tests use minimal GGUF fixtures
+    from chowder_batch.reap_gguf_header_preflight import run_preflight
+
+    expected = (32, 7, 15)[phase]  # pinned llama.h: BF16, Q8_0, Q4_K_M
+    report = run_preflight(
+        path, Path(spec["candidate"]), expected_file_type=expected,
+    )
+    if report.get("status") != "GGUF_METADATA_TOPOLOGY_MATCH_ONLY":
+        raise ValueError(f"GGUF phase {phase} has no verified 40x128 metadata topology")
+    return report
+
+
 def _phase_manifest_path(output: Path) -> Path:
     return output.with_name(output.name + ".reap-stage.json")
 
@@ -102,6 +117,7 @@ def _verify_completed_stage(output: Path, *, phase: int, spec: dict,
             or len(record["sha256"]) != 64):
         raise ValueError(f"GGUF resume witness does not match frozen recipe: {output}")
     _minimal_gguf_check(output)
+    _verify_stage_topology(output, phase=phase, spec=spec)
     if _digest(output) != record["sha256"]:
         raise ValueError(f"GGUF stage payload changed since sealed publication: {output}")
     return record
@@ -227,6 +243,7 @@ def build(*, specification: dict, log_path: Path, execute: bool,
                 raise RuntimeError(f"owned GGUF phase {phase} returned {status}; "
                                    f"private partial file retained at {temporary}")
             _minimal_gguf_check(temporary)
+            topology = _verify_stage_topology(temporary, phase=phase, spec=specification)
             digest = _digest(temporary)
             size = temporary.stat().st_size
             if out.exists():
@@ -238,6 +255,7 @@ def build(*, specification: dict, log_path: Path, execute: bool,
                 "schema": "chowder.reap-gguf-stage.v1",
                 "spec_sha256": _stable_spec_digest(specification),
                 "input_sha256": upstream_digest,
+                "topology_receipt": topology,
             }
             # Never overwrite a stage receipt. If publication succeeds but
             # the sidecar cannot be written, future resume fails closed on

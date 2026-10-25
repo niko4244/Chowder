@@ -158,3 +158,24 @@ def test_gguf_audit_log_cannot_write_inside_original_bf16_source(tmp_path, monke
             specification=spec, log_path=original / "never-create.log", execute=True,
         )
     assert not list(original.iterdir())
+
+
+def test_production_gguf_stages_require_checked_moe_topology(tmp_path, monkeypatch):
+    spec = _spec(tmp_path)
+    spec["schema"] = "chowder.reap128-v2-gguf-prebuild-v1"
+    monkeypatch.setattr(supervise, "resource_problems", lambda *a, **k: [])
+    monkeypatch.setattr(supervise, "_owned_stage", _stub_command)
+    checked = []
+
+    def fake_topology(file, candidate, *, expected_file_type):
+        checked.append(expected_file_type)
+        return {"status": "GGUF_METADATA_TOPOLOGY_MATCH_ONLY"}
+
+    from chowder_batch import reap_gguf_header_preflight
+    monkeypatch.setattr(reap_gguf_header_preflight, "run_preflight", fake_topology)
+    result = supervise.build(
+        specification=spec, log_path=tmp_path / "production.log", execute=True,
+    )
+    assert checked == [32, 7, 15]
+    assert all(p["topology_receipt"]["status"] == "GGUF_METADATA_TOPOLOGY_MATCH_ONLY"
+               for p in result["phases"])

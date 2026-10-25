@@ -34,6 +34,20 @@ def test_complete_routed_inventory_passes_as_metadata_only():
     assert "Not a SHA-256" in result["limits"]
 
 
+@pytest.mark.parametrize("file_type", (7, 15, 32))
+def test_frozen_bf16_q8_q4_topology_requires_exact_gguf_stage_type(file_type):
+    fields, tensors, config, prune = _witness()
+    fields["general.file_type"] = file_type
+    assert verify_header_topology(
+        fields, tensors, config, prune, expected_file_type=file_type,
+    )["file_type"] == file_type
+    with pytest.raises(GGUFHeaderRefusal, match="file type"):
+        verify_header_topology(
+            fields, tensors, config, prune,
+            expected_file_type={7: 15, 15: 32, 32: 7}[file_type],
+        )
+
+
 @pytest.mark.parametrize("problem", ["wrong_architecture", "wrong_quant", "wrong_experts",
                                     "wrong_top_k", "wrong_layers", "lost_gate", "lost_down",
                                     "bad_axis", "out_of_range", "stale_prune", "duplicate_survivor",
