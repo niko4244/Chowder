@@ -1020,3 +1020,49 @@ minis or uninspectable owners immediately. New CPU-only regression
 matrix: **33 passed, one real quantizer case intentionally deselected**,
 Ruff clean. No GSM8K/HumanEval, CUDA parity, fit/speed, REAP160 or Gen-0
 status is changed by this production recovery.
+
+### October 25 15:05 CDT — safe owner-only mmap cache reclamation
+
+Third exclusive Q4 supervisor resumed from seven immutable GGUF and
+receipt pairs after a fresh full BF16 parent SHA recheck. Audit log:
+`F:\reap128-v2-q4-streaming-resume3-20261025.log`. It independently
+emitted `EXACT_Q4_CHUNK_REUSED` for original indices 0 through 6 but
+again entered `Q4_CHUNK_RESOURCE_WAIT` before part eight. Independent
+host inspection found that the **owned** Python parent retained about
+**6.766 GiB resident working set** from read-only source GGUF mmap
+pages, leaving only **9.578 GiB available physical RAM**, below the
+untouched 12-GiB start threshold. No external service was touched.
+
+One independently identified Windows-owned PID 57764 process (the exact
+Q4 restart command, with no active quantizer child) was trimmed using
+Windows `EmptyWorkingSet` on that **single owned process**. Its resident
+working set dropped from **6.766 GiB to 0.094 GiB**, restoring available
+physical RAM from **9.578 GiB to 15.475 GiB** without stopping Python,
+invalidating a mapped file, lowering a guard or touching unrelated
+Ollama/llama.cpp GPU servers. The live original supervisor then logged
+`Q4_CHUNK_ADMISSION_RECOVERED` after 31 polling intervals and proceeded
+to genuine next-chunk quantization. No model-quality claim follows.
+
+For future restarts, the source-side Q4 code now permits **one** automatic
+`EmptyWorkingSet(GetCurrentProcess())` per failed per-chunk RAM/commit
+admission. It exclusively trims the executing Python owner, never opens
+or modifies external process handles, and *immediately re-evaluates the
+same* 12-GiB RAM/16-GiB commit/6-GiB disk start thresholds. If self-trim
+is unavailable or cannot restore admission, the finite guarded wait
+continues unchanged; disk failures still fail closed immediately.
+New adversarial regression covers one-shot trim/recheck, original
+resource-floor enforcement, bounded timeout, external process refusal,
+and non-Windows no-op. The currently running Python process imported
+the prepatch code at launch; its successful owned trim was performed
+separately against the exact verified PID, not hot-reloaded into it.
+
+The recovered original owner subsequently SHA-sealed **chunk 008/042**,
+with 10 mixed Q4_K/F32 tensors, status
+`CHUNK_Q4_K_M_BITWISE_WITNESSED_NOT_QUALITY_GATE` and original production
+chunk GGUF SHA-256
+`5ba6202184804c0b5dec921b1ccfaed257ea36a57dfc6745a57b8dd2074fec1d`.
+Its immutable chunk receipt SHA-256 is
+`93ad1d8c0b618f6048fdde53d57554b4511d4508addb7e9083f619e62c2d1506`.
+At 15:09 CDT, **8/42** production chunks were certified. Full GGUF merge,
+published Q4 receipt, model load, numeric/full quality and Gen-0 selection
+remain unfinished.

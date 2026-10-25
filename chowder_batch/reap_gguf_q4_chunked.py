@@ -33,6 +33,29 @@ ADMISSION_POLL_SECONDS = 5
 ADMISSION_MAX_WAIT_SECONDS = 3600
 
 
+def _trim_owned_working_set() -> bool:
+    """Discard only THIS Python owner's reclaimable Windows mmap pages.
+
+    A source GGUFReader can retain >6 GiB of resident, read-only parent
+    pages after validating the frozen 37-GiB source/chunk receipts. A
+    guarded owner must not launch under the 12-GiB start floor or kill
+    anybody else's model server. EmptyWorkingSet(GetCurrentProcess())
+    releases resident cache pages while preserving the mmap and all
+    source bytes; next accesses fault the same original data back in.
+    """
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    psapi.EmptyWorkingSet.argtypes = [wintypes.HANDLE]
+    psapi.EmptyWorkingSet.restype = wintypes.BOOL
+    return bool(psapi.EmptyWorkingSet(kernel.GetCurrentProcess()))
+
+
 def _require_no_competing_quantizer() -> None:
     """Fail closed while another Q8/Q4 supervisor or quantizer owns the host."""
     import psutil
@@ -79,6 +102,7 @@ def _await_chunk_start_admission(paths: list[Path], log) -> None:
 
     deadline = time.monotonic() + ADMISSION_MAX_WAIT_SECONDS
     polls = 0
+    trimmed = False
     while True:
         _require_no_competing_quantizer()
         issues = resource_problems(paths, initial=True)
@@ -91,6 +115,18 @@ def _await_chunk_start_admission(paths: list[Path], log) -> None:
         if any("volume floor" in issue for issue in issues):
             raise ValueError("Q4 next-chunk disk safeguard refused launch: "
                              + "; ".join(issues))
+        if not trimmed:
+            trimmed = True
+            # Perform this once per admission interval. Never trim or open
+            # any unowned process; re-read the unchanged admission floors
+            # immediately if our own working-set trim succeeded.
+            freed = _trim_owned_working_set()
+            log.write(json.dumps({"event": "Q4_OWNED_MMAP_CACHE_TRIM",
+                                  "succeeded": freed,
+                                  "unchanged_start_floor_required": True}) + "\n")
+            log.flush()
+            if freed:
+                continue
         if time.monotonic() >= deadline:
             raise ValueError("Q4 unchanged start RAM/commit admission timeout: "
                              + "; ".join(issues))

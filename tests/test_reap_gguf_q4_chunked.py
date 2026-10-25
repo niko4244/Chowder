@@ -70,6 +70,7 @@ def test_q4_transient_initial_ram_and_commit_wait_preserves_original_floors(
 
     monkeypatch.setattr(supervisor, "resource_problems", resource)
     assert q4.ADMISSION_MAX_WAIT_SECONDS == 3600
+    monkeypatch.setattr(q4, "_trim_owned_working_set", lambda: False)
     monkeypatch.setattr(q4, "_require_no_competing_quantizer",
                         lambda: inspections.append(True))
     monkeypatch.setattr(q4.time, "sleep", lambda value: sleeps.append(value))
@@ -90,6 +91,8 @@ def test_q4_admission_refuses_disk_without_wait_or_lowering_threshold(
     monkeypatch.setattr(supervisor, "resource_problems",
                         lambda *_args, **kwargs: ["volume floor breached at G:"])
     monkeypatch.setattr(q4, "_require_no_competing_quantizer", lambda: None)
+    monkeypatch.setattr(q4, "_trim_owned_working_set",
+                        lambda: pytest.fail("must not trim on disk failure"))
     monkeypatch.setattr(q4.time, "sleep", lambda _: pytest.fail("must not wait"))
     with pytest.raises(ValueError, match="disk safeguard"):
         q4._await_chunk_start_admission([tmp_path], io.StringIO())
@@ -101,10 +104,39 @@ def test_q4_admission_timeout_retains_start_guard(tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor, "resource_problems",
                         lambda *_args, **kwargs: ["insufficient free Windows commit"])
     monkeypatch.setattr(q4, "_require_no_competing_quantizer", lambda: None)
+    monkeypatch.setattr(q4, "_trim_owned_working_set", lambda: False)
     monkeypatch.setattr(q4, "ADMISSION_MAX_WAIT_SECONDS", 0)
     monkeypatch.setattr(q4.time, "sleep", lambda _: pytest.fail("timed out"))
     with pytest.raises(ValueError, match="unchanged start RAM/commit admission timeout"):
         q4._await_chunk_start_admission([tmp_path], io.StringIO())
+
+
+def test_q4_owned_mmap_cache_trim_only_rechecks_original_floors(tmp_path, monkeypatch):
+    from chowder_batch import reap_gguf_supervised as supervisor
+
+    calls, trims, polls = [], [], []
+    reasons = [["insufficient unowned physical RAM"], []]
+
+    def guarded_resource(_paths, *, initial):
+        calls.append(initial)
+        return reasons.pop(0)
+
+    monkeypatch.setattr(supervisor, "resource_problems", guarded_resource)
+    monkeypatch.setattr(q4, "_require_no_competing_quantizer",
+                        lambda: polls.append(True))
+    monkeypatch.setattr(q4, "_trim_owned_working_set",
+                        lambda: trims.append(True) or True)
+    monkeypatch.setattr(q4.time, "sleep", lambda _: pytest.fail("RAM recovered"))
+    log = io.StringIO()
+    q4._await_chunk_start_admission([tmp_path], log)
+    assert trims == [True]
+    assert calls == polls == [True, True]
+    assert "Q4_OWNED_MMAP_CACHE_TRIM" in log.getvalue()
+
+
+def test_q4_self_trim_is_noop_on_unsupported_platform(monkeypatch):
+    monkeypatch.setattr(q4.os, "name", "posix", raising=False)
+    assert q4._trim_owned_working_set() is False
 
 
 def _synthetic_ready(tmp_path):
