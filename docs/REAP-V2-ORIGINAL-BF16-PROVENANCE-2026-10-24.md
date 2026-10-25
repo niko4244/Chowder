@@ -1,6 +1,10 @@
 # REAP128_v2 original BF16 revision pin and token census
 
-**Status: source identity pinned; 704×40 D0 still NOT_MEASURED.**
+**Status: source identity pinned; 704×40 D0 MEASURED — PASS.**
+The completed run measured calibration perplexity `15.451270210051794` against
+the frozen `< 20` gate. Result and evidence:
+`REAP-V2-BF16-D0-RESULT-2026-10-24.md`. The attestation and CUDA-parity
+limits recorded below still apply to that result.
 
 Original public Qwen source: `Qwen/Qwen3.6-35B-A3B`, immutable Git
 revision `995ad96eacd98c81ed38be0c5b274b04031597b0`.

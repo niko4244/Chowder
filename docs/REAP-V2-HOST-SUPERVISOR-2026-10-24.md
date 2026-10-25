@@ -2,6 +2,9 @@
 
 The October 24 r2 abort saved eleven full layer-statistics files but no
 restorable state. It was an INCOMPLETE observation with D0 NOT_MEASURED.
+It was superseded on 2026-10-24 by a complete, restorable run that measured
+D0 = PASS (perplexity `15.451270210051794`),
+see `REAP-V2-BF16-D0-RESULT-2026-10-24.md`.
 **Do not resume or overwrite r2.** Resume requires a fresh atomic
 two-buffer observation begun on PR #280 or later.
 
@@ -116,8 +119,10 @@ ran is **still missing**; no self-hashed JSON receipt can establish that alone.
    outstanding; CPU bitwise storage and crash tests do not certify arithmetic.
 2. Windows NTFS atomic rename plus file `fsync` handles common process kills,
    but independent sudden-power-loss metadata durability remains unverified.
-3. A monitored successful original 704-sequence, 40-layer, frozen-source
-   observation has not run. Gate D0 is **NOT_MEASURED**.
+3. ~~A monitored successful original 704-sequence, 40-layer, frozen-source
+   observation has not run.~~ **Resolved 2026-10-24**: the run completed and
+   published a sealed observation; gate D0 is **PASS** at perplexity
+   `15.451270210051794`. See `REAP-V2-BF16-D0-RESULT-2026-10-24.md`.
 4. The previous supervisor's Ollama configuration restoration reported an
    error in its archived final receipt; subsequent manual restoration was
    reported separately. Verify current restoration through the system's

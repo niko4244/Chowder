@@ -41,7 +41,11 @@ safe host resource window. NEVER run the old direct in-RAM command as registered
 D0: it has no sealed atomic checkpoint.
 Gate D0 requires a separate completed observer measurement with calibration
 perplexity below 20; all subsequent frozen admission/quality/fit gates remain
-unchanged. The intended `--out` directory must be absent; the preflight refuses
+unchanged. **That measurement now exists (2026-10-24):** calibration perplexity
+`15.451270210051794`, gate `< 20` → PASS, published as a sealed observation from
+the supervised two-buffer observer — see
+`docs/REAP-V2-BF16-D0-RESULT-2026-10-24.md` and
+`docs/REAP-V2-BF16-HANDOFF-2026-10-24.md`. The intended `--out` directory must be absent; the preflight refuses
 overlap with input directories and refuses overwrite.
 
 The registered full observer now commits exact BF16 hidden states between

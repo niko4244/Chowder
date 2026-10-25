@@ -177,8 +177,13 @@ start fresh with new unique directories instead.
 
 ## What is still NOT claimed
 
-No complete 704×40 D0 run has yet passed or been measured. No current
-inference that the model meets PPL <20 is authorized. CPU-only crash,
+**Update 2026-10-24: the complete 704×40 D0 run has now been executed and
+measured — perplexity `15.451270210051794`, gate `< 20` → PASS. See
+`REAP-V2-BF16-D0-RESULT-2026-10-24.md` and
+`REAP-V2-BF16-HANDOFF-2026-10-24.md`. The paragraphs below describe the
+limits that still attach to that result.**
+
+CPU-only crash,
 manifest and supervisor tests do NOT establish numerical CUDA parity or
 independently authenticated evidence of genuine model execution.
 The original external USB disks also do not have verified sudden-power-loss
