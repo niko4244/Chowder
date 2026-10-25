@@ -886,6 +886,27 @@ receipt SHA-256
 The final model's SHA was certified by the guarded publisher; independent
 Q8-vs-BF16 numerical window testing and external scientific evaluation
 still require their **own** measurements and cannot be inferred from this
-construction receipt. The publisher's separately SHA-verified cleanup of
-the F: assembled temporary continues until its own exit, so Q4 is not
-permitted to run concurrently with that owner.
+construction receipt. The publisher subsequently **exited code 0**, after
+logging `EXACT_ASSEMBLED_TEMP_CLEANED` against the same full-model SHA,
+releasing the verified F: temporary GGUF and recovering **37.52 GiB free**
+on F:. Original Q8 constructor ownership is fully cleared.
+
+### Independently guarded BF16-to-Q8 numerical window measurement
+
+The CPU-only `chowder_batch.reap_gguf_quant_sample --execute` was launched
+only after the full I: Q8 GGUF and sidecar were published and the original
+Q8 supervisor exited. It uses the existing `_owned_stage` resource guard
+and registered published BF16/Q8 SHA witnesses, before comparing four
+deterministic 256-value windows in each of three routed expert tensors
+through all 40 decoder layers. Admission recorded **12.23 GiB available
+physical RAM and 20.13 GiB free Windows commit**, CUDA disabled and no
+competing quantizer. Child PID **32748**, audit log
+`F:\reap128-v2-q8-numeric-supervised-20261025.log`, intended report
+`F:\reap128-v2-q8-bf16-numeric-sample-20261025.json`.
+This real numerical test **has not published a result**; it cannot be
+promoted to a registered quality, original CUDA, model-fit or speed PASS.
+
+Full Q4_K_M had been initially refused at 10.99 GiB available RAM, below
+the original **12 GiB minimum start threshold**. A later transient 12+
+GiB snapshot coincided with the guarded Q8 numeric child; Q4 cannot run
+concurrently, and no unrelated live Ollama/llama.cpp service was stopped.
