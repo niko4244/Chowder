@@ -132,7 +132,8 @@ def _validate_assembled_q4(original, assembly: Path, proofs: dict) -> None:
                 or not core._quantized_shape_matches(src, target)
                 or proof.get("shape") != list(map(int, target.shape))
                 or proof.get("tensor_type") != target.tensor_type.name
-                or proof.get("raw_sha256") != core.hash_tensor_data(target.data)):
+                or proof.get("raw_sha256") != core.hash_tensor_span(
+                    assembly, int(target.data_offset), int(target.n_bytes))):
             raise ValueError(f"Q4 assembled tensor shape/type/payload inconsistent: {name}")
 
 
@@ -605,7 +606,9 @@ def merge_q4(source: Path, parts: list[Path], output: Path, expected: dict) -> d
             proof = expected[name]
             if (tensor.name != name or tensor.tensor_type.name != proof["tensor_type"]
                     or list(map(int, tensor.shape)) != proof["shape"]
-                    or core.hash_tensor_data(tensor.data) != proof["raw_sha256"]):
+                    or core.hash_tensor_span(
+                        output, int(tensor.data_offset), int(tensor.n_bytes))
+                    != proof["raw_sha256"]):
                 raise ValueError(f"merged Q4 tensor identity changed: {name}")
 
     validate_finished_file()

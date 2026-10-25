@@ -818,3 +818,20 @@ construction. The Q8 numerical sampler now verifies final Q8 GGUF raw
 tensor SHA through bounded file range reads instead of mmap ndarray
 payload hashing, to avoid repeating the physical-memory guard abort;
 **24 sampler CPU tests passed**, including adversarial mmap-page refusal.
+
+### Q4 complete-file verifier hardening while Q8 publisher owns conversion
+
+The original Q8 final-memory abort also exposed two Q4 full-assembly
+verification paths that still faulted the *entire* output GGUF tensor
+arrays into the worker's resident memory. Both `merge_q4` final reread
+and `_validate_assembled_q4` (crash-durable ledger/reattest consumer)
+now verify every raw tensor SHA using the existing bounded
+`core.hash_tensor_span()` file-offset reader. GGUFReader is used only
+for model and tensor metadata; no threshold, quantization type,
+source lineage or frozen gate changes. Adversarial synthetic tests prove
+the independent assembled-model proof refuses mapped quantized payload
+hashing and uses exactly one buffered span per witnessed output tensor.
+With the live Q8 owner still present, **34 Q4/recovery CPU tests passed,
+one pinned real quantizer test was deliberately skipped**, Ruff clean.
+Full Q4_K_M remains **NOT EXECUTED** pending final Q8 publication and
+fresh exclusive host admission.

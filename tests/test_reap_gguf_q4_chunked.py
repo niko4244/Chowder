@@ -192,6 +192,48 @@ def test_q4_streaming_merge_detects_part_mutation_and_refuses_success(tmp_path):
         q4.merge_q4(source, parts, final, proofs)
 
 
+def test_q4_independent_full_assembly_proof_never_faults_mapped_quantized_data(
+    tmp_path, monkeypatch,
+):
+    source, _scratch, _chunks, assembly, proofs = _synthetic_ready(tmp_path)
+    original = GGUFReader(str(source), "r")
+    old_hash = core.hash_tensor_data
+    old_span = core.hash_tensor_span
+    spans = []
+
+    def no_mmap_quantized_hash(data):
+        if data.dtype == np.dtype("uint8"):
+            raise AssertionError("Q4 full-assembly verification must use bounded file spans")
+        return old_hash(data)
+
+    def counted_span(path, offset, nbytes):
+        assert Path(path) == assembly
+        spans.append((offset, nbytes))
+        return old_span(path, offset, nbytes)
+
+    monkeypatch.setattr(core, "hash_tensor_data", no_mmap_quantized_hash)
+    monkeypatch.setattr(core, "hash_tensor_span", counted_span)
+    q4._validate_assembled_q4(original, assembly, proofs)
+    assert len(spans) == len(proofs) == 4
+
+
+def test_q4_merge_final_integrity_reread_uses_bounded_spans(tmp_path, monkeypatch):
+    source, parts, proofs = _q4_mixed_parts(tmp_path)
+    output = tmp_path / "streamed-verified-q4.gguf"
+    old_span = core.hash_tensor_span
+    ranges = []
+
+    def traced_span(path, offset, nbytes):
+        assert Path(path) == output
+        ranges.append((offset, nbytes))
+        return old_span(path, offset, nbytes)
+
+    monkeypatch.setattr(core, "hash_tensor_span", traced_span)
+    actual = q4.merge_q4(source, parts, output, proofs)
+    assert actual["output_sha256"] == core.hash_file(output)
+    assert len(ranges) == len(proofs) == 4
+
+
 def _seal_synthetic(source, scratch, chunks, assembly, proofs, output,
                     groups, identity):
     """Write small per-group GGUF outputs and complete source-bound receipts."""
