@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import io
+import gc
 import json
 import os
 import shutil
 import subprocess
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -97,6 +99,97 @@ def _synthetic_ready(tmp_path):
                        "raw_sha256": core.hash_tensor_data(t.data)}
               for t in actual.tensors}
     return source, scratch, chunks, assembly, proofs
+
+
+def _q4_mixed_parts(tmp_path):
+    """All-Q4-family synthetic bytes and original copied F32 singleton."""
+    source, _scratch, _chunks, assembly, proofs = _synthetic_ready(tmp_path)
+    def serialize_parts():
+        tensors = GGUFReader(str(assembly), "r").tensors
+        groups = [tensors[:2], tensors[2:]]
+        result = []
+        for index, group in enumerate(groups):
+            part = tmp_path / f"mixed-part-{index}.gguf"
+            writer = GGUFWriter(str(part), "qwen35moe")
+            writer.add_file_type(15)
+            for t in group:
+                writer.add_tensor(t.name, t.data, raw_dtype=t.tensor_type)
+            writer.write_header_to_file()
+            writer.write_kv_data_to_file()
+            writer.write_tensors_to_file()
+            writer.close()
+            result.append(part)
+        return result
+    return source, serialize_parts(), proofs
+
+
+def test_q4_streaming_merge_bitwise_equal_to_previous_gguf_writer(tmp_path):
+    source, parts, proofs = _q4_mixed_parts(tmp_path)
+    baseline = tmp_path / "old-q4-merge.gguf"
+    def old_writer():
+        original = GGUFReader(str(source), "r")
+        tensors = {t.name: t for part in parts
+                   for t in GGUFReader(str(part), "r").tensors}
+        writer = GGUFWriter(str(baseline), "qwen35moe")
+        core.copy_metadata(original, writer, file_type=q4.Q4_FILE_TYPE)
+        for t in original.tensors:
+            tensor = tensors[t.name]
+            writer.add_tensor(t.name, tensor.data, raw_dtype=tensor.tensor_type)
+        writer.write_header_to_file()
+        writer.write_kv_data_to_file()
+        writer.write_tensors_to_file()
+        writer.close()
+
+    old_writer()
+    streamed = tmp_path / "new-q4-merge.gguf"
+    result = q4.merge_q4(source, parts, streamed, proofs)
+    assert result["output_sha256"] == core.hash_file(baseline)
+    assert streamed.read_bytes() == baseline.read_bytes()
+    merged = GGUFReader(str(streamed), "r")
+    assert merged.get_field("general.file_type").contents() == 15
+    assert {t.tensor_type for t in merged.tensors} == {
+        GGMLQuantizationType.Q4_K, GGMLQuantizationType.Q5_K,
+        GGMLQuantizationType.Q6_K, GGMLQuantizationType.F32,
+    }
+    assert [t.name for t in merged.tensors] == [
+        t.name for t in GGUFReader(str(source), "r").tensors
+    ]
+
+
+def test_q4_streaming_merge_releases_each_part_reader_before_next(tmp_path, monkeypatch):
+    import gguf
+
+    source, parts, proofs = _q4_mixed_parts(tmp_path)
+    reader = gguf.GGUFReader
+    live = weakref.WeakSet()
+    reads = [0]
+    def tracked(*args, **kwargs):
+        gc.collect()
+        assert not live, "previous Q4 GGUF reader or tokenizer mapping retained"
+        obj = reader(*args, **kwargs)
+        live.add(obj)
+        reads[0] += 1
+        return obj
+
+    monkeypatch.setattr(gguf, "GGUFReader", tracked)
+    monkeypatch.setattr(q4, "MERGE_COPY_BLOCK", 17, raising=False)
+    streamed = tmp_path / "bounded-q4.gguf"
+    result = q4.merge_q4(source, parts, streamed, proofs)
+    assert result["tensors"] == 4
+    assert reads[0] == 4  # source, 2 parts, final independent proof
+
+
+def test_q4_streaming_merge_detects_part_mutation_and_refuses_success(tmp_path):
+    source, parts, proofs = _q4_mixed_parts(tmp_path)
+    def payload_offset():
+        return int(GGUFReader(str(parts[0]), "r").tensors[0].data_offset)
+
+    with parts[0].open("r+b") as f:
+        f.seek(payload_offset())
+        f.write(b"\xE7")
+    final = tmp_path / "tampered-q4.gguf"
+    with pytest.raises(ValueError, match="payload|SHA|changed|mismatch"):
+        q4.merge_q4(source, parts, final, proofs)
 
 
 def _seal_synthetic(source, scratch, chunks, assembly, proofs, output,

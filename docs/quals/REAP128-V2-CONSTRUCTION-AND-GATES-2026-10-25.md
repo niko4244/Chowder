@@ -656,8 +656,9 @@ atomically republishes each independently certified suite without silently
 discarding the other.
 
 The integrated CPU-only construction/eval/gate/selection/serving/parity
-preflight regression matrix completed **290 passed, 3 intentionally
-skipped**, with Ruff clean and no Git whitespace errors. No model-quality
+preflight regression matrix completed **295 passed, 3 intentionally
+skipped** after streaming merge and retry-manifest regressions, with
+Ruff clean and no Git whitespace errors. No model-quality
 PASS or GPU placement is inferred from these regression tests.
 
 ### October 25 11:23 — guarded Q8 merger memory-floor interruption
@@ -724,3 +725,24 @@ separate crash-recovery hole in which an aborted earlier merge left one
 small manifest, a later complete merge left a second identical manifest,
 and the emergency recovery path incorrectly required exactly one.
 Adversarial synthetic tests passed without touching the live assembly.
+
+### Bounded-memory Q4_K_M merger before production dispatch
+
+Independent code review found the same all-part `GGUFReader`/mmap lifetime
+amplification in Q4 assembly. The Q4 streaming merger now keeps only
+primitive source-bound part offsets, sizes and GGML types while inspecting
+one source file at a time; it emits the canonical type-15 GGUF tensor
+table in original BF16 order, streams Q4_K/Q5_K/Q6_K and retained types
+in bounded byte blocks, SHA-verifies each raw payload during copy, and
+independently rereads the entire output for tensor/type/shape/hash
+integrity. It requires lossless original FP32 bytes through the pinned
+single-unit shape normalization. The existing crash-durable Q4 ledger,
+partial transfer recovery and safety guards remain unchanged.
+
+Synthetic tests reproduced prior GGUFReader retention RED and proved
+exact *whole-file* compatibility with the historical writer for mixed
+Q4_K/Q5_K/Q6_K/F32 tensors after streaming GREEN. Adversarial payload
+tamper and no-retained-reader tests pass. The scoped Q4/recovery CPU matrix
+passed **29 tests, with one deliberate pinned-quantizer skip** while
+the exclusive production Q8 merge was active. Full original 40x128 Q4
+output is **NOT BUILT** and remains serially gated behind completed Q8.

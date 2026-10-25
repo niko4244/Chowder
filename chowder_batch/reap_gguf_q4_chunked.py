@@ -23,6 +23,7 @@ MODE = "Q4_K_M"
 Q4_FILE_TYPE = 15
 BINARY_SHA256 = "eeb75877bd41d8d7b51d18129d873e6220014613baea349fa18e6b5d36c987de"
 FINALIZATION_SCHEMA = "chowder.reap128-v2-gguf-q4-durable-finalization.v1"
+MERGE_COPY_BLOCK = core.HASH_BLOCK
 
 
 def _require_no_competing_quantizer() -> None:
@@ -469,58 +470,145 @@ def _recover_finalization(*, scratch: Path, chunks: Path, source: Path,
 
 
 def merge_q4(source: Path, parts: list[Path], output: Path, expected: dict) -> dict:
-    """Merge source-ordered Q4_K_M per-tensor payloads without requantizing."""
-    from gguf import GGUFReader, GGUFWriter, GGMLQuantizationType
+    """Bitwise Q4 merge with no retained per-part reader or tensor mmaps.
 
-    if not parts or output.exists() or not output.parent.is_dir():
+    A part is opened only during its own inventory inspection. Only primitive
+    offsets, type identifiers, dtype strings, sizes, and shapes survive. Payloads
+    are subsequently read from one open part at a time in bounded byte blocks,
+    without building a 42-part in-memory GGUF tokenizer/tensor collection.
+    """
+    from gguf import GGUFReader, GGUFWriter, GGMLQuantizationType
+    import numpy as np
+
+    if (not parts or output.exists() or output.is_symlink()
+            or not output.parent.is_dir()):
         raise ValueError("Q4 merge requires fresh output and complete chunk list")
-    original = GGUFReader(str(source), "r")
-    source_items = {t.name: t for t in original.tensors}
-    all_tensors = []
-    for path in parts:
-        reader = GGUFReader(str(path), "r")
-        all_tensors.extend(reader.tensors)
-        del reader
-    tensors = {t.name: t for t in all_tensors}
-    names = [t.name for t in original.tensors]
-    if (len(source_items) != len(names)
-            or len(tensors) != len(all_tensors) or set(tensors) != set(names)
-            or set(tensors) != set(expected)):
+
+    writer = GGUFWriter(str(output), "qwen35moe")
+    # Scope the original reader so its tokenizer metadata and ndarray views
+    # cannot coexist with the subsequent 42 part readers.
+    def source_metadata() -> tuple[list[str], dict[str, tuple]]:
+        original = GGUFReader(str(source), "r")
+        core.copy_metadata(original, writer, file_type=Q4_FILE_TYPE)
+        order = [t.name for t in original.tensors]
+        if len(order) != len(set(order)):
+            raise ValueError("Q4 original source has duplicate tensor names")
+        source_proofs = {}
+        for t in original.tensors:
+            if t.tensor_type not in (GGMLQuantizationType.BF16, GGMLQuantizationType.F32):
+                raise ValueError("Q4 original source tensor is not BF16/F32")
+            source_proofs[t.name] = (
+                tuple(map(int, t.shape)), int(t.tensor_type),
+                core.hash_tensor_data(t.data)
+                if t.tensor_type == GGMLQuantizationType.F32 else None,
+            )
+        return order, source_proofs
+
+    names, source_proofs = source_metadata()
+    if (not isinstance(expected, dict) or len(expected) != len(names)
+            or set(expected) != set(names)
+            or len({str(part.resolve()) for part in parts}) != len(parts)):
         raise ValueError("Q4 chunk inventory differs from registered BF16")
     q4_types = {GGMLQuantizationType.Q4_K, GGMLQuantizationType.Q5_K,
                 GGMLQuantizationType.Q6_K, GGMLQuantizationType.Q8_0,
                 GGMLQuantizationType.F32, GGMLQuantizationType.F16,
                 GGMLQuantizationType.BF16}
-    for name, item in expected.items():
-        tensor = tensors[name]
-        if (tensor.tensor_type not in q4_types
-                or not core._quantized_shape_matches(source_items[name], tensor)
-                or list(map(int, tensor.shape)) != item["shape"]
-                or tensor.tensor_type.name != item["tensor_type"]
-                or core.hash_tensor_data(tensor.data) != item["raw_sha256"]):
-            raise ValueError(f"Q4 chunk payload or type changed: {name}")
-    if not any(t.tensor_type == GGMLQuantizationType.Q4_K for t in tensors.values()):
+
+    def inspect_one_part(path: Path) -> dict[str, tuple]:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("Q4 chunk is not a trusted regular file")
+        reader = GGUFReader(str(path), "r")
+        length = path.stat().st_size
+        witness: dict[str, tuple] = {}
+        for tensor in reader.tensors:
+            name = tensor.name
+            if name in witness or name not in source_proofs:
+                raise ValueError(f"Q4 duplicate/unregistered chunk tensor: {name}")
+            item = expected[name]
+            shape = tuple(map(int, tensor.shape))
+            dtype = tensor.tensor_type
+            if (not isinstance(item, dict) or dtype not in q4_types
+                    or item.get("shape") != list(shape)
+                    or item.get("tensor_type") != dtype.name
+                    or item.get("raw_sha256") != core.hash_tensor_data(tensor.data)):
+                raise ValueError(f"Q4 chunk payload or type changed: {name}")
+            original_shape, source_type, original_f32_sha = source_proofs[name]
+            if source_type == int(GGMLQuantizationType.F32):
+                normalized = original_shape
+                while len(normalized) > len(shape) and normalized[-1] == 1:
+                    normalized = normalized[:-1]
+                if (dtype != GGMLQuantizationType.F32 or normalized != shape
+                        or item["raw_sha256"] != original_f32_sha):
+                    raise ValueError(f"Q4 copied F32 singleton bytes/shape changed: {name}")
+            elif shape != original_shape:
+                raise ValueError(f"Q4 quantized tensor shape differs: {name}")
+            nbytes, offset = int(tensor.n_bytes), int(tensor.data_offset)
+            if (nbytes <= 0 or offset < 0 or offset > length
+                    or nbytes > length - offset or nbytes != tensor.data.nbytes):
+                raise ValueError(f"Q4 chunk tensor byte bounds changed: {name}")
+            witness[name] = (
+                str(path.resolve()), offset, nbytes,
+                tuple(map(int, tensor.data.shape)),
+                tensor.data.dtype.str, int(dtype), shape,
+            )
+        return witness
+
+    metadata: dict[str, tuple] = {}
+    for part in parts:
+        scanned = inspect_one_part(part)
+        if set(metadata).intersection(scanned):
+            raise ValueError("Q4 tensor duplicated across chunk files")
+        metadata.update(scanned)
+    if set(metadata) != set(names):
+        raise ValueError("Q4 chunk tensor inventory differs from BF16")
+    if not any(row[5] == int(GGMLQuantizationType.Q4_K) for row in metadata.values()):
         raise ValueError("Q4_K_M recipe produced no Q4_K tensors")
-    writer = GGUFWriter(str(output), "qwen35moe")
-    core.copy_metadata(original, writer, file_type=Q4_FILE_TYPE)
-    for name in names:
-        tensor = tensors[name]
-        writer.add_tensor(name, tensor.data, raw_dtype=tensor.tensor_type)
-    writer.write_header_to_file()
-    writer.write_kv_data_to_file()
-    writer.write_tensors_to_file()
-    writer.close()
-    merged = GGUFReader(str(output), "r")
-    after = {t.name: t for t in merged.tensors}
-    if len(after) != len(names) or set(after) != set(names):
-        raise ValueError("merged Q4 tensor inventory changed")
-    if merged.get_field("general.file_type").contents() != Q4_FILE_TYPE:
-        raise ValueError("merged Q4 metadata file type changed")
-    for name in names:
-        before, now = tensors[name], after[name]
-        if (now.tensor_type != before.tensor_type or list(now.shape) != list(before.shape)
-                or core.hash_tensor_data(now.data) != expected[name]["raw_sha256"]):
-            raise ValueError(f"merged Q4 tensor identity changed: {name}")
+
+    try:
+        for name in names:
+            _path, _offset, nbytes, byte_shape, numpy_dtype, kind, _shape = metadata[name]
+            writer.add_tensor_info(name, byte_shape, np.dtype(numpy_dtype),
+                                   nbytes, raw_dtype=GGMLQuantizationType(kind))
+        writer.write_header_to_file()
+        writer.write_kv_data_to_file()
+        writer.write_ti_data_to_file()
+        assert writer.fout is not None and len(writer.fout) == 1
+        dest = writer.fout[0]
+        writer.write_padding(dest, dest.tell())
+        for name in names:
+            part_path, offset, nbytes, _byteshape, _dtype, _kind, _shape = metadata[name]
+            sha = hashlib.sha256()
+            with Path(part_path).open("rb") as stream:
+                stream.seek(offset)
+                remaining = nbytes
+                while remaining:
+                    block = stream.read(min(remaining, MERGE_COPY_BLOCK))
+                    if not block:
+                        raise ValueError(f"Q4 part truncated during bounded stream: {name}")
+                    dest.write(block)
+                    sha.update(block)
+                    remaining -= len(block)
+            if sha.hexdigest() != expected[name]["raw_sha256"]:
+                raise ValueError(f"Q4 payload changed during final raw copy: {name}")
+            writer.write_padding(dest, nbytes)
+        writer.flush()
+    finally:
+        writer.close()
+
+    # This scope releases the complete final GGUFReader before returning.
+    def validate_finished_file() -> None:
+        merged = GGUFReader(str(output), "r")
+        if (len(merged.tensors) != len(names)
+                or merged.get_field("general.file_type").contents() != Q4_FILE_TYPE):
+            raise ValueError("merged Q4 tensor inventory/file type changed")
+        for name, tensor in zip(names, merged.tensors):
+            proof = expected[name]
+            if (tensor.name != name or tensor.tensor_type.name != proof["tensor_type"]
+                    or list(map(int, tensor.shape)) != proof["shape"]
+                    or core.hash_tensor_data(tensor.data) != proof["raw_sha256"]):
+                raise ValueError(f"merged Q4 tensor identity changed: {name}")
+
+    validate_finished_file()
     return {
         "status": "GGUF_CHUNKED_Q4_TENSOR_BITWISE_MERGE_NOT_QUALITY_QUALIFIED",
         "mode": MODE, "tensors": len(names), "output": str(output.resolve()),
