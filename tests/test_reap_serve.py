@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 import os
 import socket
@@ -110,6 +111,11 @@ def _setup(monkeypatch, eval_rc=0, health_fail=False):
     calls = []
     FakeProc.terminated = False
     monkeypatch.setattr(reap_serve, "_require_owned_listener", lambda proc, port: None)
+    # Existing fake-model session tests exercise serving state transitions,
+    # not 733-tensor BF16 construction; separately test the genuine v2
+    # registered-model admission without bypassing it in production.
+    monkeypatch.setattr(reap_serve, "_verify_registered_v2_construction",
+                        lambda gguf, arm, digest: None)
 
     class FakeEvalProc:
         def __init__(self, cmd):
@@ -145,6 +151,87 @@ def _setup(monkeypatch, eval_rc=0, health_fail=False):
     monkeypatch.setattr(reap_serve.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(reap_serve.time, "sleep", lambda s: None)
     return calls
+
+
+def _synthetic_registered_v2_model(tmp_path, *, arm="reap128_v2_q4"):
+    """Construction-receipt admission fixture, not a quantized GGUF proof."""
+    gguf = tmp_path / "example.gguf"
+    gguf.write_bytes(b"fixture-not-a-real-733-tensor-gguf")
+    sha = hashlib.sha256(gguf.read_bytes()).hexdigest()
+    names = [f"blk.{layer}.{suffix}" for layer in range(40)
+             for suffix in ("ffn_down_exps.weight", "ffn_gate_exps.weight",
+                            "ffn_up_exps.weight")]
+    names.extend(f"fixture.auxiliary.{i}" for i in range(613))
+    groups = [names[index::42] for index in range(42)]
+    schema, status = reap_serve.REGISTERED_V2_CONSTRUCTION[arm]
+    record = {"schema": schema, "status": status,
+              "output": str(gguf.resolve()), "output_sha256": sha,
+              "output_size_bytes": gguf.stat().st_size,
+              "source_gguf_sha256": reap_serve.REGISTERED_BF16_SHA256,
+              "frozen_stage_spec_sha256": reap_serve.REGISTERED_STAGE_SHA256,
+              "quantizer_binary_sha256": reap_serve.REGISTERED_QUANTIZER_SHA256,
+              "chunk_count": 42, "quality_gate": "NOT_EVALUATED",
+              "gpu_fit_gate": "NOT_EVALUATED",
+              "chunked_reference_receipts": {
+                  "source_groups": groups,
+                  "all_tensors": {name: {"shape": [1], "tensor_type": "Q4_K",
+                                         "raw_sha256": "a" * 64} for name in names}}}
+    path = gguf.with_name(gguf.name + ".reap-chunked.json")
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return gguf, sha, path, record
+
+
+def test_new_v2_serving_refuses_foreign_unpublished_gguf_before_model_launch(
+    tmp_path, monkeypatch,
+):
+    gguf = tmp_path / "unregistered.gguf"
+    gguf.write_bytes(b"foreign-model")
+    monkeypatch.setattr(reap_serve.subprocess, "Popen",
+                        lambda *_a, **_kw: pytest.fail("unregistered model must not launch"))
+    with pytest.raises(ValueError, match="complete registered source-bound GGUF receipt"):
+        reap_serve.main(_serve_args(gguf, tmp_path / "evaluation", arm="reap128_v2_q4"))
+
+
+@pytest.mark.parametrize("mutation", [
+    "source", "status", "digest", "groups", "experts", "tensor_sha", "receipt_missing",
+])
+def test_q4_source_bound_server_preflight_refuses_resealed_or_partial_construction(
+    tmp_path, mutation,
+):
+    gguf, sha, path, record = _synthetic_registered_v2_model(tmp_path)
+    if mutation == "source":
+        record["source_gguf_sha256"] = "b" * 64
+    elif mutation == "status":
+        record["status"] = "READY_FOR_DEPLOYMENT"
+    elif mutation == "digest":
+        record["output_sha256"] = "c" * 64
+    elif mutation == "groups":
+        record["chunked_reference_receipts"]["source_groups"].pop()
+    elif mutation == "experts":
+        record["chunked_reference_receipts"]["all_tensors"].pop("blk.0.ffn_up_exps.weight")
+    elif mutation == "tensor_sha":
+        record["chunked_reference_receipts"]["all_tensors"]["blk.0.ffn_up_exps.weight"]["raw_sha256"] = "not-a-hash"
+    if mutation == "receipt_missing":
+        path.unlink()
+    else:
+        path.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(ValueError, match="construction|receipt|inventory|tensor proof"):
+        reap_serve._verify_registered_v2_construction(gguf.resolve(), "reap128_v2_q4", sha)
+
+
+def test_published_v2_construction_preflight_validates_source_but_not_quality(tmp_path):
+    gguf, sha, _, record = _synthetic_registered_v2_model(tmp_path)
+    assert reap_serve._verify_registered_v2_construction(
+        gguf.resolve(), "reap128_v2_q4", sha,
+    ) is None
+    assert record["quality_gate"] == "NOT_EVALUATED"
+    assert record["gpu_fit_gate"] == "NOT_EVALUATED"
+
+
+def test_q8_new_v2_refuses_model_with_foreign_full_sha_even_if_self_sealed(tmp_path):
+    gguf, sha, _, _ = _synthetic_registered_v2_model(tmp_path, arm="reap128_v2")
+    with pytest.raises(ValueError, match="construction"):
+        reap_serve._verify_registered_v2_construction(gguf.resolve(), "reap128_v2", sha)
 
 
 def test_serve_json_and_eval_run(tmp_path, monkeypatch):

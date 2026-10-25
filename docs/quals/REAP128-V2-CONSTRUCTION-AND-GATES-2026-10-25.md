@@ -1440,3 +1440,50 @@ links, safe no-replace semantics and original exclusive receipt behavior.
 The focused CUDA provenance/parity suite passed **14 tests**, Ruff and
 Git whitespace checks clean. No GPU was initialized or allocated and no
 new BF16 CUDA parity measurement is claimed.
+
+### October 25 16:37 CDT — new-v2 serving bound to published BF16-derived GGUF
+
+The source-bound serving wrapper previously verified the *actual* GGUF
+whole-file SHA before launching a model server, but a new-v2 arm could
+claim any internally consistent foreign GGUF plus matching `serve.json`
+and evaluation-input identity without proving it belonged to the frozen
+704×40, 26-shard, source-bound REAP128_v2 construction lineage. New
+`reap128_v2` Q8 and `reap128_v2_q4` serving admissions now require the
+adjacent, regular, size-bounded complete **42-group**
+`.reap-chunked.json` publication receipt with the exact model SHA/byte
+length, pinned original BF16 GGUF SHA, frozen stage/spec and quantizer
+SHA, correct Q8/Q4 publication schema/status, untouched
+`NOT_EVALUATED` quality/fit statuses, and exact **733** unique tensor
+provenance records with legal tensor shape/type and 64-character payload
+hashes. All 120 routed expert tensor names across the original frozen
+40 layers are required. The original fully published Q8 arm additionally
+requires the independently pinned, previously audited whole-file SHA
+`89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6`;
+the future Q4 arm may only admit its genuinely published full GGUF SHA.
+This is a necessary construction-identity preflight, **not** a new
+independent 733-tensor raw-payload certificate or model-quality proof;
+that separate exact source-bound audit remains mandatory after Q4
+publication. Original historical dense/REAP160/random128 serving routes
+were not retrospectively requalified or otherwise changed.
+
+Adversarial CPU tests show foreign/unpublished GGUFs are refused before
+launch; source ancestry, status, model digest, group count, routed expert
+inventory, per-tensor hash and missing-receipt tampering are rejected.
+Synthetic positive 733-name/42-group Q4 fixtures explicitly remain
+non-scientific. The offline serving, evaluator and gate focused matrix
+completed **146 passed**, two benign Python warnings, Ruff and diff
+checks clean. A separate read-only preflight against the original
+**actual published Q8** file and adjacent 191,080-byte source-bound
+sidecar succeeded as
+`PUBLISHED_Q8_SOURCE_BOUND_SERVING_PREFLIGHT_PASS_NOT_QUALITY_GATE`.
+No large model was loaded, no new GPU context created and no model
+inference/evaluation was performed by the check.
+
+At 16:37 CDT fifth original Q4 supervisor PID 46388 remained live,
+source-bound recovery log included `CHUNKED_Q4_START` with the exact
+frozen BF16/spec/quantizer identity and 42 original groups, and **27/42**
+original parts still existed with their immutable receipts. No fresh
+chunk publication or complete final Q4 GGUF had been observed. Its
+revalidation is ongoing; never start a competing quantizer or convert
+this CPU preflight into a scientific PASS. Amendment4 Gen-0 `BLOCKED`,
+PR #282 draft, and external GPU workloads protected.

@@ -28,6 +28,16 @@ from pathlib import Path
 DEFAULT_SERVER = r"C:\llama.cpp\bin\llama-server.exe"
 FLAGS = ["--fit", "on", "-np", "4", "-c", "16384", "--jinja"]
 HEALTH_TIMEOUT = 900
+REGISTERED_V2_CONSTRUCTION = {
+    "reap128_v2": ("chowder.reap128-v2-gguf-q8-chunked-final.v1",
+                   "Q8_TENSOR_EXACT_CONSTRUCTED_NOT_QUALITY_QUALIFIED"),
+    "reap128_v2_q4": ("chowder.reap128-v2-gguf-q4-chunked-final.v1",
+                      "Q4_K_M_TENSOR_EXACT_CONSTRUCTED_NOT_QUALITY_QUALIFIED"),
+}
+REGISTERED_BF16_SHA256 = "80341aa776ad9b5f937c21b081b6d76de4a2ea277e5fb88c9ae2634a9da8f4c6"
+REGISTERED_STAGE_SHA256 = "7f9065d8036f7bd04c19a15f87540ad195658f46a80a1a09aa407b44c4836a94"
+REGISTERED_QUANTIZER_SHA256 = "eeb75877bd41d8d7b51d18129d873e6220014613baea349fa18e6b5d36c987de"
+REGISTERED_Q8_GGUF_SHA256 = "89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6"
 
 _KEEP = re.compile(r"llama_params_fit|common_fit|n_cpu_moe|overflowing|offloaded \d+/\d+ layers|exps.*(?:overridden|CPU)", re.I)
 _CPU_MOE = re.compile(r"n_cpu_moe\s*[=:]?\s*(\d+)", re.I)
@@ -66,6 +76,63 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _verify_registered_v2_construction(gguf: Path, arm: str, digest: str) -> None:
+    """Do not serve an unregistered/partial v2 GGUF merely because it hashes.
+
+    This binds the actual model file SHA (already freshly measured by the
+    serving wrapper) to its published source-bound 42-chunk construction
+    evidence. This is a necessary preflight, not independent full raw-tensor
+    or model-quality proof. The historical REAP160 and random128 arms are
+    intentionally unchanged and must never acquire retroactive witnesses.
+    """
+    required = REGISTERED_V2_CONSTRUCTION.get(arm)
+    if required is None:
+        return
+    receipt = gguf.with_name(gguf.name + ".reap-chunked.json")
+    if (receipt.is_symlink() or not receipt.is_file()
+            or receipt.stat().st_size > 4 * 1024 * 1024):
+        raise ValueError(f"{arm}: complete registered source-bound GGUF receipt missing")
+    try:
+        claimed = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError(f"{arm}: registered construction receipt cannot be parsed") from exc
+    if not isinstance(claimed, dict):
+        raise ValueError(f"{arm}: registered construction receipt must be an object")
+    provenance = claimed.get("chunked_reference_receipts")
+    groups = provenance.get("source_groups") if isinstance(provenance, dict) else None
+    proofs = provenance.get("all_tensors") if isinstance(provenance, dict) else None
+    if (claimed.get("schema") != required[0] or claimed.get("status") != required[1]
+            or claimed.get("output") != str(gguf)
+            or claimed.get("output_sha256") != digest
+            or claimed.get("output_size_bytes") != gguf.stat().st_size
+            or claimed.get("source_gguf_sha256") != REGISTERED_BF16_SHA256
+            or (arm == "reap128_v2" and digest != REGISTERED_Q8_GGUF_SHA256)
+            or claimed.get("frozen_stage_spec_sha256") != REGISTERED_STAGE_SHA256
+            or claimed.get("quantizer_binary_sha256") != REGISTERED_QUANTIZER_SHA256
+            or claimed.get("chunk_count") != 42
+            or claimed.get("quality_gate") != "NOT_EVALUATED"
+            or claimed.get("gpu_fit_gate") != "NOT_EVALUATED"
+            or not isinstance(groups, list) or len(groups) != 42
+            or not isinstance(proofs, dict) or len(proofs) != 733):
+        raise ValueError(f"{arm}: incomplete or foreign BF16-derived v2 construction")
+    names = [name for group in groups if isinstance(group, list) for name in group]
+    if len(names) != 733 or len(set(names)) != 733 or set(names) != set(proofs):
+        raise ValueError(f"{arm}: registered 733-tensor GGUF inventory invalid")
+    for name, record in proofs.items():
+        if (not isinstance(record, dict)
+                or not isinstance(record.get("shape"), list)
+                or not record["shape"]
+                or any(type(n) is not int or n <= 0 for n in record["shape"])
+                or record.get("tensor_type") not in {"Q4_K", "Q5_K", "Q6_K", "Q8_0", "F32", "F16", "BF16"}
+                or not isinstance(record.get("raw_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", record["raw_sha256"])):
+            raise ValueError(f"{arm}: incomplete registered GGUF tensor proof: {name}")
+    for layer in range(40):
+        for suffix in ("ffn_down_exps.weight", "ffn_gate_exps.weight", "ffn_up_exps.weight"):
+            if f"blk.{layer}.{suffix}" not in proofs:
+                raise ValueError(f"{arm}: frozen 40-layer routed expert inventory absent")
 
 
 def _digest_json(value: dict) -> str:
@@ -404,6 +471,10 @@ def main(argv: list[str] | None = None) -> int:
         if _model_stat(gguf) != model_stat:
             raise RuntimeError("REAP GGUF changed while hashing; refusing serving")
         resumed = _admit_output(arm_dir, gguf=gguf, digest=digest)
+        # The official new-v2 scientific arms must use a published original
+        # BF16-derived artifact, not a foreign GGUF that merely matches its
+        # own claimed serve.json and evaluator input witness.
+        _verify_registered_v2_construction(gguf, args.arm, digest)
         _require_free_loopback_port(args.port)
         session = uuid.uuid4().hex if resumed else None
         log_path = arm_dir / (f"server.resume-{session}.log" if resumed else "server.log")
