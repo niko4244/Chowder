@@ -29,3 +29,5 @@ docs/quals/reap128-v2-q8-F-full-independent-tensor-cert-20261025.json -text
 docs/quals/reap128-v2-q8-I-final-construction-receipt-20261025.json -text
 docs/quals/reap128-v2-q8-bf16-numeric-sample-20261025.json -text
 docs/quals/reap128-v2-frozen-offline-inputs-20261025.json -text
+docs/quals/reap128-v2-q4-independent-full-tensor-cert-20261025.json -text
+docs/quals/reap128-v2-q4-bf16-numeric-sample-20261025.json -text
