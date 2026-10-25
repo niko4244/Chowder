@@ -1390,3 +1390,53 @@ the old owner and all child quantizers are exited, scratch unsealed files
 absent, original source SHA/quantizer identity unchanged, host floors met
 and a fresh audit log path unused. No unrelated Ollama/llama.cpp services
 may be interrupted and all deployment/scientific gates remain BLOCKED.
+
+### October 25 16:31 CDT — independently admitted fifth source-bound Q4 recovery
+
+The prior fourth exclusive Q4 constructor and every owned quantizer child
+had exited before recovery. A fresh actual Windows census found **zero**
+competing Q8/Q4 supervisors or `llama-quantize` processes; exactly **27/42**
+original source-bound chunk GGUFs and corresponding immutable receipts were
+present with consecutive matching part names. There was no unsealed F:
+scratch mini, no previously published final G: Q4 GGUF/sidecar, and the
+new F: audit log path was unused. The verified original BF16 stage remained
+present. Host admission recorded **20.73 GiB free physical RAM, 20.13 GiB
+free Windows commit**, and F/G/I free volumes **37.52/26.64/13.87 GiB**;
+the unchanged `resource_problems(..., initial=True)` returned no issues,
+and the new exact-command competing-owner census passed.
+
+An exclusive **fifth original-source recovery** was started through
+`python -u -B -m chowder_batch.reap_gguf_q4_chunked --execute`, preserving
+the exact 42-part plan, original BF16 SHA-256
+`80341aa776ad9b5f937c21b081b6d76de4a2ea277e5fb88c9ae2634a9da8f4c6`,
+fixed pinned quantizer, 1024-MiB maximum BF16 chunks, 1-MiB slabs,
+`F:\reap-v2-q4-streaming-scratch-20261025` and
+`G:\reap-v2-q4-streaming-chunks-20261025`. The **new original owner PID
+46388**, retained console session **85833**, has the exclusive unused log
+`F:\reap128-v2-q4-streaming-resume5-census-recovery-20261025.log`.
+The process and full command line were independently rechecked live
+at 16:31 CDT with **27** previously sealed pairs unchanged. It was
+still hashing/validating the original 37.1-GB BF16 source before producing
+its first event log; an empty log at that point is **not** evidence of a
+failed or abandoned owner. No competing quantizer, new model inference or
+GPU operation was launched. Q4 full output and source-bound numerical
+fidelity still do not exist. Scientific selection remains `BLOCKED`.
+
+### October 25 16:31 CDT — CUDA numerical receipt publication across Windows volumes
+
+The guarded original-BF16 CUDA parity utility's existing output publisher
+already used exclusive staging, full JSON serialization, `fsync` and an
+atomic hard link to prevent incomplete or overwritten numerical evidence.
+On a Windows volume without hard-link support, however, it would refuse
+to publish an otherwise valid completed numerical result. The publication
+now uses the Windows-specific exclusive same-directory `Path.rename`,
+which refuses replacing an existing target, and retains the original
+exclusive `os.link` behavior on POSIX where `rename` would replace an
+existing receipt. Private incomplete stages are still cleaned in `finally`;
+no numerical measurement status, BF16 source validation, CUDA admission
+policy, GPU ownership rule or frozen scientific threshold was changed.
+Adversarial CPU tests exercise an external Windows volume rejecting hard
+links, safe no-replace semantics and original exclusive receipt behavior.
+The focused CUDA provenance/parity suite passed **14 tests**, Ruff and
+Git whitespace checks clean. No GPU was initialized or allocated and no
+new BF16 CUDA parity measurement is claimed.

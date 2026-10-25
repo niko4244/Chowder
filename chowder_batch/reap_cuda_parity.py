@@ -111,11 +111,11 @@ def _read_json_bounded(path: Path, max_bytes: int) -> dict:
 
 
 def publish_receipt(path: Path, result: dict) -> None:
-    """Durable same-directory publish without overwriting another receipt.
+    """Durable same-directory exclusive publish without incomplete evidence.
 
-    A hard link acts as an atomic exclusive create on NTFS and POSIX. If the
-    volume does not support hard links, refuse instead of publishing partially
-    written JSON or replacing existing experiment evidence.
+    Windows rename refuses an existing destination even on external volumes
+    without hard-link support; POSIX needs exclusive hard-link publication
+    because rename would overwrite prior evidence. Never replace a receipt.
     """
     raw = (json.dumps(result, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -124,9 +124,16 @@ def publish_receipt(path: Path, result: dict) -> None:
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
-        os.link(temporary, path)
+        if _windows_exclusive_rename():
+            temporary.rename(path)
+        else:
+            os.link(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _windows_exclusive_rename() -> bool:
+    return os.name == "nt"
 
 
 def original_provenance(

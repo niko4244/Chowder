@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -71,6 +72,43 @@ def test_exclusive_receipt_publication_is_atomic_and_preserves_prior_evidence(tm
         parity.publish_receipt(target, {"status": "MEASURED_EXACT_BF16_MATCH"})
     assert json.loads(target.read_text(encoding="utf-8")) == value
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_windows_exclusive_cuda_receipt_publish_survives_no_hardlink_volume(
+    tmp_path, monkeypatch,
+):
+    """Reproduce an external Windows volume with no hardlink support, CPU only."""
+    target = tmp_path / "cuda-metric.json"
+    monkeypatch.setattr(parity, "_windows_exclusive_rename", lambda: True)
+
+    def no_links(*_args, **_kwargs):
+        raise OSError("hard links unsupported on this volume")
+
+    monkeypatch.setattr(parity.os, "link", no_links)
+    value = {"schema": parity.SCHEMA, "status": "MEASURED_NUMERIC_DIFFERENCES",
+             "scientific_gate": "NOT_REGISTERED"}
+    parity.publish_receipt(target, value)
+    assert json.loads(target.read_text(encoding="utf-8")) == value
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_windows_exclusive_cuda_publish_refuses_existing_receipt(tmp_path, monkeypatch):
+    target = tmp_path / "original.json"
+    original = b"already sealed old numerical evidence\n"
+    target.write_bytes(original)
+    monkeypatch.setattr(parity, "_windows_exclusive_rename", lambda: True)
+    real_rename = Path.rename
+
+    def windows_no_replace(self, new):
+        if Path(new) == target and target.exists():
+            raise FileExistsError("Windows atomic publication cannot replace")
+        return real_rename(self, new)
+
+    monkeypatch.setattr(Path, "rename", windows_no_replace)
+    with pytest.raises(FileExistsError, match="cannot replace"):
+        parity.publish_receipt(target, {"status": "MEASURED_EXACT_BF16_MATCH"})
+    assert target.read_bytes() == original
+    assert not list(tmp_path.glob(".*.tmp"))
 
 
 def test_frozen_prefix_rejects_substituted_calibration_without_tokenizer(tmp_path):
