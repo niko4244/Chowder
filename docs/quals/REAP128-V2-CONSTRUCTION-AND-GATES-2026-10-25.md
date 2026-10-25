@@ -1168,3 +1168,41 @@ completed **56 passed, one live pinned-quantizer test deliberately
 deselected, two upstream SWIG deprecation warnings** in 15.41 seconds.
 Ruff passed. Neither test invokes the production quantizer, uses a GPU,
 or substitutes fixtures for full real-model evidence.
+
+### October 25 15:48 CDT — Q4 numerical evidence publication hardening
+
+The independent future full-model Q4-versus-BF16 sampler previously
+wrote its source-bound descriptive JSON directly to the authoritative
+output path. A crash after a partial write could strand invalid JSON in
+that path and block a legitimate source-bound retry. It now reuses the
+constructor's exclusive `_publish_exclusive` mechanism: write the
+complete bounded evidence to an unpredictable private dot-pending file,
+flush and `fsync`, then atomically publish **without replacing an existing
+receipt**. Python exceptions remove only that owned pending file. A hard
+kill may leave an uncommitted private pending sibling, but cannot expose
+its partial bytes as the authoritative output. No quantizer, frozen SHA,
+tensor-inventory, sample mathematics, score threshold or gate status was
+changed. The sampler remains
+`DESCRIPTIVE_Q4_QUANTIZATION_SAMPLE_NOT_QUALITY_GATE` and will only run
+on a complete, independently published 733-tensor Q4 model after fresh
+host admission.
+
+Six new CPU adversarial tests exercise source-bound tiny mixed-K output,
+flush/fsync ordering, an interrupted partial write, failed atomic rename,
+a competing authoritative-destination publication race and a stale
+private pending orphan. The prime's combined offline Q4 construction,
+Q4 numerical, and Q8 recovery suite passed **62 tests**, with **one
+live pinned-quantizer test deliberately excluded** and two SWIG
+deprecation warnings; Ruff passed. These are engineering regressions,
+not replacement benchmark quality evidence.
+
+At 15:48 CDT the original exclusive Q4 supervisor PID 72824 remained
+live, verified chunk **016/042** had GGUF SHA-256
+`a3f0735d2c7b19368330fd5b000d39762b63f4e9a009ff2e7f2de12a0e07ef07`,
+and **16 immutable receipts** were present. The next quantizer child was
+observed as PID 28896 under that owner; its still-unsealed output is not
+counted as progress. No full Q4 GGUF/sidecar or measured Q4 BF16 numeric
+receipt had been published. The 704×40 original observation, 26-shard
+BF16 candidate, finished Q8 and independent Q8 numerical measurement
+are preserved. Frozen Amendment4 Gen-0 remains `BLOCKED` and PR #282
+remains draft pending genuine full quality, control and hardware evidence.

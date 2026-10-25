@@ -15,7 +15,9 @@ from pathlib import Path
 
 from chowder_batch import reap_gguf_chunked as core
 from chowder_batch import reap_gguf_quant_sample as q8
-from chowder_batch.reap_gguf_q4_chunked import BINARY_SHA256, Q4_FILE_TYPE
+from chowder_batch.reap_gguf_q4_chunked import (
+    BINARY_SHA256, Q4_FILE_TYPE, _publish_exclusive,
+)
 
 Q4_SCHEMA = "chowder.reap128-v2-gguf-q4-chunked-final.v1"
 TYPES = {"Q4_K": (256, 144), "Q5_K": (256, 176),
@@ -196,8 +198,9 @@ def main(argv=None) -> int:
         if args.out.exists() or args.out.is_symlink() or not args.out.parent.is_dir():
             raise ValueError("new exclusive Q4 numerical receipt required")
         result = measure(args.bf16, args.q4)
-        with args.out.open("x", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(result, sort_keys=True, indent=2, allow_nan=False) + "\n")
+        # A failed/interrupted write may leave a private pending sibling, but
+        # must never publish a truncated authoritative numerical receipt.
+        _publish_exclusive(args.out, result)
         print(json.dumps({key: result[key] for key in (
             "status", "verified_tensor_count", "compared_expert_tensors",
             "total_compared_values", "max_abs_error", "mean_abs_error",

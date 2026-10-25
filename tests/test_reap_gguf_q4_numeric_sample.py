@@ -2,12 +2,166 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
 from gguf import GGUFReader, GGUFWriter, GGMLQuantizationType as Q
 
 from chowder_batch import reap_gguf_q4_numeric_sample as numeric
+from chowder_batch import reap_gguf_q4_chunked as q4_chunked
+
+
+def _sample_result():
+    """Small, source-identified descriptive receipt for publication-only tests."""
+    return {
+        "status": "DESCRIPTIVE_Q4_QUANTIZATION_SAMPLE_NOT_QUALITY_GATE",
+        "source_sha256": "a" * 64, "quantized_sha256": "b" * 64,
+        "source": "C:/frozen/original.gguf", "model": "G:/frozen/q4.gguf",
+        "verified_tensor_count": 733, "compared_expert_tensors": 120,
+        "total_compared_values": 30720, "max_abs_error": 0.1,
+        "mean_abs_error": 0.01, "root_mean_squared_error": 0.02,
+    }
+
+
+def _run_sample(tmp_path, monkeypatch, *, receipt_name="sample.json"):
+    result = _sample_result()
+    monkeypatch.setattr(numeric, "measure", lambda *_: result)
+    out = tmp_path / receipt_name
+    args = ["--bf16", str(tmp_path / "source.gguf"),
+            "--q4", str(tmp_path / "quantized.gguf"), "--out", str(out)]
+    return out, result, args
+
+
+def test_q4_numeric_receipt_is_fsynced_before_exclusive_atomic_publish(
+    tmp_path, monkeypatch, capsys,
+):
+    out, result, args = _run_sample(tmp_path, monkeypatch)
+    real_fsync = q4_chunked.os.fsync
+    observed = []
+
+    def traced_fsync(fd):
+        pending = list(tmp_path.glob(".sample.json.*.pending"))
+        assert len(pending) == 1, "fsync must occur on the private staged receipt"
+        assert not out.exists(), "the authoritative receipt must not exist before fsync"
+        observed.append(json.loads(pending[0].read_text(encoding="utf-8")))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(q4_chunked.os, "fsync", traced_fsync)
+    assert numeric.main(args) == 0
+    assert observed == [result]
+    assert json.loads(out.read_text(encoding="utf-8")) == result
+    assert not list(tmp_path.glob(".sample.json.*.pending"))
+    assert "NOT_QUALITY_GATE" in capsys.readouterr().out
+
+
+def test_q4_numeric_partial_write_failure_never_exposes_authoritative_receipt(
+    tmp_path, monkeypatch, capsys,
+):
+    out, _result, args = _run_sample(tmp_path, monkeypatch)
+    real_open = Path.open
+    writes = []
+
+    class InterruptedWrite:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self.stream.__exit__(*exc)
+
+        def write(self, content):
+            self.stream.write(content[:20])
+            writes.append(True)
+            raise OSError("injected failure after writing an incomplete JSON prefix")
+
+    def fail_open(self, mode="r", *args, **kwargs):
+        stream = real_open(self, mode, *args, **kwargs)
+        if self.parent == tmp_path and mode in ("x", "xb"):
+            return InterruptedWrite(stream)
+        return stream
+
+    monkeypatch.setattr(Path, "open", fail_open)
+    assert numeric.main(args) == 2
+    assert writes == [True]
+    assert not out.exists(), "partial JSON must never appear at the final path"
+    assert not list(tmp_path.glob(".sample.json.*.pending"))
+    assert "injected failure" in capsys.readouterr().err
+
+
+def test_q4_numeric_publish_failure_cleans_fsync_staged_orphan(
+    tmp_path, monkeypatch, capsys,
+):
+    out, _result, args = _run_sample(tmp_path, monkeypatch)
+    real_rename = Path.rename
+    real_link = q4_chunked.os.link
+
+    def refuse_rename(self, target):
+        if self.name.endswith(".pending") and Path(target) == out:
+            raise OSError("injected atomic publication failure")
+        return real_rename(self, target)
+
+    def refuse_link(source, target, *args, **kwargs):
+        if str(source).endswith(".pending") and Path(target) == out:
+            raise OSError("injected atomic publication failure")
+        return real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rename", refuse_rename)
+    monkeypatch.setattr(q4_chunked.os, "link", refuse_link)
+    assert numeric.main(args) == 2
+    assert not out.exists()
+    assert not list(tmp_path.glob(".sample.json.*.pending"))
+    assert "injected atomic publication failure" in capsys.readouterr().err
+
+
+def test_q4_numeric_receipt_never_overwrites_race_created_authoritative_path(
+    tmp_path, monkeypatch,
+):
+    out, result, args = _run_sample(tmp_path, monkeypatch)
+    original = "prior authoritative evidence\n"
+
+    def race(_bf16, _q4):
+        out.write_text(original, encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(numeric, "measure", race)
+    assert numeric.main(args) == 2
+    assert out.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob(".sample.json.*.pending"))
+
+
+def test_q4_numeric_stale_atomic_orphan_is_not_promoted_or_overwritten(
+    tmp_path, monkeypatch,
+):
+    out, result, args = _run_sample(tmp_path, monkeypatch)
+    orphan = tmp_path / ".sample.json.interrupted.pending"
+    orphan.write_text('{"partial":', encoding="utf-8")
+    assert numeric.main(args) == 0
+    assert json.loads(out.read_text(encoding="utf-8")) == result
+    assert orphan.read_text(encoding="utf-8") == '{"partial":'
+    assert list(tmp_path.glob(".sample.json.*.pending")) == [orphan]
+
+
+def test_q4_numeric_main_publishes_source_bound_descriptive_evidence(
+    tmp_path, monkeypatch, capsys,
+):
+    bf16, q4 = _fixture(tmp_path, monkeypatch)
+    out = tmp_path / "numerical-sample.json"
+    assert numeric.main(["--bf16", str(bf16), "--q4", str(q4),
+                         "--out", str(out)]) == 0
+    published = json.loads(out.read_text(encoding="utf-8"))
+    assert published["status"] == "DESCRIPTIVE_Q4_QUANTIZATION_SAMPLE_NOT_QUALITY_GATE"
+    assert published["source_sha256"] == hashlib.sha256(bf16.read_bytes()).hexdigest()
+    assert published["quantized_sha256"] == hashlib.sha256(q4.read_bytes()).hexdigest()
+    assert published["source"] == str(bf16.resolve())
+    assert published["model"] == str(q4.resolve())
+    assert published["verified_tensor_count"] == 733
+    assert published["compared_expert_tensors"] == 120
+    assert "NOT_QUALITY_GATE" in capsys.readouterr().out
+    assert not list(tmp_path.glob(".numerical-sample.json.*.pending"))
 
 
 def _fixture(tmp_path, monkeypatch):
