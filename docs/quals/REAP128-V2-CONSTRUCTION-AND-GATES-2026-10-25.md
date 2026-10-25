@@ -101,6 +101,80 @@ interruption affects only scientific verification and downstream
 conversions, never the proven 26-shard source-bound construction or
 720 sampled bitwise expert-row checks.
 
+## Resumable full-source equivalence, October 25 continuation
+
+The previous monolithic `--full-compare` was host-aborted before producing
+any receipt. To avoid losing another expensive full pass on unpredictable
+shared-memory fluctuations, `chowder_batch.reap_verify_shards` now compares
+all original BF16 source tensors against the reconstructed candidate
+**one original safetensors shard per owned CPU subprocess**. Each completed
+shard receives an exclusive, source-bound certificate containing exact
+retained-expert row comparisons, all unchanged BF16 tensor comparisons,
+source SHA-256, pruned shard SHA-256, and selection/model receipt hashes.
+The separate process exits after each shard to release Python memory.
+
+There are 26 indexed shards. Completed receipts live outside the models at
+`F:\reap-v2-equivalence-shards-20261025`, so a resource abort never
+requires expensive already-attested shards to be repeated. The supervisor
+performs fresh RAM/commit and G:/F: disk admission before each owned
+subprocess, exposes no CUDA device, and stops **only** its own subprocess if
+resource floors are breached. Dry-run is default; `--execute`, an
+exclusive log path, and `--max-new-shards` are required for bounded
+actual work. No process belonging to Ollama, llama.cpp, or other users
+is affected.
+
+```powershell
+python -B -m chowder_batch.reap_verify_shards `
+  --source 'G:\llm-cold\bf16\Qwen3.6-35B-A3B' `
+  --observed 'C:\llm-work\reap\observe-v2-bf16-atomic-20261024-222950-223f34d3' `
+  --selection 'C:\llm-work\reap\reap128-v2-selection-20261025-002722\selection.json' `
+  --candidate 'G:\llm-cold\bf16\Qwen3.6-REAP128-V2' `
+  --receipts-dir 'F:\reap-v2-equivalence-shards-20261025'
+```
+
+After all **26** immutable shard certificates exist, invoke the same
+command with
+`--finalize 'F:\reap128-v2-full-source-equivalence-20261025.json'`.
+Finalization rehashes **all** live original source and all candidate
+weight shards to reject stale/mutated certificates and checks the global
+37,981,137,632-byte tensor geometry and 120 routed tensor census.
+Only successful finalization may produce the standard
+`FULL_SOURCE_TENSOR_EQUIVALENCE_PASS` receipt accepted by the strict
+CPU inference and GGUF production preflights.
+
+**Partial shard certificates are not a full model qualification.** Do
+not mark inference, Q8/Q4, CUDA parity, speed, or Gen-0 as passed
+until their separate preregistered measurements and mandatory gates exist.
+
+### October 25 execution and resource admission results
+
+- The legacy PyTorch/safetensors full-verification path still allocated
+  approximately **7.1 GiB private memory** when opening the first large
+  original/source shard. The owned runtime guard stopped the initial
+  worker when Windows commit crossed its **8 GiB free safety floor**,
+  exit code 3; no proof was written.
+- The exact-comparison implementation now validates BF16 safetensors
+  metadata (bounded header size, dtype/shape, contiguous unambiguous
+  offsets), uses file-backed read-only mappings, and compares each
+  selected expert row and unchanged tensor in chunks of at most
+  **8 MiB**. It detects bitwise changes including signed-zero differences.
+  Full verification no longer calls the PyTorch-backed `safe_open`
+  tensor accessor at all.
+- The bounded-memory design retains the **8 GiB free Windows commit
+  runtime floor** plus 8 GiB of prelaunch margin, giving a 16 GiB
+  minimum commit admission. It also requires 12 GiB physical RAM and
+  independent target/receipt-volume disk reserves. These are
+  operational admission constraints, **not scientific-gate thresholds**.
+- Subsequent headerless-worker launches were twice refused **before
+  spawning any child**: fresh snapshots were respectively about
+  11.74 and 11.78 GiB available RAM, below the 12 GiB requirement.
+  No new shard certificates were produced and no model or service
+  was changed. The receipts directory remains safely reusable.
+
+These outcomes demonstrate a fixed memory-intensive code path but
+**not yet successful full-source verification of a production shard**.
+Do not reinterpret these resource refusals as REAP scientific failures.
+
 ## Required model and scientific gates (no automatic promotion)
 
 1. The final G: BF16 directory must exist and contain 26 checked shards,

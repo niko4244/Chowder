@@ -8,8 +8,8 @@ torch = pytest.importorskip("torch")
 safetensors = pytest.importorskip("safetensors.torch")
 
 from chowder_batch.reap_verify_pruned import (
-    _equal_copied_tensor, _equal_expert_rows, _equal_source_row,
-    _identical_bf16_bits, _indexed, _source_runs, inspect,
+    _compare_mapped_bf16_shard, _equal_copied_tensor, _equal_expert_rows,
+    _equal_source_row, _identical_bf16_bits, _indexed, _source_runs, inspect,
 )
 
 
@@ -66,3 +66,51 @@ def test_bitwise_comparator_detects_signed_zero_and_preserves_nan_payloads():
     assert _identical_bf16_bits(a, b)
     b.view(torch.int16)[1] = 0
     assert not _identical_bf16_bits(a, b)
+
+
+def test_mapped_comparison_checks_all_expert_rows_and_copied_raw_bits(tmp_path):
+    from safetensors.torch import save_file
+
+    original = tmp_path / "source.safetensors"
+    pruned = tmp_path / "pruned.safetensors"
+    key = "model.language_model.layers.0.mlp.gate.weight"
+    source = torch.arange(8 * 6, dtype=torch.int16).reshape(8, 6).view(torch.bfloat16)
+    unchanged = torch.tensor([0, -32768, 32641], dtype=torch.int16).view(torch.bfloat16)
+    kept = {0: [0, 2, 4, 7]}
+    save_file({key: source.clone(), "unchanged": unchanged.clone()}, str(original))
+    save_file({key: source[kept[0]].contiguous(), "unchanged": unchanged.clone()},
+              str(pruned))
+    assert _compare_mapped_bf16_shard(original, pruned, {key, "unchanged"}, kept) == 5
+    changed = source[kept[0]].clone()
+    changed.view(torch.int16)[1, 1] = 12345
+    save_file({key: changed, "unchanged": unchanged.clone()}, str(pruned))
+    with pytest.raises(ValueError, match="expert byte mismatch"):
+        _compare_mapped_bf16_shard(original, pruned, {key, "unchanged"}, kept)
+    signed_zero_changed = unchanged.clone()
+    signed_zero_changed.view(torch.int16)[1] = 0
+    save_file({key: source[kept[0]].contiguous(),
+               "unchanged": signed_zero_changed}, str(pruned))
+    with pytest.raises(ValueError, match="copied BF16 tensor byte mismatch"):
+        _compare_mapped_bf16_shard(original, pruned, {key, "unchanged"}, kept)
+
+
+def test_mapped_comparison_rejects_invalid_header_offsets_and_symlink(tmp_path):
+    import struct
+    from safetensors.torch import save_file
+
+    src = tmp_path / "src.safetensors"
+    dst = tmp_path / "dst.safetensors"
+    save_file({"same": torch.ones((3, 4), dtype=torch.bfloat16)}, str(src))
+    dst.write_bytes(src.read_bytes())
+    data = bytearray(dst.read_bytes())
+    header_size = struct.unpack("<Q", data[:8])[0]
+    # Corrupt the only tensor's byte range without changing file size.
+    import json
+    metadata = json.loads(data[8:8 + header_size])
+    metadata["same"]["data_offsets"] = [0, 2]
+    encoded = json.dumps(metadata, separators=(",", ":")).encode()
+    if len(encoded) <= header_size:
+        data[8:8 + header_size] = encoded.ljust(header_size, b" ")
+        dst.write_bytes(data)
+        with pytest.raises(ValueError, match="invalid tensor byte extent"):
+            _compare_mapped_bf16_shard(src, dst, {"same"}, {})
