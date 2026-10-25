@@ -276,6 +276,38 @@ quantized-model quality, Q4 fit/speed, or scientific selection.
    (32/7/15) before publication; real gguf-py writer/reader fixtures
    passed these tests. The candidate's GGUF prebuild was independently
    admitted on F:/I:/G: with disk reserves, but that is not conversion.
+   **Actual subsequent BF16 GGUF conversion succeeded:** the source-bound
+   frozen converter published
+   `F:\reap128-v2-bf16-intermediate-20261025.gguf`, **37,122,439,488
+   bytes**, full-content SHA-256
+   `80341aa776ad9b5f937c21b081b6d76de4a2ea277e5fb88c9ae2634a9da8f4c6`.
+   Its production header check saw 733 tensors, 40 blocks, 128 experts
+   per block, top-k 8, and all 162 mandatory MoE tensor shapes with BF16
+   GGUF file type 32. Source/full-BF16 verification parent SHA is
+   `0746c8c06764f784fa7134ecdc4a18954a761372f865256c9e0120588cfbbc7d`.
+   Exact source-bound stage witness is versioned at
+   `docs/quals/reap128-v2-bf16-gguf-stage-20261025.json`, SHA-256
+   `8754ba965efd50ec7d07b1b2e63940c096540b29c5446fd07efdc1b187ebb361`.
+   The inner topology receipt's `gguf_path` names the private staging
+   file used for header verification, whereas the authoritative witness
+   `output` is the published final path and its full SHA-256.
+   No model quality or loading claim follows from the GGUF file.
+
+   The first Q8_0 quantization launched from this BF16 file but its
+   owned-child guard aborted near tensor 120/733 due to transient
+   **physical RAM below the 7 GiB runtime floor**; this was neither
+   a scientific failure nor a source-provenance mismatch.
+   Its partial, unpublished Q8 private file was retained. Re-entry uses
+   the verified source stage receipt and explicit
+   `reap_gguf_supervised --resume`; original BF16 and the BF16 GGUF
+   are not rebuilt.
+
+   A bounded CPU-only `reap_gguf_quant_sample` probe is available
+   after successful Q8_0 publication. It measures BF16 versus Q8_0
+   dequantized weight differences at four deterministic 256-value
+   positions in each of 120 routed expert tensors, binding both stage
+   receipts without allocating whole tensors. This is descriptive
+   quantization evidence, **not** preregistered quality qualification.
 4. Original-model CUDA numerical parity, the actual Q8_0 quality suite
    (GSM8K 1,319 / HumanEval 164), Q4_K_M GPU placement and
    200-item throughput, and the random128 negative-control comparison

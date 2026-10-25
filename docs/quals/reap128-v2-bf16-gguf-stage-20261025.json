@@ -1,0 +1,28 @@
+{
+  "input_sha256": "0746c8c06764f784fa7134ecdc4a18954a761372f865256c9e0120588cfbbc7d",
+  "output": "F:\\reap128-v2-bf16-intermediate-20261025.gguf",
+  "phase": 0,
+  "schema": "chowder.reap-gguf-stage.v1",
+  "sha256": "80341aa776ad9b5f937c21b081b6d76de4a2ea277e5fb88c9ae2634a9da8f4c6",
+  "size_bytes": 37122439488,
+  "spec_sha256": "7f9065d8036f7bd04c19a15f87540ad195658f46a80a1a09aa407b44c4836a94",
+  "status": "PUBLISHED_GGUF_NOT_QUALITY_QUALIFIED",
+  "topology_receipt": {
+    "architecture": "qwen35moe",
+    "bf16_config_sha256": "73ec3ee3d192a09489e704bf5e433bb226a64a56dddbd814c92a2232722ca8ad",
+    "blocks": 40,
+    "checked_tensor_shapes": 162,
+    "experts_per_block": 128,
+    "file_type": 32,
+    "gguf_path": "F:\\.reap128-v2-bf16-intermediate-20261025.owned-df8ea93823464dfa96bb854014ee99f6.gguf",
+    "gguf_size_bytes": 37122439488,
+    "gguf_weight_sha256": "NOT_REHASHED_ARCHIVAL_IDENTITY_NOT_REVERIFIED",
+    "gpu_hours_consumed": 0,
+    "limits": "Not a SHA-256 of GGUF weight bytes, checkpoint ancestry proof, actual llama.cpp load, decode test or speed/fit gate",
+    "prune_record_sha256": "2dde3ea2de6bc3fd11308c9314b82993b2a57f13f03994b0fc10c8825533b2e1",
+    "schema": "chowder.reap-gguf-header-preflight.v1",
+    "status": "GGUF_METADATA_TOPOLOGY_MATCH_ONLY",
+    "top_k": 8,
+    "total_gguf_tensor_headers": 733
+  }
+}
