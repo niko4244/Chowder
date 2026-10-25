@@ -1817,3 +1817,48 @@ The full published Q4, 733-tensor independent fidelity validation,
 new real-model GSM8K/HumanEval, original BF16 CUDA parity, paired fresh
 Q4/dense session throughput and REAP160 same-session evidence remain
 not measured. Gen-0 `BLOCKED`, PR #282 draft.
+
+### October 25 18:05 CDT — complete private Q4 merge and resource-safe finalization recovery
+
+The original single source-bound Q4 constructor supervisor PID **46388**
+SHA-certified all **42/42** original immutable mixed-K chunks and spawned
+only its own short-lived bounded CPU merge worker PID **3788**. This real
+worker inspected the original BF16 source, verified 733 exact mixed-K
+quantized tensor names/order/shape and per-chunk raw payload hashes,
+and published a *private* merged-checkpoint receipt with status
+`GGUF_CHUNKED_Q4_TENSOR_BITWISE_MERGE_NOT_QUALITY_QUALIFIED`.
+The sealed private F: GGUF was **11,563,915,264 bytes**, SHA-256
+`2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7`.
+The original supervisor logged `Q4_CHUNK_MERGE_PASS`, retained every
+durable original chunk receipt and private original-assembly checkpoint,
+and continued validating the complete BF16 ancestry before transfer.
+No G: public GGUF or final `.reap-chunked.json` sidecar had yet been
+published at this point, and none may be inferred from the private merge.
+
+During this same original-owner source validation the parent retained
+reclaimable read-only mapped GGUF pages, leading free physical RAM to
+fall **below** the original 7-GiB runtime safeguard. Before one
+controlled recovery operation, source/process checks verified exact
+owner PID/command including original source SHA, exclusive resume5 log,
+**no child quantizer or other quantizer**, all 42 chunk GGUF/receipt
+pairs, exactly one assembled private GGUF of certified byte length with
+its sealed merge receipt, and no unsealed BF16 mini. A single Windows
+`EmptyWorkingSet` call was applied **only to this verified original
+Q4 supervisor handle**, leaving all unowned Ollama/llama.cpp processes
+untouched. The directly measured result was:
+
+- Q4 owner resident working set **15.340 → 1.686 GiB**;
+- available physical RAM **3.759 → 17.882 GiB**;
+- original source/quantizer/model payloads, all 42 immutable receipts,
+  private merge, process ownership, host admission parameters and
+  original 12/16-GiB start, 7/8-GiB runtime and disk floors unchanged.
+
+The exact original Q4 owner remained alive at PID 46388, and a later
+independent host snapshot showed ~17.85 GiB physical RAM free and
+~18.16 GiB Windows commit free. This measured owner-only cache
+reclamation is **not** an independent public artifact certificate,
+numerical fidelity, GSM8K/HumanEval qualification, GPU offload proof or
+Gen-0 PASS. Continue source-bound finalization and exclusive public
+publication, then separately run the full original-BF16/733-tensor
+independent audit and real Q4 numerical sampler, subject to fresh host
+admission. Gen-0 stays `BLOCKED`, draft PR #282 unmerged.
