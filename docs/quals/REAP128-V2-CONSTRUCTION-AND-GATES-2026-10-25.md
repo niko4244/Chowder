@@ -1206,3 +1206,46 @@ receipt had been published. The 704×40 original observation, 26-shard
 BF16 candidate, finished Q8 and independent Q8 numerical measurement
 are preserved. Frozen Amendment4 Gen-0 remains `BLOCKED` and PR #282
 remains draft pending genuine full quality, control and hardware evidence.
+
+### October 25 16:00 CDT — real Q4 continuation and paired source-witness validation
+
+Independent inspection found the **original** supervisor PID 72824 still
+running the exact registered Q4 command, with **20 of 42** mixed-K GGUF
+chunks and matching source-bound immutable receipts successfully published.
+Original indices 18 and 19 were newly sealed with GGUF SHA-256
+`e8d5a5714185494430c0b87543be5685eb4fcb77505b38f8427d585135590376`
+and `35dede7978466c158e8445c03c8ec86a05fb94474a6531295904f7e0b58ee6d1`,
+respectively. The final public Q4 model/sidecar still does not exist. At
+that read the host had 12.00 GiB free physical RAM and 23.76 GiB available
+Windows commit; the supervisor's unchanged per-chunk admission guard
+controls new child starts, and no unrelated process was terminated.
+
+The separate `reap_compare` diagnostic was found to permit a potentially
+misleading apparent quality **win** for `reap128_v2` from a GSM8K-only
+or shortened paired corpus, without validating genuine model/serving
+or official dataset source witnesses. This does not meet frozen scientific
+qualification. Comparison of a new v2 *quality arm* now refuses unless
+**every participating arm** has exactly both full registered GSM8K 1,319
+and HumanEval 164 IDs. New v2 quality arms additionally require the
+selector's frozen official source-population fingerprint, decoding,
+scoring, serve.json and per-suite input witness. All per-item correctness
+fields must be real booleans rather than forged numeric values, and the
+diagnostic margin must be finite and nonnegative. Model/serving and
+dataset input witness SHA values are included in the descriptive report,
+and any corresponding input changing while pairing runs fails closed.
+Historical generic `reap128` diagnostic subsets retain their original
+scope, with no alteration to the registered selection thresholds.
+
+Adversarial CPU tests prove refusal of missing/short suites, resealed
+nonofficial GSM8K source digests, noncanonical IDs, numeric nonboolean
+correctness, invalid statistical margins, and post-verification
+serve/inputs/rows mutation, alongside a positive full-population
+synthetic source-witness fixture. The combined scoped comparison,
+selection and frozen gate regression suite passed **143 tests** (one
+preexisting invalid-regex-escape warning), Ruff and diff checks clean.
+This is readiness/evidence-integrity engineering only: the positive
+test fixture is not registered quality, no new model inference was run,
+and an internally matching serve.json is not independent proof that a
+specific GGUF was resident on a GPU. Selector Amendment4 `BLOCKED`,
+Q4 speed `UNKNOWN`, protected GPU services and all original thresholds
+remain unchanged.

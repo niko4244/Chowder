@@ -30,16 +30,22 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import statistics
 import sys
 from pathlib import Path
 
 try:  # script mode (python chowder_batch/reap_compare.py)
-    from reap_gates import lower_bound
+    from reap_gates import GateError, lower_bound
 except ImportError:  # imported as chowder_batch.reap_compare
-    from chowder_batch.reap_gates import lower_bound
+    from chowder_batch.reap_gates import GateError, lower_bound
 
 REPORT_VERSION = "reap-compare-v1"
+FROZEN_V2_QUALITY_ARMS = {"reap128_v2", "reap160_v2"}
+FROZEN_QUALITY_COHORTS = {
+    "gsm8k": (1319, "gsm8k-"),
+    "humaneval": (164, "HumanEval/"),
+}
 
 
 class CompareError(Exception):
@@ -48,6 +54,32 @@ class CompareError(Exception):
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _source_snapshots(eval_dir, arms: list[str]) -> dict[str, dict[str, str]]:
+    """Pin genuine files across *the whole* comparison, not only row summaries.
+
+    New v2 comparisons must retain the exact source-population and serving
+    identity witnesses in their report; a file changing midway refuses the
+    report even if its self-contained saved SHA was internally consistent.
+    This does not attest the live server or GGUF bytes independently.
+    """
+    snapshots: dict[str, dict[str, str]] = {}
+    for arm in arms:
+        directory = Path(eval_dir) / arm
+        names = ["summary.json"] + sorted(p.name for p in directory.glob("*.jsonl"))
+        if arm in FROZEN_V2_QUALITY_ARMS:
+            names.extend(["serve.json", "gsm8k.inputs.json", "humaneval.inputs.json",
+                          "gsm8k.jsonl", "humaneval.jsonl"])
+        unique = dict.fromkeys(names)
+        result = {}
+        for name in unique:
+            file = directory / name
+            if file.is_symlink() or not file.is_file():
+                raise CompareError(f"{arm}: source-bound comparison input missing or untrusted: {name}")
+            result[name] = _sha256(file)
+        snapshots[arm] = result
+    return snapshots
 
 
 def _summary(eval_dir, arm: str) -> dict:
@@ -79,6 +111,9 @@ def _rows(eval_dir, arm: str, suite: str, entry: dict) -> dict:
         if not line.strip():
             continue
         row = json.loads(line)
+        if (not isinstance(row, dict) or not isinstance(row.get("correct"), bool)
+                or not isinstance(row.get("id"), str) or not row["id"]):
+            raise CompareError(f"{arm}/{suite}: invalid item ID or nonbinary correctness")
         rid = row["id"]
         if rid in rows:
             raise CompareError(f"{arm}/{suite}: duplicate item id {rid!r}")
@@ -88,6 +123,37 @@ def _rows(eval_dir, arm: str, suite: str, entry: dict) -> dict:
             f"{arm}/{suite}: summary.json n={entry.get('n')} but {len(rows)} rows on disk"
         )
     return rows
+
+
+def _verify_frozen_v2_quality_inputs(eval_dir, summaries: dict, rows: dict) -> None:
+    """A descriptive v2 comparison cannot declare a win from partial/forged quality.
+
+    This leaves the historical generic comparison utility intact, but any
+    newly qualified v2 quality arm must use both exact registered cohorts,
+    the same IDs on the comparison baseline, and official input/serve
+    witnesses. It is not an independent live-model/GPU or quality gate.
+    """
+    if not FROZEN_V2_QUALITY_ARMS.intersection(summaries):
+        return
+    try:
+        try:
+            from reap_select import GateError as SelectorGateError, _v2_input_witness
+        except ImportError:
+            from chowder_batch.reap_select import GateError as SelectorGateError, _v2_input_witness
+        for arm, summary in summaries.items():
+            if set(summary) != set(FROZEN_QUALITY_COHORTS):
+                raise CompareError(f"{arm}: full registered GSM8K and HumanEval quality required for v2 comparison")
+            for suite, (count, prefix) in FROZEN_QUALITY_COHORTS.items():
+                cohort = rows[(arm, suite)]
+                expected = {f"{prefix}{i}" for i in range(count)}
+                if set(cohort) != expected:
+                    raise CompareError(f"{arm}/{suite}: noncanonical or partial {count}-item frozen cohort")
+                if arm in FROZEN_V2_QUALITY_ARMS:
+                    _v2_input_witness(Path(eval_dir), arm, suite)
+    except CompareError:
+        raise
+    except (GateError, SelectorGateError, ValueError, KeyError, TypeError, OSError) as exc:
+        raise CompareError(f"registered v2 source/model witness refused: {exc}") from exc
 
 
 def _bounds(deltas: list[float]) -> tuple[float, float]:
@@ -118,6 +184,10 @@ def _overall(verdicts: list[str]) -> str:
 
 
 def compare(eval_dir, candidate: str, baselines: list[str], margin: float = 0.0) -> dict:
+    if not baselines or not math.isfinite(margin) or margin < 0.0:
+        raise CompareError("at least one baseline and finite nonnegative descriptive margin required")
+    arms = list(dict.fromkeys([candidate, *baselines]))
+    initial_inputs = _source_snapshots(eval_dir, arms)
     summaries = {candidate: _summary(eval_dir, candidate)}
     for arm in baselines:
         summaries[arm] = _summary(eval_dir, arm)
@@ -127,6 +197,8 @@ def compare(eval_dir, candidate: str, baselines: list[str], margin: float = 0.0)
     for arm, summary in summaries.items():
         for suite in summary:
             rows[(arm, suite)] = _rows(eval_dir, arm, suite, summary[suite])
+
+    _verify_frozen_v2_quality_inputs(eval_dir, summaries, rows)
 
     all_suites: list[str] = []
     for summary in summaries.values():
@@ -166,10 +238,8 @@ def compare(eval_dir, candidate: str, baselines: list[str], margin: float = 0.0)
             })
         verdicts[arm] = _overall(arm_verdicts)
 
-    inputs = {arm: {"summary.json": _sha256(Path(eval_dir) / arm / "summary.json")}
-              for arm in summaries}
-    for arm, suite in rows:
-        inputs[arm][f"{suite}.jsonl"] = _sha256(Path(eval_dir) / arm / f"{suite}.jsonl")
+    if _source_snapshots(eval_dir, arms) != initial_inputs:
+        raise CompareError("source-bound comparison evidence changed during scoring")
 
     return {
         "version": REPORT_VERSION,
@@ -178,7 +248,7 @@ def compare(eval_dir, candidate: str, baselines: list[str], margin: float = 0.0)
         "baselines": baselines,
         "margin": margin,
         "suites": all_suites,
-        "inputs": inputs,
+        "inputs": initial_inputs,
         "rows": compared,
         "verdicts": verdicts,
         "not_compared": not_compared,
