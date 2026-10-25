@@ -109,6 +109,27 @@ def test_recovery_exact_post_cleanup_733_tensor_merge_and_fp32_fold(tmp_path, mo
     assert list(after["extra.000.weight"].shape) == [2048]
 
 
+def test_recovery_accepts_multiple_only_identical_old_merge_input_rosters(
+    tmp_path, monkeypatch,
+):
+    """Aborted merge retries leave small old manifests, not extra GGUFs."""
+    source, original, scratch, chunks, _assembly, log, _ = _source_bound_setup(
+        tmp_path, monkeypatch)
+    first = scratch / "merge-input-synthetic.json"
+    shutil.copyfile(first, scratch / "merge-input-aborted-first-attempt.json")
+    result = recovery._recheck_owned_assembly(
+        source, scratch, chunks, original, {"spec_sha256": "c" * 64},
+        core.hash_file(source), log, max_mib=8, slab_mib=1)
+    assert len(result[3]) == 733
+    forged = json.loads(first.read_text())
+    forged[next(iter(forged))]["raw_sha256"] = "0" * 64
+    (scratch / "merge-input-aborted-first-attempt.json").write_text(json.dumps(forged))
+    with pytest.raises(ValueError, match="merge tensor roster"):
+        recovery._recheck_owned_assembly(
+            source, scratch, chunks, original, {"spec_sha256": "c" * 64},
+            core.hash_file(source), log, max_mib=8, slab_mib=1)
+
+
 @pytest.mark.parametrize("tamper", [
     "no_cleanup_witness", "bad_cleanup_digest", "missing_chunk_receipt",
     "different_source_tensor", "different_quantized_tensor",

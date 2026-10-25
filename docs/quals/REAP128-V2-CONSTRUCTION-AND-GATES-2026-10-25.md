@@ -714,3 +714,13 @@ with no competing quantization owner. Its new exclusive audit log is
 The original >=7 GiB physical-runtime safety floor is unchanged; a
 freshly launched/ongoing assembly is **NOT** equivalent to final Q8
 publication, full GGUF SHA, verified 733-tensor output or scientific PASS.
+
+The separate **post-merge** emergency recovery reader also now accepts
+multiple old immutable F: `merge-input-*.json` rosters after guarded
+merge attempts, **only if every roster exactly equals the original 733
+tensor SHA manifest reconstructed from all 42 source-bound receipts**.
+It refuses a single mismatching/forged historical roster. This closes a
+separate crash-recovery hole in which an aborted earlier merge left one
+small manifest, a later complete merge left a second identical manifest,
+and the emergency recovery path incorrectly required exactly one.
+Adversarial synthetic tests passed without touching the live assembly.

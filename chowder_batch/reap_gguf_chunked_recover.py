@@ -171,9 +171,17 @@ def _recheck_owned_assembly(
             if name in expected_tensors:
                 raise ValueError("overlapping Q8 chunk tensor receipts")
             expected_tensors[name] = receipt["output_tensor_provenance"][name]
-    claimed_input = _small_json(_only_match(scratch, "merge-input-*.json"))
-    if claimed_input != expected_tensors:
-        raise ValueError("saved merge tensor roster differs from original chunk receipts")
+    # A guarded merge can abort before producing any assembly, leaving its
+    # small merge-input-UUID.json behind. A later, byte-identical retry writes
+    # another immutable roster. Requiring *exactly one* would strand the valid
+    # completed assembly after post-merge chunk deletion. Admit multiple only
+    # when every existing source-bound roster is independently identical.
+    rosters = sorted(scratch.glob("merge-input-*.json"))
+    if not 1 <= len(rosters) <= 128:
+        raise ValueError("missing or unbounded Q8 merge-input roster history")
+    for roster in rosters:
+        if _small_json(roster) != expected_tensors:
+            raise ValueError("saved merge tensor roster differs from original chunk receipts")
     merged = GGUFReader(str(assembly), "r")
     if (merged.get_field("general.file_type").contents() != 7
             or merged.get_field("qwen35moe.block_count").contents() != 40
