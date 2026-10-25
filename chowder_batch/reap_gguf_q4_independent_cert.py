@@ -70,6 +70,13 @@ def collect_chunk_receipts(
         identity = record.get("identity")
         if (record.get("schema") != CHUNK_SCHEMA
                 or record.get("status") != CHUNK_STATUS
+                or not isinstance(record.get("source_mini_sha256"), str)
+                or not HEX_SHA.fullmatch(record["source_mini_sha256"])
+                or not isinstance(record.get("output_sha256"), str)
+                or not HEX_SHA.fullmatch(record["output_sha256"])
+                or type(record.get("output_size_bytes")) is not int
+                or record["output_size_bytes"] <= 0
+                or record.get("output") != str(chunks / name.replace(".receipt.json", ".q4_k_m.gguf"))
                 or not isinstance(identity, dict)
                 or identity.get("source_sha256") != source_sha
                 or identity.get("stage_spec_sha256") != stage_sha

@@ -37,7 +37,10 @@ def _fixture(tmp_path):
                  "effective_quant_command": ["quantize.exe", "--max-buffer-size", "1",
                                              "original-mini.gguf", "out.gguf", "Q4_K_M", "2"],
                  "input_tensor_provenance": old, "output_tensor_provenance": new,
-                 "output_sha256": "c" * 64}
+                 "output_sha256": "c" * 64,
+                 "source_mini_sha256": "d" * 64,
+                 "output_size_bytes": 123,
+                 "output": str(chunks / f"chunk-{i + 1:03d}-of-042.q4_k_m.gguf")}
         (chunks / f"chunk-{i + 1:03d}-of-042.receipt.json").write_text(json.dumps(entry))
     return chunks, names, {"source_groups": groups, "all_tensors": outputs}
 
@@ -59,7 +62,8 @@ def test_all_42_original_chunks_match_733_exact_names_and_payload_claims(tmp_pat
 
 @pytest.mark.parametrize("mutation", ["source", "stage", "quantizer", "index", "groups",
                                      "mixed_receipt", "output_proof", "source_proof",
-                                     "command", "missing", "duplicate"])
+                                     "command", "missing", "duplicate", "output_sha",
+                                     "source_mini_sha", "output_bytes", "output_path"])
 def test_altered_ancestry_chunk_recipe_or_inventory_fails_closed(tmp_path, mutation):
     chunks, names, claims = _fixture(tmp_path)
     target = chunks / "chunk-035-of-042.receipt.json"
@@ -83,6 +87,14 @@ def test_altered_ancestry_chunk_recipe_or_inventory_fails_closed(tmp_path, mutat
         entry["input_tensor_provenance"][tensor]["shape"] = [0]
     elif mutation == "command":
         entry["effective_quant_command"][-2] = "Q8_0"
+    elif mutation == "output_sha":
+        entry["output_sha256"] = "not-a-digest"
+    elif mutation == "source_mini_sha":
+        entry["source_mini_sha256"] = "not-a-digest"
+    elif mutation == "output_bytes":
+        entry["output_size_bytes"] = -3
+    elif mutation == "output_path":
+        entry["output"] = str(chunks / "someone-else.gguf")
     elif mutation == "missing":
         target.unlink()
     elif mutation == "duplicate":
