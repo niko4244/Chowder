@@ -1671,3 +1671,52 @@ admission floors. The full 733-tensor Q4 public model, source-bound numeric
 sample, registered GSM8K/HumanEval outcomes, CUDA parity and same-session
 REAP160/Q4 throughput are still unmeasured; Amendment4 Gen-0 remains
 `BLOCKED` and PR #282 must remain draft.
+
+### October 25 17:03 CDT — new-v2 speed cannot borrow detached archived dense throughput
+
+The frozen REAP speed threshold (candidate/dense tokens-per-second ratio
+**≥1.3**, original serving flags, identical first 200 GSM8K items) is
+unchanged. The scientific consumer previously compared newly witnessed
+v2 Q4 output against **historically archived** `dense_q4` throughput,
+which has no original same-session startup/fit/model/row receipt. That
+cannot certify a contemporaneous comparison on the occupied shared GPU.
+
+New-v2 candidate speed instead requires a separate fresh `dense_v2_q4`
+arm, using the exact **existing original dense Q4 model SHA-256**
+`2c6d9466129e8802839566b35728e2506aaf1e8705cd137009e2f08feb9dd049`
+(historical path `G:\llm-cold\gguf\dense-q4_k_m.gguf`,
+21,166,757,984 bytes). The new baseline must be served by its real
+Windows-owned `llama-server` session under the *same frozen flags* and
+complete official source-population witness, produce its own exact
+**first-200** rows and SHA-attested timing data, have original startup
+fit/offload logs with a same-session PID/log/row/summary proof, and
+survive the original non-resume/foreign-listener gates. The evaluator now
+also binds this dense reference to the actual live serving PID and the
+exact pinned original dense model SHA, rejecting arbitrary dense lookalikes.
+The new v2 selector automatically references this new comparator, while
+historical archived `dense_q4`/REAP160 results are preserved without
+retroactive qualification. Missing original-session dense speed yields
+**UNKNOWN**, never PASS. No speedup threshold, sample size, selection
+branch order or frozen input rendering was altered. The hardware will
+need a fresh admitted and independently audited `dense_v2_q4` session;
+no such model or GPU evaluation was launched while user's services own
+memory.
+
+Added CPU RED/GREEN tests for a genuine paired candidate/dense set,
+missing contemporary dense serving proof, a forged dense model SHA,
+modified registered speed source and existing Q4 original-session
+anti-forgery regressions. The integrated offline frozen gates/selector/
+serving/evaluator suite passed **220 tests**, two benign warnings, Ruff
+and diff clean. This is future scientific admission and **NOT** measured
+model throughput or registered quality.
+
+At 17:03 CDT the original exclusive Q4 supervisor PID 46388 continued
+without competition, with **32/42** real source-bound GGUF parts and
+immutable receipts. Newly witnessed chunk 031 SHA-256
+`34de41da928393247994fb725c92de61e1fc1fbde7d2eb8960350ec7cd731bef`
+and chunk 032 SHA-256
+`8b4df6c4e7abd2be6281cb4df576a2dc74de7c949b499dc56b3ddbf7bca714d7`.
+Physical RAM free ~16.17 GiB, Windows commit free ~20.16 GiB;
+no full 733-tensor public Q4, numerical BF16↔Q4 proof, full new-v2
+quality, CUDA parity, genuine same-session speed or complete canonical
+REAP160 verification yet. Amendment4 Gen-0 `BLOCKED` and PR #282 draft.

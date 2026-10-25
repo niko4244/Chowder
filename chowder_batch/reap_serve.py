@@ -50,7 +50,9 @@ _ALL_LAYERS = re.compile(r"offloaded (\d+)/(\d+) layers to GPU", re.I)
 LOG_VERBOSITY = "4"
 REGISTERED_V2_EVALUATION_ARMS = {
     "reap128_v2", "reap128_v2_q4", "reap160_v2", "reap160_v2_q4",
+    "dense_v2_q4",
 }
+REGISTERED_DENSE_Q4_SHA256 = "2c6d9466129e8802839566b35728e2506aaf1e8705cd137009e2f08feb9dd049"
 
 
 def parse_offload(text: str) -> tuple[list[str], int | None]:
@@ -497,6 +499,8 @@ def main(argv: list[str] | None = None) -> int:
         digest = _sha256(gguf)
         if _model_stat(gguf) != model_stat:
             raise RuntimeError("REAP GGUF changed while hashing; refusing serving")
+        if args.arm == "dense_v2_q4" and digest != REGISTERED_DENSE_Q4_SHA256:
+            raise ValueError("new same-session dense Q4 speed baseline must use the original pinned dense model")
         resumed = _admit_output(arm_dir, gguf=gguf, digest=digest)
         # The official new-v2 scientific arms must use a published original
         # BF16-derived artifact, not a foreign GGUF that merely matches its

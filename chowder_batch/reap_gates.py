@@ -244,6 +244,10 @@ def _speed(eval_dir, speed_arm, speed_dense, *, arm):
            "speed_ratio_min": SPEEDUP}
     if not speed_arm or not speed_dense:
         return _g("UNKNOWN", None, thr, None, reason="speed arms not given")
+    is_new_v2 = arm in {"reap128_v2", "reap160_v2"}
+    if is_new_v2 and speed_dense != "dense_v2_q4":
+        return _g("UNKNOWN", None, thr, None,
+                  reason="new-v2 speed requires fresh same-session pinned dense_v2_q4 comparator")
     serve_path = Path(eval_dir) / speed_arm / "serve.json"
     offloaded = None
     if serve_path.exists():
@@ -274,6 +278,23 @@ def _speed(eval_dir, speed_arm, speed_dense, *, arm):
         if not _verify_new_q4_speed_session(eval_dir, speed_arm,
                                             json.loads(serve_path.read_text(encoding="utf-8"))):
             return _g("UNKNOWN", stat, thr, na, reason="new v2 Q4 speed session proof missing")
+    if is_new_v2:
+        # Reusing detached historical dense_q4 throughput would make a new
+        # model's measured speed ratio scientifically unauthenticated. Both
+        # arms need their own genuine original server startup/row/fit proofs,
+        # on the frozen first 200 official items with unchanged serve flags.
+        dense_serve = Path(eval_dir) / speed_dense / "serve.json"
+        if dense_serve.is_symlink() or not dense_serve.is_file():
+            return _g("UNKNOWN", stat, thr, nb,
+                      reason="new-v2 comparison has no same-session dense Q4 serving receipt")
+        dense_receipt = json.loads(dense_serve.read_text(encoding="utf-8"))
+        if dense_receipt.get("gguf_sha256") != (
+            "2c6d9466129e8802839566b35728e2506aaf1e8705cd137009e2f08feb9dd049"
+        ):
+            raise GateError("new-v2 dense Q4 speed comparator has foreign model SHA")
+        if not _verify_new_q4_speed_session(eval_dir, speed_dense, dense_receipt):
+            return _g("UNKNOWN", stat, thr, nb,
+                      reason="new-v2 dense Q4 comparator lacks its sealed 200-row serving session")
     if offloaded is not None and offloaded != 0 and not partial_allowed:
         return _g("FAIL", stat, thr, na)  # offload alone fails the gate whatever the speed
     if offloaded is None or ratio is None:

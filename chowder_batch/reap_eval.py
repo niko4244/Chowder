@@ -45,7 +45,8 @@ import psutil
 MAX_TOKENS = {"gsm8k": 1024, "humaneval": 768, "math500": 2048}
 SYSTEM = "You are a helpful assistant."
 IDENTITY_SCHEMA = "chowder.reap-eval-input-identity.v1"
-REGISTERED_V2_ARMS = {"reap128_v2", "reap128_v2_q4", "reap160_v2", "reap160_v2_q4"}
+REGISTERED_V2_ARMS = {"reap128_v2", "reap128_v2_q4", "reap160_v2", "reap160_v2_q4",
+                      "dense_v2_q4"}
 
 
 def _digest(value: Any) -> str:
@@ -223,7 +224,9 @@ def _require_live_new_v2_server(out_dir: Path, *, arm: str, port: int) -> None:
     if os.name != "nt":
         raise ValueError("registered v2 scoring requires Windows serving-owner attestation")
     try:
-        from chowder_batch.reap_serve import FLAGS as REGISTERED_SERVE_FLAGS
+        from chowder_batch.reap_serve import (
+            FLAGS as REGISTERED_SERVE_FLAGS, REGISTERED_DENSE_Q4_SHA256,
+        )
 
         context = json.loads(os.environ.get("REAP_BOUND_EVALUATION_SESSION", ""))
         if not isinstance(context, dict) or set(context) != {
@@ -253,6 +256,8 @@ def _require_live_new_v2_server(out_dir: Path, *, arm: str, port: int) -> None:
                 or not isinstance(serve.get("gguf"), str)
                 or not serve["gguf"]):
             raise ValueError("bound serving receipt disagrees with live evaluator session")
+        if arm == "dense_v2_q4" and serve["gguf_sha256"] != REGISTERED_DENSE_Q4_SHA256:
+            raise ValueError("same-session dense baseline model differs from frozen original SHA")
         argv = psutil.Process(context["server_pid"]).cmdline()
         if (not argv or "llama-server" not in Path(argv[0]).stem.lower()
                 or argv[1:1 + len(REGISTERED_SERVE_FLAGS)] != REGISTERED_SERVE_FLAGS

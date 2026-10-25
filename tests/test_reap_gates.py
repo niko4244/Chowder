@@ -344,7 +344,14 @@ def _v2_speed_proof(root, arm="reap128_v2_q4"):
     from chowder_batch import reap_serve
 
     write_arm(root, arm, "gsm8k", [1] * 200, pps=[25.0] * 200)
-    write_arm(root, "dense_q4", "gsm8k", [1] * 200, pps=[10.0] * 200)
+    if arm != "dense_v2_q4":
+        # A genuine v2 speed comparison needs another *new* complete
+        # serving session for the original pinned dense Q4 model; an
+        # archived dense_q4 result is not a contemporary hardware control.
+        _v2_speed_proof(root, "dense_v2_q4")
+        write_arm(root, "dense_q4", "gsm8k", [1] * 200, pps=[10.0] * 200)
+    else:
+        write_arm(root, arm, "gsm8k", [1] * 200, pps=[10.0] * 200)
     directory = root / arm
     rows = directory / "gsm8k.jsonl"
     sha = lambda data: hashlib.sha256(data).hexdigest()
@@ -352,7 +359,10 @@ def _v2_speed_proof(root, arm="reap128_v2_q4"):
     (directory / "server.log").write_bytes(log + b"later log line\n")
     offload_lines, offload_count = reap_serve.parse_offload(log.decode())
     assert offload_count == 0
-    model = {"gguf": "C:/models/reap128-v2.gguf", "gguf_sha256": "a" * 64,
+    digest = (reap_serve.REGISTERED_DENSE_Q4_SHA256 if arm == "dense_v2_q4"
+              else "a" * 64)
+    model = {"gguf": "C:/models/dense-q4.gguf" if arm == "dense_v2_q4"
+             else "C:/models/reap128-v2.gguf", "gguf_sha256": digest,
              "flags": ["--fit", "on", "-np", "4", "-c", "16384", "--jinja"]}
     source_sha = rg.FROZEN_SOURCE_SHA256["gsm8k"]
     witness = {"schema": "chowder.reap-eval-input-identity.v1", "suite": "gsm8k",
@@ -383,7 +393,26 @@ def _v2_speed_proof(root, arm="reap128_v2_q4"):
 
 
 def _v2_speed(root, arm="reap128_v2"):
-    return rg._speed(root, f"{arm}_q4", "dense_q4", arm=arm)
+    return rg._speed(root, f"{arm}_q4", "dense_v2_q4", arm=arm)
+
+
+def test_v2_speed_never_passes_using_archived_detached_dense_q4(tmp_path):
+    _v2_speed_proof(tmp_path)
+    dense = tmp_path / "dense_v2_q4"
+    (dense / "serve.json").unlink()
+    result = _v2_speed(tmp_path)
+    assert result["status"] == "UNKNOWN"
+    assert "dense" in result["reason"]
+
+
+def test_v2_speed_refuses_alien_model_for_new_dense_comparator(tmp_path):
+    _v2_speed_proof(tmp_path)
+    dense = tmp_path / "dense_v2_q4" / "serve.json"
+    receipt = json.loads(dense.read_text(encoding="utf-8"))
+    receipt["gguf_sha256"] = "f" * 64
+    dense.write_text(json.dumps(receipt), encoding="utf-8")
+    with pytest.raises(rg.GateError, match="dense Q4 speed comparator.*foreign"):
+        _v2_speed(tmp_path)
 
 
 @pytest.mark.parametrize("arm", ["reap128_v2", "reap160_v2"])
