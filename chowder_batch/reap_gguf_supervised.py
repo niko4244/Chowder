@@ -74,7 +74,7 @@ def _phase_manifest_path(output: Path) -> Path:
 def _stable_spec_digest(spec: dict) -> str:
     """Exclude live free-disk admission figures, bind exact source and recipes."""
     keys = (
-        "candidate", "candidate_verification_sha256", "converter_revision",
+        "candidate", "original_source", "candidate_verification_sha256", "converter_revision",
         "converter_sha256", "quantizer_binary_sha256", "conversion_command",
         "q8_quality_command", "q4_fit_command",
     )
@@ -184,6 +184,8 @@ def build(*, specification: dict, log_path: Path, execute: bool,
     if not log_path.parent.is_dir() or log_path.exists():
         raise ValueError("conversion audit log must be new with an existing parent")
     roots = [Path(specification["candidate"]), *destinations]
+    if specification.get("original_source"):
+        roots.append(Path(specification["original_source"]))
     if any(log_path.resolve().is_relative_to(path.resolve()) for path in roots):
         raise ValueError("log must not live inside model or staged outputs")
     phase_results = []

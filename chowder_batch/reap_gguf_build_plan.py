@@ -36,6 +36,12 @@ def plan(*, candidate: Path, verification: Path,
             or not isinstance(receipt.get("candidate_shard_sha256"), dict)
             or len(receipt["candidate_shard_sha256"]) != 26):
         raise ValueError("full source-exact 26-shard candidate verification is required")
+    original_source = receipt.get("original_source")
+    if (not isinstance(original_source, str) or not original_source
+            or not Path(original_source).resolve().is_dir()
+            or Path(original_source).resolve() == model):
+        raise ValueError("registered original BF16 source is missing or overlaps candidate")
+    original_source = Path(original_source).resolve()
     if (receipt.get("candidate_index_sha256") != _sha(model / "model.safetensors.index.json")
             or receipt.get("candidate_prune_receipt_sha256") != _sha(model / "reap-prune.json")):
         raise ValueError("actual candidate index/prune provenance changed after verification")
@@ -64,8 +70,9 @@ def plan(*, candidate: Path, verification: Path,
             or (not allow_existing and any(path.exists() for path in outputs))):
         raise ValueError("each new GGUF output must have its own existing clean parent")
     if (bf16_out.drive.lower() == candidate.drive.lower()
-            or not all(path.parent.resolve() != model for path in outputs)):
-        raise ValueError("BF16 GGUF intermediate must be on storage separate from model")
+            or any(path.is_relative_to(root) for path in outputs
+                   for root in (model, original_source))):
+        raise ValueError("GGUF outputs must be disjoint from original and pruned models")
     bytes_model = receipt.get("pruned_tensor_bytes")
     if type(bytes_model) is not int or bytes_model <= 0:
         raise ValueError("missing verified model tensor byte count")
@@ -88,7 +95,8 @@ def plan(*, candidate: Path, verification: Path,
         "schema": "chowder.reap128-v2-gguf-prebuild-v1",
         "status": "PREBUILD_ADMITTED_NOT_CONVERTED_OR_QUALIFIED",
         "candidate_verification_sha256": _sha(verification),
-        "candidate": str(model), "converter_revision": revision,
+        "candidate": str(model), "original_source": str(original_source),
+        "converter_revision": revision,
         "converter": str(converter.resolve()), "quantizer": str(quantizer.resolve()),
         "converter_sha256": _sha(converter),
         "quantizer_binary_sha256": _sha(quantizer),

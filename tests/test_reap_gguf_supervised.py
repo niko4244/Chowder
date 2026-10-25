@@ -143,3 +143,18 @@ def test_resume_refuses_orphan_gguf_without_provenance(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="unbound/orphan"):
         supervise.build(specification=spec, log_path=tmp_path / "orphan.log",
                         execute=True, resume=True)
+
+
+def test_gguf_audit_log_cannot_write_inside_original_bf16_source(tmp_path, monkeypatch):
+    spec = _spec(tmp_path)
+    original = tmp_path / "frozen-original"
+    original.mkdir()
+    spec["original_source"] = str(original)
+    monkeypatch.setattr(supervise, "resource_problems", lambda *args, **kwargs: [])
+    monkeypatch.setattr(supervise, "_owned_stage",
+                        lambda *args, **kwargs: pytest.fail("unowned mutation"))
+    with pytest.raises(ValueError, match="log must not live inside model"):
+        supervise.build(
+            specification=spec, log_path=original / "never-create.log", execute=True,
+        )
+    assert not list(original.iterdir())
