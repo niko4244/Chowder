@@ -5,8 +5,8 @@ Usage:
       -- --port 8790 --arm <name> --suites gsm8k --out <eval dir>
 
 Flags are frozen by the prereg (section 3): ``--fit on -np 4 -c 16384 --jinja``.
-Writes <out>/<arm>/server.log and <out>/<arm>/serve.json; the server is always
-terminated on exit.
+Creates <out>/<arm>/server.log and <out>/<arm>/serve.json exclusively. Resumed
+sessions retain these original receipts and use separate per-session records.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import uuid
 from pathlib import Path
 
 DEFAULT_SERVER = r"C:\llama.cpp\bin\llama-server.exe"
@@ -65,6 +66,11 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _model_stat(path: Path) -> tuple[int, int, int, int, int]:
+    info = path.stat()
+    return (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_dev, info.st_ino)
 
 
 def _wait_health(proc, port: int, timeout: int) -> None:
@@ -135,12 +141,113 @@ def _require_free_loopback_port(port: int) -> None:
             raise RuntimeError(f"server port {port} is in use or unavailable; refusing foreign health endpoint") from exc
 
 
+def _require_owned_listener(proc, port: int) -> None:
+    """On the Windows execution host, bind a healthy listener to our child PID."""
+    if os.name != "nt":
+        return
+    script = ("$ErrorActionPreference='Stop'; "
+              f"Get-NetTCPConnection -State Listen -LocalPort {port} | "
+              "Where-Object { $_.LocalAddress -eq '127.0.0.1' -or "
+              "$_.LocalAddress -eq '0.0.0.0' } | "
+              "Select-Object -ExpandProperty OwningProcess")
+    try:
+        check = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive",
+                                "-Command", script], capture_output=True, text=True, timeout=20)
+        owners = {int(line.strip()) for line in check.stdout.splitlines() if line.strip()}
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("could not verify Windows REAP loopback listener owner") from exc
+    if check.returncode != 0 or owners != {proc.pid}:
+        raise RuntimeError("healthy REAP loopback listener is not owned by launched server PID")
+
+
+def _admit_output(arm_dir: Path, *, gguf: Path, digest: str) -> bool:
+    """Allow a fresh directory or an original, model-bound resumable session."""
+    if arm_dir.is_symlink() or not arm_dir.is_dir():
+        raise ValueError("REAP arm output must be a real directory")
+    existing = [path for path in arm_dir.iterdir() if path.name != ".serve.lock"]
+    if not existing:
+        return False
+    serve_path = arm_dir / "serve.json"
+    log_path = arm_dir / "server.log"
+    if (not serve_path.is_file() or not log_path.is_file()
+            or serve_path.is_symlink() or log_path.is_symlink()):
+        raise ValueError("REAP existing output has incomplete or unclaimed serving identity")
+    try:
+        serving = json.loads(serve_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise ValueError("REAP existing serving identity cannot be read") from exc
+    if not isinstance(serving, dict) or not isinstance(serving.get("gguf"), str):
+        raise ValueError("REAP existing serving model identity is malformed")
+    expected = {"gguf": serving["gguf"], "gguf_sha256": digest, "flags": FLAGS}
+    if (Path(serving["gguf"]).resolve() != gguf
+            or any(serving.get(k) != v for k, v in expected.items())):
+        raise ValueError("REAP existing serving model identity/flags disagree; use a new output arm")
+
+    from chowder_batch.reap_eval import IDENTITY_SCHEMA
+
+    # Never give legacy historical results a retrospective model witness.
+    for results in arm_dir.glob("*.jsonl"):
+        suite = results.stem
+        witness = arm_dir / f"{suite}.inputs.json"
+        if results.is_symlink() or not witness.is_file() or witness.is_symlink():
+            raise ValueError(f"REAP existing {suite} results lack a trustworthy input witness")
+    for witness in arm_dir.glob("*.inputs.json"):
+        suite = witness.name.removesuffix(".inputs.json")
+        if witness.is_symlink():
+            raise ValueError("REAP existing input witness cannot be a symlink")
+        try:
+            record = json.loads(witness.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise ValueError("REAP existing input witness is unreadable") from exc
+        if (not isinstance(record, dict) or record.get("schema") != IDENTITY_SCHEMA
+                or record.get("suite") != suite or record.get("model") != expected):
+            raise ValueError("REAP existing input witness model identity disagrees")
+    summary_path = arm_dir / "summary.json"
+    if summary_path.exists():
+        if not summary_path.is_file() or summary_path.is_symlink():
+            raise ValueError("REAP existing evaluation summary is not a regular file")
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise ValueError("REAP existing evaluation summary is unreadable") from exc
+        if not isinstance(summary, dict):
+            raise ValueError("REAP existing evaluation summary is malformed")
+        for suite, info in summary.items():
+            results = arm_dir / f"{suite}.jsonl"
+            if (not isinstance(suite, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", suite)
+                    or not isinstance(info, dict) or not results.is_file()
+                    or not (arm_dir / f"{suite}.inputs.json").is_file()
+                    or info.get("file_sha256") != _sha256(results)):
+                raise ValueError("REAP existing evaluation summary is unclaimed or modified")
+    return True
+
+
 def _stop(proc) -> None:
+    if proc.poll() is not None:
+        return
     proc.terminate()
     try:
         proc.wait(timeout=30)
     except subprocess.TimeoutExpired:
         proc.kill()
+
+
+def _run_eval(server, command: list[str]) -> int:
+    """Stop scoring if the model server exits before the evaluator finishes."""
+    evaluator = subprocess.Popen(command)
+    try:
+        while True:
+            try:
+                code = evaluator.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                if server.poll() is not None:
+                    raise RuntimeError("REAP model server exited during evaluation") from None
+                continue
+            if server.poll() is not None:
+                raise RuntimeError("REAP model server exited before evaluation completed")
+            return code
+    finally:
+        _stop(evaluator)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -155,33 +262,69 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--timeout", type=int, default=HEALTH_TIMEOUT)
     args = p.parse_args(ours)
 
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.arm):
+        raise ValueError("REAP arm must be a simple name without path separators")
+    gguf = Path(args.gguf).resolve(strict=True)
+    if not gguf.is_file() or Path(args.gguf).is_symlink():
+        raise ValueError("REAP GGUF must be an existing regular model file")
     _verify_eval_target(eval_args, port=args.port, arm=args.arm, out=Path(args.out))
-    _require_free_loopback_port(args.port)
 
     arm_dir = Path(args.out) / args.arm
+    if arm_dir.is_symlink():
+        raise ValueError("REAP arm output cannot be a symlink")
     arm_dir.mkdir(parents=True, exist_ok=True)
-    log_path = arm_dir / "server.log"
-    gguf = Path(args.gguf)
-    cmd = [args.server, *FLAGS, "--port", str(args.port), "-m", str(gguf)]
-    started = dt.datetime.now(dt.timezone.utc).isoformat()
-    t0 = time.time()
-    with log_path.open("wb") as log:
-        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
-                                env={**os.environ, "LLAMA_ARG_LOG_VERBOSITY": LOG_VERBOSITY})
-        try:
-            _wait_health(proc, args.port, args.timeout)
-            ready = round(time.time() - t0, 1)
-            lines, n = parse_offload(log_path.read_text(encoding="utf-8", errors="replace"))
-            (arm_dir / "serve.json").write_text(json.dumps({
-                "gguf": str(gguf), "gguf_sha256": _sha256(gguf), "flags": FLAGS,
-                "log_verbosity": LOG_VERBOSITY,
-                "experts_offloaded": n, "offload_log_lines": lines,
-                "vram_used_mib": _vram_used_mib(), "started": started, "ready_seconds": ready,
-            }, indent=2), encoding="utf-8")
-            eval_py = str(Path(__file__).with_name("reap_eval.py"))
-            return subprocess.run([sys.executable, eval_py, *eval_args]).returncode
-        finally:
-            _stop(proc)
+    lock_path = arm_dir / ".serve.lock"
+    try:
+        lock = lock_path.open("x", encoding="utf-8")
+    except FileExistsError as exc:
+        raise RuntimeError("REAP arm already has an active or abandoned session lock") from exc
+    try:
+        lock.write(f"pid={os.getpid()}\n")
+        lock.flush()
+        model_stat = _model_stat(gguf)
+        digest = _sha256(gguf)
+        if _model_stat(gguf) != model_stat:
+            raise RuntimeError("REAP GGUF changed while hashing; refusing serving")
+        resumed = _admit_output(arm_dir, gguf=gguf, digest=digest)
+        _require_free_loopback_port(args.port)
+        session = uuid.uuid4().hex if resumed else None
+        log_path = arm_dir / (f"server.resume-{session}.log" if resumed else "server.log")
+        receipt_path = arm_dir / (f"serve.resume-{session}.json" if resumed else "serve.json")
+        cmd = [args.server, *FLAGS, "--port", str(args.port), "-m", str(gguf)]
+        started = dt.datetime.now(dt.timezone.utc).isoformat()
+        t0 = time.time()
+        with log_path.open("xb") as log:
+            proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                    env={**os.environ, "LLAMA_ARG_LOG_VERBOSITY": LOG_VERBOSITY})
+            try:
+                _wait_health(proc, args.port, args.timeout)
+                if proc.poll() is not None:
+                    raise RuntimeError("launched llama-server exited before evaluation")
+                _require_owned_listener(proc, args.port)
+                if _model_stat(gguf) != model_stat:
+                    raise RuntimeError("REAP GGUF changed during server startup")
+                ready = round(time.time() - t0, 1)
+                lines, n = parse_offload(log_path.read_text(encoding="utf-8", errors="replace"))
+                receipt = {
+                    "gguf": str(gguf), "gguf_sha256": digest, "flags": FLAGS,
+                    "log_verbosity": LOG_VERBOSITY,
+                    "experts_offloaded": n, "offload_log_lines": lines,
+                    "vram_used_mib": _vram_used_mib(), "started": started, "ready_seconds": ready,
+                }
+                if resumed:
+                    receipt["session_log"] = log_path.name
+                with receipt_path.open("x", encoding="utf-8") as record:
+                    json.dump(receipt, record, indent=2)
+                eval_py = str(Path(__file__).with_name("reap_eval.py"))
+                code = _run_eval(proc, [sys.executable, eval_py, *eval_args])
+                if _model_stat(gguf) != model_stat:
+                    raise RuntimeError("REAP GGUF changed during evaluation")
+                return code
+            finally:
+                _stop(proc)
+    finally:
+        lock.close()
+        lock_path.unlink()
 
 
 if __name__ == "__main__":

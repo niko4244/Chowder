@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import socket
 import sys
 from pathlib import Path
@@ -70,6 +71,7 @@ def test_parse_unparseable_is_null():
 
 class FakeProc:
     terminated = False
+    pid = 4242
 
     def __init__(self, cmd, stdout=None, stderr=None, **kw):
         self.cmd = cmd
@@ -107,7 +109,24 @@ class FakeResp:
 def _setup(monkeypatch, eval_rc=0, health_fail=False):
     calls = []
     FakeProc.terminated = False
-    monkeypatch.setattr(reap_serve.subprocess, "Popen", FakeProc)
+    monkeypatch.setattr(reap_serve, "_require_owned_listener", lambda proc, port: None)
+
+    class FakeEvalProc:
+        def __init__(self, cmd):
+            calls.append(cmd)
+
+        def poll(self):
+            return eval_rc
+
+        def wait(self, timeout=None):
+            return eval_rc
+
+    def fake_popen(cmd, **kw):
+        if any("reap_eval.py" in str(part) for part in cmd):
+            return FakeEvalProc(cmd)
+        return FakeProc(cmd, **kw)
+
+    monkeypatch.setattr(reap_serve.subprocess, "Popen", fake_popen)
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
@@ -241,3 +260,189 @@ def test_serve_refuses_foreign_listener_before_launch(tmp_path, monkeypatch):
             reap_serve.main(["--gguf", str(gguf), "--arm", "reap160", "--port", str(port),
                              "--out", str(tmp_path / "evaluation"), "--",
                              "--port", str(port), "--arm", "reap160", "--out", str(tmp_path / "evaluation")])
+
+
+def _serve_args(gguf, out, arm="reap128_v2", port=8790):
+    return ["--gguf", str(gguf), "--arm", arm, "--port", str(port),
+            "--out", str(out), "--", "--port", str(port), "--arm", arm, "--out", str(out)]
+
+
+def test_resume_preserves_original_serve_and_log(tmp_path, monkeypatch):
+    _setup(monkeypatch)
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"model A")
+    out = tmp_path / "eval"
+    assert reap_serve.main(_serve_args(gguf, out)) == 0
+    arm_dir = out / "reap128_v2"
+    original_log = (arm_dir / "server.log").read_bytes()
+    original_serve = (arm_dir / "serve.json").read_bytes()
+    assert reap_serve.main(_serve_args(gguf, out)) == 0
+    assert (arm_dir / "server.log").read_bytes() == original_log
+    assert (arm_dir / "serve.json").read_bytes() == original_serve
+    assert len(list(arm_dir.glob("server.resume-*.log"))) == 1
+    assert len(list(arm_dir.glob("serve.resume-*.json"))) == 1
+    assert not (arm_dir / ".serve.lock").exists()
+
+
+def test_refuses_existing_different_model_without_mutation(tmp_path, monkeypatch):
+    _setup(monkeypatch)
+    first, second = tmp_path / "a.gguf", tmp_path / "b.gguf"
+    first.write_bytes(b"model A")
+    second.write_bytes(b"model B")
+    out = tmp_path / "eval"
+    reap_serve.main(_serve_args(first, out))
+    arm_dir = out / "reap128_v2"
+    previous = {p.name: p.read_bytes() for p in arm_dir.iterdir()}
+    monkeypatch.setattr(reap_serve.subprocess, "Popen", lambda *a, **kw: pytest.fail("must not launch"))
+    with pytest.raises(ValueError, match="model|GGUF|identity"):
+        reap_serve.main(_serve_args(second, out))
+    assert {p.name: p.read_bytes() for p in arm_dir.iterdir()} == previous
+
+
+@pytest.mark.parametrize("legacy", ["server.log", "serve.json", "gsm8k.jsonl", "summary.json"])
+def test_refuses_unclaimed_existing_output(tmp_path, monkeypatch, legacy):
+    gguf = tmp_path / "a.gguf"
+    gguf.write_bytes(b"model A")
+    out = tmp_path / "eval"
+    arm_dir = out / "reap128_v2"
+    arm_dir.mkdir(parents=True)
+    (arm_dir / legacy).write_bytes(b"historical evidence")
+    monkeypatch.setattr(reap_serve.subprocess, "Popen", lambda *a, **kw: pytest.fail("must not launch"))
+    with pytest.raises(ValueError, match="existing|identity|incomplete|unclaimed"):
+        reap_serve.main(_serve_args(gguf, out))
+    assert (arm_dir / legacy).read_bytes() == b"historical evidence"
+
+
+def test_refuses_historical_results_without_input_witness(tmp_path, monkeypatch):
+    _setup(monkeypatch)
+    gguf = tmp_path / "a.gguf"
+    gguf.write_bytes(b"model A")
+    out = tmp_path / "eval"
+    reap_serve.main(_serve_args(gguf, out))
+    arm_dir = out / "reap128_v2"
+    (arm_dir / "gsm8k.jsonl").write_bytes(b'historical answers\n')
+    monkeypatch.setattr(reap_serve.subprocess, "Popen", lambda *a, **kw: pytest.fail("must not launch"))
+    with pytest.raises(ValueError, match="witness|unclaimed"):
+        reap_serve.main(_serve_args(gguf, out))
+    assert (arm_dir / "gsm8k.jsonl").read_bytes() == b'historical answers\n'
+
+
+def test_refuses_invalid_arm_path_and_concurrent_lock(tmp_path, monkeypatch):
+    gguf = tmp_path / "a.gguf"
+    gguf.write_bytes(b"model A")
+    out = tmp_path / "eval"
+    monkeypatch.setattr(reap_serve.subprocess, "Popen", lambda *a, **kw: pytest.fail("must not launch"))
+    with pytest.raises(ValueError, match="arm"):
+        reap_serve.main(_serve_args(gguf, out, "../archive"))
+    arm_dir = out / "reap128_v2"
+    arm_dir.mkdir(parents=True)
+    (arm_dir / ".serve.lock").write_text("other owner")
+    with pytest.raises((RuntimeError, ValueError), match="lock|session|existing"):
+        reap_serve.main(_serve_args(gguf, out))
+    assert (arm_dir / ".serve.lock").read_text() == "other owner"
+
+
+def test_resume_accepts_matching_witnessed_partial_results(tmp_path, monkeypatch):
+    _setup(monkeypatch)
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"model A")
+    out = tmp_path / "eval"
+    reap_serve.main(_serve_args(gguf, out))
+    arm_dir = out / "reap128_v2"
+    served = json.loads((arm_dir / "serve.json").read_text())
+    witness = {"schema": reap_eval.IDENTITY_SCHEMA, "suite": "gsm8k",
+               "model": {key: served[key] for key in ("gguf", "gguf_sha256", "flags")}}
+    (arm_dir / "gsm8k.inputs.json").write_text(json.dumps(witness))
+    (arm_dir / "gsm8k.jsonl").write_text('{"id":"gsm8k-0","correct":true}\n')
+    existing = {p.name: p.read_bytes() for p in arm_dir.iterdir()}
+    assert reap_serve.main(_serve_args(gguf, out)) == 0
+    assert all((arm_dir / name).read_bytes() == payload for name, payload in existing.items())
+
+
+def test_resume_refuses_changed_partial_results_before_launch(tmp_path, monkeypatch):
+    _setup(monkeypatch)
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"model A")
+    out = tmp_path / "eval"
+    reap_serve.main(_serve_args(gguf, out))
+    arm_dir = out / "reap128_v2"
+    served = json.loads((arm_dir / "serve.json").read_text())
+    (arm_dir / "gsm8k.inputs.json").write_text(json.dumps({
+        "schema": reap_eval.IDENTITY_SCHEMA, "suite": "gsm8k",
+        "model": {key: served[key] for key in ("gguf", "gguf_sha256", "flags")},
+    }))
+    (arm_dir / "gsm8k.jsonl").write_text('{"id":"gsm8k-0"}\n')
+    (arm_dir / "summary.json").write_text(json.dumps({
+        "gsm8k": {"file_sha256": "0" * 64, "n": 1},
+    }))
+    monkeypatch.setattr(reap_serve.subprocess, "Popen", lambda *a, **kw: pytest.fail("must not launch"))
+    with pytest.raises(ValueError, match="summary"):
+        reap_serve.main(_serve_args(gguf, out))
+    assert not (arm_dir / ".serve.lock").exists()
+
+
+def test_evaluator_is_stopped_if_launched_server_exits(monkeypatch):
+    class GoneServer:
+        def poll(self):
+            return 7
+
+    class PendingEval:
+        stopped = False
+
+        def poll(self):
+            return 1 if self.stopped else None
+
+        def wait(self, timeout=None):
+            if not self.stopped:
+                raise reap_serve.subprocess.TimeoutExpired("eval", timeout)
+            return 1
+
+        def terminate(self):
+            self.stopped = True
+
+    evaluation = PendingEval()
+    monkeypatch.setattr(reap_serve.subprocess, "Popen", lambda *a, **kw: evaluation)
+    with pytest.raises(RuntimeError, match="server exited during evaluation"):
+        reap_serve._run_eval(GoneServer(), ["fake-evaluator"])
+    assert evaluation.stopped
+
+
+def test_model_changed_while_hashing_is_rejected_before_launch(tmp_path, monkeypatch):
+    gguf = tmp_path / "mutable.gguf"
+    gguf.write_bytes(b"model A")
+    real_sha = reap_serve._sha256
+
+    def changed_sha(path):
+        digest = real_sha(path)
+        path.write_bytes(b"model B updated")
+        return digest
+
+    monkeypatch.setattr(reap_serve, "_sha256", changed_sha)
+    monkeypatch.setattr(reap_serve.subprocess, "Popen", lambda *a, **kw: pytest.fail("must not launch"))
+    out = tmp_path / "eval"
+    with pytest.raises(RuntimeError, match="changed while hashing"):
+        reap_serve.main(_serve_args(gguf, out))
+    assert not (out / "reap128_v2" / ".serve.lock").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows listener owner proof")
+def test_windows_listener_pid_refuses_foreign_and_accepts_own_process(monkeypatch):
+    class FakeCheck:
+        returncode = 0
+        stdout = "67890\n"
+
+    class Owner:
+        pid = 4242
+
+    with monkeypatch.context() as patch:
+        patch.setattr(reap_serve.subprocess, "run", lambda *a, **kw: FakeCheck())
+        with pytest.raises(RuntimeError, match="not owned"):
+            reap_serve._require_owned_listener(Owner(), 8790)
+
+    # A real, temporary localhost socket verifies the standard Windows PID lookup.
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen()
+        class CurrentProcess:
+            pid = os.getpid()
+        reap_serve._require_owned_listener(CurrentProcess(), sock.getsockname()[1])
