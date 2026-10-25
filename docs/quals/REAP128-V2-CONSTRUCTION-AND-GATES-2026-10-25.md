@@ -353,13 +353,38 @@ quantized-model quality, Q4 fit/speed, or scientific selection.
    **all 10 Q8_0 tensors** again matched monolithic bytes. These two
    fixtures demonstrate a promising bounded-memory alternative but do
    **not** establish production equivalence, science, or deployability.
-   `chowder_batch.reap_gguf_chunked` implements a CPU-only source
+   `chowder_batch.reap_gguf_chunked` now implements a CPU-only source
    chunk-layout planner, exact raw BF16 mini-GGUF preservation, the
-   pinned executable's per-mini quantization, and bitwise tensor
-   validation of a merged Q8_0 GGUF. The CLI is currently **read-only**
-   (its status is `READ_ONLY_CHUNK_PLAN_NOT_EXECUTED`); actual
-   production orchestration, durable per-chunk checkpointing and
-   multi-volume publication are not yet claimed.
+   pinned executable's per-mini quantization, per-chunk SHA receipts,
+   guarded merging, cross-volume staged publication, and bitwise tensor
+   validation of a merged Q8_0 GGUF. The default CLI is read-only
+   (`READ_ONLY_CHUNK_PLAN_NOT_EXECUTED`); `--execute` additionally
+   requires separately mounted BF16 scratch and Q8 output/chunk drives,
+   a registered full 26-shard verification receipt, original BF16
+   GGUF full SHA-256, exact pinned quantizer binary, an exclusive log,
+   and fresh host RAM/commit/disk checks before launching each tiny
+   quantization child. A **synthetic end-to-end positive test** confirms
+   complete Q8_0 publication with all independent tensor bytes
+   identical to monolithic quantization. None of this is a production
+   Q8_0 evaluation or Gen-0 selection claim.
+
+   The third monolithic Q8_0 attempt, including a 64 MiB buffer, still
+   failed the same physical RAM floor around tensor 194/733. Its
+   6,072,422,400-byte unpublished owned private output was audited and
+   discarded; audit receipt:
+   `docs/quals/reap128-v2-incomplete-q8-cleanup-third-20261025.json`,
+   SHA-256
+   `612a119e6c303ec1b10be94cbec70d62a4125a209b727c659aed92cfa58ac57a`.
+   A separate BF16→Q4_K_M run with a 1 MiB row-slab cap similarly
+   reached approximately tensor 150/733 before the same RAM guard
+   refused further execution. Its incomplete 3,303,043,072-byte
+   temporary was isolated and then audited for exact owned-process
+   cleanup; audit:
+   `docs/quals/reap128-v2-incomplete-q4-cleanup-20261025.json`,
+   SHA-256
+   `bf7c9021a3919543bce72ba3b4b7a538173316652557db829fd2d40365d3e0c9`.
+   Neither abort is an indication of scientific quantized-model
+   quality; no valid Q8_0/Q4_K_M GGUF or frozen-Gate PASS resulted.
    Before the resumed quantizer launched, the exact abandoned private
    file (4,206,747,648 bytes) was removed after checking the original
    owned-child abort log and absence of an active quantizer, restoring
