@@ -273,6 +273,10 @@ def _doctor(args: argparse.Namespace) -> int:
             model_dir=args.model_dir,
             weights_dir=args.weights_dir,
             out=args.out,
+            # A --resume pre-screen must accept the existing output directory
+            # that the resume itself requires; otherwise --doctor reports a
+            # valid resumable checkpoint as "frozen_paths_or_source_invalid".
+            allow_existing_out=args.resume,
         )
         report["frozen_inputs"] = {
             "status": "METADATA_ADMITTED_FULL_SHARD_HASH_NOT_PERFORMED",

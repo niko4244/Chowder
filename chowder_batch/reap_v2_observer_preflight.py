@@ -199,14 +199,24 @@ def _validate_model(model: Path, weights: Path, declared_tokens: int) -> dict[st
 
 
 def admit(*, calibration: Path, model_dir: Path, out: Path,
-          weights_dir: Path | None = None) -> dict[str, Any]:
+          weights_dir: Path | None = None,
+          allow_existing_out: bool = False) -> dict[str, Any]:
     calib = calibration.resolve(strict=True)
     model = model_dir.resolve(strict=True)
     weights = (weights_dir or model_dir).resolve(strict=True)
     intended = out.resolve()
     _check(calib.is_dir() and model.is_dir() and weights.is_dir(),
            "calibration, model and weight paths must be directories")
-    _check(not intended.exists(), "observer output already exists: refusing overwrite or reuse")
+    if allow_existing_out:
+        # Resume path: the output directory legitimately exists and must be
+        # reused. A completed observation is still an absolute refusal.
+        _check(intended.is_dir(),
+               "resume requires an existing observer output directory")
+        _check(not (intended / "observation.json").exists(),
+               "resume refused: this observation already completed")
+    else:
+        _check(not intended.exists(),
+               "observer output already exists: refusing overwrite or reuse")
     _check(not any(intended == source or intended.is_relative_to(source)
                    or source.is_relative_to(intended) for source in (calib, model, weights)),
            "observer output overlaps an input directory")
