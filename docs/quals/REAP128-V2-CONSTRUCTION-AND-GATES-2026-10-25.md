@@ -782,3 +782,14 @@ tested **15 passing CPU regressions** (Ruff clean). The admitted *real*
 published BF16 parent and original sealed chunk receipts. Its actual
 full-byte/733-tensor result is **not yet verified** while that process
 continues, and no scientific gates may be promoted from it.
+
+An independently invoked metadata-only
+`reap_gguf_header_preflight --expected-file-type 7` on the complete-size
+F: assembly returned `GGUF_METADATA_TOPOLOGY_MATCH_ONLY`: **19,748,435,968
+file bytes; 733 GGUF tensor headers; 40 decoder blocks; 128 experts per
+block; routed top-k 8; 162 required shape checks; GGUF file type 7**.
+No GGUF full-file SHA was computed or claimed by this *header-only*
+instrument, and it does **not** attest source raw tensor payloads,
+actual llama.cpp load, GSM8K/HumanEval or deployment fit. Immutable
+header receipt: `docs/quals/reap128-v2-q8-F-orphan-header-only-20261025.json`
+(SHA-256 `80b8122673c4604f5058961e86df53577b706a73833b648d40cebaffc4ceb1e1`).
