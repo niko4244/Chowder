@@ -72,7 +72,7 @@ def _load_chunked(bf16: Path, q8: Path, source: dict) -> dict:
     from gguf import GGUFReader
 
     from chowder_batch.reap_gguf_chunked import (
-        _quantized_shape_matches, hash_tensor_data,
+        _quantized_shape_matches, hash_tensor_span,
     )
 
     receipt_path = q8.with_name(q8.name + ".reap-chunked.json")
@@ -148,7 +148,8 @@ def _load_chunked(bf16: Path, q8: Path, source: dict) -> dict:
                 or not isinstance(claimed.get("raw_sha256"), str)
                 or re.fullmatch(r"[0-9a-f]{64}", claimed["raw_sha256"]) is None
                 or not _quantized_shape_matches(src, target)
-                or hash_tensor_data(target.data) != claimed["raw_sha256"]):
+                or hash_tensor_span(q8, int(target.data_offset),
+                                    int(target.n_bytes)) != claimed["raw_sha256"]):
             raise ValueError(f"chunked Q8 tensor shape/type/payload receipt mismatch: {target.name}")
         saw_q8 |= target.tensor_type.name == "Q8_0"
     if not saw_q8:

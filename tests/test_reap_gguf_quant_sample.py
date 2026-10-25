@@ -13,6 +13,7 @@ from gguf import GGMLQuantizationType as Q
 from gguf import GGUFReader, GGUFWriter, quants
 
 from chowder_batch import reap_gguf_quant_sample as sample
+from chowder_batch import reap_gguf_chunked as chunk
 
 
 def _bits_and_q8(n: int = 1024):
@@ -138,6 +139,32 @@ def test_real_chunked_q8_witness_all_733_tensors_accepted(tmp_path, monkeypatch)
     assert result["compared_expert_tensors"] == 120
     assert result["total_compared_values"] == 120 * 256
     assert 0 < result["mean_abs_error"] < 0.01
+
+
+def test_chunked_witness_uses_bounded_file_spans_not_quantized_mmap_pages(
+    tmp_path, monkeypatch,
+):
+    bf16, q8, _ = _chunked_pair(tmp_path, monkeypatch)
+    original_hash = chunk.hash_tensor_data
+    calls = []
+    original_span = chunk.hash_tensor_span
+
+    def reject_mapped_quantized_tensor(raw):
+        if raw.dtype == np.dtype("uint8"):
+            raise AssertionError("Q8 payload witness must not fault mmap tensor pages")
+        return original_hash(raw)
+
+    def counted_bounded_span(path, offset, nbytes):
+        assert Path(path) == q8
+        assert nbytes > 0 and offset >= 0
+        calls.append((offset, nbytes))
+        return original_span(path, offset, nbytes)
+
+    monkeypatch.setattr(chunk, "hash_tensor_data", reject_mapped_quantized_tensor)
+    monkeypatch.setattr(chunk, "hash_tensor_span", counted_bounded_span)
+    witness = sample._stage_identity(bf16, q8)
+    assert witness["q8_0"]["chunk_count"] == 3
+    assert len(calls) == sample.TENSOR_INVENTORY
 
 
 def test_chunked_cli_preflight_describes_hashes_without_quality_claim(

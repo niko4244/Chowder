@@ -1,0 +1,10 @@
+{
+  "mode": "Q8_0",
+  "origin": "independent 733-tensor reattestation of guarded merge orphan; original merge worker aborted without certifying a receipt",
+  "output": "F:\\reap-v2-q8-streaming-scratch-20261025\\merged-q8-720fdec6b18c4ce588b530745113645b.gguf",
+  "output_sha256": "89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6",
+  "source": "F:\\reap128-v2-bf16-intermediate-20261025.gguf",
+  "status": "GGUF_CHUNKED_TENSOR_INDEPENDENT_ORPHAN_ATTESTED_NOT_QUALITY_QUALIFIED",
+  "supervision_log_sha256": "a444644aa16deaa06fb8572c076a36dd6de239fe331accacc392b9fab2c02154",
+  "tensors": 733
+}

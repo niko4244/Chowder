@@ -793,3 +793,28 @@ instrument, and it does **not** attest source raw tensor payloads,
 actual llama.cpp load, GSM8K/HumanEval or deployment fit. Immutable
 header receipt: `docs/quals/reap128-v2-q8-F-orphan-header-only-20261025.json`
 (SHA-256 `80b8122673c4604f5058961e86df53577b706a73833b648d40cebaffc4ceb1e1`).
+
+### October 25 12:44 — independently certified full F: assembly
+
+The guarded F: complete-orphan certifier **completed successfully** after
+independently rechecking the original BF16 and 26-shard provenance,
+all **42/42 certified Q8 chunks**, 733 BF16/quantized raw tensor
+signatures, 40x128/top-k 8 topology and the complete F: model SHA.
+The F: merged GGUF is **19,748,435,968 bytes**, SHA-256
+`89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6`.
+The immutable separately labeled *independent* F: certificate is
+`docs/quals/reap128-v2-q8-F-full-independent-tensor-cert-20261025.json`,
+receipt SHA-256
+`22145b94628396a288e7f301df1d7217436c0605b38cb60943b24fc84e3545d3`.
+Its supervision-log SHA independently matches the real guarded
+second-attempt RAM-abort log; it does not forge an original-worker seal.
+
+An exclusive original publisher was subsequently admitted and started
+to reuse and rehash this independently certified F: assembly. The **final
+I: GGUF and sidecar are NOT PUBLISHED** until its source-bound cleanup,
+cross-volume copy and output SHA fully complete. All frozen quality,
+speed, GPU and Gen-0 gates remain unmeasured/blocked separately from
+construction. The Q8 numerical sampler now verifies final Q8 GGUF raw
+tensor SHA through bounded file range reads instead of mmap ndarray
+payload hashing, to avoid repeating the physical-memory guard abort;
+**24 sampler CPU tests passed**, including adversarial mmap-page refusal.
