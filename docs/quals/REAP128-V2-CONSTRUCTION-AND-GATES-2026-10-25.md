@@ -865,3 +865,27 @@ Only full SHA equality permits final rename and exclusive receipt.
 Tests: **18 recovery CPU cases passed**, including exact-prefix recovery
 for both registered owned names, corrupt-prefix refusal, duplicate candidate
 refusal and guard-abort preservation. No new model-quality gate is asserted.
+
+### October 25 13:19 — full Q8_0 published on I: with final 733-tensor receipt
+
+**Production Q8 GGUF publication PASS (construction only).** The original
+exclusive guarded publisher rechecked the sealed F: assembly, emitted all
+**42/42 SHA-bound chunk-cleanup events**, completed the guarded I:
+cross-volume transfer, verified the final copied SHA and issued
+`CHUNKED_Q8_FINAL_PUBLISHED` for model
+`I:\reap128-v2-q8_0-20261025.gguf`, **19,748,435,968 bytes**, SHA-256
+`89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6`.
+The published I: `.reap-chunked.json` sidecar records the frozen BF16
+parent SHA, fixed pinned quantizer, **42 distinct original groups and 733
+unique raw tensor receipt names**, and explicitly states
+`quality_gate=NOT_EVALUATED`, `gpu_fit_gate=NOT_EVALUATED`.
+An independently exact-byte-copied immutable construction sidecar is
+`docs/quals/reap128-v2-q8-I-final-construction-receipt-20261025.json`,
+receipt SHA-256
+`a1cfe1464df4579ea9d5ae1320efc01c0de5dae1070235caca18c821ce67479d`.
+The final model's SHA was certified by the guarded publisher; independent
+Q8-vs-BF16 numerical window testing and external scientific evaluation
+still require their **own** measurements and cannot be inferred from this
+construction receipt. The publisher's separately SHA-verified cleanup of
+the F: assembled temporary continues until its own exit, so Q4 is not
+permitted to run concurrently with that owner.

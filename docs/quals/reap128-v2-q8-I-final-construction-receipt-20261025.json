@@ -1,0 +1,6589 @@
+{
+  "chunk_count": 42,
+  "chunked_reference_receipts": {
+    "all_tensors": {
+      "blk.0.attn_gate.weight": {
+        "raw_sha256": "179de4ea3eaa159fa9984da241c23c0962f6b018f69b6bfbb5ae5bce163c1675",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.0.attn_norm.weight": {
+        "raw_sha256": "f452e90d3bc696497fce0aee0233ce7d3f7dfa4dbfc2ebcc992d426a5df9e4ee",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.0.attn_qkv.weight": {
+        "raw_sha256": "e2e92488d5e4173370569aa40899c2c527e5ebc41dcf86a583927e52f8fc36fd",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.0.ffn_down_exps.weight": {
+        "raw_sha256": "3fe9b9a390d94364f0444b5fdd2d793c56ee5509ba60ace35893b3935369f5f5",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.0.ffn_down_shexp.weight": {
+        "raw_sha256": "63aceca25a621944b847e64cb8fbd6ee8413623b5f64ee1d8c755d702d3d6da9",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.0.ffn_gate_exps.weight": {
+        "raw_sha256": "49989da51ed403cf739123322aa4dbb8c523d0d36b43fd6e8224e1e320139ecc",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.0.ffn_gate_inp.weight": {
+        "raw_sha256": "83a42c90159ec571acbefe970f8e4ac7bc6b96d92d89c7bd23190be9a1a3661d",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.0.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "b79f587c6837e413617b7c1a1569b96880aacbdaed0599521e8b4f7580474932",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.0.ffn_gate_shexp.weight": {
+        "raw_sha256": "ede4eebf4ee5ab689359578e8f133cb75a3d332e731ad0cf6e09a26fbb067352",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.0.ffn_up_exps.weight": {
+        "raw_sha256": "751ef35f4a9a810a17c58799697d5727a5597e3e8d4101aac7d50463f52e7cf5",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.0.ffn_up_shexp.weight": {
+        "raw_sha256": "603845fbb38bcf2686edf7019d9bd25721dc1445e53450ef4f3d7d73c1b019c7",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.0.post_attention_norm.weight": {
+        "raw_sha256": "b22b5501c496a7a4fa185022fd42cc59309ffc0334119ab09935f4f260e650fa",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.0.ssm_a": {
+        "raw_sha256": "5e6cab973f68e2eab346661ca0e8438f1944feb54d5ac4218ac0018f784f8826",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.0.ssm_alpha.weight": {
+        "raw_sha256": "c0827c43c085bf3534e6ebd8ab80d0f3da5a0a632e389316805693bb058c4871",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.0.ssm_beta.weight": {
+        "raw_sha256": "7720ccb61612927d7e77671cca5ea71689a583541e678ae642f60096a1440bfb",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.0.ssm_conv1d.weight": {
+        "raw_sha256": "86a4640cfc294de8dd913421a3670a679032dc73324984ac16ccd37a99ba807b",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.0.ssm_dt.bias": {
+        "raw_sha256": "29c9394e85df2ad2fb5e7aaa18c1c0e2dc3b0b39f775640b85554f5e69ea80a6",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.0.ssm_norm.weight": {
+        "raw_sha256": "8b51ece7e812b72c556fa4540e4ce46ead78c137b11c2dbdace07f238f85b36c",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.0.ssm_out.weight": {
+        "raw_sha256": "c88f5bd1bb94131ed5136d19bab9e53f65ffacf6144b227e0044caaf7aad774b",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.1.attn_gate.weight": {
+        "raw_sha256": "b6749ae275a13bf5fac6d29e90e1d16a6ff5267c00ce48dfc68c23da333751ef",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.1.attn_norm.weight": {
+        "raw_sha256": "80bbc15117a1a0188ec3b9b51d0e36e4d082e21c894156e6fd6101f65603efea",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.1.attn_qkv.weight": {
+        "raw_sha256": "7b78e19decab725cd92a43e5c391e9ead9e674355fedb7ebfbbcecb32f3566e5",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.1.ffn_down_exps.weight": {
+        "raw_sha256": "eabadc3520ed28a9598612a59e88783331b7961f114954c52f7c4326b38e1fb2",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.1.ffn_down_shexp.weight": {
+        "raw_sha256": "23c84cfaa0ffe822eb19112ad86b0b7c39bbe336406ed4141b3cef35f63f535a",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.1.ffn_gate_exps.weight": {
+        "raw_sha256": "f51907c5b5309a8380ceea0addd90e36a2b189017ceedb8c0324bc273291f82b",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.1.ffn_gate_inp.weight": {
+        "raw_sha256": "32e868f0098d7a037447d0496e0f21f8f2a40673f7f5076193f2f0130a2ad18a",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.1.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "1b1fd57c4881b3260172470f241ac0dcd82acb75071eb93bd8dd58c39558b4ff",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.1.ffn_gate_shexp.weight": {
+        "raw_sha256": "93c92532e9ff6152787964522f058fba61f7cb533d9cd0d83da26f169e7042f8",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.1.ffn_up_exps.weight": {
+        "raw_sha256": "0e9e438bcd163ec87065de22fed903874a1669a2ce5f2bc6cf03dc790d3264a3",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.1.ffn_up_shexp.weight": {
+        "raw_sha256": "437ba25959878a3d7dc0a82d63ffbb9341e37fa07e84cbe8a8ce52df047e00b9",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.1.post_attention_norm.weight": {
+        "raw_sha256": "f30b87f9ca2ad9b3ad5066568690e5907e3fe1a6c9f91bf517124793612cdd7e",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.1.ssm_a": {
+        "raw_sha256": "87a06e61c2c5623b0579e18ed4cacb85be30a0480c59b1bf80537a204d48931d",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.1.ssm_alpha.weight": {
+        "raw_sha256": "a0fa124cc99501fd5e6111385b19cc6bc90a11e122c787a8bd40a9fe381fd228",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.1.ssm_beta.weight": {
+        "raw_sha256": "47d2457db1f45d02954f257bee42f2f2d34a60600c25863b5ce16b82ebe8c028",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.1.ssm_conv1d.weight": {
+        "raw_sha256": "4125a21f4dbcd98c7cfbe2a7688950dc039a0e8e5bc3d2d99e9d5d0d7c58d386",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.1.ssm_dt.bias": {
+        "raw_sha256": "ae7fa8f1efc0c753eca697b4b565622b8fa3ec20073749339aa9e90b6dde2aba",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.1.ssm_norm.weight": {
+        "raw_sha256": "c33f19dd8b0441984cc79299badeac3e01add7db32de3609ca6249c1f153ef36",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.1.ssm_out.weight": {
+        "raw_sha256": "5eae64ccf643716d8dceea48fb7c73b98c991b433562b3e1fb1ddaf610bca9de",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.10.attn_gate.weight": {
+        "raw_sha256": "2a5f3762e73876144135cbcc91aec1e9c3b9f01799464ea32bb10dcbfe851be7",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.10.attn_norm.weight": {
+        "raw_sha256": "c5fbf5b0186c9bee57761db07e0e165e92b43b523015b48d2d40ca8a672ad8f3",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.10.attn_qkv.weight": {
+        "raw_sha256": "9e874df2d6ed08bbceb4c9dcb1ff20f3d3e63c6ba388230b8b947d816ab5fd38",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.10.ffn_down_exps.weight": {
+        "raw_sha256": "1531d21e724ee0ff68cf749141a0ee157a19b22ff770f81168108495f575351c",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.10.ffn_down_shexp.weight": {
+        "raw_sha256": "e817384ac287c27d9c6e0fbdb5e3d4177cf59f5372cd47b098827df88cecb154",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.10.ffn_gate_exps.weight": {
+        "raw_sha256": "bd29bf2eaefbea52904d64241ecbff61a597b8edb4ea32ffee3af0cd4086b4c1",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.10.ffn_gate_inp.weight": {
+        "raw_sha256": "6319dc4174904c1c2796f09dc96cab597780f2f089b5a37398cc6b3154971f13",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.10.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "daeb491cc7e892c709c752e9badecba986e570a288b6a9cd3d8a9a0683e15eb1",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.10.ffn_gate_shexp.weight": {
+        "raw_sha256": "7098aadb4b7f128e63f76310d190ca6126e8827d143e2af0c39d81f90ebde484",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.10.ffn_up_exps.weight": {
+        "raw_sha256": "e4e333c2d87ae87ad6454d41d56e77fe9474050e7df151477b1d81715c734af1",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.10.ffn_up_shexp.weight": {
+        "raw_sha256": "5faab8d950063a16f89e29e1e45486526f890c1ffe6382017a531bac89eb5065",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.10.post_attention_norm.weight": {
+        "raw_sha256": "e2244dff2ef30ef6adc3d50c9d3fc134a3d4648144cbaaeba85cfc0974935af1",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.10.ssm_a": {
+        "raw_sha256": "94ac7010115da6f508f0fea80bb2b3a91ad8261b8c5de874d91302237217fa39",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.10.ssm_alpha.weight": {
+        "raw_sha256": "0503ab561c50ee35865a3d90683f1de2f4740c2e8e0fb46189db22b1ed3a0225",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.10.ssm_beta.weight": {
+        "raw_sha256": "98bd072ae4e632a70770f89317b6400d4571807aa07722711c8e99e5b39431c8",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.10.ssm_conv1d.weight": {
+        "raw_sha256": "f430c0addd0dc5d6051517c7ca090fcdf5de3ff5226b167a36a6dbf9da81ca94",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.10.ssm_dt.bias": {
+        "raw_sha256": "721e7496d3b1eeef3c07ebda0145e0d36b75e10fb5742e85b5022c300d71c7b1",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.10.ssm_norm.weight": {
+        "raw_sha256": "5f7156624d43eda3a80bd61efd17c629153cafba237b73326b90f0660f6146b7",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.10.ssm_out.weight": {
+        "raw_sha256": "877f3c5e526bf512d52325b80f088c264bab55771da79d81be6ca7aec99d473a",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.11.attn_k.weight": {
+        "raw_sha256": "38e5e789408e0a469748852a34d2d736bb350a26aaa70d62b680622e50bc4cfe",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.11.attn_k_norm.weight": {
+        "raw_sha256": "41f8b08f0487a390cd60949301ecc07296de3f49bc415e71615c7ade0ed17416",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.11.attn_norm.weight": {
+        "raw_sha256": "da01028235452e2428f4b099c74dcafcfc1c64c53b511caf65a725b0d9d11d93",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.11.attn_output.weight": {
+        "raw_sha256": "3e2c274eee4ed6e00f4de77f478bdf0f4a280d2a0aac9fa9aa8a002f73041536",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.11.attn_q.weight": {
+        "raw_sha256": "b1c1b366eebe608364d5fbd27968bcd46cb4f29de416f44a23caad21383c2092",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.11.attn_q_norm.weight": {
+        "raw_sha256": "3a0dc3c44ebc1d399be44c1ccb6c530572d940ad2127869dd8cb77cbe322ff72",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.11.attn_v.weight": {
+        "raw_sha256": "ac752cc6fc1a4dd0cab61ce359faddb549b9d0a7758180444a46d507b78570e4",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.11.ffn_down_exps.weight": {
+        "raw_sha256": "19736268b6c7bf7d9edcdeed7657721944affe6fd1d82402fe864b61967fdf4a",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.11.ffn_down_shexp.weight": {
+        "raw_sha256": "5806339ddd141a8fe0d5c16fe5962cc535d6ff61eed7e98971a4c1fe8f3288f6",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.11.ffn_gate_exps.weight": {
+        "raw_sha256": "2e23a3a5f41ba62551c6cced3cfc2df5a0e55774d9c119f9430a59009abac802",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.11.ffn_gate_inp.weight": {
+        "raw_sha256": "bddf2fcf387320bd26f3c5010baa9b26b51984ca6858a839ff49c8229faa5a1e",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.11.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "be8550e84e067eddaf4c8eb0d7c92d322ec7a618e4692316e94f73cfafc98a20",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.11.ffn_gate_shexp.weight": {
+        "raw_sha256": "114b1e2d142b0b4e02a5377b60ba60b3e47a1aadac55d836a37be47292ddc418",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.11.ffn_up_exps.weight": {
+        "raw_sha256": "20b11565146d4f62482ac8021a3c5beb94abce7b50029e0d62030877374c46fd",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.11.ffn_up_shexp.weight": {
+        "raw_sha256": "8367d150c2af33d1f1186709ee9710a138e897e543282fa79af62f49d5b6c620",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.11.post_attention_norm.weight": {
+        "raw_sha256": "22a51933e23bb52c56ea239c5f1e0f2af0e30f8949aa4ac6124903cfd4745207",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.12.attn_gate.weight": {
+        "raw_sha256": "9b9d875a7c48ae2639a78a8053bc0d0a70978f77addae4b66f2c40601be47f25",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.12.attn_norm.weight": {
+        "raw_sha256": "5213e1fa41fa3305aec129362f5dc51460cb3548ddb41791f4a93944117092ee",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.12.attn_qkv.weight": {
+        "raw_sha256": "e4ed49223321581db2f1283df5fb38278f694d9c26c5811df5df378074daf004",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.12.ffn_down_exps.weight": {
+        "raw_sha256": "27536a098c2eb0abfb2a5dcd6661dc7ae1cf4e861df56f070fe1bcd9fb1d565c",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.12.ffn_down_shexp.weight": {
+        "raw_sha256": "eeb0f0ca779e6ac3d5cb375d36a107d9902cd6bcafa9bf8d85cd4875791a2508",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.12.ffn_gate_exps.weight": {
+        "raw_sha256": "28f7cd1a57a156c12caab1dd1c463f25179197ca35bd541577cae832913c46ad",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.12.ffn_gate_inp.weight": {
+        "raw_sha256": "7698d4f0ad0d7f6d10c17e88e71577c113f50fa94690572a5c1af8f1421f74fc",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.12.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "f33e3a2c0443b903316db06406af506609f2e35a37991ed37b777aa2d0f3dd85",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.12.ffn_gate_shexp.weight": {
+        "raw_sha256": "8f52813990db9f57b75cafd41788c51b36f079173da4a83d8ec8f3461c0d7467",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.12.ffn_up_exps.weight": {
+        "raw_sha256": "43b91dabdf106757b51b97c43869b6c04be2baca90cde3ec75a6ce27d562a9a5",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.12.ffn_up_shexp.weight": {
+        "raw_sha256": "79b091ea325df4a23abf789b31ba52797620c9ecc68ed006aa95537ed8697f82",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.12.post_attention_norm.weight": {
+        "raw_sha256": "938c09b29b14619ed745815bc359dfc97eff6947c908417c359bc5473f36209c",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.12.ssm_a": {
+        "raw_sha256": "b6419c47d077080d519520783d70b828a6179894a61f80e0a1962a9d523fca12",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.12.ssm_alpha.weight": {
+        "raw_sha256": "e5d2ef73f92c21728d39c49a71173ef391474a6ac645d808c55f2f548e9906c1",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.12.ssm_beta.weight": {
+        "raw_sha256": "a5bcb7c6e85f346924e3ce4323ce2fdc3e744211fbbe847d9728e935ae4e9397",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.12.ssm_conv1d.weight": {
+        "raw_sha256": "bf7b20c57abc1fe5e96c68aa59609cd7fb45d22fc98201f2e08edb8a9275a0ed",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.12.ssm_dt.bias": {
+        "raw_sha256": "1f6ed7600df405b71adfced42f622fdf009d85893651f11a0831113eeaabfcb1",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.12.ssm_norm.weight": {
+        "raw_sha256": "0b08c73437f36bd76b847a323610de504e92faa772fd1ad4e985bf38e258876b",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.12.ssm_out.weight": {
+        "raw_sha256": "ccac069233eb9632c81ca68e7fb57b8bbaaa3e44867e3cce1ecac2efbf881f18",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.13.attn_gate.weight": {
+        "raw_sha256": "c272c94acbd52ddc475754021554866190735054f7cce7d9d91a1dbec00adc84",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.13.attn_norm.weight": {
+        "raw_sha256": "a67fed6c4d83654cf79865223ef794f0dfd32e7041d818f3d8beb39e0de0cd6d",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.13.attn_qkv.weight": {
+        "raw_sha256": "dcf338ebe806342775b78624b9dc42cd71ff646aca44e180fe17f08a71199712",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.13.ffn_down_exps.weight": {
+        "raw_sha256": "84ceb4b7da170d58bbc10ae65691040e05a1ca600df68f06bdbef0c8d3466c88",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.13.ffn_down_shexp.weight": {
+        "raw_sha256": "df3bbf6b5bfaf664626f1203177ec885f0613a5cf425a925ceb03dea956b605b",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.13.ffn_gate_exps.weight": {
+        "raw_sha256": "22835b8fc2d381a2f19e38fa6972308b094378ae7191697d10fbf558a2f56244",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.13.ffn_gate_inp.weight": {
+        "raw_sha256": "23b7b330a6e48a6062c3d2a67e7240e4f457830b2180f4d4c153b443c8beb68d",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.13.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "5bb060cff82b69a301660b804248f01a01235df99598aef80d58bf7015da2b63",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.13.ffn_gate_shexp.weight": {
+        "raw_sha256": "cf8f05bc15d1544a28c48043c2828ea276e52312252c17607f2bc1a82d4d18c3",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.13.ffn_up_exps.weight": {
+        "raw_sha256": "1924855f0aefd36b8a8acfda84d7a31740655a87f93fba022a9a2a78fa28c6b5",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.13.ffn_up_shexp.weight": {
+        "raw_sha256": "bed6e5eab95309e8db7074ff1095171b355968c0b7395523961678f03035aa7d",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.13.post_attention_norm.weight": {
+        "raw_sha256": "57b134d1a96a733bdf001db823c714a678b49fb9c0aab1780b2e9a42e3fd561c",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.13.ssm_a": {
+        "raw_sha256": "659222d4afdc65d571ea8d18da583ecd8d54065fedcdf6365cb491e805061747",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.13.ssm_alpha.weight": {
+        "raw_sha256": "9fcdf2740506a3fca9e1bf31cb068b2139040ffe7ad75ddaef43c2f82edd916a",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.13.ssm_beta.weight": {
+        "raw_sha256": "4f6aba3d671a3420b3a5f8d59682845513a094d95f568b81c9765d6275d1b3ed",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.13.ssm_conv1d.weight": {
+        "raw_sha256": "2a1d8beee8a75774b8c81e26d7c947603e43a906cbe51b4732f40bb2bdaba375",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.13.ssm_dt.bias": {
+        "raw_sha256": "c8a93b884096100f8a1d4d7cb2ed40f0e17e999a40df5625db177e20c37d2afb",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.13.ssm_norm.weight": {
+        "raw_sha256": "f1cdba67dc2bfcd5964f1bb305249184c8a9c08fdfa24d64c1a9c7513108f700",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.13.ssm_out.weight": {
+        "raw_sha256": "f9d916c051a684b9e5aff6f25ff5f9fd06179d0b7e04e5006f726e963a9ff4d2",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.14.attn_gate.weight": {
+        "raw_sha256": "6caa79dcc2f9adfed52c9431f8f8411603fea41c3543741aa0bf7495e590c517",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.14.attn_norm.weight": {
+        "raw_sha256": "fa1345932259c9b7584742602bc4a94e831032f6a069d0482a6be43c131456bf",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.14.attn_qkv.weight": {
+        "raw_sha256": "d1f867ba61b4223af26b2533fd65241d60af29b5acfcee4a5d5b7eb89ca14001",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.14.ffn_down_exps.weight": {
+        "raw_sha256": "8117f3779a0ee5e9654da9928af28f25b00838614468ef4cc61a6ea69b50f886",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.14.ffn_down_shexp.weight": {
+        "raw_sha256": "a4600f7296bffa365bd5586b86e9ab025cb6583590f72f58183e30895a1b2901",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.14.ffn_gate_exps.weight": {
+        "raw_sha256": "50725d181fa7f9c1c2dad73dec75c2368ddc49d3d92ca5bba50437d9a304c352",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.14.ffn_gate_inp.weight": {
+        "raw_sha256": "152ad571f43df691e69cf62340f5d34d0b22a1fcbd4929eace52d7aa05a4734b",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.14.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "90510164aa8b32f2624ccfd285a53dbb3ac3ed0b3f8c1e1fa7dd31e1723a2cdc",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.14.ffn_gate_shexp.weight": {
+        "raw_sha256": "bd81fa9be6c4c6222ef08edfcdd58258bcb6b7754a90c301d1512e7518c9d1cd",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.14.ffn_up_exps.weight": {
+        "raw_sha256": "978026db5890695740ce52c93337bff6c7b72034eb7df116af074c45aafaeaae",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.14.ffn_up_shexp.weight": {
+        "raw_sha256": "948d6a5350b87f3cb2a7566de13314196b3a00433dac9536778a03e47fd0cd18",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.14.post_attention_norm.weight": {
+        "raw_sha256": "16b829ce198728eab55dcaf8aecf6196f20056ffee276f321b9da145efed1032",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.14.ssm_a": {
+        "raw_sha256": "872551fd619e8a769c55ae0ff84b995e7cb35f22b766f72a29f07d8afcdda23e",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.14.ssm_alpha.weight": {
+        "raw_sha256": "9b755bc7f38d4ae823302df350689045adf0bbf7852a0943ad5e4a232fbbdd67",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.14.ssm_beta.weight": {
+        "raw_sha256": "b234de7c30b6a82ff430879739d2faee0b40bf0445179327d1b9b5b64f2aa7e0",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.14.ssm_conv1d.weight": {
+        "raw_sha256": "c76eb7732d16ec59f5c25dcfc11c0a8f3d8e0971596374222b1d2eee92a7bccc",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.14.ssm_dt.bias": {
+        "raw_sha256": "2361530f9654e6fbf3b4d9759eedb798e44869f10f991c075f102ed3a1965a66",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.14.ssm_norm.weight": {
+        "raw_sha256": "5a13c2cf15cf100b0d6b9276e739c0668504f7cd0a03b0a9f131d20394e76314",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.14.ssm_out.weight": {
+        "raw_sha256": "bb260effee6d73705e929fd2919855833d150ca51d3a555a42ac59f335739c28",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.15.attn_k.weight": {
+        "raw_sha256": "b7297868e6c67402b32eb99189cb092c4e0e016a1938c09635eadaffff9790be",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.15.attn_k_norm.weight": {
+        "raw_sha256": "68031bcede62b2a9ea30e98af6c5dd8580c141ed13d560e206f8781863983a39",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.15.attn_norm.weight": {
+        "raw_sha256": "5e58ac632d8d8a3a1692c2a2d63d031eed8098d656c04730525bafea697aa8c5",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.15.attn_output.weight": {
+        "raw_sha256": "ad1abe533fcf0af30678bd8edad9cf98050cd11705d1b3e0695f4d6ace0d6076",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.15.attn_q.weight": {
+        "raw_sha256": "8a50903a1ab093d96ea27702da352f991424d5b5b15069fb1bc0eb89aec2502a",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.15.attn_q_norm.weight": {
+        "raw_sha256": "7d5916de404f184f7d565298678b2762961b7ace27f1a9722b140ef312870f41",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.15.attn_v.weight": {
+        "raw_sha256": "f18da6f281fc36d4a871aabc3ab547e0d9036192c04a454af53b1763656fbdd2",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.15.ffn_down_exps.weight": {
+        "raw_sha256": "28362febdf3380fd3fa8a4788246577c0adeca0ada189d1995a28060982fbd25",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.15.ffn_down_shexp.weight": {
+        "raw_sha256": "ad64692ae7f78d6d3d7cf46d3e178ebd632300b77d47269400baf5b8e0ba717b",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.15.ffn_gate_exps.weight": {
+        "raw_sha256": "76a489c8e72f1b889dff1fa8c8feb3793e8f0556c1c7072d00c8bfcbd2d087e1",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.15.ffn_gate_inp.weight": {
+        "raw_sha256": "cedd682fb8326daf9aaa2e8833b2772977027852132c20cfc88cffc8fdb5f3ac",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.15.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "025311e3bd3467dd106aae168acd5412fddbcae6cf5e44c5a24416a3c1d40c72",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.15.ffn_gate_shexp.weight": {
+        "raw_sha256": "b41ed61b6bf3e16d2eb4fd7113270d16d037c17c0fd9902ddddf8cc91c369537",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.15.ffn_up_exps.weight": {
+        "raw_sha256": "00873fee4ab4be545661c3135e8a5ab76a5b9e3b6df7acc90150714dfba04041",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.15.ffn_up_shexp.weight": {
+        "raw_sha256": "c4c50b97e9ed288fee432498975bd902a309aaa731ae51de38c0a7a958891ccf",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.15.post_attention_norm.weight": {
+        "raw_sha256": "df008c4daeffd5cdff46a802bc2d57f9d3525c1a94b434092f4884f7fe7ca7ba",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.16.attn_gate.weight": {
+        "raw_sha256": "5f825cc7ba93a7577f22ca5aa2853ff40f1c89e3d56f8f2b9233567934d2bf50",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.16.attn_norm.weight": {
+        "raw_sha256": "6b2a33b641f3a097ab90c18887e47806458e7756e7d7f9388a07c6ebb6a99e32",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.16.attn_qkv.weight": {
+        "raw_sha256": "cf111c581418a96602f2fa7d31840b6c228853a4ed897295422ba29b7f4cbece",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.16.ffn_down_exps.weight": {
+        "raw_sha256": "8d5d9ca7c9da014d7f60189f9dfe0d1e721bc2bd573d9c218a7f7f6db90956a3",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.16.ffn_down_shexp.weight": {
+        "raw_sha256": "49dd4f4cd97eef9fdbf74cf5a699b171a971001efeac1411a798ca3489657242",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.16.ffn_gate_exps.weight": {
+        "raw_sha256": "855672b928c8c26e7660157fc4195d7890c66ed766286719d0d3ae226ce32a90",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.16.ffn_gate_inp.weight": {
+        "raw_sha256": "7a15eff25c28a8c9e60b8f7aceaa7e6142c65c95c33c20ada0a0757367f518f3",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.16.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "1f56afe543fbc4ec8bf8e4eb6d02e018943eb8db86fd144c452f47fe32dcc56a",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.16.ffn_gate_shexp.weight": {
+        "raw_sha256": "17c66b9a10568c9048e060d62642720e7b18c22db2a9156c0da7b35f3173b007",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.16.ffn_up_exps.weight": {
+        "raw_sha256": "676aa1929ff2aae33c56c761061ffd3187f207fce3db71ecfc5eb8c5f2bb8b43",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.16.ffn_up_shexp.weight": {
+        "raw_sha256": "29dbd2a747ed7f7d0c8fd9fcb46a415010cc460d3fc3c45f14006328fbe679b3",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.16.post_attention_norm.weight": {
+        "raw_sha256": "fe97e3577a638868575f7ebf4cf51cb5ebaba279b3934b27e9c76611ee4f8253",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.16.ssm_a": {
+        "raw_sha256": "172cd8939f92b32d5682075d11d8c4cff74bda9f81f788c5b41c0a5608385e19",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.16.ssm_alpha.weight": {
+        "raw_sha256": "46bac7565f1d799f0fcdb930c6cc1bedf394669827e6c29ac5b1114b79cdd38e",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.16.ssm_beta.weight": {
+        "raw_sha256": "ad8519871e2d7cbf33cd6a1cabaf2d4c67c4666590453940cacbc3060d0a5733",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.16.ssm_conv1d.weight": {
+        "raw_sha256": "8b2e13cd83671dead3f21f32bf662a4b3514c324af24986fab26d4fed7acd08b",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.16.ssm_dt.bias": {
+        "raw_sha256": "ece61c8c29305deba08381e203122906b144d0a4e01f81413b83c9a553ac01c8",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.16.ssm_norm.weight": {
+        "raw_sha256": "a65674976c1c3133e335009a69da4833aa832fcedb0795c428594efcfabe0f67",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.16.ssm_out.weight": {
+        "raw_sha256": "790e91c1da60f44a5026668bd6f1cb442ae19107f45ff492de7fc317566436cb",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.17.attn_gate.weight": {
+        "raw_sha256": "8d8c0b87dd396ee7ee6b1602df5a759c5071e7c42f1f0f90631c2312545e46fe",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.17.attn_norm.weight": {
+        "raw_sha256": "9ba4094c37228961be2f91e0d7299c7a2d6ed50ffbd30145a02b8bfba30430f4",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.17.attn_qkv.weight": {
+        "raw_sha256": "c4f437f1c7a059efa46f44d6d75bb8b469efb7ac3af7eb8ed879905ea0b9b479",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.17.ffn_down_exps.weight": {
+        "raw_sha256": "ee1d84cf122521703f17d1ef0194247c3b7302a7e50a64151c13c6dd2a90d7a4",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.17.ffn_down_shexp.weight": {
+        "raw_sha256": "e445db49708d96321a4207374b464f6e1585349e9b2e697066b4d8f63f7f3911",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.17.ffn_gate_exps.weight": {
+        "raw_sha256": "8fb9244e99617cfe6a66344a984037a241fe4d6fd1bfeaad1560a4462a46c92b",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.17.ffn_gate_inp.weight": {
+        "raw_sha256": "25770132aa10f6e2af9584ebbca7e9fc2d90d779b85a69a450ae7f877cc6fad1",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.17.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "2789c021e511865d964e17692d940c7bc379d3f3a8ba080d4fe728d4ee485d6b",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.17.ffn_gate_shexp.weight": {
+        "raw_sha256": "1dbf0a54b1d60f96b63d322c905c6a145e0fea867cb48eefefe4fe7518fbc576",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.17.ffn_up_exps.weight": {
+        "raw_sha256": "7c96f003d8214d4a84060ed6aa06fc560b6cccd17eab107f66ed09def47e7717",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.17.ffn_up_shexp.weight": {
+        "raw_sha256": "bedfd304bd91449995bbe520e9149031520eb5ac18f756276958e6a966554d90",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.17.post_attention_norm.weight": {
+        "raw_sha256": "d18d3d29734ee405954e5294378e4290dab39bd15e6cd3868251d907331f716f",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.17.ssm_a": {
+        "raw_sha256": "fdb68c54ac6e647eb2f0f8951faf6327a11edb24fce759230c4cbd82fb7d6247",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.17.ssm_alpha.weight": {
+        "raw_sha256": "7949685559ab38f5d685ec044c592813bea303e2eb8ee1af6854e7830bdf5afb",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.17.ssm_beta.weight": {
+        "raw_sha256": "3a0081bf5362c6204eb405e6f12ba351c390bda80aeeaaba34b75f9e032c832a",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.17.ssm_conv1d.weight": {
+        "raw_sha256": "808e9ce41d84c8734aa6e3d427aa2f5f846a6e7019c4d793665e0020b918fd90",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.17.ssm_dt.bias": {
+        "raw_sha256": "5d919f5973806741f0d8c16574cd45d06c7c880257f6b7da6aa3128f50c31e24",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.17.ssm_norm.weight": {
+        "raw_sha256": "2c11a94bbb7ad8f6b344f9080e7af71e39e9179e8b1916db44cc86e9f520b71a",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.17.ssm_out.weight": {
+        "raw_sha256": "04dafd853d59f6bd00202de51a95fbf849b40c5432bbaef4fb0cded25980d7b9",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.18.attn_gate.weight": {
+        "raw_sha256": "4b375bf278199ff7349aa029f77b57f0bbaf89e2e0f3541390fceb2db2613eec",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.18.attn_norm.weight": {
+        "raw_sha256": "0bbd2dd69af69862b272adec879a64715909d48685667c3c9239e8b50b83161b",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.18.attn_qkv.weight": {
+        "raw_sha256": "5773503e6e72a60c38ed70f6242c222f9ad8cd39b2bd38d5df56851ce68e1b1d",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.18.ffn_down_exps.weight": {
+        "raw_sha256": "2d64403bf632c8580ed272b166d5225c8d714fa8e5d9c0a82c1b1311d6504573",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.18.ffn_down_shexp.weight": {
+        "raw_sha256": "419b5d97f2e2cc0653a97177fb463de01847c9db99666010ec106769dbf460d9",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.18.ffn_gate_exps.weight": {
+        "raw_sha256": "4ed0f8f296e375931cf2cc3bdfe11665d910a0412e86e49bebfae10d72cb2e54",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.18.ffn_gate_inp.weight": {
+        "raw_sha256": "8d899f4769d399eb3860443b2a0c46214b32068ec3f109c581de4686a890dda2",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.18.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "b28135ed1abd8e259f3d563c5112eddebcf25d7ea2297d929ac395c7e30aa5ae",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.18.ffn_gate_shexp.weight": {
+        "raw_sha256": "11701f179a7b5db67d337d8481d9ff04798fff9d948b17543224b204c7b6a854",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.18.ffn_up_exps.weight": {
+        "raw_sha256": "6a9d26930d444b44f2b93658f0343692d4b929f0b3ee0f1142661612626d8af1",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.18.ffn_up_shexp.weight": {
+        "raw_sha256": "441a4ff26b9dd1d61d4dac8effa003cdd085a1d48dc0f837b019dc2145cbc40a",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.18.post_attention_norm.weight": {
+        "raw_sha256": "522d65b310023785c6728188d4a34952236a024127e606c30b8f2ab9135bede1",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.18.ssm_a": {
+        "raw_sha256": "39904636a4ef50a5e29b9f1d2539083b9418ac7263fa277fbc569efb273c3240",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.18.ssm_alpha.weight": {
+        "raw_sha256": "2953de619339ac92fdbef27c4c05a9978a422b1105330960cdd0176f538fee3e",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.18.ssm_beta.weight": {
+        "raw_sha256": "7c04eae13fc417e359c22cf935607c5bd3022ae39a1359d40845e40808625667",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.18.ssm_conv1d.weight": {
+        "raw_sha256": "eb029a7f9d7f61a56abe0e893a390e4471ec26258cb7464e11a9c8eadff6153c",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.18.ssm_dt.bias": {
+        "raw_sha256": "4992c8d4494c4c974a52a142abf4da27af6e1380f417b4cf066a61829d9e0782",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.18.ssm_norm.weight": {
+        "raw_sha256": "37a77f90df5407125d79bc5f6641ab91742a4a00489ec71bae5e2985944df957",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.18.ssm_out.weight": {
+        "raw_sha256": "602d9371094ccb79068c5bf5a9f6b0322f4d3803a5e09ae2f5ace74e450d1923",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.19.attn_k.weight": {
+        "raw_sha256": "42eea37cccc36256ed104195cd594a5ba5de727755de855f2b23f28fc9f78145",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.19.attn_k_norm.weight": {
+        "raw_sha256": "bf5fe1535430475e5ec58d5895059b382ab92b95b7a6a092014b3f19286d33ab",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.19.attn_norm.weight": {
+        "raw_sha256": "6cf766bd08651d6897625c6e38a7f95537d015318028029bbd825a6c24374b18",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.19.attn_output.weight": {
+        "raw_sha256": "939bd655cd0f8fc2fe1314fe52c3353491252c07b3150a2f97b15a94666926dd",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.19.attn_q.weight": {
+        "raw_sha256": "b7b9cc1e5c0f3cfd59ab84b7b53af19c021a8ce49724ec4b02e78aad0cc989de",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.19.attn_q_norm.weight": {
+        "raw_sha256": "c1a0357d975013c0362e48473169ecb8c2c7706ed1c9ade23e8d53b9a010bd6e",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.19.attn_v.weight": {
+        "raw_sha256": "5f5a06ce4ce579567bbe9fd048e660b84f98c8e96751399f4182e679df9e9a47",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.19.ffn_down_exps.weight": {
+        "raw_sha256": "f06153e0b325df673fc17d34b362e6f2c99e585087b403a2e6c5d577a77c8cfe",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.19.ffn_down_shexp.weight": {
+        "raw_sha256": "0990d8bbc36b01c14c483b77d1b646435eba699ad80da71d57580dd61b0caaf7",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.19.ffn_gate_exps.weight": {
+        "raw_sha256": "075ba26cba63768d661fe8813c3fc429736dfeb2d8a59269944001e7a1a760c4",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.19.ffn_gate_inp.weight": {
+        "raw_sha256": "0ac0a6e24ea4d00f94b58df4dc223cf6c3e78e11372411129519ba81886a21d9",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.19.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "261fba9c288f554214946f4fc65abe10c5f211da7cd0acd0cc9eff0f0c4a6871",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.19.ffn_gate_shexp.weight": {
+        "raw_sha256": "1091c18c699dd4185ca5a3b64e0d2e2de6672f016bd486517f58fefd7697dbcb",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.19.ffn_up_exps.weight": {
+        "raw_sha256": "edbcc4305ea5035ccf43d055eb7f23f2c00eb78c5ab52cd19744bde9a5c96335",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.19.ffn_up_shexp.weight": {
+        "raw_sha256": "534c65517c7b2263334c3fce9257d731741dee819692a0b9985190c19b4fcac5",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.19.post_attention_norm.weight": {
+        "raw_sha256": "1565f4ba75937001b78c18f0c82d1b2fd2ad5c1fe01aff845b28fa3186395a02",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.2.attn_gate.weight": {
+        "raw_sha256": "24ff97dfb33ae09f3835711401086608a2b9fc209cc1b37f5cdc76779fc0d491",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.2.attn_norm.weight": {
+        "raw_sha256": "b3ffec5cfaf5bc320c0b1898b57d7b8ecff20d1f73ca86347c7c29aeb2740f60",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.2.attn_qkv.weight": {
+        "raw_sha256": "d5db7bbfe9a5c394ee2441fe126e854bb7becb978b3b787b0adbb309a4dc5aac",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.2.ffn_down_exps.weight": {
+        "raw_sha256": "462b394d2bf2388439d06bfa4edc098d06b6d73e6a9b2b26747af4d1875ec5c8",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.2.ffn_down_shexp.weight": {
+        "raw_sha256": "5c0145d0627d36354a2ef0d2cb38de1e270465a66b475fb2be83e35e67b37b94",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.2.ffn_gate_exps.weight": {
+        "raw_sha256": "5664f7c2b9406f797415173e91d728aacdd4ed8df07abbecf124dfb72240bb58",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.2.ffn_gate_inp.weight": {
+        "raw_sha256": "758e21f078f5527024e030987a156bd057c3e8208edb34eba60a2c416c3af357",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.2.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "69f49c49ae17c06269c5e4d2c8809e357cec8659a11db6b5159900b80f8169d0",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.2.ffn_gate_shexp.weight": {
+        "raw_sha256": "ae85579f6db2244c785dfd1c1b90961c2523b3ebafbd80c82d943bd8181e889c",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.2.ffn_up_exps.weight": {
+        "raw_sha256": "a04f68e66a3abc4bca2df2c0d0e90ca45e7c0840932158d63e369e9a152ccb5e",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.2.ffn_up_shexp.weight": {
+        "raw_sha256": "eae29e1d90855fc242e52d13ab9f515c614334d4304cd29c71c1faeca204ff01",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.2.post_attention_norm.weight": {
+        "raw_sha256": "d4dba16b0ecb2d28cf28529714963fa05562f7f4a8f1dae32a66f06074888b1e",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.2.ssm_a": {
+        "raw_sha256": "c8bc0ee511b76ec72d37968da26bc495a159a36b096ad4bd7233113ea26ac71b",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.2.ssm_alpha.weight": {
+        "raw_sha256": "2f6c247adb12a4b62005e9fc9da8bbb139adc40bf4e4d14965ec2c20f391784d",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.2.ssm_beta.weight": {
+        "raw_sha256": "ddb576128b5993f13d54387ef6c645feee21f9252f70a438e29163b9e644d8ae",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.2.ssm_conv1d.weight": {
+        "raw_sha256": "6ce65c96e33dfe06da9c54863e2459b0c75cb53a70183b34017911c2d8f29df9",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.2.ssm_dt.bias": {
+        "raw_sha256": "9a8562d083f817c716ffcf8bd453749280842e7d4ab5db61fc7a8a8df8b30d98",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.2.ssm_norm.weight": {
+        "raw_sha256": "c6a14eefd60495262b3bbf35920691d3d79146405f57a53cc8d0099d1baec00d",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.2.ssm_out.weight": {
+        "raw_sha256": "7476d8af6ef7a3dbe2d53db881ef0c7f7f7b2a773780a9e388508dcbe2c38686",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.20.attn_gate.weight": {
+        "raw_sha256": "787a0f1a13defa95a3be212933650d68746a7f70c1fdf5e4c1c4492bbeeadd36",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.20.attn_norm.weight": {
+        "raw_sha256": "5ddb5a36b9efc486e5faf05dae1cb7ceeccc69f18fe2bcfc157d9332e4e0470d",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.20.attn_qkv.weight": {
+        "raw_sha256": "1d0273f39743fc043d08980c0a34ed7568a2a4903e8c5e1463074cbf40de71ec",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.20.ffn_down_exps.weight": {
+        "raw_sha256": "55cc342879ae9e274c3ba8ac9ed11d0289e5f103bd121f10b6c0f4f6fdf2e86a",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.20.ffn_down_shexp.weight": {
+        "raw_sha256": "ff02cc943944a3d159fe57344e0280826eef8e214c91adae800352fc1c4f2dd4",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.20.ffn_gate_exps.weight": {
+        "raw_sha256": "583a76970a6d2c3038e312a7594b1ec81791fd29ed27b2f1ef53c0516edee473",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.20.ffn_gate_inp.weight": {
+        "raw_sha256": "18fd692da0f264fbb5e08d7c4aada45c7ae4fa6abda7c5d3e421998bcc17126f",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.20.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "34e8aa999087393e946fa9f2f727f3719af74bd6de1d9820253624d8afd4e00c",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.20.ffn_gate_shexp.weight": {
+        "raw_sha256": "715e6e5bdc43df0f81e81dd8aca037287a6cef8527ec4fdd537a10583116df03",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.20.ffn_up_exps.weight": {
+        "raw_sha256": "8e3439d7a40d0e278b9167223c18484f6a2495647cc599a1319b2810c3e9bc93",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.20.ffn_up_shexp.weight": {
+        "raw_sha256": "ae6f3b5e7e6153fa67cc34ba144601c04f757dfba7a3ec2c424fb4157051abc9",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.20.post_attention_norm.weight": {
+        "raw_sha256": "c934426fdf15b32168bf4f9d17e7583b38a0eaede077763e4f95fe5d8ca31771",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.20.ssm_a": {
+        "raw_sha256": "133d5f495aaab6fd7a145b71181b9ae700695b85dbf0a61d31ece11fb0828e0b",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.20.ssm_alpha.weight": {
+        "raw_sha256": "f0372388b956efb2c252c6a4640c15c629740d1a4925be34dcd3646d9c159f0a",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.20.ssm_beta.weight": {
+        "raw_sha256": "05c941f0945fc50027ac8962409c3ca06cce259e7c5c5441f6c5e3c4571482df",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.20.ssm_conv1d.weight": {
+        "raw_sha256": "ab23f4760f428f1ec9cc934f529d1e169c1d2697afc1a8dcf4e6c2af2aac3241",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.20.ssm_dt.bias": {
+        "raw_sha256": "e911dcf739e3522ec87f449b53f08dca1bf5c928fa21f187ba8a7c15499699af",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.20.ssm_norm.weight": {
+        "raw_sha256": "f0d14140ce8b7737650ac917f47d168360c47770b515123df754ec7eae32c838",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.20.ssm_out.weight": {
+        "raw_sha256": "2821514c0dcb4ee7fa3c1071c069cc300df402b424f43961e0ad265f55777cec",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.21.attn_gate.weight": {
+        "raw_sha256": "26ed4fff82cfbd4f8f3b20f4e22f78bdf998178cb5c17201e619f04a3a52be73",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.21.attn_norm.weight": {
+        "raw_sha256": "2fa7f2a41d22df78189c0a3f2a39bd5761e6496f11f291af56175cf2a9ac9371",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.21.attn_qkv.weight": {
+        "raw_sha256": "7700a76f4def50db6839ad9d892d7a407c523122747735774d55b5bdcd6c1c78",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.21.ffn_down_exps.weight": {
+        "raw_sha256": "f8adb300486727b832f6e7fdae40f89a90676ba414bc6daf009461b919f101df",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.21.ffn_down_shexp.weight": {
+        "raw_sha256": "781fc234f20b00ac3a98603d7a1ce8495433c2da5fc6d292d4dbce4cbd8323e5",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.21.ffn_gate_exps.weight": {
+        "raw_sha256": "a1ece988e0679cf4029e9f469ff93ac5bf51414cc2f8aee2bbc284cf86c4cf58",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.21.ffn_gate_inp.weight": {
+        "raw_sha256": "d34ad66a1ae03b81925d320b637d6c7240edecb9d7c2e13f7ace613c0bafb3a9",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.21.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "3340f5664487b53c7cef6e90c5ba2ab20d282974d19c347a9f7fda023c9dad31",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.21.ffn_gate_shexp.weight": {
+        "raw_sha256": "b964f8fa99861bdc974bb67fafea58246a707141297045d207e9e0e5a187c6d4",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.21.ffn_up_exps.weight": {
+        "raw_sha256": "64cbe1c68bd0ad7ef3707a8b4d02be7f8d8124f690d13ac5aed886af6833483b",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.21.ffn_up_shexp.weight": {
+        "raw_sha256": "a8387cb401701211e8c65769240f0e919108ef104359ae7771275ffc44411d94",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.21.post_attention_norm.weight": {
+        "raw_sha256": "244fd7582f04f263706fbc1270f8e2b5cab91296f6156b8858cbca5c3a4993fd",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.21.ssm_a": {
+        "raw_sha256": "c3745b834bb58e3edddcc1e03a6cea9e84c4ded082c32bad5de8ebe3a93558f7",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.21.ssm_alpha.weight": {
+        "raw_sha256": "2b72e8fdc691788fbc45e8e969cd1460117d69474ae92fdcc047638017657b92",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.21.ssm_beta.weight": {
+        "raw_sha256": "c65b1cd9e0182757158a69fd107747e01c925210ccedd133d15c711ef7e3c57c",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.21.ssm_conv1d.weight": {
+        "raw_sha256": "f9137d59911ce40cff3ce87d4b76ef7db1562b49454bf63db03cb09d2d40f574",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.21.ssm_dt.bias": {
+        "raw_sha256": "0214fb609bb7cc180053a4f26b46bbca2970ac8a5fe5231678b34d2ff27f96aa",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.21.ssm_norm.weight": {
+        "raw_sha256": "1b79c825ae0432b4f6e011d3d643ca8f2a48e1c5d11f87f70981581ee82b18c6",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.21.ssm_out.weight": {
+        "raw_sha256": "47f123da4a9c53b8fe7f9438e035e898ce78072f18970b7a5df02008b5f5ca64",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.22.attn_gate.weight": {
+        "raw_sha256": "57cdf8cf564d1c37e02871be1caf5078d63ad0638cf6d4a87f5a5e2887398841",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.22.attn_norm.weight": {
+        "raw_sha256": "8c3b0f83e7e16a70c4ff2b5000790eb3a37724e236484fcefd3e88fdfe851a00",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.22.attn_qkv.weight": {
+        "raw_sha256": "dc8e6416b0cad50375546dc5815b0f207f694bfd77c485b73abf0fe9499274f7",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.22.ffn_down_exps.weight": {
+        "raw_sha256": "f1d2ad302aae639d8ee4e564247ed21efb49ba1deb51419b5378a8d3526fc9ca",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.22.ffn_down_shexp.weight": {
+        "raw_sha256": "30fe251d812a87407d82fa95e57bbee399b514443f8b747fe2d9f4ab263d0fd1",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.22.ffn_gate_exps.weight": {
+        "raw_sha256": "cffd7675a5d18d23d76c30b6f1f5359fbe93289cdeeb621cd3e2b8ad44327afc",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.22.ffn_gate_inp.weight": {
+        "raw_sha256": "af07dbbbeee38181d41b143b13f5176a7d3ecaa7bf023cc2518f510f269d5103",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.22.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "a5643e1f678f203e12bd693f4246a0d05fc1d9caa3097ad2ccb5253a83d5d43b",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.22.ffn_gate_shexp.weight": {
+        "raw_sha256": "9fb8516751f08229c6309fefbbe23a0589183330dbc89bfccdd74912559da0cf",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.22.ffn_up_exps.weight": {
+        "raw_sha256": "97c933dd1cd73c3668899e0eb507ef6d0d423912307cee66dca708bf2ca71960",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.22.ffn_up_shexp.weight": {
+        "raw_sha256": "727dd83eae3244f8db512c991a3a2e614a651ed2205a2e155ea09513e94186b2",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.22.post_attention_norm.weight": {
+        "raw_sha256": "aa24af3016f307a3d244ce44835f5514291534ddb61d186aa907de99fab6bad0",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.22.ssm_a": {
+        "raw_sha256": "04520bcc640f36b71d9cd9a9e2141ee7391b42ea715da01c75fb644b6683133d",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.22.ssm_alpha.weight": {
+        "raw_sha256": "90585acf89a74165b16efeb4fd7de9dcfad3d3bd7a2c4163c18cc5cc19f914a1",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.22.ssm_beta.weight": {
+        "raw_sha256": "58b2dbde7514db23bea19428a14b78c8a2f7d4bf1fd1de70763d24a6fad7973c",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.22.ssm_conv1d.weight": {
+        "raw_sha256": "2c1dbc4b0957c909dfc846af73c1966605dee896d8ffa77ce0d62549804a1286",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.22.ssm_dt.bias": {
+        "raw_sha256": "585508ac980ba99bb7024be65209116c12b9c63038dced8b7da9e0e9fbcbb7ad",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.22.ssm_norm.weight": {
+        "raw_sha256": "197c6e2b894d412ecb1b24ac6553af2fe2a0b82bfd90ef17891b688d0191c892",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.22.ssm_out.weight": {
+        "raw_sha256": "cdb4e9dfcbd1dcf68ece60f3a8c704bc2282f09f0b83be734c31863d180cfda0",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.23.attn_k.weight": {
+        "raw_sha256": "0056da7b2879b746c8ca778343ef8117644021e6f082709e72b95db5de7477f4",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.23.attn_k_norm.weight": {
+        "raw_sha256": "6f76f5a3331c8740aa7350b9bec2d686b34e9f24d77b9188f9b043303e34a988",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.23.attn_norm.weight": {
+        "raw_sha256": "d7364da16cce7a7d5746355462490230fc992d0f5f2da1277cdf5189676f5bb9",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.23.attn_output.weight": {
+        "raw_sha256": "9fced3933be45cbb41ba0f0f54ec5961183fd8e4e635bc6cbe0b695f4010fa75",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.23.attn_q.weight": {
+        "raw_sha256": "2da8c8e97ee8eeeb6a62cd22620cd814d6fe661f1d5afb7b71102e01c8400be6",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.23.attn_q_norm.weight": {
+        "raw_sha256": "4d36df1a85ea7f724ec5ada95fc6808f86fd07d4ae2e55d9b2f77975b7e1a485",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.23.attn_v.weight": {
+        "raw_sha256": "a105660b26e08dde77135ef5ba50a26645a5744eb43a9591011821a6fedf54c3",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.23.ffn_down_exps.weight": {
+        "raw_sha256": "3151efa320cdd659b62d193abfef1b221c97a7921ee03a2043a53d3b0725fb60",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.23.ffn_down_shexp.weight": {
+        "raw_sha256": "0b82cb50592d6a15b3150b2035f048e9adfb0c6805931c2614bba96f9ec17016",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.23.ffn_gate_exps.weight": {
+        "raw_sha256": "72c582fc5d7a583a8cb62fd3911e4b8cbad848f08899171e3626d74f331c59bf",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.23.ffn_gate_inp.weight": {
+        "raw_sha256": "7b0cbc4e9c5bc8dfd91e67d5cfefa62acf51928ba791f13b11c990695f0ab9c1",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.23.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "81ec809d76a66cbc42df364012d519ddbda258f4a41eefadbc1fa3e2c0773d44",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.23.ffn_gate_shexp.weight": {
+        "raw_sha256": "9bb65a5ff73aaf59ae211054831553bcec9f45118e6a1ab226f10d7f8d8fffb9",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.23.ffn_up_exps.weight": {
+        "raw_sha256": "c54f47869b1433cc071934dff9e20dc2e1e584ce6a540dd0d19f83e599510af3",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.23.ffn_up_shexp.weight": {
+        "raw_sha256": "1a67284f0a4d1563e961eeba03b4c041b06f921cb0bcedf8f036b6637a55a544",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.23.post_attention_norm.weight": {
+        "raw_sha256": "7f03ac07e07a6bf4f010cc67a42ec34295b6792de5f7d5b4f31e61bf2c995c64",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.24.attn_gate.weight": {
+        "raw_sha256": "86565dc84611a0fdf203fa65c15ccfc5edb11d1e812d6367f834b8cc3f17a8fa",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.24.attn_norm.weight": {
+        "raw_sha256": "91a3b48b4ce892d1ec0ce75ecaef4553b01566c49fb2c282aad495abf1271037",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.24.attn_qkv.weight": {
+        "raw_sha256": "531f27e9973c6d272e7377cfa1ce0cac4d7606d676fa523ed8f0a7ccb517d01d",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.24.ffn_down_exps.weight": {
+        "raw_sha256": "c8573214afd045dd3c1c4eefe36c00379f7ec5240a8d2fa6eb0b9a83f7650201",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.24.ffn_down_shexp.weight": {
+        "raw_sha256": "d38490babc1cc0eb376c71bfcb997b98f288d3461974473e75b2d7a670183038",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.24.ffn_gate_exps.weight": {
+        "raw_sha256": "70e7f960407448357e7b87d67b9f206cdcaee74a4fbc38f350768868027b2f0e",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.24.ffn_gate_inp.weight": {
+        "raw_sha256": "2d659408f94797aa818594b63baaf1dc6ea39e48c26e1ae5a0ad9790a937a729",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.24.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "a7790f1e0b47a4455e6247c0eaf99cbad4923c7e31c515ff79593640de92da06",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.24.ffn_gate_shexp.weight": {
+        "raw_sha256": "b165e373fda7def80ed4e512f3cee89bf3ce252b8f1d240d7ca01bad5bae5b6c",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.24.ffn_up_exps.weight": {
+        "raw_sha256": "6ef4dbd03aaa54964dd39681246634ca012f19e0c22cd0bda473b2550ae6e5c7",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.24.ffn_up_shexp.weight": {
+        "raw_sha256": "f83cbf59903e0ad1c384e0082c0d1bd9d48ba10b7615db6b9f84fdf2f2d68085",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.24.post_attention_norm.weight": {
+        "raw_sha256": "b3f627466002ebea4f87b661e21c0f29279c8554a446d7408e49ebe72420f5c4",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.24.ssm_a": {
+        "raw_sha256": "2c87ecb8637f1e21f963d8b127ec7c3c6d848ced642fb5567ef7691ba4eefcf2",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.24.ssm_alpha.weight": {
+        "raw_sha256": "e4b1d17952c9d376bd4d716790d357aadecf4a7b2709784ff83db07204abfb62",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.24.ssm_beta.weight": {
+        "raw_sha256": "12e37bfdfa873f352b97a53b1a11df9eecc5f83a135fab7f28c63db789a92823",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.24.ssm_conv1d.weight": {
+        "raw_sha256": "8a43a2860ee4af762f8661bdd83f7889739336703faba1f27562a33f7162697a",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.24.ssm_dt.bias": {
+        "raw_sha256": "1ae5a615b970db0336cedaf4ced047fee9394aa636e42839751bcf9de8a11fea",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.24.ssm_norm.weight": {
+        "raw_sha256": "143bf25b7b2e2baee50e5c6e8955be33495f2f2afbb731e8ecce6815294588f9",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.24.ssm_out.weight": {
+        "raw_sha256": "582cb454e0c56e319c55879c1fe553589fa20a58055f49edba8c37901b62c0eb",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.25.attn_gate.weight": {
+        "raw_sha256": "90541d8c20f29c69d0c1e6ef7a76e0c2eefb3b853470963eeb5f96b056a8aed8",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.25.attn_norm.weight": {
+        "raw_sha256": "1258e2334dea42b3b0d4005e86ee7389f34b97dea7d7feeaa3ab6cd3b9a249e7",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.25.attn_qkv.weight": {
+        "raw_sha256": "5c0796352e59823a5e10a04f74f7c5b9a8a82f18816df8908b97bc54871c8e93",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.25.ffn_down_exps.weight": {
+        "raw_sha256": "e78c60fa247b4e89257e6586e908bcd091a42e630bbd7d8f49d469055e65903b",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.25.ffn_down_shexp.weight": {
+        "raw_sha256": "8499a3e7f95f7c0d8813af369d9c158f1c03ffd53e5d5128654d1b02a1224b00",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.25.ffn_gate_exps.weight": {
+        "raw_sha256": "44c865c0e561faf9aad521e2e5fe50f10de25c1ae08b2b98178f6c495b41f5c3",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.25.ffn_gate_inp.weight": {
+        "raw_sha256": "dbad08df1e64fdecd8006be0ce069fd1a755803ef5d389cf57c5d4bbaf45be09",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.25.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "48cc0c9780c3dee8e42607f79ba8dfe1b1ffbb134db45b000d870e3cd86892f8",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.25.ffn_gate_shexp.weight": {
+        "raw_sha256": "86090a15c60245eff585ba7cfad7f895d56a70e20052dfba9542f76dfef73170",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.25.ffn_up_exps.weight": {
+        "raw_sha256": "84cdceab47b0555d7b6bd86a809217dbd59fa584731c9a155f943e9681af9988",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.25.ffn_up_shexp.weight": {
+        "raw_sha256": "3d97d8f87d254e2cda2271a1493059307c87b9c8962037f04bad0159ebe9ad66",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.25.post_attention_norm.weight": {
+        "raw_sha256": "9743e4d75ad26fce31e3c51c21237f7a433d4ee317f97703b2d48ef296ed6666",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.25.ssm_a": {
+        "raw_sha256": "527464082dcb25e0b65a33679b9d3e1ea34d784b69347c1e065277b2ee2f45ea",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.25.ssm_alpha.weight": {
+        "raw_sha256": "9f9678a2f0b0ae4e9000971cc72c9b65a584673a90f7c87e55b3bf926f97ed74",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.25.ssm_beta.weight": {
+        "raw_sha256": "d3b6edec3aaf40c9353b2d209d27a2600452af928b6985a85460e95984d869e3",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.25.ssm_conv1d.weight": {
+        "raw_sha256": "04520f511d78f29e182af54a425e9cbb138aa6b5fac274e1240f0122cfe68562",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.25.ssm_dt.bias": {
+        "raw_sha256": "a253eda5b3df1b45f3e90b9c78f80d58b10734cc5d2ae668373dd0e92db3e8e0",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.25.ssm_norm.weight": {
+        "raw_sha256": "a5973e8ae7c56bba2420956704c475d8fdc8debee3b8ac5daa6a52c0db6188fb",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.25.ssm_out.weight": {
+        "raw_sha256": "c28fab9ffa24339ef729dfd882dd2e553fc19cdc883f304243568ce8d176fc21",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.26.attn_gate.weight": {
+        "raw_sha256": "db5592165ae7eb205b66d00b31703a1a29fda18bcedd30fdb8e704d11a4d726e",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.26.attn_norm.weight": {
+        "raw_sha256": "79c09619ebd9d13fbb921f0b5acf22488df6015e9eab23c04885df14e33b6ca5",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.26.attn_qkv.weight": {
+        "raw_sha256": "e6c8e04b2678fc730eaa7ffbc76711efc6d5268ce9c98560a8cf0ed298f60e63",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.26.ffn_down_exps.weight": {
+        "raw_sha256": "bd0736a09f60f77fcd260ee223693880933573a749334a3c6e0c40a3d8bc9dca",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.26.ffn_down_shexp.weight": {
+        "raw_sha256": "9fe84ac898fa9fe48438c78d089d197fa7e9e170359a3929df48842d52afe37a",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.26.ffn_gate_exps.weight": {
+        "raw_sha256": "0c8d6beb6666d6ea88b6285663d8692233d5fb1bd91b86523043d144a605d489",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.26.ffn_gate_inp.weight": {
+        "raw_sha256": "1e5a24eb260afe3dde668c24892b15648ebd8c5f8bb92ade5f063ae91948871d",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.26.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "541b7dbcc40c79d688f8cc46d750e7a68453492b8cec83ff72898f18656ba5f6",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.26.ffn_gate_shexp.weight": {
+        "raw_sha256": "53bf21af40086dedf43e558f7f7866e853f6dbc029681777d8383cc4becd9026",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.26.ffn_up_exps.weight": {
+        "raw_sha256": "da3f665f19cb6322c53ec97e0d348bcd1cfd38cfb5e912d8907748f36778449f",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.26.ffn_up_shexp.weight": {
+        "raw_sha256": "1a24614af23e95978888ab6e2ac2d0db9e27e8ffb2692521427a55f5f6227f3d",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.26.post_attention_norm.weight": {
+        "raw_sha256": "e211ca5fd8e6101b3d86a083f753396e3ae3f88e03313026865ea2793ee7a7e9",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.26.ssm_a": {
+        "raw_sha256": "4545925a2a458bd30cd214cdb7992e04dd3e000a250ee397b25caad45c1aff96",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.26.ssm_alpha.weight": {
+        "raw_sha256": "8501a0caf5f286964a522f31f514b62197967d797855e0645074ae6268450264",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.26.ssm_beta.weight": {
+        "raw_sha256": "b1489c9b292c9a077dde7046a1218242e15f39cc41bce17af902d9e8eae69e98",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.26.ssm_conv1d.weight": {
+        "raw_sha256": "05b3cbad2c95f972d0db37400ab64909c417394a2c0ec79254b04001fec364f2",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.26.ssm_dt.bias": {
+        "raw_sha256": "65b769f22a946ec1ec3e90da562cadf0be312f47e2e36155e7c0e0fdbb452ac9",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.26.ssm_norm.weight": {
+        "raw_sha256": "0d32aadd99369acd8d808b1bfab37b337b26359472d9139e7cedc9c68b9fe5b2",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.26.ssm_out.weight": {
+        "raw_sha256": "0aabc711e1a08e7b53c1f3f2da661ecc1e83b06df67a247e63dc89a0acc50be2",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.27.attn_k.weight": {
+        "raw_sha256": "3736a0b135b598751c65e6b84c5f2fe21744e5c90082139b35c128cea604fa97",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.27.attn_k_norm.weight": {
+        "raw_sha256": "55025dab7457688dbd0243fc63337b4c682bf04ea56a1ec29d505864aa66330b",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.27.attn_norm.weight": {
+        "raw_sha256": "574416f99e8efbe78da98af7bb48a29bdc689124e556f51ca5803a54c0620626",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.27.attn_output.weight": {
+        "raw_sha256": "1c721aa55be77e380c84eb63bffa9b24eadf2d02a5d968e5cb29f54e928b9e55",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.27.attn_q.weight": {
+        "raw_sha256": "b1da10b41fa175e7ecb6503921356878eb774823b898f5d8328de369e3166bca",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.27.attn_q_norm.weight": {
+        "raw_sha256": "d075651fe6c1245a9773979356484eec66a285a9491b8e3de39d5c463cd7d431",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.27.attn_v.weight": {
+        "raw_sha256": "c7f9516c94b21656cc2a9ea46e176c03af2a8d1719948c059d5c416ec7fed483",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.27.ffn_down_exps.weight": {
+        "raw_sha256": "69b35be78d4cfa2cd395fabe86f69a421d911fc9a9d5e0de258c4685ec36247e",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.27.ffn_down_shexp.weight": {
+        "raw_sha256": "3c06e9b293a69f3263958ca9d79a2296f844d656a8e40932cd1f7215d0208da8",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.27.ffn_gate_exps.weight": {
+        "raw_sha256": "5eae877b7b77b30cbf1fb92ce3061f9b38deba08351903bc89be4820b7ae4261",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.27.ffn_gate_inp.weight": {
+        "raw_sha256": "9f1c389349e0324e320bac1e773810effb052c9fa2a534168ec5050ce213719b",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.27.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "e7a74c7cdf3e4dca77d8b16c4bb8168b628f91129752afd5aaa28908700144b9",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.27.ffn_gate_shexp.weight": {
+        "raw_sha256": "560faab74983b487fb9e2461cb88be51753791f12674c366c5561a090e3c6589",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.27.ffn_up_exps.weight": {
+        "raw_sha256": "2e111db043fada46ae63c73e1cace0fda6c10cd0a3d069d0eb7457515cb348d6",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.27.ffn_up_shexp.weight": {
+        "raw_sha256": "7ac5eb5a38094911cf2a4bcec908abadffa513b3da0fd557dd963f3f2a56171c",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.27.post_attention_norm.weight": {
+        "raw_sha256": "8c84abe4cdb95006217ab1cda4a39c62a72b61bab6a5ecd1d71fe3bae69851cd",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.28.attn_gate.weight": {
+        "raw_sha256": "6a88c5cb808426f338ed3b7608e1d096c60624759ebb6e11f1ba51729b1a6316",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.28.attn_norm.weight": {
+        "raw_sha256": "f03621529f4f078ced5cae5e0a2c1fa4cf2b10bae80f6bcf6cd528cd738c3d90",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.28.attn_qkv.weight": {
+        "raw_sha256": "0cd6e07f47dd8eda8995a0ca7ed7bcbe0fe28aca89f22c4fe19f89269c60fdf4",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.28.ffn_down_exps.weight": {
+        "raw_sha256": "9c6c39083e69c9c6f1756d48292966d10484112c09cc760831afb746177dec72",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.28.ffn_down_shexp.weight": {
+        "raw_sha256": "428d9c34d7473730d1612f40d82fbf08827a2dc9bf4517c909ca4563cc758def",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.28.ffn_gate_exps.weight": {
+        "raw_sha256": "2d4e922ecb85a13b88722e2f06e023ef3a459adecd6feb84ca9d50c912a61343",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.28.ffn_gate_inp.weight": {
+        "raw_sha256": "fb5ce1da3a1eb36119fc58271f957dafc5c42699e9e9dea02166f7988f1b9af3",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.28.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "3015e09d97f4d4a624c25e34e3f9fa7a2f723c0569c85033a7d1add7ef8b67c1",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.28.ffn_gate_shexp.weight": {
+        "raw_sha256": "2a794086ed3db626c734ddcc31d330a1a1e94c75175e5cf47de39acaabd241b3",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.28.ffn_up_exps.weight": {
+        "raw_sha256": "ef84201876bc4745200e0d297bae4226df1d253245af5c542e1415f04e7e62d9",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.28.ffn_up_shexp.weight": {
+        "raw_sha256": "dab42684f659adb4749b7a28dd858d2679eaee1e3885bb1156cd39e437a63a3d",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.28.post_attention_norm.weight": {
+        "raw_sha256": "efc0b6e6ca164f0739c5a0bcd1d9a9a1413356c9e0db37caaa5bc7dcbfd723d0",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.28.ssm_a": {
+        "raw_sha256": "1436116e02539c850fea9702b98fff7d5fb4c8225d3d845d42cdbd03f09c2334",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.28.ssm_alpha.weight": {
+        "raw_sha256": "b0764c76aae4a80b5fa0c94a24ef19d18f16ccf614e6bf79fa1575fb40ac159f",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.28.ssm_beta.weight": {
+        "raw_sha256": "5c0e0d04e2ab0f7d697dfb3165d7f62e84647d14e0a983a9ff66fec8823ab393",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.28.ssm_conv1d.weight": {
+        "raw_sha256": "a13a003a08a1a2c4fdf82e1e911656f69637b30a5d7b3435f8ecb29c6ba06258",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.28.ssm_dt.bias": {
+        "raw_sha256": "9840101f45536659066110c38797f4712636768a7ef1e0c265c2443e0ed18129",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.28.ssm_norm.weight": {
+        "raw_sha256": "58adaab16ad214974c88d1c28e9a4bcbef6b314e5c2aa50dff38fd0670ca08e0",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.28.ssm_out.weight": {
+        "raw_sha256": "44663ee9060f50b93d124e79447a1e7df9ecedc7a3bd7e0e4843592ebbe934c3",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.29.attn_gate.weight": {
+        "raw_sha256": "0588a65724700e6fe706740666cea08c3943f67a76fdabf692d323eb8bc8ebd9",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.29.attn_norm.weight": {
+        "raw_sha256": "1274f519a17ec3286b26bcc54e4cae245c1a3a433e0a7a4f671645a1de31bf6f",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.29.attn_qkv.weight": {
+        "raw_sha256": "23f6c04113c7964ccbc34c86a5a903d3c39f33d52e9d95998c7a6211dba4a786",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.29.ffn_down_exps.weight": {
+        "raw_sha256": "e57143739adf1faf977ef6861968de70d007a627851b8ac0be03a44302f61fa1",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.29.ffn_down_shexp.weight": {
+        "raw_sha256": "a3f2f87d9c20c68b92ada6d97b64f9fa49957366807e307f39838d864e5fecda",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.29.ffn_gate_exps.weight": {
+        "raw_sha256": "b91973710bf9e16bfbabaedbbe232fb2f715371cdb9a890ce85a49f0a9e9c089",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.29.ffn_gate_inp.weight": {
+        "raw_sha256": "01b91b7d8e23b60d1266ec7afd30dd5be466b82fe26ca5e263c4f95218bd6601",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.29.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "88d439538f51c6c1c94d91aeef71c868763e274f8fcefe6b153b4a25140dec02",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.29.ffn_gate_shexp.weight": {
+        "raw_sha256": "102b26598b71a6f454f53a304b830305583800353684f720d86d629cb899a419",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.29.ffn_up_exps.weight": {
+        "raw_sha256": "c1ede696deb4b12e8d29857432292584ea5dd2445625b2a639b2508fb6e0aedf",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.29.ffn_up_shexp.weight": {
+        "raw_sha256": "e3bf3b7daba5211472e20815bd94f3135243f8ce39ce297bfda928dfff424198",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.29.post_attention_norm.weight": {
+        "raw_sha256": "083e2ccd72b66c11fc9f06b23d80383e976f4b61018050d37d5c77fffda304ee",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.29.ssm_a": {
+        "raw_sha256": "5e865ce7a50ba6b4a85854433cf07bc865bf6e265883508cce5c3834f1b4959d",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.29.ssm_alpha.weight": {
+        "raw_sha256": "27dc94a672679c75aae073edea247eff0c8e602f7e04bd5dc6e0ddef27e46f0b",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.29.ssm_beta.weight": {
+        "raw_sha256": "3cb6a84f301e1bcd31632d6b76dda16ce8d435f494fc87a6515220f8898f1813",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.29.ssm_conv1d.weight": {
+        "raw_sha256": "b5a247e6657f869d2ba6d12958d7f2974c13f89b9bc6a5dcd6b428b48c1e69d6",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.29.ssm_dt.bias": {
+        "raw_sha256": "aec824d76a12a4e1cd827cc063555551354613faee4b00ee198ba5c732fe7c28",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.29.ssm_norm.weight": {
+        "raw_sha256": "ba7c71e070096af174f953f024f81c5fb75c3827f5effba3a3b426a618148d89",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.29.ssm_out.weight": {
+        "raw_sha256": "38f97216616bbe60da7c489d2ae01d252b605344aeac71a336a8bff4a57e88ed",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.3.attn_k.weight": {
+        "raw_sha256": "f982a09769ad26a983159a09049e20464a35df4bee12a610a85f41cb091348d2",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.3.attn_k_norm.weight": {
+        "raw_sha256": "d50d149bd840708117471d1533498f249bb9bd04e24115da9950a13d3a606c49",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.3.attn_norm.weight": {
+        "raw_sha256": "9442749a4fdfe04e0324ffd2a7e313096cc781789291eec581b2d44ba07db637",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.3.attn_output.weight": {
+        "raw_sha256": "382cf8df51281a223a59fd7aaee48782ddeb8cefba7369f14603c8aa1a2786b7",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.3.attn_q.weight": {
+        "raw_sha256": "5e376877f505efba2f2382103a6b6a614715cb8a9f6649255453bcd065f79c24",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.3.attn_q_norm.weight": {
+        "raw_sha256": "5fcde32a0447477e2ee5abab51c9f7c61aab2d3abc51d7153bbeb5dce452acb9",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.3.attn_v.weight": {
+        "raw_sha256": "8a8101a76989dc1f5a3e092faa5b56fc68da11fca622fc310fd4c47b30185d31",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.3.ffn_down_exps.weight": {
+        "raw_sha256": "0839d7efc03e378fbf972ebb88513b0f6928855fdf75281cb7898ce81b5a3601",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.3.ffn_down_shexp.weight": {
+        "raw_sha256": "d78d7d5aa170a1d48242b3636b14102e27b8a04d8fc21ef167fe2c9d711a8e6d",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.3.ffn_gate_exps.weight": {
+        "raw_sha256": "00c8fc5e8c58b55b417e7aa760889afb8d9cd0bd59739cc3c3d337d6059bb507",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.3.ffn_gate_inp.weight": {
+        "raw_sha256": "41ef247fb1243b359eee3d740ee362d2fb3f35929a452054f575230b88692eec",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.3.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "437fffe805279669471b0913bcaf9eb4f0fee6c20528a8c221c243af5042c047",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.3.ffn_gate_shexp.weight": {
+        "raw_sha256": "5624cd5c1ffcb65a2231a002a65a984d545c21c8633aef1fca0347725f61500d",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.3.ffn_up_exps.weight": {
+        "raw_sha256": "e1864e060148888d7baf063805109b5a8c3e967915ded33cd0772134a918c8cb",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.3.ffn_up_shexp.weight": {
+        "raw_sha256": "ac96b3915022474f3731b74c85dda66bcb466191eee7b53be271e4c92195f861",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.3.post_attention_norm.weight": {
+        "raw_sha256": "9f1fac902b141f1a60b07e3c7645af6f0fcd9e09d8688bc1531637893859e754",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.30.attn_gate.weight": {
+        "raw_sha256": "d620040c68607da208b7833f3df23182cffa8dcf02333546c8bc4b2d27936f82",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.30.attn_norm.weight": {
+        "raw_sha256": "a02bdf6531ce58f8104b723cdd124e7daf7d3a6e5d57e01f88a3c4381e400495",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.30.attn_qkv.weight": {
+        "raw_sha256": "965a2ce18c888942d67ea750473ff0d46042800a6d08311964daba554c3dce50",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.30.ffn_down_exps.weight": {
+        "raw_sha256": "eefa4df0939e9a8cc5ccc6ce51ea71ca740eb27c9565129275f0389f543bc19f",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.30.ffn_down_shexp.weight": {
+        "raw_sha256": "e2fbdc6b7ef7963eda6d27331a339a5c6983c6c1cb35f5b3355c8bf2b91f0e70",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.30.ffn_gate_exps.weight": {
+        "raw_sha256": "c13d2923d7044d1ad7611df8a49497d85db7619318c5e4eec0093485ab3f430b",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.30.ffn_gate_inp.weight": {
+        "raw_sha256": "b6b2c36f04e570310fdea240c07e315c86f8a77ea9439678127e208967250af2",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.30.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "aa70e5d52da1fb05d5b2dfe49f1b3dfccae1e6f59691b8ca25076d848afd4bc6",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.30.ffn_gate_shexp.weight": {
+        "raw_sha256": "f407270380df9f67b4fd02dd66cbaf626d6ec4aa545be919d98a0e4ff16a8122",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.30.ffn_up_exps.weight": {
+        "raw_sha256": "ec9aa69d301b947576955866e1a4b813ea44e196a85f668b346d831fc4e9d1cf",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.30.ffn_up_shexp.weight": {
+        "raw_sha256": "650942ef414bdcd7446cf35bb7e57526410479a65f2ea4ed3ff8f3bcca41e49e",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.30.post_attention_norm.weight": {
+        "raw_sha256": "105be2c68ec7cdbc74d1393dbe879d0a1431063643e3bc592ccbaf2fe544abfd",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.30.ssm_a": {
+        "raw_sha256": "206163924e2bc4a9d622a3cd2486e22621c2a36c335b1b72bbf265b48c99b821",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.30.ssm_alpha.weight": {
+        "raw_sha256": "f89188092909e229c9081e7eb6bcc4d5a1fb9f0d7e1ca273da4635f1f7f5e4e4",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.30.ssm_beta.weight": {
+        "raw_sha256": "0c3bb1bfdb3297988d34dc378091eee715fb1e122f0fd64a0405e852cf4afe9d",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.30.ssm_conv1d.weight": {
+        "raw_sha256": "adadd65af38af347b6c4c54d523485ea604fbbd72b1e3ae6841fcea7733a8d64",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.30.ssm_dt.bias": {
+        "raw_sha256": "eb2f696a9a8ed2990c2a1bc58b9d47aa1492684a467feb6a74ec04d0c76eb66b",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.30.ssm_norm.weight": {
+        "raw_sha256": "7796171888277d466fdae9a635ca270e7be8f51bc4fd7a1f5561c2a2bb0a8fc3",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.30.ssm_out.weight": {
+        "raw_sha256": "ceea54c19d2b25e5d467a60c85cc849b90c89febcba682646be56423ee197828",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.31.attn_k.weight": {
+        "raw_sha256": "8b2dc4f05a81ba1d4fd0d98c29160e7b499f4e7ab69dfe51e98df5330eef44b9",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.31.attn_k_norm.weight": {
+        "raw_sha256": "16e1370ddc867df12ddaeda9b8601b8edc59bdaf7dc03f97b8b189329f5b45d3",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.31.attn_norm.weight": {
+        "raw_sha256": "19fe8bcb1fe5b716c88a9b36ee5d7b3d05a0ab6a17a62aea2c72cec47c1c7ee6",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.31.attn_output.weight": {
+        "raw_sha256": "9c8298c9766032c941d5e7aa7f7c62f3ba09065ee0871df0ef9b6153a555902e",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.31.attn_q.weight": {
+        "raw_sha256": "b885a79da63489c8228347b829d48de613fe42d1f8b263abec15b48d111968b8",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.31.attn_q_norm.weight": {
+        "raw_sha256": "1836068151c76facc02868d5506ba3f292a8ec43caa4a6fcb9ccba0bfa545132",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.31.attn_v.weight": {
+        "raw_sha256": "3d1756a2dcfd55ed5d0b433d19512045214b5ab02f7c88570a5578d770b52a27",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.31.ffn_down_exps.weight": {
+        "raw_sha256": "2fffcf0d49d27cba93cd34acc263b18876d869812fabdb42d28ef677171c4b51",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.31.ffn_down_shexp.weight": {
+        "raw_sha256": "a9f08a0da8c1953818c033fc8d662227d0047a3de884f471fead1f2254826d7e",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.31.ffn_gate_exps.weight": {
+        "raw_sha256": "23d1c0395db0b1112693282d41b8e7a8f3704eeacbc691dc818af68eabfaaacc",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.31.ffn_gate_inp.weight": {
+        "raw_sha256": "2637e2083d64702c4d2acf6c7d99bd199846c6df47b3a54f211d61dd84944fd8",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.31.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "cc9ef4b022aad2f26865c6f7fdc454ebed9839ad87e70ca74e71d3627d310305",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.31.ffn_gate_shexp.weight": {
+        "raw_sha256": "17819217414ed572893cc7d74580511686daa3006eff3deb6ab0103f3f9d24d8",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.31.ffn_up_exps.weight": {
+        "raw_sha256": "0c6e9b367c2ba84e09ff5f642e0694cd3a77aa643d98959df9ea2099a81528cb",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.31.ffn_up_shexp.weight": {
+        "raw_sha256": "bf3b0179abe74f159bdd8d13841eb72de434cc0939e79f219c88f3c56b976128",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.31.post_attention_norm.weight": {
+        "raw_sha256": "2809d6fd7e8cca9f02e56066f6c3701297fef97081f3a23c31cbf2bddddbe3b8",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.32.attn_gate.weight": {
+        "raw_sha256": "660e789b0fdaac82447a54db38a7902fa9351dc5b7da53c3f3080c754191ba1c",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.32.attn_norm.weight": {
+        "raw_sha256": "524d9778046c2278ec3e1690ce4897cd5990c42a6ab6ad95483accd786840341",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.32.attn_qkv.weight": {
+        "raw_sha256": "3944faf4d5c27cf9ac20d8c98ef517e90b16d04e1c0108ff5ecc6df7e1de780b",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.32.ffn_down_exps.weight": {
+        "raw_sha256": "a0f88491cf8669b19fc2eba3e89bdfd96eb47b6c698289d98fd799405e0617f4",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.32.ffn_down_shexp.weight": {
+        "raw_sha256": "bd797ab48ab28660d416a4f0e27597f56c275960dcffc3c4bb64aeb9c3795322",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.32.ffn_gate_exps.weight": {
+        "raw_sha256": "4d0cc204ad8900a6f3e3bc0730243d6d46cf01dc9989b9d1cf3b4e217fa9ca19",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.32.ffn_gate_inp.weight": {
+        "raw_sha256": "ab7b5c6e89fe7c1efb7af25d07e951a19c58131d6f35b88fa2253d35dd8d0167",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.32.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "548b751a08b3d0e3e79c06ff3b4de1c0e8f8962a6c9720c610de8b5acd944bcc",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.32.ffn_gate_shexp.weight": {
+        "raw_sha256": "f1eeaff8e4dcd5682fb1cfdb2dc50382e8ef5928d6112bd36139340c26abd21c",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.32.ffn_up_exps.weight": {
+        "raw_sha256": "49e0574dff4dcf7d7ade69a00936d4e03065b5d6cc051b83e101d05f415c61f4",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.32.ffn_up_shexp.weight": {
+        "raw_sha256": "47c7a5a4277e22dfec097cabdabc68e407b60cff3ab0ab0b35fd959385c02c84",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.32.post_attention_norm.weight": {
+        "raw_sha256": "73dbf8b8206ee6e885cf3e714c2565fb7f95efb1425f996137da9ec97f694a5e",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.32.ssm_a": {
+        "raw_sha256": "32280974db5b1925588044cca2dbed1dc3227474d8d317792c7451ca57582ec5",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.32.ssm_alpha.weight": {
+        "raw_sha256": "e8db0ef387aa0089009245bc441ae2ce6be48088375541750cf7a4e4106adecc",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.32.ssm_beta.weight": {
+        "raw_sha256": "0bf234edb23fede975cd118a9c4675dfc360a7f28dca284682d2d73fdf70f197",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.32.ssm_conv1d.weight": {
+        "raw_sha256": "1621559d7a7e7f0ac0f0b31bb5e73bb1b60fc8551ccd113bac055bfce5327b28",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.32.ssm_dt.bias": {
+        "raw_sha256": "38f41d593940a6cdff43e0164a28a0ff1571c50fa95ac3b73ca0201d8235430a",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.32.ssm_norm.weight": {
+        "raw_sha256": "76027e1711b3c4d1786abdcc9cc658ede25bbc3114eeab81f542d7cd063af378",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.32.ssm_out.weight": {
+        "raw_sha256": "3c40dcb02a5f1653f0513d2f15cb2ecd2454f5d1b1eaf35e92c7cee5f9937fa6",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.33.attn_gate.weight": {
+        "raw_sha256": "2e772598bfe1688eb5fee6347e0453e79579ec5a0a21be6fc4555ffc4f3b7acb",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.33.attn_norm.weight": {
+        "raw_sha256": "5e6d94142ac34348c243b0c5d23be000cf6149fcb66b8b8ceb521058906b70d6",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.33.attn_qkv.weight": {
+        "raw_sha256": "b15a50e03b1442a9575b462dd7fdf89b4fb34ff210ac1bbc380bd9112506586c",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.33.ffn_down_exps.weight": {
+        "raw_sha256": "f0b4e9319bca27f544775deba00d482932ca39bdc2ea3be288fb615fe0532c27",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.33.ffn_down_shexp.weight": {
+        "raw_sha256": "140d7d0ea1b83462486b5a3f28fb6ccc3fee463961991cd8ee13c0ec418c03db",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.33.ffn_gate_exps.weight": {
+        "raw_sha256": "b1e08bdfbe930667a86e4106a5c0f803ab3ac594f34affe70be654dd70c052c2",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.33.ffn_gate_inp.weight": {
+        "raw_sha256": "79e40a7eb11c03409b84122d3a22c391280199e3a76f387e8c2f60d6426e1ff7",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.33.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "301bb8c8d70addb33cbe54b2363850e9d7f4e3a4602c83d69a25eb1b40ce1cad",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.33.ffn_gate_shexp.weight": {
+        "raw_sha256": "bfa3915de6d2cf2c503bd3df945302d32b2a3637508c22866a55a0d31e33dc38",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.33.ffn_up_exps.weight": {
+        "raw_sha256": "0e3dbccffe24db484d49b69596e65e29555cf6c987f2316300dfbb414661f934",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.33.ffn_up_shexp.weight": {
+        "raw_sha256": "0295cf84a0e274b154254e520dead4f25e039e68a087b1e8219177f0345ab9f1",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.33.post_attention_norm.weight": {
+        "raw_sha256": "a1796bbf07fc253ab6bc0020ffe98d74e49af3faaaebf3e6b0ec336220763f97",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.33.ssm_a": {
+        "raw_sha256": "599f1cce9dab0f2850efee5d086cdba493dcdf0ef6da1b36baf829c0c24727ba",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.33.ssm_alpha.weight": {
+        "raw_sha256": "7aba3d41984276bb2496ad324df673589e6c3ca3a4f46b496e0e90dcb930af24",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.33.ssm_beta.weight": {
+        "raw_sha256": "1c8eb42c1eb27a4cd2efc391a31a91db315db18a6cd26444c6a39aaf38c5a6c4",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.33.ssm_conv1d.weight": {
+        "raw_sha256": "d2fd5c639d39e4a194e208edea41523e4a75d63f8a22fb97e29a3a867de0479b",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.33.ssm_dt.bias": {
+        "raw_sha256": "10eba46e4edb86b086628579fe77498c94cf0ea2f2e0e0ffa0369ecadb14e66c",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.33.ssm_norm.weight": {
+        "raw_sha256": "600a28c79a8292f17704f370e907f800d3c0406d2275e10d0554a75fdbaa4373",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.33.ssm_out.weight": {
+        "raw_sha256": "bf633f286e1c88311b0591ee546c8eadc4ccb9fbab43af1aab2a23ae7ab67d87",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.34.attn_gate.weight": {
+        "raw_sha256": "121ef589d30aa7bb1f9699a3c97b0a11e2801afb837d2f5ce88ed849a3e91272",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.34.attn_norm.weight": {
+        "raw_sha256": "f39837a3706627efff4a137e05127449b11b90dc671ce3ec8a448547c6c08a47",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.34.attn_qkv.weight": {
+        "raw_sha256": "e17b59c55455df96aa24323ba0c3fe8c8b5cfebfc89204b2b32c7de6ed31a611",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.34.ffn_down_exps.weight": {
+        "raw_sha256": "e53edf3b5e5d9d325a6200419da9fdc1de881b983b5810678c9fd6ac6e212140",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.34.ffn_down_shexp.weight": {
+        "raw_sha256": "208b10105a780f610368c641b3fc28f797bff05bbf2c5451690c8a8348b72c51",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.34.ffn_gate_exps.weight": {
+        "raw_sha256": "4276f4163a9327e9116502a6fcbe3f6a1eea58a70ef142c698cab0b3101ab460",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.34.ffn_gate_inp.weight": {
+        "raw_sha256": "8fadc0c51f874088d88336609f80f808b4c78cc61f872aa75e5f3b7af2b5313d",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.34.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "c8a905b547bae926d481d346a8e220f533d8889bb8340db0e4b5b2dee4e6502e",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.34.ffn_gate_shexp.weight": {
+        "raw_sha256": "b8c428ee57ddf4cb6e121a1e27ab063ece96e80314ac2f0886bd4f6f15ef999d",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.34.ffn_up_exps.weight": {
+        "raw_sha256": "3be5765f1e81d87113f780150dcf416fcdcd50254726adce04752506612face2",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.34.ffn_up_shexp.weight": {
+        "raw_sha256": "10db402d12b2fbc34daf36efa3b318f67f5227011b364d26cd0c176b59f57ce9",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.34.post_attention_norm.weight": {
+        "raw_sha256": "fc4094a3963720f1198122011fc6802c41c8ab6680e7f62ec5e0a036b6066025",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.34.ssm_a": {
+        "raw_sha256": "4b0d1dcf976c397a5795501f1fdcb23cdf8517702747b38530255c4198ce669d",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.34.ssm_alpha.weight": {
+        "raw_sha256": "95b27e8380bc08e59f70d1005ab5a7d3ffe1ed4836f0e45abed4f7df3e586cb4",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.34.ssm_beta.weight": {
+        "raw_sha256": "66836fdec34c7d3f5164f396603dda721aea4299c96cf99df0b4a0de73a63bd3",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.34.ssm_conv1d.weight": {
+        "raw_sha256": "143700e55b1b598917282606f972a846968d9726238e106e3726b3795d748e24",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.34.ssm_dt.bias": {
+        "raw_sha256": "d05443aab124c3d905e3b6909ca578d1df9953ead8e59b3c2a92ad1bf8c9c688",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.34.ssm_norm.weight": {
+        "raw_sha256": "b23767edde2e3af21604e8cbdf170b4fba8de460d6a18fc004edc2e72339288f",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.34.ssm_out.weight": {
+        "raw_sha256": "0dce10b8be4db753f2889027083e05a8c405ba64b51ac17edffe640665323be4",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.35.attn_k.weight": {
+        "raw_sha256": "53da661124eae1ec7f980f0cbd4eaaeb802bdf8e0f43861498d29246ed5bcaa9",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.35.attn_k_norm.weight": {
+        "raw_sha256": "91c9c33d749ead02e9b82f4a1ff0343e79528dca12f39d36d4dfc26a9f576341",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.35.attn_norm.weight": {
+        "raw_sha256": "6cc3dc2f7520513f04a8732252be75b2bc7857def0c3baf57175f7059603cfa2",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.35.attn_output.weight": {
+        "raw_sha256": "011299c30a94f28c13b0f7e09e7a9da28867707b1acb8a0f5c6ac258e49359e6",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.35.attn_q.weight": {
+        "raw_sha256": "32a7dfb7cecec1108b2bbb71250a6190872ca5f84242f72846122bec3d4c4097",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.35.attn_q_norm.weight": {
+        "raw_sha256": "d1d2c986babcf169d40a1db6efbac3b7d326cf82f33142ef81b9f0a1b6d41dd4",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.35.attn_v.weight": {
+        "raw_sha256": "46d70b2abbe2d66078663d76ce38862d9c5d07a7623d8c8f01276d97b36ac130",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.35.ffn_down_exps.weight": {
+        "raw_sha256": "63997dce9357cd3576d0a10de4d338e134b228335059d26f1316c13e140224ee",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.35.ffn_down_shexp.weight": {
+        "raw_sha256": "9720c2eca1696f653231a4866fc4dfd45a3f07a843024e80f784ed08c3ea8f58",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.35.ffn_gate_exps.weight": {
+        "raw_sha256": "96f0ad421e2b24f6577d27b1522aad64184fa32bab7109747dddc69679573d91",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.35.ffn_gate_inp.weight": {
+        "raw_sha256": "eb239219746b016ce914670051547a6efd879e8b44f785a2525c9acd12aef9d2",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.35.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "c900a1ed6633c5142b1bd3c92fdc9e4d6e639e1d92186221c6e62492c3eb4ed7",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.35.ffn_gate_shexp.weight": {
+        "raw_sha256": "4d868611820412481cd278e9491c1415e565f7fe6506c92adcaab7a0d842d0cd",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.35.ffn_up_exps.weight": {
+        "raw_sha256": "69f97afeefe51839749445513bf3edf5bc54dee3b6f1246b1c53c6091b3729f4",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.35.ffn_up_shexp.weight": {
+        "raw_sha256": "734f1aecc627be03dbc046a3c40c919b6b90dc9736fedd73fbeb51e2a70dbe24",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.35.post_attention_norm.weight": {
+        "raw_sha256": "9a555775495e6c997d8c5323f9579a9968c9749aadf8b71e2b37668a06420fed",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.36.attn_gate.weight": {
+        "raw_sha256": "c4237a851487361dd5cd25bf8510faafd2fee5bb24fb58e130cc302d449feac0",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.36.attn_norm.weight": {
+        "raw_sha256": "b5bd56cf6a60f813b9826c28882bc16ec64273e54d78834a1f5dd0f51a4fd3bb",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.36.attn_qkv.weight": {
+        "raw_sha256": "9c0f206dae6aa5902f6001efd905c4eec7b096dd1f8211b8680af00d856fc962",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.36.ffn_down_exps.weight": {
+        "raw_sha256": "0de8eace747f3dbe8172c5a68535bd0dcce416af7f84e6ab65f9fff2ec5e7d60",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.36.ffn_down_shexp.weight": {
+        "raw_sha256": "6cc86f8e03afad81ca7d67d367d2c5797a3578047dd4098912051d6a2e3d7cba",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.36.ffn_gate_exps.weight": {
+        "raw_sha256": "8029376a2cdd6a564a16634f0d7efd49c1e0e33202ffc64d9a87f95426e5c5f3",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.36.ffn_gate_inp.weight": {
+        "raw_sha256": "459dc804aace4e0a947af3a6f04dbb15605eb0c6bb85eca076c54a2d3fecc91c",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.36.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "2b3c177774786689e605a1761f4c21d2cb8e8c081dad2e010f4a2fde40d9b1c3",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.36.ffn_gate_shexp.weight": {
+        "raw_sha256": "800d5967fc9a0581857bdc6c1f0bcbc9be5706ff8e3b9c6dc664e4fc3b3fa5a3",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.36.ffn_up_exps.weight": {
+        "raw_sha256": "b8cbbd5baa74def0906901b77d7f3965901a8020030a8a8522899732bbb5a8a3",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.36.ffn_up_shexp.weight": {
+        "raw_sha256": "a0e6af43821d5c391f7ba5874115222f26de71f352385a31ee355e76147442b7",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.36.post_attention_norm.weight": {
+        "raw_sha256": "12eb94d4dbb4877a551f92ac744c1b845ca18c3bca7ceb861a9a54425ecb64fe",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.36.ssm_a": {
+        "raw_sha256": "7a41d04a24148573523ae1436c2a6918e4204b2023ee795d481b953a95c6b07d",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.36.ssm_alpha.weight": {
+        "raw_sha256": "ff206478baf4a04495077967bb768a4368c55d7247054173e112506296c6f3ae",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.36.ssm_beta.weight": {
+        "raw_sha256": "ea9894481483f7c2938a01c55252413b2a673f29b2e52d9d64418fe9764e4f9e",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.36.ssm_conv1d.weight": {
+        "raw_sha256": "176226da81fcf67f381531072d36bc19ea9aff6f22134f7aae197a0eb25d3d5a",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.36.ssm_dt.bias": {
+        "raw_sha256": "1499ac11c60ff973a8daa89b4589a5267130da2abe9c77735f4a3e15fc47cc9e",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.36.ssm_norm.weight": {
+        "raw_sha256": "511c15a9342f181c56e4519f6363709d19fdf67dc7991407e54bd11ba8f39003",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.36.ssm_out.weight": {
+        "raw_sha256": "8fb5b03eb946d655c137a960a34336b1bda2ef2ae4825431cdc47fab6ea279dd",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.37.attn_gate.weight": {
+        "raw_sha256": "9f7e03fee9a4ffdf10d33f03db36a40f54d21f75c8f56e153d28a65a35725301",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.37.attn_norm.weight": {
+        "raw_sha256": "3d1ae1558d4f8dc420998a8f34eb2d95c02238f9824cabafb21a59c950d83920",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.37.attn_qkv.weight": {
+        "raw_sha256": "242a681a3f2329ecef682b7192600ea8186dce5bf765e0d65d6582135e24263c",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.37.ffn_down_exps.weight": {
+        "raw_sha256": "cae93bf66431d533c35a81752b15cab03282fe366e5d34dc059d80ebe14f8c55",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.37.ffn_down_shexp.weight": {
+        "raw_sha256": "b278dfd5b2cb40b343eb7ac483042608cdcb13776a04fd7fe7afe1dd84e7e08e",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.37.ffn_gate_exps.weight": {
+        "raw_sha256": "3694f1f7f89c42c39ef64d2d80bbcba22614964f3b086b764f3ce8f5bfa26de2",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.37.ffn_gate_inp.weight": {
+        "raw_sha256": "ea4ed472d9cbde646fecbfeb3b8a3228c9959dd4ec3cb24510aa252d36d1453c",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.37.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "8e9d89619c205fb543fccc48c8b98b815a204c86ae49ee48f13587edaca06ad8",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.37.ffn_gate_shexp.weight": {
+        "raw_sha256": "822997134392e96b771782407c1a6ba9481b0946146e08e71b4deedd4765b0e7",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.37.ffn_up_exps.weight": {
+        "raw_sha256": "560168afd2e48ede64c07e2dc1967a12817bce016aa7e3f86355c41526a84800",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.37.ffn_up_shexp.weight": {
+        "raw_sha256": "a15ab48a13453756b39f0f50d4b74458c4030b9ef0f692a8e23a2355bc82dd4a",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.37.post_attention_norm.weight": {
+        "raw_sha256": "23ea6cb37e5e97178b38805ef9bce20454a2b077eedf4225b005e27fcfc888e7",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.37.ssm_a": {
+        "raw_sha256": "ee66c24aea71b2db3f518ba1fe3ba375748bc42ab38b67ff4f5327c6656b23f5",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.37.ssm_alpha.weight": {
+        "raw_sha256": "01fe0865948ac5533bf1e7ca841da16abed6f2cdb6aa10a74e14684459f7a89d",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.37.ssm_beta.weight": {
+        "raw_sha256": "39086ba84e99e2dd77c69157b38b7a33e09ae5133cc87f6020f195f2e1ab21eb",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.37.ssm_conv1d.weight": {
+        "raw_sha256": "0de89cf2b2f9d2fa4a272eab00c1116ec4da6bcd8bf36b8cd2f18537248881c8",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.37.ssm_dt.bias": {
+        "raw_sha256": "792dfe9fb79cd5974336f42e6e878132e04891ae1334907ebdea2113288a6614",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.37.ssm_norm.weight": {
+        "raw_sha256": "8f049e08b70261c505840c4ca5b9a70df6c4ceb8e290c3e357c0e63baf5da485",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.37.ssm_out.weight": {
+        "raw_sha256": "7b0d76298bdc0dd94d08d2cc19879e90e2a058cfbcf4b53da23858cb2b1a98fd",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.38.attn_gate.weight": {
+        "raw_sha256": "20c04e24caa4723eefb92da25473ca7ac49b08b0e1ec29c7b233713e55b9c757",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.38.attn_norm.weight": {
+        "raw_sha256": "819b9daf6ac24e89b18b43e3dc5a2debc620d86ac52c6c7b5a263e94dd351a73",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.38.attn_qkv.weight": {
+        "raw_sha256": "79c4999a8b5b0f6693c81c05caa8e7838cb187c16c43fe7dce02f62e777a9e87",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.38.ffn_down_exps.weight": {
+        "raw_sha256": "6f30ce72c7399cdd3826cdc1ae16f1b0f65f511d1db8112e1df2c1addb9a895b",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.38.ffn_down_shexp.weight": {
+        "raw_sha256": "acc281a924b7caf189c30b69ae4e7de9fa29648cc1a01d08a4d330a789a78288",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.38.ffn_gate_exps.weight": {
+        "raw_sha256": "e265369a153087505a6864e10eadd1d2d5b04728f1a36e9342af84043caf8fc7",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.38.ffn_gate_inp.weight": {
+        "raw_sha256": "c38177db8747646530d392be6564965de0115723b847d8001da29318a570fb1c",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.38.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "dd1ce588dafa7a62ca7221ce5ef68f48f7857b876c065f0d6c6ff8afb69de04b",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.38.ffn_gate_shexp.weight": {
+        "raw_sha256": "b04851ff15e07f5534a70c44e3a91dded6d40826fec3b0745f2c549c2d7b238b",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.38.ffn_up_exps.weight": {
+        "raw_sha256": "228290258d0d2cb8acea32915ace9c0336aaa858ba59141c8aa56c5fde2c1250",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.38.ffn_up_shexp.weight": {
+        "raw_sha256": "744b0ca5e1053e799d445ea8e7fbb908fb9b16511eebc3af758cffb396414fa9",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.38.post_attention_norm.weight": {
+        "raw_sha256": "236dc643d91585096a5fffd5e39f0ee4c0ef90b87b2a4fb8d91d68f25a9ee79a",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.38.ssm_a": {
+        "raw_sha256": "d32111c4e7bbaf8d57e8717c3b4e0a33c641ce535bd66ae744d28a3929b22cbd",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.38.ssm_alpha.weight": {
+        "raw_sha256": "a21349a16aef59b07c18279306564b49f380e6d2b13b1f46edc905384fd6e68f",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.38.ssm_beta.weight": {
+        "raw_sha256": "becd222d4d38a7ba52a41ca70349a8ef95551833df7428f3ecd611cf2c87f1d0",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.38.ssm_conv1d.weight": {
+        "raw_sha256": "0e29e621a6b520063e2d80d65899c87f27a00a082e3a597eae8f9ee5d93722cd",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.38.ssm_dt.bias": {
+        "raw_sha256": "b1bab280f5529895de9781c50f64ed5dbe984d424a8e6cf9839092f6f62d0e45",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.38.ssm_norm.weight": {
+        "raw_sha256": "49b1debdf429f43b3fcff911a362836f569d429cb8d8f84a2be7f0a57694e344",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.38.ssm_out.weight": {
+        "raw_sha256": "84a18b185b1f4eae1b82db293aa07d03f9c85c9dad7748ebd0b4b0031709b1dd",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.39.attn_k.weight": {
+        "raw_sha256": "4ca0340c29e9102bac0c7477f783a5dc66e67552a4679ef40ed13d6e98011572",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.39.attn_k_norm.weight": {
+        "raw_sha256": "9bc90a9ed4b4b142e6491e374c28581a400e0b840e69d34e0bd1abd7fe96261b",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.39.attn_norm.weight": {
+        "raw_sha256": "c2c98f1b4a8fe834188e67411c3e957ac1e28f6eba254c351d68981dbb236193",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.39.attn_output.weight": {
+        "raw_sha256": "24f7a39a58cfc20ebaba90c267f94a75edad58938a6c8e3b853396b90612d03f",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.39.attn_q.weight": {
+        "raw_sha256": "5a1a26943795f93cf4cd305d2295193bcb0eff774dec4e02f1f6cbd2fd2a67b2",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.39.attn_q_norm.weight": {
+        "raw_sha256": "46cd77c4b2e27d7e0c0a35986c5a1d7fb21d6f0dc9558f08a2559ebe96813460",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.39.attn_v.weight": {
+        "raw_sha256": "45b877df1878103d0bbcd714a3d7d7601bd06dee70bfddc3cd728183c11b17cb",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.39.ffn_down_exps.weight": {
+        "raw_sha256": "8448bd65c54198d0c100abc8b9baf61b2400b91731c9b62d14204a3d33676864",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.39.ffn_down_shexp.weight": {
+        "raw_sha256": "77f0cab291c00b6a91de1f8d24eaceee8013568eef2f57c797fb4e4ff5056f40",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.39.ffn_gate_exps.weight": {
+        "raw_sha256": "c9d5ca68bea2d54d73bf4edc7b6c9e2106e0ffdbc106787ae6f4ed2c181105c2",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.39.ffn_gate_inp.weight": {
+        "raw_sha256": "0162f00370ff87b0659caa27a7ad198236c8c6469df0f53a4e755a60f26874b8",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.39.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "39902429cba0b3c06944afb1e7e0fd347c2e75db717112e270064cfd3b7bfc33",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.39.ffn_gate_shexp.weight": {
+        "raw_sha256": "f1af1b932f9113b75f81d94017938530f50e16018f6c2f4389ef48abde0c4a5f",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.39.ffn_up_exps.weight": {
+        "raw_sha256": "e6981e632c27578c1e1f64bceb0e32a29ef23f0a9e2727052386094b0681db8b",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.39.ffn_up_shexp.weight": {
+        "raw_sha256": "bab5422467f708e686c5e4035e1df3807c0835eca4bb670a22242743d1269156",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.39.post_attention_norm.weight": {
+        "raw_sha256": "1fabea44acda7dc3728597eb7d51ad44f45deabacb31b99359a368a2ff7a521e",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.4.attn_gate.weight": {
+        "raw_sha256": "a7fc0f26d19a0f0607d2380204509b34f6871f895544177c573c03c6d5d3709a",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.4.attn_norm.weight": {
+        "raw_sha256": "5f3eb46f631708214c56c997ef25a2e8879db68c97100e270e7ab7c098e3c7dc",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.4.attn_qkv.weight": {
+        "raw_sha256": "bad11986bf81ab76b2b5ad432d5e5c68d84b92e022d824e6c00aa4f1c7bd246a",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.4.ffn_down_exps.weight": {
+        "raw_sha256": "3747cc115054cfd9ccdbc456dbc34746c74731b0dc474cec9a423b9efdb9149a",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.4.ffn_down_shexp.weight": {
+        "raw_sha256": "e2eb69461b32e154ca5590d00956932f0cd8526dfe4ceef95fe49d9faac08cc4",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.4.ffn_gate_exps.weight": {
+        "raw_sha256": "ca36fcb77257989182cb220aa5266d7ba867947cfbdfcb2a2a8402c5fd7dd8ff",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.4.ffn_gate_inp.weight": {
+        "raw_sha256": "38213f576f7219ad98b01f49c8f60a1c20df04afc3b5fcbddd05530311a6c85f",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.4.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "6a83ee78d47a4cfd288aa7e4258ead7720bf5ef9aa492354902dfbeb55738ce9",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.4.ffn_gate_shexp.weight": {
+        "raw_sha256": "a381a7f06d9a2c0e32c4654d1e16746d2b118082bfdf70c486dc27202f1046b5",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.4.ffn_up_exps.weight": {
+        "raw_sha256": "29f53d7226ec6349e0a44af668d6482dc2fb78196ff5f55cfc888d5b9cf01119",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.4.ffn_up_shexp.weight": {
+        "raw_sha256": "32114516faddb4338ebf7377dd1c23667c36cde60f9ea68d3e8f07ad215a9ece",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.4.post_attention_norm.weight": {
+        "raw_sha256": "ea3fdf2b9852d0dacbc9233de82f9ec665584c011fa7ae26619773b1efb19f21",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.4.ssm_a": {
+        "raw_sha256": "395cf7abf7c3493be1c9b8494b527bd9a62bf9856f187afd8d60f960c40fd4c5",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.4.ssm_alpha.weight": {
+        "raw_sha256": "4e8a910784fc775725af7965ca717e9a26cc16d6e1ab0f301d9dbb8d5e49a9ba",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.4.ssm_beta.weight": {
+        "raw_sha256": "e5ade41fdddfb42d1bc713889ca1072250d1efd77c665e00f6ac893b0462c8ed",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.4.ssm_conv1d.weight": {
+        "raw_sha256": "0055bd783722cc1f69060aa6317b03c225409bf97f68c3ec11ac79c4dbf3aab0",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.4.ssm_dt.bias": {
+        "raw_sha256": "1c1c5780e14440f46020b08103fb3e9b466ea7ba271072c68f8ac6a57976ede2",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.4.ssm_norm.weight": {
+        "raw_sha256": "5060bfd047f40052f0f1f11388a436f1b9cb8f1ff35ebea00c50c9e8ef37be81",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.4.ssm_out.weight": {
+        "raw_sha256": "2dd62829e328641ab4408cc6989dbfe7f17cb64c8850929b2c35b348153a4f57",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.5.attn_gate.weight": {
+        "raw_sha256": "a944d44d5d19fb7f7145152bb6955b668577f3b4570a8b4ff1ea2158ad7fc51b",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.5.attn_norm.weight": {
+        "raw_sha256": "2dfe5462593c21131a983df7e7feacdc11b9c31d98b5ff9a75c47fc3b0c85b16",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.5.attn_qkv.weight": {
+        "raw_sha256": "1cc8598ceb8145adf5165a1551c43efaa076dd134e20c080861536417db5391d",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.5.ffn_down_exps.weight": {
+        "raw_sha256": "91d51bfb2bfb288a4c3a4e6778019f24ecf1bdf3f9e4710e1d122c9372af5a8a",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.5.ffn_down_shexp.weight": {
+        "raw_sha256": "1fcf7c7de9a0ecba56870467cd0e8e3561ef5bbffe78f032ccbfd7c0a6eed0f8",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.5.ffn_gate_exps.weight": {
+        "raw_sha256": "a6938711fda90fc291f0bb5352650dae877e3d369349eb9690198df0ca826df2",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.5.ffn_gate_inp.weight": {
+        "raw_sha256": "278e17ff90f4b365abd4c8161f3308cd1fd8600c0afcfa0ada10394191bc0171",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.5.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "5ed9f5c8766f0bfe42cb4e8c3191422db9b0e157cfd22e3b999f11b4913347b1",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.5.ffn_gate_shexp.weight": {
+        "raw_sha256": "f55ad47ee67e2f78e22b1878c553319febcb7e92d8e5beb0c98ee6895a4483be",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.5.ffn_up_exps.weight": {
+        "raw_sha256": "84dc04945d19f5f29e0e70f639cdb5b757ec40c1178802d182ba8142f6a62572",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.5.ffn_up_shexp.weight": {
+        "raw_sha256": "ddee7f8cc8ee57a865e7d5d15fa52fc58d02535f4b4a5d38ceb8f69c95f627b9",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.5.post_attention_norm.weight": {
+        "raw_sha256": "e4e3f8da4e8c3c2fac9f6cf0c0b442a02fca060029d96fba519f11dac6047dac",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.5.ssm_a": {
+        "raw_sha256": "363458cc9343f4c55ac936e9f0cd3d916a7859863d3cc6ff3aec655d1e864753",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.5.ssm_alpha.weight": {
+        "raw_sha256": "af33cd83e64dc93d25c232006af9510518303979a35331dcf2ce9fa5353f3d0b",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.5.ssm_beta.weight": {
+        "raw_sha256": "8865982e37c26261d58e1aab34fc258ac35dfab5e380113e03eae3876b34d502",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.5.ssm_conv1d.weight": {
+        "raw_sha256": "e89e25d013818fbd41bd4952130874baecbe28617e52532053e3aeebd7f9e8d2",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.5.ssm_dt.bias": {
+        "raw_sha256": "c52cf2190aa7ea6e9ef7f7a37d168e1f04d4d9dba3a9950cc1987831511a85ce",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.5.ssm_norm.weight": {
+        "raw_sha256": "669bbad90cea1c5f037123c223e225bcb5e00c045252389c0349c2d8dc6c3742",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.5.ssm_out.weight": {
+        "raw_sha256": "c86c0ff85561895750635392643c2fa95fb42f85851af4bd2ea727f5aa316ca1",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.6.attn_gate.weight": {
+        "raw_sha256": "2ec48b2d4887da1061286d01bc0fefba6ea7b5b379ccf37fbe8376a33b0035bc",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.6.attn_norm.weight": {
+        "raw_sha256": "2005e855d0e4f52beb46899a86f6516df7e852c2d8f5ad4cb1575438db8b9570",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.6.attn_qkv.weight": {
+        "raw_sha256": "03d4288e546bbcebd01fc6e73337932103e3fcb0673bc39fc1f4d3a995dc2390",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.6.ffn_down_exps.weight": {
+        "raw_sha256": "fae09c20bea972d17791ed7e734c97fa78b0677c5242360afcb42874e32235dc",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.6.ffn_down_shexp.weight": {
+        "raw_sha256": "ebae663a7abd7c58fb37b5068ebb0fd1cf8982540b80c3ec9cd39fdb093a642d",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.6.ffn_gate_exps.weight": {
+        "raw_sha256": "ab54517505cda6176c3d2eef58b4d97db4becacdea07f04b8b1dded748b94062",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.6.ffn_gate_inp.weight": {
+        "raw_sha256": "9e8dbd19d201685175b82ba4edd5d339e3b96169e41024d8b2474486aade6060",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.6.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "545cfd0672dded48ee5a54163ca0d6474bb9aa43e2df687ef64786be99036a0c",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.6.ffn_gate_shexp.weight": {
+        "raw_sha256": "656b4afa44957616cb95e1ff53d1662091a1c2ef8b5fc8b7192f6d8f8c362256",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.6.ffn_up_exps.weight": {
+        "raw_sha256": "4099a2929b057ddbf0fbb9d90a6d1253f9b4274e6bd34b34c1d90a78920a1d3f",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.6.ffn_up_shexp.weight": {
+        "raw_sha256": "8e63f03b7d5d394ed8a42ec3d297d88abd0138ca8509a539b6af90f08ca092bf",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.6.post_attention_norm.weight": {
+        "raw_sha256": "8727fcd0a49bee5d873c941b9a939592aedfcde54561fa6437958e21775211ec",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.6.ssm_a": {
+        "raw_sha256": "fe7cea40b28f6911d7045fd9531c62fdb95737140389c3da4d2eac5e1eabf1b4",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.6.ssm_alpha.weight": {
+        "raw_sha256": "f07a1dea11eec88da43e48b0d6541198a3aeed2a7fa7de61b8a91afbccee8c71",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.6.ssm_beta.weight": {
+        "raw_sha256": "051dab62007c70c9e92f0e99f6176aa77011c80ececde41cc470d7194d55df67",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.6.ssm_conv1d.weight": {
+        "raw_sha256": "133d811148e8a0ca95bd037263fd5f949685a0a73e8121cc15dcc950a5caaf11",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.6.ssm_dt.bias": {
+        "raw_sha256": "3b399e6eff25615fa35a4b98714f7c1b22ece4592c57b242c02549ffbe6352d2",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.6.ssm_norm.weight": {
+        "raw_sha256": "76b910a5d6cdc14d348f4366c66fc1b473301054406fadb6cd22d2b69bbf1c65",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.6.ssm_out.weight": {
+        "raw_sha256": "ec84ec796a8ef70a407c74a1f9bd20034daf97a05cd26fef38279074a38e94d9",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.7.attn_k.weight": {
+        "raw_sha256": "0e2577c5e2ba21c5d21865157513eaf975e53a54319909635ef8bbbeb434b506",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.7.attn_k_norm.weight": {
+        "raw_sha256": "092870999fbac3bd37ac3ea7f2bd35b5731cad0b807bd4f936937b025c907b33",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.7.attn_norm.weight": {
+        "raw_sha256": "3229a37782036c3ec49bd4a02947beaa7a963e73b74c148e0369e235142a767c",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.7.attn_output.weight": {
+        "raw_sha256": "34726ed955763615d1a3b244a607095f1b1b0c5e1ba1604a2beb15954cfe3527",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.7.attn_q.weight": {
+        "raw_sha256": "584c43b74b386e796e5ca7d81d77c28c71f77efad9cdca44787db483c1bd6738",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.7.attn_q_norm.weight": {
+        "raw_sha256": "c796871f06e3ca742ada4ee551d6bc416914af7877497bb187c50fc6aa5015c6",
+        "shape": [
+          256
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.7.attn_v.weight": {
+        "raw_sha256": "4bad1d2cd1fe62aa467b355048e42bece20e82d2c0d9a585e18abc98dd6afc10",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.7.ffn_down_exps.weight": {
+        "raw_sha256": "96f4ee909da02f42971602b016f881b74b55b954ccd0af585f615710c54cbe70",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.7.ffn_down_shexp.weight": {
+        "raw_sha256": "c7d9daa1b0ab23fbba7f6576b84872f27d1e00bd578d5ee2d4733680da783e46",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.7.ffn_gate_exps.weight": {
+        "raw_sha256": "2bc1acf577c16bb1e8c5939a769fda1d913bb8d013a0eb8689c5125bf48267ce",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.7.ffn_gate_inp.weight": {
+        "raw_sha256": "a6cd83cf67c773448c0d6ab61a8554f64e87a38c36c500e75b496a1c516fba3e",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.7.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "f27d5410f5c9fca17a9756f7e8f7537f051e74dd664149d3ccddbe806eb299dd",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.7.ffn_gate_shexp.weight": {
+        "raw_sha256": "51380a64926db9f2e98003f9d1c6c2190f166ae5b06deb48a68a97863955365f",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.7.ffn_up_exps.weight": {
+        "raw_sha256": "acdff1f5cc1cc14161cd0520e4354226f81f53b96138792dcab9cd85cff17734",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.7.ffn_up_shexp.weight": {
+        "raw_sha256": "7a045632ee7b01b47f7b67b02d130e70215cc7b04f9f28a1e262bd10c20f0d91",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.7.post_attention_norm.weight": {
+        "raw_sha256": "001b8ba8dd7e1b59ca3be873d397622b4552eae02c797cd7d82a30066d521b79",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.8.attn_gate.weight": {
+        "raw_sha256": "a4e3c4d030ebf9c883f93f2f7e73d484648672022f9365143ed2503eb1140b58",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.8.attn_norm.weight": {
+        "raw_sha256": "be7706ddcc8eff7419b3bc740412903b640e803dcaafeb58eefe2647c9e67a24",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.8.attn_qkv.weight": {
+        "raw_sha256": "cb45189df28272d1c2ae2e5222e11ec927c96314bffecaa2e916059dcd91898a",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.8.ffn_down_exps.weight": {
+        "raw_sha256": "dbb386f4acf34909ac1e3197ec490431f89414fffefdce2b5d410c9a0aa635ea",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.8.ffn_down_shexp.weight": {
+        "raw_sha256": "14f5d9c2db1bab56164aad71a8620523e5b35145760ffcfcaacfe343e944fc77",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.8.ffn_gate_exps.weight": {
+        "raw_sha256": "c287269c45cf125d4c3b5660bd2dd62159f3e11cf3ebc18e1937d2e1b3be7853",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.8.ffn_gate_inp.weight": {
+        "raw_sha256": "cb1cded6357b92618ca744f297c1271e4699373419feb667d2cf4aa9d3cae299",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.8.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "59229dcaef4d608ed7bc91b1ae882140c7977ba984eb596825d1f01c51274c34",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.8.ffn_gate_shexp.weight": {
+        "raw_sha256": "4464b830870b1ca1e0a2752f2c2c076368c89364ef60f1e053242af15ea1c203",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.8.ffn_up_exps.weight": {
+        "raw_sha256": "8885ba495cfcaec8a9e037bd9de0fd3f942566f637afcba7756e01f73dd18465",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.8.ffn_up_shexp.weight": {
+        "raw_sha256": "1e8b5b40b7fbe61b095304cbbcff29f1c5bba7e5a0fc5ba72bee49a0edc269d0",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.8.post_attention_norm.weight": {
+        "raw_sha256": "0bc340df7c7f9a4dc78900269ccf3ff48bec0fa42454ac642f386d33b82b7f42",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.8.ssm_a": {
+        "raw_sha256": "273a603fbdcef728e8492df4be3a5bd766b34759ee90e2567e7b8ee6c387ec00",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.8.ssm_alpha.weight": {
+        "raw_sha256": "005c6283537fdc81e05f490ef26d32bcf8cf01ded34992f20dd3c2043b4ca0d5",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.8.ssm_beta.weight": {
+        "raw_sha256": "9a7428de62cb696ff69ec5670a1a507b9a7823cbad883f8d40cf96347e478d87",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.8.ssm_conv1d.weight": {
+        "raw_sha256": "c3383424e196965fe8bfe097ff74ca521c2319734b3d570e8d69c15f5aacbac4",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.8.ssm_dt.bias": {
+        "raw_sha256": "6ec42ea5b01cfbcfa913f71bb915871f9467f7933853ba9c959e65364b245610",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.8.ssm_norm.weight": {
+        "raw_sha256": "32cccdd46089251dde46adb05ebad9d7a218f7bddd53c5cdfa4aa836d668b7b7",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.8.ssm_out.weight": {
+        "raw_sha256": "0bb987c22156406e338524b6b886b4a6b18ec94541056a5bf7cc2a82b6b9bdc3",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.9.attn_gate.weight": {
+        "raw_sha256": "0f215d6e77ec86ced714ffbf698610ef433ba822a4b26d70451c26c1e6194c46",
+        "shape": [
+          2048,
+          4096
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.9.attn_norm.weight": {
+        "raw_sha256": "f17f3b2bc1e60d635be4bdd407158323463287e30633676cd17c54b352fb24dd",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.9.attn_qkv.weight": {
+        "raw_sha256": "40908634afc1a267f2481a3a4de4b156a6be119770a09bff3224d8f46a040370",
+        "shape": [
+          2048,
+          8192
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.9.ffn_down_exps.weight": {
+        "raw_sha256": "49402c2026b8bf1fabc6b73b5acda8d49a4ec4505a71c91983a7284c8293388a",
+        "shape": [
+          512,
+          2048,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.9.ffn_down_shexp.weight": {
+        "raw_sha256": "f603383a720285f3cddcda00ce176719270aeed7f6c705f8f3a79ba01d7615c9",
+        "shape": [
+          512,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.9.ffn_gate_exps.weight": {
+        "raw_sha256": "edc5c56e8d9f372fabe69c877fa74782532a3a55d9b59e2ee93bf00ef9c3fa8a",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.9.ffn_gate_inp.weight": {
+        "raw_sha256": "bccf12a6e1b9cfb81df8f9d91a87dc865af4031e84527e2d920e101ae7d61c68",
+        "shape": [
+          2048,
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.9.ffn_gate_inp_shexp.weight": {
+        "raw_sha256": "7c91eadcd32cb2893a0c4f817b1a1d60dd51a7b77bc46ebcac894ed27933cb7f",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.9.ffn_gate_shexp.weight": {
+        "raw_sha256": "696c3a993db46dd4d895a749762b7d00f5ab4f1d8e12b69da73b750ab5974034",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.9.ffn_up_exps.weight": {
+        "raw_sha256": "c3e49bcd2e31ba53acb78c8cff95c09cfbf76c555db829c1d2896f65a0078924",
+        "shape": [
+          2048,
+          512,
+          128
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.9.ffn_up_shexp.weight": {
+        "raw_sha256": "fccfd900f9e167ae9b8a0ae299c39e2d51cc55ef614611f450baa296c463b08c",
+        "shape": [
+          2048,
+          512
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.9.post_attention_norm.weight": {
+        "raw_sha256": "5c083ce12a55823dd653a35393ae40258d6f313c43eb3d2bca7b81c5e9ecc999",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.9.ssm_a": {
+        "raw_sha256": "bd1a84f6ee74815d7cc9fc9a26a4ff294f2360d5d780c2faaa86bfb4832e999a",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.9.ssm_alpha.weight": {
+        "raw_sha256": "eb35e2a05cab971a216e46f04d5711c37e7f8691104cd444847c937b0eeb87e6",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.9.ssm_beta.weight": {
+        "raw_sha256": "95821fd75f723a33762a5f619990a731360451ba4d7a5bef65c7ab63d324084b",
+        "shape": [
+          2048,
+          32
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "blk.9.ssm_conv1d.weight": {
+        "raw_sha256": "c188d78bfd845aaa597f4e1454b4dca9733feab983123a7f28ae41535505204e",
+        "shape": [
+          4,
+          8192
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.9.ssm_dt.bias": {
+        "raw_sha256": "01a15f26132a606760828c820deeb6bd78d247c8308713cb03472cad222a486a",
+        "shape": [
+          32
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.9.ssm_norm.weight": {
+        "raw_sha256": "3b1c9f45dc27d550847d7b60922a0626867abf0d35550496f4e7e99c2973702c",
+        "shape": [
+          128
+        ],
+        "tensor_type": "F32"
+      },
+      "blk.9.ssm_out.weight": {
+        "raw_sha256": "2c094ece05fb587e5b78fc9640448acaf3832ac2c174e51d33634aa9056b5bfd",
+        "shape": [
+          4096,
+          2048
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "output.weight": {
+        "raw_sha256": "d39064714a29049c8afbb96307188dc45828bc6b1140f6b2efe7873ab31ef19d",
+        "shape": [
+          2048,
+          248320
+        ],
+        "tensor_type": "Q8_0"
+      },
+      "output_norm.weight": {
+        "raw_sha256": "19f7f87ea054c19dee992e4d1ce5a2d3468b067b9f300fc031e58048f1d750a0",
+        "shape": [
+          2048
+        ],
+        "tensor_type": "F32"
+      },
+      "token_embd.weight": {
+        "raw_sha256": "a1c8a86668c05ad6392b1e55bb7b076e27a0e20eb1e553ab46df4c18f2d0191f",
+        "shape": [
+          2048,
+          248320
+        ],
+        "tensor_type": "Q8_0"
+      }
+    },
+    "source_groups": [
+      [
+        "token_embd.weight",
+        "blk.0.attn_qkv.weight",
+        "blk.0.attn_gate.weight"
+      ],
+      [
+        "blk.0.ssm_out.weight",
+        "blk.0.ffn_gate_exps.weight",
+        "blk.0.ffn_up_exps.weight",
+        "blk.1.attn_qkv.weight",
+        "blk.1.attn_gate.weight",
+        "blk.1.ssm_out.weight",
+        "blk.1.ffn_down_exps.weight"
+      ],
+      [
+        "blk.1.ffn_gate_exps.weight",
+        "blk.1.ffn_up_exps.weight",
+        "blk.0.attn_norm.weight",
+        "blk.0.ssm_a",
+        "blk.0.ssm_conv1d.weight",
+        "blk.0.ssm_dt.bias",
+        "blk.0.ssm_alpha.weight",
+        "blk.0.ssm_beta.weight",
+        "blk.0.ssm_norm.weight",
+        "blk.0.ffn_down_exps.weight",
+        "blk.0.ffn_gate_inp.weight",
+        "blk.0.ffn_down_shexp.weight",
+        "blk.0.ffn_gate_shexp.weight",
+        "blk.0.ffn_up_shexp.weight",
+        "blk.0.ffn_gate_inp_shexp.weight",
+        "blk.0.post_attention_norm.weight",
+        "blk.1.attn_norm.weight",
+        "blk.1.ssm_a",
+        "blk.1.ssm_conv1d.weight",
+        "blk.1.ssm_dt.bias",
+        "blk.1.ssm_alpha.weight",
+        "blk.1.ssm_beta.weight",
+        "blk.1.ssm_norm.weight",
+        "blk.1.ffn_gate_inp.weight",
+        "blk.1.ffn_down_shexp.weight",
+        "blk.1.ffn_gate_shexp.weight",
+        "blk.1.ffn_up_shexp.weight",
+        "blk.1.ffn_gate_inp_shexp.weight",
+        "blk.1.post_attention_norm.weight",
+        "blk.2.attn_norm.weight",
+        "blk.2.ssm_a",
+        "blk.2.ssm_conv1d.weight",
+        "blk.2.ssm_dt.bias",
+        "blk.2.ssm_alpha.weight",
+        "blk.2.ssm_beta.weight",
+        "blk.2.attn_qkv.weight",
+        "blk.2.attn_gate.weight",
+        "blk.2.ssm_norm.weight",
+        "blk.2.ssm_out.weight"
+      ],
+      [
+        "blk.2.ffn_down_exps.weight",
+        "blk.2.ffn_gate_exps.weight",
+        "blk.2.ffn_up_exps.weight",
+        "blk.2.ffn_gate_inp.weight",
+        "blk.2.ffn_down_shexp.weight",
+        "blk.2.ffn_gate_shexp.weight",
+        "blk.2.ffn_up_shexp.weight",
+        "blk.2.ffn_gate_inp_shexp.weight",
+        "blk.2.post_attention_norm.weight",
+        "blk.3.attn_norm.weight"
+      ],
+      [
+        "blk.3.ffn_down_exps.weight",
+        "blk.3.ffn_gate_exps.weight",
+        "blk.3.ffn_up_exps.weight",
+        "blk.3.ffn_gate_inp.weight",
+        "blk.3.ffn_down_shexp.weight",
+        "blk.3.ffn_gate_shexp.weight",
+        "blk.3.ffn_up_shexp.weight",
+        "blk.3.ffn_gate_inp_shexp.weight",
+        "blk.3.post_attention_norm.weight",
+        "blk.3.attn_k_norm.weight",
+        "blk.3.attn_k.weight",
+        "blk.3.attn_output.weight",
+        "blk.3.attn_q_norm.weight",
+        "blk.3.attn_q.weight",
+        "blk.3.attn_v.weight",
+        "blk.4.attn_norm.weight",
+        "blk.4.ssm_a",
+        "blk.4.ssm_conv1d.weight",
+        "blk.4.ssm_dt.bias",
+        "blk.4.ssm_alpha.weight",
+        "blk.4.ssm_beta.weight",
+        "blk.4.attn_qkv.weight",
+        "blk.4.attn_gate.weight",
+        "blk.4.ssm_norm.weight",
+        "blk.4.ssm_out.weight"
+      ],
+      [
+        "blk.4.ffn_down_exps.weight",
+        "blk.4.ffn_gate_exps.weight",
+        "blk.4.ffn_up_exps.weight",
+        "blk.4.ffn_gate_inp.weight",
+        "blk.4.ffn_down_shexp.weight",
+        "blk.4.ffn_gate_shexp.weight",
+        "blk.4.ffn_up_shexp.weight",
+        "blk.4.ffn_gate_inp_shexp.weight",
+        "blk.4.post_attention_norm.weight",
+        "blk.5.attn_norm.weight",
+        "blk.5.ssm_a",
+        "blk.5.ssm_conv1d.weight",
+        "blk.5.ssm_dt.bias",
+        "blk.5.ssm_alpha.weight",
+        "blk.5.ssm_beta.weight",
+        "blk.5.attn_qkv.weight",
+        "blk.5.attn_gate.weight",
+        "blk.5.ssm_norm.weight",
+        "blk.5.ssm_out.weight"
+      ],
+      [
+        "blk.5.ffn_down_exps.weight",
+        "blk.5.ffn_gate_exps.weight",
+        "blk.5.ffn_up_exps.weight",
+        "blk.5.ffn_gate_inp.weight",
+        "blk.5.ffn_down_shexp.weight",
+        "blk.5.ffn_gate_shexp.weight",
+        "blk.5.ffn_up_shexp.weight",
+        "blk.5.ffn_gate_inp_shexp.weight",
+        "blk.5.post_attention_norm.weight",
+        "blk.6.attn_norm.weight",
+        "blk.6.ssm_a",
+        "blk.6.ssm_conv1d.weight",
+        "blk.6.ssm_dt.bias",
+        "blk.6.ssm_alpha.weight",
+        "blk.6.ssm_beta.weight",
+        "blk.6.attn_qkv.weight",
+        "blk.6.attn_gate.weight",
+        "blk.6.ssm_norm.weight",
+        "blk.6.ssm_out.weight"
+      ],
+      [
+        "blk.6.ffn_down_exps.weight",
+        "blk.6.ffn_gate_exps.weight",
+        "blk.6.ffn_up_exps.weight",
+        "blk.6.ffn_gate_inp.weight",
+        "blk.6.ffn_down_shexp.weight",
+        "blk.6.ffn_gate_shexp.weight",
+        "blk.6.ffn_up_shexp.weight",
+        "blk.6.ffn_gate_inp_shexp.weight",
+        "blk.6.post_attention_norm.weight",
+        "blk.7.attn_norm.weight"
+      ],
+      [
+        "blk.7.ffn_down_exps.weight",
+        "blk.7.ffn_gate_exps.weight",
+        "blk.7.ffn_up_exps.weight",
+        "blk.7.ffn_gate_inp.weight",
+        "blk.7.ffn_down_shexp.weight",
+        "blk.7.ffn_gate_shexp.weight",
+        "blk.7.ffn_up_shexp.weight",
+        "blk.7.ffn_gate_inp_shexp.weight",
+        "blk.7.post_attention_norm.weight",
+        "blk.7.attn_k_norm.weight",
+        "blk.7.attn_k.weight",
+        "blk.7.attn_output.weight",
+        "blk.7.attn_q_norm.weight",
+        "blk.7.attn_q.weight",
+        "blk.7.attn_v.weight",
+        "blk.10.attn_qkv.weight",
+        "blk.10.attn_gate.weight",
+        "blk.10.ssm_out.weight"
+      ],
+      [
+        "blk.10.ffn_down_exps.weight",
+        "blk.8.attn_qkv.weight",
+        "blk.8.attn_gate.weight",
+        "blk.8.ssm_out.weight",
+        "blk.8.ffn_down_exps.weight",
+        "blk.8.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.8.ffn_up_exps.weight",
+        "blk.9.attn_qkv.weight",
+        "blk.9.attn_gate.weight",
+        "blk.9.ssm_out.weight",
+        "blk.9.ffn_down_exps.weight",
+        "blk.9.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.9.ffn_up_exps.weight",
+        "blk.10.attn_norm.weight",
+        "blk.10.ssm_a",
+        "blk.10.ssm_conv1d.weight",
+        "blk.10.ssm_dt.bias",
+        "blk.10.ssm_alpha.weight",
+        "blk.10.ssm_beta.weight",
+        "blk.10.ssm_norm.weight",
+        "blk.10.ffn_gate_exps.weight",
+        "blk.10.ffn_up_exps.weight",
+        "blk.10.ffn_gate_inp.weight",
+        "blk.10.ffn_down_shexp.weight",
+        "blk.10.ffn_gate_shexp.weight",
+        "blk.10.ffn_up_shexp.weight",
+        "blk.10.ffn_gate_inp_shexp.weight",
+        "blk.10.post_attention_norm.weight",
+        "blk.8.attn_norm.weight",
+        "blk.8.ssm_a",
+        "blk.8.ssm_conv1d.weight",
+        "blk.8.ssm_dt.bias",
+        "blk.8.ssm_alpha.weight",
+        "blk.8.ssm_beta.weight",
+        "blk.8.ssm_norm.weight",
+        "blk.8.ffn_gate_inp.weight",
+        "blk.8.ffn_down_shexp.weight",
+        "blk.8.ffn_gate_shexp.weight",
+        "blk.8.ffn_up_shexp.weight",
+        "blk.8.ffn_gate_inp_shexp.weight",
+        "blk.8.post_attention_norm.weight",
+        "blk.9.attn_norm.weight",
+        "blk.9.ssm_a",
+        "blk.9.ssm_conv1d.weight",
+        "blk.9.ssm_dt.bias",
+        "blk.9.ssm_alpha.weight",
+        "blk.9.ssm_beta.weight",
+        "blk.9.ssm_norm.weight",
+        "blk.9.ffn_gate_inp.weight",
+        "blk.9.ffn_down_shexp.weight",
+        "blk.9.ffn_gate_shexp.weight",
+        "blk.9.ffn_up_shexp.weight",
+        "blk.9.ffn_gate_inp_shexp.weight",
+        "blk.9.post_attention_norm.weight"
+      ],
+      [
+        "blk.11.ffn_gate_exps.weight",
+        "blk.11.ffn_up_exps.weight",
+        "blk.11.attn_k.weight",
+        "blk.11.attn_output.weight",
+        "blk.11.attn_q.weight",
+        "blk.11.attn_v.weight",
+        "blk.12.attn_qkv.weight",
+        "blk.12.attn_gate.weight",
+        "blk.12.ssm_out.weight",
+        "blk.12.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.12.ffn_up_exps.weight",
+        "blk.13.attn_qkv.weight",
+        "blk.13.attn_gate.weight",
+        "blk.13.ssm_out.weight",
+        "blk.13.ffn_down_exps.weight",
+        "blk.13.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.13.ffn_up_exps.weight",
+        "blk.11.attn_norm.weight",
+        "blk.11.ffn_down_exps.weight",
+        "blk.11.ffn_gate_inp.weight",
+        "blk.11.ffn_down_shexp.weight",
+        "blk.11.ffn_gate_shexp.weight",
+        "blk.11.ffn_up_shexp.weight",
+        "blk.11.ffn_gate_inp_shexp.weight",
+        "blk.11.post_attention_norm.weight",
+        "blk.11.attn_k_norm.weight",
+        "blk.11.attn_q_norm.weight",
+        "blk.12.attn_norm.weight",
+        "blk.12.ssm_a",
+        "blk.12.ssm_conv1d.weight",
+        "blk.12.ssm_dt.bias",
+        "blk.12.ssm_alpha.weight",
+        "blk.12.ssm_beta.weight",
+        "blk.12.ssm_norm.weight",
+        "blk.12.ffn_down_exps.weight",
+        "blk.12.ffn_gate_inp.weight",
+        "blk.12.ffn_down_shexp.weight",
+        "blk.12.ffn_gate_shexp.weight",
+        "blk.12.ffn_up_shexp.weight",
+        "blk.12.ffn_gate_inp_shexp.weight",
+        "blk.12.post_attention_norm.weight",
+        "blk.13.attn_norm.weight",
+        "blk.13.ssm_a",
+        "blk.13.ssm_conv1d.weight",
+        "blk.13.ssm_dt.bias",
+        "blk.13.ssm_alpha.weight",
+        "blk.13.ssm_beta.weight",
+        "blk.13.ssm_norm.weight",
+        "blk.13.ffn_gate_inp.weight",
+        "blk.13.ffn_down_shexp.weight",
+        "blk.13.ffn_gate_shexp.weight",
+        "blk.13.ffn_up_shexp.weight",
+        "blk.13.ffn_gate_inp_shexp.weight",
+        "blk.13.post_attention_norm.weight",
+        "blk.14.attn_qkv.weight",
+        "blk.14.attn_gate.weight",
+        "blk.14.ssm_out.weight"
+      ],
+      [
+        "blk.14.ffn_down_exps.weight",
+        "blk.14.ffn_gate_exps.weight",
+        "blk.14.ffn_up_exps.weight",
+        "blk.15.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.15.ffn_up_exps.weight",
+        "blk.15.attn_k.weight",
+        "blk.15.attn_output.weight",
+        "blk.15.attn_q.weight",
+        "blk.15.attn_v.weight",
+        "blk.16.attn_qkv.weight",
+        "blk.16.attn_gate.weight",
+        "blk.16.ssm_out.weight",
+        "blk.16.ffn_gate_exps.weight",
+        "blk.16.ffn_up_exps.weight",
+        "blk.14.attn_norm.weight",
+        "blk.14.ssm_a",
+        "blk.14.ssm_conv1d.weight",
+        "blk.14.ssm_dt.bias",
+        "blk.14.ssm_alpha.weight",
+        "blk.14.ssm_beta.weight",
+        "blk.14.ssm_norm.weight",
+        "blk.14.ffn_gate_inp.weight",
+        "blk.14.ffn_down_shexp.weight",
+        "blk.14.ffn_gate_shexp.weight",
+        "blk.14.ffn_up_shexp.weight",
+        "blk.14.ffn_gate_inp_shexp.weight",
+        "blk.14.post_attention_norm.weight",
+        "blk.15.attn_norm.weight"
+      ],
+      [
+        "blk.15.ffn_down_exps.weight",
+        "blk.15.ffn_gate_inp.weight",
+        "blk.15.ffn_down_shexp.weight",
+        "blk.15.ffn_gate_shexp.weight",
+        "blk.15.ffn_up_shexp.weight",
+        "blk.15.ffn_gate_inp_shexp.weight",
+        "blk.15.post_attention_norm.weight",
+        "blk.15.attn_k_norm.weight",
+        "blk.15.attn_q_norm.weight",
+        "blk.16.attn_norm.weight",
+        "blk.16.ssm_a",
+        "blk.16.ssm_conv1d.weight",
+        "blk.16.ssm_dt.bias",
+        "blk.16.ssm_alpha.weight",
+        "blk.16.ssm_beta.weight",
+        "blk.16.ssm_norm.weight",
+        "blk.16.ffn_down_exps.weight",
+        "blk.16.ffn_gate_inp.weight",
+        "blk.16.ffn_down_shexp.weight",
+        "blk.16.ffn_gate_shexp.weight",
+        "blk.16.ffn_up_shexp.weight",
+        "blk.16.ffn_gate_inp_shexp.weight",
+        "blk.16.post_attention_norm.weight",
+        "blk.17.attn_qkv.weight",
+        "blk.17.attn_gate.weight",
+        "blk.17.ssm_out.weight",
+        "blk.17.ffn_down_exps.weight"
+      ],
+      [
+        "blk.17.ffn_gate_exps.weight",
+        "blk.17.ffn_up_exps.weight",
+        "blk.18.attn_qkv.weight",
+        "blk.18.attn_gate.weight",
+        "blk.18.ssm_out.weight",
+        "blk.18.ffn_down_exps.weight"
+      ],
+      [
+        "blk.19.ffn_gate_exps.weight",
+        "blk.19.ffn_up_exps.weight",
+        "blk.19.attn_k.weight",
+        "blk.19.attn_output.weight",
+        "blk.19.attn_q.weight",
+        "blk.19.attn_v.weight",
+        "blk.17.attn_norm.weight",
+        "blk.17.ssm_a",
+        "blk.17.ssm_conv1d.weight",
+        "blk.17.ssm_dt.bias",
+        "blk.17.ssm_alpha.weight",
+        "blk.17.ssm_beta.weight",
+        "blk.17.ssm_norm.weight",
+        "blk.17.ffn_gate_inp.weight",
+        "blk.17.ffn_down_shexp.weight",
+        "blk.17.ffn_gate_shexp.weight",
+        "blk.17.ffn_up_shexp.weight",
+        "blk.17.ffn_gate_inp_shexp.weight",
+        "blk.17.post_attention_norm.weight",
+        "blk.18.attn_norm.weight",
+        "blk.18.ssm_a",
+        "blk.18.ssm_conv1d.weight",
+        "blk.18.ssm_dt.bias",
+        "blk.18.ssm_alpha.weight",
+        "blk.18.ssm_beta.weight",
+        "blk.18.ssm_norm.weight",
+        "blk.18.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.18.ffn_up_exps.weight",
+        "blk.18.ffn_gate_inp.weight",
+        "blk.18.ffn_down_shexp.weight",
+        "blk.18.ffn_gate_shexp.weight",
+        "blk.18.ffn_up_shexp.weight",
+        "blk.18.ffn_gate_inp_shexp.weight",
+        "blk.18.post_attention_norm.weight",
+        "blk.19.attn_norm.weight",
+        "blk.19.ffn_down_exps.weight",
+        "blk.19.ffn_gate_inp.weight",
+        "blk.19.ffn_down_shexp.weight",
+        "blk.19.ffn_gate_shexp.weight",
+        "blk.19.ffn_up_shexp.weight",
+        "blk.19.ffn_gate_inp_shexp.weight",
+        "blk.19.post_attention_norm.weight",
+        "blk.19.attn_k_norm.weight",
+        "blk.19.attn_q_norm.weight",
+        "blk.20.attn_qkv.weight",
+        "blk.20.attn_gate.weight",
+        "blk.20.ssm_out.weight",
+        "blk.20.ffn_down_exps.weight"
+      ],
+      [
+        "blk.20.ffn_gate_exps.weight",
+        "blk.20.ffn_up_exps.weight",
+        "blk.21.attn_qkv.weight",
+        "blk.21.attn_gate.weight",
+        "blk.21.ssm_out.weight",
+        "blk.21.ffn_down_exps.weight",
+        "blk.22.attn_qkv.weight",
+        "blk.22.attn_gate.weight",
+        "blk.22.ssm_out.weight"
+      ],
+      [
+        "blk.22.ffn_gate_exps.weight",
+        "blk.22.ffn_up_exps.weight",
+        "blk.20.attn_norm.weight",
+        "blk.20.ssm_a",
+        "blk.20.ssm_conv1d.weight",
+        "blk.20.ssm_dt.bias",
+        "blk.20.ssm_alpha.weight",
+        "blk.20.ssm_beta.weight",
+        "blk.20.ssm_norm.weight",
+        "blk.20.ffn_gate_inp.weight",
+        "blk.20.ffn_down_shexp.weight",
+        "blk.20.ffn_gate_shexp.weight",
+        "blk.20.ffn_up_shexp.weight",
+        "blk.20.ffn_gate_inp_shexp.weight",
+        "blk.20.post_attention_norm.weight",
+        "blk.21.attn_norm.weight",
+        "blk.21.ssm_a",
+        "blk.21.ssm_conv1d.weight",
+        "blk.21.ssm_dt.bias",
+        "blk.21.ssm_alpha.weight",
+        "blk.21.ssm_beta.weight",
+        "blk.21.ssm_norm.weight",
+        "blk.21.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.21.ffn_up_exps.weight",
+        "blk.21.ffn_gate_inp.weight",
+        "blk.21.ffn_down_shexp.weight",
+        "blk.21.ffn_gate_shexp.weight",
+        "blk.21.ffn_up_shexp.weight",
+        "blk.21.ffn_gate_inp_shexp.weight",
+        "blk.21.post_attention_norm.weight",
+        "blk.22.attn_norm.weight",
+        "blk.22.ssm_a",
+        "blk.22.ssm_conv1d.weight",
+        "blk.22.ssm_dt.bias",
+        "blk.22.ssm_alpha.weight",
+        "blk.22.ssm_beta.weight",
+        "blk.22.ssm_norm.weight",
+        "blk.22.ffn_down_exps.weight",
+        "blk.22.ffn_gate_inp.weight",
+        "blk.22.ffn_down_shexp.weight",
+        "blk.22.ffn_gate_shexp.weight",
+        "blk.22.ffn_up_shexp.weight",
+        "blk.22.ffn_gate_inp_shexp.weight",
+        "blk.22.post_attention_norm.weight",
+        "blk.23.ffn_down_exps.weight"
+      ],
+      [
+        "blk.23.ffn_gate_exps.weight",
+        "blk.23.ffn_up_exps.weight",
+        "blk.23.attn_k.weight",
+        "blk.23.attn_output.weight",
+        "blk.23.attn_q.weight",
+        "blk.23.attn_v.weight",
+        "blk.24.attn_qkv.weight",
+        "blk.24.attn_gate.weight",
+        "blk.24.ssm_out.weight",
+        "blk.24.ffn_down_exps.weight"
+      ],
+      [
+        "blk.24.ffn_gate_exps.weight",
+        "blk.24.ffn_up_exps.weight",
+        "blk.25.attn_qkv.weight",
+        "blk.25.attn_gate.weight",
+        "blk.25.ssm_out.weight",
+        "blk.25.ffn_down_exps.weight",
+        "blk.23.attn_norm.weight",
+        "blk.23.ffn_gate_inp.weight",
+        "blk.23.ffn_down_shexp.weight",
+        "blk.23.ffn_gate_shexp.weight",
+        "blk.23.ffn_up_shexp.weight",
+        "blk.23.ffn_gate_inp_shexp.weight",
+        "blk.23.post_attention_norm.weight",
+        "blk.23.attn_k_norm.weight",
+        "blk.23.attn_q_norm.weight",
+        "blk.24.attn_norm.weight",
+        "blk.24.ssm_a",
+        "blk.24.ssm_conv1d.weight",
+        "blk.24.ssm_dt.bias",
+        "blk.24.ssm_alpha.weight",
+        "blk.24.ssm_beta.weight",
+        "blk.24.ssm_norm.weight",
+        "blk.24.ffn_gate_inp.weight",
+        "blk.24.ffn_down_shexp.weight",
+        "blk.24.ffn_gate_shexp.weight",
+        "blk.24.ffn_up_shexp.weight",
+        "blk.24.ffn_gate_inp_shexp.weight",
+        "blk.24.post_attention_norm.weight",
+        "blk.25.attn_norm.weight",
+        "blk.25.ssm_a",
+        "blk.25.ssm_conv1d.weight",
+        "blk.25.ssm_dt.bias",
+        "blk.25.ssm_alpha.weight",
+        "blk.25.ssm_beta.weight",
+        "blk.25.ssm_norm.weight"
+      ],
+      [
+        "blk.25.ffn_gate_exps.weight",
+        "blk.25.ffn_up_exps.weight",
+        "blk.25.ffn_gate_inp.weight",
+        "blk.25.ffn_down_shexp.weight",
+        "blk.25.ffn_gate_shexp.weight",
+        "blk.25.ffn_up_shexp.weight",
+        "blk.25.ffn_gate_inp_shexp.weight",
+        "blk.25.post_attention_norm.weight",
+        "blk.26.attn_qkv.weight",
+        "blk.26.attn_gate.weight",
+        "blk.26.ssm_out.weight",
+        "blk.26.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.26.ffn_up_exps.weight",
+        "blk.27.ffn_gate_exps.weight",
+        "blk.27.ffn_up_exps.weight",
+        "blk.27.attn_k.weight",
+        "blk.27.attn_output.weight",
+        "blk.27.attn_q.weight",
+        "blk.27.attn_v.weight",
+        "blk.28.attn_qkv.weight",
+        "blk.28.attn_gate.weight",
+        "blk.28.ssm_out.weight"
+      ],
+      [
+        "blk.28.ffn_down_exps.weight",
+        "blk.28.ffn_gate_exps.weight",
+        "blk.28.ffn_up_exps.weight",
+        "blk.26.attn_norm.weight",
+        "blk.26.ssm_a",
+        "blk.26.ssm_conv1d.weight",
+        "blk.26.ssm_dt.bias",
+        "blk.26.ssm_alpha.weight",
+        "blk.26.ssm_beta.weight",
+        "blk.26.ssm_norm.weight"
+      ],
+      [
+        "blk.26.ffn_down_exps.weight",
+        "blk.26.ffn_gate_inp.weight",
+        "blk.26.ffn_down_shexp.weight",
+        "blk.26.ffn_gate_shexp.weight",
+        "blk.26.ffn_up_shexp.weight",
+        "blk.26.ffn_gate_inp_shexp.weight",
+        "blk.26.post_attention_norm.weight",
+        "blk.27.attn_norm.weight",
+        "blk.27.ffn_down_exps.weight",
+        "blk.27.ffn_gate_inp.weight",
+        "blk.27.ffn_down_shexp.weight",
+        "blk.27.ffn_gate_shexp.weight",
+        "blk.27.ffn_up_shexp.weight",
+        "blk.27.ffn_gate_inp_shexp.weight",
+        "blk.27.post_attention_norm.weight",
+        "blk.27.attn_k_norm.weight",
+        "blk.27.attn_q_norm.weight",
+        "blk.28.attn_norm.weight",
+        "blk.28.ssm_a",
+        "blk.28.ssm_conv1d.weight",
+        "blk.28.ssm_dt.bias",
+        "blk.28.ssm_alpha.weight",
+        "blk.28.ssm_beta.weight",
+        "blk.28.ssm_norm.weight",
+        "blk.28.ffn_gate_inp.weight",
+        "blk.28.ffn_down_shexp.weight",
+        "blk.28.ffn_gate_shexp.weight",
+        "blk.28.ffn_up_shexp.weight",
+        "blk.28.ffn_gate_inp_shexp.weight",
+        "blk.28.post_attention_norm.weight",
+        "blk.29.attn_qkv.weight",
+        "blk.29.attn_gate.weight",
+        "blk.29.ssm_out.weight",
+        "blk.29.ffn_down_exps.weight",
+        "blk.30.attn_qkv.weight",
+        "blk.30.attn_gate.weight",
+        "blk.30.ssm_out.weight"
+      ],
+      [
+        "blk.30.ffn_gate_exps.weight",
+        "blk.30.ffn_up_exps.weight",
+        "blk.31.ffn_down_exps.weight",
+        "blk.31.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.31.ffn_up_exps.weight",
+        "blk.31.attn_k.weight",
+        "blk.31.attn_output.weight",
+        "blk.31.attn_q.weight",
+        "blk.31.attn_v.weight",
+        "blk.29.attn_norm.weight",
+        "blk.29.ssm_a",
+        "blk.29.ssm_conv1d.weight",
+        "blk.29.ssm_dt.bias",
+        "blk.29.ssm_alpha.weight",
+        "blk.29.ssm_beta.weight",
+        "blk.29.ssm_norm.weight",
+        "blk.29.ffn_gate_exps.weight",
+        "blk.29.ffn_up_exps.weight",
+        "blk.29.ffn_gate_inp.weight",
+        "blk.29.ffn_down_shexp.weight",
+        "blk.29.ffn_gate_shexp.weight",
+        "blk.29.ffn_up_shexp.weight",
+        "blk.29.ffn_gate_inp_shexp.weight",
+        "blk.29.post_attention_norm.weight",
+        "blk.30.attn_norm.weight",
+        "blk.30.ssm_a",
+        "blk.30.ssm_conv1d.weight",
+        "blk.30.ssm_dt.bias",
+        "blk.30.ssm_alpha.weight",
+        "blk.30.ssm_beta.weight",
+        "blk.30.ssm_norm.weight"
+      ],
+      [
+        "blk.30.ffn_down_exps.weight",
+        "blk.30.ffn_gate_inp.weight",
+        "blk.30.ffn_down_shexp.weight",
+        "blk.30.ffn_gate_shexp.weight",
+        "blk.30.ffn_up_shexp.weight",
+        "blk.30.ffn_gate_inp_shexp.weight",
+        "blk.30.post_attention_norm.weight",
+        "blk.31.attn_norm.weight",
+        "blk.31.ffn_gate_inp.weight",
+        "blk.31.ffn_down_shexp.weight",
+        "blk.31.ffn_gate_shexp.weight",
+        "blk.31.ffn_up_shexp.weight",
+        "blk.31.ffn_gate_inp_shexp.weight",
+        "blk.31.post_attention_norm.weight",
+        "blk.31.attn_k_norm.weight",
+        "blk.31.attn_q_norm.weight",
+        "blk.32.attn_norm.weight",
+        "blk.32.ssm_a",
+        "blk.32.ssm_conv1d.weight",
+        "blk.32.ssm_dt.bias",
+        "blk.32.ssm_alpha.weight",
+        "blk.32.ssm_beta.weight",
+        "blk.32.attn_qkv.weight",
+        "blk.32.attn_gate.weight",
+        "blk.32.ssm_norm.weight",
+        "blk.32.ssm_out.weight",
+        "blk.32.ffn_down_exps.weight",
+        "blk.32.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.32.ffn_up_exps.weight",
+        "blk.32.ffn_gate_inp.weight",
+        "blk.32.ffn_down_shexp.weight",
+        "blk.32.ffn_gate_shexp.weight",
+        "blk.32.ffn_up_shexp.weight",
+        "blk.32.ffn_gate_inp_shexp.weight",
+        "blk.32.post_attention_norm.weight",
+        "blk.33.attn_norm.weight",
+        "blk.33.ssm_a",
+        "blk.33.ssm_conv1d.weight",
+        "blk.33.ssm_dt.bias",
+        "blk.33.ssm_alpha.weight",
+        "blk.33.ssm_beta.weight",
+        "blk.33.attn_qkv.weight",
+        "blk.33.attn_gate.weight",
+        "blk.33.ssm_norm.weight",
+        "blk.33.ssm_out.weight",
+        "blk.33.ffn_down_exps.weight",
+        "blk.33.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.33.ffn_up_exps.weight",
+        "blk.33.ffn_gate_inp.weight",
+        "blk.33.ffn_down_shexp.weight",
+        "blk.33.ffn_gate_shexp.weight",
+        "blk.33.ffn_up_shexp.weight",
+        "blk.33.ffn_gate_inp_shexp.weight",
+        "blk.33.post_attention_norm.weight",
+        "blk.34.attn_norm.weight",
+        "blk.34.ssm_a",
+        "blk.34.ssm_conv1d.weight",
+        "blk.34.ssm_dt.bias",
+        "blk.34.ssm_alpha.weight",
+        "blk.34.ssm_beta.weight",
+        "blk.34.attn_qkv.weight",
+        "blk.34.attn_gate.weight",
+        "blk.34.ssm_norm.weight",
+        "blk.34.ssm_out.weight",
+        "blk.34.ffn_down_exps.weight",
+        "blk.34.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.34.ffn_up_exps.weight",
+        "blk.34.ffn_gate_inp.weight",
+        "blk.34.ffn_down_shexp.weight",
+        "blk.34.ffn_gate_shexp.weight",
+        "blk.34.ffn_up_shexp.weight",
+        "blk.34.ffn_gate_inp_shexp.weight",
+        "blk.34.post_attention_norm.weight",
+        "blk.35.attn_norm.weight",
+        "blk.35.ffn_down_exps.weight",
+        "blk.35.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.35.ffn_up_exps.weight",
+        "blk.35.ffn_gate_inp.weight",
+        "blk.35.ffn_down_shexp.weight",
+        "blk.35.ffn_gate_shexp.weight",
+        "blk.35.ffn_up_shexp.weight",
+        "blk.35.ffn_gate_inp_shexp.weight",
+        "blk.35.post_attention_norm.weight",
+        "blk.35.attn_k_norm.weight",
+        "blk.35.attn_k.weight",
+        "blk.35.attn_output.weight",
+        "blk.35.attn_q_norm.weight",
+        "blk.35.attn_q.weight",
+        "blk.35.attn_v.weight",
+        "blk.36.attn_norm.weight",
+        "blk.36.ssm_a",
+        "blk.36.ssm_conv1d.weight",
+        "blk.36.ssm_dt.bias",
+        "blk.36.ssm_alpha.weight",
+        "blk.36.ssm_beta.weight",
+        "blk.36.attn_qkv.weight",
+        "blk.36.attn_gate.weight",
+        "blk.36.ssm_norm.weight",
+        "blk.36.ssm_out.weight",
+        "blk.36.ffn_down_exps.weight",
+        "blk.36.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.36.ffn_up_exps.weight",
+        "blk.36.ffn_gate_inp.weight",
+        "blk.36.ffn_down_shexp.weight",
+        "blk.36.ffn_gate_shexp.weight",
+        "blk.36.ffn_up_shexp.weight",
+        "blk.36.ffn_gate_inp_shexp.weight",
+        "blk.36.post_attention_norm.weight",
+        "blk.37.attn_norm.weight",
+        "blk.37.ssm_a",
+        "blk.37.ssm_conv1d.weight",
+        "blk.37.ssm_dt.bias",
+        "blk.37.ssm_alpha.weight",
+        "blk.37.ssm_beta.weight",
+        "blk.37.attn_qkv.weight",
+        "blk.37.attn_gate.weight",
+        "blk.37.ssm_norm.weight",
+        "blk.37.ssm_out.weight",
+        "blk.37.ffn_down_exps.weight",
+        "blk.37.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.37.ffn_up_exps.weight",
+        "blk.37.ffn_gate_inp.weight",
+        "blk.37.ffn_down_shexp.weight",
+        "blk.37.ffn_gate_shexp.weight",
+        "blk.37.ffn_up_shexp.weight",
+        "blk.37.ffn_gate_inp_shexp.weight",
+        "blk.37.post_attention_norm.weight",
+        "blk.38.attn_norm.weight",
+        "blk.38.ssm_a",
+        "blk.38.ssm_conv1d.weight",
+        "blk.38.ssm_dt.bias",
+        "blk.38.ssm_alpha.weight",
+        "blk.38.ssm_beta.weight",
+        "blk.38.attn_qkv.weight",
+        "blk.38.attn_gate.weight",
+        "blk.38.ssm_norm.weight",
+        "blk.38.ssm_out.weight",
+        "blk.38.ffn_down_exps.weight",
+        "blk.38.ffn_gate_exps.weight"
+      ],
+      [
+        "blk.38.ffn_up_exps.weight",
+        "blk.38.ffn_gate_inp.weight",
+        "blk.38.ffn_down_shexp.weight",
+        "blk.38.ffn_gate_shexp.weight",
+        "blk.38.ffn_up_shexp.weight",
+        "blk.38.ffn_gate_inp_shexp.weight",
+        "blk.38.post_attention_norm.weight",
+        "blk.39.ffn_gate_exps.weight",
+        "blk.39.ffn_up_exps.weight"
+      ],
+      [
+        "output.weight",
+        "blk.39.attn_norm.weight"
+      ],
+      [
+        "blk.39.ffn_down_exps.weight",
+        "blk.39.ffn_gate_inp.weight",
+        "blk.39.ffn_down_shexp.weight",
+        "blk.39.ffn_gate_shexp.weight",
+        "blk.39.ffn_up_shexp.weight",
+        "blk.39.ffn_gate_inp_shexp.weight",
+        "blk.39.post_attention_norm.weight",
+        "blk.39.attn_k_norm.weight",
+        "blk.39.attn_k.weight",
+        "blk.39.attn_output.weight",
+        "blk.39.attn_q_norm.weight",
+        "blk.39.attn_q.weight",
+        "blk.39.attn_v.weight",
+        "output_norm.weight"
+      ]
+    ]
+  },
+  "frozen_stage_spec_sha256": "7f9065d8036f7bd04c19a15f87540ad195658f46a80a1a09aa407b44c4836a94",
+  "gpu_fit_gate": "NOT_EVALUATED",
+  "output": "I:\\reap128-v2-q8_0-20261025.gguf",
+  "output_sha256": "89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6",
+  "output_size_bytes": 19748435968,
+  "quality_gate": "NOT_EVALUATED",
+  "quantizer_binary_sha256": "eeb75877bd41d8d7b51d18129d873e6220014613baea349fa18e6b5d36c987de",
+  "schema": "chowder.reap128-v2-gguf-q8-chunked-final.v1",
+  "source_gguf_sha256": "80341aa776ad9b5f937c21b081b6d76de4a2ea277e5fb88c9ae2634a9da8f4c6",
+  "status": "Q8_TENSOR_EXACT_CONSTRUCTED_NOT_QUALITY_QUALIFIED"
+}
