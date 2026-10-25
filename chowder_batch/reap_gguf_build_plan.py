@@ -26,7 +26,8 @@ def _sha(path: Path) -> str:
 
 def plan(*, candidate: Path, verification: Path,
          converter: Path, llama_checkout: Path, quantizer: Path,
-         bf16_out: Path, q8_out: Path, q4_out: Path) -> dict:
+         bf16_out: Path, q8_out: Path, q4_out: Path,
+         allow_existing: bool = False) -> dict:
     receipt = json.loads(verification.read_text(encoding="utf-8"))
     model = candidate.resolve()
     if (receipt.get("schema") != "chowder.reap128-v2-pruned-bf16-verification.v1"
@@ -59,8 +60,8 @@ def plan(*, candidate: Path, verification: Path,
     if dirty:
         raise ValueError("frozen converter and gguf-py checkout has uncommitted modifications")
     outputs = tuple(p.resolve() for p in (bf16_out, q8_out, q4_out))
-    if (len(set(outputs)) != 3 or any(path.exists() or not path.parent.is_dir()
-                                     for path in outputs)):
+    if (len(set(outputs)) != 3 or any(not path.parent.is_dir() for path in outputs)
+            or (not allow_existing and any(path.exists() for path in outputs))):
         raise ValueError("each new GGUF output must have its own existing clean parent")
     if (bf16_out.drive.lower() == candidate.drive.lower()
             or not all(path.parent.resolve() != model for path in outputs)):
@@ -77,7 +78,7 @@ def plan(*, candidate: Path, verification: Path,
     capacity = {}
     for kind, path in zip(estimates, outputs):
         disk = shutil.disk_usage(path.parent)
-        if disk.free < estimates[kind]:
+        if (not (allow_existing and path.is_file())) and disk.free < estimates[kind]:
             raise ValueError(f"{kind} output has inadequate free disk+reserve")
         capacity[kind] = {
             "intended": str(path), "free_bytes": disk.free,

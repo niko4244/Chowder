@@ -193,6 +193,15 @@ Do not reinterpret these resource refusals as REAP scientific failures.
    BF16-derived Q4_K_M fit arm. Planned storage: BF16 intermediate F:,
    Q8_0 output I:, Q4_K_M output G:. No imatrix, no MTP, no Q8→Q4
    requantization. Conversion must not race source construction.
+   The guarded `reap_gguf_supervised` now supports explicit `--resume`
+   for an interrupted later stage. Every completed BF16/Q8_0/Q4_K_M GGUF
+   file has a new exclusive `.reap-stage.json` receipt, which binds the
+   candidate full-equivalence proof SHA-256, pinned converter/quantizer,
+   exact frozen commands, input GGUF digest, output size and output SHA-256.
+   Resumption rereads the entire previously published GGUF to verify the
+   sealed hash before reusing it. An existing output without the exact
+   receipt, a changed recipe or a same-size changed payload fails closed.
+   No stage may be reused based on magic bytes, filename or size alone.
 4. Original-model CUDA numerical parity, the actual Q8_0 quality suite
    (GSM8K 1,319 / HumanEval 164), Q4_K_M GPU placement and
    200-item throughput, and the random128 negative-control comparison

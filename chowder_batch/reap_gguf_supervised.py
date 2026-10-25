@@ -67,6 +67,46 @@ def _minimal_gguf_check(path: Path) -> None:
         raise ValueError(f"GGUF stage header magic/version invalid: {path}")
 
 
+def _phase_manifest_path(output: Path) -> Path:
+    return output.with_name(output.name + ".reap-stage.json")
+
+
+def _stable_spec_digest(spec: dict) -> str:
+    """Exclude live free-disk admission figures, bind exact source and recipes."""
+    keys = (
+        "candidate", "candidate_verification_sha256", "converter_revision",
+        "converter_sha256", "quantizer_binary_sha256", "conversion_command",
+        "q8_quality_command", "q4_fit_command",
+    )
+    payload = {key: spec.get(key) for key in keys}
+    payload["destinations"] = {
+        name: spec["capacity"][name]["intended"] for name in ("bf16", "q8_0", "q4_k_m")
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def _verify_completed_stage(output: Path, *, phase: int, spec: dict,
+                            input_digest: str) -> dict:
+    sidecar = _phase_manifest_path(output)
+    if (output.is_symlink() or sidecar.is_symlink()
+            or not output.is_file() or not sidecar.is_file()):
+        raise ValueError(f"unbound/orphan GGUF stage cannot be resumed: {output}")
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    if (record.get("schema") != "chowder.reap-gguf-stage.v1"
+            or record.get("phase") != phase
+            or record.get("output") != str(output)
+            or record.get("spec_sha256") != _stable_spec_digest(spec)
+            or record.get("input_sha256") != input_digest
+            or record.get("size_bytes") != output.stat().st_size
+            or not isinstance(record.get("sha256"), str)
+            or len(record["sha256"]) != 64):
+        raise ValueError(f"GGUF resume witness does not match frozen recipe: {output}")
+    _minimal_gguf_check(output)
+    if _digest(output) != record["sha256"]:
+        raise ValueError(f"GGUF stage payload changed since sealed publication: {output}")
+    return record
+
+
 def _reader(stream, sink: queue.Queue) -> None:
     try:
         for line in stream:
@@ -124,7 +164,8 @@ def _owned_stage(command: list[str], *, drives: list[Path], log) -> int:
         return 3 if aborted else int(child.wait())
 
 
-def build(*, specification: dict, log_path: Path, execute: bool) -> dict:
+def build(*, specification: dict, log_path: Path, execute: bool,
+          resume: bool = False) -> dict:
     commands = [
         specification["conversion_command"],
         specification["q8_quality_command"],
@@ -151,8 +192,20 @@ def build(*, specification: dict, log_path: Path, execute: bool) -> dict:
                              sort_keys=True) + "\n")
         log.flush()
         for phase, (original, out) in enumerate(zip(commands, destinations)):
-            if out.exists():
-                raise ValueError(f"output already exists, refusing conversion: {out}")
+            upstream_digest = (specification.get("candidate_verification_sha256", "")
+                               if phase == 0 else phase_results[0]["sha256"])
+            if out.exists() or _phase_manifest_path(out).exists():
+                if not resume:
+                    raise ValueError(f"output already exists, refusing conversion: {out}")
+                completed = _verify_completed_stage(
+                    out, phase=phase, spec=specification,
+                    input_digest=upstream_digest,
+                )
+                phase_results.append(completed)
+                log.write(json.dumps({"event": "FROZEN_GGUF_STAGE_REUSED",
+                                      "phase": phase, "sha256": completed["sha256"]}) + "\n")
+                log.flush()
+                continue
             if resource_problems(destinations, initial=True):
                 raise ValueError(f"insufficient resources for conversion phase {phase}")
             temporary = out.with_name(f".{out.stem}.owned-{uuid.uuid4().hex}.gguf")
@@ -180,7 +233,15 @@ def build(*, specification: dict, log_path: Path, execute: bool) -> dict:
             result = {
                 "phase": phase, "output": str(out), "sha256": digest,
                 "size_bytes": size, "status": "PUBLISHED_GGUF_NOT_QUALITY_QUALIFIED",
+                "schema": "chowder.reap-gguf-stage.v1",
+                "spec_sha256": _stable_spec_digest(specification),
+                "input_sha256": upstream_digest,
             }
+            # Never overwrite a stage receipt. If publication succeeds but
+            # the sidecar cannot be written, future resume fails closed on
+            # the orphan instead of silently trusting its GGUF magic.
+            with _phase_manifest_path(out).open("x", encoding="utf-8", newline="\n") as witness:
+                witness.write(json.dumps(result, sort_keys=True, indent=2) + "\n")
             phase_results.append(result)
             log.write(json.dumps({"event": "OWNED_STAGE_PUBLISHED", **result}) + "\n")
             log.flush()
@@ -196,6 +257,8 @@ def main(argv=None) -> int:
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--log", type=Path)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--resume", action="store_true",
+                        help="reuse existing stages only with exact immutable SHA-linked receipts")
     args = parser.parse_args(argv)
     try:
         spec = plan(
@@ -203,12 +266,13 @@ def main(argv=None) -> int:
             converter=args.converter, llama_checkout=args.llama_checkout,
             quantizer=args.quantizer, bf16_out=args.bf16_out,
             q8_out=args.q8_out, q4_out=args.q4_out,
+            allow_existing=args.resume,
         )
         if args.execute and args.log is None:
             raise ValueError("--execute requires an exclusive --log path")
         result = build(specification=spec,
                        log_path=args.log if args.log is not None else Path("not-used.log"),
-                       execute=args.execute)
+                       execute=args.execute, resume=args.resume)
         print(json.dumps(result, sort_keys=True, allow_nan=False), flush=True)
         return 0
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError) as exc:

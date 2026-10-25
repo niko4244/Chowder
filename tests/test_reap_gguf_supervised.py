@@ -73,3 +73,73 @@ def test_gguf_supervisor_rejects_admission_and_never_launches(tmp_path, monkeypa
                         lambda *args, **kwargs: pytest.fail("must never launch"))
     with pytest.raises(ValueError, match="admission refused"):
         supervise.build(specification=spec, log_path=tmp_path / "log", execute=True)
+
+
+def test_resume_skips_only_digest_bound_existing_stage_after_later_failure(tmp_path, monkeypatch):
+    spec = _spec(tmp_path)
+    spec["candidate_verification_sha256"] = "a" * 64
+    monkeypatch.setattr(supervise, "resource_problems", lambda *args, **kwargs: [])
+    launched = []
+
+    def fail_second(command, **kwargs):
+        launched.append(command)
+        if len(launched) == 2:
+            return 3
+        return _stub_command(command, **kwargs)
+
+    monkeypatch.setattr(supervise, "_owned_stage", fail_second)
+    with pytest.raises(RuntimeError, match="phase 1 returned 3"):
+        supervise.build(specification=spec, log_path=tmp_path / "first.log", execute=True)
+    bf16 = tmp_path / "new-original.gguf"
+    assert bf16.is_file()
+    assert supervise._phase_manifest_path(bf16).is_file()
+    assert not (tmp_path / "new-q8.gguf").exists()
+
+    resumed = []
+
+    def run_remaining(command, **kwargs):
+        resumed.append(command)
+        return _stub_command(command, **kwargs)
+
+    monkeypatch.setattr(supervise, "_owned_stage", run_remaining)
+    result = supervise.build(
+        specification=spec, log_path=tmp_path / "resume.log",
+        execute=True, resume=True,
+    )
+    assert len(resumed) == 2
+    assert all("--outfile" not in command for command in resumed)
+    assert len(result["phases"]) == 3
+    assert result["phases"][0]["sha256"] == supervise._digest(bf16)
+    assert all(supervise._phase_manifest_path(
+        __import__("pathlib").Path(phase["output"])).is_file()
+        for phase in result["phases"])
+
+
+def test_resume_detects_same_size_modified_gguf_and_mismatched_recipe(tmp_path, monkeypatch):
+    spec = _spec(tmp_path)
+    monkeypatch.setattr(supervise, "resource_problems", lambda *args, **kwargs: [])
+    monkeypatch.setattr(supervise, "_owned_stage", _stub_command)
+    supervise.build(specification=spec, log_path=tmp_path / "initial.log", execute=True)
+    output = tmp_path / "new-original.gguf"
+    unchanged = output.read_bytes()
+    output.write_bytes(unchanged[:10] + b"Z" + unchanged[11:])
+    with pytest.raises(ValueError, match="payload changed"):
+        supervise.build(specification=spec, log_path=tmp_path / "tamper.log",
+                        execute=True, resume=True)
+    output.write_bytes(unchanged)
+    altered = dict(spec)
+    altered["conversion_command"] = list(spec["conversion_command"])
+    altered["conversion_command"][-3] = "f16"
+    with pytest.raises(ValueError, match="witness does not match"):
+        supervise.build(specification=altered, log_path=tmp_path / "mismatch.log",
+                        execute=True, resume=True)
+
+
+def test_resume_refuses_orphan_gguf_without_provenance(tmp_path, monkeypatch):
+    spec = _spec(tmp_path)
+    monkeypatch.setattr(supervise, "resource_problems", lambda *args, **kwargs: [])
+    (tmp_path / "new-original.gguf").write_bytes(
+        b"GGUF" + (3).to_bytes(4, "little") + b"x" * 1048576)
+    with pytest.raises(ValueError, match="unbound/orphan"):
+        supervise.build(specification=spec, log_path=tmp_path / "orphan.log",
+                        execute=True, resume=True)
