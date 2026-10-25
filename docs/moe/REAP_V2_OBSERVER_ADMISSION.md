@@ -33,18 +33,28 @@ inspection does not attest an exact model weight revision. It also does not
 verify that the installed Torch/Transformers versions or GPU state can complete
 the forward pass.
 
-The receipt's `observation_command_not_executed` is the full 704-sequence,
-40-layer observer invocation, with no `--limit-seqs` and no `--layers` shortcut.
+The receipt's `observation_command_not_executed` is now a TEMPLATE for the
+version-controlled **supervised, two-buffer atomic BF16 observer**, with
+no `--limit-seqs` and no `--layers` shortcut. It cannot run until the operator
+replaces the unique unused scratch/log placeholders and provides a dedicated
+safe host resource window. NEVER run the old direct in-RAM command as registered
+D0: it has no sealed atomic checkpoint.
 Gate D0 requires a separate completed observer measurement with calibration
 perplexity below 20; all subsequent frozen admission/quality/fit gates remain
-unchanged. The intended `--out` directory must be absent; the preflight refuses
+unchanged. **That measurement now exists (2026-10-24):** calibration perplexity
+`15.451270210051794`, gate `< 20` → PASS, published as a sealed observation from
+the supervised two-buffer observer — see
+`docs/REAP-V2-BF16-D0-RESULT-2026-10-24.md` and
+`docs/REAP-V2-BF16-HANDOFF-2026-10-24.md`. The intended `--out` directory must be absent; the preflight refuses
 overlap with input directories and refuses overwrite.
 
-The observer keeps all per-sequence hidden states in host RAM. At a declared
-1,192,636 tokens × 2,048 hidden dimensions × 2 BF16 bytes, that is at least
-4.55 GiB of hidden data alone, excluding Python, attention activations, model
-weights and other processing buffers. The final vocabulary projection is
-bounded to 64 positions at a time in `reap_observe.py`.
+The registered full observer now commits exact BF16 hidden states between
+two 4.55-GiB file-backed slabs with durable per-layer `CURRENT` and hashes.
+The default *uncheckpointed smoke-only* observer still uses host RAM tensors;
+do not use that code path for the 704×40 registered D0. The 1,192,632 actually
+retokenized tokens require two slabs totalling about 9.10 GiB, plus 4 GiB
+scratch reserve. The final vocabulary projection is bounded to 64 positions
+at a time in `reap_observe.py`.
 
 ### Local Windows commit-pressure mitigation (October 23, 2026)
 
@@ -57,21 +67,15 @@ samples (VRAM free 0.72 GiB). The watchdog restored Sharp-Spark. The only
 result is layer-00.pt; it contains no hidden-state continuation checkpoint,
 no D0/perplexity and cannot resume at layer 1.
 
-For a NEW registered full run, an optional exact-BF16 file-backed storage
-path is now supported:
-
-    python -u -B chowder_batch/reap_observe.py --model-dir G:\llm-cold\bf16\Qwen3.6-35B-A3B --calibration C:\llm-work\reap\calib-v2-ornith-bare-20261023\calibration.jsonl --out C:\llm-work\reap\observe-v2-full-registered-20261023-r2 --hidden-disk-dir F:\reap-v2-hidden-full-20261023-r2
-
-Both output and scratch directories must be new; the file-backed scratch
-directory is automatically created only after a disk-space check. Its
-contiguous uint16 payload reinterprets each 16-bit BF16 hidden element
-without conversion, preserving the original sequence offsets and arithmetic
-order. The original default remains the RAM tensor list. The disk slab needs
-at least 4.55 GiB plus a 2 GiB reserve on the scratch volume and reads/
-writes all 704 sequences at each decoder layer. This reduces Windows private
-commit use but increases disk I/O. Interrupted scratch directories are
-never re-used or silently qualified; only complete new observation.json
-files support D0.
+**Do not launch or resume the historical r2 output or F: scratch.** They are
+incomplete single-buffer experiments without atomic `CURRENT` and cannot
+resume. Use `docs/REAP-V2-FULL-RUN-OPERATOR-2026-10-24.md` for the exact
+**fresh, unique path**, read-only `--doctor`, explicit `--launch` and
+interrupted-run `--resume` workflow. The launch wrapper does not pause or
+restore any model services: the resource maintenance window is arranged
+separately, by the owner, before the launch. Two BF16 slabs preserve exact
+uint16 bits and per-layer statistics; completed generations can resume after
+an owned-worker safety stop. A run without completed D0 is never promoted.
 
 Each layer now releases last-sequence CUDA temporaries before the next
 layer is loaded, and records PyTorch allocator peak/remaining and CUDA

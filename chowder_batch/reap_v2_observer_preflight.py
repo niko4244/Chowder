@@ -199,30 +199,51 @@ def _validate_model(model: Path, weights: Path, declared_tokens: int) -> dict[st
 
 
 def admit(*, calibration: Path, model_dir: Path, out: Path,
-          weights_dir: Path | None = None) -> dict[str, Any]:
+          weights_dir: Path | None = None,
+          allow_existing_out: bool = False) -> dict[str, Any]:
     calib = calibration.resolve(strict=True)
     model = model_dir.resolve(strict=True)
     weights = (weights_dir or model_dir).resolve(strict=True)
     intended = out.resolve()
     _check(calib.is_dir() and model.is_dir() and weights.is_dir(),
            "calibration, model and weight paths must be directories")
-    _check(not intended.exists(), "observer output already exists: refusing overwrite or reuse")
+    if allow_existing_out:
+        # Resume path: the output directory legitimately exists and must be
+        # reused. A completed observation is still an absolute refusal.
+        _check(intended.is_dir(),
+               "resume requires an existing observer output directory")
+        _check(not (intended / "observation.json").exists(),
+               "resume refused: this observation already completed")
+    else:
+        _check(not intended.exists(),
+               "observer output already exists: refusing overwrite or reuse")
     _check(not any(intended == source or intended.is_relative_to(source)
                    or source.is_relative_to(intended) for source in (calib, model, weights)),
            "observer output overlaps an input directory")
     provenance = _validate_calibration(calib)
     checkpoint = _validate_model(model, weights, provenance["declared_tokens"])
-    command = ["python", "-B", "chowder_batch/reap_observe.py",
+    # This is a SAFE supervised launch TEMPLATE, not the historical direct
+    # in-RAM observer. Running reap_observe.py without atomic checkpoint flags
+    # would strand the 704-row D0 and cannot satisfy the registered seal gate.
+    command = ["python", "-B", "-m", "chowder_batch.reap_observe_supervised", "--launch",
                "--model-dir", str(model), "--calibration", str(calib / "calibration.jsonl"),
                "--out", str(intended)]
     if weights_dir is not None:
         command += ["--weights-dir", str(weights)]
+    command += ["--scratch", "<NEW_UNUSED_F_VOLUME_CHECKPOINT_DIR>",
+                "--log-dir", "<NEW_UNUSED_C_VOLUME_SUPERVISOR_LOG_DIR>"]
     return {
         "schema": "chowder.reap-v2-observer-admission.v1",
         "status": "INPUTS_ADMITTED_OBSERVATION_NOT_RUN",
         "calibration": provenance,
         "model": {"directory": str(model), "weights_directory": str(weights), **checkpoint},
         "observation_command_not_executed": command,
+        "command_requires_operator_actions": (
+            "Replace placeholders with unique nonexistent directories; arrange "
+            "explicit protected-model-service maintenance, recover host/GPU/commit "
+            "headroom and pass the supervisor's three 30s-spaced host samples. "
+            "The direct observer command without atomic scratch is NOT a D0 launch."
+        ),
         "intended_output": str(intended),
         "bounds": {"full_layers": 40, "sequences": 704,
                    "next_token_nll_position_chunk": 64,

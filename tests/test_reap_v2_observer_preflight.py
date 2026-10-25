@@ -81,9 +81,11 @@ def test_frozen_v2_input_admitted_without_gpu_or_output_creation(sources):
     assert report["model"]["indexed_tensors"] == 123
     assert report["gate_d0"].startswith("NOT_MEASURED")
     assert report["gpu_work_started"] is False
-    assert report["observation_command_not_executed"][0:3] == [
-        "python", "-B", "chowder_batch/reap_observe.py",
+    assert report["observation_command_not_executed"][0:5] == [
+        "python", "-B", "-m", "chowder_batch.reap_observe_supervised", "--launch",
     ]
+    assert "--scratch" in report["observation_command_not_executed"]
+    assert "--log-dir" in report["observation_command_not_executed"]
     assert not sources[2].exists()
 
 
@@ -172,3 +174,32 @@ def test_pruned_expert_tensor_header_refused(sources):
     shard.write_bytes(struct.pack("<Q", len(encoded)) + encoded + raw[8 + header_len:])
     with pytest.raises(preflight.ObserverAdmissionError, match="unpruned 256-expert"):
         _admit(sources)
+
+
+def test_resume_accepts_existing_output_but_refuses_completed_observation(sources):
+    """A --resume pre-screen must accept the directory the resume requires.
+
+    Otherwise --doctor reports a perfectly valid resumable checkpoint as
+    "frozen_paths_or_source_invalid", which is what happened to a real run that
+    had committed 20 of 40 layers before a telemetry abort.
+    """
+    calibration, model, out = sources
+
+    def admit_resume() -> dict:
+        return preflight.admit(
+            calibration=calibration, model_dir=model, out=out,
+            allow_existing_out=True,
+        )
+
+    # Default behaviour still refuses any pre-existing path.
+    out.mkdir()
+    with pytest.raises(preflight.ObserverAdmissionError, match="output already exists"):
+        _admit(sources)
+
+    # A resume pre-screen accepts it (checkpoint present, not yet published).
+    assert admit_resume()["bounds"]["sequences"] == 704
+
+    # A completed observation can never be resumed over.
+    (out / "observation.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(preflight.ObserverAdmissionError, match="already completed"):
+        admit_resume()

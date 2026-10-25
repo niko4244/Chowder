@@ -237,6 +237,16 @@ def build_plan(*, arm: str, calibration: Path, observations: Path,
     config = _model_metadata(model, weights)
     provenance = _calibration_provenance(calibration, observations, mix)
     observed = _json(observations / "observation.json")
+    if mix == "v2" and observed.get("n_seqs") == 704:
+        receipt = observed.get("checkpoint_receipt")
+        identity = receipt.get("source_identity") if isinstance(receipt, dict) else None
+        _require(
+            isinstance(identity, dict)
+            and identity.get("model_dir") == str(model)
+            and identity.get("weights_dir") == str(weights)
+            and identity.get("output_dir") == str(observations),
+            "registered v2 D0 receipt must bind requested model/weights/observation paths",
+        )
     saliency_sha = _saliency(observations, observed["layers"])
 
     command = ["python", "chowder_batch/reap_prune.py", "--model-dir", str(model)]

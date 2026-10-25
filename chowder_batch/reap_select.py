@@ -232,6 +232,23 @@ def _validate_v2_observation(calibration: Path, observation: Path) -> None:
         frozen_v2_source_identity(calibration, manifest)
     except V2SourceIdentityError as exc:
         raise GateError(str(exc)) from exc
+    # The actual preregistered v2 source contains exactly 704 sequences.
+    # No completed 704-row legacy in-RAM D0 is qualified: the historical r2
+    # in-place slab was interrupted and the current registered observer uses
+    # two committed BF16 buffers. For that exact registered population,
+    # stripping BOTH receipt-identifying fields cannot silently downgrade
+    # its gate to an unsealed legacy observer.
+    if declared_rows == 704 and not isinstance(observed.get("checkpoint_receipt"), dict):
+        raise GateError("registered 704-row v2 D0 requires sealed BF16 checkpoint receipt")
+    if "hidden_storage" in observed or "checkpoint_receipt" in observed:
+        from chowder_batch.reap_hidden_checkpoint import validate_observation_receipt
+        try:
+            validate_observation_receipt(
+                observation.parent, observed,
+                require_registered_original=(declared_rows == 704),
+            )
+        except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
+            raise GateError(f"v2 BF16 checkpoint provenance invalid: {exc}") from exc
 
 
 def evaluate(

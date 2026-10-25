@@ -112,6 +112,17 @@ def main() -> None:
         raise SystemExit(f"--keep must be in [{text['num_experts_per_tok']}, {n_experts})")
     if args.method != "random" and not args.observations:
         raise SystemExit("--observations is required for reap/frequency")
+    if args.method != "random":
+        evidence = Path(args.observations) / "observation.json"
+        if evidence.is_file():
+            observed = json.loads(evidence.read_text(encoding="utf-8"))
+            if "checkpoint_receipt" in observed or "hidden_storage" in observed:
+                from chowder_batch.reap_hidden_checkpoint import validate_observation_receipt
+                validate_observation_receipt(Path(args.observations), observed,
+                                             expected_generation=n_layers,
+                                             require_registered_original=(
+                                                 n_layers == 40 and observed.get("n_seqs") == 704
+                                             ))
     kept = kept_experts(Path(args.observations), n_layers, n_experts, args.keep, args.method, args.seed)
 
     index = json.loads((model_dir / "model.safetensors.index.json").read_text(encoding="utf-8"))
