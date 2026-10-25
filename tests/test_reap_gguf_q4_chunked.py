@@ -52,6 +52,60 @@ def test_q4_refuses_a_running_q8_or_other_quantizer(monkeypatch):
         q4._require_no_competing_quantizer()
 
 
+def test_q4_transient_initial_ram_and_commit_wait_preserves_original_floors(
+    tmp_path, monkeypatch,
+):
+    from chowder_batch import reap_gguf_supervised as supervisor
+
+    replies = [
+        ["insufficient unowned physical RAM"],
+        ["insufficient free Windows commit"],
+        [],
+    ]
+    calls, sleeps, inspections = [], [], []
+
+    def resource(paths, *, initial=False):
+        calls.append((paths, initial))
+        return replies.pop(0)
+
+    monkeypatch.setattr(supervisor, "resource_problems", resource)
+    monkeypatch.setattr(q4, "_require_no_competing_quantizer",
+                        lambda: inspections.append(True))
+    monkeypatch.setattr(q4.time, "sleep", lambda value: sleeps.append(value))
+    log = io.StringIO()
+    q4._await_chunk_start_admission([tmp_path / "source", tmp_path / "out"], log)
+    assert len(calls) == len(inspections) == 3
+    assert all(initial for _paths, initial in calls)
+    assert len(sleeps) == 2
+    assert "Q4_CHUNK_RESOURCE_WAIT" in log.getvalue()
+    assert "Q4_CHUNK_ADMISSION_RECOVERED" in log.getvalue()
+
+
+def test_q4_admission_refuses_disk_without_wait_or_lowering_threshold(
+    tmp_path, monkeypatch,
+):
+    from chowder_batch import reap_gguf_supervised as supervisor
+
+    monkeypatch.setattr(supervisor, "resource_problems",
+                        lambda *_args, **kwargs: ["volume floor breached at G:"])
+    monkeypatch.setattr(q4, "_require_no_competing_quantizer", lambda: None)
+    monkeypatch.setattr(q4.time, "sleep", lambda _: pytest.fail("must not wait"))
+    with pytest.raises(ValueError, match="disk safeguard"):
+        q4._await_chunk_start_admission([tmp_path], io.StringIO())
+
+
+def test_q4_admission_timeout_retains_start_guard(tmp_path, monkeypatch):
+    from chowder_batch import reap_gguf_supervised as supervisor
+
+    monkeypatch.setattr(supervisor, "resource_problems",
+                        lambda *_args, **kwargs: ["insufficient free Windows commit"])
+    monkeypatch.setattr(q4, "_require_no_competing_quantizer", lambda: None)
+    monkeypatch.setattr(q4, "ADMISSION_MAX_WAIT_SECONDS", 0)
+    monkeypatch.setattr(q4.time, "sleep", lambda _: pytest.fail("timed out"))
+    with pytest.raises(ValueError, match="unchanged start RAM/commit admission timeout"):
+        q4._await_chunk_start_admission([tmp_path], io.StringIO())
+
+
 def _synthetic_ready(tmp_path):
     """Tiny legitimate GGUF shapes with mixed Q4/Q5/Q6 and copied F32."""
     source = tmp_path / "original.gguf"

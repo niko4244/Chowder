@@ -958,3 +958,39 @@ headers, forged source/output/quantizer/tensor payload/selected-gate
 refusal and resealed copied F32 mutation refusal; Ruff clean. **No real
 Q4 numeric results can be reported until the full Q4 construction exits
 and is independently verified.**
+
+### Frozen Q4 guarded two-chunk recovery and unchanged floor admission wait
+
+The first production Q4 run SHA-verified the full BF16 parent, then
+successfully produced and SHA-sealed the first **2 of 42** chunks before
+the third new chunk was started. Chunk 001: Q4 GGUF SHA-256
+`6a457d91a36b07e883dbb1dda241a9f546eeb964741c023bae87f6e45089308c`
+(3 tensors including actual Q4_K attention-gate and Q6_K embedding/QKV);
+chunk 002: Q4 GGUF SHA-256
+`6213637edc0b0ffb8b4b3c915b28a1dfb2398cfc1a65a6739a5f3b89ca42628d`
+(7 mixed-K tensors including routed FFN 128 experts).
+
+The parent refused its next per-chunk start admission with
+`Q4 prelaunch guard or unsealed mini refused`, **exit 2**. Independent
+post-exit inspection found **no active Q4/quantizer owner**, **no orphan
+F: source mini**, and exactly two matching immutable G: chunk GGUFs and
+receipts; the OS-level `.reap-gguf-chunked.lock` inode remains durable.
+The host's RAM/commit briefly dropped below the unchanged **12/16 GiB**
+new-chunk launch floor, while neither the **7/8 GiB runtime floor** nor
+any original source/model service was reduced or modified.
+
+To avoid another full 37-GiB source-hash restart on every transient
+RAM/commit fluctuation, the exclusive Q4 supervisor now waits for a
+bounded interval on **the exact same `resource_problems(initial=True)`
+thresholds** before starting an additional mini. It polls the competing
+quantizer/process census each time, writes sparse guarded-wait/recovered
+events, immediately rejects permanent disk-floor problems, and fails
+closed after the finite admission deadline. Abandoned source minis still
+fail immediately, rather than being silently overwritten. CPU regression
+**51 passed, one real quantizer regression deliberately deselected**,
+Ruff and whitespace checks clean. The supervisor restarted with the
+same frozen parent SHA, recipe, quantizer, chunk topology and slab,
+under fresh recovered 12/16 GiB admission, using a new exclusive log at
+`F:\reap128-v2-q4-streaming-resume2-20261025.log`. It must revalidate
+the existing 2 original chunk receipts before any further conversion.
+**No full Q4 GGUF/quality-gate completion is claimed by this recovery.**

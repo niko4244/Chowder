@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 from shutil import disk_usage
@@ -24,6 +25,8 @@ Q4_FILE_TYPE = 15
 BINARY_SHA256 = "eeb75877bd41d8d7b51d18129d873e6220014613baea349fa18e6b5d36c987de"
 FINALIZATION_SCHEMA = "chowder.reap128-v2-gguf-q4-durable-finalization.v1"
 MERGE_COPY_BLOCK = core.HASH_BLOCK
+ADMISSION_POLL_SECONDS = 5
+ADMISSION_MAX_WAIT_SECONDS = 600
 
 
 def _require_no_competing_quantizer() -> None:
@@ -58,6 +61,42 @@ def _require_no_competing_quantizer() -> None:
                     "reap_gguf_chunked.py", "reap_gguf_q4_chunked.py",
                 )))):
             raise ValueError("concurrent Q8/Q4 quantization owner detected; refusing Q4")
+
+
+def _await_chunk_start_admission(paths: list[Path], log) -> None:
+    """Wait for the unchanged start floors instead of restarting source SHA.
+
+    This holds the OS-level Q4 workspace lock but does not launch any child
+    while free RAM <12 GiB or commit <16 GiB. Disk-floor problems and any
+    uninspectable competing quantizer remain immediate fail-closed errors.
+    The bounded wait never lowers the original initial/runtime thresholds.
+    """
+    from chowder_batch.reap_gguf_supervised import resource_problems
+
+    deadline = time.monotonic() + ADMISSION_MAX_WAIT_SECONDS
+    polls = 0
+    while True:
+        _require_no_competing_quantizer()
+        issues = resource_problems(paths, initial=True)
+        if not issues:
+            if polls:
+                log.write(json.dumps({"event": "Q4_CHUNK_ADMISSION_RECOVERED",
+                                      "polls": polls}) + "\n")
+                log.flush()
+            return
+        if any("volume floor" in issue for issue in issues):
+            raise ValueError("Q4 next-chunk disk safeguard refused launch: "
+                             + "; ".join(issues))
+        if time.monotonic() >= deadline:
+            raise ValueError("Q4 unchanged start RAM/commit admission timeout: "
+                             + "; ".join(issues))
+        if polls == 0 or polls % 12 == 0:
+            log.write(json.dumps({"event": "Q4_CHUNK_RESOURCE_WAIT",
+                                  "reasons": issues, "polls": polls}) + "\n")
+            log.flush()
+        polls += 1
+        time.sleep(min(ADMISSION_POLL_SECONDS,
+                       max(0.0, deadline - time.monotonic())))
 
 
 def _finalization_path(scratch: Path, output: Path) -> Path:
@@ -722,8 +761,9 @@ def _build(*, source: Path, output: Path, scratch: Path, chunks: Path,
                 log.write(json.dumps({"event": "EXACT_Q4_CHUNK_REUSED", "index": index}) + "\n")
             else:
                 _require_no_competing_quantizer()
-                if mini.exists() or resource_problems([source, mini, part], initial=True):
-                    raise ValueError("Q4 prelaunch guard or unsealed mini refused")
+                if mini.exists() or mini.is_symlink():
+                    raise ValueError("Q4 unsealed source mini refused before quantization")
+                _await_chunk_start_admission([source, mini, part], log)
                 prefix = core.create_mini(source, mini, names)
                 quant = core.quantize_mini(mini, part, quantizer=quantizer,
                                            mode=MODE, memory_mib=slab_mib, log=log)
