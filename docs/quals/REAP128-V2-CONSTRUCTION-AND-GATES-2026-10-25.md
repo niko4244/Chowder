@@ -171,9 +171,62 @@ until their separate preregistered measurements and mandatory gates exist.
   No new shard certificates were produced and no model or service
   was changed. The receipts directory remains safely reusable.
 
-These outcomes demonstrate a fixed memory-intensive code path but
-**not yet successful full-source verification of a production shard**.
-Do not reinterpret these resource refusals as REAP scientific failures.
+These were historical initial refusals, superseded by the October 25
+**completed 26-shard full-source verification** below. The refusals were
+operational host admission events, never REAP scientific failures.
+
+## October 25 full production BF16 source-equivalence result
+
+The source-bound `reap_verify_shards` comparator subsequently verified
+**all 26/26 real BF16 safetensors shards** with exact selected-expert row
+and unchanged-tensor bitwise comparisons. It recorded **16,266 exact
+tensor/row checks**, all **120 routed tensor geometries**, the canonical
+40×128 selection and the **37,981,137,632-byte** candidate tensor payload.
+Individual per-shard immutable proof files reside in
+`F:\reap-v2-equivalence-shards-20261025`.
+
+An independent full-model finalization then rehashed **every live
+original and candidate shard** and confirmed each byte digest against
+the frozen source identities and shard certificates. The result was
+`FULL_SOURCE_TENSOR_EQUIVALENCE_PASS`; the source weights and all
+original observation/checkpoints were left untouched.
+
+Complete receipt:
+`F:\reap128-v2-full-source-equivalence-20261025.json`
+
+Receipt SHA-256:
+`0746c8c06764f784fa7134ecdc4a18954a761372f865256c9e0120588cfbbc7d`
+
+This closes the source-identity, expert-selection, tensor-geometry
+and exact BF16 construction-integrity requirements. It is **not**
+an end-to-end inference, CUDA numerical-parity, quantized-quality,
+GPU-fit, speed, or Gen-0 selection gate.
+
+## October 25 actual 40-layer BF16 CPU inference result
+
+After the complete source equivalence gate passed and an independently
+admitted CPU-only host check (about 16.4 GiB RAM and 28.7 GiB Windows
+commit available), the **real pruned checkpoint** executed all 40
+decoder layers: **30 linear-attention** and **10 full-attention**. All
+four immutable activation checkpoints (layers 0, 9, 19, and 29) were
+saved on F:, and the model computed finite final logits with
+**predicted next-token ID 9542**. Its final-logits SHA-256 is
+`493e11204820af204b64947ea753efb712c177d51963569f8a55a5fbc51daae0`;
+actual end-to-end elapsed time was **312.75 seconds**.
+
+Source-bound inference receipt:
+`docs/quals/reap128-v2-bf16-real-inference-20261025.json`
+(identical to
+`F:\reap128-v2-bf16-real-inference-20261025.json`).
+
+Receipt SHA-256:
+`a2ffe0e146e4bc75853e5c2d62b8ce4620a9ccd4e851dd21c69622f941e970b4`
+
+Result:
+`CPU_BF16_END_TO_END_SMOKE_PASS_NOT_QUALITY_GATE`.
+This proves a bounded, genuine 40-layer BF16 model forward, but is
+**not** calibrated perplexity, GSM8K/HumanEval, CUDA numerical parity,
+quantized-model quality, Q4 fit/speed, or scientific selection.
 
 ## Required model and scientific gates (no automatic promotion)
 
@@ -200,7 +253,9 @@ Do not reinterpret these resource refusals as REAP scientific failures.
    final-logits SHA-256 matches the uninterrupted model forward exactly.
    These intermediate snapshots are operational progress only; **no
    actual checkpoint inference PASS** is claimed until all 40 layers and
-   final finite logits are independently witnessed.
+   final finite logits are independently witnessed. **The real 40-layer
+   candidate has now satisfied that bounded inference smoke**; see
+   source-bound actual receipt and metrics above.
 3. After complete BF16 verification, `chowder_batch.reap_gguf_build_plan`
    checks the pinned llama.cpp converter, available storage and distinct
    target filesystems for BF16 GGUF intermediate, Q8_0 quality arm, and
@@ -216,6 +271,11 @@ Do not reinterpret these resource refusals as REAP scientific failures.
    sealed hash before reusing it. An existing output without the exact
    receipt, a changed recipe or a same-size changed payload fails closed.
    No stage may be reused based on magic bytes, filename or size alone.
+   The newly pinned GGUF topology validator also checks the exact
+   40×128 MoE tensor inventory and BF16/Q8_0/Q4_K_M stage file types
+   (32/7/15) before publication; real gguf-py writer/reader fixtures
+   passed these tests. The candidate's GGUF prebuild was independently
+   admitted on F:/I:/G: with disk reserves, but that is not conversion.
 4. Original-model CUDA numerical parity, the actual Q8_0 quality suite
    (GSM8K 1,319 / HumanEval 164), Q4_K_M GPU placement and
    200-item throughput, and the random128 negative-control comparison

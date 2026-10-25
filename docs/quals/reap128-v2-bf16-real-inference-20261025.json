@@ -1,0 +1,31 @@
+{
+  "activation_progress_dir": "F:\\reap-v2-bf16-activation-progress-20261025",
+  "checkpoint": "G:\\llm-cold\\bf16\\Qwen3.6-REAP128-V2",
+  "elapsed_seconds": 312.75,
+  "final_logits_sha256": "493e11204820af204b64947ea753efb712c177d51963569f8a55a5fbc51daae0",
+  "full_verification_sha256": "0746c8c06764f784fa7134ecdc4a18954a761372f865256c9e0120588cfbbc7d",
+  "input_tokens": [
+    760,
+    4087,
+    369
+  ],
+  "layer_count": 40,
+  "layer_types": {
+    "full_attention": 10,
+    "linear_attention": 30
+  },
+  "predicted_token_id": 9542,
+  "predicted_token_text": " yes",
+  "prompt": "The answer is",
+  "resumed_after_layer": -1,
+  "schema": "chowder.reap128-v2-cpu-streaming-smoke.v1",
+  "status": "CPU_BF16_END_TO_END_SMOKE_PASS_NOT_QUALITY_GATE",
+  "top_5_token_ids": [
+    9542,
+    874,
+    421,
+    25,
+    4145
+  ],
+  "verification_scope": "single bounded greedy next-token BF16 forward only"
+}
