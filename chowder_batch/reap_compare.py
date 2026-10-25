@@ -141,9 +141,16 @@ def _verify_frozen_v2_quality_inputs(eval_dir, summaries: dict, rows: dict) -> N
         except ImportError:
             from chowder_batch.reap_select import GateError as SelectorGateError, _v2_input_witness
         for arm, summary in summaries.items():
-            if set(summary) != set(FROZEN_QUALITY_COHORTS):
-                raise CompareError(f"{arm}: full registered GSM8K and HumanEval quality required for v2 comparison")
-            for suite, (count, prefix) in FROZEN_QUALITY_COHORTS.items():
+            # `random128` is preregistered as a *GSM8K-only* negative
+            # control. Never fabricate a HumanEval control run or refuse
+            # that legitimate complete GSM8K pairing. Candidate and other
+            # quality baselines still need both entire registered suites.
+            required = {"gsm8k"} if arm == "random128" else set(FROZEN_QUALITY_COHORTS)
+            if set(summary) != required:
+                raise CompareError(f"{arm}: full registered GSM8K and HumanEval quality "
+                                   "(or original GSM8K-only random128 control) required")
+            for suite in required:
+                count, prefix = FROZEN_QUALITY_COHORTS[suite]
                 cohort = rows[(arm, suite)]
                 expected = {f"{prefix}{i}" for i in range(count)}
                 if set(cohort) != expected:
@@ -253,6 +260,7 @@ def compare(eval_dir, candidate: str, baselines: list[str], margin: float = 0.0)
         "verdicts": verdicts,
         "not_compared": not_compared,
         "candidate_beats_all": all(v == "BEATS" for v in verdicts.values()),
+        "qualification": "DESCRIPTIVE_PAIRED_COMPARISON_NOT_REGISTERED_SCIENTIFIC_GATE",
     }
 
 

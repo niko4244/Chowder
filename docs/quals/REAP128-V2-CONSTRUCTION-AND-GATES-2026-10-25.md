@@ -1322,3 +1322,32 @@ No complete Q4 GGUF or sidecar existed. Available physical RAM was
 ~36.65/27.17/12.75 GiB. The model owner, original quantizer and
 unrelated GPU workloads were untouched. All mandatory scientific
 qualification and deterministic Gen-0 gates remain pending/BLOCKED.
+
+### October 25 16:14 CDT — preregistered random128 negative-control compatibility
+
+The new mandatory full-v2 paired-comparison source binding was reviewed
+against the **actual preregistered negative control**: `random128` has
+only the complete 1,319-item GSM8K evaluation, not a HumanEval result.
+Requiring HumanEval from every comparator would incorrectly prevent a
+valid scientific control check or tempt an invented control result. The
+diagnostic now allows that **specific original GSM8K-only random128
+control**, while requiring its exact 1,319 canonical `gsm8k-*` IDs and
+unaltered SHA-attested rows. Newly built v2 quality candidates and their
+ordinary dense/v1/REAP160 quality baselines still require *both* full
+GSM8K and HumanEval cohorts, source/serve fingerprints and stable input
+hashes. A synthetic positive paired control covers both dense and
+random128; an adversarial truncated-control variant fails closed. The
+result explicitly says
+`DESCRIPTIVE_PAIRED_COMPARISON_NOT_REGISTERED_SCIENTIFIC_GATE`:
+a pairwise win alone never overrides genuine registered Gate0–2,
+random128 control, hardware requirements or Amendment4 selection.
+
+The updated paired/selector/gate CPU suite passed **148 tests**, Ruff
+and whitespace clean. This does not run or claim fresh random128 quality.
+The original Q4 PID 72824 was still alive and reached **25/42** genuinely
+sealed parts, newest chunk 025 GGUF SHA-256
+`6b016bdfc65fcc5c3361050e498643b9a9d916684c7a067923b6a6cbbafe4103`.
+No final Q4 output or source-bound Q4 numerical results existed. Free
+physical RAM ~15.41 GiB, Windows commit ~17.56 GiB, F/G/I disk free
+~36.68/26.89/12.75 GiB. Original resource floors and external GPU
+service ownership remain unchanged; all incomplete gates BLOCKED/UNKNOWN.

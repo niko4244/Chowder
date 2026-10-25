@@ -219,6 +219,28 @@ def test_v2_comparison_valid_full_source_witness_is_descriptive_only(tmp_path):
     for name in ("serve.json", "gsm8k.inputs.json", "humaneval.inputs.json"):
         assert result["inputs"]["reap128_v2"][name] == hashlib.sha256(
             (tmp_path / "reap128_v2" / name).read_bytes()).hexdigest()
+    assert result["qualification"] == "DESCRIPTIVE_PAIRED_COMPARISON_NOT_REGISTERED_SCIENTIFIC_GATE"
+
+
+def test_new_v2_uses_frozen_full_gsm8k_only_random128_negative_control(tmp_path):
+    _full_v2_quality_fixture(tmp_path)
+    write_arm(tmp_path, "random128", "gsm8k", [False] * 1319,
+              ids=[f"gsm8k-{i}" for i in range(1319)])
+    result = rc.compare(tmp_path, "reap128_v2", ["dense", "random128"])
+    assert result["candidate_beats_all"] is True
+    assert {row["baseline"]: row["n"] for row in result["rows"]
+            if row["suite"] == "gsm8k"} == {"dense": 1319, "random128": 1319}
+    assert result["not_compared"] == [{"baseline": "random128",
+                                       "suite": "humaneval", "candidate_has": True,
+                                       "baseline_has": False}]
+    assert result["qualification"].endswith("NOT_REGISTERED_SCIENTIFIC_GATE")
+
+
+def test_v2_refuses_truncated_random128_negative_control(tmp_path):
+    _full_v2_quality_fixture(tmp_path)
+    write_arm(tmp_path, "random128", "gsm8k", [False] * 200)
+    with pytest.raises(rc.CompareError, match="noncanonical or partial"):
+        rc.compare(tmp_path, "reap128_v2", ["random128"])
 
 
 @pytest.mark.parametrize("changed", ["serve.json", "gsm8k.inputs.json", "gsm8k.jsonl"])
