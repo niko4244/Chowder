@@ -109,6 +109,52 @@ evidence.
 - The optional `--selection` is revalidated against its exact source
   observation, layer statistics, expert layout, source config, and index before
   any model weights are opened. Preflight also consumes and hashes it.
+- **Continuation, 2026-10-25:** For the registered 704-row/40-layer
+  REAP128_v2 128-expert build, `--selection` is now mandatory, and the
+  intended prune destination must match the manifest exactly. Direct pruning
+  also refuses output paths that overlap original model, weights or observation
+  trees, and binds the sealed observer's source paths to the actual model
+  arguments. The production preflight independently checks the live upstream
+  **metadata and 26 shard sizes** against the registered public pin; it does
+  not read all weight payloads.
+- At the **actual prune build** (not this metadata-only preflight), the
+  pruner streams each of the original 26 shard payloads and checks the live
+  bytes against the pinned upstream LFS SHA-256 hashes **before creating the
+  staged output**. That full ~71.9 GB verification is an intentional
+  scientific-lineage expense of the model build, not a completed rehash in
+  the present qualification.
+- Read-only production safetensors-header inspection, no payload reads:
+  **26** shards, **1,045** indexed tensors, **120** expert/router tensors,
+  original tensor payload **66.9655 GiB**, projected pruned tensor payload
+  **35.3727 GiB**, difference **31.5928 GiB**, largest projected output
+  shard **2.4717 GiB**. These are tensor bytes, excluding safetensors
+  headers and small model metadata. Disk availability must be reconfirmed
+  before the actual staging job.
+- The production `reap_build_preflight.py` now repeats that 26-shard
+  **header-only** census at the real pinned source, validates all 120
+  Qwen `gate_up` / `down` / router shapes and BF16 dtypes, and refuses
+  insufficient disk space before printing an executable pruning command.
+  The original `--selection` and live-source metadata pins are also checked.
+  On the October 25 live admission snapshot, expected pruned tensor bytes
+  **37,981,137,632**, intended-stage minimum including an operational
+  8 GiB reserve **46,571,072,224** bytes, available G: free space
+  **74,565,382,144** bytes; result
+  `HEADER_SIZED_AND_DISK_ADMITTED_NOT_BUILT`.
+  The 8 GiB reserve is an operational safety margin, **not** a change to any
+  registered model-quality criterion. No source tensor payloads were loaded.
+- A separate read-only host snapshot showed approximately **18.39 GiB**
+  available physical RAM, **28.70 GiB** available Windows commit, **833**
+  processes, and **11,287 MiB** free on the RTX 5060 Ti. These values are
+  transient and do **not** authorize a substantial job or establish safe
+  memory headroom for an unrestricted run; re-admit immediately before
+  starting the CPU pruning/conversion pipeline.
+- Bounded CPU-only synthetic reference parity now compares the installed
+  Qwen3.5 MoE experts with the observer's hook: exact BF16 outputs,
+  independently accumulated router statistics (rel `2e-5`, abs `1e-4`),
+  and exact BF16 decoder activations across both full and linear attention.
+  The final next-token NLL uses rel `1e-6`, abs `2e-3`; **3 tests passed**.
+  This materially strengthens code-level equivalence but is **not a CUDA
+  numerical parity test of original BF16 weights**.
 - Git's default Windows `core.autocrlf=true` corrupted the exact bytes of the
   versioned upstream manifest in a new worktree; `.gitattributes` now excludes
   both byte-addressed JSON manifests from text transformations. No hash pin or

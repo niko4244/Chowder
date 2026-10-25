@@ -43,6 +43,23 @@ COPY_FILES = ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.t
               "video_preprocessor_config.json", "LICENSE")
 
 
+def _verify_registered_shard(path: Path, parent: Path, *, size: int, sha256: str) -> str:
+    """Verify live original BF16 payload before the model build opens it.
+
+    This intentionally streams the full original shard. The small metadata-only
+    preflight does NOT give byte-level attestation of the current weights.
+    """
+    if (path.is_symlink() or not path.is_file()
+            or path.resolve().parent != parent.resolve()
+            or path.stat().st_size != size):
+        raise ValueError(f"unsafe or wrong-size original BF16 shard: {path.name}")
+    from chowder_batch.reap_hidden_checkpoint import sha256_file
+    actual = sha256_file(path)
+    if actual != sha256:
+        raise ValueError(f"original BF16 shard differs from pinned upstream: {path.name}")
+    return actual
+
+
 def kept_experts(observations: Path, n_layers: int, n_experts: int, keep: int, method: str, seed: int) -> dict[int, list[int]]:
     kept: dict[int, list[int]] = {}
     generator = torch.Generator().manual_seed(seed)
@@ -109,10 +126,17 @@ def main() -> None:
     model_dir = Path(args.model_dir)
     weights_dir = Path(args.weights_dir or args.model_dir)
     out = Path(args.out)
+    resolved_out = out.resolve()
     if out.exists():
         raise SystemExit(f"refusing to overwrite existing model directory: {out}")
     if not out.parent.is_dir():
         raise SystemExit(f"model output parent does not exist: {out.parent}")
+    source_directories = [model_dir.resolve(), weights_dir.resolve()]
+    if args.observations:
+        source_directories.append(Path(args.observations).resolve())
+    if any(resolved_out.is_relative_to(source) or source.is_relative_to(resolved_out)
+           for source in source_directories):
+        raise SystemExit("model output must be disjoint from model, weights and observations")
     config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     text = config["text_config"]
     n_layers, n_experts = int(text["num_hidden_layers"]), int(text["num_experts"])
@@ -120,6 +144,7 @@ def main() -> None:
         raise SystemExit(f"--keep must be in [{text['num_experts_per_tok']}, {n_experts})")
     if args.method != "random" and not args.observations:
         raise SystemExit("--observations is required for reap/frequency")
+    registered_original = False
     if args.method != "random":
         evidence = Path(args.observations) / "observation.json"
         if n_layers == 40 and n_experts == 256 and not evidence.is_file():
@@ -128,6 +153,10 @@ def main() -> None:
             observed = json.loads(evidence.read_text(encoding="utf-8"))
             if n_layers == 40 and n_experts == 256 and observed.get("n_seqs") not in (384, 704):
                 raise ValueError("original 40x256 REAP observation must match a frozen calibration")
+            if (n_layers == 40 and n_experts == 256 and args.keep == 128
+                    and args.method == "reap" and observed.get("n_seqs") == 704
+                    and not args.selection):
+                raise ValueError("registered REAP128_v2 build requires --selection manifest")
             if n_layers == 40 and n_experts == 256 and observed.get("n_seqs") == 384:
                 from chowder_batch.reap_build_preflight import FROZEN_V1_SHA256
                 if observed.get("calibration_sha256") != FROZEN_V1_SHA256:
@@ -138,6 +167,13 @@ def main() -> None:
                 validate_observation_receipt(Path(args.observations), observed,
                                              expected_generation=n_layers,
                                              require_registered_original=registered_original)
+            if registered_original:
+                from chowder_batch.reap_original_bf16_pin import validate_registered_source_metadata
+                validate_registered_source_metadata(model_dir.resolve(), weights_dir.resolve())
+                source = observed["checkpoint_receipt"]["source_identity"]
+                if (source.get("model_dir") != str(model_dir.resolve())
+                        or source.get("weights_dir") != str(weights_dir.resolve())):
+                    raise ValueError("registered BF16 observation source differs from pruning inputs")
     kept = kept_experts(Path(args.observations), n_layers, n_experts, args.keep, args.method, args.seed)
     selection_sha256 = None
     if args.selection:
@@ -150,11 +186,21 @@ def main() -> None:
         selection_bytes = selection_path.read_bytes()
         selection = json.loads(selection_bytes)
         validate_selection(selection, model_dir=model_dir, weights_dir=weights_dir,
-                           observations=Path(args.observations), kept=kept)
+                           observations=Path(args.observations), kept=kept, out=out)
         selection_sha256 = hashlib.sha256(selection_bytes).hexdigest()
 
     index = json.loads((model_dir / "model.safetensors.index.json").read_text(encoding="utf-8"))
     shards = _indexed_shards(index, n_layers)
+    pinned_source_shards = {}
+    if args.method != "random" and registered_original:
+        from chowder_batch.reap_original_bf16_pin import load_original_pin
+        # No staging is created until the live 26 shards have been verified.
+        pinned = load_original_pin()["weight_shards"]
+        for filename, expected in sorted(pinned.items()):
+            pinned_source_shards[filename] = _verify_registered_shard(
+                weights_dir / filename, weights_dir,
+                size=expected["size"], sha256=expected["sha256"],
+            )
     # A completed directory must be a single published artifact, never a partly
     # written large checkpoint. The temporary directory is created by this run
     # and cannot collide with another owner's model directory.
@@ -209,6 +255,7 @@ def main() -> None:
                 for i in range(n_layers)
             } if args.method != "random" else {},
             "selection_sha256": selection_sha256,
+            "verified_live_upstream_weight_sha256": pinned_source_shards,
             "kept_experts": {str(k): v for k, v in kept.items()},
             "total_bytes": total_bytes,
         }

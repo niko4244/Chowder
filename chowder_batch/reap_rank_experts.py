@@ -100,7 +100,7 @@ def generate(*, model_dir: Path, weights_dir: Path, calibration: Path,
 
 def validate_selection(document: dict, *, model_dir: Path,
                        weights_dir: Path, observations: Path,
-                       kept: dict[int, list[int]]) -> None:
+                       kept: dict[int, list[int]], out: Path) -> None:
     """Pruner-side check that an external selection matches its exact inputs."""
     if not isinstance(document, dict) or any((
         document.get("schema") != SCHEMA,
@@ -115,6 +115,7 @@ def validate_selection(document: dict, *, model_dir: Path,
         document.get("source_model_dir") != str(model_dir.resolve()),
         document.get("source_weights_dir") != str(weights_dir.resolve()),
         document.get("observation_dir") != str(observations.resolve()),
+        document.get("intended_prune_out") != str(out.resolve()),
         document.get("observer_sha256") != _sha256(observations / "observation.json"),
         document.get("source_model_config_sha256") != _sha256(model_dir / "config.json"),
         document.get("source_model_index_sha256") != _sha256(model_dir / "model.safetensors.index.json"),
@@ -166,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     # Verify the consumer can read precisely the published mapping before writing.
     kept = kept_experts(args.observations, N_LAYERS, N_EXPERTS, KEEP, "reap", 20261017)
     validate_selection(document, model_dir=args.model_dir, weights_dir=args.weights_dir,
-                       observations=args.observations, kept=kept)
+                       observations=args.observations, kept=kept, out=args.prune_out)
     payload = json.dumps(document, sort_keys=True, indent=2, allow_nan=False) + "\n"
     with args.out.open("x", encoding="utf-8", newline="\n") as handle:
         handle.write(payload)

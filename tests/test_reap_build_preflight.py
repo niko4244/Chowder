@@ -389,3 +389,42 @@ def test_checkpointed_observation_cannot_strip_receipt_to_pass_d0(tmp_path):
     with pytest.raises(preflight.PreflightError, match="checkpoint provenance"):
         _plan(paths)
     assert not paths["out"].exists()
+
+
+def test_registered_bf16_header_sizing_checks_real_tensor_geometry(tmp_path):
+    """This exercises safetensors *headers* only, using a tiny 40-layer CPU file."""
+    from safetensors.torch import save_file
+
+    model = tmp_path / "model"
+    model.mkdir()
+    tensors = {}
+    for layer in range(40):
+        prefix = f"model.language_model.layers.{layer}.mlp."
+        tensors[prefix + "experts.gate_up_proj"] = torch.zeros((256, 4, 4), dtype=torch.bfloat16)
+        tensors[prefix + "experts.down_proj"] = torch.zeros((256, 4, 2), dtype=torch.bfloat16)
+        tensors[prefix + "gate.weight"] = torch.zeros((256, 4), dtype=torch.bfloat16)
+    tensors["lm_head.weight"] = torch.zeros((17, 4), dtype=torch.bfloat16)
+    tensors["mtp.fc.weight"] = torch.zeros((4, 8), dtype=torch.bfloat16)
+    shard = model / "model-00001-of-00001.safetensors"
+    save_file(tensors, str(shard))
+    _save(model / "config.json", {"text_config": {
+        "hidden_size": 4, "moe_intermediate_size": 2,
+    }})
+    index = {name: shard.name for name in tensors}
+    _save(model / "model.safetensors.index.json", {"weight_map": index})
+    sizing = preflight._registered_prune_header_sizing(model, model, keep=128)
+    assert sizing["source_indexed_tensors"] == 122
+    assert sizing["verified_routed_tensor_headers"] == 120
+    expected_routed = 40 * (256 * 4 * 4 + 256 * 4 * 2 + 256 * 4) * 2
+    assert sizing["source_tensor_bytes"] == expected_routed + 17 * 4 * 2 + 4 * 8 * 2
+    assert sizing["projected_pruned_tensor_bytes"] == expected_routed // 2 + 17 * 4 * 2
+    assert sizing["projected_largest_output_shard_bytes"] == sizing["projected_pruned_tensor_bytes"]
+
+    # A self-consistent index is still rejected if the actual tensor shape
+    # differs from the registered original expert geometry.
+    tensors["model.language_model.layers.3.mlp.gate.weight"] = torch.zeros(
+        (256, 5), dtype=torch.bfloat16,
+    )
+    save_file(tensors, str(shard))
+    with pytest.raises(preflight.PreflightError, match="routed expert shape"):
+        preflight._registered_prune_header_sizing(model, model, keep=128)

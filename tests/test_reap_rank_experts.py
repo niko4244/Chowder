@@ -60,10 +60,10 @@ def _generate(paths):
 
 
 def _validate(paths, document):
-    model, obs, _, _, _ = paths
+    model, obs, _, out, _ = paths
     kept = rank.kept_experts(obs, 40, 256, 128, "reap", 20261017)
     rank.validate_selection(document, model_dir=model, weights_dir=model,
-                            observations=obs, kept=kept)
+                            observations=obs, kept=kept, out=out)
 
 
 def test_40x128_selection_is_deterministic_and_mapped(tmp_path, monkeypatch):
@@ -86,7 +86,7 @@ def test_40x128_selection_is_deterministic_and_mapped(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("damage", ["rank", "kept", "mapping", "stats", "observer",
-                                    "config", "missing_layer", "path"])
+                                    "config", "missing_layer", "path", "out"])
 def test_selection_rejects_mismatched_provenance_or_mapping(tmp_path, monkeypatch, damage):
     paths = _fixture(tmp_path, monkeypatch)
     selection = _generate(paths)
@@ -106,6 +106,8 @@ def test_selection_rejects_mismatched_provenance_or_mapping(tmp_path, monkeypatc
         (model / "config.json").write_text('{"text_config":{"num_hidden_layers":39}}')
     elif damage == "missing_layer":
         selection["layers"].pop("39")
+    elif damage == "out":
+        selection["intended_prune_out"] = str(tmp_path / "foreign-model")
     else:
         selection["source_model_dir"] = str(tmp_path / "other-model")
     with pytest.raises((ValueError, OSError)):
@@ -129,8 +131,34 @@ def test_direct_pruner_cannot_consume_40x256_unsealed_stats(tmp_path, entry):
     assert missing.returncode and "requires observation.json" in missing.stderr
     (obs / "observation.json").write_text('{"n_seqs":704}')
     unsealed = subprocess.run(cmd, cwd=root, capture_output=True, text=True, check=False)
-    assert unsealed.returncode and "registered BF16 D0 requires checkpointed" in unsealed.stderr
+    assert unsealed.returncode and "requires --selection manifest" in unsealed.stderr
+    unsealed_with_selection = subprocess.run(
+        cmd + ["--selection", str(tmp_path / "invalid-selection.json")],
+        cwd=root, capture_output=True, text=True, check=False,
+    )
+    assert (unsealed_with_selection.returncode
+            and "registered BF16 D0 requires checkpointed" in unsealed_with_selection.stderr)
     (obs / "observation.json").write_text('{"n_seqs":384,"calibration_sha256":"forged"}')
     unregistered_v1 = subprocess.run(cmd, cwd=root, capture_output=True, text=True, check=False)
     assert unregistered_v1.returncode and "wrong frozen calibration" in unregistered_v1.stderr
+    assert not (tmp_path / "out").exists()
+
+
+def test_pruner_requires_selection_for_registered_704_row_reap128(tmp_path):
+    model, obs = tmp_path / "model", tmp_path / "obs"
+    model.mkdir()
+    obs.mkdir()
+    (model / "config.json").write_text(json.dumps({"text_config": {
+        "num_hidden_layers": 40, "num_experts": 256, "num_experts_per_tok": 8
+    }}))
+    (obs / "observation.json").write_text('{"n_seqs":704}')
+    result = subprocess.run(
+        [sys.executable, "-B", "-m", "chowder_batch.reap_prune",
+         "--model-dir", str(model), "--observations", str(obs), "--keep", "128",
+         "--method", "reap", "--out", str(tmp_path / "out")],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True,
+        text=True, check=False,
+    )
+    assert result.returncode != 0
+    assert "requires --selection" in result.stderr
     assert not (tmp_path / "out").exists()
