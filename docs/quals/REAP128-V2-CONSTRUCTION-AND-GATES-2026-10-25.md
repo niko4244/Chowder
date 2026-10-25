@@ -1628,6 +1628,37 @@ GSM8K/HumanEval, random128 paired control, same-session GPU fit/speed
 and canonical REAP160 remain **not measured**. Gen-0 must stay
 `BLOCKED`, no selected deployment candidate, PR #282 draft.
 
+### October 25 17:27 CDT — independent post-publication full Q4 certificate prepared
+
+Added a separate CPU-only full-Q4 construction certificate program,
+`chowder_batch.reap_gguf_q4_independent_cert`, that is deliberately
+**not invoked while the exclusive Q4 producer is running**. Once the
+original complete G: model and final sidecar have been published, this
+tool independently rechecks the original frozen BF16 GGUF whole SHA,
+the complete Q4 GGUF whole SHA, all exact 733 source/final tensor names,
+orders, shapes, typed GGUF payload SHA-256 witnesses, 40×128/top-k 8
+geometry, copied-tensor source bytes, original pinned quantizer/spec,
+all 42 immutable chunk receipts and final publication receipt.
+Its full-model tensor hashes use bounded file spans rather than
+materializing multi-GiB tensor ndarray mappings into RAM. It requires a
+new exclusive/fsync'd atomic output receipt and declares explicitly
+`INDEPENDENT_SOURCE_AND_733_MIXED_K_PAYLOADS_MATCH_NOT_QUALITY_GATE`,
+`quality_gate:NOT_EVALUATED`, and `release_approved:false`.
+
+The independent certificate is a different implementation and provenance
+walk from the constructor's own inline final-check ledger and source-bound
+BF16↔Q4 numeric sampler. Focused combined Q4-construction, Q4-numeric,
+and independent-certificate adversarial tests passed **63 tests**, with
+one real quantizer test deliberately excluded to protect the original
+production owner. Ruff and whitespace clean. Synthetic tests cover
+missing, duplicated, reordered, tampered and source/recipe-swapped chunk
+receipts; none are interpreted as evidence of the real complete model.
+
+At the time of this preparation, the fifth source-bound owner PID 46388
+had sealed **39/42** real chunks and was constructing a later private
+mini. No final 733-tensor public Q4, independent certificate, actual
+BF16↔Q4 numeric result or model-quality gate has been reported.
+
 ### October 25 16:58 CDT — new-v2 evaluation requires live source/model serving owner
 
 The source-bound new-v2 serving wrapper already freshly SHA-hashes a complete
