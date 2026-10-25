@@ -36,6 +36,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,28 @@ def _digest(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, ensure_ascii=False,
                          separators=(",", ":"), allow_nan=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _publish_input_witness_exclusive(path: Path, context: dict) -> None:
+    """Publish a complete, fsynced source witness without clobber or partial JSON.
+
+    A killed evaluator may leave a private pending sibling but never an
+    incomplete authoritative `.inputs.json`. A fresh run can safely retry
+    without taking over an earlier serving/model witness.
+    """
+    pending = path.with_name(f".{path.name}.{uuid.uuid4().hex}.pending")
+    try:
+        with pending.open("xb") as stream:
+            stream.write((json.dumps(context, sort_keys=True, indent=2,
+                                     allow_nan=False) + "\n").encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.name == "nt":
+            pending.rename(path)  # Windows rename refuses existing targets.
+        else:
+            os.link(pending, path)  # POSIX rename would replace existing proof.
+    finally:
+        pending.unlink(missing_ok=True)
 
 
 def _bind_evaluation_inputs(out_dir: Path, suite: str, items: list[dict]) -> dict:
@@ -89,6 +112,8 @@ def _bind_evaluation_inputs(out_dir: Path, suite: str, items: list[dict]) -> dic
     }
     witness = out_dir / f"{suite}.inputs.json"
     results = out_dir / f"{suite}.jsonl"
+    if witness.is_symlink() or (witness.exists() and not witness.is_file()):
+        raise ValueError("REAP source identity witness must be a regular file")
     if witness.is_file():
         try:
             recorded = json.loads(witness.read_text(encoding="utf-8"))
@@ -101,10 +126,9 @@ def _bind_evaluation_inputs(out_dir: Path, suite: str, items: list[dict]) -> dic
         if results.exists():
             raise ValueError("REAP unclaimed existing results have no original resume identity; "
                              "use a new experiment output directory")
-        # Exclusive creation preserves an earlier interrupted experiment witness.
-        with witness.open("x", encoding="utf-8") as stream:
-            json.dump(context, stream, sort_keys=True, indent=2)
-            stream.write("\n")
+        # Source identity is authoritative only once the entire JSON is
+        # flushed and atomically published. Never overwrite a racing owner.
+        _publish_input_witness_exclusive(witness, context)
     return context
 
 
@@ -263,6 +287,7 @@ def _publish_summary(out_dir: Path, summary: dict, *, prior_bytes: bytes | None,
     with pending.open("xb") as stream:
         stream.write(encoded)
         stream.flush()
+        os.fsync(stream.fileno())
     try:
         if _summary_bytes(path) != prior_bytes:
             raise ValueError("REAP summary changed before atomic publication")

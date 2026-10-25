@@ -3,6 +3,7 @@
 import hashlib
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -49,6 +50,103 @@ SUITES = {"gsm8k": ITEMS, "humaneval": [
     {"id": "HumanEval/0", "prompt": "write f", "header": "def f():\n",
      "entry_point": "f", "test": "def check(f): assert f() == 42"},
 ]}
+
+
+def test_source_witness_fsyncs_complete_json_before_exclusive_publication(
+    tmp_path, monkeypatch,
+):
+    _serve(tmp_path)
+    target = tmp_path / "gsm8k.inputs.json"
+    observed = []
+    real_fsync = reap_eval.os.fsync
+
+    def trace_fsync(fd):
+        pending = list(tmp_path.glob(".gsm8k.inputs.json.*.pending"))
+        assert len(pending) == 1
+        assert not target.exists()
+        observed.append(json.loads(pending[0].read_text(encoding="utf-8")))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(reap_eval.os, "fsync", trace_fsync)
+    result = reap_eval._bind_evaluation_inputs(tmp_path, "gsm8k", ITEMS)
+    assert observed == [result]
+    assert json.loads(target.read_text(encoding="utf-8")) == result
+    assert not list(tmp_path.glob(".gsm8k.inputs.json.*.pending"))
+
+
+def test_partial_source_witness_write_never_creates_authoritative_invalid_json(
+    tmp_path, monkeypatch,
+):
+    _serve(tmp_path)
+    real_open = Path.open
+    wrote_partial = []
+
+    class FailingWrite:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def write(self, data):
+            self.stream.write(data[:17])
+            wrote_partial.append(True)
+            raise OSError("injected interrupted source receipt write")
+
+    def intercept(self, mode="r", *args, **kwargs):
+        stream = real_open(self, mode, *args, **kwargs)
+        if self.parent == tmp_path and mode == "xb" and self.name.endswith(".pending"):
+            return FailingWrite(stream)
+        return stream
+
+    monkeypatch.setattr(Path, "open", intercept)
+    with pytest.raises(OSError, match="injected interrupted source"):
+        reap_eval._bind_evaluation_inputs(tmp_path, "gsm8k", ITEMS)
+    assert wrote_partial == [True]
+    assert not (tmp_path / "gsm8k.inputs.json").exists()
+    assert not list(tmp_path.glob(".gsm8k.inputs.json.*.pending"))
+
+
+def test_concurrent_source_witness_publication_never_replaces_other_identity(
+    tmp_path, monkeypatch,
+):
+    _serve(tmp_path)
+    target = tmp_path / "gsm8k.inputs.json"
+    prior = b'{"another_immutable_identity":true}\n'
+    real_rename = Path.rename
+    real_link = reap_eval.os.link
+
+    def race_rename(self, other):
+        if self.name.endswith(".pending") and Path(other) == target:
+            target.write_bytes(prior)
+            raise FileExistsError("injected concurrent source receipt")
+        return real_rename(self, other)
+
+    def race_link(source, other, *args, **kwargs):
+        if str(source).endswith(".pending") and Path(other) == target:
+            target.write_bytes(prior)
+            raise FileExistsError("injected concurrent source receipt")
+        return real_link(source, other, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rename", race_rename)
+    monkeypatch.setattr(reap_eval.os, "link", race_link)
+    with pytest.raises(FileExistsError, match="concurrent source receipt"):
+        reap_eval._bind_evaluation_inputs(tmp_path, "gsm8k", ITEMS)
+    assert target.read_bytes() == prior
+    assert not list(tmp_path.glob(".gsm8k.inputs.json.*.pending"))
+
+
+def test_stale_uncommitted_source_witness_pending_never_promoted(tmp_path):
+    _serve(tmp_path)
+    abandoned = tmp_path / ".gsm8k.inputs.json.previous.pending"
+    abandoned.write_text('{"partial":', encoding="utf-8")
+    current = reap_eval._bind_evaluation_inputs(tmp_path, "gsm8k", ITEMS)
+    assert json.loads((tmp_path / "gsm8k.inputs.json").read_text()) == current
+    assert abandoned.read_text(encoding="utf-8") == '{"partial":'
 
 
 def test_separate_suite_invocations_preserve_original_digest_and_both_gates(

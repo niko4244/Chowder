@@ -1287,3 +1287,38 @@ index 22 SHA-256
 The complete Q4 publication, real Q4 numerical fidelity and registered
 science remain pending. No quantizer duplication, GPU ownership change
 or resource-floor reduction occurred. PR remains draft; Gen-0 BLOCKED.
+
+### October 25 16:11 CDT — crash-safe official evaluator input-witness publication
+
+The registered evaluation runner's authoritative `<suite>.inputs.json`
+identity previously used a direct exclusive `open('x')` followed by
+`json.dump`. An abrupt stop mid-write could expose corrupt, partial JSON
+under the authoritative evidence name and prevent an otherwise sound
+future experiment re-entry. The runner now builds a unique same-directory
+private pending witness, flushes and `fsync`s all bytes, then exclusively
+publishes without overwriting an existing source/model identity (Windows
+rename or POSIX hard link). On Python exceptions it removes only its
+owned pending file; a hard-killed process may leave an untrusted private
+orphan, never a half-written authoritative witness. Symlink/nonregular
+prior witnesses fail closed. The cooperative per-arm summary publication
+now also `fsync`s its completely serialized pending bytes before its
+already-guarded atomic summary replacement. No source prompts, scoring,
+decode flags, resumption rules, model SHA, thresholds or real results
+were altered.
+
+Adversarial CPU tests prove full JSON and `fsync` precede first official
+visibility, interrupted partial writes leave no false authority,
+concurrent publish cannot replace another serving source identity,
+and a previous orphan is never promoted. The combined offline
+evaluator/isolated-workspace/compare/selector suite passed **109 tests**,
+Ruff and whitespace checks clean. This is evidence-integrity hardening,
+not a registered quality PASS or new serving session.
+
+At 16:11 CDT, real original exclusive Q4 PID 72824 was still alive with
+**24/42** SHA-sealed chunks; newly published chunk 024 GGUF SHA-256
+`8148af7454077fb075b9261676ee1cd591082f19f9a7b3bf630da97e11f29f27`.
+No complete Q4 GGUF or sidecar existed. Available physical RAM was
+~16.02 GiB, free Windows commit ~23.88 GiB, and F/G/I free disk space
+~36.65/27.17/12.75 GiB. The model owner, original quantizer and
+unrelated GPU workloads were untouched. All mandatory scientific
+qualification and deterministic Gen-0 gates remain pending/BLOCKED.
