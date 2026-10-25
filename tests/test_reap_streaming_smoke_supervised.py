@@ -97,3 +97,42 @@ def test_owned_log_cannot_modify_original_source_tree(tmp_path, monkeypatch):
         "--log", str(original / "must-not-write.log"),
     ]) == 2
     assert not list(original.iterdir())
+
+
+def test_resume_progress_is_bound_to_full_proof_and_separate_from_models(tmp_path, monkeypatch):
+    model, proof, output = _inputs(tmp_path)
+    directory = tmp_path / "activation"
+    directory.mkdir()
+    monkeypatch.setattr(guarded, "host_state", lambda _: _fake_host())
+    launched = []
+
+    def fake_owned(cmd, *, out, log):
+        launched.append(cmd)
+        out.write_text('{"status":"CPU_BF16_END_TO_END_SMOKE_PASS_NOT_QUALITY_GATE"}')
+        return 0
+
+    monkeypatch.setattr(guarded, "_run_owned", fake_owned)
+    arguments = [
+        "--model", str(model), "--verification", str(proof), "--out", str(output),
+        "--progress-dir", str(directory), "--execute", "--log", str(tmp_path / "owned.log"),
+    ]
+    assert guarded.main(arguments) == 0
+    assert launched and "--progress-dir" in launched[0]
+    assert launched[0][launched[0].index("--full-verification-sha256") + 1] == guarded._sha(proof)
+
+
+def test_activation_progress_cannot_modify_original_bf16_tree(tmp_path, monkeypatch):
+    model, proof, output = _inputs(tmp_path)
+    source = tmp_path / "original"
+    source.mkdir()
+    content = json.loads(proof.read_text())
+    content["original_source"] = str(source.resolve())
+    proof.write_text(json.dumps(content))
+    monkeypatch.setattr(guarded, "host_state", lambda _: _fake_host())
+    monkeypatch.setattr(guarded, "_run_owned",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("launched")))
+    assert guarded.main([
+        "--model", str(model), "--verification", str(proof), "--out", str(output),
+        "--progress-dir", str(source), "--execute", "--log", str(tmp_path / "log"),
+    ]) == 2
+    assert not list(source.iterdir())

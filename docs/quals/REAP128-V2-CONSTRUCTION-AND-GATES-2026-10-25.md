@@ -187,6 +187,20 @@ Do not reinterpret these resource refusals as REAP scientific failures.
    `chowder_batch.reap_streaming_bf16_smoke`. It checks a single bounded
    local-tokenizer forward pass through all 40 BF16 pruned layers and final
    finite logits without loading all model weights into host RAM.
+   The `reap_streaming_smoke_supervised` guarded wrapper now optionally
+   accepts `--progress-dir` (an existing directory outside both the
+   original and candidate BF16 trees). At layers 0, 9, 19, and 29, the
+   inference worker records an immutable BF16 activation snapshot plus a
+   SHA-256 receipt bound to the frozen checkpoint, exact input tokens,
+   model config and the completed full-source verification digest.
+   On a later admitted run, the same prompt/config/proof can safely
+   resume from the highest complete checkpoint without revisiting earlier
+   layers. Any stale, corrupted or missing predecessor record fails
+   closed. A positive **40-layer CPU synthetic test** confirmed resumed
+   final-logits SHA-256 matches the uninterrupted model forward exactly.
+   These intermediate snapshots are operational progress only; **no
+   actual checkpoint inference PASS** is claimed until all 40 layers and
+   final finite logits are independently witnessed.
 3. After complete BF16 verification, `chowder_batch.reap_gguf_build_plan`
    checks the pinned llama.cpp converter, available storage and distinct
    target filesystems for BF16 GGUF intermediate, Q8_0 quality arm, and

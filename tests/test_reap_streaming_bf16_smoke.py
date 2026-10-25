@@ -93,9 +93,21 @@ def test_40_layer_cpu_streaming_inference_loads_sharded_synthetic_checkpoint(
         AutoTokenizer, "from_pretrained", lambda *args, **kwargs: TinyTokenizer(),
     )
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "-1")
-    answer = smoke.run(model, prompt="synthetic test", max_tokens=8)
+    progress = tmp_path / "owned-progress"
+    progress.mkdir()
+    answer = smoke.run(model, prompt="synthetic test", max_tokens=8,
+                       progress_dir=progress, full_verification_sha256="a" * 64)
     assert answer["status"] == "CPU_BF16_END_TO_END_SMOKE_PASS_NOT_QUALITY_GATE"
     assert answer["layer_count"] == 40
     assert answer["layer_types"] == {"linear_attention": 30, "full_attention": 10}
     assert len(answer["final_logits_sha256"]) == 64
     assert len(answer["top_5_token_ids"]) == 5
+    assert answer["resumed_after_layer"] == -1
+    assert len(list(progress.glob("layer-*.receipt.json"))) == 4
+    resumed = smoke.run(model, prompt="synthetic test", max_tokens=8,
+                        progress_dir=progress, full_verification_sha256="a" * 64)
+    assert resumed["resumed_after_layer"] == 29
+    assert resumed["final_logits_sha256"] == answer["final_logits_sha256"]
+    with pytest.raises(ValueError, match="stale/corrupt"):
+        smoke.run(model, prompt="synthetic test", max_tokens=8,
+                  progress_dir=progress, full_verification_sha256="b" * 64)

@@ -76,6 +76,8 @@ def main(argv=None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--prompt", default="The answer is")
     parser.add_argument("--max-tokens", type=int, default=16)
+    parser.add_argument("--progress-dir", type=Path,
+                        help="existing external directory for source-bound layer-activation receipts")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--log", type=Path)
     args = parser.parse_args(argv)
@@ -96,6 +98,14 @@ def main(argv=None) -> int:
         protected_roots = [args.model.resolve()]
         if isinstance(original_source, str) and original_source:
             protected_roots.append(Path(original_source).resolve())
+        progress_dir = args.progress_dir.resolve() if args.progress_dir else None
+        if progress_dir is not None and (
+                not progress_dir.is_dir()
+                or any(progress_dir.is_relative_to(root) or root.is_relative_to(progress_dir)
+                       for root in protected_roots)
+                or args.out.resolve().is_relative_to(progress_dir)
+                or log_path.is_relative_to(progress_dir)):
+            raise ValueError("activation progress dir must be existing and disjoint from all models/logs/receipts")
         if (log_path.exists() or not log_path.parent.is_dir()
                 or any(log_path.is_relative_to(root) for root in protected_roots)
                 or log_path == args.out.resolve()):
@@ -110,6 +120,11 @@ def main(argv=None) -> int:
             "--model", str(args.model.resolve()), "--prompt", args.prompt,
             "--max-tokens", str(args.max_tokens), "--out", str(args.out.resolve()),
         ]
+        if progress_dir is not None:
+            command.extend([
+                "--progress-dir", str(progress_dir),
+                "--full-verification-sha256", fresh["verification_sha256"],
+            ])
         with log_path.open("x", encoding="utf-8", newline="\n") as log:
             log.write(json.dumps(fresh, sort_keys=True) + "\n")
             log.flush()
