@@ -464,3 +464,101 @@ artifacts are never resumed or appended in place.
 **Release decision until all required evidence exists: BLOCKED, no Gen-0
 promotion or owner approval implied.** Neither frozen thresholds nor the
 predeclared arm-selection order may be weakened.
+
+## October 25 serial chunked Q8 recovery and independent Q4 readiness
+
+The first actual serial 42-chunk Q8 build sealed source-bound chunks 001 and
+002, including their full SHA receipts on I:, before a *validation error* in
+chunk 003. This was not a quantizer numerical failure: the pinned llama.cpp
+quantizer writes two FP32 `blk.{0,1}.ffn_gate_inp_shexp.weight` tensors as
+shape `[2048]` instead of the BF16 GGUF source metadata `[2048, 1]` while
+preserving the original FP32 payload bit-for-bit. Independent live GGUF
+reader checks confirmed precisely two shape changes among chunk 003's 39
+tensors, with identical 8,192-byte payloads for each affected tensor.
+
+The converter's strict identity check now permits *only* the removable
+trailing singleton dimension of copied F32 tensors, and requires that their
+complete raw data SHA match. Other shape/type/data changes remain refused.
+An OS-held, nonblocking, persistent-inode ownership lock guards future Q8
+resumes, so two same-target jobs cannot overlap and an interrupted owner's
+lock is released by the OS without removing the common lock file.
+
+The sole unsealed chunk 003 output and its private BF16 mini-source were
+independently audited against the exact original tensor group and SHA-256
+before *only those two owner-created files* were discarded, with no owning
+quantizer still running. The two sealed chunk receipts remain unchanged.
+Audited orphan Q8 SHA-256:
+`1f21282c20e0e93f9a2cab7318e5b4a2f4020c1f581c33f448555682a0e0c774`.
+Mini-source SHA-256:
+`076d42cd9e5ac1406ab74d80c9af8a98005664bf3afa220cec40b70efe7f12f3`.
+Audited cleanup JSON:
+`docs/quals/reap128-v2-q8-orphan-chunk003-audit-20261025.json`, SHA-256
+`051ccbd347609e20b493464a1cd9900ed8834b0d660d45f621ab1c536f81bf34`.
+
+A fresh serial Q8 recovery was launched against the unchanged published
+37.12-GB BF16 source with the identical chunk identity and a new audit log
+`F:\reap128-v2-q8-streaming-recovery1-20261025.log`. Its observed startup
+is **not** completion of the full Q8, quantized model loading, registered
+GSM8K/HumanEval, or GPU gates. Chunks are certified only after their own
+receipt is sealed; no incomplete source is promoted.
+
+For Q4_K_M, `chowder_batch.reap_gguf_q4_chunked` now provides a separate
+CPU-only, BF16-source-bound, guarded sequential mini-GGUF workflow, including
+per-mini and final bitwise tensor hashes, typed K-quant metadata, parent
+source equivalence, protected cross-volume publication and restart refusal
+for unsealed artifacts. The first pinned real-quantizer tiny MoE fixture
+verified that all Q4_K_M per-tensor types, shapes, and data match the
+monolithic tiny BF16 reference. **The real 40×128 production Q4 is not yet
+built or measured** and must not run concurrently with the Q8 constructor.
+The registered Q4 speed, fit and full scientific gates remain pending.
+
+## October 25 evaluation evidence-integrity regression fixes
+
+- The actual future **chunked Q8 final** has a distinct
+  `.reap-chunked.json` construction schema, not a monolithic
+  `.reap-stage.json`. `reap_gguf_quant_sample` now accepts that exact
+  construction witness only after validating registered BF16 ancestry,
+  quantizer/spec hashes, entire Q8 file checksum, 733 unique tensor
+  headers, 42 ordered source groups, and every quantified raw tensor
+  hash/shape/type. It refuses conflicting or contradictory receipts.
+  It does not turn weight-error windows into benchmark quality.
+- `reap_gates` now rejects 200-speed-sample cohorts that are not the
+  **first 200 frozen GSM8K IDs on both sides**. It also makes Q4
+  speed/fit `UNKNOWN` if a resumed serving record/log or an active
+  serving lock exists, rather than using a stale original offload count
+  for measurements from an unbound later session. REAP160's historic
+  independent load-only GPU probe continues to be corroborating, not
+  eligible as a same-session speed PASS.
+- `reap_eval` now preserves and revalidates earlier suite summaries,
+  item results, input identity, scores and SHA when another frozen
+  suite is run later. A cooperative exclusive summary lock and atomic
+  replacement stop legitimate resumed evaluators from losing prior
+  GSM8K evidence upon a HumanEval-only re-entry. Corrupt, orphaned,
+  mismatched or stale previous records fail closed.
+- `reap_select` requires newly produced v2 quality/200-item GGUF arms
+  to carry matching model/serving SHA, suite-specific `.inputs.json`
+  and frozen prompt/decode/scoring/source-population fingerprints.
+  V2 Q8 and Q4 GSM8K source SHA/count must agree. Historical archived
+  reference arms remain separately grandfathered; their missing new
+  witnesses never substitute for v2 data. Receipt-level witness
+  integrity cannot prove an independently rebuilt upstream dataset
+  or live resident model process against *collusive* forged receipts;
+  those stronger external attestations remain separate requirements.
+
+The focused post-change CPU regression matrix passed **198 tests** with
+**3 intentional skips** of tiny real quantizer tests while the production
+Q8 owner was running. The skipped pinned-quantizer miniature proofs had
+passed before the additional concurrent-conversion protection was
+installed. Ruff and Git whitespace checks passed. This is regression
+evidence, not model-quality validation.
+
+A separate real archived-evaluation selector replay (not a new quality
+run) wrote
+`F:\reap128-v2-frozen-post-evidence-integrity-20261025.json`
+(byte-identical repository evidence at
+`docs/quals/reap128-v2-frozen-post-evidence-integrity-20261025.json`)
+with SHA-256
+`82f3583eebd0436d07cc13739068ececfd2d708f2e39bde3c025253f03a0af46`.
+The unchanged frozen decision was exactly
+`BLOCKED`, `chosen=null`, reason **both REAP128_v2 and REAP160 full
+gates are required**. The PR remains a draft; release approval is absent.

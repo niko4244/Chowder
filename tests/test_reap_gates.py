@@ -283,3 +283,57 @@ def test_speed_gate_requires_and_accepts_all_200_valid_samples(tmp_path):
     assert speed["status"] == "PASS"
     assert speed["n"] == 200
     assert speed["statistic"]["ratio"] == pytest.approx(2.5)
+
+
+@pytest.mark.parametrize("changed_arm", ["reap128_q4", "dense_q4", "both"])
+def test_speed_gate_refuses_200_fast_but_unpaired_gsm8k_items(tmp_path, changed_arm):
+    build(tmp_path)
+    write_arm(tmp_path, "reap128_q4", "gsm8k", [1] * 200, pps=[25.0] * 200,
+              serve={"experts_offloaded": 0})
+    write_arm(tmp_path, "dense_q4", "gsm8k", [1] * 200, pps=[10.0] * 200)
+    targets = ("reap128_q4", "dense_q4") if changed_arm == "both" else (changed_arm,)
+    for target in targets:
+        path = tmp_path / target / "gsm8k.jsonl"
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        rows[0]["id"] = "gsm8k-200"  # still 200 distinct, finite speed observations
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    with pytest.raises(rg.GateError, match="first 200 GSM8K"):
+        run(tmp_path, speed_arm="reap128_q4", speed_dense="dense_q4")
+
+
+@pytest.mark.parametrize(("resumed_arm", "marker"), [
+    ("reap128_q4", "serve.resume-rescored.json"),
+    ("dense_q4", "serve.resume-rescored.json"),
+    ("reap128_q4", "server.resume-interrupted.log"),
+    ("reap128_q4", ".serve.lock"),
+])
+def test_speed_gate_cannot_reuse_original_fit_for_resumed_speed_rows(
+    tmp_path, resumed_arm, marker,
+):
+    build(tmp_path)
+    write_arm(tmp_path, "reap128_q4", "gsm8k", [1] * 200, pps=[25.0] * 200,
+              serve={"experts_offloaded": 0})
+    write_arm(tmp_path, "dense_q4", "gsm8k", [1] * 200, pps=[10.0] * 200)
+    # Per-item rows have no session ID; a resume can contribute fast samples
+    # while serve.json still describes the original GPU placement.
+    (tmp_path / resumed_arm / marker).write_text(
+        json.dumps({"experts_offloaded": 12}) if marker.endswith(".json") else "resumed session",
+        encoding="utf-8",
+    )
+    speed = run(tmp_path, speed_arm="reap128_q4", speed_dense="dense_q4")["gates"]["speed"]
+    assert speed["status"] == "UNKNOWN"
+    assert "session" in speed["reason"]
+
+
+def test_historical_reap160_null_placement_remains_unknown(tmp_path):
+    build(tmp_path)
+    write_arm(tmp_path, "reap160", "gsm8k", [1] * 1319)
+    write_arm(tmp_path, "reap160", "humaneval", [1] * 164)
+    write_arm(tmp_path, "reap160_q4", "gsm8k", [1] * 200, pps=[40.0] * 200,
+              serve={"experts_offloaded": None})
+    write_arm(tmp_path, "dense_q4", "gsm8k", [1] * 200, pps=[10.0] * 200)
+    result = rg.compute(tmp_path, "reap160", "dense", "random128",
+                        "reap160_q4", "dense_q4", tmp_path / "observation.json")
+    speed = result["gates"]["speed"]
+    assert speed["status"] == "UNKNOWN"
+    assert speed["statistic"]["ratio"] == pytest.approx(4.0)

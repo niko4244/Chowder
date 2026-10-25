@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +48,72 @@ def hash_tensor_data(raw: Any) -> str:
         return h.hexdigest()
     finally:
         view.release()
+
+
+def _quantized_shape_matches(original: Any, quantized: Any) -> bool:
+    """Permit only llama.cpp's lossless F32 trailing-unit-dimension fold.
+
+    The pinned quantizer serializes an F32 [2048, 1] gate tensor as [2048]
+    without changing a single data byte. Quantized shapes must otherwise
+    match exactly, and *all* copied F32 payloads must retain original bytes.
+    """
+    from gguf import GGMLQuantizationType
+
+    source_shape = tuple(map(int, original.shape))
+    target_shape = tuple(map(int, quantized.shape))
+    if original.tensor_type == GGMLQuantizationType.F32:
+        if (quantized.tensor_type != GGMLQuantizationType.F32
+                or hash_tensor_data(original.data) != hash_tensor_data(quantized.data)):
+            return False
+        while len(source_shape) > len(target_shape) and source_shape[-1] == 1:
+            source_shape = source_shape[:-1]
+    return source_shape == target_shape
+
+
+@contextmanager
+def _exclusive_chunk_owner(directory: Path):
+    """Kernel-backed nonblocking lock, durable across interrupted owners.
+
+    Never unlink this inode: a second process must lock the same file after a
+    crash or restart. The OS releases the byte-range lock at process exit.
+    """
+    lock = directory / ".reap-gguf-chunked.lock"
+    if lock.is_symlink():
+        raise ValueError("untrusted GGUF chunk lock symlink")
+    with lock.open("a+b") as handle:
+        handle.seek(0)
+        try:
+            empty = handle.read(1) == b""
+        except PermissionError as error:
+            # Windows also prevents *reading* a locked byte range.
+            raise ValueError("another owned GGUF chunk construction is running") from error
+        if empty:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as error:
+                raise ValueError("another owned GGUF chunk construction is running") from error
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                raise ValueError("another owned GGUF chunk construction is running") from error
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def groups_for(source_reader: Any, *, max_mib: int = 1024) -> list[list[str]]:
@@ -164,7 +232,7 @@ def quantize_mini(
     result = {}
     for name, t in b.items():
         src = a[name]
-        if list(map(int, src.shape)) != list(map(int, t.shape)):
+        if not _quantized_shape_matches(src, t):
             raise ValueError(f"quantized tensor shape differs: {name}")
         if t.tensor_type not in (
                 GGMLQuantizationType.Q8_0, GGMLQuantizationType.Q4_K,
@@ -250,7 +318,7 @@ def _load_chunk_record(receipt: Path, output: Path, *,
     return saved
 
 
-def run_chunked(
+def _run_chunked_locked(
     *,
     source: Path, output: Path, scratch: Path, chunks: Path,
     quantizer: Path, max_mib: int = 1024, slab_mib: int = 1,
@@ -461,6 +529,15 @@ def run_chunked(
                               "sha256": combined["output_sha256"]}) + "\n")
         log.flush()
         return result
+
+
+def run_chunked(**kwargs) -> dict:
+    """Lock the chunk directory *before* source hashing or touching chunks."""
+    directory = kwargs["chunks"].resolve()
+    if not directory.is_dir() or directory.is_symlink():
+        raise ValueError("chunk directory must exist and cannot be a symlink")
+    with _exclusive_chunk_owner(directory):
+        return _run_chunked_locked(**kwargs)
 
 
 def main(argv=None) -> int:

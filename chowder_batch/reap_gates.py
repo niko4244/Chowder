@@ -140,11 +140,13 @@ def _gate0(arm_rows, base_rows):
               {"terminated_delta_min": -G0_TOL, "degenerate_delta_max": G0_TOL}, len(arm_rows))
 
 
-def _mean_pps(eval_dir, arm):
-    # The preregistered speed comparison uses 200 GSM8K items, not the
-    # 1,319-item quality arm. All 200 must have finite measurements:
-    # filtering absent/invalid values must not turn one fast item into a PASS.
+def _mean_pps(eval_dir, arm, *, frozen_first_200=False):
+    # The scientific gate must use the SAME first 200 GSM8K items in both
+    # Q4 arms. Leave read-only historical speed reconciliation descriptive.
     rows = _load(eval_dir, arm, "gsm8k", expected_n=200)
+    if frozen_first_200 and rows is not None and set(rows) != {f"gsm8k-{i}" for i in range(200)}:
+        raise GateError(f"{arm}: speed gate needs the frozen first 200 GSM8K item ids")
+    # Filtering absent/invalid values must not turn one fast item into a PASS.
     vals = [r.get("predicted_per_second") for r in (rows or {}).values()]
     measured = [v for v in vals if isinstance(v, (int, float)) and not isinstance(v, bool)
                 and math.isfinite(v) and v >= 0]
@@ -168,10 +170,20 @@ def _speed(eval_dir, speed_arm, speed_dense, *, arm):
     ):
         return _g("FAIL", {"experts_offloaded": offloaded}, thr, None,
                   reason="invalid negative or noninteger expert offload count")
-    a, na = _mean_pps(eval_dir, speed_arm)
-    b, nb = _mean_pps(eval_dir, speed_dense)
+    a, na = _mean_pps(eval_dir, speed_arm, frozen_first_200=True)
+    b, nb = _mean_pps(eval_dir, speed_dense, frozen_first_200=True)
     ratio = a / b if a is not None and b else None
     stat = {"experts_offloaded": offloaded, "pps_arm": a, "pps_dense": b, "ratio": ratio}
+    # ponytail: treat all resumed speed sessions as UNKNOWN without per-row
+    # attribution. Ceiling: harmless resumes cannot PASS. Upgrade: seal each
+    # row's session ID against that session's model/fit serving receipt.
+    for speed_dir in (Path(eval_dir) / speed_arm, Path(eval_dir) / speed_dense):
+        if ((speed_dir / ".serve.lock").exists()
+                or any(speed_dir.glob("serve.resume-*.json"))
+                or any(speed_dir.glob("server.resume-*.log"))):
+            return _g("UNKNOWN", stat, thr, na,
+                      reason=f"{speed_dir.name}: speed samples lack session-bound fit evidence "
+                             "(resumed or active session)")
     if offloaded is not None and offloaded != 0 and not partial_allowed:
         return _g("FAIL", stat, thr, na)  # offload alone fails the gate whatever the speed
     if offloaded is None or ratio is None:

@@ -71,6 +71,40 @@ def test_deterministic_source_chunk_layout_and_rejects_overlarge_tensor():
         chunk.groups_for(SimpleNamespace(tensors=tensors + tensors[:1]), max_mib=8)
 
 
+def test_lossless_f32_quantizer_singleton_dimension_normalization():
+    original = SimpleNamespace(
+        tensor_type=GGMLQuantizationType.F32, shape=np.array([2048, 1]),
+        data=np.arange(2048, dtype="<f4").reshape(1, 2048),
+    )
+    normalized = SimpleNamespace(
+        tensor_type=GGMLQuantizationType.F32, shape=np.array([2048]),
+        data=np.arange(2048, dtype="<f4"),
+    )
+    assert chunk._quantized_shape_matches(original, normalized)
+    assert not chunk._quantized_shape_matches(original, SimpleNamespace(
+        tensor_type=GGMLQuantizationType.F32, shape=np.array([2048]),
+        data=np.zeros(2048, dtype="<f4"),
+    ))
+    assert not chunk._quantized_shape_matches(original, SimpleNamespace(
+        tensor_type=GGMLQuantizationType.F32, shape=np.array([1024, 2]),
+        data=np.arange(2048, dtype="<f4"),
+    ))
+    assert not chunk._quantized_shape_matches(original, SimpleNamespace(
+        tensor_type=GGMLQuantizationType.F16, shape=np.array([2048]),
+        data=np.arange(2048, dtype="<f4"),
+    ))
+
+
+def test_chunk_ownership_lock_fails_closed_to_competing_owner(tmp_path):
+    with chunk._exclusive_chunk_owner(tmp_path):
+        with pytest.raises(ValueError, match="another owned"):
+            with chunk._exclusive_chunk_owner(tmp_path):
+                pytest.fail("duplicate construction incorrectly acquired lock")
+    with chunk._exclusive_chunk_owner(tmp_path):
+        pass
+    assert (tmp_path / ".reap-gguf-chunked.lock").is_file()
+
+
 def test_bf16_minis_preserve_every_raw_tensor_byte(tmp_path):
     source = tmp_path / "base.gguf"
     _small_bf16(source)
@@ -94,6 +128,12 @@ def test_pinned_quantizer_independent_q8_minis_merge_bitwise_equal_to_monolith(
     tmp_path, monkeypatch,
 ):
     from chowder_batch import reap_gguf_supervised as supervise
+    from chowder_batch.reap_gguf_q4_chunked import _require_no_competing_quantizer
+
+    try:
+        _require_no_competing_quantizer()
+    except ValueError:
+        pytest.skip("another registered conversion currently owns the CPU quantizer")
 
     source = tmp_path / "bf16.gguf"
     _small_bf16(source)
@@ -155,6 +195,12 @@ def test_owned_chunked_q8_pipeline_publishes_only_after_all_tensor_proofs(
     import json
     import shutil
     from chowder_batch import reap_gguf_supervised as supervise
+    from chowder_batch.reap_gguf_q4_chunked import _require_no_competing_quantizer
+
+    try:
+        _require_no_competing_quantizer()
+    except ValueError:
+        pytest.skip("another registered conversion currently owns the CPU quantizer")
 
     source = tmp_path / "source.gguf"
     _small_bf16(source)

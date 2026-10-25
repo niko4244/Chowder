@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -24,6 +25,11 @@ except ImportError:  # direct script mode outside the repository package path
 
 REQUIRED = ("d0", "gate0", "gate1", "gate2", "control", "speed")
 MARGIN = -0.02  # frozen strict lower bound for paired v2-v1 comparisons
+FROZEN_SERVE_FLAGS = ["--fit", "on", "-np", "4", "-c", "16384", "--jinja"]
+FROZEN_SCORING = "frozen reap_eval production scoring: final_number_match/boxed/HumanEval"
+FROZEN_INPUT_SCHEMA = "chowder.reap-eval-input-identity.v1"
+FROZEN_SOURCE_COUNTS = {"gsm8k": 1319, "humaneval": 164}
+FROZEN_MAX_TOKENS = {"gsm8k": 1024, "humaneval": 768}
 # §4 explicitly defines LB = mean(d) - 1.645 * sd(d)/sqrt(n), whereas
 # Amendment 4 §2 calls for "paired McNemar" one-sided 95% noninferiority at
 # -0.02. McNemar's equality test does not uniquely determine a lower CI for
@@ -101,6 +107,55 @@ def select(gates: dict[str, dict | None], paired: dict | None = None) -> dict:
     return {"status": "SELECTED", "chosen": "reap128", "reason": "v1 retained under amendment 4"}
 
 
+def _is_new_v2(arm: str) -> bool:
+    return arm in {"reap128_v2", "reap128_v2_q4", "reap160_v2", "reap160_v2_q4"}
+
+
+def _v2_input_witness(eval_dir: Path, arm: str, suite: str) -> dict:
+    """Validate the frozen evaluator's new-arm source/model/decode claim."""
+    directory = eval_dir / arm
+    path = directory / f"{suite}.inputs.json"
+    serving = directory / "serve.json"
+    if not path.is_file() or not serving.is_file() or path.is_symlink() or serving.is_symlink():
+        raise GateError(f"{arm}/{suite}: new v2 evaluation witness or serve.json missing")
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        serve = json.loads(serving.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise GateError(f"{arm}/{suite}: v2 input witness/serving receipt is unreadable") from exc
+    if not isinstance(record, dict) or record.get("schema") != FROZEN_INPUT_SCHEMA:
+        raise GateError(f"{arm}/{suite}: frozen input witness schema mismatch")
+    if set(record) != {"schema", "model", "suite", "source_items_sha256",
+                       "source_items_n", "decode", "scoring"}:
+        raise GateError(f"{arm}/{suite}: frozen input witness schema fields mismatch")
+    if record.get("suite") != suite:
+        raise GateError(f"{arm}/{suite}: input witness suite mismatch")
+    source_sha = record.get("source_items_sha256")
+    if (not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", source_sha)
+            or type(record.get("source_items_n")) is not int
+            or record["source_items_n"] != FROZEN_SOURCE_COUNTS[suite]):
+        raise GateError(f"{arm}/{suite}: frozen source item digest/count invalid")
+    decode = {"system": "You are a helpful assistant.", "temperature": 0.0,
+              "top_k": 1, "seed": 7, "max_tokens": FROZEN_MAX_TOKENS[suite],
+              "enable_thinking": False}
+    if (record.get("decode") != decode or not isinstance(record["decode"], dict)
+            or any(type(record["decode"][key]) is not type(value)
+                   for key, value in decode.items())):
+        raise GateError(f"{arm}/{suite}: frozen decode policy mismatch")
+    if record.get("scoring") != FROZEN_SCORING:
+        raise GateError(f"{arm}/{suite}: frozen scoring policy mismatch")
+    if not isinstance(serve, dict) or serve.get("flags") != FROZEN_SERVE_FLAGS:
+        raise GateError(f"{arm}/{suite}: frozen serving flags mismatch")
+    model = record.get("model")
+    if (not isinstance(model, dict) or set(model) != {"gguf", "gguf_sha256", "flags"}
+            or not isinstance(model.get("gguf"), str) or not model["gguf"].strip()
+            or not isinstance(model.get("gguf_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", model["gguf_sha256"])
+            or any(serve.get(key) != model[key] for key in model)):
+        raise GateError(f"{arm}/{suite}: input witness model identity disagrees with serving receipt")
+    return record
+
+
 def _attested_rows(eval_dir: Path, arm: str, suite: str, expected: int) -> dict | None:
     path = eval_dir / arm / f"{suite}.jsonl"
     summary_path = eval_dir / arm / "summary.json"
@@ -116,6 +171,8 @@ def _attested_rows(eval_dir: Path, arm: str, suite: str, expected: int) -> dict 
     rows = _load(eval_dir, arm, suite, expected_n=expected)
     if entry.get("n") != len(rows):
         raise GateError(f"{arm}/{suite} summary item count mismatch")
+    if _is_new_v2(arm):
+        _v2_input_witness(eval_dir, arm, suite)
     return rows
 
 
@@ -149,7 +206,8 @@ def _input_digests(
                 "reap128_q4", "reap128_v2", "reap128_v2_q4",
                 "reap160", "reap160_q4", "reap160_v2", "reap160_v2_q4"):
         directory = eval_dir / arm
-        for name in ("summary.json", "gsm8k.jsonl", "humaneval.jsonl", "serve.json"):
+        for name in ("summary.json", "gsm8k.jsonl", "humaneval.jsonl", "serve.json",
+                     "gsm8k.inputs.json", "humaneval.inputs.json"):
             path = directory / name
             if path.is_file():
                 paths.append(path)
@@ -279,7 +337,14 @@ def evaluate(
         if any(row is None for row in entries):
             raise GateError(f"{arm}: missing full SHA-attested quality evidence")
         speed_arm = f"{arm}_q4"
-        _attested_rows(root, speed_arm, "gsm8k", 200)
+        speed_rows = _attested_rows(root, speed_arm, "gsm8k", 200)
+        if _is_new_v2(arm) and speed_rows is not None:
+            quality_source = _v2_input_witness(root, arm, "gsm8k")
+            speed_source = _v2_input_witness(root, speed_arm, "gsm8k")
+            if (quality_source["source_items_sha256"] != speed_source["source_items_sha256"]
+                    or quality_source["source_items_n"] != speed_source["source_items_n"]
+                    or not set(speed_rows).issubset(entries[0])):
+                raise GateError(f"{arm}: Q8/Q4 source item fingerprints or paired GSM8K IDs mismatch")
         # v2 is a separately observed saliency/calibration arm. Never borrow
         # the v1 observer's successful D0 as evidence that v2 passed D0.
         observer = observation_path

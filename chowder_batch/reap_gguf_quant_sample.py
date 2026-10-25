@@ -2,8 +2,8 @@
 
 This is an independent CPU-only *weight reconstruction* measurement, not
 GSM8K/HumanEval, a full GGUF-byte attestation, inference, or a registered gate.
-Both GGUFs must already have been atomically published by the frozen
-REAP supervisor with exact stage witnesses and common recipe identity.
+Both GGUFs must already have been published by the frozen REAP construction
+route with verified monolithic stage or complete source-bound chunked witnesses.
 
 At four deterministic 256-value positions in each of the three routed
 expert tensors of all 40 layers, compare Q8_0 GGUF block dequantization
@@ -18,6 +18,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -27,11 +28,23 @@ WINDOW_VALUES = 256
 BLOCK_COUNT = 4
 LAYERS = 40
 EXPERT_KEYS = ("ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight")
+FROZEN_SOURCE_SHA256 = "80341aa776ad9b5f937c21b081b6d76de4a2ea277e5fb88c9ae2634a9da8f4c6"
+FROZEN_SPEC_SHA256 = "7f9065d8036f7bd04c19a15f87540ad195658f46a80a1a09aa407b44c4836a94"
+FROZEN_QUANTIZER_SHA256 = "eeb75877bd41d8d7b51d18129d873e6220014613baea349fa18e6b5d36c987de"
+TENSOR_INVENTORY = 733
+MAX_CHUNKED_RECEIPT_BYTES = 2 * 1024 * 1024
+
+
+def _sha256_file(path: Path) -> str:
+    """Hash full GGUF bytes using bounded reads; independent of the receipt."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _load_stage(path: Path, phase: int) -> dict:
-    import re
-
     record_path = path.with_name(path.name + ".reap-stage.json")
     if (path.is_symlink() or record_path.is_symlink() or not path.is_file()
             or not record_path.is_file() or record_path.stat().st_size > 1024 * 1024):
@@ -50,12 +63,112 @@ def _load_stage(path: Path, phase: int) -> dict:
     return record
 
 
+def _load_chunked(bf16: Path, q8: Path, source: dict) -> dict:
+    """Verify the completed alternate Q8 construction against frozen BF16 ancestry.
+
+    Full-file and per-tensor SHA witnesses are checked against the *actual*
+    read-only GGUF data. The final construction receipt is not a quality gate.
+    """
+    from gguf import GGUFReader
+
+    from chowder_batch.reap_gguf_chunked import hash_tensor_data
+
+    receipt_path = q8.with_name(q8.name + ".reap-chunked.json")
+    if (bf16.is_symlink() or q8.is_symlink() or receipt_path.is_symlink()
+            or not bf16.is_file() or not q8.is_file()
+            or not receipt_path.is_file()
+            or receipt_path.stat().st_size > MAX_CHUNKED_RECEIPT_BYTES):
+        raise ValueError("chunked GGUF and bounded final receipt must be published files")
+    before = (_file_stat(bf16), _file_stat(q8), _file_stat(receipt_path))
+    record = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if not isinstance(record, dict):
+        raise ValueError("chunked GGUF final receipt must be an object")
+    if (source["sha256"] != FROZEN_SOURCE_SHA256
+            or source["spec_sha256"] != FROZEN_SPEC_SHA256
+            or _sha256_file(bf16) != source["sha256"]):
+        raise ValueError("chunked Q8 source differs from registered full BF16 stage SHA")
+    digest = record.get("output_sha256")
+    references = record.get("chunked_reference_receipts")
+    if (record.get("schema") != "chowder.reap128-v2-gguf-q8-chunked-final.v1"
+            or record.get("status") != "Q8_TENSOR_EXACT_CONSTRUCTED_NOT_QUALITY_QUALIFIED"
+            or record.get("source_gguf_sha256") != source["sha256"]
+            or record.get("frozen_stage_spec_sha256") != source["spec_sha256"]
+            or record.get("quantizer_binary_sha256") != FROZEN_QUANTIZER_SHA256
+            or record.get("output") != str(q8.resolve())
+            or record.get("output_size_bytes") != q8.stat().st_size
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or record.get("quality_gate") != "NOT_EVALUATED"
+            or record.get("gpu_fit_gate") != "NOT_EVALUATED"
+            or type(record.get("chunk_count")) is not int
+            or not 1 <= record["chunk_count"] <= TENSOR_INVENTORY
+            or not isinstance(references, dict)
+            or not isinstance(references.get("all_tensors"), dict)
+            or not isinstance(references.get("source_groups"), list)):
+        raise ValueError("chunked Q8 final receipt has invalid source, mode, or non-gate status")
+    receipts = references["all_tensors"]
+    groups = references["source_groups"]
+    if (len(receipts) != TENSOR_INVENTORY
+            or len(groups) != record["chunk_count"]
+            or any(not isinstance(group, list) or not group
+                   or any(not isinstance(name, str) for name in group)
+                   for group in groups)):
+        raise ValueError("chunked Q8 tensor inventory or group count differs")
+    ordered_names = [name for group in groups for name in group]
+    if len(ordered_names) != TENSOR_INVENTORY or set(ordered_names) != set(receipts):
+        raise ValueError("chunked Q8 groups must cover each of 733 tensors exactly once")
+    if _sha256_file(q8) != digest:
+        raise ValueError("chunked Q8 output SHA differs from published GGUF bytes")
+
+    original = GGUFReader(str(bf16), "r")
+    quantized = GGUFReader(str(q8), "r")
+    for reader, expected_type in ((original, 32), (quantized, 7)):
+        fields = (("general.file_type", expected_type),
+                  ("qwen35moe.block_count", LAYERS),
+                  ("qwen35moe.expert_count", 128))
+        if any(reader.get_field(field) is None
+               or reader.get_field(field).contents() != expected
+               for field, expected in fields):
+            raise ValueError("chunked Q8 mode or frozen 40x128 geometry mismatch")
+    source_tensors = original.tensors
+    output_tensors = quantized.tensors
+    if (len(source_tensors) != TENSOR_INVENTORY
+            or len(output_tensors) != TENSOR_INVENTORY
+            or [tensor.name for tensor in source_tensors] != ordered_names
+            or [tensor.name for tensor in output_tensors] != ordered_names):
+        raise ValueError("chunked Q8 GGUF tensor inventory/order differs from source groups")
+    saw_q8 = False
+    for src, target in zip(source_tensors, output_tensors):
+        claimed = receipts[target.name]
+        if (not isinstance(claimed, dict)
+                or claimed.get("shape") != [int(v) for v in target.shape]
+                or claimed.get("tensor_type") != target.tensor_type.name
+                or not isinstance(claimed.get("raw_sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", claimed["raw_sha256"]) is None
+                or tuple(src.shape) != tuple(target.shape)
+                or hash_tensor_data(target.data) != claimed["raw_sha256"]):
+            raise ValueError(f"chunked Q8 tensor shape/type/payload receipt mismatch: {target.name}")
+        saw_q8 |= target.tensor_type.name == "Q8_0"
+    if not saw_q8:
+        raise ValueError("chunked Q8 mode has no Q8_0 tensor")
+    if before != (_file_stat(bf16), _file_stat(q8), _file_stat(receipt_path)):
+        raise ValueError("chunked Q8 witnesses or GGUF bytes changed during verification")
+    return record
+
+
 def _stage_identity(bf16: Path, q8: Path) -> dict:
     source = _load_stage(bf16, 0)
-    target = _load_stage(q8, 1)
-    if (source["spec_sha256"] != target["spec_sha256"]
-            or target.get("input_sha256") != source["sha256"]):
-        raise ValueError("Q8 stage does not descend from the witnessed BF16 GGUF")
+    stage_path = q8.with_name(q8.name + ".reap-stage.json")
+    chunk_path = q8.with_name(q8.name + ".reap-chunked.json")
+    if stage_path.exists() or stage_path.is_symlink():
+        if chunk_path.exists() or chunk_path.is_symlink():
+            raise ValueError("Q8 GGUF cannot have conflicting monolithic/chunked witnesses")
+        target = _load_stage(q8, 1)
+        if (source["spec_sha256"] != target["spec_sha256"]
+                or target.get("input_sha256") != source["sha256"]):
+            raise ValueError("Q8 stage does not descend from the witnessed BF16 GGUF")
+    else:
+        target = _load_chunked(bf16, q8, source)
     return {"bf16": source, "q8_0": target}
 
 
@@ -148,6 +261,7 @@ def measure(bf16: Path, q8: Path) -> dict:
     rmse = math.sqrt(sum(w["sum_squared_error"] for w in windows) / count)
     if any(_file_stat(Path(path)) != stamp for path, stamp in stamps.items()):
         raise ValueError("GGUF weights changed during the sampled quantization measurement")
+    chunked = witnesses["q8_0"].get("schema") == "chowder.reap128-v2-gguf-q8-chunked-final.v1"
     return {
         "schema": "chowder.reap128-v2-gguf-q8-bf16-numeric-sample.v1",
         "status": "DESCRIPTIVE_QUANTIZATION_SAMPLE_NOT_QUALITY_GATE",
@@ -164,9 +278,13 @@ def measure(bf16: Path, q8: Path) -> dict:
         "root_mean_squared_error": rmse,
         "samples": rows,
         "limitations": (
-            "Sampled numerical weight comparison only. Full GGUF hashes were "
-            "recorded by conversion supervisor stage receipts but not rehashed "
-            "here. Does not measure perplexity, GSM8K, HumanEval, GPU fit, speed "
+            "Sampled numerical weight comparison only. "
+            + ("Full-file GGUF and all 733 output tensor hashes were verified "
+               "against the frozen BF16 stage and final chunked receipt. "
+               if chunked else
+               "Monolithic GGUF full-file hashes are recorded in stage "
+               "receipts but not rehashed by this sampler. ")
+            + "Does not measure perplexity, GSM8K, HumanEval, GPU fit, speed "
             "or any registered scientific quality/selection threshold."
         ),
     }
@@ -187,11 +305,12 @@ def main(argv=None) -> int:
                 or args.out.resolve().is_relative_to(source.parent / source.name)
                 or args.out.resolve().is_relative_to(quantized.parent / quantized.name)):
             raise ValueError("new external quantization sample receipt is required")
-        witnessed = _stage_identity(source, quantized)
         if not args.execute:
+            witnessed = _stage_identity(source, quantized)
             print(json.dumps({"status": "PREFLIGHT_ONLY_NUMERICS_NOT_MEASURED",
-                              "stage_sha256": [witnessed[k]["sha256"]
-                                               for k in ("bf16", "q8_0")]}))
+                              "stage_sha256": [witnessed["bf16"]["sha256"],
+                                               witnessed["q8_0"].get("sha256",
+                                                                     witnessed["q8_0"].get("output_sha256"))]}))
             return 0
         result = measure(source, quantized)
         with args.out.open("x", encoding="utf-8", newline="\n") as handle:

@@ -1,0 +1,23 @@
+{
+  "limitations": "No completed chunk receipt; quarantined bytes must not be promoted; only exact identified owned orphan files may be discarded after checking no quantizer owner exists.",
+  "lossless_f32_trailing_unit_dim_fold": [
+    "blk.0.ffn_gate_inp_shexp.weight",
+    "blk.1.ffn_gate_inp_shexp.weight"
+  ],
+  "orphan_chunk": "I:\\reap-v2-q8-streaming-chunks-20261025\\chunk-003-of-042.q8_0.gguf",
+  "orphan_chunk_bytes": 484068192,
+  "orphan_chunk_sha256": "1f21282c20e0e93f9a2cab7318e5b4a2f4020c1f581c33f448555682a0e0c774",
+  "owner_exit_code": 1,
+  "owner_failure": "quantized tensor shape differs: blk.0.ffn_gate_inp_shexp.weight",
+  "owner_session": 88081,
+  "recorded_at_utc": "2026-10-25T15:01:38.962392+00:00",
+  "schema": "chowder.reap128-v2-unsealed-chunk-cleanup.v1",
+  "sealed_previous_chunks_preserved": 2,
+  "source_gguf_sha256": "80341aa776ad9b5f937c21b081b6d76de4a2ea277e5fb88c9ae2634a9da8f4c6",
+  "source_group_index": 2,
+  "status": "AUDITED_UNSEALED_CHUNK_003_DISCARD_AUTHORIZED_ONLY_AFTER_OWNER_EXIT",
+  "tensor_count": 39,
+  "unsealed_source_mini": "F:\\reap-v2-q8-streaming-scratch-20261025\\chunk-003-of-042.bf16.gguf",
+  "unsealed_source_mini_bytes": 899279744,
+  "unsealed_source_mini_sha256": "076d42cd9e5ac1406ab74d80c9af8a98005664bf3afa220cec40b70efe7f12f3"
+}

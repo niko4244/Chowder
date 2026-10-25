@@ -133,6 +133,19 @@ def _attest(root, arm, suite, n, *, fail=0, speed=False):
     summary.write_text(json.dumps(values), encoding="utf-8")
     if speed:
         (directory / "serve.json").write_text(json.dumps({"experts_offloaded": 0}))
+    if arm.endswith("_v2") or arm.endswith("_v2_q4"):
+        model = {"gguf": f"C:/models/{arm}.gguf", "gguf_sha256": "a" * 64,
+                 "flags": ["--fit", "on", "-np", "4", "-c", "16384", "--jinja"]}
+        (directory / "serve.json").write_text(json.dumps({**model, "experts_offloaded": 0}))
+        (directory / f"{suite}.inputs.json").write_text(json.dumps({
+            "schema": "chowder.reap-eval-input-identity.v1", "model": model,
+            "suite": suite, "source_items_sha256": "b" * 64,
+            "source_items_n": 1319 if suite == "gsm8k" else 164,
+            "decode": {"system": "You are a helpful assistant.", "temperature": 0.0,
+                       "top_k": 1, "seed": 7, "max_tokens": 1024 if suite == "gsm8k" else 768,
+                       "enable_thinking": False},
+            "scoring": "frozen reap_eval production scoring: final_number_match/boxed/HumanEval",
+        }), encoding="utf-8")
     return path
 
 
@@ -177,6 +190,80 @@ def test_full_synthetic_raw_evidence_blocks_missing_mandatory_v2(tmp_path):
     assert "mandatory fallback unchanged" in result["paired_method"]["scope"]
     assert result["input_sha256"][str(tmp_path / "dense" / "gsm8k.jsonl")]
     assert result["release_approved"] is False
+
+
+def _full_v2_rows(root):
+    obs = _evidence(root)
+    _attest(root, "reap128_v2", "gsm8k", 1319)
+    _attest(root, "reap128_v2", "humaneval", 164)
+    _attest(root, "reap128_v2_q4", "gsm8k", 200, speed=True)
+    return obs
+
+
+@pytest.mark.parametrize(("target", "mutation", "error"), [
+    ("reap128_v2/gsm8k.inputs.json", "delete", "witness"),
+    ("reap128_v2_q4/gsm8k.inputs.json", "delete", "witness"),
+    ("reap128_v2/humaneval.inputs.json", "delete", "witness"),
+    ("reap128_v2/gsm8k.inputs.json", ("schema", "wrong"), "schema"),
+    ("reap128_v2/humaneval.inputs.json", ("suite", "gsm8k"), "suite"),
+    ("reap128_v2/gsm8k.inputs.json", ("source_items_sha256", "fake"), "source"),
+    ("reap128_v2_q4/gsm8k.inputs.json", ("source_items_n", 200), "source"),
+    ("reap128_v2_q4/gsm8k.inputs.json", ("source_items_n", 1319.0), "source"),
+    ("reap128_v2/gsm8k.inputs.json", ("decode", {}), "decode"),
+    ("reap128_v2/humaneval.inputs.json", ("scoring", "other"), "scoring"),
+    ("reap128_v2/gsm8k.inputs.json", ("model", {}), "model"),
+    ("reap128_v2_q4/gsm8k.inputs.json", ("model.flags", ["--fit", "off"]), "model"),
+    ("reap128_v2_q4/gsm8k.inputs.json", ("model.gguf_sha256", "c" * 64), "model"),
+    ("reap128_v2_q4/gsm8k.inputs.json", ("model.gguf", "C:/models/foreign.gguf"), "model"),
+    ("reap128_v2_q4/serve.json", ("flags", ["--fit", "off"]), "flags"),
+    ("reap128_v2/serve.json", ("gguf_sha256", "c" * 64), "model"),
+    ("reap128_v2/gsm8k.jsonl", "append", "SHA256"),
+    ("reap128_v2_q4/gsm8k.inputs.json", ("source_items_sha256", "c" * 64), "source"),
+    ("reap128_v2/gsm8k.inputs.json", "corrupt_json", "unreadable"),
+])
+def test_uncertified_v2_results_refuse_selection(tmp_path, target, mutation, error):
+    obs = _full_v2_rows(tmp_path)
+    path = tmp_path / target
+    if mutation == "delete":
+        path.unlink()
+    elif mutation == "corrupt_json":
+        path.write_text("{", encoding="utf-8")
+    elif mutation == "append":
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write('{}\n')
+    else:
+        key, value = mutation
+        content = json.loads(path.read_text(encoding="utf-8"))
+        if key.startswith("model."):
+            content["model"][key.removeprefix("model.")] = value
+        else:
+            content[key] = value
+        path.write_text(json.dumps(content), encoding="utf-8")
+    with pytest.raises(GateError, match=error):
+        evaluate(tmp_path, obs)
+
+
+def test_v2_full_population_fingerprint_is_bound_across_q8_q4(tmp_path):
+    obs = _full_v2_rows(tmp_path)
+    report = evaluate(tmp_path, obs)
+    assert report["gates"]["reap128_v2"]["gates"]["d0"]["status"] == "UNKNOWN"
+    for arm in ("reap128_v2", "reap128_v2_q4"):
+        witness = tmp_path / arm / "gsm8k.inputs.json"
+        assert report["input_sha256"][str(witness)] == hashlib.sha256(witness.read_bytes()).hexdigest()
+
+
+def test_v2_q4_gsm8k_window_must_pair_with_q8_item_ids(tmp_path):
+    obs = _full_v2_rows(tmp_path)
+    path = tmp_path / "reap128_v2_q4" / "gsm8k.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    rows[0]["id"] = "gsm8k-not-in-quality-arm"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    summary_path = path.parent / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["gsm8k"]["file_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    with pytest.raises(GateError, match="paired GSM8K IDs"):
+        evaluate(tmp_path, obs)
 
 
 def test_sha_tampered_raw_baseline_refuses_before_selection(tmp_path):
