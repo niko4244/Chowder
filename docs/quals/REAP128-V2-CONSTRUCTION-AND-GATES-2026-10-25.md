@@ -1249,3 +1249,41 @@ and an internally matching serve.json is not independent proof that a
 specific GGUF was resident on a GPU. Selector Amendment4 `BLOCKED`,
 Q4 speed `UNKNOWN`, protected GPU services and all original thresholds
 remain unchanged.
+
+### October 25 16:06 CDT — official per-item ID binding in deterministic selector
+
+The existing selector already checked exact frozen rendered GSM8K/HumanEval
+population fingerprints and input/serve claims for new v2 arms, but a
+separately resealed `.jsonl` containing an equal *count* of wrong IDs
+could pass those checks if the paired legacy rows were also manipulated.
+New full v2 quality evidence must now carry exactly `gsm8k-0` through
+`gsm8k-1318` and `HumanEval/0` through `HumanEval/163`; new Q4 speed
+evidence requires exactly the first `gsm8k-0` through `gsm8k-199`.
+Unexpected, missing, duplicated or injected identifiers fail closed,
+even with internally matching SHA/summary and original dataset claims.
+No change to frozen first-200 ordering, score thresholds, historic v1
+failure or Amendment4 fallback order. New RED/GREEN regressions cover
+canonical full and 200-item cohorts, each of three resealed spurious-ID
+variants and preserved official-source pinning. The combined CPU
+selection/comparison/gates/speed-reconciliation regression passed
+**152 tests**, one existing non-scientific Python invalid-regex warning,
+Ruff clean. These tests do not constitute model inference or new gates.
+
+A read-only actual **historical** selector replay against the existing
+isolated 26-file baseline workspace and original registered v1/v2 D0
+records returned exact decision
+`{"chosen":null,"reason":"amendment 4 requires both REAP128_v2 and REAP160 full gates","status":"BLOCKED"}`;
+`release_approved=false`, 28 baseline/calibration input digests. The
+REAP128 v1 computed Gate1 remains FAIL. Later v1 gates are presented as
+`NOT_EVALUATED` after this failure (with their separate computed statuses
+retained); REAP160 original quality gates remain PASS but canonical
+same-session speed is still UNKNOWN. The replay is **not** a new model
+quality measurement and never overrides archived historical receipts.
+
+At 16:06 CDT the untouched original Q4 PID 72824 was independently
+observed through **23 of 42** source-bound sealed GGUF parts, newest
+index 22 SHA-256
+`311110a9248e6a5afb4e1f21f7e57aa45d1b1498129e1eb171167efdf48dc9d6`.
+The complete Q4 publication, real Q4 numerical fidelity and registered
+science remain pending. No quantizer duplication, GPU ownership change
+or resource-floor reduction occurred. PR remains draft; Gen-0 BLOCKED.

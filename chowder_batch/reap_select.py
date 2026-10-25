@@ -174,6 +174,18 @@ def _attested_rows(eval_dir: Path, arm: str, suite: str, expected: int) -> dict 
     if entry.get("n") != len(rows):
         raise GateError(f"{arm}/{suite} summary item count mismatch")
     if _is_new_v2(arm):
+        # The official source-population fingerprint in .inputs.json binds
+        # the *questions*, but alone does not prove that the saved answers
+        # correspond to the canonical item IDs. Full cohorts and the first
+        # 200 speed items must use the actual frozen dataset ordering.
+        if suite == "gsm8k" and expected in (1319, 200):
+            frozen_ids = {f"gsm8k-{i}" for i in range(expected)}
+        elif suite == "humaneval" and expected == 164:
+            frozen_ids = {f"HumanEval/{i}" for i in range(164)}
+        else:
+            raise GateError(f"{arm}/{suite}: unregistered v2 population requested")
+        if set(rows) != frozen_ids:
+            raise GateError(f"{arm}/{suite}: item IDs do not match the frozen official cohort")
         _v2_input_witness(eval_dir, arm, suite)
     return rows
 

@@ -130,7 +130,8 @@ def _attest(root, arm, suite, n, *, fail=0, speed=False):
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{suite}.jsonl"
     rows = [
-        {"id": f"{suite}-{i}", "correct": i >= fail, "terminated": True,
+        {"id": (f"HumanEval/{i}" if suite == "humaneval" else f"{suite}-{i}"),
+         "correct": i >= fail, "terminated": True,
          "trigram_ratio": 0.9, "predicted_per_second": 42.0 if speed else None}
         for i in range(n)
     ]
@@ -261,6 +262,27 @@ def test_v2_full_population_fingerprint_is_bound_across_q8_q4(tmp_path):
         assert report["input_sha256"][str(witness)] == hashlib.sha256(witness.read_bytes()).hexdigest()
 
 
+@pytest.mark.parametrize(("arm", "suite", "new_id"), [
+    ("reap128_v2", "gsm8k", "gsm8k-99999"),
+    ("reap128_v2", "humaneval", "HumanEval/99999"),
+    ("reap128_v2_q4", "gsm8k", "gsm8k-99999"),
+])
+def test_v2_selector_rejects_forged_item_ids_even_with_resealed_result_sha(
+    tmp_path, arm, suite, new_id,
+):
+    obs = _full_v2_rows(tmp_path)
+    predictions = tmp_path / arm / f"{suite}.jsonl"
+    rows = [json.loads(line) for line in predictions.read_text(encoding="utf-8").splitlines()]
+    rows[0]["id"] = new_id
+    predictions.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    summary_path = tmp_path / arm / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary[suite]["file_sha256"] = hashlib.sha256(predictions.read_bytes()).hexdigest()
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    with pytest.raises(GateError, match="item IDs.*frozen official cohort"):
+        evaluate(tmp_path, obs)
+
+
 @pytest.mark.parametrize(("suite", "official"), [
     ("gsm8k", "913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89"),
     ("humaneval", "49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420"),
@@ -293,7 +315,7 @@ def test_v2_q4_gsm8k_window_must_pair_with_q8_item_ids(tmp_path):
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     summary["gsm8k"]["file_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
     summary_path.write_text(json.dumps(summary), encoding="utf-8")
-    with pytest.raises(GateError, match="paired GSM8K IDs"):
+    with pytest.raises(GateError, match="frozen official cohort|paired GSM8K IDs"):
         evaluate(tmp_path, obs)
 
 
