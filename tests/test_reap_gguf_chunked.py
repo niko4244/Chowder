@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import io
+import gc
 import os
 import subprocess
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -118,6 +120,134 @@ def test_bf16_minis_preserve_every_raw_tensor_byte(tmp_path):
         chunk.create_mini(source, mini, names[:2])
     with pytest.raises(ValueError, match="not found"):
         chunk.create_mini(source, tmp_path / "invalid.gguf", ["missing.tensor"])
+
+
+def _synthetic_q8_parts(tmp_path):
+    """Two independent source-ordered parts with raw Q8_0 and copied F32."""
+    source = tmp_path / "tiny-source.gguf"
+    writer = GGUFWriter(str(source), "qwen35moe")
+    writer.add_file_type(32)
+    writer.add_quantization_version(2)
+    writer.add_uint32("qwen35moe.block_count", 2)
+    names = ["blk.0.ffn_gate_exps.weight", "blk.1.ffn_up_exps.weight",
+             "blk.0.ffn_gate_inp_shexp.weight"]
+    for name in names[:2]:
+        writer.add_tensor(name, np.full((2, 128), 4, dtype=np.uint8),
+                          raw_dtype=GGMLQuantizationType.BF16)
+    writer.add_tensor(names[2], np.arange(64, dtype="<f4").reshape(1, 64),
+                      raw_dtype=GGMLQuantizationType.F32)
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    parts = []
+    for index, group in enumerate((names[:2], names[2:])):
+        target = tmp_path / f"part-{index}.gguf"
+        writer = GGUFWriter(str(target), "qwen35moe")
+        writer.add_file_type(7)
+        writer.add_quantization_version(2)
+        writer.add_uint32("qwen35moe.block_count", 2)
+        for name in group:
+            if name == names[2]:
+                writer.add_tensor(name, np.arange(64, dtype="<f4"),
+                                  raw_dtype=GGMLQuantizationType.F32)
+            else:
+                writer.add_tensor(name, np.full((2, 68), index + 3,
+                                                dtype=np.uint8),
+                                  raw_dtype=GGMLQuantizationType.Q8_0)
+        writer.write_header_to_file()
+        writer.write_kv_data_to_file()
+        writer.write_tensors_to_file()
+        writer.close()
+        parts.append(target)
+    receipts = {
+        t.name: {"shape": list(map(int, t.shape)), "tensor_type": t.tensor_type.name,
+                 "raw_sha256": chunk.hash_tensor_data(t.data)}
+        for part in parts for t in GGUFReader(str(part), "r").tensors
+    }
+    return source, parts, receipts
+
+
+def test_q8_streaming_merge_byte_identical_to_historical_writer(tmp_path):
+    source, parts, receipts = _synthetic_q8_parts(tmp_path)
+    legacy = tmp_path / "old-writer.gguf"
+    src = GGUFReader(str(source), "r")
+    by_name = {t.name: t for part in parts
+               for t in GGUFReader(str(part), "r").tensors}
+    writer = GGUFWriter(str(legacy), "qwen35moe")
+    chunk.copy_metadata(src, writer, file_type=7)
+    for tensor in src.tensors:
+        quantized = by_name[tensor.name]
+        writer.add_tensor(tensor.name, quantized.data, raw_dtype=quantized.tensor_type)
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    del src, by_name, writer
+
+    streamed = tmp_path / "new-stream.gguf"
+    result = chunk.merge_mini(source, parts, streamed,
+                              expected_tensor_receipts=receipts, mode="Q8_0")
+    assert result["output_sha256"] == chunk.hash_file(legacy)
+    assert streamed.read_bytes() == legacy.read_bytes()
+    assert list(GGUFReader(str(streamed), "r").fields) == list(
+        GGUFReader(str(legacy), "r").fields)
+
+
+def test_q8_streaming_merge_drops_old_mmaps_and_uses_bounded_reads(tmp_path, monkeypatch):
+    import gguf
+
+    source, parts, receipts = _synthetic_q8_parts(tmp_path)
+    reader = gguf.GGUFReader
+    alive = weakref.WeakSet()
+    maximum = [0]
+
+    def tracked(*args, **kwargs):
+        gc.collect()
+        maximum[0] = max(maximum[0], len(alive))
+        assert len(alive) == 0, "prior GGUF reader retained into next part"
+        instance = reader(*args, **kwargs)
+        alive.add(instance)
+        return instance
+
+    monkeypatch.setattr(gguf, "GGUFReader", tracked)
+    monkeypatch.setattr(chunk, "HASH_BLOCK", 31)
+    target = tmp_path / "bounded.gguf"
+    chunk.merge_mini(source, parts, target,
+                     expected_tensor_receipts=receipts, mode="Q8_0")
+    assert target.is_file()
+    assert maximum[0] == 0
+
+
+def test_q8_streaming_merge_rejects_part_payload_tamper_before_publication(tmp_path):
+    source, parts, receipts = _synthetic_q8_parts(tmp_path)
+    with parts[0].open("r+b") as fh:
+        offset = GGUFReader(str(parts[0]), "r").tensors[0].data_offset
+        fh.seek(offset)
+        fh.write(b"\xff")
+    target = tmp_path / "must-not-publish.gguf"
+    with pytest.raises(ValueError, match="mismatch|payload|SHA|digest"):
+        chunk.merge_mini(source, parts, target,
+                         expected_tensor_receipts=receipts, mode="Q8_0")
+
+
+def test_q8_abandoned_partial_merge_refused_without_touching_certified_parts(tmp_path):
+    part = tmp_path / "chunk-001.q8_0.gguf"
+    part.write_bytes(b"certified chunk fixture")
+    witness = tmp_path / "merge-input-prior.json"
+    witness.write_text("historical receipts")
+    chunk._refuse_unsealed_q8_merge(tmp_path)
+    orphan = tmp_path / "merged-q8-crashed.gguf"
+    orphan.write_bytes(b"interrupted assembly")
+    with pytest.raises(ValueError, match="unsealed Q8"):
+        chunk._refuse_unsealed_q8_merge(tmp_path)
+    assert orphan.read_bytes() == b"interrupted assembly"
+    assert part.read_bytes() == b"certified chunk fixture"
+    orphan.unlink()
+    orphan_receipt = tmp_path / "merged-q8-crashed.gguf.receipt.json"
+    orphan_receipt.write_text("incomplete worker receipt")
+    with pytest.raises(ValueError, match="unsealed Q8"):
+        chunk._refuse_unsealed_q8_merge(tmp_path)
 
 
 @pytest.mark.skipif(

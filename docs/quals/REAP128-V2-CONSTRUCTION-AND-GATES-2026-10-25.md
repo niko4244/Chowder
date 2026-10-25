@@ -682,3 +682,35 @@ stored, and any admitted exclusive restart must rehash them before reuse.
 No identical merge was relaunched; the corrective work is a one-reader,
 bounded-memory streaming GGUF assembly with synthetic byte-for-byte and
 adversarial regressions, subject to the same unchanged safety floors.
+
+### Bounded-memory merger fix and exclusive resumed verification
+
+The Q8 merger no longer retains all 42 tokenization-heavy GGUFReader
+objects, tensor ndarray views and mmap bases. It reads each source part
+individually and saves only primitive file offsets, raw lengths, data
+shapes/types and tensor identities. In the frozen BF16 original tensor
+order it writes the canonical GGUF header/KV/tensor-info, then copies
+the registered Q8/F32 raw payloads in bounded chunks, rechecking their
+SHA-256 during copy and reproducing the original GGUF alignment. The
+finished output is reread independently to validate all tensor identities,
+types, shapes and raw SHA, before the old serial parent can seal/publish.
+An unexpected orphan F: merged output or merge receipt now fails closed
+before duplicate final-assembly work, preserving abandoned bytes for audit.
+
+Synthetic RED proved the prior implementation still held one reader when
+opening the next part. GREEN tests demonstrate no prior reader alive,
+bounded reads, mixed Q8/F32 exact *whole-file byte* identity with the
+previous GGUFWriter route, tamper refusal and orphan refusal. After the
+first merge supervisor stopped, the original pinned tiny **real**
+Q8_0 and Q4_K_M llama-quantize tests were admitted and rerun without any
+GPU/model service changes: **25 passed**, Ruff clean. Those tiny oracle
+proofs do not constitute full production model numerical/quality results.
+
+The new serial production resume was launched with the **same 42 sealed
+chunks and pinned source** after an independently observed resource
+admission of 18.92 GiB physical RAM and 28.98 GiB Windows commit free,
+with no competing quantization owner. Its new exclusive audit log is
+`F:\reap128-v2-q8-streaming-recovery2-bounded-merge-20261025.log`.
+The original >=7 GiB physical-runtime safety floor is unchanged; a
+freshly launched/ongoing assembly is **NOT** equivalent to final Q8
+publication, full GGUF SHA, verified 733-tensor output or scientific PASS.

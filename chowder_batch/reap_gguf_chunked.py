@@ -252,51 +252,143 @@ def merge_mini(
     source: Path, mini_outputs: list[Path], output: Path, *,
     expected_tensor_receipts: dict[str, dict], mode: str,
 ) -> dict:
-    """Reassemble in original tensor order using mapped raw GGUF payloads."""
+    """Stream raw GGUF tensors with one short-lived part reader at a time.
+
+    Never retain ReaderTensor objects, tensor ndarray views, or mmap bases from
+    multiple parts. Register the entire tensor-info table using only primitive
+    file offsets and shapes, then copy bytes directly in the source tensor order.
+    """
     from gguf import GGUFReader, GGUFWriter, GGMLQuantizationType
+    import numpy as np
 
     if mode != "Q8_0":
         raise ValueError("production chunk reassembly currently supports Q8_0 only")
-    if output.exists() or not output.parent.is_dir() or not mini_outputs:
+    if output.exists() or output.is_symlink() or not output.parent.is_dir() or not mini_outputs:
         raise ValueError("final merged output must be a fresh existing-directory path")
-    bf16 = GGUFReader(str(source), "r")
-    # Do not retain all chunk GGUFReader objects: they each parse the full
-    # original tokenizer field arrays. Raw tensor mappings hold their own
-    # mmap bases, so keeping 42 reader objects would amplify RAM needlessly.
-    tensors = []
-    for part in mini_outputs:
-        reader = GGUFReader(str(part), "r")
-        tensors.extend(reader.tensors)
-        del reader
-    lookup = {t.name: t for t in tensors}
-    names = [t.name for t in bf16.tensors]
-    if (len(lookup) != len(tensors) or set(lookup) != set(names)
-            or set(lookup) != set(expected_tensor_receipts)):
-        raise ValueError("chunk tensor inventory differs from source original")
-    for name, item in expected_tensor_receipts.items():
-        t = lookup[name]
-        if (list(map(int, t.shape)) != item["shape"]
-                or t.tensor_type.name != item["tensor_type"]
-                or hash_tensor_data(t.data) != item["raw_sha256"]):
-            raise ValueError(f"sample payload mismatch before merging: {name}")
+
     writer = GGUFWriter(str(output), "qwen35moe")
-    copy_metadata(bf16, writer, file_type=7)
-    for name in names:
-        t = lookup[name]
-        writer.add_tensor(name, t.data, raw_dtype=t.tensor_type)
-    writer.write_header_to_file()
-    writer.write_kv_data_to_file()
-    writer.write_tensors_to_file()
-    writer.close()
-    reread = GGUFReader(str(output), "r")
-    new = {t.name: t for t in reread.tensors}
-    if len(new) != len(names):
-        raise ValueError("merged GGUF inventory changed")
-    for name in names:
-        a, b = lookup[name], new[name]
-        if (b.tensor_type != a.tensor_type or list(b.shape) != list(a.shape)
-                or hash_tensor_data(b.data) != expected_tensor_receipts[name]["raw_sha256"]):
-            raise ValueError(f"merged quantization payload mismatch: {name}")
+    # Return *only* Python primitives: the original full-tokenizer GGUFReader
+    # and its ndarray views must die before the first part is opened.
+    def source_info() -> tuple[list[str], dict[str, tuple[tuple[int, ...], str | None]]]:
+        original = GGUFReader(str(source), "r")
+        copy_metadata(original, writer, file_type=7)
+        names = [tensor.name for tensor in original.tensors]
+        if len(names) != len(set(names)):
+            raise ValueError("original BF16 tensor names not unique")
+        from gguf import GGMLQuantizationType
+        source_shapes = {
+            tensor.name: (
+                tuple(map(int, tensor.shape)),
+                hash_tensor_data(tensor.data)
+                if tensor.tensor_type == GGMLQuantizationType.F32 else None,
+            ) for tensor in original.tensors
+        }
+        return names, source_shapes
+
+    names, source_shapes = source_info()
+    if (not isinstance(expected_tensor_receipts, dict)
+            or len(expected_tensor_receipts) != len(names)
+            or set(expected_tensor_receipts) != set(names)
+            or len({str(part.resolve()) for part in mini_outputs}) != len(mini_outputs)):
+        raise ValueError("chunk inventory differs from registered BF16 tensors")
+
+    # Store primitives only: path/offset/byte count/byte shape/np.dtype name/
+    # ggml type. No ReaderTensor or numpy arrays escape this helper.
+    def inspect_part(path: Path) -> dict[str, tuple]:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("untrusted GGUF chunk path")
+        reader = GGUFReader(str(path), "r")
+        saved: dict[str, tuple] = {}
+        length = path.stat().st_size
+        for tensor in reader.tensors:
+            name = tensor.name
+            if name in saved or name not in source_shapes:
+                raise ValueError("duplicate or unregistered quantized tensor")
+            witness = expected_tensor_receipts[name]
+            shape = tuple(map(int, tensor.shape))
+            ggml_type = tensor.tensor_type
+            if (not isinstance(witness, dict)
+                    or witness.get("shape") != list(shape)
+                    or witness.get("tensor_type") != ggml_type.name
+                    or witness.get("raw_sha256") != hash_tensor_data(tensor.data)):
+                raise ValueError(f"quantized chunk payload SHA/type/shape mismatch: {name}")
+            source_shape, original_f32_sha = source_shapes[name]
+            if original_f32_sha is not None:
+                folded = source_shape
+                while len(folded) > len(shape) and folded[-1] == 1:
+                    folded = folded[:-1]
+                if (ggml_type != GGMLQuantizationType.F32 or folded != shape
+                        or witness["raw_sha256"] != original_f32_sha):
+                    raise ValueError(f"quantized copied F32 tensor differs from BF16 source: {name}")
+            elif shape != source_shape:
+                raise ValueError(f"quantized tensor shape differs from BF16: {name}")
+            nbytes, offset = int(tensor.n_bytes), int(tensor.data_offset)
+            if (nbytes <= 0 or offset < 0 or offset > length
+                    or nbytes > length - offset or nbytes != tensor.data.nbytes):
+                raise ValueError(f"GGUF tensor byte bounds invalid: {name}")
+            saved[name] = (str(path.resolve()), offset, nbytes,
+                           tuple(map(int, tensor.data.shape)),
+                           tensor.data.dtype.str, int(ggml_type), shape)
+        return saved
+
+    meta: dict[str, tuple] = {}
+    for path in mini_outputs:
+        part_meta = inspect_part(path)
+        if set(meta).intersection(part_meta):
+            raise ValueError("quantized tensor appears in more than one part")
+        meta.update(part_meta)
+    if set(meta) != set(names):
+        raise ValueError("chunk tensor inventory differs from source original")
+
+    try:
+        for name in names:
+            _path, _offset, nbytes, byte_shape, dtype, quant_type, _shape = meta[name]
+            writer.add_tensor_info(
+                name, byte_shape, np.dtype(dtype), nbytes,
+                raw_dtype=GGMLQuantizationType(quant_type),
+            )
+        writer.write_header_to_file()
+        writer.write_kv_data_to_file()
+        writer.write_ti_data_to_file()
+        assert writer.fout is not None and len(writer.fout) == 1
+        dest = writer.fout[0]
+        writer.write_padding(dest, dest.tell())
+        for name in names:
+            part_path, offset, nbytes, _byte_shape, _dtype, _type, _shape = meta[name]
+            digest = hashlib.sha256()
+            with Path(part_path).open("rb") as stream:
+                stream.seek(offset)
+                remaining = nbytes
+                while remaining:
+                    data = stream.read(min(HASH_BLOCK, remaining))
+                    if not data:
+                        raise ValueError(f"truncated Q8 GGUF part during stream: {name}")
+                    dest.write(data)
+                    digest.update(data)
+                    remaining -= len(data)
+            if digest.hexdigest() != expected_tensor_receipts[name]["raw_sha256"]:
+                raise ValueError(f"Q8 GGUF source payload changed during stream: {name}")
+            writer.write_padding(dest, nbytes)
+        writer.flush()
+    finally:
+        writer.close()
+
+    # Reader and payload views are contained in this final verification scope.
+    def verify_merged() -> None:
+        merged = GGUFReader(str(output), "r")
+        if len(merged.tensors) != len(names):
+            raise ValueError("merged GGUF inventory count changed")
+        for desired, actual in zip(names, merged.tensors):
+            witness = expected_tensor_receipts[desired]
+            if (actual.name != desired
+                    or list(map(int, actual.shape)) != witness["shape"]
+                    or actual.tensor_type.name != witness["tensor_type"]
+                    or hash_tensor_data(actual.data) != witness["raw_sha256"]):
+                raise ValueError(f"merged Q8 tensor identity changed: {desired}")
+        if merged.get_field("general.file_type").contents() != 7:
+            raise ValueError("merged Q8 GGUF file type changed")
+
+    verify_merged()
     return {"status": "GGUF_CHUNKED_TENSOR_BITWISE_MERGE_NOT_QUALITY_QUALIFIED",
             "mode": mode, "tensors": len(names), "output": str(output.resolve()),
             "output_sha256": hash_file(output), "source": str(source.resolve()),
@@ -316,6 +408,20 @@ def _load_chunk_record(receipt: Path, output: Path, *,
             or saved.get("output_sha256") != hash_file(output)):
         raise ValueError(f"resumable GGUF chunk identity/hash mismatch: {output}")
     return saved
+
+
+def _refuse_unsealed_q8_merge(scratch: Path) -> None:
+    """Prevent duplicate giant assemblies after a guarded merge was aborted.
+
+    Previously created but incomplete assemblies require independent audit.
+    Never delete them or touch the separately SHA-sealed input chunks.
+    An old merge-input JSON without any GGUF output is safe to leave alone.
+    """
+    if (not scratch.is_dir() or scratch.is_symlink()
+            or any(scratch.glob("merged-q8-*.gguf"))
+            or any(scratch.glob("merged-q8-*.gguf.receipt.json"))):
+        raise ValueError("unsealed Q8 merged GGUF/receipt exists; "
+                         "refusing duplicate assembly until independently audited")
 
 
 def _run_chunked_locked(
@@ -449,6 +555,7 @@ def _run_chunked_locked(
                     raise ValueError("two Q8 chunks claim same tensor")
                 by_name[tensor_name] = value
             started.append(chunk_output)
+        _refuse_unsealed_q8_merge(scratch)
         # The merge is a separately guarded owned child, so even the
         # potentially ~20-GiB assembled output can be safely aborted.
         assembly = scratch / ("merged-q8-" + uuid.uuid4().hex + ".gguf")
