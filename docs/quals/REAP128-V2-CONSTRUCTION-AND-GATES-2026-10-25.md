@@ -835,3 +835,33 @@ With the live Q8 owner still present, **34 Q4/recovery CPU tests passed,
 one pinned real quantizer test was deliberately skipped**, Ruff clean.
 Full Q4_K_M remains **NOT EXECUTED** pending final Q8 publication and
 fresh exclusive host admission.
+
+### Guarded Q8 publication, audited I: cleanup and interrupted-copy recovery
+
+The original guarded Q8 publisher independently reverified and admitted
+the sealed F: assembly with event
+`EXACT_ORPHAN_ASSEMBLY_REATTESTED_AND_REUSED`, retaining the registered
+full SHA `89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6`.
+It then individually rehashed and deleted all **42/42** original Q8 mini
+GGUF payload files on I:, emitting SHA-bound
+`EXACT_SOURCE_BOUND_PART_CLEANED` for each. **All 42 source-bound chunk
+receipt JSON files remain intact**. The original full-size F: certified
+GGUF has not been modified. Its I: private cross-volume copy reached the
+expected **19,748,435,968** bytes, but final I: public naming/receipt
+must not be claimed until an independently verified full SHA and atomic
+publication finish.
+
+An additional **restart-only, no-quantizer emergency Q8 recovery path**
+now protects this vulnerable transfer window: after acquiring the original
+exclusive chunk lock, independently rechecking BF16 ancestry, all 42
+individual deletion-log entries, source-tensor witnesses and the sealed F:
+GGUF, the recovery method recognizes at most one same-volume source-owner
+`.chunked-owned-<uuid>.gguf` or prior `.recovery-owned-<uuid>.gguf` copy.
+Every existing transfer-prefix byte is compared against the certified F:
+model in bounded blocks before appending only the missing suffix. Mismatched,
+untrusted, duplicate, oversized or symlink candidates fail closed, as does
+insufficient remaining destination reserve or the original RAM/commit guard.
+Only full SHA equality permits final rename and exclusive receipt.
+Tests: **18 recovery CPU cases passed**, including exact-prefix recovery
+for both registered owned names, corrupt-prefix refusal, duplicate candidate
+refusal and guard-abort preservation. No new model-quality gate is asserted.

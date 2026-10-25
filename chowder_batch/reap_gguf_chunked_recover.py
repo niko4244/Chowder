@@ -97,6 +97,58 @@ def _cleanup_events(log: Path) -> dict[str, str]:
     return deleted
 
 
+def _resume_owned_copy(assembly: Path, output: Path, sha256: str,
+                       resource_problems) -> None:
+    """Resume at most one original/recovery-owned I: transfer, never guess bytes.
+
+    The original Q8 writer can be stopped by its physical-RAM guard after
+    deleting all 42 already-certified chunks. Its partial `.chunked-owned-`
+    copy is valuable, but must not be treated as a sealed model. Under the
+    exclusive source-chunk lock, compare *every existing prefix byte* with
+    the full independently reattested F: assembly before appending.
+    """
+    prefix = "." + output.stem
+    pattern = re.compile(re.escape(prefix) +
+                         r"\.(?:chunked|recovery)-owned-[0-9a-f]{32}\.gguf\Z")
+    candidates = sorted(path for path in output.parent.iterdir()
+                        if path.name.startswith(prefix + ".")
+                        and (".chunked-owned-" in path.name
+                             or ".recovery-owned-" in path.name))
+    if len(candidates) > 1:
+        raise ValueError("multiple Q8 private transfers prevent deterministic recovery")
+    if candidates:
+        transfer = candidates[0]
+        if (not pattern.fullmatch(transfer.name) or transfer.is_symlink()
+                or not transfer.is_file()):
+            raise ValueError("untrusted Q8 private transfer candidate")
+        offset = transfer.stat().st_size
+        if offset > assembly.stat().st_size:
+            raise ValueError("Q8 partial transfer longer than independently sealed assembly")
+    else:
+        transfer = output.with_name(prefix + ".recovery-owned-" +
+                                    uuid.uuid4().hex + ".gguf")
+        offset = 0
+    if disk_usage(output.parent).free < assembly.stat().st_size - offset + 6 * core.GIB:
+        raise ValueError("Q8 recovery lacks remaining copy bytes plus protected reserve")
+    with assembly.open("rb") as src, transfer.open("r+b" if candidates else "xb") as dst:
+        remaining = offset
+        while remaining:
+            piece = min(core.HASH_BLOCK, remaining)
+            if src.read(piece) != dst.read(piece):
+                raise ValueError("Q8 partial transfer failed exact assembled-prefix comparison")
+            remaining -= piece
+        dst.seek(offset)
+        for block in iter(lambda: src.read(core.HASH_BLOCK), b""):
+            if resource_problems([assembly, transfer]):
+                raise RuntimeError("Q8 resumed transfer refused by original host guard")
+            dst.write(block)
+        dst.flush()
+        os.fsync(dst.fileno())
+    if core.hash_file(transfer) != sha256:
+        raise ValueError("Q8 completed owned transfer differs from original F: SHA")
+    transfer.rename(output)
+
+
 def _verify_source(source: Path, verification: Path, source_sha: str):
     from gguf import GGUFReader
 
@@ -340,18 +392,8 @@ def recover_final(
                     or core.hash_file(output) != sealed["output_sha256"]):
                 raise ValueError("existing unsealed final target has different bytes")
         else:
-            if disk_usage(output.parent).free < assembly.stat().st_size + 6 * core.GIB:
-                raise ValueError("Q8 destination lacks final model and protected reserve")
-            transfer = output.with_name("." + output.stem + ".recovery-owned-" +
-                                        uuid.uuid4().hex + ".gguf")
-            with assembly.open("rb") as src, transfer.open("xb") as target:
-                for block in iter(lambda: src.read(core.HASH_BLOCK), b""):
-                    if resource_problems([assembly, transfer]):
-                        raise RuntimeError("Q8 recovered transfer aborted by host guard")
-                    target.write(block)
-            if core.hash_file(transfer) != sealed["output_sha256"]:
-                raise ValueError("recovered staged copy differs from sealed assembly")
-            transfer.rename(output)
+            _resume_owned_copy(assembly, output, sealed["output_sha256"],
+                               resource_problems)
         sidecar = output.with_name(output.name + ".reap-chunked.json")
         with sidecar.open("x", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(report, sort_keys=True, indent=2) + "\n")

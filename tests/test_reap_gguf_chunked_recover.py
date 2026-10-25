@@ -247,6 +247,48 @@ def test_full_orphan_seal_is_exclusive_and_never_publishes_unchecked_final(
         core._certified_assembly_reuse(scratch, source, expected)
 
 
+@pytest.mark.parametrize("owner", ["chunked", "recovery"])
+def test_recover_exact_prefix_of_original_or_recovery_owned_q8_transfer(
+    tmp_path, monkeypatch, owner,
+):
+    monkeypatch.setattr(recovery, "disk_usage", lambda _: SimpleNamespace(
+        free=200 * core.GIB))
+    source = tmp_path / "recovery-source.gguf"
+    output = tmp_path / "restored-q8.gguf"
+    payload = bytes(range(256)) * 48
+    source.write_bytes(payload)
+    partial = tmp_path / (".restored-q8." + owner + "-owned-" + "a" * 32 + ".gguf")
+    partial.write_bytes(payload[:1999])
+    recovery._resume_owned_copy(source, output, core.hash_file(source), lambda _: [])
+    assert output.read_bytes() == payload
+    assert not partial.exists()
+
+
+def test_recovery_refuses_corrupt_or_multiple_original_transfer_candidates(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(recovery, "disk_usage", lambda _: SimpleNamespace(
+        free=200 * core.GIB))
+    source = tmp_path / "certified-F.gguf"
+    output = tmp_path / "q8-model.gguf"
+    source.write_bytes(b"CERTIFIED" * 1000)
+    partial = tmp_path / (".q8-model.chunked-owned-" + "b" * 32 + ".gguf")
+    partial.write_bytes(b"CORRUPTED_PREFIX")
+    with pytest.raises(ValueError, match="exact assembled-prefix"):
+        recovery._resume_owned_copy(source, output, core.hash_file(source), lambda _: [])
+    assert not output.exists() and partial.read_bytes() == b"CORRUPTED_PREFIX"
+    partial.write_bytes(source.read_bytes()[:1200])
+    other = tmp_path / (".q8-model.recovery-owned-" + "c" * 32 + ".gguf")
+    other.write_bytes(source.read_bytes()[:500])
+    with pytest.raises(ValueError, match="multiple Q8 private transfers"):
+        recovery._resume_owned_copy(source, output, core.hash_file(source), lambda _: [])
+    other.unlink()
+    with pytest.raises(RuntimeError, match="original host guard"):
+        recovery._resume_owned_copy(source, output, core.hash_file(source),
+                                    lambda _: ["insufficient unowned physical RAM"])
+    assert not output.exists() and partial.stat().st_size == 1200
+
+
 @pytest.mark.parametrize("tamper", [
     "no_cleanup_witness", "bad_cleanup_digest", "missing_chunk_receipt",
     "different_source_tensor", "different_quantized_tensor",
