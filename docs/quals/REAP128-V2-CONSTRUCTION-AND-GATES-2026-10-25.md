@@ -926,3 +926,35 @@ parsing before any Q4 side effects, and subsequent admission fell to
 **15.25 GiB** free commit, below the unchanged 16-GiB start floor.
 Full production Q4 therefore remained **NOT STARTED**, and unrelated
 services were preserved.
+
+### Source-bound Q4 production admission and independent fidelity verifier
+
+After Q8 numerical sampling exited and its results were SHA-sealed,
+original Q4 construction resource admission recovered to **15.95 GiB
+physical RAM and 18.36 GiB available Windows commit**. The code's own
+`resource_problems(..., initial=True)` and exclusive process census
+passed; separate F: scratch and G: chunk directories were both empty.
+Original `chowder_batch.reap_gguf_q4_chunked --execute --max-mib 1024
+--slab-mib 1` CPU-only production started from the registered
+`F:\reap128-v2-bf16-intermediate-20261025.gguf` parent with the pinned
+quantizer. **This is a guarded start, not a Q4 publication claim**;
+first stage rereads complete parent BF16 SHA before constructing chunks.
+At 13:49 CDT owner PID **81772** had read **24.85 GiB** of the frozen
+source, and no Q4 chunk output or receipt existed; host RAM and free
+commit were **16.12/22.95 GiB**. All unrelated GPU services remained.
+
+Independent companion `chowder_batch/reap_gguf_q4_numeric_sample.py`
+now validates only a published `Q4_K_M_TENSOR_EXACT_CONSTRUCTED_...`
+GGUF with original full BF16 stage SHA and frozen stage/quantizer source
+identity. It rehashes the *entire* Q4 output and **all 733 tensor raw
+file spans** against the final receipt, checks full 40x128 top-k 8
+geometry and canonical source order, and checks copied BF16/F32 tensors
+still match original bytes. Separate deterministic 256-value windows
+dequantize actual Q4_K, Q5_K, Q6_K and Q8_0 expert block types to
+measure absolute/RMS deviations from original BF16 values. A produced
+receipt always remains descriptive and **NOT A QUALITY GATE**. Synthetic
+independent CPU suite **11 passed**, including all 733 mixed-type
+headers, forged source/output/quantizer/tensor payload/selected-gate
+refusal and resealed copied F32 mutation refusal; Ruff clean. **No real
+Q4 numeric results can be reported until the full Q4 construction exits
+and is independently verified.**
