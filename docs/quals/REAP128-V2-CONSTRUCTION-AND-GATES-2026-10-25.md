@@ -45,11 +45,23 @@ python -B -m chowder_batch.reap_prune_supervised --execute `
 
 Owned child initially identified as PID 81264. The source-payload verification
 stage read all 26 original BF16 shard hashes before it created any temporary
-model output directory. As of approximately 02:57 local, the model remained
-under a private G: staging directory; two output shards had been written.
-**That interim state is not a completed model or a promotion decision.**
-Consult the complete run log, the published output path, and an independently
-generated postbuild verification receipt to determine the final outcome.
+model output directory. **The owned pruner completed with return code 0 and
+atomically published the final G: checkpoint at 03:27 local on October 25.**
+The build log ends in `OWNED_PRUNER_EXIT: 0, output_published: true`.
+The published directory contains 26 BF16 safetensors shards, the untouched
+tokenizer/model support files, `config.json`,
+`model.safetensors.index.json`, and `reap-prune.json`. Its 40 decoder
+layers retain 128 selected experts each (down from 256) and the recorded
+tensor payload is **37,981,137,632 bytes**.
+
+An independent production `reap_verify_pruned` sample verifier **passed**
+all 26 safetensors headers, all 120 routed expert tensor shapes, 720
+bitwise source/destination expert-row samples, the exact selection SHA-256,
+original BF16 observation identity, and the published pruning receipt.
+Receipt: `C:\llm-work\reap\reap128-v2-bf16-header-sample-verification-20261025.json`,
+status `HEADER_AND_EXPERT_SAMPLE_PASS`.
+The stronger `--full-compare` result, an actual final-logits inference
+witness, GGUF results, and scientific scores must each be reported separately.
 
 ## Required model and scientific gates (no automatic promotion)
 
