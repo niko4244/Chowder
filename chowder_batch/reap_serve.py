@@ -50,9 +50,14 @@ _ALL_LAYERS = re.compile(r"offloaded (\d+)/(\d+) layers to GPU", re.I)
 LOG_VERBOSITY = "4"
 REGISTERED_V2_EVALUATION_ARMS = {
     "reap128_v2", "reap128_v2_q4", "reap160_v2", "reap160_v2_q4",
-    "dense_v2_q4",
+    "dense_v2_q4", "dense_v2", "random128_v2",
 }
 REGISTERED_DENSE_Q4_SHA256 = "2c6d9466129e8802839566b35728e2506aaf1e8705cd137009e2f08feb9dd049"
+REGISTERED_QUALITY_REFERENCE_SHA256 = {
+    "dense_v2": "2ff57a74a36939c5baabf40a0d3eb06d4424ecc94cf7d4ef04b3ac02059097c2",
+    "random128_v2": "601871e00403658708eb4eebf3b05f9dc54a93b326e31f2f87b48cb59f92241b",
+    "dense_v2_q4": REGISTERED_DENSE_Q4_SHA256,
+}
 
 
 def parse_offload(text: str) -> tuple[list[str], int | None]:
@@ -499,8 +504,9 @@ def main(argv: list[str] | None = None) -> int:
         digest = _sha256(gguf)
         if _model_stat(gguf) != model_stat:
             raise RuntimeError("REAP GGUF changed while hashing; refusing serving")
-        if args.arm == "dense_v2_q4" and digest != REGISTERED_DENSE_Q4_SHA256:
-            raise ValueError("new same-session dense Q4 speed baseline must use the original pinned dense model")
+        expected_reference = REGISTERED_QUALITY_REFERENCE_SHA256.get(args.arm)
+        if expected_reference is not None and digest != expected_reference:
+            raise ValueError("new scientific reference/control must use its original pinned GGUF SHA")
         resumed = _admit_output(arm_dir, gguf=gguf, digest=digest)
         # The official new-v2 scientific arms must use a published original
         # BF16-derived artifact, not a foreign GGUF that merely matches its

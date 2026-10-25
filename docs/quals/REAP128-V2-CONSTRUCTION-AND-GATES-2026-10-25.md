@@ -1720,3 +1720,69 @@ Physical RAM free ~16.17 GiB, Windows commit free ~20.16 GiB;
 no full 733-tensor public Q4, numerical BF16↔Q4 proof, full new-v2
 quality, CUDA parity, genuine same-session speed or complete canonical
 REAP160 verification yet. Amendment4 Gen-0 `BLOCKED` and PR #282 draft.
+
+### October 25 17:10 CDT — complete fresh new-v2 quality reference and negative control
+
+Frozen Amendment4 requires candidate-vs-dense quality and a genuinely
+independent original `random128` negative control, not only matching a
+candidate's own rendered source digest. The previously copied historical
+`dense` and `random128` GSM8K/HumanEval output files carry archived
+self-contained result digests but cannot certify a new model's science
+from **fresh authentic serving sessions**. The historical v1 and REAP160
+scores must remain untouched, including v1 Gate1 FAIL.
+
+New `reap128_v2` and `reap160_v2` gate computation now uses freshly
+named `dense_v2` (**full 1,319 GSM8K + 164 HumanEval**) and
+`random128_v2` (**full 1,319 GSM8K** under the original negative-control
+definition). Each is independently checked for exact canonical item IDs,
+official rendered question/expected-answer/test-source hashes, frozen
+decoding/scoring policy, serve/model SHA and genuine live Windows
+listener PID/session/flags before evaluation summary publication.
+Missing new reference/control scores remain `UNKNOWN`, not an inferred
+quality PASS from the detached archive; malformed, resealed or
+different-source scores are rejected. No control distribution, quality
+sample size, noninferiority statistic, frozen speed threshold, or
+Amendment4 fallback/selection order was modified.
+
+To prevent replacing the preregistered models with arbitrary lookalikes,
+the original *archived* serving receipts pin the expected comparison
+model identities for future **fresh whole-file SHA checks at serving**:
+
+- Original dense Q8 reference:
+  `2ff57a74a36939c5baabf40a0d3eb06d4424ecc94cf7d4ef04b3ac02059097c2`.
+- Original random128 Q8 negative control:
+  `601871e00403658708eb4eebf3b05f9dc54a93b326e31f2f87b48cb59f92241b`.
+- Original dense Q4 same-session speed reference:
+  `2c6d9466129e8802839566b35728e2506aaf1e8705cd137009e2f08feb9dd049`.
+
+Those are historical model **identity claims**, not newly rehashed
+current GGUF bytes in this CPU-only wave; the live serving wrapper
+must freshly hash each full actual model and refuse any mismatch before
+starting the registered benchmark. The historical dense Q8 receipt's
+old C: path no longer exists, but a `dense-q8_0.gguf` named file is
+present on `G:\llm-cold\gguf`; **name/existence alone does not establish
+the historical source SHA**. It must undergo independent full SHA
+admission before use. The original random128 model file also exists in
+G: but is not newly inference-qualified. No new baseline/control
+model server was launched while GPU services were occupied.
+
+Adversarial CPU selector tests prove old-only archival references leave
+the four new-v2 quality/control gates `UNKNOWN`, fully source-bound
+synthetic fresh populations exercise the original unchanged math without
+promoting hardware/overall PASS, resealed forged control sources are
+rejected, and an unpinned reference GGUF is refused before any server
+launch. The combined frozen gates, source-bound selector, serving,
+evaluator and comparison suite passed **248 tests**, two benign Python
+warnings, Ruff and diff checks clean. Synthetic regression values are
+not scientific measurements.
+
+At 17:10 CDT exclusive fifth Q4 supervisor PID 46388 had sealed
+**34/42** source-bound chunks; chunk 034 GGUF SHA-256
+`456fd01d92730b6cdd0d18ee8df9f639ea2eeb19bb1f33d9944b6bcd460ebc2d`.
+The unchanged resource guard observed a transient shortage of Windows
+free commit and waited, then logged `Q4_CHUNK_ADMISSION_RECOVERED` on
+poll 1; no safety floor was lowered, no second quantizer launched.
+The full published Q4, 733-tensor independent fidelity validation,
+new real-model GSM8K/HumanEval, original BF16 CUDA parity, paired fresh
+Q4/dense session throughput and REAP160 same-session evidence remain
+not measured. Gen-0 `BLOCKED`, PR #282 draft.

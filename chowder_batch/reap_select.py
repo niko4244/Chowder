@@ -108,7 +108,8 @@ def select(gates: dict[str, dict | None], paired: dict | None = None) -> dict:
 
 
 def _is_new_v2(arm: str) -> bool:
-    return arm in {"reap128_v2", "reap128_v2_q4", "reap160_v2", "reap160_v2_q4"}
+    return arm in {"reap128_v2", "reap128_v2_q4", "reap160_v2", "reap160_v2_q4",
+                   "dense_v2", "dense_v2_q4", "random128_v2"}
 
 
 def _v2_input_witness(eval_dir: Path, arm: str, suite: str) -> dict:
@@ -216,7 +217,8 @@ def _input_digests(
     if calibration_v2 is not None:
         paths.extend((calibration_v2 / "calibration.jsonl",
                       calibration_v2 / "calibration-manifest.json"))
-    for arm in ("dense", "dense_q4", "dense_v2_q4", "random128", "reap128",
+    for arm in ("dense", "dense_q4", "dense_v2", "dense_v2_q4",
+                "random128", "random128_v2", "reap128",
                 "reap128_q4", "reap128_v2", "reap128_v2_q4",
                 "reap160", "reap160_q4", "reap160_v2", "reap160_v2_q4"):
         directory = eval_dir / arm
@@ -356,6 +358,14 @@ def evaluate(
                           ("random128", "gsm8k", 1319), ("dense_q4", "gsm8k", 200)):
         if _attested_rows(root, arm, suite, n) is None:
             raise GateError(f"missing frozen baseline {arm}/{suite}")
+    # New v2 qualification cannot borrow archived dense/control *scores*.
+    # When present, the genuine full fresh reference and negative-control
+    # inputs must be independently source/session witnessed. Missing arms
+    # remain UNKNOWN in the gate consumer, never a fabricated PASS.
+    for reference, suite, n in (("dense_v2", "gsm8k", 1319),
+                                ("dense_v2", "humaneval", 164),
+                                ("random128_v2", "gsm8k", 1319)):
+        _attested_rows(root, reference, suite, n)
     present = {}
     for arm in ("reap128", "reap128_v2", "reap160", "reap160_v2"):
         # A partially present arm is explicitly unresolved, not silently absent.
@@ -387,7 +397,9 @@ def evaluate(
         # the exact original pinned dense Q4 model in a new first-200
         # same-session arm; preserve historical baselines unchanged.
         dense_speed_arm = "dense_v2_q4" if _is_new_v2(arm) else "dense_q4"
-        present[arm] = compute(root, arm, "dense", "random128",
+        dense_quality = "dense_v2" if _is_new_v2(arm) else "dense"
+        random_control = "random128_v2" if _is_new_v2(arm) else "random128"
+        present[arm] = compute(root, arm, dense_quality, random_control,
                                speed_arm, dense_speed_arm, observer)
     paired = _paired(root) if "reap128_v2" in present else None
     decision = select(present, paired)

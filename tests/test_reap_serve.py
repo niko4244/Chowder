@@ -372,6 +372,16 @@ def test_new_v2_wrapper_provides_exact_initial_live_model_bound_eval_session(
                      "model_sha256": receipt["gguf_sha256"], "receipt": "serve.json"}
 
 
+@pytest.mark.parametrize("arm", ["dense_v2", "random128_v2", "dense_v2_q4"])
+def test_new_reference_server_refuses_unpinned_model_before_launch(tmp_path, monkeypatch, arm):
+    gguf = tmp_path / "foreign.gguf"
+    gguf.write_bytes(b"foreign dense/control bytes")
+    monkeypatch.setattr(reap_serve.subprocess, "Popen",
+                        lambda *_a, **_kw: pytest.fail("foreign reference must not launch"))
+    with pytest.raises(ValueError, match="original pinned GGUF"):
+        reap_serve.main(_serve_args(gguf, tmp_path / "eval", arm=arm))
+
+
 def test_server_terminated_when_eval_fails(tmp_path, monkeypatch):
     _setup(monkeypatch, eval_rc=3)
     gguf = tmp_path / "m.gguf"

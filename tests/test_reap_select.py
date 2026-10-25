@@ -262,6 +262,43 @@ def test_v2_full_population_fingerprint_is_bound_across_q8_q4(tmp_path):
         assert report["input_sha256"][str(witness)] == hashlib.sha256(witness.read_bytes()).hexdigest()
 
 
+def test_new_v2_quality_cannot_pass_using_detached_archived_dense_or_random_control(tmp_path):
+    obs = _full_v2_rows(tmp_path)
+    # Old archived dense/random128 baseline result files exist, but the new
+    # v2 arm has not generated original-server-bound contemporary references.
+    # Its G0/G1/G2 and negative control therefore remain UNKNOWN.
+    report = evaluate(tmp_path, obs)
+    gates = report["gates"]["reap128_v2"]["gates"]
+    for key in ("gate0", "gate1", "gate2", "control"):
+        assert gates[key]["status"] == "UNKNOWN", (key, gates[key])
+    assert report["decision"]["status"] == "BLOCKED"
+
+
+def test_complete_new_v2_source_witnessed_quality_references_enable_only_quality_gates(tmp_path):
+    obs = _full_v2_rows(tmp_path)
+    for suite, n in (("gsm8k", 1319), ("humaneval", 164)):
+        _attest(tmp_path, "dense_v2", suite, n)
+    _attest(tmp_path, "random128_v2", "gsm8k", 1319, fail=1000)
+    report = evaluate(tmp_path, obs)
+    gates = report["gates"]["reap128_v2"]["gates"]
+    for key in ("gate0", "gate1", "gate2", "control"):
+        assert gates[key]["status"] == "PASS", (key, gates[key])
+    assert gates["speed"]["status"] == "UNKNOWN"
+    assert report["decision"]["status"] == "BLOCKED"
+    assert report["release_approved"] is False
+
+
+def test_resealed_forged_fresh_negative_control_source_refuses_v2_selection(tmp_path):
+    obs = _full_v2_rows(tmp_path)
+    _attest(tmp_path, "random128_v2", "gsm8k", 1319, fail=1000)
+    path = tmp_path / "random128_v2" / "gsm8k.inputs.json"
+    witness = json.loads(path.read_text(encoding="utf-8"))
+    witness["source_items_sha256"] = "f" * 64
+    path.write_text(json.dumps(witness), encoding="utf-8")
+    with pytest.raises(GateError, match="source fingerprint.*official"):
+        evaluate(tmp_path, obs)
+
+
 @pytest.mark.parametrize(("arm", "suite", "new_id"), [
     ("reap128_v2", "gsm8k", "gsm8k-99999"),
     ("reap128_v2", "humaneval", "HumanEval/99999"),
