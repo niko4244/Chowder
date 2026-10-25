@@ -48,6 +48,9 @@ _ALL_LAYERS = re.compile(r"offloaded (\d+)/(\d+) layers to GPU", re.I)
 # verbosity (3); 4 does, at ~30 lines per request. Set through the environment so
 # the pre-registered FLAGS (and inference) stay unchanged.
 LOG_VERBOSITY = "4"
+REGISTERED_V2_EVALUATION_ARMS = {
+    "reap128_v2", "reap128_v2_q4", "reap160_v2", "reap160_v2_q4",
+}
 
 
 def parse_offload(text: str) -> tuple[list[str], int | None]:
@@ -441,9 +444,9 @@ def _stop(proc) -> None:
         proc.kill()
 
 
-def _run_eval(server, command: list[str]) -> int:
+def _run_eval(server, command: list[str], *, env: dict | None = None) -> int:
     """Stop scoring if the model server exits before the evaluator finishes."""
-    evaluator = subprocess.Popen(command)
+    evaluator = subprocess.Popen(command, **({"env": env} if env is not None else {}))
     try:
         while True:
             try:
@@ -500,7 +503,9 @@ def main(argv: list[str] | None = None) -> int:
         # own claimed serve.json and evaluator input witness.
         _verify_registered_v2_construction(gguf, args.arm, digest)
         _require_free_loopback_port(args.port)
-        session = uuid.uuid4().hex if resumed else None
+        # Every new-v2 evaluation needs an original, unique live-server
+        # identity, including the first session, not only resume sessions.
+        session = uuid.uuid4().hex if resumed or args.arm in REGISTERED_V2_EVALUATION_ARMS else None
         log_path = arm_dir / (f"server.resume-{session}.log" if resumed else "server.log")
         receipt_path = arm_dir / (f"serve.resume-{session}.json" if resumed else "serve.json")
         q4 = args.arm.endswith("_q4")
@@ -538,11 +543,25 @@ def main(argv: list[str] | None = None) -> int:
                     "server_log_startup_sha256": hashlib.sha256(startup_raw).hexdigest(),
                     "vram_used_mib": _vram_used_mib(), "started": started, "ready_seconds": ready,
                 }
+                if args.arm in REGISTERED_V2_EVALUATION_ARMS:
+                    receipt.update({"eval_session_id": session, "server_pid": proc.pid,
+                                    "server_port": args.port})
                 if resumed:
                     receipt["session_log"] = log_path.name
                 _publish_initial_serve_exclusive(receipt_path, receipt)
                 eval_py = str(Path(__file__).with_name("reap_eval.py"))
-                code = _run_eval(proc, [sys.executable, eval_py, *eval_args])
+                evaluator_env = None
+                if args.arm in REGISTERED_V2_EVALUATION_ARMS:
+                    evaluator_env = {
+                        **os.environ,
+                        "REAP_BOUND_EVALUATION_SESSION": json.dumps({
+                            "session_id": session, "server_pid": proc.pid,
+                            "port": args.port, "model_sha256": digest,
+                            "receipt": receipt_path.name,
+                        }, sort_keys=True),
+                    }
+                code = _run_eval(proc, [sys.executable, eval_py, *eval_args],
+                                 **({"env": evaluator_env} if evaluator_env else {}))
                 if _model_stat(gguf) != model_stat:
                     raise RuntimeError("REAP GGUF changed during evaluation")
                 _verify_offload_receipt(receipt, log_path)

@@ -1627,3 +1627,47 @@ independent BF16→Q4 numerical error, actual model inference, registered
 GSM8K/HumanEval, random128 paired control, same-session GPU fit/speed
 and canonical REAP160 remain **not measured**. Gen-0 must stay
 `BLOCKED`, no selected deployment candidate, PR #282 draft.
+
+### October 25 16:58 CDT — new-v2 evaluation requires live source/model serving owner
+
+The source-bound new-v2 serving wrapper already freshly SHA-hashes a complete
+published model and validates its BF16-derived original/quantized GGUF
+publication witness before starting llama-server. The registered evaluator,
+however, could previously be run *standalone* with a stale `serve.json`,
+pointing to a different local port's model while persisting rows under the
+claimed original model identity. Such rows must never become scientific PASS.
+
+New `reap128_v2`, `reap128_v2_q4`, `reap160_v2` and `reap160_v2_q4` evaluator
+invocations now require a unique serving-session identity supplied directly
+to the evaluator child by the live serving wrapper. This is checked
+**before any source/dataset output or new model call** and **again before
+summary publication**. The checks bind the session token, SHA-bound GGUF,
+declared model path, exact frozen serving flags, original Windows server PID,
+port and exclusive serving receipt, independently read the actual running
+llama-server command arguments, and confirm that exact PID owns the Windows
+TCP listening port. The first and resumed serving receipts each declare
+their own actual PID/port/session token; the original model SHA and frozen
+per-suite source identity remain consistent across legitimate suite reentry.
+Unbound standalone v2 evaluations and missing, stale, forged, changed-model,
+changed-flags, different-listener, different-port or lost-owner sessions fail
+closed without publishing a source-bound quality summary. Historical arms
+remain unchanged; non-Windows registered-v2 serving is conservatively
+unadmitted until equivalent listener ownership proof is supported.
+
+Adversarial offline Windows CPU tests cover unbound standalone refusal,
+complete positive serving-owner context, foreign model/server PID/port,
+missing/foreign receipt, altered serve flags, listener replacement and
+live-server loss after genuine row scoring but *before* the signed summary.
+The serving/evaluator/selector regression passed **151 tests**, Ruff and
+Git diff checks clean. These source/session checks are necessary admission
+controls and do **not** constitute actual quality measurements.
+
+At ~16:58 CDT, the intact fifth exclusive Q4 supervisor PID 46388 had
+independently reused all 27 original chunks and source-bound sealed up to
+**30/42 real parts**; chunk 030 GGUF SHA-256
+`2b3b133952572a04b5abdca646d9c9404d8e8c1a07383b0938476f30e87d55d8`.
+It logged successful `Q4_OWNED_MMAP_CACHE_TRIM` with its unchanged original
+admission floors. The full 733-tensor Q4 public model, source-bound numeric
+sample, registered GSM8K/HumanEval outcomes, CUDA parity and same-session
+REAP160/Q4 throughput are still unmeasured; Amendment4 Gen-0 remains
+`BLOCKED` and PR #282 must remain draft.

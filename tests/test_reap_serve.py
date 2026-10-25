@@ -343,6 +343,35 @@ def test_serve_json_and_eval_run(tmp_path, monkeypatch):
     assert FakeProc.last.env["LLAMA_ARG_LOG_VERBOSITY"] == "4" and sj["log_verbosity"] == "4"
 
 
+def test_new_v2_wrapper_provides_exact_initial_live_model_bound_eval_session(
+    tmp_path, monkeypatch,
+):
+    _setup(monkeypatch)
+    gguf = tmp_path / "registered-v2.gguf"
+    gguf.write_bytes(b"test-only-source-bound-model")
+    recorded = []
+
+    def capture_eval(server, command, *, env=None):
+        recorded.append((server.pid, command, env))
+        return 0
+
+    monkeypatch.setattr(reap_serve, "_run_eval", capture_eval)
+    out = tmp_path / "evaluation"
+    assert reap_serve.main(_serve_args(gguf, out, arm="reap128_v2")) == 0
+    receipt = json.loads((out / "reap128_v2" / "serve.json").read_text())
+    assert receipt["server_pid"] == FakeProc.pid
+    assert receipt["server_port"] == 8790
+    assert len(receipt["eval_session_id"]) == 32
+    assert len(recorded) == 1
+    pid, cmd, env = recorded[0]
+    assert pid == FakeProc.pid and "reap_eval.py" in " ".join(cmd)
+    assert env is not None
+    proof = json.loads(env["REAP_BOUND_EVALUATION_SESSION"])
+    assert proof == {"session_id": receipt["eval_session_id"],
+                     "server_pid": FakeProc.pid, "port": 8790,
+                     "model_sha256": receipt["gguf_sha256"], "receipt": "serve.json"}
+
+
 def test_server_terminated_when_eval_fails(tmp_path, monkeypatch):
     _setup(monkeypatch, eval_rc=3)
     gguf = tmp_path / "m.gguf"
@@ -682,7 +711,7 @@ def _mock_frozen_q4_scores(monkeypatch, *, missing_last=False, bad_item=False,
              for i in range(1319)]
     monkeypatch.setattr(reap_eval, "_load", lambda suite: items)
 
-    def write_scored_rows(server, command):
+    def write_scored_rows(server, command, *, env=None):
         words = command
         out = Path(words[words.index("--out") + 1])
         arm = words[words.index("--arm") + 1]

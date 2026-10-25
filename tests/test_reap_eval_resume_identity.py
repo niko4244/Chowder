@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import os
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -147,6 +149,102 @@ def test_stale_uncommitted_source_witness_pending_never_promoted(tmp_path):
     current = reap_eval._bind_evaluation_inputs(tmp_path, "gsm8k", ITEMS)
     assert json.loads((tmp_path / "gsm8k.inputs.json").read_text()) == current
     assert abandoned.read_text(encoding="utf-8") == '{"partial":'
+
+
+def test_new_v2_standalone_evaluation_refuses_before_any_generation(tmp_path, monkeypatch):
+    root = tmp_path / "reap128_v2"
+    _serve(root)
+    monkeypatch.delenv("REAP_BOUND_EVALUATION_SESSION", raising=False)
+    called = []
+    monkeypatch.setattr(reap_eval, "_load", lambda _: called.append("dataset") or ITEMS)
+    args = SimpleNamespace(arm="reap128_v2", port=8790, suites="gsm8k", limit=0, parallel=1)
+    with pytest.raises(ValueError, match="serving.*attestation|bound serving session|serving owner not verifiable"):
+        reap_eval._run_suites(args, root)
+    assert called == []
+    assert not (root / "gsm8k.jsonl").exists()
+    assert not (root / "gsm8k.inputs.json").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="registered new-v2 listener owner is Windows-bound")
+@pytest.mark.parametrize("mutation", ["none", "wrong_model", "wrong_pid", "wrong_port",
+                                     "wrong_receipt", "wrong_flags", "foreign_listener"])
+def test_live_v2_eval_requires_exact_model_process_and_listener(
+    tmp_path, monkeypatch, mutation,
+):
+    import psutil
+
+    root = tmp_path / "reap128_v2"
+    _serve(root)
+    sid = "a" * 32
+    gguf = r"C:\verified\reap128-model.gguf"
+    receipt = {"gguf": gguf, "gguf_sha256": "a" * 64,
+               "eval_session_id": sid, "server_pid": 4242, "server_port": 8790,
+               "flags": ["--fit", "on", "-np", "4", "-c", "16384", "--jinja"]}
+    (root / "serve.json").write_text(json.dumps(receipt), encoding="utf-8")
+    claim = {"session_id": sid, "server_pid": 4242, "port": 8790,
+             "model_sha256": "a" * 64, "receipt": "serve.json"}
+    argv = [r"C:\llama.cpp\bin\llama-server.exe", *receipt["flags"],
+            "--port", "8790", "-m", gguf]
+    owner = 4242
+    if mutation == "wrong_model":
+        argv[-1] = r"C:\other\alien.gguf"
+    if mutation == "wrong_pid":
+        claim["server_pid"] = 9000
+    if mutation == "wrong_port":
+        claim["port"] = 8767
+    if mutation == "wrong_receipt":
+        claim["receipt"] = "../../foreign.json"
+    if mutation == "wrong_flags":
+        argv[2] = "off"
+    if mutation == "foreign_listener":
+        owner = 1234
+
+    class Process:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def cmdline(self):
+            return argv
+
+    monkeypatch.setattr(psutil, "Process", Process)
+    monkeypatch.setattr(psutil, "net_connections", lambda kind: [SimpleNamespace(
+        pid=owner, status=psutil.CONN_LISTEN,
+        laddr=SimpleNamespace(port=8790, ip="127.0.0.1"))])
+    monkeypatch.setenv("REAP_BOUND_EVALUATION_SESSION", json.dumps(claim))
+    if mutation == "none":
+        assert reap_eval._require_live_new_v2_server(root, arm="reap128_v2", port=8790) is None
+    else:
+        with pytest.raises(ValueError, match="serving|live|bound|session"):
+            reap_eval._require_live_new_v2_server(root, arm="reap128_v2", port=8790)
+
+
+def test_v2_live_server_loss_during_scoring_never_publishes_summary(tmp_path, monkeypatch):
+    arm = tmp_path / "reap128_v2"
+    _serve(arm)
+    calls = []
+
+    def owner_check(_root, *, arm, port):
+        assert arm == "reap128_v2" and port == 8790
+        calls.append(True)
+        if len(calls) > 1:
+            raise ValueError("serving owner lost while scoring")
+
+    monkeypatch.setattr(reap_eval, "_require_live_new_v2_server", owner_check)
+    monkeypatch.setattr(reap_eval, "_load", lambda _: ITEMS)
+    monkeypatch.setattr(reap_eval, "_chat", lambda *_a: {
+        "text": "42", "finish_reason": "stop", "completion_tokens": 1,
+        "seconds": 0.1, "timings": {"predicted_per_second": 5}})
+    monkeypatch.setattr(reap_eval, "_score", lambda _suite, item, _response: {
+        "id": item["id"], "correct": True, "terminated": True, "trigram_ratio": 1.0,
+        "completion_tokens": 1, "seconds": 0.1, "predicted_per_second": 5,
+        "text": "42"})
+    args = SimpleNamespace(arm="reap128_v2", port=8790, suites="gsm8k", limit=0, parallel=1)
+    with pytest.raises(ValueError, match="serving owner lost"):
+        reap_eval._run_suites(args, arm)
+    assert len(calls) == 2
+    assert not (arm / "summary.json").exists()
+    assert not (arm / ".summary.json.lock").exists()
+    assert len((arm / "gsm8k.jsonl").read_text().splitlines()) == len(ITEMS)
 
 
 def test_separate_suite_invocations_preserve_original_digest_and_both_gates(
