@@ -1066,3 +1066,32 @@ Its immutable chunk receipt SHA-256 is
 At 15:09 CDT, **8/42** production chunks were certified. Full GGUF merge,
 published Q4 receipt, model load, numeric/full quality and Gen-0 selection
 remain unfinished.
+
+### October 25 15:16 CDT — ten certified Q4 chunks and automatic self-trim restart
+
+The original third exclusive Q4 run successfully certified source-bound
+chunks **009** and **010**, reaching **10/42** production chunks. Chunk
+010 contains six mixed-K tensors and has GGUF SHA-256
+`9cfa5cbdac6e1a7672288fbd122ab120b4f0f66fa11fb0b0124e887b70f5aa50`;
+its receipt SHA-256 is
+`96c4c90d7bd78ddf4d0ad83fb3030b0d11692d1f84df5256f3514a2b6d37063b`.
+At the next **Q4_CHUNK_RESOURCE_WAIT** boundary, with no active
+quantizer child and no unsealed F: scratch mini, the exact *owned*
+original supervisor PID 57764 was verified, suspended and deliberately
+terminated to activate the now-tested **automatic current-process-only
+mmap-cache trim** in a fresh Python interpreter. Unrelated processes and
+all ten SHA-sealed GGUFs/receipts were untouched. The old supervised
+session exited nonzero due this explicitly operator-initiated stop,
+**not** a data-integrity or quantization failure.
+
+Following fresh >=12 GiB physical RAM and >=16 GiB available commit
+admission, the same frozen source SHA, pinned quantizer, 42-piece map,
+1-MiB slab and protected F/G paths were restored under exclusive Q4
+recovery log `F:\reap128-v2-q4-streaming-resume4-auto-trim-20261025.log`.
+New supervisor PID 72824 was launched, preserving all original chunk
+receipts for independent full-SHA continuation. The new Windows API
+self-trim is used **only** when actual per-chunk host RAM/commit admission
+fails, no more than once per wait interval, and immediately rechecks the
+unchanged safety floors. At documentation freeze, **10/42** chunks are
+certified and the fourth source-bound resume remains in progress. Full
+Q4 model publication, science and deterministic Gen-0 remain blocked.
