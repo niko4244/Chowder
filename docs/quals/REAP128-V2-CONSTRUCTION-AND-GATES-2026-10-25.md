@@ -332,6 +332,14 @@ quantized-model quality, Q4 fit/speed, or scientific selection.
    `--quant-buffer-mib` is now bound to each individual quantized-stage
    receipt as an operational parameter; resumption refuses a different
    value. It does not alter the full-source BF16 stage's frozen recipe.
+   The second Q8 private partial (2,811,457,536 bytes) was likewise
+   deleted only after the owned supervisor recorded the same physical
+   RAM abort and no quantizer process remained. The independent audit
+   `docs/quals/reap128-v2-incomplete-q8-cleanup-second-20261025.json`
+   is byte pinned (SHA-256
+   `d479f722881f61f339b815179b2286c80ec8430dece150514400cbc0e5db8e0c`).
+   This restored I: disk headroom without touching any completed or
+   published artifact.
    Before the resumed quantizer launched, the exact abandoned private
    file (4,206,747,648 bytes) was removed after checking the original
    owned-child abort log and absence of an active quantizer, restoring

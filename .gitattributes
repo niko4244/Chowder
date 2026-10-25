@@ -16,3 +16,4 @@ docs/quals/reap128-v2-bf16-real-inference-20261025.json -text
 docs/quals/reap128-v2-bf16-gguf-stage-20261025.json -text
 docs/quals/reap128-v2-incomplete-q8-cleanup-20261025.json -text
 docs/quals/reap128-v2-quant-buffer-equivalence-v3-20261025.json -text
+docs/quals/reap128-v2-incomplete-q8-cleanup-second-20261025.json -text
