@@ -564,6 +564,19 @@ def merge_q4(source: Path, parts: list[Path], output: Path, expected: dict) -> d
             or not output.parent.is_dir()):
         raise ValueError("Q4 merge requires fresh output and complete chunk list")
 
+    # The live supervisor starts its merge worker in a new Python process.
+    # Admit scratch capacity here, before GGUFWriter opens any output, even
+    # when the already-running parent imported an earlier _build definition.
+    # All part files contain their own GGUF metadata and tensor table; their
+    # combined physical size conservatively bounds the assembled GGUF size.
+    # Preserve the unchanged 6-GiB disk floor throughout the whole merge.
+    if any(part.is_symlink() or not part.is_file() for part in parts):
+        raise ValueError("Q4 merge requires existing regular sealed chunk files")
+    scratch_required = sum(part.stat().st_size for part in parts) + 6 * GIB
+    if disk_usage(output.parent).free < scratch_required:
+        raise ValueError("Q4 merge scratch capacity cannot preserve complete assembly "
+                         "and original 6-GiB reserve")
+
     writer = GGUFWriter(str(output), "qwen35moe")
     # Scope the original reader so its tokenizer metadata and ndarray views
     # cannot coexist with the subsequent 42 part readers.

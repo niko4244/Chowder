@@ -243,6 +243,33 @@ def test_q4_streaming_merge_bitwise_equal_to_previous_gguf_writer(tmp_path):
     ]
 
 
+@pytest.mark.parametrize("shortfall", [1, q4.GIB])
+def test_q4_merge_refuses_short_scratch_before_creating_orphan(
+    tmp_path, monkeypatch, shortfall,
+):
+    source, parts, proofs = _q4_mixed_parts(tmp_path)
+    full_part_upper_bound = sum(part.stat().st_size for part in parts)
+    monkeypatch.setattr(q4, "disk_usage", lambda _: SimpleNamespace(
+        free=full_part_upper_bound + 6 * q4.GIB - shortfall,
+    ))
+    output = tmp_path / "merged-q4-insufficient-space.gguf"
+    with pytest.raises(ValueError, match="merge.*scratch.*reserve"):
+        q4.merge_q4(source, parts, output, proofs)
+    assert not output.exists(), "a failed preflight must not create an orphan merge"
+
+
+def test_q4_merge_accepts_conservative_complete_capacity(tmp_path, monkeypatch):
+    source, parts, proofs = _q4_mixed_parts(tmp_path)
+    full_part_upper_bound = sum(part.stat().st_size for part in parts)
+    monkeypatch.setattr(q4, "disk_usage", lambda _: SimpleNamespace(
+        free=full_part_upper_bound + 6 * q4.GIB,
+    ))
+    output = tmp_path / "merged-q4-sufficient-space.gguf"
+    report = q4.merge_q4(source, parts, output, proofs)
+    assert report["tensors"] == 4
+    assert report["output_sha256"] == core.hash_file(output)
+
+
 def test_q4_streaming_merge_releases_each_part_reader_before_next(tmp_path, monkeypatch):
     import gguf
 

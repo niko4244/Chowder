@@ -1095,3 +1095,76 @@ fails, no more than once per wait interval, and immediately rechecks the
 unchanged safety floors. At documentation freeze, **10/42** chunks are
 certified and the fourth source-bound resume remains in progress. Full
 Q4 model publication, science and deterministic Gen-0 remain blocked.
+
+### October 25 15:34 CDT — fourth exclusive Q4 owner verified live; automatic trim observed
+
+Independent Windows process and immutable-evidence inspection verified
+the **same** supervised original PID 72824 (not a competing restart), exact
+registered BF16 source SHA, 42-part plan, 1-MiB quantizer slab, isolated
+F:/G: workspaces and exclusive recovery log
+`F:\reap128-v2-q4-streaming-resume4-auto-trim-20261025.log`.
+The fourth run emitted `EXACT_Q4_CHUNK_REUSED` for **all ten** original
+indices 0–9. It subsequently logged
+`Q4_OWNED_MMAP_CACHE_TRIM` with `succeeded: true` and
+`unchanged_start_floor_required: true`. This is now **live production
+evidence for the integrated current-process-only trim**, rather than
+merely the earlier independently performed owned-PID experiment or a
+CPU-mocked test. The source and external GPU servers were not modified.
+
+The verified original owner then **published new chunk 011/042** (zero-based
+event index 10) with an exact immutable receipt, Q4 GGUF SHA-256
+`77525e92246a1285d36ed5251f7df2fe3fdc3c179e2a172fba42283afe85521d`.
+At 15:34 CDT, **11 original Q4 chunks and 11 receipts** were present and
+the parent was preparing or processing subsequent work; no final public
+Q4 GGUF or `.reap-chunked.json` receipt had been observed. Available
+physical RAM was ~18.12 GiB, Windows free commit ~24.90 GiB, and
+previous measured F/G/I free space ~36.70/31.02/7.99 GiB. The
+unchanged 12/16 GiB start, 7/8 GiB runtime and disk safety floors remain
+in effect. No registered GSM8K/HumanEval, BF16 CUDA parity, Q4/GPU
+fit, same-session 200-row speed or REAP160 requalification is implied.
+**Gen-0 remains BLOCKED; PR #282 remains draft.**
+
+### October 25 15:39 CDT — bounded Q4 merge disk preflight and continued real chunks
+
+A fresh read-only audit of final Q4 publication identified a consequential
+scratch-volume failure interval: the parent Q4 startup checks for at least
+8 GiB free on F:, but the future `--merge-worker` must write an additional
+complete Q4 GGUF to F: before the durable finalization ledger can be sealed.
+If free space disappeared between serial chunks and full assembly, the
+runtime 6-GiB disk guard could stop the worker with a partial orphaned
+assembly. The existing fail-closed recovery deliberately refuses that
+unsealed partial artifact, so this required a preventive admission check.
+
+The independent `merge_q4` process now conservatively requires *at least*
+the sum of the exact 42 input mini-GGUF file sizes **plus the original 6-GiB
+scratch-volume reserve** before opening the output GGUF writer. Each mini
+GGUF includes its own metadata; their combined sizes upper-bound the full
+merged single-metadata model. Missing/symlinked chunk inputs also fail
+closed before output creation. Crucially the fourth **currently running**
+parent has already imported its Python `_build`; the subsequent newly
+spawned `--merge-worker` will import this amended source at launch. The
+check therefore protects the existing original owner without forcing a
+restart, modifying its live process, lowering any floor or touching
+unowned workloads. Exact mixed-K payload verification and immutable
+source/receipt checks remain unchanged. The guarded G: final-copy phase
+already checks full remaining transfer bytes plus the same 6-GiB reserve
+after retiring individually certified chunk payloads against its sealed
+F: assembly.
+
+At 15:39 CDT, the original owner additionally sealed **chunk 012/042**
+(GGUF SHA-256
+`7727f054a5c74e06b803280725c88c878eb07fcbf020c7e840f42bae11264445`)
+and **chunk 013/042** (SHA-256
+`6e5fd38c669aa831e7f482dac5b06a1e125e08068471c99ea980e6aac5be221e`),
+each with its own durable proof; **13/42 chunks** are now complete. These
+are exact partial Q4 construction milestones, not a final 733-tensor
+model, descriptive BF16-vs-Q4 numerical result, registered quality PASS,
+or scientific approval. Gen-0 remains `BLOCKED` and PR #282 remains draft.
+
+The new low-space refusal and exact-capacity success fixtures prove the
+check runs **before creating an orphan assembly**. The prime's offline
+Q4 construction, Q4 numerical sampling and chunk-recovery focused matrix
+completed **56 passed, one live pinned-quantizer test deliberately
+deselected, two upstream SWIG deprecation warnings** in 15.41 seconds.
+Ruff passed. Neither test invokes the production quantizer, uses a GPU,
+or substitutes fixtures for full real-model evidence.
