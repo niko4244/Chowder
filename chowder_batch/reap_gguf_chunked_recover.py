@@ -14,7 +14,9 @@ The registered scientific quality and GPU gates remain NOT_EVALUATED.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import sys
 import uuid
@@ -30,6 +32,26 @@ FROZEN_QUANTIZER_PATH = Path("C:/llama.cpp/bin/llama-quantize.exe")
 FROZEN_BF16_SHA = "80341aa776ad9b5f937c21b081b6d76de4a2ea277e5fb88c9ae2634a9da8f4c6"
 FROZEN_SPEC_SHA = "7f9065d8036f7bd04c19a15f87540ad195658f46a80a1a09aa407b44c4836a94"
 FROZEN_PROOF_SHA = "0746c8c06764f784fa7134ecdc4a18954a761372f865256c9e0120588cfbbc7d"
+CERTIFIED_ORPHAN_STATUS = "GGUF_CHUNKED_TENSOR_INDEPENDENT_ORPHAN_ATTESTED_NOT_QUALITY_QUALIFIED"
+
+
+def _hash_span(path: Path, offset: int, nbytes: int) -> str:
+    """Hash a GGUF tensor from bounded *file reads*, not mmap resident pages."""
+    if (type(offset) is not int or offset < 0 or type(nbytes) is not int or nbytes <= 0
+            or offset > path.stat().st_size
+            or nbytes > path.stat().st_size - offset):
+        raise ValueError("GGUF raw tensor span exceeds existing file bounds")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        stream.seek(offset)
+        remaining = nbytes
+        while remaining:
+            block = stream.read(min(core.HASH_BLOCK, remaining))
+            if not block:
+                raise ValueError("GGUF tensor raw byte span truncated")
+            digest.update(block)
+            remaining -= len(block)
+    return digest.hexdigest()
 
 
 def _independent_volume_plan(source: Path, output: Path, scratch: Path, chunks: Path) -> bool:
@@ -112,18 +134,39 @@ def _verify_source(source: Path, verification: Path, source_sha: str):
 def _recheck_owned_assembly(
     source: Path, scratch: Path, chunks: Path, original, stage: dict,
     source_sha: str, supervision_log: Path, *, max_mib: int, slab_mib: int,
+    admit_complete_unsealed_orphan: bool = False,
 ) -> tuple[Path, dict, list[list[str]], dict]:
     from gguf import GGUFReader
 
     assembly = _only_match(scratch, "merged-q8-*.gguf")
-    assembly_receipt = _small_json(assembly.with_name(assembly.name + ".receipt.json"))
-    if (assembly_receipt.get("status") !=
-            "GGUF_CHUNKED_TENSOR_BITWISE_MERGE_NOT_QUALITY_QUALIFIED"
+    assembly_path = assembly.with_name(assembly.name + ".receipt.json")
+    if assembly_path.is_symlink():
+        raise ValueError("Q8 merged worker receipt cannot be a symlink")
+    unsealed = not assembly_path.exists()
+    if unsealed and not admit_complete_unsealed_orphan:
+        raise ValueError("Q8 finished merge is missing independent or original seal")
+    if unsealed:
+        if not (supervision_log.is_file() and not supervision_log.is_symlink()
+                and supervision_log.stat().st_size <= 64 * core.MIB
+                and "OWNED_CONVERSION_ABORT: insufficient unowned physical RAM"
+                in supervision_log.read_text(encoding="utf-8", errors="replace")):
+            raise ValueError("unsealed Q8 orphan is not bound to the original guarded RAM abort")
+        # Never claim that the original guarded worker issued a receipt.
+        # Certification must reconstruct the entire SHA/tensor proof below.
+        assembly_receipt = {"status": CERTIFIED_ORPHAN_STATUS,
+                            "mode": MODE, "source": str(source),
+                            "output": str(assembly), "tensors": 733}
+    else:
+        assembly_receipt = _small_json(assembly_path)
+    if (assembly_receipt.get("status") not in {
+                "GGUF_CHUNKED_TENSOR_BITWISE_MERGE_NOT_QUALITY_QUALIFIED",
+                CERTIFIED_ORPHAN_STATUS,
+            }
             or assembly_receipt.get("mode") != MODE
             or assembly_receipt.get("source") != str(source)
             or assembly_receipt.get("output") != str(assembly)
             or assembly_receipt.get("tensors") != 733
-            or assembly_receipt.get("output_sha256") != core.hash_file(assembly)):
+            or (not unsealed and assembly_receipt.get("output_sha256") != core.hash_file(assembly))):
         raise ValueError("Q8 owned assembled GGUF has no valid finished merge witness")
     groups = core.groups_for(original, max_mib=max_mib)
     signature = {
@@ -158,6 +201,8 @@ def _recheck_owned_assembly(
         if part.exists():
             core._load_chunk_record(chunks / (prefix + ".receipt.json"),
                                     part, expected=identity)
+        elif unsealed:
+            raise ValueError(f"unsealed Q8 F assembly requires every original part, missing {index+1}")
         elif deletion_events.get(str(part)) != receipt.get("output_sha256"):
             raise ValueError(f"missing chunk {index+1} lacks exact owned deletion event")
         for name in names:
@@ -166,7 +211,8 @@ def _recheck_owned_assembly(
             if (original_receipt.get("shape") != list(map(int, original_tensor.shape))
                     or original_receipt.get("tensor_type") != original_tensor.tensor_type.name
                     or original_receipt.get("raw_sha256") !=
-                    core.hash_tensor_data(original_tensor.data)):
+                    _hash_span(source, int(original_tensor.data_offset),
+                               int(original_tensor.n_bytes))):
                 raise ValueError(f"chunk source tensor differs from published BF16: {name}")
             if name in expected_tensors:
                 raise ValueError("overlapping Q8 chunk tensor receipts")
@@ -191,11 +237,36 @@ def _recheck_owned_assembly(
         raise ValueError("merged GGUF is not registered 733-tensor 40x128 Q8 model")
     for source_tensor, t in zip(original.tensors, merged.tensors):
         claimed = expected_tensors[t.name]
-        if (not core._quantized_shape_matches(source_tensor, t)
+        input_shape = tuple(int(v) for v in source_tensor.shape)
+        actual_shape = tuple(int(v) for v in t.shape)
+        original_is_f32 = source_tensor.tensor_type.name == "F32"
+        if original_is_f32:
+            while len(input_shape) > len(actual_shape) and input_shape[-1] == 1:
+                input_shape = input_shape[:-1]
+        matches = input_shape == actual_shape
+        if original_is_f32:
+            matches = (matches and t.tensor_type.name == "F32"
+                       and _hash_span(source, int(source_tensor.data_offset),
+                                      int(source_tensor.n_bytes))
+                       == claimed.get("raw_sha256"))
+        if (not matches
                 or claimed.get("shape") != list(map(int, t.shape))
                 or claimed.get("tensor_type") != t.tensor_type.name
-                or claimed.get("raw_sha256") != core.hash_tensor_data(t.data)):
+                or claimed.get("raw_sha256") !=
+                _hash_span(assembly, int(t.data_offset), int(t.n_bytes))):
             raise ValueError(f"merged Q8 tensor provenance or payload differs: {t.name}")
+    # File digest after every reconstructed chunk/tensor witness, without
+    # mmap paging of the 18+ GiB output into the resident process working set.
+    final_sha = core.hash_file(assembly)
+    if unsealed:
+        assembly_receipt["output_sha256"] = final_sha
+        assembly_receipt["origin"] = (
+            "independent 733-tensor reattestation of guarded merge orphan; "
+            "original merge worker aborted without certifying a receipt"
+        )
+        assembly_receipt["supervision_log_sha256"] = core.hash_file(supervision_log)
+    elif assembly_receipt.get("output_sha256") != final_sha:
+        raise ValueError("assembled GGUF full SHA changed during full source reattestation")
     return assembly, assembly_receipt, groups, expected_tensors
 
 
@@ -203,7 +274,7 @@ def recover_final(
     *, source: Path, output: Path, scratch: Path, chunks: Path,
     full_verification: Path, supervision_log: Path, quantizer: Path,
     source_sha: str, max_mib: int = 1024, slab_mib: int = 1,
-    execute: bool = False,
+    execute: bool = False, seal_unsealed_orphan_only: bool = False,
 ) -> dict:
     from chowder_batch.reap_gguf_supervised import resource_problems
 
@@ -225,6 +296,7 @@ def recover_final(
         assembly, sealed, groups, tensor_proofs = _recheck_owned_assembly(
             source, scratch, chunks, original, stage, source_sha, supervision_log,
             max_mib=max_mib, slab_mib=slab_mib,
+            admit_complete_unsealed_orphan=seal_unsealed_orphan_only,
         )
         report = {
             "schema": Q8_FINAL_SCHEMA,
@@ -243,10 +315,25 @@ def recover_final(
             "gpu_fit_gate": "NOT_EVALUATED",
         }
         if not execute:
-            return {"status": "RECOVERY_PREFLIGHT_PASS_NOT_PUBLISHED",
+            return {"status": "ORPHAN_FULL_TENSOR_PREFLIGHT_PASS_NOT_PUBLISHED"
+                    if seal_unsealed_orphan_only else "RECOVERY_PREFLIGHT_PASS_NOT_PUBLISHED",
                     "source_sha256": source_sha,
                     "output_sha256": sealed["output_sha256"],
                     "tensors": len(tensor_proofs), "chunks": len(groups)}
+        if seal_unsealed_orphan_only:
+            stage_receipt = assembly.with_name(assembly.name + ".receipt.json")
+            if stage_receipt.exists() or stage_receipt.is_symlink():
+                raise ValueError("source-recovered orphan must not overwrite an existing merge witness")
+            with stage_receipt.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(json.dumps(sealed, sort_keys=True, indent=2,
+                                        allow_nan=False) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            return {"status": CERTIFIED_ORPHAN_STATUS,
+                    "assembled_output": str(assembly),
+                    "output_sha256": sealed["output_sha256"],
+                    "tensors": len(tensor_proofs), "chunks": len(groups),
+                    "final_I": "NOT_PUBLISHED", "quality_gate": "NOT_EVALUATED"}
         if output.exists():
             # Crash after cross-volume rename but before exclusive sidecar.
             if (output.stat().st_size != assembly.stat().st_size
@@ -282,6 +369,8 @@ def main(argv=None) -> int:
     parser.add_argument("--max-mib", type=int, default=1024)
     parser.add_argument("--slab-mib", type=int, default=1)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--seal-unsealed-orphan-only", action="store_true",
+                        help="independently certify an aborted but complete F: assembly; never delete/copy chunks")
     a = parser.parse_args(argv)
     try:
         result = recover_final(
@@ -289,6 +378,7 @@ def main(argv=None) -> int:
             quantizer=a.quantizer, full_verification=a.full_verification,
             supervision_log=a.supervision_log, source_sha=a.parent_source_sha256,
             max_mib=a.max_mib, slab_mib=a.slab_mib, execute=a.execute,
+            seal_unsealed_orphan_only=a.seal_unsealed_orphan_only,
         )
     except (OSError, ValueError, ImportError) as exc:
         print(f"Q8 final publication recovery REFUSED: {exc}", file=sys.stderr)

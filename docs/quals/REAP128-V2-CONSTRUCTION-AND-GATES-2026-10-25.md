@@ -746,3 +746,39 @@ tamper and no-retained-reader tests pass. The scoped Q4/recovery CPU matrix
 passed **29 tests, with one deliberate pinned-quantizer skip** while
 the exclusive production Q8 merge was active. Full original 40x128 Q4
 output is **NOT BUILT** and remains serially gated behind completed Q8.
+
+### Second guarded Q8 merge and independent orphan reattestation
+
+The bounded streaming merger verified the original 42 Q8 chunks and
+finished writing a **19,748,435,968-byte** GGUF F: assembly at
+`F:\reap-v2-q8-streaming-scratch-20261025\merged-q8-720fdec6b18c4ce588b530745113645b.gguf`.
+Its last verification step, however, was still hashing the entire
+18.392-GiB model via memory-mapped ndarray views. Its resident memory
+increased until the unchanged **7 GiB host free-memory guard** correctly
+aborted the exclusive worker before any final F: receipt was sealed.
+All **42/42 original SHA-sealed I: chunks** and the complete F: assembly
+were preserved; no I: Q8 final output exists.
+
+The merger's full-model validator now uses GGUFReader **metadata only**
+and rehashes each tensor by bounded file reads at its registered offset,
+without retaining mapped data pages in the worker's resident memory.
+Separately, `reap_gguf_chunked_recover` now supports an explicitly
+distinguished **independent complete-orphan certification**: source-BF16
+and 26-shard ancestry, all 42 surviving chunk file and tensor hashes,
+the failed owner's RAM-abort log, all 733 merged tensor types/shapes/raw
+hashes, frozen 40x128 metadata and full F: SHA must match. Its
+`--seal-unsealed-orphan-only --execute` mode issues an exclusively
+created **F: independent recovery receipt**, clearly recording that
+the original worker never sealed the file; it never deletes original
+chunks or publishes I:. The ordinary Q8 supervisor can later reuse
+only that fully verified source-bound assembly, avoiding another giant
+quantizer/merge run. Unknown or forged F: witnesses fail closed.
+
+Synthetic complete 733-tensor orphan reattestation, lossless FP32 fold,
+direct buffered span hashes, missing original chunk and tampered data
+refusal, duplicate receipt refusal and F: seal-only semantics were
+tested **15 passing CPU regressions** (Ruff clean). The admitted *real*
+18.39-GiB F: certification was launched independently against its
+published BF16 parent and original sealed chunk receipts. Its actual
+full-byte/733-tensor result is **not yet verified** while that process
+continues, and no scientific gates may be promoted from it.

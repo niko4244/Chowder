@@ -130,6 +130,123 @@ def test_recovery_accepts_multiple_only_identical_old_merge_input_rosters(
             core.hash_file(source), log, max_mib=8, slab_mib=1)
 
 
+def _completed_unsealed_orphan_fixture(tmp_path, monkeypatch):
+    source, original, scratch, chunks, assembly, log, _ = _source_bound_setup(
+        tmp_path, monkeypatch)
+    part = chunks / "chunk-001-of-001.q8_0.gguf"
+    shutil.copyfile(assembly, part)
+    (scratch / (assembly.name + ".receipt.json")).unlink()
+    log.write_text(log.read_text() +
+                   "OWNED_CONVERSION_ABORT: insufficient unowned physical RAM\n")
+    return source, original, scratch, chunks, assembly, log
+
+
+def test_unsealed_complete_orphan_is_fully_reattested_via_buffered_span_hashes(
+    tmp_path, monkeypatch,
+):
+    source, original, scratch, chunks, assembly, log = _completed_unsealed_orphan_fixture(
+        tmp_path, monkeypatch)
+    def forbidden_mmap_hash(_data):
+        raise AssertionError("full GGUF tensor mmap data must not be touched")
+    monkeypatch.setattr(core, "hash_tensor_data", forbidden_mmap_hash)
+    _assembled, independently_sealed, groups, raw = recovery._recheck_owned_assembly(
+        source, scratch, chunks, original, {"spec_sha256": "c" * 64},
+        core.hash_file(source), log, max_mib=8, slab_mib=1,
+        admit_complete_unsealed_orphan=True,
+    )
+    assert _assembled == assembly
+    assert independently_sealed["status"] == recovery.CERTIFIED_ORPHAN_STATUS
+    assert independently_sealed["output_sha256"] == core.hash_file(assembly)
+    assert len(groups) == 1 and len(raw) == 733
+    assert not (scratch / (assembly.name + ".receipt.json")).exists()
+    assert (chunks / "chunk-001-of-001.q8_0.gguf").exists()
+
+
+def test_orphan_reattest_rejects_missing_chunk_or_tampered_bytes(tmp_path, monkeypatch):
+    source, original, scratch, chunks, assembly, log = _completed_unsealed_orphan_fixture(
+        tmp_path, monkeypatch)
+    part = chunks / "chunk-001-of-001.q8_0.gguf"
+    part.unlink()
+    with pytest.raises(ValueError, match="requires every original part"):
+        recovery._recheck_owned_assembly(
+            source, scratch, chunks, original, {"spec_sha256": "c" * 64},
+            core.hash_file(source), log, max_mib=8, slab_mib=1,
+            admit_complete_unsealed_orphan=True,
+        )
+    shutil.copyfile(assembly, part)
+    with assembly.open("r+b") as stream:
+        reader = GGUFReader(str(assembly), "r")
+        stream.seek(reader.tensors[-1].data_offset)
+        original_byte = stream.read(1)
+        stream.seek(reader.tensors[-1].data_offset)
+        stream.write(bytes([original_byte[0] ^ 1]))
+    with pytest.raises(ValueError, match="merged Q8 tensor provenance"):
+        recovery._recheck_owned_assembly(
+            source, scratch, chunks, original, {"spec_sha256": "c" * 64},
+            core.hash_file(source), log, max_mib=8, slab_mib=1,
+            admit_complete_unsealed_orphan=True,
+        )
+
+
+def test_full_orphan_seal_is_exclusive_and_never_publishes_unchecked_final(
+    tmp_path, monkeypatch,
+):
+    from chowder_batch import reap_gguf_supervised as supervisor
+
+    source, _original, scratch, chunks, assembly, log = (
+        _completed_unsealed_orphan_fixture(tmp_path, monkeypatch)
+    )
+    verification = tmp_path / "26-shards.json"
+    _write_json(verification, {
+        "schema": "chowder.reap128-v2-pruned-bf16-verification.v1",
+        "status": "FULL_SOURCE_TENSOR_EQUIVALENCE_PASS",
+        "candidate_shard_sha256": {str(i): "a" * 64 for i in range(26)},
+    })
+    stage_file = source.with_name(source.name + ".reap-stage.json")
+    stage = json.loads(stage_file.read_text())
+    stage["input_sha256"] = core.hash_file(verification)
+    _write_json(stage_file, stage)
+    monkeypatch.setattr(recovery, "FROZEN_BF16_SHA", core.hash_file(source))
+    monkeypatch.setattr(recovery, "FROZEN_SPEC_SHA", "c" * 64)
+    monkeypatch.setattr(recovery, "FROZEN_PROOF_SHA", core.hash_file(verification))
+    monkeypatch.setattr(recovery, "_independent_volume_plan", lambda *args: True)
+    monkeypatch.setattr(supervisor, "resource_problems", lambda *args, **kwargs: [])
+    target = tmp_path / "still-unpublished.gguf"
+    kwargs = {
+        "source": source, "output": target, "scratch": scratch,
+        "chunks": chunks, "full_verification": verification,
+        "supervision_log": log,
+        "quantizer": Path("C:/llama.cpp/bin/llama-quantize.exe"),
+        "source_sha": core.hash_file(source), "max_mib": 8,
+        "slab_mib": 1, "seal_unsealed_orphan_only": True,
+    }
+    preflight = recovery.recover_final(**kwargs, execute=False)
+    assert preflight["status"] == "ORPHAN_FULL_TENSOR_PREFLIGHT_PASS_NOT_PUBLISHED"
+    assert not target.exists()
+    assert not (scratch / (assembly.name + ".receipt.json")).exists()
+    sealed = recovery.recover_final(**kwargs, execute=True)
+    assert sealed["status"] == recovery.CERTIFIED_ORPHAN_STATUS
+    assert sealed["final_I"] == "NOT_PUBLISHED"
+    saved = json.loads((scratch / (assembly.name + ".receipt.json")).read_text())
+    assert saved["output_sha256"] == core.hash_file(assembly)
+    assert saved["supervision_log_sha256"] == core.hash_file(log)
+    assert not target.exists()
+    assert (chunks / "chunk-001-of-001.q8_0.gguf").exists()
+    expected = json.loads((chunks / "chunk-001-of-001.receipt.json").read_text())[
+        "output_tensor_provenance"
+    ]
+    reused = core._certified_assembly_reuse(scratch, source, expected)
+    assert reused == (assembly, saved)
+    with pytest.raises(ValueError, match="must not overwrite"):
+        recovery.recover_final(**kwargs, execute=True)
+
+    altered = dict(saved)
+    altered["output_sha256"] = "0" * 64
+    _write_json(scratch / (assembly.name + ".receipt.json"), altered)
+    with pytest.raises(ValueError, match="not source-bound"):
+        core._certified_assembly_reuse(scratch, source, expected)
+
+
 @pytest.mark.parametrize("tamper", [
     "no_cleanup_witness", "bad_cleanup_digest", "missing_chunk_receipt",
     "different_source_tensor", "different_quantized_tensor",

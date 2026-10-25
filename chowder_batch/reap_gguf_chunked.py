@@ -50,6 +50,30 @@ def hash_tensor_data(raw: Any) -> str:
         view.release()
 
 
+def hash_tensor_span(path: Path, offset: int, nbytes: int) -> str:
+    """Verify file-backed GGUF tensor bytes without touching mapped ndarray pages.
+
+    A 19 GiB GGUFReader does not fault 19 GiB resident memory until its raw
+    tensor data are accessed; hashing via ndarray memoryview previously did
+    just that and the unchanged 7-GiB host floor correctly aborted.
+    """
+    if (type(offset) is not int or offset < 0 or type(nbytes) is not int
+            or nbytes <= 0 or offset > path.stat().st_size
+            or nbytes > path.stat().st_size - offset):
+        raise ValueError("GGUF tensor offset or byte length outside file")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        remaining = nbytes
+        while remaining:
+            block = handle.read(min(HASH_BLOCK, remaining))
+            if not block:
+                raise ValueError("GGUF tensor truncated during bounded SHA verification")
+            digest.update(block)
+            remaining -= len(block)
+    return digest.hexdigest()
+
+
 def _quantized_shape_matches(original: Any, quantized: Any) -> bool:
     """Permit only llama.cpp's lossless F32 trailing-unit-dimension fold.
 
@@ -383,7 +407,8 @@ def merge_mini(
             if (actual.name != desired
                     or list(map(int, actual.shape)) != witness["shape"]
                     or actual.tensor_type.name != witness["tensor_type"]
-                    or hash_tensor_data(actual.data) != witness["raw_sha256"]):
+                    or hash_tensor_span(output, int(actual.data_offset),
+                                        int(actual.n_bytes)) != witness["raw_sha256"]):
                 raise ValueError(f"merged Q8 tensor identity changed: {desired}")
         if merged.get_field("general.file_type").contents() != 7:
             raise ValueError("merged Q8 GGUF file type changed")
@@ -422,6 +447,55 @@ def _refuse_unsealed_q8_merge(scratch: Path) -> None:
             or any(scratch.glob("merged-q8-*.gguf.receipt.json"))):
         raise ValueError("unsealed Q8 merged GGUF/receipt exists; "
                          "refusing duplicate assembly until independently audited")
+
+
+def _certified_assembly_reuse(scratch: Path, source: Path, expected: dict):
+    """Reuse ONLY a prior, independently sealed and rehashed F: merge.
+
+    This preserves all 42 original chunks and avoids reproducing an already
+    complete 19-GiB file after the guarded worker exited during its former
+    mmap-heavy final verification. Never infer a receipt for an orphan.
+    """
+    from gguf import GGUFReader
+
+    candidates = sorted(scratch.glob("merged-q8-*.gguf"))
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise ValueError("multiple merged Q8 outputs require independent audit")
+    output = candidates[0]
+    seal = output.with_name(output.name + ".receipt.json")
+    if (output.is_symlink() or not output.is_file()
+            or seal.is_symlink() or not seal.is_file()
+            or seal.stat().st_size > 4 * MIB):
+        raise ValueError("unsealed or untrusted merged Q8 candidate is present")
+    receipt = json.loads(seal.read_text(encoding="utf-8"))
+    if (not isinstance(receipt, dict)
+            or receipt.get("status") not in {
+                "GGUF_CHUNKED_TENSOR_INDEPENDENT_ORPHAN_ATTESTED_NOT_QUALITY_QUALIFIED",
+                "GGUF_CHUNKED_TENSOR_BITWISE_MERGE_NOT_QUALITY_QUALIFIED",
+            }
+            or receipt.get("mode") != "Q8_0"
+            or receipt.get("source") != str(source)
+            or receipt.get("output") != str(output)
+            or receipt.get("tensors") != len(expected)
+            or receipt.get("output_sha256") != hash_file(output)):
+        raise ValueError("F: Q8 sealed assembly receipt is not source-bound")
+    original = GGUFReader(str(source), "r")
+    current = GGUFReader(str(output), "r")
+    if (current.get_field("general.file_type").contents() != 7
+            or len(current.tensors) != len(expected)
+            or [t.name for t in current.tensors]
+            != [t.name for t in original.tensors]):
+        raise ValueError("F: Q8 sealed assembly inventory differs from BF16")
+    for tensor in current.tensors:
+        proof = expected[tensor.name]
+        if (proof.get("shape") != list(map(int, tensor.shape))
+                or proof.get("tensor_type") != tensor.tensor_type.name
+                or proof.get("raw_sha256") != hash_tensor_span(
+                    output, int(tensor.data_offset), int(tensor.n_bytes))):
+            raise ValueError(f"F: independently sealed Q8 tensor changed: {tensor.name}")
+    return output, receipt
 
 
 def _run_chunked_locked(
@@ -555,24 +629,34 @@ def _run_chunked_locked(
                     raise ValueError("two Q8 chunks claim same tensor")
                 by_name[tensor_name] = value
             started.append(chunk_output)
-        _refuse_unsealed_q8_merge(scratch)
-        # The merge is a separately guarded owned child, so even the
-        # potentially ~20-GiB assembled output can be safely aborted.
-        assembly = scratch / ("merged-q8-" + uuid.uuid4().hex + ".gguf")
-        tensor_receipts = scratch / ("merge-input-" + uuid.uuid4().hex + ".json")
-        with tensor_receipts.open("x", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(by_name, sort_keys=True, allow_nan=False) + "\n")
-        command = [
-            sys.executable, "-B", "-m", "chowder_batch.reap_gguf_chunked",
-            "--merge-worker", "--source", str(source), "--out", str(assembly),
-            "--tensor-receipts", str(tensor_receipts),
-        ]
-        for part in started:
-            command.extend(["--part", str(part)])
-        status = _owned_stage(command, drives=[source, assembly, *started], log=log)
-        if status:
-            raise RuntimeError(f"guarded GGUF merge aborted ({status}); parts retained")
-        combined = json.loads((assembly.with_name(assembly.name + ".receipt.json")).read_text())
+        recovered = _certified_assembly_reuse(scratch, source, by_name)
+        if recovered is None:
+            _refuse_unsealed_q8_merge(scratch)
+            # The merge is a separately guarded owned child, so even the
+            # potentially ~20-GiB assembled output can be safely aborted.
+            assembly = scratch / ("merged-q8-" + uuid.uuid4().hex + ".gguf")
+            tensor_receipts = scratch / ("merge-input-" + uuid.uuid4().hex + ".json")
+            with tensor_receipts.open("x", encoding="utf-8", newline="\n") as f:
+                f.write(json.dumps(by_name, sort_keys=True, allow_nan=False) + "\n")
+            command = [
+                sys.executable, "-B", "-m", "chowder_batch.reap_gguf_chunked",
+                "--merge-worker", "--source", str(source), "--out", str(assembly),
+                "--tensor-receipts", str(tensor_receipts),
+            ]
+            for part in started:
+                command.extend(["--part", str(part)])
+            status = _owned_stage(command, drives=[source, assembly, *started], log=log)
+            if status:
+                raise RuntimeError(f"guarded GGUF merge aborted ({status}); parts retained")
+            combined = json.loads((assembly.with_name(assembly.name + ".receipt.json")).read_text())
+        else:
+            assembly, combined = recovered
+            log.write(json.dumps({
+                "event": "EXACT_ORPHAN_ASSEMBLY_REATTESTED_AND_REUSED",
+                "sha256": combined["output_sha256"],
+                "seal_status": combined["status"],
+            }) + "\n")
+            log.flush()
         if (combined.get("output_sha256") != hash_file(assembly)
                 or combined.get("tensors") != len(by_name)):
             raise ValueError("merged GGUF content identity changed")
