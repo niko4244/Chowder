@@ -1599,3 +1599,31 @@ The still-live source-bound recovery has **27/42** immutable chunk pairs
 and no Q4 final model or sidecar; later model/numeric/quality/GPU gates
 remain `UNKNOWN`/`BLOCKED`. Reclamation is a host-liveness safeguard,
 not proof of model quality or completed Q4 conversion.
+
+### October 25 16:52 CDT — all 27 source-bound original parts reused; new chunk 028 sealed
+
+The fifth exclusive Q4 original source supervisor PID 46388 subsequently
+emitted **`EXACT_Q4_CHUNK_REUSED` for all 27 original zero-based indices
+0–26**, validating each previously certified GGUF, immutable receipt,
+frozen original BF16 input witnesses, registered quantizer recipe and
+typed raw output tensors without requantizing them. The first newly
+admitted owned `llama-quantize` child PID 44560 then generated the
+genuine **chunk 028/042**, registered BF16 input mini
+`F:\reap-v2-q4-streaming-scratch-20261025\chunk-028-of-042.bf16.gguf`.
+The original supervisor source-bound validated and sealed output GGUF
+SHA-256
+`5fd985297948a547197c1c026d1128cd66e9e0a79c45d4c98fbee0dbab28af7f`
+in the immutable chunk 028 receipt; the owned BF16 scratch mini was
+deleted after proof, not retained or declared a final Q4. At the
+16:52 CDT read, there were exactly **28/42** durable parts and matching
+receipts and **14 still to construct**. The original single producer
+remained alive and no unowned process was interrupted. Host physical
+RAM free was ~13.90 GiB, commit free ~17.47 GiB; the unchanged
+12/16 GiB start and 7/8 GiB runtime guards remain controlling.
+
+This advances *real* source-bound production beyond the fifth recovery,
+but the guarded full 733-tensor mixed-K merge, G: model+sidecar,
+independent BF16→Q4 numerical error, actual model inference, registered
+GSM8K/HumanEval, random128 paired control, same-session GPU fit/speed
+and canonical REAP160 remain **not measured**. Gen-0 must stay
+`BLOCKED`, no selected deployment candidate, PR #282 draft.
