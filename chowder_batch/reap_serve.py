@@ -68,6 +68,97 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _digest_json(value: dict) -> str:
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _startup_log(path: Path, size: int) -> bytes:
+    if (not isinstance(size, int) or isinstance(size, bool)
+            or not 1 <= size <= 64 * 1024 * 1024):
+        raise ValueError("REAP serving startup log length is invalid")
+    with path.open("rb") as stream:
+        raw = stream.read(size)
+    if len(raw) != size:
+        raise ValueError("REAP serving startup log is truncated")
+    return raw
+
+
+def _verify_offload_receipt(receipt: dict, path: Path) -> None:
+    """Recompute the original fit assertion from the same serving startup log."""
+    if "server_log_startup_sha256" in receipt:
+        raw = _startup_log(path, receipt.get("server_log_startup_bytes"))
+        if hashlib.sha256(raw).hexdigest() != receipt["server_log_startup_sha256"]:
+            raise ValueError("REAP serving startup log digest disagrees with receipt")
+    else:
+        # Older original receipts lack the prefix digest; they cannot gain one
+        # retrospectively. Their offload assertion must still match raw log.
+        raw = path.read_bytes()
+    lines, count = parse_offload(raw.decode("utf-8", errors="replace"))
+    measured = receipt.get("measured_experts_offloaded", receipt.get("experts_offloaded"))
+    if (lines != receipt.get("offload_log_lines") or count != measured
+            or (receipt.get("experts_offloaded") is not None
+                and receipt["experts_offloaded"] != count)):
+        raise ValueError("REAP serving offload receipt disagrees with original startup log")
+
+
+def _certify_q4_speed_session(arm_dir: Path, *, eval_args: list[str], receipt: dict,
+                              session_id: str, port: int, server_pid: int) -> dict | None:
+    """Certify exactly one new, witnessed first-200 GSM8K session, or UNKNOWN."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--port")
+    parser.add_argument("--arm")
+    parser.add_argument("--out")
+    parser.add_argument("--suites", default="gsm8k,humaneval")
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--parallel", type=int, default=4)
+    if not eval_args:
+        return None
+    args = parser.parse_args(eval_args)
+    if args.suites != "gsm8k" or args.limit != 200:
+        return None
+    # The listener PID is independently checked on the Windows execution host.
+    # Other platforms have no implemented ownership attestation in this wrapper.
+    if os.name != "nt":
+        return None
+    if receipt.get("measured_experts_offloaded") is None:
+        return None
+    from chowder_batch import reap_eval
+
+    for filename in ("gsm8k.inputs.json", "gsm8k.jsonl", "summary.json"):
+        path = arm_dir / filename
+        if not path.is_file() or path.is_symlink():
+            raise ValueError("REAP speed session lacks a regular result, summary or input witness")
+    full_items = reap_eval._load("gsm8k")
+    witness = reap_eval._bind_evaluation_inputs(arm_dir, "gsm8k", full_items)
+    if witness["model"] != {key: receipt[key] for key in ("gguf", "gguf_sha256", "flags")}:
+        raise ValueError("REAP speed session witness belongs to a different serving model")
+    saved, _ = reap_eval._validated_saved_summary(arm_dir)
+    summary = saved.get("gsm8k")
+    expected_ids = {f"gsm8k-{i}" for i in range(200)}
+    rows_path = arm_dir / "gsm8k.jsonl"
+    rows = reap_eval._read_resume_rows(rows_path, expected_ids, arm_dir / "summary.json", "gsm8k")
+    if (len(rows) != 200 or summary is None or summary.get("n") != 200
+            or set(rows) != expected_ids):
+        raise ValueError("REAP speed session lacks its complete same-session first-200 GSM8K rows")
+    for row in rows.values():
+        speed = row.get("predicted_per_second")
+        if (isinstance(speed, bool) or not isinstance(speed, (int, float))
+                or not 0 <= speed < float("inf")):
+            raise ValueError("REAP speed session contains missing/nonfinite throughput")
+    return {
+        "schema": "chowder.reap-q4-same-session-speed.v1",
+        "session_id": session_id, "server_pid": server_pid, "port": port,
+        "suite": "gsm8k", "n": 200,
+        "gguf_sha256": receipt["gguf_sha256"],
+        "server_log_startup_sha256": receipt["server_log_startup_sha256"],
+        "source_items_sha256": witness["source_items_sha256"],
+        "inputs_sha256": _sha256(arm_dir / "gsm8k.inputs.json"),
+        "rows_sha256": _sha256(rows_path),
+        "summary_entry_sha256": _digest_json(summary),
+    }
+
+
 def _model_stat(path: Path) -> tuple[int, int, int, int, int]:
     info = path.stat()
     return (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_dev, info.st_ino)
@@ -182,6 +273,7 @@ def _admit_output(arm_dir: Path, *, gguf: Path, digest: str) -> bool:
     if (Path(serving["gguf"]).resolve() != gguf
             or any(serving.get(k) != v for k, v in expected.items())):
         raise ValueError("REAP existing serving model identity/flags disagree; use a new output arm")
+    _verify_offload_receipt(serving, log_path)
 
     from chowder_batch.reap_eval import IDENTITY_SCHEMA
 
@@ -203,6 +295,7 @@ def _admit_output(arm_dir: Path, *, gguf: Path, digest: str) -> bool:
                 or record.get("suite") != suite or record.get("model") != expected):
             raise ValueError("REAP existing input witness model identity disagrees")
     summary_path = arm_dir / "summary.json"
+    summary = {}
     if summary_path.exists():
         if not summary_path.is_file() or summary_path.is_symlink():
             raise ValueError("REAP existing evaluation summary is not a regular file")
@@ -219,6 +312,31 @@ def _admit_output(arm_dir: Path, *, gguf: Path, digest: str) -> bool:
                     or not (arm_dir / f"{suite}.inputs.json").is_file()
                     or info.get("file_sha256") != _sha256(results)):
                 raise ValueError("REAP existing evaluation summary is unclaimed or modified")
+    session = serving.get("speed_session")
+    if session is not None:
+        if (not isinstance(session, dict)
+                or session.get("schema") != "chowder.reap-q4-same-session-speed.v1"
+                or session.get("suite") != "gsm8k" or type(session.get("n")) is not int
+                or session["n"] != 200
+                or not isinstance(session.get("session_id"), str) or not session["session_id"]
+                or type(session.get("server_pid")) is not int or session["server_pid"] <= 0
+                or type(session.get("port")) is not int or not 1 <= session["port"] <= 65535
+                or session.get("gguf_sha256") != digest
+                or session.get("server_log_startup_sha256") != serving.get("server_log_startup_sha256")
+                or "gsm8k" not in summary
+                or _digest_json(summary["gsm8k"]) != session.get("summary_entry_sha256")
+                or any(_sha256(arm_dir / name) != session.get(field) for name, field in (
+                    ("gsm8k.jsonl", "rows_sha256"),
+                    ("gsm8k.inputs.json", "inputs_sha256"),
+                ))):
+            raise ValueError("REAP existing same-session speed receipt evidence changed")
+        try:
+            source_witness = json.loads((arm_dir / "gsm8k.inputs.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise ValueError("REAP existing speed input witness is unreadable") from exc
+        if (not isinstance(source_witness, dict) or source_witness.get("source_items_sha256")
+                != session.get("source_items_sha256")):
+            raise ValueError("REAP existing speed source witness differs from same-session proof")
     return True
 
 
@@ -290,6 +408,13 @@ def main(argv: list[str] | None = None) -> int:
         session = uuid.uuid4().hex if resumed else None
         log_path = arm_dir / (f"server.resume-{session}.log" if resumed else "server.log")
         receipt_path = arm_dir / (f"serve.resume-{session}.json" if resumed else "serve.json")
+        q4 = args.arm.endswith("_q4")
+        # A resumed 200-row cohort is always mixed/uncertain for speed.
+        may_certify_speed = q4 and not resumed and bool(eval_args)
+        if may_certify_speed and any((arm_dir / file).exists() for file in (
+            "gsm8k.jsonl", "gsm8k.inputs.json", "summary.json"
+        )):
+            may_certify_speed = False
         cmd = [args.server, *FLAGS, "--port", str(args.port), "-m", str(gguf)]
         started = dt.datetime.now(dt.timezone.utc).isoformat()
         t0 = time.time()
@@ -304,11 +429,18 @@ def main(argv: list[str] | None = None) -> int:
                 if _model_stat(gguf) != model_stat:
                     raise RuntimeError("REAP GGUF changed during server startup")
                 ready = round(time.time() - t0, 1)
-                lines, n = parse_offload(log_path.read_text(encoding="utf-8", errors="replace"))
+                startup_raw = log_path.read_bytes()
+                lines, n = parse_offload(startup_raw.decode("utf-8", errors="replace"))
                 receipt = {
                     "gguf": str(gguf), "gguf_sha256": digest, "flags": FLAGS,
                     "log_verbosity": LOG_VERBOSITY,
-                    "experts_offloaded": n, "offload_log_lines": lines,
+                    # Keep the speed gate UNKNOWN until this new Q4 session has
+                    # produced and sealed its complete, same-session 200 rows.
+                    "experts_offloaded": None if q4 else n,
+                    "measured_experts_offloaded": n,
+                    "offload_log_lines": lines,
+                    "server_log_startup_bytes": len(startup_raw),
+                    "server_log_startup_sha256": hashlib.sha256(startup_raw).hexdigest(),
                     "vram_used_mib": _vram_used_mib(), "started": started, "ready_seconds": ready,
                 }
                 if resumed:
@@ -319,6 +451,33 @@ def main(argv: list[str] | None = None) -> int:
                 code = _run_eval(proc, [sys.executable, eval_py, *eval_args])
                 if _model_stat(gguf) != model_stat:
                     raise RuntimeError("REAP GGUF changed during evaluation")
+                _verify_offload_receipt(receipt, log_path)
+                if may_certify_speed and code == 0:
+                    _require_owned_listener(proc, args.port)
+                    proof = _certify_q4_speed_session(
+                        arm_dir, eval_args=eval_args, receipt=receipt,
+                        session_id=session or uuid.uuid4().hex,
+                        port=args.port, server_pid=proc.pid,
+                    )
+                    if proof is not None:
+                        provisional_receipt = receipt.copy()
+                        receipt["speed_session"] = proof
+                        receipt["experts_offloaded"] = n
+                        # The provisional receipt is still ours under the arm
+                        # lock. Seal only after source, rows, summary and log
+                        # were verified; no historical receipt is replaced.
+                        # A concurrent edit to the provisional receipt is a
+                        # provenance violation, not permission to overwrite it.
+                        if json.loads(receipt_path.read_text(encoding="utf-8")) != provisional_receipt:
+                            raise ValueError("REAP provisional serving receipt changed before sealing")
+                        pending = arm_dir / f".serve-pending-{uuid.uuid4().hex}.json"
+                        try:
+                            with pending.open("x", encoding="utf-8") as record:
+                                json.dump(receipt, record, indent=2)
+                            os.replace(pending, receipt_path)
+                        finally:
+                            if pending.exists():
+                                pending.unlink()
                 return code
             finally:
                 _stop(proc)

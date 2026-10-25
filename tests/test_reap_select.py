@@ -12,6 +12,7 @@ import sys
 import pytest
 
 from chowder_batch.reap_gates import GateError
+from chowder_batch.reap_gates import FROZEN_SOURCE_SHA256
 from chowder_batch.reap_select import (
     PAIRED_METHOD_DISCREPANCY, REQUIRED, _paired, _validate_v2_observation,
     evaluate, select,
@@ -19,6 +20,14 @@ from chowder_batch.reap_select import (
 from chowder_batch import reap_v2_source_identity as identity
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_v2_source_pins(monkeypatch):
+    # All synthetic attestations below use invented benchmark rows. Patch the
+    # source pins only inside this test module; production keeps official SHAs.
+    monkeypatch.setitem(FROZEN_SOURCE_SHA256, "gsm8k", "b" * 64)
+    monkeypatch.setitem(FROZEN_SOURCE_SHA256, "humaneval", "b" * 64)
 
 
 def arm(**statuses):
@@ -252,6 +261,28 @@ def test_v2_full_population_fingerprint_is_bound_across_q8_q4(tmp_path):
         assert report["input_sha256"][str(witness)] == hashlib.sha256(witness.read_bytes()).hexdigest()
 
 
+@pytest.mark.parametrize(("suite", "official"), [
+    ("gsm8k", "913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89"),
+    ("humaneval", "49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420"),
+])
+def test_v2_rejects_consistent_but_nonofficial_dataset_claim(tmp_path, monkeypatch, suite, official):
+    obs = _full_v2_rows(tmp_path)
+    # The attacker wrote matching plausible Q8/Q4 hashes, but those hashes
+    # are not the official unmodified source-item population fingerprint.
+    monkeypatch.setitem(FROZEN_SOURCE_SHA256, suite, official)
+    with pytest.raises(GateError, match="source fingerprint.*official"):
+        evaluate(tmp_path, obs)
+
+
+def test_v2_q4_original_server_log_is_sha_snapshotted_for_selection(tmp_path):
+    obs = _full_v2_rows(tmp_path)
+    log = tmp_path / "reap128_v2_q4" / "server.log"
+    log.write_bytes(b"frozen startup prefix and logged fit rows\n")
+    report = evaluate(tmp_path, obs)
+    assert report["gates"]["reap128_v2"]["gates"]["speed"]["status"] == "UNKNOWN"
+    assert report["input_sha256"][str(log)] == hashlib.sha256(log.read_bytes()).hexdigest()
+
+
 def test_v2_q4_gsm8k_window_must_pair_with_q8_item_ids(tmp_path):
     obs = _full_v2_rows(tmp_path)
     path = tmp_path / "reap128_v2_q4" / "gsm8k.jsonl"
@@ -477,6 +508,17 @@ def test_v2_worked_is_refused_by_both_selector_entrypoints(tmp_path, entrypoint)
     _attest(tmp_path, "reap128_v2", "gsm8k", 1319)
     _attest(tmp_path, "reap128_v2", "humaneval", 164)
     _attest(tmp_path, "reap128_v2_q4", "gsm8k", 200, speed=True)
+    # CLI subprocesses use production pins rather than pytest's synthetic
+    # monkeypatch. Keep this case testing Ornith qualification, not sources.
+    for arm, suite, actual_sha in (
+        ("reap128_v2", "gsm8k", "913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89"),
+        ("reap128_v2", "humaneval", "49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420"),
+        ("reap128_v2_q4", "gsm8k", "913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89"),
+    ):
+        witness_path = tmp_path / arm / f"{suite}.inputs.json"
+        witness = json.loads(witness_path.read_text(encoding="utf-8"))
+        witness["source_items_sha256"] = actual_sha
+        witness_path.write_text(json.dumps(witness), encoding="utf-8")
     calib = tmp_path / "calib"
     calib.mkdir()
     raw = calib / "calibration.jsonl"

@@ -1,0 +1,23 @@
+{
+  "c_free_gib": 7.702,
+  "commit_available_gib": 25.731,
+  "f_free_gib": 36.616,
+  "gpu_available_gib": 10.89,
+  "gpu_temperature_c": 49.0,
+  "minimum_admission": {
+    "commit_gib": 24.0,
+    "gpu_gib": 12.0,
+    "physical_gib": 16.0
+  },
+  "physical_available_gib": 12.673,
+  "protected_service_ports_listening": true,
+  "recorded_at_utc": "2026-10-25T15:55:12.045855+00:00",
+  "refusal_reasons": [
+    "physical_ram_below_16_gib",
+    "gpu_free_below_12_gib",
+    "protected_service_ports_listening"
+  ],
+  "schema": "chowder.reap128-v2-host-resource-single-snapshot.v1",
+  "scope": "Only one passive read-only snapshot with no CUDA context; no 60-second stability or process-owner approval and no GPU work performed. Admission requires ALL criteria; current static shortfalls alone prohibit original BF16 CUDA parity and GPU-heavy serving. No unowned processes stopped.",
+  "status": "CUDA_ADMISSION_STATIC_CONDITIONS_REFUSED_NOT_60_SECOND_ADMISSION"
+}

@@ -446,3 +446,153 @@ def test_windows_listener_pid_refuses_foreign_and_accepts_own_process(monkeypatc
         class CurrentProcess:
             pid = os.getpid()
         reap_serve._require_owned_listener(CurrentProcess(), sock.getsockname()[1])
+
+
+def test_refuse_forged_offload_from_original_log_on_resume(tmp_path, monkeypatch):
+    _setup(monkeypatch)
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"model A")
+    out = tmp_path / "eval"
+    assert reap_serve.main(_serve_args(gguf, out)) == 0
+    arm = out / "reap128_v2"
+    receipt = json.loads((arm / "serve.json").read_text())
+    assert receipt["experts_offloaded"] == 19
+    receipt["experts_offloaded"] = 0
+    (arm / "serve.json").write_text(json.dumps(receipt))
+    monkeypatch.setattr(reap_serve.subprocess, "Popen", lambda *a, **kw: pytest.fail("must not launch"))
+    with pytest.raises(ValueError, match="offload|log|receipt|evidence"):
+        reap_serve.main(_serve_args(gguf, out))
+
+
+def test_q4_without_same_session_200_rows_stays_unknown(tmp_path, monkeypatch):
+    _setup(monkeypatch)
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"model A")
+    out = tmp_path / "eval"
+    assert reap_serve.main(_serve_args(gguf, out, arm="reap128_v2_q4")) == 0
+    receipt = json.loads((out / "reap128_v2_q4" / "serve.json").read_text())
+    assert receipt["experts_offloaded"] is None
+    assert receipt["measured_experts_offloaded"] == 19
+    assert "speed_session" not in receipt
+
+
+def test_q4_nonfrozen_eval_args_do_not_certify_speed(tmp_path, monkeypatch):
+    _setup(monkeypatch)
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"model A")
+    out = tmp_path / "eval"
+    args = _serve_args(gguf, out, arm="dense_q4") + ["--suites", "gsm8k", "--limit", "199"]
+    assert reap_serve.main(args) == 0
+    receipt = json.loads((out / "dense_q4" / "serve.json").read_text())
+    assert receipt["experts_offloaded"] is None
+
+
+def test_tampered_startup_log_refuses_compatible_resume(tmp_path, monkeypatch):
+    _setup(monkeypatch)
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"model A")
+    out = tmp_path / "eval"
+    assert reap_serve.main(_serve_args(gguf, out)) == 0
+    arm = out / "reap128_v2"
+    with (arm / "server.log").open("ab") as log:
+        log.write(b"\nextra generation logging is allowed\n")
+    assert reap_serve.main(_serve_args(gguf, out)) == 0
+    original = (arm / "server.log").read_bytes()
+    (arm / "server.log").write_bytes(b"X" + original[1:])
+    monkeypatch.setattr(reap_serve.subprocess, "Popen", lambda *a, **kw: pytest.fail("must not launch"))
+    with pytest.raises(ValueError, match="log|receipt|evidence"):
+        reap_serve.main(_serve_args(gguf, out))
+
+
+def _mock_frozen_q4_scores(monkeypatch, *, missing_last=False, bad_item=False,
+                           missing_witness=False, tampered_startup=False):
+    items = [{"id": f"gsm8k-{i}", "prompt": f"question {i}", "expected": "1"}
+             for i in range(1319)]
+    monkeypatch.setattr(reap_eval, "_load", lambda suite: items)
+
+    def write_scored_rows(server, command):
+        words = command
+        out = Path(words[words.index("--out") + 1])
+        arm = words[words.index("--arm") + 1]
+        root = out / arm
+        if not missing_witness:
+            reap_eval._bind_evaluation_inputs(root, "gsm8k", items)
+        count = 199 if missing_last else 200
+        rows = [dict(id=f"gsm8k-{i}", correct=True, terminated=True,
+                     trigram_ratio=1.0, completion_tokens=10, predicted_per_second=70.0,
+                     seconds=1.0, text="answer") for i in range(count)]
+        if bad_item:
+            rows[0]["id"] = "gsm8k-201"
+        result_file = root / "gsm8k.jsonl"
+        result_file.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        saved = reap_eval._summarize_rows(rows, result_file)
+        (root / "summary.json").write_text(json.dumps({"gsm8k": saved}), encoding="utf-8")
+        if tampered_startup:
+            path = root / "server.log"
+            raw = path.read_bytes()
+            path.write_bytes(b"X" + raw[1:])
+        return 0
+
+    monkeypatch.setattr(reap_serve, "_run_eval", write_scored_rows)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="same-session speed attestation requires Windows listener PID")
+def test_new_q4_same_session_first_200_receipt_certifies_source_and_fit(tmp_path, monkeypatch):
+    _setup(monkeypatch)
+    _mock_frozen_q4_scores(monkeypatch)
+    gguf = tmp_path / "q4.gguf"
+    gguf.write_bytes(b"model A")
+    out = tmp_path / "eval"
+    args = _serve_args(gguf, out, arm="reap128_v2_q4") + ["--suites", "gsm8k", "--limit", "200"]
+    assert reap_serve.main(args) == 0
+    arm = out / "reap128_v2_q4"
+    recorded = json.loads((arm / "serve.json").read_text())
+    assert recorded["experts_offloaded"] == recorded["measured_experts_offloaded"] == 19
+    proof = recorded["speed_session"]
+    assert proof["schema"] == "chowder.reap-q4-same-session-speed.v1"
+    assert proof["n"] == 200
+    assert proof["rows_sha256"] == reap_serve._sha256(arm / "gsm8k.jsonl")
+    assert proof["source_items_sha256"] == reap_eval._digest(reap_eval._load("gsm8k"))
+    assert reap_serve._admit_output(arm, gguf=gguf.resolve(), digest=reap_serve._sha256(gguf))
+    assert not (arm / ".serve.lock").exists()
+
+
+@pytest.mark.parametrize("attack", ["missing_last", "bad_item", "missing_witness", "tampered_startup"])
+@pytest.mark.skipif(os.name != "nt", reason="same-session speed attestation requires Windows listener PID")
+def test_q4_refuses_false_same_session_200_proof(tmp_path, monkeypatch, attack):
+    _setup(monkeypatch)
+    _mock_frozen_q4_scores(monkeypatch, **{attack: True})
+    gguf = tmp_path / "q4.gguf"
+    gguf.write_bytes(b"model A")
+    out = tmp_path / "eval"
+    args = _serve_args(gguf, out, arm="reap128_v2_q4") + ["--suites", "gsm8k", "--limit", "200"]
+    with pytest.raises(ValueError, match="(speed|source|summary|identity|log|witness|result|row)"):
+        reap_serve.main(args)
+    recorded = json.loads((out / "reap128_v2_q4" / "serve.json").read_text())
+    assert recorded["experts_offloaded"] is None
+    assert "speed_session" not in recorded
+    assert not (out / "reap128_v2_q4" / ".serve.lock").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="same-session speed attestation requires Windows listener PID")
+def test_q4_certified_speed_refuses_later_row_tampering(tmp_path, monkeypatch):
+    _setup(monkeypatch)
+    _mock_frozen_q4_scores(monkeypatch)
+    gguf = tmp_path / "q4.gguf"
+    gguf.write_bytes(b"model A")
+    out = tmp_path / "eval"
+    args = _serve_args(gguf, out, arm="dense_q4") + ["--suites", "gsm8k", "--limit", "200"]
+    assert reap_serve.main(args) == 0
+    arm = out / "dense_q4"
+    file = arm / "gsm8k.jsonl"
+    file.write_bytes(file.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="summary|speed|evidence"):
+        reap_serve._admit_output(arm, gguf=gguf.resolve(), digest=reap_serve._sha256(gguf))
+
+
+def test_q4_missing_verified_fit_stays_unknown_even_with_frozen_args(tmp_path):
+    serving = {"measured_experts_offloaded": None}
+    assert reap_serve._certify_q4_speed_session(
+        tmp_path, eval_args=["--suites", "gsm8k", "--limit", "200"],
+        receipt=serving, session_id="test", port=8790, server_pid=4242,
+    ) is None

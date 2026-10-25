@@ -21,3 +21,5 @@ docs/quals/reap128-v2-incomplete-q8-cleanup-third-20261025.json -text
 docs/quals/reap128-v2-incomplete-q4-cleanup-20261025.json -text
 docs/quals/reap128-v2-q8-orphan-chunk003-audit-20261025.json -text
 docs/quals/reap128-v2-frozen-post-evidence-integrity-20261025.json -text
+docs/quals/reap-frozen-scoring-source-fingerprints-20261025.json -text
+docs/quals/reap128-v2-cuda-host-static-refusal-20261025.json -text

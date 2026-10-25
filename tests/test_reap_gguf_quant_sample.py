@@ -60,6 +60,7 @@ def _chunked_pair(tmp_path: Path, monkeypatch, *, target_file_type=7):
         writer.add_file_type(file_type)
         writer.add_uint32("qwen35moe.block_count", sample.LAYERS)
         writer.add_uint32("qwen35moe.expert_count", 128)
+        writer.add_uint32("qwen35moe.expert_used_count", 8)
         for index, name in enumerate(names):
             if index < 120:
                 if file == bf16:
@@ -67,6 +68,13 @@ def _chunked_pair(tmp_path: Path, monkeypatch, *, target_file_type=7):
                 else:
                     data, dtype = quant.reshape(8, 34), Q.Q8_0
                 writer.add_tensor(name, data, raw_dtype=dtype)
+            elif name == "extra.000.weight":
+                # The pinned llama-quantize production stream *actually*
+                # canonicalizes copied F32 [2048,1] to [2048]. No FP32 byte
+                # may change, and source/quantized rows remain BF16-bound.
+                values = np.arange(2048, dtype="<f4")
+                writer.add_tensor(name, values.reshape(1, 2048) if file == bf16
+                                  else values, raw_dtype=Q.F32)
             else:
                 writer.add_tensor(name, np.full((8, 32), index / 733,
                                                 dtype=np.float32))

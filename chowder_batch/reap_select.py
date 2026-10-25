@@ -15,12 +15,12 @@ import sys
 from pathlib import Path
 
 try:
-    from chowder_batch.reap_gates import GateError, _load, compute, lower_bound
+    from chowder_batch.reap_gates import GateError, FROZEN_SOURCE_SHA256, _load, compute, lower_bound
     from chowder_batch.reap_v2_source_identity import (
         V2SourceIdentityError, frozen_v2_source_identity,
     )
 except ImportError:  # direct script mode outside the repository package path
-    from reap_gates import GateError, _load, compute, lower_bound
+    from reap_gates import GateError, FROZEN_SOURCE_SHA256, _load, compute, lower_bound
     from reap_v2_source_identity import V2SourceIdentityError, frozen_v2_source_identity
 
 REQUIRED = ("d0", "gate0", "gate1", "gate2", "control", "speed")
@@ -135,6 +135,8 @@ def _v2_input_witness(eval_dir: Path, arm: str, suite: str) -> dict:
             or type(record.get("source_items_n")) is not int
             or record["source_items_n"] != FROZEN_SOURCE_COUNTS[suite]):
         raise GateError(f"{arm}/{suite}: frozen source item digest/count invalid")
+    if source_sha != FROZEN_SOURCE_SHA256[suite]:
+        raise GateError(f"{arm}/{suite}: new v2 source fingerprint differs from frozen official {suite}")
     decode = {"system": "You are a helpful assistant.", "temperature": 0.0,
               "top_k": 1, "seed": 7, "max_tokens": FROZEN_MAX_TOKENS[suite],
               "enable_thinking": False}
@@ -211,8 +213,23 @@ def _input_digests(
             path = directory / name
             if path.is_file():
                 paths.append(path)
-    return {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in paths if path.is_file()}
+        if _is_new_v2(arm) and arm.endswith("_q4"):
+            log = directory / "server.log"
+            if log.exists() and (log.is_symlink() or not log.is_file()):
+                raise GateError(f"{arm}: Q4 original startup log is not a regular file")
+            if log.is_file():
+                paths.append(log)
+    # Snapshot serving log bytes as well as the receipt; otherwise a log that
+    # changes after the speed gate check could escape the final drift check.
+    digests = {}
+    for path in paths:
+        if path.is_file():
+            h = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1 << 20), b""):
+                    h.update(chunk)
+            digests[str(path)] = h.hexdigest()
+    return digests
 
 
 def _validate_v2_observation(calibration: Path, observation: Path) -> None:

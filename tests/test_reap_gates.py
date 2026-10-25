@@ -1,4 +1,5 @@
 import json
+import hashlib
 import math
 import subprocess
 import sys
@@ -337,3 +338,132 @@ def test_historical_reap160_null_placement_remains_unknown(tmp_path):
     speed = result["gates"]["speed"]
     assert speed["status"] == "UNKNOWN"
     assert speed["statistic"]["ratio"] == pytest.approx(4.0)
+
+
+def _v2_speed_proof(root, arm="reap128_v2_q4"):
+    from chowder_batch import reap_serve
+
+    write_arm(root, arm, "gsm8k", [1] * 200, pps=[25.0] * 200)
+    write_arm(root, "dense_q4", "gsm8k", [1] * 200, pps=[10.0] * 200)
+    directory = root / arm
+    rows = directory / "gsm8k.jsonl"
+    sha = lambda data: hashlib.sha256(data).hexdigest()
+    log = b"llama_params_fit: successfully fit\noffloaded 41/41 layers to GPU\n"
+    (directory / "server.log").write_bytes(log + b"later log line\n")
+    offload_lines, offload_count = reap_serve.parse_offload(log.decode())
+    assert offload_count == 0
+    model = {"gguf": "C:/models/reap128-v2.gguf", "gguf_sha256": "a" * 64,
+             "flags": ["--fit", "on", "-np", "4", "-c", "16384", "--jinja"]}
+    source_sha = rg.FROZEN_SOURCE_SHA256["gsm8k"]
+    witness = {"schema": "chowder.reap-eval-input-identity.v1", "suite": "gsm8k",
+               "source_items_sha256": source_sha, "source_items_n": 1319,
+               "model": model, "decode": {"system": "You are a helpful assistant.",
+                                            "temperature": 0.0, "top_k": 1, "seed": 7,
+                                            "max_tokens": 1024, "enable_thinking": False},
+               "scoring": "frozen reap_eval production scoring: final_number_match/boxed/HumanEval"}
+    inputs = directory / "gsm8k.inputs.json"
+    inputs.write_text(json.dumps(witness), encoding="utf-8")
+    entry = {"n": 200, "file_sha256": sha(rows.read_bytes())}
+    (directory / "summary.json").write_text(json.dumps({"gsm8k": entry}), encoding="utf-8")
+    receipt = {**model, "experts_offloaded": 0, "measured_experts_offloaded": 0,
+               "offload_log_lines": offload_lines,
+               "server_log_startup_bytes": len(log), "server_log_startup_sha256": sha(log),
+               "speed_session": {"schema": "chowder.reap-q4-same-session-speed.v1",
+                                 "session_id": "a" * 32, "server_pid": 321, "port": 8790,
+                                 "suite": "gsm8k", "n": 200,
+                                 "gguf_sha256": model["gguf_sha256"],
+                                 "server_log_startup_sha256": sha(log),
+                                 "source_items_sha256": source_sha,
+                                 "inputs_sha256": sha(inputs.read_bytes()),
+                                 "rows_sha256": sha(rows.read_bytes()),
+                                 "summary_entry_sha256": sha(json.dumps(entry, sort_keys=True,
+                                                             separators=(",", ":")).encode())}}
+    (directory / "serve.json").write_text(json.dumps(receipt), encoding="utf-8")
+    return directory, receipt
+
+
+def _v2_speed(root, arm="reap128_v2"):
+    return rg._speed(root, f"{arm}_q4", "dense_q4", arm=arm)
+
+
+@pytest.mark.parametrize("arm", ["reap128_v2", "reap160_v2"])
+def test_new_v2_q4_speed_requires_original_complete_session_proof(tmp_path, arm):
+    directory, receipt = _v2_speed_proof(tmp_path, f"{arm}_q4")
+    assert _v2_speed(tmp_path, arm)["status"] == "PASS"
+    receipt.pop("speed_session")
+    (directory / "serve.json").write_text(json.dumps(receipt), encoding="utf-8")
+    result = _v2_speed(tmp_path, arm)
+    assert result["status"] == "UNKNOWN" and "speed" in result["reason"]
+
+
+@pytest.mark.parametrize("tamper", [
+    "schema", "summary", "rows", "inputs", "source", "gguf", "flags",
+    "startup_log", "startup_length", "offload", "pid", "suite", "count",
+    "decode", "scoring",
+])
+def test_v2_speed_refuses_forged_same_session_receipt(tmp_path, tamper):
+    directory, receipt = _v2_speed_proof(tmp_path)
+    speed = receipt["speed_session"]
+    if tamper == "schema":
+        speed["schema"] = "untrusted"
+    elif tamper == "summary":
+        speed["summary_entry_sha256"] = "f" * 64
+    elif tamper == "rows":
+        speed["rows_sha256"] = "f" * 64
+    elif tamper == "inputs":
+        speed["inputs_sha256"] = "f" * 64
+    elif tamper == "source":
+        speed["source_items_sha256"] = "f" * 64
+    elif tamper == "gguf":
+        speed["gguf_sha256"] = "f" * 64
+    elif tamper == "flags":
+        receipt["flags"] = ["--fit", "off"]
+    elif tamper == "startup_log":
+        (directory / "server.log").write_bytes(b"forged" + (directory / "server.log").read_bytes())
+    elif tamper == "startup_length":
+        receipt["server_log_startup_bytes"] = 1
+    elif tamper == "offload":
+        receipt["offload_log_lines"] = ["fake fit"]
+    elif tamper == "pid":
+        speed["server_pid"] = True
+    elif tamper == "suite":
+        speed["suite"] = "humaneval"
+    elif tamper == "count":
+        speed["n"] = 199
+    elif tamper in {"decode", "scoring"}:
+        inputs_path = directory / "gsm8k.inputs.json"
+        witness = json.loads(inputs_path.read_text(encoding="utf-8"))
+        if tamper == "decode":
+            witness["decode"]["temperature"] = 0.8
+        else:
+            witness["scoring"] = "attacker-defined"
+        inputs_path.write_text(json.dumps(witness), encoding="utf-8")
+        speed["inputs_sha256"] = hashlib.sha256(inputs_path.read_bytes()).hexdigest()
+    (directory / "serve.json").write_text(json.dumps(receipt), encoding="utf-8")
+    with pytest.raises(rg.GateError, match="speed|session|receipt|startup|source|model"):
+        _v2_speed(tmp_path)
+
+
+def test_v2_speed_with_valid_original_proof_but_later_resume_is_unknown(tmp_path):
+    directory, _ = _v2_speed_proof(tmp_path)
+    assert _v2_speed(tmp_path)["status"] == "PASS"
+    (directory / "server.resume-restart.log").write_text("new session", encoding="utf-8")
+    assert _v2_speed(tmp_path)["status"] == "UNKNOWN"
+
+
+def test_v2_speed_requires_all_200_finite_predictions_even_with_resealed_receipt(tmp_path):
+    directory, receipt = _v2_speed_proof(tmp_path)
+    path = directory / "gsm8k.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    rows[2]["predicted_per_second"] = -1.0
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    summary_path = directory / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["gsm8k"]["file_sha256"] = sha
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    receipt["speed_session"]["rows_sha256"] = sha
+    receipt["speed_session"]["summary_entry_sha256"] = hashlib.sha256(json.dumps(
+        summary["gsm8k"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    (directory / "serve.json").write_text(json.dumps(receipt), encoding="utf-8")
+    assert _v2_speed(tmp_path)["status"] == "UNKNOWN"

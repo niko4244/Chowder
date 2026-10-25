@@ -562,3 +562,100 @@ with SHA-256
 The unchanged frozen decision was exactly
 `BLOCKED`, `chosen=null`, reason **both REAP128_v2 and REAP160 full
 gates are required**. The PR remains a draft; release approval is absent.
+
+## Frozen scoring-source fingerprint and interrupted-finalization recovery
+
+The registered original offline Hugging Face benchmark loaders were rerun
+*locally, CPU only*, without model inference, download, GPU use, or
+change to scoring/decoding. The exact rendered full source populations are:
+
+- `openai/gsm8k` `main/test`: **1,319** items,
+  `_digest(_load('gsm8k'))` SHA-256
+  `913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89`;
+  item IDs `gsm8k-0` through `gsm8k-1318`.
+- `openai/openai_humaneval` `test`: **164** items,
+  `_digest(_load('humaneval'))` SHA-256
+  `49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420`;
+  item IDs `HumanEval/0` through `HumanEval/163`.
+
+Exact file/renderer and scope:
+`docs/quals/reap-frozen-scoring-source-fingerprints-20261025.json`,
+SHA-256 `62d32cf168712b298159e3f33803acd80b4f86cb244030a9adfee48ab951da00`.
+This locally cached population proof is stronger than accepting two matching
+claimed v2 hashes but is **not** independent external Hub version verification,
+model evaluation or authority to modify preregistration.
+
+An interruption after a **finished and independently sealed F: merged Q8
+GGUF** can strand the original Q8 constructor because verified I: chunk
+payloads are intentionally removed before final cross-volume publication.
+The new `chowder_batch.reap_gguf_chunked_recover` path does **not**
+requantize, reconstruct missing tensors, override an existing complete
+receipt, delete another process's files, or run during its active owner.
+It requires the exclusive Windows file lock, exact registered BF16 GGUF
+and 26-shard proof SHA, frozen quantizer identity, unique merged F: assembly
+and its SHA, all original per-chunk input/output tensor certificates,
+explicit deletion-log events for absent I: parts, full 733-tensor model
+geometry and raw payload hashes, and exact rehashed cross-volume publication.
+Its default is read-only `RECOVERY_PREFLIGHT_PASS_NOT_PUBLISHED`; explicit
+`--execute` publishes only an already proved F: assembly under fresh
+resource admission, leaving scientific gates `NOT_EVALUATED`.
+No emergency recovery was invoked while the legitimate Q8 supervisor ran.
+
+A synthetic actual-GGUF fixture exercised 733 headers (including the
+pinned quantizer's byte-identical FP32 `[2048,1]` → `[2048]` normalization),
+seven adversarial missing/forged receipt variants, and a checksum-verified
+cross-volume publication simulation without a quantizer or GPU child.
+**34 CPU-only Q8 recovery/numerical tests passed**, including the numerical
+sampler's corrected treatment of copied FP32 singleton dimensions. Production
+GGUF and quality evidence remain distinct from these tests.
+
+### Live GPU/CUDA qualification admission refusal
+
+The original frozen CUDA host guard was read *passively* with no model
+load, model-server connection, GPU context or service changes. At the
+October 25 read it reported **12.673 GiB physical RAM free** (admission
+requires at least 16 GiB), **25.731 GiB Windows commit free** (at least
+24 GiB), **10.890 GiB GPU memory free** (at least 12 GiB), and live
+protected Ollama/llama.cpp serving ports. Each of the RAM, GPU and
+protected-service conditions independently prohibits launching the
+registered original-BF16 CUDA numerical parity run. This was one
+snapshot only and was never represented as a full 60-second admission.
+
+Evidence:
+`docs/quals/reap128-v2-cuda-host-static-refusal-20261025.json`,
+SHA-256
+`27a3b6cded0404977f4728296c88956767c89ddbf1004ff0abb09f3ce95bf10f`.
+Therefore **CUDA numerical parity remains NOT_MEASURED**, and GPU fit,
+Q4 200-item same-session performance and REAP160 repeat placement
+cannot be certified by this snapshot. Original service ownership and
+scientific thresholds are not relaxed to bypass these limits.
+
+### Integrated Q4 recovery and serving evidence integrity
+
+The Q4_K_M workflow now seals an atomic, immutable finalization ledger
+before deleting any certified chunk. It independently rechecks Q4_K, Q5_K,
+Q6_K, retained FP32 and other allowed tensor types, source/input proofs,
+quantizer command, finished merge SHA and exact raw payloads. Recovery
+from a partial cross-volume transfer checks its byte prefix before resuming;
+crashes after final rename but before receipt are also recoverable. Original
+BF16 weights and approved model services remain untouched. Production Q4
+quantization must still be launched serially after Q8 termination and fresh
+resource admission; synthetic construction tests are not a quality gate.
+
+The Q4 serving source receipt now withholds claimed offload PASS until a
+fresh same-session, witnessed first-200 GSM8K cohort has finite per-row
+throughput, the exact startup server-log prefix SHA, serving-model digest,
+frozen input witness, per-item output and summary hashes. The speed-gate
+consumer revalidates the source/flags/offload/log/rows and refuses stale,
+resumed, forged or absent certificates for newly built v2 Q4 arms.
+The selector pins the official locally cached GSM8K/HumanEval population
+fingerprints above for new v2 arms. Historical v1 and REAP160 evidence
+remains separately assessed; all frozen thresholds and Amendment4 ordering
+are unchanged. GSM8K/HumanEval multi-suite re-entry retains, rechecks and
+atomically republishes each independently certified suite without silently
+discarding the other.
+
+The integrated CPU-only construction/eval/gate/selection/serving/parity
+preflight regression matrix completed **290 passed, 3 intentionally
+skipped**, with Ruff clean and no Git whitespace errors. No model-quality
+PASS or GPU placement is inferred from these regression tests.

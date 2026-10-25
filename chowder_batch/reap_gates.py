@@ -27,6 +27,10 @@ G2_THRESH = -0.10
 SPEEDUP = 1.3
 DEGENERATE_TRIGRAM = 0.5
 FROZEN_SUITE_SIZES = {"gsm8k": 1319, "humaneval": 164}
+FROZEN_SOURCE_SHA256 = {
+    "gsm8k": "913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89",
+    "humaneval": "49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420",
+}
 
 
 class GateError(Exception):
@@ -153,6 +157,85 @@ def _mean_pps(eval_dir, arm, *, frozen_first_200=False):
     return (statistics.fmean(measured), 200) if len(measured) == 200 else (None, len(measured))
 
 
+def _verify_new_q4_speed_session(eval_dir, arm, receipt):
+    """Admit the serving wrapper's *sealed* original 200-item Q4 run only."""
+    import hashlib
+    import re
+
+    directory = Path(eval_dir) / arm
+    proof = receipt.get("speed_session")
+    if proof is None:
+        return False  # no post-hoc certification of old or interrupted runs
+    if not isinstance(proof, dict):
+        raise GateError(f"{arm}: malformed Q4 speed session receipt")
+    if (proof.get("schema") != "chowder.reap-q4-same-session-speed.v1"
+            or not isinstance(proof.get("session_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", proof["session_id"])
+            or type(proof.get("server_pid")) is not int or proof["server_pid"] <= 0
+            or type(proof.get("port")) is not int or not 1 <= proof["port"] <= 65535
+            or proof.get("suite") != "gsm8k"
+            or type(proof.get("n")) is not int or proof["n"] != 200):
+        raise GateError(f"{arm}: invalid Q4 same-session speed receipt")
+    paths = {name: directory / name for name in
+             ("server.log", "gsm8k.jsonl", "summary.json", "gsm8k.inputs.json")}
+    if any(not p.is_file() or p.is_symlink() for p in paths.values()):
+        raise GateError(f"{arm}: incomplete Q4 same-session speed evidence")
+    digest = lambda raw: hashlib.sha256(raw).hexdigest()
+    try:
+        inputs = json.loads(paths["gsm8k.inputs.json"].read_text(encoding="utf-8"))
+        summary = json.loads(paths["summary.json"].read_text(encoding="utf-8"))
+        source = inputs.get("source_items_sha256") if isinstance(inputs, dict) else None
+        model = {key: receipt.get(key) for key in ("gguf", "gguf_sha256", "flags")}
+        entry = summary.get("gsm8k") if isinstance(summary, dict) else None
+        rows_sha = digest(paths["gsm8k.jsonl"].read_bytes())
+        frozen_decode = {"system": "You are a helpful assistant.",
+                         "temperature": 0.0, "top_k": 1, "seed": 7,
+                         "max_tokens": 1024, "enable_thinking": False}
+        decoded = inputs.get("decode") if isinstance(inputs, dict) else None
+        if (not isinstance(inputs, dict)
+                or inputs.get("schema") != "chowder.reap-eval-input-identity.v1"
+                or inputs.get("suite") != "gsm8k" or type(inputs.get("source_items_n")) is not int
+                or inputs["source_items_n"] != 1319
+                or source != FROZEN_SOURCE_SHA256["gsm8k"]
+                or not isinstance(decoded, dict) or decoded != frozen_decode
+                or any(type(decoded[key]) is not type(value)
+                       for key, value in frozen_decode.items())
+                or inputs.get("scoring") != "frozen reap_eval production scoring: final_number_match/boxed/HumanEval"
+                or inputs.get("model") != model
+                or not isinstance(model["gguf"], str) or not model["gguf"].strip()
+                or model["flags"] != ["--fit", "on", "-np", "4", "-c", "16384", "--jinja"]
+                or not isinstance(model["gguf_sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", model["gguf_sha256"])
+                or proof.get("source_items_sha256") != source
+                or proof.get("gguf_sha256") != model["gguf_sha256"]
+                or proof.get("inputs_sha256") != digest(paths["gsm8k.inputs.json"].read_bytes())
+                or proof.get("rows_sha256") != rows_sha
+                or not isinstance(entry, dict) or type(entry.get("n")) is not int
+                or entry["n"] != 200 or entry.get("file_sha256") != rows_sha
+                or proof.get("summary_entry_sha256") != digest(json.dumps(
+                    entry, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))):
+            raise GateError(f"{arm}: Q4 same-session speed source/model/rows/summary receipt mismatch")
+        prefix_size = receipt.get("server_log_startup_bytes")
+        if type(prefix_size) is not int or not 1 <= prefix_size <= 64 * 1024 * 1024:
+            raise GateError(f"{arm}: invalid Q4 startup log length")
+        with paths["server.log"].open("rb") as stream:
+            raw = stream.read(prefix_size)
+        if (len(raw) != prefix_size or digest(raw) != receipt.get("server_log_startup_sha256")
+                or proof.get("server_log_startup_sha256") != digest(raw)):
+            raise GateError(f"{arm}: Q4 startup log SHA256 receipt mismatch")
+        # Verify fit from actual startup lines, not a forged zero in serve.json.
+        try:
+            from chowder_batch import reap_serve
+        except ImportError:
+            import reap_serve
+        reap_serve._verify_offload_receipt(receipt, paths["server.log"])
+        if receipt.get("experts_offloaded") != receipt.get("measured_experts_offloaded"):
+            raise GateError(f"{arm}: Q4 original serving offload receipt mismatch")
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
+        raise GateError(f"{arm}: invalid Q4 same-session speed receipt: {exc}") from exc
+    return True
+
+
 def _speed(eval_dir, speed_arm, speed_dense, *, arm):
     # Amendment 2 + §5 permit partial offload for the REAP160 fallback;
     # REAP128 must still fit with zero routed experts offloaded.
@@ -180,10 +263,17 @@ def _speed(eval_dir, speed_arm, speed_dense, *, arm):
     for speed_dir in (Path(eval_dir) / speed_arm, Path(eval_dir) / speed_dense):
         if ((speed_dir / ".serve.lock").exists()
                 or any(speed_dir.glob("serve.resume-*.json"))
-                or any(speed_dir.glob("server.resume-*.log"))):
+                or any(speed_dir.glob("server.resume-*.log"))
+                or any(speed_dir.glob(".serve-pending-*.json"))):
             return _g("UNKNOWN", stat, thr, na,
                       reason=f"{speed_dir.name}: speed samples lack session-bound fit evidence "
                              "(resumed or active session)")
+    if speed_arm in {"reap128_v2_q4", "reap160_v2_q4"}:
+        if not serve_path.is_file():
+            return _g("UNKNOWN", stat, thr, na, reason="new v2 Q4 speed session proof missing")
+        if not _verify_new_q4_speed_session(eval_dir, speed_arm,
+                                            json.loads(serve_path.read_text(encoding="utf-8"))):
+            return _g("UNKNOWN", stat, thr, na, reason="new v2 Q4 speed session proof missing")
     if offloaded is not None and offloaded != 0 and not partial_allowed:
         return _g("FAIL", stat, thr, na)  # offload alone fails the gate whatever the speed
     if offloaded is None or ratio is None:
