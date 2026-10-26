@@ -211,3 +211,162 @@ was verified to hold before proposing it (zero candidate artifacts under
   completions, which is a different and narrower thing.
 
 
+## Automated pool drop -- 2026-10-26
+
+> **Unvetted, machine-appended -- nothing here is registered.** These are
+> arXiv search hits that named a surface mechanism in a watched primary
+> category, listed for triage. No paper here has been read, no result is
+> quoted, and no intervention family, maturity label, or gate is touched
+> (`README.md`, rule 7). Curate anything real into a dated curated section
+> under the rules, or delete this drop if it adds nothing.
+
+- window: last 14 day(s) | surfaced: 70 | new: 65 | already in the log: 5 | off-scope: 17
+- source: `.github/workflows/literature-watch.yml` (`watch.py --append-log`: the primary-category gate plus the surface-term screen)
+
+### training-methods
+
+- **Reinforcement Learning with Multi-Step Transition Predictions: A Bellman Theory** -- `arXiv:2610.32887v1` -- 2026-10-23 -- cs.LG -- matched: reinforcement learning
+  - https://arxiv.org/abs/2610.32887
+- **Multiplicative vs. Additive State Coupling in Learned Optimizer Schedules** -- `arXiv:2610.32801v1` -- 2026-10-23 -- cs.LG -- matched: optimizer
+  - https://arxiv.org/abs/2610.32801
+- **Accordion: Elastic-Depth Inference via Fixed-Prefix Layer Looping** -- `arXiv:2610.32492v1` -- 2026-10-23 -- cs.LG -- matched: pretraining, reinforcement learning, fine-tuning
+  - https://arxiv.org/abs/2610.32492
+
+### compression
+
+- **LoCA: Enabling Multi-Modality in Geospatial Location Encoders** -- `arXiv:2610.32894v1` -- 2026-10-23 -- cs.CV -- matched: low rank
+  - https://arxiv.org/abs/2610.32894
+- **Sustainability of TSFM Deployment and Pretraining: From Carbon Footprint Analysis to Mitigation via Pruning** -- `arXiv:2610.32859v1` -- 2026-10-23 -- cs.LG -- matched: prun
+  - https://arxiv.org/abs/2610.32859
+- **Neural LoFi with Backward Coupling: A Spectral Theory of Cross-Layer Feature Learning** -- `arXiv:2610.32849v1` -- 2026-10-23 -- cs.LG -- matched: low-rank
+  - https://arxiv.org/abs/2610.32849
+- **Earth embeddings are decomposable records of the land surface** -- `arXiv:2610.32617v1` -- 2026-10-23 -- cs.LG -- matched: compress
+  - https://arxiv.org/abs/2610.32617
+- **Sharpness-aware Orthogonalized Momentum Algorithms** -- `arXiv:2610.32465v1` -- 2026-10-23 -- cs.LG -- matched: quantiz
+  - https://arxiv.org/abs/2610.32465
+- **BiLoCo: Binary Low-Rank Corrections for Post-Training Quantization** -- `arXiv:2610.32243v1` -- 2026-10-23 -- cs.LG -- matched: quantiz, low-rank
+  - https://arxiv.org/abs/2610.32243
+- **Rethinking LoRA Initialization for Robust Asymmetric Learning Rates** -- `arXiv:2610.32142v1` -- 2026-10-23 -- cs.LG -- matched: low-rank
+  - https://arxiv.org/abs/2610.32142
+- **MPQ: A Message-Passing View of Post-Training Quantization** -- `arXiv:2610.32127v1` -- 2026-10-23 -- cs.AI -- matched: quantiz, compress
+  - https://arxiv.org/abs/2610.32127
+- **DBCM: Dual-Branch Calibration Module for Test-Time Adaptation in Time Series Forecasting** -- `arXiv:2610.32071v1` -- 2026-10-23 -- cs.LG -- matched: low-rank
+  - https://arxiv.org/abs/2610.32071
+- **MAGIC: Margin-gated Contrastive Debiasing with Evidence Restoration for VLM Test-time Robustness Scaling** -- `arXiv:2610.32013v1` -- 2026-10-23 -- cs.CV -- matched: prun
+  - https://arxiv.org/abs/2610.32013
+- **GS-MoE: Training-Free MoE Compression via Groupwise Subspace Sharing and Pruning** -- `arXiv:2610.32009v1` -- 2026-10-23 -- cs.LG -- matched: prun, low-rank, compress
+  - https://arxiv.org/abs/2610.32009
+- **Every Weight Is a Path of Shared Discrete Decisions** -- `arXiv:2610.31931v1` -- 2026-10-22 -- cs.LG -- matched: quantiz, prun, low-rank, compress
+  - https://arxiv.org/abs/2610.31931
+- **Decode Late, Multiply Once: Rethinking the Dot Product for Quantized Weights** -- `arXiv:2610.31913v1` -- 2026-10-22 -- cs.LG -- matched: quantiz
+  - https://arxiv.org/abs/2610.31913
+- **Learning Structured Sparsity for Large Models: Bridging Model Compressibility and Efficient Inference** -- `arXiv:2610.31897v1` -- 2026-10-22 -- cs.LG -- matched: low-rank, compress, sparsit
+  - https://arxiv.org/abs/2610.31897
+
+### peft-adapters
+
+- **Interpretable sparse fine-tuning with TopKLoRA enables faithful circuit discovery** -- `arXiv:2610.32866v1` -- 2026-10-23 -- cs.LG -- matched: lora, adapter, parameter-efficient
+  - https://arxiv.org/abs/2610.32866
+- **DIAL-S2ST: Learning Latency Control for Simultaneous Speech-to-Speech Translation** -- `arXiv:2610.32214v1` -- 2026-10-23 -- cs.CL -- matched: lora, adapter
+  - https://arxiv.org/abs/2610.32214
+- **Parameter-Efficient Adaptation of Large Language Models to a Low-Resource Agglutinative Language: A Corpus, Datasets, and a Reproducible Benchmark for the Bashkir Language** -- `arXiv:2610.31397v1` -- 2026-10-22 -- cs.CL -- matched: qlora, parameter-efficient
+  - https://arxiv.org/abs/2610.31397
+- **CoWriter: Guiding Methodological and Synergetic Human-LLM Co-Authoring** -- `arXiv:2610.31277v1` -- 2026-10-22 -- cs.CL -- matched: lora
+  - https://arxiv.org/abs/2610.31277
+
+### distillation
+
+- **On-Policy Self-Training: Data-Free Self-Improvement in Large Language Models** -- `arXiv:2610.32770v1` -- 2026-10-23 -- cs.CL -- matched: distillation
+  - https://arxiv.org/abs/2610.32770
+- **TileShare: Training-Free Acceleration of Overlapping Tiled ViT Decoding** -- `arXiv:2610.32233v1` -- 2026-10-23 -- cs.CV -- matched: distillation
+  - https://arxiv.org/abs/2610.32233
+- **REACT: Representational Early Analysis and Control of Chain-of-Thought Trajectories** -- `arXiv:2610.32113v1` -- 2026-10-23 -- cs.LG -- matched: distil
+  - https://arxiv.org/abs/2610.32113
+- **ReMedI: Inference-Time Refinement and Self-Distillation for Controllable Molecular Optimization** -- `arXiv:2610.32103v1` -- 2026-10-23 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.32103
+- **Can Test-Time Memory Evolution Outperform Test-Time Training for Scientific Discovery?** -- `arXiv:2610.32046v1` -- 2026-10-23 -- cs.AI -- matched: distil
+  - https://arxiv.org/abs/2610.32046
+- **REDAR: Reinforcement-Driven Adaptive Regularisation for Class Incremental Learning** -- `arXiv:2610.31991v1` -- 2026-10-22 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.31991
+- **Don't Forget What You Just Learned: Self-Directed Repair Turns Agent Mistakes Into Lasting Lessons** -- `arXiv:2610.31846v1` -- 2026-10-22 -- cs.AI -- matched: distil
+  - https://arxiv.org/abs/2610.31846
+- **A Fix for Softmax and Cross-Entropy** -- `arXiv:2610.31642v1` -- 2026-10-22 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.31642
+- **OP-Print: Tracing Membership Imprints in On-Policy Self-Distillation** -- `arXiv:2610.31616v1` -- 2026-10-22 -- cs.LG -- matched: distillation, teacher-student
+  - https://arxiv.org/abs/2610.31616
+- **When to Follow the Teacher: Advantage-Based On-Policy Distillation** -- `arXiv:2610.31563v1` -- 2026-10-22 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.31563
+- **Learning to Be Monitored: Causal Bounds and Intervention-Aware Post-Training Recipes for Chain-of-Thought Monitorability** -- `arXiv:2610.31733v1` -- 2026-10-22 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.31733
+- **DIAL: Steerable Language Models with Distilled Instruction-Adherence Levels** -- `arXiv:2610.31438v1` -- 2026-10-22 -- cs.AI -- matched: distillation
+  - https://arxiv.org/abs/2610.31438
+- **HERD: Harness-Evolving Recursive Distillation for Continual Learning** -- `arXiv:2610.31401v1` -- 2026-10-22 -- cs.CL -- matched: distillation
+  - https://arxiv.org/abs/2610.31401
+- **Same molecule, Different Knowledge: Cross-Identifier Binding Failures in LLMs For chemistry** -- `arXiv:2610.30903v1` -- 2026-10-22 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.30903
+- **Building Presentation Intelligence for High-Quality Slide Generation** -- `arXiv:2610.30888v1` -- 2026-10-22 -- cs.LG -- matched: teacher model
+  - https://arxiv.org/abs/2610.30888
+- **Tracing Subliminal Learning Through Pretraining** -- `arXiv:2610.30884v1` -- 2026-10-22 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.30884
+- **One Teacher, Many Views: Reducing Reference Sensitivity in On-Policy Self-Distillation** -- `arXiv:2610.30880v1` -- 2026-10-22 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2610.30880
+
+### efficient-inference
+
+- **KnitTrans: Coordinated Trajectory Transfer for Effective and Efficient LLM Reinforcement Learning** -- `arXiv:2610.32389v1` -- 2026-10-23 -- cs.DC -- matched: latency, serving
+  - https://arxiv.org/abs/2610.32389
+- **Correct but Unselectable: The Hidden Interface Tax in Multi-Candidate Reasoning** -- `arXiv:2610.32235v1` -- 2026-10-23 -- cs.LG -- matched: latency
+  - https://arxiv.org/abs/2610.32235
+- **Speculative Diffusion is a Tale of Two Tradeoffs** -- `arXiv:2610.31819v1` -- 2026-10-22 -- cs.LG -- matched: speculative decoding, draft model
+  - https://arxiv.org/abs/2610.31819
+- **Efficient Omni-modal Large Language Model Inference via Per-Query Modality Selection** -- `arXiv:2610.31768v1` -- 2026-10-22 -- cs.LG -- matched: latency
+  - https://arxiv.org/abs/2610.31768
+- **Evaluating the Applicability of LLM Inference Optimizations on Apple Silicon** -- `arXiv:2610.31479v1` -- 2026-10-22 -- cs.LG -- matched: speculative decoding, throughput, serving
+  - https://arxiv.org/abs/2610.31479
+- **Joint or Per-Option? Compact Encoders for Closed-Set Decisions from 17 Million to 1 Billion Parameters** -- `arXiv:2610.30970v1` -- 2026-10-22 -- cs.CL -- matched: latency
+  - https://arxiv.org/abs/2610.30970
+- **Energy and Latency First: How Deployment Constraints Reverse Time-Series Model Selection** -- `arXiv:2610.30965v1` -- 2026-10-22 -- cs.LG -- matched: latency
+  - https://arxiv.org/abs/2610.30965
+- **Memory-Augmented Online Test-Time Adaptation for EEG Motor Imagery via Perturbation Consistency and Confidence Calibration** -- `arXiv:2610.30422v1` -- 2026-10-21 -- cs.LG -- matched: latency
+  - https://arxiv.org/abs/2610.30422
+- **SWE-VERIFIER: Selective Verification for Cost-Efficient Coding Agents** -- `arXiv:2610.30284v1` -- 2026-10-21 -- cs.LG -- matched: inference efficiency
+  - https://arxiv.org/abs/2610.30284
+- **Looped Uniform Diffusion Language Models** -- `arXiv:2610.30066v1` -- 2026-10-21 -- cs.CL -- matched: inference efficiency
+  - https://arxiv.org/abs/2610.30066
+
+### evaluation-integrity
+
+- **CounselPlex: A Stressor-Aware Full-Duplex Counseling Model** -- `arXiv:2610.32702v1` -- 2026-10-23 -- cs.CL -- matched: judge
+  - https://arxiv.org/abs/2610.32702
+- **How Ground Truth Shapes Retrieval Scores: Evidence-Aware Evaluation of a Retrieval-Augmented Generation System for Breast Lesions** -- `arXiv:2610.31606v2` -- 2026-10-22 -- cs.CL -- matched: llm judge, annotat
+  - https://arxiv.org/abs/2610.31606
+- **An Empirical Study of Recent Large Language Models for Knowledge Graph to Text Generation on Standard Benchmarks** -- `arXiv:2610.31529v1` -- 2026-10-22 -- cs.CL -- matched: annotat
+  - https://arxiv.org/abs/2610.31529
+- **From Clinical Judgment to Checkable Rules: Clinician-Led Guardrails for Mental-Health Chatbots** -- `arXiv:2610.30690v1` -- 2026-10-22 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.30690
+- **Behind Aggregate Scores: What Systematically Varying Arena-Hard's LLM Judge Reveals** -- `arXiv:2610.30512v1` -- 2026-10-21 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.30512
+- **What the Author Wrote, What the Agent Reads: Silent Cue Loss in Enterprise Document Ingestion** -- `arXiv:2610.30026v1` -- 2026-10-21 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.30026
+- **Real PMIDs, Wrong Papers: Harness Design for Biomedical Claim-Verification Agents** -- `arXiv:2610.29812v1` -- 2026-10-21 -- cs.AI -- matched: llm judge
+  - https://arxiv.org/abs/2610.29812
+- **Signals and Queries: Token-Efficient Agentic Context Discovery** -- `arXiv:2610.29326v1` -- 2026-10-21 -- cs.CL -- matched: judge
+  - https://arxiv.org/abs/2610.29326
+- **Hierarchical Masked Diffusion Language Models** -- `arXiv:2610.29255v1` -- 2026-10-21 -- cs.CL -- matched: llm judge, annotat
+  - https://arxiv.org/abs/2610.29255
+- **Our Own Jev: Typed Decisions in One Forward Pass, from an In-House Judge to Open LoRA Models** -- `arXiv:2610.29052v1` -- 2026-10-21 -- cs.CL -- matched: llm judge, leaderboard
+  - https://arxiv.org/abs/2610.29052
+- **SANE: Automated Scorer-Specific Metamorphic Testing for LLM Judges** -- `arXiv:2610.28886v2` -- 2026-10-20 -- cs.CL -- matched: llm judge, evaluator
+  - https://arxiv.org/abs/2610.28886
+- **Capable Teacher, Myopic Scorer: Reward-Free Teacher Repair for Agentic On-Policy Distillation** -- `arXiv:2610.28586v1` -- 2026-10-20 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.28586
+- **Building Telecom Language Models with RSOD: Domain Data, Specialist Post-Training, Memory-Conscious Distillation, and Networking Evaluation** -- `arXiv:2610.27993v1` -- 2026-10-20 -- cs.AI -- matched: judge
+  - https://arxiv.org/abs/2610.27993
+- **Why Do LLMs Accept Generics? Explaining Acceptability using Psycholinguistic and Model-Derived Factors** -- `arXiv:2610.27928v1` -- 2026-10-20 -- cs.CL -- matched: judge
+  - https://arxiv.org/abs/2610.27928
+- **Memory as Code: Declarative Retrieval over Codified Long-Term Memory** -- `arXiv:2610.27700v1` -- 2026-10-20 -- cs.CL -- matched: judge
+  - https://arxiv.org/abs/2610.27700
+- **Corpus Quality Improves, Retrieval Utility Does Not: An Ablation of Preprocessing and Refinement in a Speech-to-QA Pipeline** -- `arXiv:2610.27652v1` -- 2026-10-20 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2610.27652
+- **Recoverability and Verifier Strength: Two Measured Preconditions for Unattended Agent Self-Improvement** -- `arXiv:2610.27465v1` -- 2026-10-20 -- cs.AI -- matched: llm judge
+  - https://arxiv.org/abs/2610.27465
