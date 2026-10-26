@@ -9,6 +9,7 @@ receipt must be provided and verified separately for that score cross-check.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timedelta
 import hashlib
 import json
 import math
@@ -100,6 +101,10 @@ def _check_postload_resource_evidence(receipt: dict) -> dict:
     ram_min = min(initial["ram"], pre["ram"], post["ram"], before["ram"], after["ram"])
     unused_min = min(initial["unused"], pre["unused"], post["unused"],
                      before["unused"], after["unused"])
+    gpu_min = [initial["gpu"][0], initial["gpu"][1]]
+    for record in (pre, post, before, after):
+        gpu_min = [min(left, right) for left, right in zip(gpu_min, record["gpu"])]
+    runtime_samples = 0
     for i, sample in enumerate(samples):
         if not isinstance(sample, dict):
             raise ValueError("malformed supervised resource sample")
@@ -110,8 +115,30 @@ def _check_postload_resource_evidence(receipt: dict) -> dict:
                 or any(type(v) is not int or v < 0 for v in gpu)
                 or ram < 7 or unused < 10):
             raise ValueError("unqualified/malformed sampled GPU/RAM/cgroup runtime")
+        # Original pinned notebooks mark startup observations with seconds and
+        # actual postload inference watchdog observations with UTC timestamp.
+        # A completed full run with only startup samples has no attested
+        # continuous scoring-time monitor and must not be called monitored.
+        if "time_utc" in sample:
+            when = sample["time_utc"]
+            if not isinstance(when, str):
+                raise ValueError("native runtime watchdog timestamp is not a string")
+            try:
+                parsed = datetime.fromisoformat(when)
+            except ValueError as exc:
+                raise ValueError("native runtime watchdog timestamp malformed") from exc
+            if parsed.utcoffset() != timedelta(0):
+                raise ValueError("native runtime watchdog timestamp is not UTC")
+            runtime_samples += 1
+        elif ("seconds" not in sample or
+              type(sample["seconds"]) not in (int, float) or
+              not math.isfinite(sample["seconds"]) or sample["seconds"] < 0):
+            raise ValueError("original startup sample has neither boot nor runtime time witness")
         ram_min = min(ram_min, ram)
         unused_min = min(unused_min, unused)
+        gpu_min = [min(left, right) for left, right in zip(gpu_min, gpu)]
+    if runtime_samples < 1:
+        raise ValueError("complete suite has no native scoring-time resource watchdog evidence")
     return {
         "status": "COMPLETE_LINUX_SOURCE_MEASURED_POSTLOAD_RESOURCE_WITNESS",
         "initial_actual_gpu_free_mib": initial["gpu"],
@@ -120,6 +147,12 @@ def _check_postload_resource_evidence(receipt: dict) -> dict:
         "minimum_measured_cgroup_unused_gib": unused_min,
         "minimum_measured_physical_available_gib": ram_min,
         "monitored_sample_count": len(samples),
+        "monitored_runtime_sample_count": runtime_samples,
+        "minimum_observed_gpu_free_mib": gpu_min,
+        "largest_sampled_drop_from_start_gpu_free_mib": [
+            max(0, original - lowest) for original, lowest in zip(initial["gpu"], gpu_min)
+        ],
+        "gpu_peak_instantaneous_claimed": False,
         "original_windows_commit_attested": False,
         "model_fit_windows_gate_eligible": False,
     }

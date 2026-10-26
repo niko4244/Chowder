@@ -42,6 +42,10 @@ def _side(model, session, row_correct, suite="gsm8k"):
             "minimum_measured_cgroup_unused_gib": 10.471,
             "minimum_measured_physical_available_gib": 29.8,
             "monitored_sample_count": 4,
+            "monitored_runtime_sample_count": 2,
+            "minimum_observed_gpu_free_mib": [4700, 4800],
+            "largest_sampled_drop_from_start_gpu_free_mib": [10212, 10112],
+            "gpu_peak_instantaneous_claimed": False,
             "original_windows_commit_attested": False,
             "model_fit_windows_gate_eligible": False,
         }
@@ -163,6 +167,16 @@ def test_humaneval_pair_admitted_only_after_both_independent_replays():
         measured_file_cache_decrease_gib=3.99),
     lambda a: a["original_measured_postload_resource_witness"].update(
         monitored_sample_count=0),
+    lambda a: a["original_measured_postload_resource_witness"].update(
+        monitored_runtime_sample_count=0),
+    lambda a: a["original_measured_postload_resource_witness"].update(
+        minimum_observed_gpu_free_mib=[4700]),
+    lambda a: a["original_measured_postload_resource_witness"].update(
+        minimum_observed_gpu_free_mib=[4700, -1]),
+    lambda a: a["original_measured_postload_resource_witness"].update(
+        largest_sampled_drop_from_start_gpu_free_mib=[10212, -1]),
+    lambda a: a["original_measured_postload_resource_witness"].update(
+        gpu_peak_instantaneous_claimed=True),
 ])
 def test_paired_q8_or_control_refuses_missing_or_forged_resource_admission(mutation):
     q8, raw = _side("reap128_v2_q8", "b" * 32, [True, False, True, False])

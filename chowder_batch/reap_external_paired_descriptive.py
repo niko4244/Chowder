@@ -76,6 +76,19 @@ def read_verified_cohort(suite: str, audit: dict, raw: bytes, *, expected_n: int
         if (not isinstance(gpu, list) or len(gpu) != 2
                 or any(type(v) is not int or v < 12288 for v in gpu)):
             raise ValueError("external Q8/control resource native start VRAM admission absent")
+        observed = witness.get("minimum_observed_gpu_free_mib")
+        allocated = witness.get("largest_sampled_drop_from_start_gpu_free_mib")
+        runtime_n = witness.get("monitored_runtime_sample_count")
+        if (not isinstance(observed, list) or len(observed) != 2
+                or any(type(v) is not int or v < 0 for v in observed)
+                or not isinstance(allocated, list) or len(allocated) != 2
+                or any(type(v) is not int or v < 0 for v in allocated)
+                or any(max(0, start - low) != delta
+                       for start, low, delta in zip(gpu, observed, allocated))
+                or type(runtime_n) is not int
+                or not 1 <= runtime_n <= witness["monitored_sample_count"]
+                or witness.get("gpu_peak_instantaneous_claimed") is not False):
+            raise ValueError("external Q8/control resource scoring-time GPU witness is missing or misrepresented")
     # Original HumanEval scoring executes generated programs. A complete
     # original-scored cohort alone is not an independently replayed code outcome.
     # The full auditor emits this proof only after checking the separate

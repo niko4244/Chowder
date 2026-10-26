@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -161,6 +162,9 @@ def _postload_receipt(arm="reap128_v2_q8"):
     def host(ram, unused, gpu=(14912, 14912)):
         return {"physical_free_gib": ram, "cgroup_unused_gib": unused,
                 "gpu_free_mib": list(gpu)}
+    started = {"seconds": 1.0, **host(45.1, 29.444)}
+    runtime = {"time_utc": datetime.now(timezone.utc).isoformat(),
+               **host(30.1, 27.83, (4900, 5000))}
     value.update(
         initial=host(45.1, 29.444),
         pre_reclaim_host=host(30.4, 10.471, (5200, 5300)),
@@ -170,8 +174,9 @@ def _postload_receipt(arm="reap128_v2_q8"):
         before_inference_host=host(30.2, 28.38, (5100, 5200)),
         after_inference_host=host(29.8, 26.76, (5110, 5190)),
         postload_clean_file_cache_recovered_gib=17.93,
-        samples=[host(45.1, 29.444), host(32.1, 10.471),
-                 host(30.1, 27.83), host(29.8, 26.76)],
+        samples=[started, {"seconds": 6.0, **host(32.1, 10.471)},
+                 runtime, {"time_utc": datetime.now(timezone.utc).isoformat(),
+                           **host(29.8, 26.76, (4700, 4800))}],
     )
     return value
 
@@ -186,12 +191,21 @@ def test_complete_postload_arms_require_actual_source_bound_memory_recovery(arm)
     assert witness["measured_postload_recovery_gib"] == pytest.approx(17.93)
     assert witness["original_windows_commit_attested"] is False
     assert witness["model_fit_windows_gate_eligible"] is False
+    assert witness["monitored_runtime_sample_count"] == 2
+    assert witness["minimum_observed_gpu_free_mib"] == [4700, 4800]
+    assert witness["largest_sampled_drop_from_start_gpu_free_mib"] == [10212, 10112]
+    assert witness["gpu_peak_instantaneous_claimed"] is False
 
 
 @pytest.mark.parametrize("mutation", [
     lambda r: r.pop("initial"),
     lambda r: r.pop("samples"),
     lambda r: r.update(samples=[]),
+    lambda r: r.update(samples=r["samples"][:2]),
+    lambda r: r["samples"][2].update(time_utc="not-a-date"),
+    lambda r: r["samples"][2].update(time_utc="2026-10-26T13:00:00"),
+    lambda r: r["samples"][2].pop("time_utc"),
+    lambda r: r["samples"][3].update(gpu_free_mib=[True, 5000]),
     lambda r: r.pop("pre_reclaim_cgroup"),
     lambda r: r["pre_reclaim_cgroup"].update(file_gib=3.0),
     lambda r: r["post_reclaim_cgroup"].update(file_gib=17.0),
