@@ -87,6 +87,26 @@ def test_safe_timeout_records_failure_only_after_verified_cleanup(monkeypatch):
     assert (passed, reason, code) == (False, "WALL_TIMEOUT_CONTAINER_KILLED", None)
 
 
+@pytest.mark.parametrize("infrastructure_exit", [
+    125, 126, 127, 137, 143, 255, 4294967295, -1,
+])
+def test_container_infrastructure_exit_must_not_count_as_executed_program(
+    monkeypatch, infrastructure_exit,
+):
+    """A model originally wrong may not match an unlaunched Podman process."""
+    def run(args, **kwargs):
+        if args[1:3] == ["container", "exists"]:
+            return SimpleNamespace(returncode=1)
+        if args[:2] == ["podman", "run"]:
+            return SimpleNamespace(returncode=infrastructure_exit)
+        pytest.fail("unexpected real command")
+
+    monkeypatch.setattr(replay, "host_safety_guard", lambda: None)
+    monkeypatch.setattr(replay.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="infrastructure|executed|runtime"):
+        replay.podman_exec("print('fixed safe fixture')\n", NAME)
+
+
 def test_unexpected_or_foreign_container_name_refused_without_host_command(monkeypatch):
     calls = []
     monkeypatch.setattr(replay, "host_safety_guard", lambda: None)
@@ -111,6 +131,7 @@ def test_unterminated_humaneval_does_not_render_or_execute_generated_text(monkey
     ]
     monkeypatch.setattr(replay, "host_safety_guard", lambda: None)
     monkeypatch.setattr(replay, "EXECUTABLE_REPLAY_QUALIFIED", True)
+    monkeypatch.setattr(replay, "execution_qualification_gaps", lambda: [])
     monkeypatch.setattr(replay, "check_source_binding",
                         lambda _: (canonical, input_rows, {}))
     monkeypatch.setattr(replay, "exact_program",
@@ -137,3 +158,41 @@ def test_unqualified_real_generated_execution_is_source_disabled(monkeypatch):
     assert replay.EXECUTABLE_REPLAY_QUALIFIED is False
     with pytest.raises(RuntimeError, match="generated HumanEval execution disabled"):
         replay.replay(argparse.Namespace())
+
+
+def test_qualified_flag_alone_cannot_override_original_py313_and_pid_tree():
+    gaps = replay.execution_qualification_gaps()
+    assert "PINNED_PY313_REPLAY_IMAGE_REQUIRED" in gaps
+    assert "INDEPENDENT_VM_PID_TREE_EXTINCTION_REQUIRED" in gaps
+    assert "ORIGINAL_10_SECOND_PYTHON_TIMEOUT_EQUIVALENCE_REQUIRED" in gaps
+    assert "ORIGINAL_CANDIDATE_FILE_AND_CWD_EQUIVALENCE_REQUIRED" in gaps
+    assert "TRUSTED_PER_TASK_REPLAY_V2_ATTESTATION_REQUIRED" in gaps
+    assert "GENERATED_EXECUTION_SOURCE_DISABLED" in gaps
+
+
+def test_python313_benign_image_does_not_rewrite_original_source_bound_probe(
+    monkeypatch,
+):
+    # A local new benign Python 3.13 image is not an approved replacement for
+    # the historically pinned original Q8 source preflight image.
+    monkeypatch.setattr(replay, "EXECUTABLE_REPLAY_QUALIFIED", True)
+    with pytest.raises(RuntimeError, match="PINNED_PY313_REPLAY_IMAGE_REQUIRED"):
+        replay.require_execution_qualification()
+
+
+@pytest.mark.parametrize(("status", "expected"), [
+    (0, (True, "EXIT_0", 0)),
+    (1, (False, "NONZERO_EXIT", 1)),
+    (2, (False, "NONZERO_EXIT", 2)),
+])
+def test_normal_python_exit_codes_keep_original_scoring_semantics(
+    monkeypatch, status, expected,
+):
+    def run(args, **kwargs):
+        if args[1:3] == ["container", "exists"]:
+            return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=status)
+
+    monkeypatch.setattr(replay, "host_safety_guard", lambda: None)
+    monkeypatch.setattr(replay.subprocess, "run", run)
+    assert replay.podman_exec("print('fixed safe fixture')\n", NAME)[:3] == expected

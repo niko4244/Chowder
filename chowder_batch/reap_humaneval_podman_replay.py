@@ -40,6 +40,41 @@ SESSION = "95876063255e45159f57e29306e0e885"
 # trusted v2 external receipt producer. No command-line flag may override this
 # source-owned research qualification gate while those checks remain open.
 EXECUTABLE_REPLAY_QUALIFIED = False
+# Fixed BENIGN Python 3.13.17 rootless OCI profile was observed on the VM.
+# This does not replace the separately pinned historical 3.11-slim harmless
+# probe or make the current replay-profile command equivalent to the original
+# Kaggle Python 3.13 scorer. Its use requires NEW trusted admission evidence.
+PY313_BENIGN_IMAGE_SHA256 = "72036a705a7cff38924efd674e60654666cb283faf7b3fad160b34007f7395bd"
+INDEPENDENT_VM_PID_TREE_EXTINCTION_VERIFIED = False
+ORIGINAL_10_SECOND_TIMEOUT_EQUIVALENCE_VERIFIED = False
+ORIGINAL_CANDIDATE_FILE_AND_CWD_EQUIVALENCE_VERIFIED = False
+TRUSTED_PER_TASK_REPLAY_V2_ATTESTATION_VERIFIED = False
+
+
+def execution_qualification_gaps() -> list[str]:
+    """Exact fail-closed gates; the harmless census cannot unlock execution."""
+    gaps = []
+    if IMAGE_SHA256 != PY313_BENIGN_IMAGE_SHA256:
+        gaps.append("PINNED_PY313_REPLAY_IMAGE_REQUIRED")
+    if not INDEPENDENT_VM_PID_TREE_EXTINCTION_VERIFIED:
+        gaps.append("INDEPENDENT_VM_PID_TREE_EXTINCTION_REQUIRED")
+    if not ORIGINAL_10_SECOND_TIMEOUT_EQUIVALENCE_VERIFIED:
+        gaps.append("ORIGINAL_10_SECOND_PYTHON_TIMEOUT_EQUIVALENCE_REQUIRED")
+    if not ORIGINAL_CANDIDATE_FILE_AND_CWD_EQUIVALENCE_VERIFIED:
+        gaps.append("ORIGINAL_CANDIDATE_FILE_AND_CWD_EQUIVALENCE_REQUIRED")
+    if not TRUSTED_PER_TASK_REPLAY_V2_ATTESTATION_VERIFIED:
+        gaps.append("TRUSTED_PER_TASK_REPLAY_V2_ATTESTATION_REQUIRED")
+    if not EXECUTABLE_REPLAY_QUALIFIED:
+        gaps.append("GENERATED_EXECUTION_SOURCE_DISABLED")
+    return gaps
+
+
+def require_execution_qualification() -> None:
+    gaps = execution_qualification_gaps()
+    if gaps:
+        raise RuntimeError(
+            "generated HumanEval execution disabled: " + ", ".join(gaps)
+        )
 
 
 def digest(blob: bytes) -> str:
@@ -146,6 +181,18 @@ def podman_exec(program: str, name: str) -> tuple[bool, str, int | None, float]:
         if container_state.returncode != 1:
             raise RuntimeError("completed isolated item still has a live or unverifiable native owner")
         host_safety_guard()
+        # Podman reserves 125/126/127 for its CLI, invocation and executable
+        # failures. 137/143 and out-of-range statuses can mean resource
+        # enforcement or an unlaunched/dead container rather than a completed
+        # Python assertion. Counting those as normal false test outcomes could
+        # accidentally "match" the originally failed HumanEval tasks and mint
+        # an independent 164/164 replay without having executed them.
+        # Fail the WHOLE scientific replay instead of treating them as misses.
+        code = result.returncode
+        if (type(code) is not int or code < 0 or code > 124):
+            raise RuntimeError(
+                "Podman infrastructure/runtime exit cannot attest executed HumanEval code"
+            )
         return result.returncode == 0, ("EXIT_0" if result.returncode == 0 else
                                          "NONZERO_EXIT"), result.returncode, (
                                              time.monotonic() - started)
@@ -211,11 +258,7 @@ def check_source_binding(paths: argparse.Namespace) -> tuple[list[dict], list[di
 
 
 def replay(paths: argparse.Namespace) -> dict:
-    if not EXECUTABLE_REPLAY_QUALIFIED:
-        raise RuntimeError(
-            "generated HumanEval execution disabled: complete independent "
-            "container process-tree, sandbox and interpreter qualification first"
-        )
+    require_execution_qualification()
     host_safety_guard()
     canonical, rows, preflight = check_source_binding(paths)
     by_id = {row["id"]: row for row in rows}
@@ -286,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"status": "SOURCE_ONLY_PREEXECUTION_ADMISSION",
                               "generated_programs_executed": 0,
                               "private_output_written": False,
+                              "execution_qualification_gaps": execution_qualification_gaps(),
                               "gen0_status": "BLOCKED"}))
             return 0
         result = replay(args)
