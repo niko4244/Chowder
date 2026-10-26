@@ -24,7 +24,15 @@ from chowder_batch.reap_q4_resource_admission import (
     ORIGINAL_COMMIT_RUNTIME_FLOOR_GIB,
     ORIGINAL_DISK_FLOOR_GIB,
     ORIGINAL_RAM_RUNTIME_FLOOR_GIB,
+    ORIGINAL_ABORT,
+    ORIGINAL_ABORT_SHA256,
+    ORIGINAL_LOG_SHA256,
+    ORIGINAL_SERVER_LOG,
+    admit_host,
+    parse_host_prompt_cache,
+    validate_aborted_speed_history,
 )
+from chowder_batch.reap_external_full_audit import _strict_json
 
 GGUF = Path("G:/reap128-v2-q4_k_m-20261025.gguf")
 SERVER = Path("F:/llama.cpp/bin/llama-server.exe")
@@ -144,6 +152,89 @@ def kill_owned_tree(proc: subprocess.Popen) -> None:
         proc.wait(timeout=10)
 
 
+def verify_admission_source(prior: dict) -> dict:
+    """Reconstruct eligibility from the two pinned original files.
+
+    The report is an untrusted transport: its claimed admission limits cannot
+    become the authority that launches an 11.56-GB model process.
+    """
+    required = {"schema", "history", "original_host_prompt_cache", "current", "decision"}
+    if type(prior) is not dict or set(prior) != required:
+        raise ValueError("original admission report structure invalid")
+    # Python considers True == 1; compare typed canonical JSON to reject
+    # altered evidence types across this untrusted file boundary.
+    def exactly(actual: object, expected: object) -> bool:
+        return json.dumps(actual, sort_keys=True, allow_nan=False) == json.dumps(
+            expected, sort_keys=True, allow_nan=False
+        )
+
+    if prior["schema"] != "reap128-v2-verified-host-admission.v1":
+        raise ValueError("original admission schema invalid")
+    history = validate_aborted_speed_history(
+        ORIGINAL_ABORT, expected_sha256=ORIGINAL_ABORT_SHA256
+    )
+    cache = parse_host_prompt_cache(
+        ORIGINAL_SERVER_LOG, expected_sha256=ORIGINAL_LOG_SHA256
+    )
+    if (not exactly(prior["history"], history)
+            or not exactly(prior["original_host_prompt_cache"], cache)):
+        raise ValueError("admission historical source evidence differs from pinned files")
+    current = prior["current"]
+    keys = {"ram_available_gib", "commit_available_gib", "gpu_free_mib", "disk_free_gib"}
+    if type(current) is not dict or set(current) != keys:
+        raise ValueError("admission resource snapshot missing or incomplete")
+    expected = admit_host(
+        history,
+        ram_available_gib=current["ram_available_gib"],
+        commit_available_gib=current["commit_available_gib"],
+        gpu_free_mib=current["gpu_free_mib"],
+        disk_free_gib=current["disk_free_gib"],
+        potential_remaining_cache_gib=cache["potential_remaining_gib"],
+    )
+    if (not exactly(prior["decision"], expected)
+            or expected["status"] != "ADMITTED_TO_ATTEMPT_NOT_SCIENTIFICALLY_QUALIFIED"):
+        raise ValueError("admission decision does not match source-bound resource math")
+    return expected
+
+
+def completed_source_bound_run(metadata: dict, serving: dict | None) -> bool:
+    """A clean exit alone cannot certify an original same-session 200."""
+    if type(serving) is not dict:
+        return False
+    speed = metadata.get("source_bound_speed_session")
+    if type(speed) is not dict:
+        return False
+    session = serving.get("eval_session_id")
+    if (type(session) is not str or len(session) != 32
+            or any(c not in "0123456789abcdef" for c in session)):
+        return False
+    return (
+        type(metadata.get("child_exit_code")) is int
+        and metadata["child_exit_code"] == 0
+        and not metadata.get("abort_reasons")
+        and type(metadata.get("sample_count")) is int
+        and metadata["sample_count"] > 0
+        and metadata.get("native_shutdown_verified") is True
+        and type(metadata.get("partial_or_complete_rows")) is int
+        and metadata["partial_or_complete_rows"] == 200
+        and isinstance(metadata.get("summary_sha256"), str)
+        and speed.get("schema") == "chowder.reap-q4-same-session-speed.v1"
+        and speed.get("session_id") == session
+        and speed.get("suite") == "gsm8k"
+        and type(speed.get("n")) is int and speed["n"] == 200
+        and type(speed.get("server_pid")) is int and speed["server_pid"] > 0
+        and speed.get("server_pid") == serving.get("server_pid")
+        and speed.get("port") == PORT
+        and speed.get("gguf_sha256") == serving.get("gguf_sha256") == MODEL_SHA
+        and speed.get("rows_sha256") == metadata.get("rows_sha256")
+        and isinstance(metadata.get("rows_sha256"), str)
+        and len(metadata["rows_sha256"]) == 64
+        and serving.get("flags") == ["--fit", "on", "-np", "4", "-c", "16384", "--jinja"]
+        and type(serving.get("measured_experts_offloaded")) is int
+        and serving["measured_experts_offloaded"] == 0
+    )
+
+
 def run(*, out: Path, admission: Path) -> dict:
     if sys.platform != "win32":
         raise RuntimeError("original registered benchmark requires Windows")
@@ -151,9 +242,13 @@ def run(*, out: Path, admission: Path) -> dict:
         raise ValueError("benchmark evidence directory must be exclusive")
     if admission.is_symlink() or not admission.is_file():
         raise ValueError("original admission receipt missing")
-    prior = json.loads(admission.read_text(encoding="utf8"))
-    if (prior.get("schema") != "reap128-v2-verified-host-admission.v1"
-            or prior.get("decision", {}).get("status")
+    if not 0 < admission.stat().st_size <= 32768:
+        raise ValueError("original admission receipt size invalid")
+    prior = _strict_json(admission.read_bytes())
+    if (type(prior) is not dict
+            or type(prior.get("decision")) is not dict
+            or prior.get("schema") != "reap128-v2-verified-host-admission.v1"
+            or prior["decision"].get("status")
             != "ADMITTED_TO_ATTEMPT_NOT_SCIENTIFICALLY_QUALIFIED"):
         raise ValueError("frozen original source-bound admission did not pass")
     if not GGUF.is_file() or not SERVER.is_file():
@@ -162,7 +257,13 @@ def run(*, out: Path, admission: Path) -> dict:
     _require_free_loopback_port(PORT)
     # Recheck immediate independent live admission floors before launching.
     start = sample(out.parent)
+    if unsafe(start):
+        raise ValueError("invalid or unsafe fresh prelaunch resource telemetry")
     before = prior["current"]
+    if type(before) is not dict or set(before) != {
+        "ram_available_gib", "commit_available_gib", "gpu_free_mib", "disk_free_gib"
+    }:
+        raise ValueError("original admission snapshot missing or incomplete")
     for key, minimum in (
         ("ram_available_gib", prior["decision"]["minimum_ram_gib"]),
         ("commit_available_gib", prior["decision"]["minimum_commit_gib"]),
@@ -173,6 +274,16 @@ def run(*, out: Path, admission: Path) -> dict:
             raise ValueError(f"source-bound admission lost before launch: {key}")
         if before[key] < minimum:
             raise ValueError(f"source-bound admission receipt was not actually eligible: {key}")
+    verified = verify_admission_source(prior)
+    # The receipt's claimed floors have now been independently recomputed.
+    for key, floor in (
+        ("ram_available_gib", verified["minimum_ram_gib"]),
+        ("commit_available_gib", verified["minimum_commit_gib"]),
+        ("gpu_free_mib", verified["minimum_gpu_mib"]),
+        ("disk_free_gib", verified["minimum_disk_gib"]),
+    ):
+        if start[key] < floor:
+            raise ValueError(f"source-bound admission lost before launch: {key}")
     out.mkdir(mode=0o700)
     command = [
         sys.executable, "-B", str(Path(__file__).with_name("reap_serve.py")),
@@ -194,6 +305,7 @@ def run(*, out: Path, admission: Path) -> dict:
     samples_path = out / "resource-samples.jsonl"
     started = time.monotonic()
     proc = None
+    serving_payload = None
     try:
         with (out / "benchmark-console.private.log").open("xb") as log, samples_path.open(
             "x", encoding="utf8",
@@ -228,6 +340,7 @@ def run(*, out: Path, admission: Path) -> dict:
         summary = arm_dir / "summary.json"
         if serving.is_file():
             payload = json.loads(serving.read_text(encoding="utf8"))
+            serving_payload = payload
             metadata["serve_json_sha256"] = sha(serving)
             metadata["source_bound_speed_session"] = payload.get("speed_session")
             metadata["native_shutdown_verified"] = verify_native_shutdown(
@@ -238,10 +351,7 @@ def run(*, out: Path, admission: Path) -> dict:
             metadata["rows_sha256"] = sha(results)
         if summary.is_file():
             metadata["summary_sha256"] = sha(summary)
-        if (metadata["child_exit_code"] == 0
-                and metadata.get("native_shutdown_verified") is True
-                and metadata.get("partial_or_complete_rows") == 200
-                and isinstance(metadata.get("source_bound_speed_session"), dict)):
+        if completed_source_bound_run(metadata, serving_payload):
             metadata["status"] = "COMPLETE_SOURCE_BOUND_200_CANDIDATE_ONLY"
         else:
             metadata["status"] = "INCOMPLETE_OR_ABORTED_NO_SPEED_CERTIFICATION"
