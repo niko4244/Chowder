@@ -182,3 +182,41 @@ No protected services or GGUFs were changed, no original model workload was
 rerun, and PR #282 must remain OPEN/DRAFT/UNMERGED. Do not merge, select,
 release, deploy or start Gen-1 until every mandatory original gate is
 genuinely evidenced.
+
+## Phase 20 follow-up — full original Q4/Q8 independent source rechecks
+
+Without loading models or executing generated Python, the unchanged strict
+original-source external auditor was rerun against the original complete
+Q4 and Q8 machine receipts, all 1,319 original GSM8K and 164 original
+HumanEval rows per arm, native 41/41 GPU startup/session logs, frozen source
+population, scorer and decoding witnesses. Both original continuous serving
+sessions passed; both retained
+`human_eval_independent_execution=PENDING_INDEPENDENT_LOW_PRIVILEGE_CODE_EXECUTION`
+because the historical optional six-field replay PASS has been correctly
+rejected as insufficient isolated v2 provenance.
+
+The new exclusive private **Q4 full source audit** receipt SHA-256 is
+`582e57557c40abad170592db1718f5aea3e61f8d3dae2db2e71a73c99ee19ea6`.
+The new exclusive **Q8 full strict source audit** SHA-256 is
+`107395f480693922bd279a50138338db14c78441320a7060914f0d82cdd73683`,
+the same trusted source-witness SHA as the previously certified exact
+phase5 Q8 output. The complete 1,319-item GSM8K paired descriptive
+consumer independently reprocessed the new audits and original exact
+rows: both right **1,198**, both wrong **68**, Q8-only **22**, Q4-only **31**;
+Q8−Q4 **−0.0068233510**. Its exclusive private SHA is
+`9ee3943012ce2632082b452e4ab855c5aab315a7bdd92798ed04d1dd078e88a0`.
+It explicitly leaves `paired_confidence_interval=null`,
+`amendment4_eligibility=false` and
+`statistical_method=NONE_DESCRIPTIVE_ONLY_UNRESOLVED_MCNEMAR_VS_WALD`.
+No full HumanEval paired v2 PASS was fabricated or inferred.
+
+A separate fixed harmless rootless OCI parent-plus-child timeout probe
+(exact owned 768-MiB profile, no generated model source) actually
+reproduced one disposable container timeout and observed it absent after
+`--rm`; private receipt SHA
+`068a6cae5ca45708dd305125d9190c18c486ac64b8a781b57813a8284355da0b`.
+The proof expressly does **not** establish independent extinction of
+all host-visible PIDs/cgroup, external threat-resistant sandbox
+qualification or original Python 3.13 parity, and never unlocks the
+source-disabled HumanEval replay. The original random128 full Kaggle
+kernel continued to report RUNNING, not COMPLETE, after this recheck.
