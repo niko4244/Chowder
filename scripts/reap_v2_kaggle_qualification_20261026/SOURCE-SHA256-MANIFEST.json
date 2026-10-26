@@ -1,0 +1,50 @@
+{
+  "schema": "chowder.reap128-v2-private-kaggle-runner-snapshots.v1",
+  "historical_windows_source_commit": "7609846557c50f9d984719a9e1e8c5f3d02f807b",
+  "source_git_HEAD_when_copied": "dc0b1246dc4cd9d454d8c5ac25b1637dfd62592a",
+  "input_models_not_included": true,
+  "original_gguf_sha256": "2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7",
+  "frozen_core_flags": "--fit on -np 4 -c 16384 --jinja",
+  "snapshots": [
+    {
+      "bytes": 2528,
+      "sha256": "ab2d3ca62a43dc2dabff54dd9a8687514771fa8333d7281cbbd5c235e4187037",
+      "file": "pinned_linux_cuda_build.py"
+    },
+    {
+      "bytes": 1887,
+      "sha256": "567e5e6861be5263642a1afee78396b303ff46a1f346088d46c31db479f9280c",
+      "file": "private_source_and_gguf_sha.py"
+    },
+    {
+      "bytes": 4018,
+      "sha256": "e410472eb4a9f1bad0d031387a87cacbb25fdbfe40377bb2f30e39e134f1aae8",
+      "file": "original_scorer_synthetic.py"
+    },
+    {
+      "bytes": 8388,
+      "sha256": "3a43ec9b68da837762d3ce97a0fb0f211850cb1e59800929436cc87f1c7f5bfd",
+      "file": "q4_native_cuda_smoke.py"
+    },
+    {
+      "bytes": 13555,
+      "sha256": "38160ac7e7230e8aba1eea0b731fceb5fa4f229467f702256e1e295bb3f4782b",
+      "file": "candidate_full_1319_164.py"
+    },
+    {
+      "bytes": 13564,
+      "sha256": "32fdd58d908ea41ec0c9d7ba53434abf0ed19faaec9c29863a2d942d116b2ffa",
+      "file": "dense_q4_first200.py"
+    },
+    {
+      "bytes": 13583,
+      "sha256": "0ffa365136b9f4b43e34e44aab6354fee78aa145cadf055709ca295f9ce9c1fb",
+      "file": "candidate_q4_first200.py"
+    },
+    {
+      "bytes": 8621,
+      "sha256": "f628b43f722dd04134ac71aad9e2ee547cb784b46dff42d949de6f7f95cbeb93",
+      "file": "single_t4_parity.py"
+    }
+  ]
+}
