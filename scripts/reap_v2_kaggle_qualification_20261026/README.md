@@ -1,8 +1,12 @@
 # REAP128_v2 Kaggle source snapshots (provisional research)
 
-The sixteen `.py` files in this directory are exact-byte snapshots of the
-private Kaggle run sources used on October 26, 2026. The independent SHA-256
-manifest binds their local bytes. The original **GGUF model weights, private
+The sixteen historical `.py` files in this directory are exact-byte snapshots
+of private Kaggle run sources used on October 26, 2026. Their original
+`SOURCE-SHA256-MANIFEST.json` binds those historical bytes unchanged.
+Separately, the **unlaunched** `dense_q4_first200_material_postload.py`
+is a new source-only candidate, not part of any completed Kaggle experiment;
+its `SOURCE-SHA256-UNLAUNCHED-DENSE-20261026.json` binds its bytes.
+The original **GGUF model weights, private
 dataset contents, Kaggle credentials, raw completions, and API tokens are not
 in this repository**.
 
@@ -80,3 +84,20 @@ model, under limited CPU/memory/filesystem resources and reduced subprocess
 privileges. It matched all 164 original recorded correctness decisions (151
 passed), but this **cross-checks Linux scoring only**; it does not establish
 Windows/Linux numerical parity or qualify the frozen reference-model gates.
+
+## New, unlaunched dense-Q4 safe re-admission preparation
+
+`dense_q4_first200_material_postload.py` was prepared after the original
+dense-Q4 reference load safety-aborted at 9.992 GiB unused cgroup following
+19.452 GiB observed consumption from a 29.444-GiB starting headroom.
+It refuses that unchanged environment. A future registered dense load requires
+at least **33.452 GiB genuinely unused cgroup**, 24 GiB free physical RAM
+before load, verified GPU VRAM and 8 GiB disk reserve. Only after fully loaded
+under the identical pinned four-way flags, the runner measures an optional
+read-only clean-file-cache advisory. Before any frozen 200-item scoring it
+requires **at least 4 GiB measured recovery and at least 14 GiB remaining
+cgroup**, with a continued 10-GiB monitored stop.
+
+This is **source preparation, NOT a submitted kernel, successful model load,
+or speed ratio certification**. Its 24 CPU-only admission tests do not
+establish Windows parity, hardware availability, or complete sandbox safety.

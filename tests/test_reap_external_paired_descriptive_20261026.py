@@ -33,6 +33,10 @@ def _side(model, session, row_correct, suite="gsm8k"):
                                                 "loopback_bound": True},
              "suites": {suite: {"n": len(rows), "correct": sum(row_correct),
                                  "terminated": len(rows), "row_sha256": row_sha}}}
+    if suite == "humaneval":
+        audit["human_eval_independent_execution"] = (
+            "PASS_FULL_164_LOW_PRIVILEGE_REEXECUTION_SHA256:" + "a" * 64
+        )
     return audit, row_bytes
 
 
@@ -95,3 +99,34 @@ def test_missing_item_and_self_comparison_fail_closed():
     poisoned = ("\n".join(json.dumps(row) for row in q4_rows) + "\n").encode()
     with pytest.raises(ValueError):
         compare("gsm8k", audit, raw, q4, poisoned, expected_n=4)
+
+
+@pytest.mark.parametrize("unverified", [
+    None, "", "PENDING_INDEPENDENT_LOW_PRIVILEGE_CODE_EXECUTION",
+    "PASS_FULL_164_LOW_PRIVILEGE_REEXECUTION_SHA256:",
+    "PASS_FULL_164_LOW_PRIVILEGE_REEXECUTION_SHA256:" + "0" * 63,
+    "PASS_FULL_164_LOW_PRIVILEGE_REEXECUTION_SHA256:" + "z" * 64,
+    "PASS_FULL_164_LOW_PRIVILEGE_REEXECUTION_SHA256:" + "0" * 65,
+])
+def test_humaneval_pair_refuses_missing_or_forged_independent_execution(unverified):
+    q8, q8_bytes = _side("reap128_v2_q8", "b" * 32, [True, False, True, False],
+                         suite="humaneval")
+    q4, q4_bytes = _side("reap128_v2_q4", "c" * 32, [True, True, False, False],
+                         suite="humaneval")
+    if unverified is None:
+        q8.pop("human_eval_independent_execution")
+    else:
+        q8["human_eval_independent_execution"] = unverified
+    with pytest.raises(ValueError, match="HumanEval"):
+        compare("humaneval", q8, q8_bytes, q4, q4_bytes, expected_n=4)
+
+
+def test_humaneval_pair_admitted_only_after_both_independent_replays():
+    q8, q8_bytes = _side("reap128_v2_q8", "b" * 32, [True, False, True, False],
+                         suite="humaneval")
+    q4, q4_bytes = _side("reap128_v2_q4", "c" * 32, [True, True, False, False],
+                         suite="humaneval")
+    result = compare("humaneval", q8, q8_bytes, q4, q4_bytes, expected_n=4)
+    assert result["candidate_only_correct"] == 1
+    assert result["reference_only_correct"] == 1
+    assert result["amendment4_eligibility"] is False

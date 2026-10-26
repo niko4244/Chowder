@@ -53,6 +53,17 @@ def read_verified_cohort(suite: str, audit: dict, raw: bytes, *, expected_n: int
             or audit["original_native_cuda_placement"].get("total_kv_buffer_mib") != 320.0
             or audit["original_native_cuda_placement"].get("loopback_bound") is not True):
         raise ValueError("external run is not an independently complete audited original session")
+    # Original HumanEval scoring executes generated programs. A complete
+    # original-scored cohort alone is not an independently replayed code outcome.
+    # The full auditor emits this proof only after checking the separate
+    # 164/164 replay's exact row SHA, serving session and correctness count.
+    # Never describe an unreplayed arm as independently verified paired code.
+    if suite == "humaneval":
+        replay = audit.get("human_eval_independent_execution")
+        if (not isinstance(replay, str) or not re.fullmatch(
+            r"PASS_FULL_164_LOW_PRIVILEGE_REEXECUTION_SHA256:[0-9a-f]{64}", replay
+        )):
+            raise ValueError("HumanEval paired comparison requires an independent full-164 code execution receipt for each arm")
     summary = audit.get("suites", {}).get(suite)
     if (not isinstance(summary, dict) or type(summary.get("n")) is not int
             or summary["n"] != expected_n

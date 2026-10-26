@@ -25,7 +25,10 @@ def test_each_snapshot_is_exactly_hashed_source_without_private_model_bytes():
     names = [entry["file"] for entry in manifest["snapshots"]]
     assert len(names) == len(set(names))
     assert {p.name for p in SNAPSHOTS.iterdir()} == {
-        *names, "SOURCE-SHA256-MANIFEST.json", "README.md"
+        *names, "SOURCE-SHA256-MANIFEST.json", "README.md",
+        "dense_q4_first200_material_postload.py",
+        "SOURCE-SHA256-UNLAUNCHED-DENSE-20261026.json",
+        ".gitattributes",
     }
     for entry in manifest["snapshots"]:
         path = SNAPSHOTS / entry["file"]
@@ -34,6 +37,35 @@ def test_each_snapshot_is_exactly_hashed_source_without_private_model_bytes():
         assert len(content) == entry["bytes"]
         assert hashlib.sha256(content).hexdigest() == entry["sha256"]
         ast.parse(content, filename=str(path))
+
+
+def test_unlaunched_dense_source_is_separately_exact_hashed_not_historical_run():
+    original_manifest = (SNAPSHOTS / "SOURCE-SHA256-MANIFEST.json").read_bytes()
+    extra = json.loads(
+        (SNAPSHOTS / "SOURCE-SHA256-UNLAUNCHED-DENSE-20261026.json").read_text("utf-8")
+    )
+    assert extra["schema"] == "chowder.reap-v2-new-unlaunched-dense-first200-runner.v1"
+    assert extra["status"] == "SOURCE_ONLY_NEVER_EXECUTED_ON_KAGGLE"
+    assert extra["historical_snapshot_manifest_sha256"] == hashlib.sha256(original_manifest).hexdigest()
+    assert extra["source_file"] == "dense_q4_first200_material_postload.py"
+    candidate = SNAPSHOTS / extra["source_file"]
+    assert candidate.is_file() and not candidate.is_symlink()
+    source_bytes = candidate.read_bytes()
+    assert len(source_bytes) == extra["source_bytes"]
+    assert hashlib.sha256(source_bytes).hexdigest() == extra["source_sha256"]
+    ast.parse(source_bytes, filename=str(candidate))
+    assert extra["benchmark_executed"] is False
+    assert extra["model_fit_proven"] is False
+    assert extra["speed_ratio_certified"] is False
+    assert extra["release_approved"] is False
+    assert extra["windows_equivalent"] is False
+    assert extra["frozen_serve_flags"] == "--fit on -np 4 -c 16384 --jinja"
+    assert extra["frozen_dense_q4_sha256"] == (
+        "2c6d9466129e8802839566b35728e2506aaf1e8705cd137009e2f08feb9dd049"
+    )
+    assert (SNAPSHOTS / ".gitattributes").read_text("utf-8").splitlines()[-1] == (
+        "dense_q4_first200_material_postload.py -text"
+    )
 
 
 def test_full_two_suite_runner_retains_original_source_scores_and_hard_guards():
