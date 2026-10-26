@@ -1,0 +1,40 @@
+{
+  "schema": "reap128-v2-eleven-benchmarks.v1",
+  "screenshot_definition": "https://api-docs.deepseek.com/updates/",
+  "competitors": {
+    "qwen": {
+      "name": "Qwen3.8-27B",
+      "identity": "Qwen/Qwen3.8-27B",
+      "publisher": "Qwen",
+      "source": "https://huggingface.co/Qwen/Qwen3.8-27B"
+    },
+    "opus": {
+      "name": "Claude Opus 5.5",
+      "identity": "Claude Opus 5.5",
+      "publisher": "Anthropic",
+      "source": "https://www.anthropic.com/claude-opus-5-5"
+    }
+  },
+  "benchmarks": [
+    {"id": "hle_no_tools", "label": "HLE (no tools, text subset)", "category": "Reasoning", "benchmark_url": "https://github.com/centerforaisafety/hle", "definition": "Pure-text subset, no tools; official subset/grader required"},
+    {"id": "terminal_bench_4", "label": "Terminal-Bench 4.0", "category": "Agentic coding", "benchmark_url": "https://www.tbench.ai/run", "definition": "Terminal-Bench 4.0, Claude Code agent harness"},
+    {"id": "deepswe_1_1", "label": "DeepSWE v1.1", "category": "Agentic coding", "benchmark_url": "https://deepswe.datacurve.ai", "definition": "Mini-SWE-V2 in screenshot; agent harness is score-defining"},
+    {"id": "programbench", "label": "ProgramBench", "category": "Agentic coding", "benchmark_url": "https://github.com/facebookresearch/ProgramBench", "definition": "Program reverse-engineering and behavioral checks"},
+    {"id": "nl2repo", "label": "NL2Repo-Bench", "category": "Agentic coding", "benchmark_url": "https://github.com/multimodal-art-projection/NL2RepoBench", "definition": "Repo generation in configured containers"},
+    {"id": "automation_v1_0_6", "label": "AutomationBench v1.0.6", "category": "Agentic workflows", "benchmark_url": "https://github.com/zapier/AutomationBench", "definition": "Version 1.0.6 and evaluation split must match"},
+    {"id": "agents_last_exam", "label": "Agents' Last Exam", "category": "Agentic workflows", "benchmark_url": "https://agents-last-exam.org", "definition": "Use explicitly identified ALE metric and evaluation cohort"},
+    {"id": "apex_v1_1", "label": "Apex Bench v1.1", "category": "Agentic workflows", "benchmark_url": "https://api-docs.deepseek.com/updates/", "definition": "Vendor-labeled Apex Bench v1.1; official standalone protocol unverified"},
+    {"id": "chartography_tools", "label": "Chartography (with tools)", "category": "Visual reasoning", "benchmark_url": "https://github.com/surge-ai/chartography", "definition": "Requires visual input and declared tool configuration"},
+    {"id": "babyvision_tools", "label": "BabyVision (with tools)", "category": "Visual reasoning", "benchmark_url": "https://github.com/UniPat-AI/BabyVision", "definition": "Requires visual input and declared tool configuration"},
+    {"id": "zerobench_main_tools", "label": "ZeroBench-main (with tools)", "category": "Visual reasoning", "benchmark_url": "https://zerobench.github.io", "definition": "Requires visual input, tools, and pass@5 evaluation"}
+  ],
+  "publisher_references": [
+    {"benchmark": "hle_no_tools", "model": "qwen", "score": 30.8, "metric": "accuracy", "comparability": "different_cohort", "publisher_evidence": "Multidisciplinary reasoning HLE  | 30.8", "caveat": "Qwen reports HLE judged by GPT-4o; pure-text-only/no-tools cohort is not established"},
+    {"benchmark": "deepswe_1_1", "model": "qwen", "score": 42.2, "metric": "resolved_rate", "comparability": "different_harness", "publisher_evidence": "Agentic coding DeepSWE 1.1  | 42.2", "caveat": "Qwen Claude Code harness; screenshot DeepSWE Mini-SWE-V2"},
+    {"benchmark": "nl2repo", "model": "qwen", "score": 42.3, "metric": "success_rate", "comparability": "unverified_harness_match", "publisher_evidence": "Repo-level code generation NL2Repo-Bench  | 42.3", "caveat": "Qwen Claude Code harness with repo download blocked; screenshot setup not fully disclosed"},
+    {"benchmark": "agents_last_exam", "model": "qwen", "score": 20.4, "metric": "pass@1", "comparability": "unverified_metric_match", "publisher_evidence": "Frontier agentic tasks Agents' Last Exam  | Pass@1 20.4 Score 42.9", "caveat": "Qwen reports both Pass@1 20.4 and Score 42.9; this column displays Pass@1 only"},
+    {"benchmark": "terminal_bench_4", "model": "opus", "score": 66.4, "metric": "success_rate", "comparability": "same_named_benchmark", "publisher_evidence": "Agentic coding Terminal-Bench 4.0¹  | 66.4%", "caveat": "Opus 5.5 xhigh effort, Claude Code harness, five trials/task; vendor result"},
+    {"benchmark": "automation_v1_0_6", "model": "opus", "score": 40.0, "metric": "success_rate", "comparability": "unverified_version_match", "publisher_evidence": "Business workflows AutomationBench²  | 40.0%", "caveat": "Zapier evaluation reported by Anthropic; public page omits version v1.0.6"},
+    {"benchmark": "chartography_tools", "model": "opus", "score": 89.0, "metric": "accuracy", "comparability": "unverified_tool_match", "publisher_evidence": "Visual chart recognition Chartography  | 89.0%with tools", "caveat": "Anthropic with-tools result, unspecified common tool configuration"}
+  ]
+}

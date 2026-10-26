@@ -1,0 +1,9 @@
+{
+  "schema": "reap128-v2-chart-pinned-evidence.v1",
+  "baseline_commit": "e62cf4e2952bbd97b5b81ae9a5c81fbc2e90f6fb",
+  "sha256": {
+    "benchmark_chart/references.json": "8b7da2e68aafc769da5e47546183e04cadf654c1593df40394f6898f2c2bf4b1",
+    "docs/quals/reap-v2-gen0-integrated-scientific-state-20261026.md": "177cabf3a73eeac23f879f4477916afa4da9c0705c9202701821858977f7dd0c",
+    "docs/quals/reap-v2-qwen38-opus55-common-test-20261026.md": "29acb3dfa6aa65ec63a5c29db87ceff11906a132ecad4d5a7426744e2be508c5"
+  }
+}
