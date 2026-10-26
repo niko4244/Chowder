@@ -285,3 +285,13 @@ def test_native_rows_refuse_ambiguous_duplicate_keys_and_nonfinite_json(tmp_path
     path.write_bytes(source)
     with pytest.raises(ValueError):
         _read_jsonl(path)
+
+
+@pytest.mark.parametrize("suite,limit", [("gsm8k", 1024), ("humaneval", 768)])
+def test_original_frozen_completion_token_ceiling(suite, limit):
+    original, rows = _rows()
+    rows[0]["completion_tokens"] = limit
+    assert _check_rows(suite, original, rows, "1" * 32)["completion_tokens"] == limit + 13
+    rows[0]["completion_tokens"] = limit + 1
+    with pytest.raises(ValueError, match="frozen.*token"):
+        _check_rows(suite, original, rows, "1" * 32)

@@ -238,7 +238,7 @@ def _number(value: object, label: str, *, nullable: bool = False) -> None:
 
 def _check_rows(suite: str, source: list[dict], rows: list[dict], session: str) -> dict:
     from chowder.evaluators.scoring import score
-    from chowder_batch.reap_eval import _trigram_ratio
+    from chowder_batch.reap_eval import MAX_TOKENS, _trigram_ratio
 
     if suite not in ("gsm8k", "humaneval") or len(rows) != len(source) or not source:
         raise ValueError("full canonical cohort missing rows")
@@ -257,6 +257,8 @@ def _check_rows(suite: str, source: list[dict], rows: list[dict], session: str) 
             raise ValueError("stale session or impossible scored row fields")
         for field in ("completion_tokens", "seconds", "predicted_per_second", "trigram_ratio"):
             _number(row.get(field), field, nullable=field == "predicted_per_second")
+        if row["completion_tokens"] > MAX_TOKENS[suite]:
+            raise ValueError("original row exceeds frozen completion token limit")
         if not 0 <= row["trigram_ratio"] <= 1:
             raise ValueError("out-of-range trigram ratio")
         if row["trigram_ratio"] != round(_trigram_ratio(row["text"]), 4):
