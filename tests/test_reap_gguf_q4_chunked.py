@@ -460,6 +460,70 @@ def test_q4_durable_finalization_survives_deleted_chunks_and_publishes(tmp_path,
                                      quantizer=source.parent / "synthetic-quantizer.exe") == result
 
 
+def test_q4_final_transfer_recovers_own_mmap_ram_without_lowering_runtime_floor(
+    tmp_path, monkeypatch,
+):
+    source, scratch, chunks, assembly, proofs = _synthetic_ready(tmp_path)
+    output = tmp_path / "owned-mmap-recovery.gguf"
+    identity = {"source_sha256": core.hash_file(source), "stage_spec_sha256": "a" * 64,
+                "quantizer_sha256": q4.BINARY_SHA256, "mode": q4.MODE,
+                "max_mib": 8, "slab_mib": 1, "chunk_count": 1}
+    groups = [list(proofs)]
+    parts = _seal_synthetic(source, scratch, chunks, assembly, proofs, output,
+                            groups, identity)
+    parts[0].unlink()  # production recovery has already cleaned every chunk
+    monkeypatch.setattr(q4, "disk_usage", lambda path: SimpleNamespace(free=200 * q4.GIB))
+    resource_calls, trims = [], []
+
+    def guarded_resource(paths, *, initial=False):
+        resource_calls.append(initial)
+        return ["insufficient unowned physical RAM"] if len(resource_calls) == 1 else []
+
+    monkeypatch.setattr("chowder_batch.reap_gguf_supervised.resource_problems",
+                        guarded_resource)
+    monkeypatch.setattr(q4, "_trim_owned_working_set",
+                        lambda: trims.append(True) or True)
+    log = io.StringIO()
+    result = q4._recover_finalization(
+        scratch=scratch, chunks=chunks, source=source, output=output,
+        identity=identity, groups=groups, stage={"spec_sha256": "a" * 64},
+        log=log, quantizer=source.parent / "synthetic-quantizer.exe",
+    )
+    assert trims == [True]
+    assert resource_calls == [False, False]
+    assert "Q4_OWNED_TRANSFER_MMAP_RECLAIM" in log.getvalue()
+    assert result["output_sha256"] == core.hash_file(output)
+
+
+@pytest.mark.parametrize("blocked", ["insufficient free Windows commit",
+                                           "volume floor breached at G:"])
+def test_q4_final_transfer_does_not_trim_or_write_under_nonram_guard(
+    tmp_path, monkeypatch, blocked,
+):
+    source, scratch, chunks, assembly, proofs = _synthetic_ready(tmp_path)
+    output = tmp_path / "guard-denied.gguf"
+    identity = {"source_sha256": core.hash_file(source), "stage_spec_sha256": "a" * 64,
+                "quantizer_sha256": q4.BINARY_SHA256, "mode": q4.MODE,
+                "max_mib": 8, "slab_mib": 1, "chunk_count": 1}
+    groups = [list(proofs)]
+    _seal_synthetic(source, scratch, chunks, assembly, proofs, output,
+                    groups, identity)
+    monkeypatch.setattr(q4, "disk_usage", lambda path: SimpleNamespace(free=200 * q4.GIB))
+    monkeypatch.setattr("chowder_batch.reap_gguf_supervised.resource_problems",
+                        lambda *args, **kwargs: [blocked])
+    monkeypatch.setattr(q4, "_trim_owned_working_set",
+                        lambda: pytest.fail("non-RAM guard must not trim"))
+    with pytest.raises(RuntimeError, match="Q4 final transfer aborted by host guard"):
+        q4._recover_finalization(
+            scratch=scratch, chunks=chunks, source=source, output=output,
+            identity=identity, groups=groups, stage={"spec_sha256": "a" * 64},
+            log=io.StringIO(), quantizer=source.parent / "synthetic-quantizer.exe",
+        )
+    assert not output.exists()
+    assert assembly.exists()
+    assert q4._transfer_path(output, identity).stat().st_size == 0
+
+
 def test_q4_finalization_refuses_tampered_assembly_even_after_chunks_removed(tmp_path):
     source, scratch, chunks, assembly, proofs = _synthetic_ready(tmp_path)
     output = tmp_path / "result.gguf"

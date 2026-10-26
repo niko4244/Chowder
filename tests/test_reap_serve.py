@@ -720,6 +720,11 @@ def _mock_frozen_q4_scores(monkeypatch, *, missing_last=False, bad_item=False,
     items = [{"id": f"gsm8k-{i}", "prompt": f"question {i}", "expected": "1"}
              for i in range(1319)]
     monkeypatch.setattr(reap_eval, "_load", lambda suite: items)
+    # These are deliberately synthetic speed-session fixture prompts, NOT the
+    # preregistered official GSM8K source. Only the test's frozen-source pin
+    # may be substituted; production admits the original official digest.
+    monkeypatch.setitem(reap_eval.FROZEN_V2_QUALITY_SOURCES, "gsm8k",
+                        (len(items), reap_eval._digest(items)))
 
     def write_scored_rows(server, command, *, env=None):
         words = command

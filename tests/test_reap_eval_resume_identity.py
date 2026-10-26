@@ -22,7 +22,7 @@ def _serve(out, model_sha="a" * 64):
 
 
 def _run(monkeypatch, root, items, *, called=None, limit=0, suites="gsm8k",
-         on_chat=None):
+         on_chat=None, arm="reap160_q4"):
     called = called if called is not None else []
     monkeypatch.setattr(reap_eval, "_load", lambda suite: items[suite] if isinstance(items, dict) else items)
 
@@ -40,7 +40,7 @@ def _run(monkeypatch, root, items, *, called=None, limit=0, suites="gsm8k",
         "seconds": 0.1, "predicted_per_second": 5, "text": "42",
     })
     monkeypatch.setattr(sys, "argv", ["reap_eval.py", "--port", "8790", "--arm",
-                                     "reap160_q4", "--suites", suites,
+                                     arm, "--suites", suites,
                                      "--out", str(root), "--limit", str(limit)])
     reap_eval.main()
     return called
@@ -52,6 +52,51 @@ SUITES = {"gsm8k": ITEMS, "humaneval": [
     {"id": "HumanEval/0", "prompt": "write f", "header": "def f():\n",
      "entry_point": "f", "test": "def check(f): assert f() == 42"},
 ]}
+
+
+@pytest.mark.parametrize("suite", ["gsm8k", "humaneval"])
+def test_fresh_v2_refuses_self_witnessed_unofficial_suite_before_generation(
+    tmp_path, monkeypatch, suite,
+):
+    arm = tmp_path / "reap128_v2"
+    _serve(arm)
+    # The serving-owner path is tested independently; this fixture isolates
+    # dataset admission and never starts a genuine model process.
+    monkeypatch.setattr(reap_eval, "_require_live_new_v2_server", lambda *_a, **_k: None)
+    calls = []
+    with pytest.raises(ValueError, match="official.*source|frozen.*source"):
+        _run(monkeypatch, tmp_path, SUITES, arm="reap128_v2", suites=suite,
+             limit=1, called=calls)
+    assert not calls
+    assert not (arm / f"{suite}.inputs.json").exists()
+    assert not (arm / f"{suite}.jsonl").exists()
+    assert not (arm / "summary.json").exists()
+    assert not (arm / ".summary.json.lock").exists()
+
+
+def test_v2_full_source_pin_preserves_both_suite_summaries_across_reentry(
+    tmp_path, monkeypatch,
+):
+    arm = tmp_path / "reap128_v2"
+    _serve(arm)
+    monkeypatch.setattr(reap_eval, "_require_live_new_v2_server", lambda *_a, **_k: None)
+    for suite, items in SUITES.items():
+        monkeypatch.setitem(reap_eval.FROZEN_V2_QUALITY_SOURCES, suite,
+                            (len(items), reap_eval._digest(items)))
+    _run(monkeypatch, tmp_path, SUITES, arm="reap128_v2", suites="gsm8k", limit=1)
+    first_summary = json.loads((arm / "summary.json").read_text())
+    assert first_summary["gsm8k"]["n"] == 1
+    gsm_witness = (arm / "gsm8k.inputs.json").read_bytes()
+    _run(monkeypatch, tmp_path, SUITES, arm="reap128_v2", suites="humaneval")
+    second_summary = json.loads((arm / "summary.json").read_text())
+    assert second_summary["gsm8k"] == first_summary["gsm8k"]
+    human_bytes = (arm / "humaneval.jsonl").read_bytes()
+    _run(monkeypatch, tmp_path, SUITES, arm="reap128_v2", suites="gsm8k")
+    final = json.loads((arm / "summary.json").read_text())
+    assert final["gsm8k"]["n"] == 2
+    assert final["humaneval"] == second_summary["humaneval"]
+    assert (arm / "gsm8k.inputs.json").read_bytes() == gsm_witness
+    assert (arm / "humaneval.jsonl").read_bytes() == human_bytes
 
 
 def test_source_witness_fsyncs_complete_json_before_exclusive_publication(
@@ -231,6 +276,8 @@ def test_v2_live_server_loss_during_scoring_never_publishes_summary(tmp_path, mo
 
     monkeypatch.setattr(reap_eval, "_require_live_new_v2_server", owner_check)
     monkeypatch.setattr(reap_eval, "_load", lambda _: ITEMS)
+    monkeypatch.setitem(reap_eval.FROZEN_V2_QUALITY_SOURCES, "gsm8k",
+                        (len(ITEMS), reap_eval._digest(ITEMS)))
     monkeypatch.setattr(reap_eval, "_chat", lambda *_a: {
         "text": "42", "finish_reason": "stop", "completion_tokens": 1,
         "seconds": 0.1, "timings": {"predicted_per_second": 5}})

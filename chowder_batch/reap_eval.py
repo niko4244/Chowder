@@ -47,6 +47,13 @@ SYSTEM = "You are a helpful assistant."
 IDENTITY_SCHEMA = "chowder.reap-eval-input-identity.v1"
 REGISTERED_V2_ARMS = {"reap128_v2", "reap128_v2_q4", "reap160_v2", "reap160_v2_q4",
                       "dense_v2_q4", "dense_v2", "random128_v2"}
+# Frozen *rendered* complete source populations, including canonical order,
+# item IDs, prompts, answers and executable HumanEval tests. These are not
+# supplied by the serving receipt or by a locally generated input witness.
+FROZEN_V2_QUALITY_SOURCES = {
+    "gsm8k": (1319, "913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89"),
+    "humaneval": (164, "49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420"),
+}
 
 
 def _digest(value: Any) -> str:
@@ -114,6 +121,11 @@ def _bind_evaluation_inputs(out_dir: Path, suite: str, items: list[dict]) -> dic
                    "enable_thinking": False},
         "scoring": "frozen reap_eval production scoring: final_number_match/boxed/HumanEval",
     }
+    if out_dir.name in REGISTERED_V2_ARMS and suite in FROZEN_V2_QUALITY_SOURCES:
+        expected_n, expected_sha = FROZEN_V2_QUALITY_SOURCES[suite]
+        if len(items) != expected_n or context["source_items_sha256"] != expected_sha:
+            raise ValueError(f"REAP registered v2 {suite} official frozen source mismatch; "
+                             "refuse self-witnessed substituted benchmark inputs")
     witness = out_dir / f"{suite}.inputs.json"
     results = out_dir / f"{suite}.jsonl"
     if witness.is_symlink() or (witness.exists() and not witness.is_file()):
@@ -465,6 +477,8 @@ def _run_suites(args: argparse.Namespace, out_dir: Path) -> None:
         raise ValueError("REAP evaluation requires unique known suite names")
     if args.limit < 0 or args.parallel < 1:
         raise ValueError("REAP evaluation limit/parallel values must be nonnegative/positive")
+    if args.arm in REGISTERED_V2_ARMS and out_dir.name != args.arm:
+        raise ValueError("REAP registered v2 evaluator arm/output path mismatch")
     _require_live_new_v2_server(out_dir, arm=args.arm, port=args.port)
     with _summary_write_guard(out_dir):
         # Validate ALL previously summarized suites before any new model call.

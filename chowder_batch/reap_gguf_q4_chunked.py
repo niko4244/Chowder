@@ -532,7 +532,21 @@ def _recover_finalization(*, scratch: Path, chunks: Path, source: Path,
                     raise ValueError("Q4 transfer checkpoint prefix differs from assembly")
             dst.seek(offset)
             for block in iter(lambda: src.read(core.HASH_BLOCK), b""):
-                if resource_problems([assembly, transfer]):
+                issues = resource_problems([assembly, transfer])
+                if issues == ["insufficient unowned physical RAM"]:
+                    # The sole publisher can accumulate resident read-only
+                    # GGUF mmaps while verifying the durable merged checkpoint.
+                    # Reclaim only its own mapped pages, then independently
+                    # require the original 7/8-GiB RAM/commit and 6-GiB disk
+                    # runtime floors. Never treat a trim as guard clearance.
+                    trimmed = _trim_owned_working_set()
+                    log.write(json.dumps({"event": "Q4_OWNED_TRANSFER_MMAP_RECLAIM",
+                                          "succeeded": trimmed,
+                                          "unchanged_runtime_floors_required": True}) + "\n")
+                    log.flush()
+                    if trimmed:
+                        issues = resource_problems([assembly, transfer])
+                if issues:
                     raise RuntimeError("Q4 final transfer aborted by host guard")
                 dst.write(block)
             dst.flush()

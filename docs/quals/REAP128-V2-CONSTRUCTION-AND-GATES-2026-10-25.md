@@ -1886,3 +1886,57 @@ integrity walk. This is *solely* evidence of protected-host liveness,
 not a full public Q4 publication, numerical accuracy result or any
 scientific/deployment gate. Original minimum physical RAM/commit/disk
 admission remains unchanged and Gen-0 stays `BLOCKED`.
+
+### October 25 19:07 CDT — sealed-Q4 final transfer guard recovery
+
+The fifth exclusive original Q4 supervisor PID **46388** independently
+verified and retired **all 42** original chunk payloads after sealing its
+complete private 11,563,915,264-byte mixed-K assembly (SHA-256
+`2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7`).
+All **42 immutable source-bound chunk receipts** survived. It subsequently
+exited code **2** on the *unchanged runtime host guard* before writing any
+public GGUF: the deterministic G: private transfer checkpoint was zero bytes,
+and neither the G: public model nor `.reap-chunked.json` was present. This is
+an incomplete final publication, **not a failed chunk quantization**.
+
+A CPU-only RED test reproduced a RAM-only runtime guard refusing transfer
+after source-backed mapped pages had accumulated. The narrow production
+change allows the exclusive publisher to reclaim **only its own** Windows
+GGUF mapped-file working set and then requires a fresh PASS of the original
+runtime physical RAM, Windows commit and disk guards **before each write**.
+The same adversarial tests prove a Windows-commit or disk shortage cannot
+trigger a trim, cannot write any final bytes and retains the sealed assembly
+for later qualified recovery. No original initial **12/16-GiB** or runtime
+**7/8-GiB** RAM/commit threshold, **6-GiB** disk floor, or GPU ownership
+constraint changed. Scoped constructor tests passed **31** (one live
+quantizer test intentionally deselected), Ruff and diff checks clean.
+
+At independently verified guarded retry admission, physical RAM was
+**25.57 GiB** free, Windows commit **24.52 GiB** free, G: **33.81 GiB**
+free, F: **26.75 GiB** free. Exactly 42 immutable receipts, zero leftover
+chunk GGUF payloads, the sealed private GGUF/ledger and zero-byte original
+transfer were present. No competing Q4/Q8 or `llama-quantize` process was
+active, and unowned Ollama/llama.cpp services were not modified. One
+**exclusive resume6** recovery, launched at the original frozen BF16 source
+SHA and quantizer, reuses the sealed private full-model payload; it does
+**not** re-quantize any chunk or rebuild the BF16/Q8 artifacts. The resume6
+log is `F:\reap128-v2-q4-streaming-resume6-transfer-20261025.log`.
+
+Independently, adversarial RED/GREEN source-binding tests exposed that the
+registered new-v2 evaluator could accept a substituted, locally
+self-witnessed complete corpus even under `--limit 1`. It now refuses new-v2
+source populations unless the **entire original offline registered** GSM8K
+1,319-item digest is
+`913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89`
+and the HumanEval 164-item digest is
+`49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420`
+before publishing input witnesses or calling model inference. It also
+rejects a registered arm/output directory mismatch. The evaluator/scientific
+comparison focused CPU suite passed **62**; the original quality and speed
+thresholds and prior negative-control definition are unchanged. This
+validation proves source-admission integrity, **not** fresh model scores.
+
+Until a successful public G: publication, independent full 733-tensor
+certificate, real BF16↔Q4 numerical reconstruction and mandatory actual
+quality/controls/GPU/throughput experiments exist, all missing gates remain
+`UNKNOWN`, Gen-0 stays `BLOCKED`, and PR #282 remains **draft**.
