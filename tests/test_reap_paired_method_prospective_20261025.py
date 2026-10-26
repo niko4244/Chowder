@@ -6,6 +6,7 @@ Its use for qualification requires separate prospective statistical approval.
 """
 
 import math
+from pathlib import Path
 
 import pytest
 
@@ -84,6 +85,32 @@ def test_nonzero_noninferiority_margin_is_not_ordinary_exact_mcnemar_null():
     # whereas the frozen NI null boundary is Δ=-0.02.
     assert MARGIN == -0.02
     assert MARGIN != 0.0
+
+
+def test_original_primary_prereg_contains_both_incompatible_method_descriptions():
+    primary = (Path(__file__).resolve().parents[1] / "docs" /
+               "REAP_QWEN36_PREREG.md").read_text(encoding="utf-8")
+    original_gates, amendment = primary.split("## Amendment 4 ", 1)
+    assert "LB = mean(d) − 1.645 · sd(d) / √n" in original_gates
+    assert "LB(v2 − v1) > −0.02" in amendment
+    assert "paired McNemar, one-sided 95%" in amendment
+
+
+def test_identical_mcnemar_discordants_do_not_identify_risk_difference_ci():
+    # The ordinary conditional exact McNemar equality test knows only b,c.
+    # Same b=0,c=2 in both populations => identical equality-test p-value;
+    # but the marginal difference (b-c)/n and its Section 4 lower bound
+    # change with the full number of canonical matched items.
+    wins, losses = 0, 2
+    discordant = wins + losses
+    exact_one_sided_equality_p = sum(
+        math.comb(discordant, k) for k in range(wins, discordant + 1)
+    ) / 2**discordant
+    assert exact_one_sided_equality_p == 1.0
+    assert (wins - losses) / 164 == pytest.approx(-0.012195121951219513)
+    assert (wins - losses) / 1319 == pytest.approx(-0.001516300227445034)
+    assert wald_lower_bound(164, wins, losses) < MARGIN
+    assert wald_lower_bound(1319, wins, losses) > MARGIN
 
 
 def test_optional_v2_replacement_remains_blocked_regardless_of_wald_result():
