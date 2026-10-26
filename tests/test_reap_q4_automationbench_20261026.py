@@ -21,7 +21,7 @@ def test_frozen_q4_flags_and_official_evaluator_command():
     assert command[command.index("--max-concurrent") + 1] == "1"
     assert command[command.index("--num-examples") + 1] == "1"
     assert command[command.index("--max-steps") + 1] == "50"
-    assert command[1:3] == ["-m", "automationbench.scripts.eval"]
+    assert command[1:4] == ["-I", "-m", "automationbench.scripts.eval"]
     assert "--toolset" in command and command[command.index("--toolset") + 1] == "api"
 
 
@@ -57,6 +57,16 @@ def test_modified_or_untracked_official_python_source_refused(tmp_path):
     with (patch.object(ab, "BENCH_ROOT", tmp_path),
           patch.object(ab.subprocess, "run", side_effect=[revision, dirty])):
         with pytest.raises(ValueError, match="untracked"):
+            ab._source_check()
+
+
+def test_ignored_dotenv_file_fails_closed_even_with_clean_git(tmp_path):
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=not-for-benchmark")
+    clean_revision = subprocess.CompletedProcess([], 0, stdout=ab.BENCH_COMMIT + "\n")
+    clean_status = subprocess.CompletedProcess([], 0, stdout="")
+    with (patch.object(ab, "BENCH_ROOT", tmp_path),
+          patch.object(ab.subprocess, "run", side_effect=[clean_revision, clean_status])):
+        with pytest.raises(ValueError, match="override"):
             ab._source_check()
 
 
@@ -116,6 +126,53 @@ def test_resource_monitor_fails_closed_on_bad_measurement(tmp_path):
           patch.object(ab.watchdog, "unsafe", return_value=["invalid resource telemetry"])):
         with pytest.raises(RuntimeError, match="floor"):
             ab._resource_watch(proc, tmp_path, started=ab.time.monotonic(), timeout=10)
+
+
+def test_runtime_samples_fsynced_with_real_phase_and_fields(tmp_path):
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.pid = 1234
+    state = {"ram_available_gib": 20.0, "commit_available_gib": 27.0,
+             "gpu_free_mib": 6500, "disk_free_gib": 31.0}
+    log_path = tmp_path / "resource.private.jsonl"
+    with (patch.object(ab.watchdog, "sample", return_value=state),
+          patch.object(ab.watchdog, "unsafe", return_value=[])):
+        with log_path.open("x", encoding="utf8") as logfile:
+            ab._resource_watch(proc, tmp_path, started=ab.time.monotonic(),
+                               timeout=10, log=logfile, phase="official_task_evaluation")
+    observation = __import__("json").loads(log_path.read_text(encoding="utf8"))
+    assert observation["phase"] == "official_task_evaluation"
+    assert observation["owned_native_pid"] == 1234
+    assert observation["measurement"] == state
+    assert observation["failures"] == []
+
+
+def test_runtime_floor_failure_writes_private_abort_receipt(tmp_path):
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.pid = 1234
+    log_path = tmp_path / "resource.private.jsonl"
+    with (patch.object(ab.watchdog, "sample", return_value={"ram_available_gib": 2}),
+          patch.object(ab.watchdog, "unsafe", return_value=["physical RAM below original floor"])):
+        with log_path.open("x", encoding="utf8") as logfile:
+            with pytest.raises(RuntimeError, match="floor"):
+                ab._resource_watch(proc, tmp_path, started=ab.time.monotonic(),
+                                   timeout=10, log=logfile, phase="native_model_load")
+    recorded = __import__("json").loads(log_path.read_text(encoding="utf8"))
+    assert recorded["failures"] == ["physical RAM below original floor"]
+
+
+def test_nonfinite_runtime_telemetry_cannot_appear_in_receipt(tmp_path):
+    proc = MagicMock()
+    proc.poll.return_value = None
+    log_path = tmp_path / "resource.private.jsonl"
+    with (patch.object(ab.watchdog, "sample", return_value={"ram_available_gib": float("nan")}),
+          patch.object(ab.watchdog, "unsafe", return_value=["invalid measurement"])):
+        with log_path.open("x", encoding="utf8") as logfile:
+            with pytest.raises(ValueError, match="telemetry"):
+                ab._resource_watch(proc, tmp_path, started=ab.time.monotonic(),
+                                   timeout=10, log=logfile)
+    assert log_path.read_bytes() == b""
 
 
 def test_read_only_state_does_not_run_source_or_spawn(tmp_path):

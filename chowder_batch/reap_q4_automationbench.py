@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
+from typing import TextIO
 import urllib.request
 
 from chowder_batch import reap_serve
@@ -55,6 +56,13 @@ def _source_check() -> dict:
     )
     if dirty.stdout.strip():
         raise ValueError("official benchmark source has modified or untracked files")
+    # Git ignore rules can hide credential files and import-time shadows from
+    # the porcelain output; explicitly reject them before Python imports.
+    for relative in (".env", "sitecustomize.py", "usercustomize.py",
+                     ".venv/Lib/site-packages/sitecustomize.py",
+                     ".venv/Lib/site-packages/usercustomize.py"):
+        if (BENCH_ROOT / relative).exists():
+            raise ValueError("official benchmark checkout has local execution override")
     if not BENCH_PYTHON.is_file() or BENCH_PYTHON.is_symlink():
         raise ValueError("private official Python3.13 runtime unavailable")
     version = subprocess.run([str(BENCH_PYTHON), "--version"],
@@ -70,7 +78,7 @@ def _source_check() -> dict:
         "print(json.dumps({'n':len(rows),'domains':DEFAULT_DOMAINS,"
         "'source_sha256':hashlib.sha256(raw).hexdigest()}))"
     )
-    data = subprocess.run([str(BENCH_PYTHON), "-c", script],
+    data = subprocess.run([str(BENCH_PYTHON), "-I", "-c", script],
                           capture_output=True, text=True, cwd=BENCH_ROOT,
                           timeout=360, check=True)
     source = json.loads(data.stdout)
@@ -94,7 +102,7 @@ def _commands(out: Path, *, count: int, port: int = PORT) -> tuple[list[str], li
               "--port", str(port),
               "-m", str(watchdog.GGUF)]
     command = [
-        str(BENCH_PYTHON), "-m", "automationbench.scripts.eval",
+        str(BENCH_PYTHON), "-I", "-m", "automationbench.scripts.eval",
         "--model", MODEL, "--base-url", f"http://127.0.0.1:{port}/v1",
         "--api-key-var", "OPENAI_API_KEY", "--api", "chat_completions",
         "--toolset", "api", "--domains", "all",
@@ -140,12 +148,28 @@ def _read_only_status(out: Path, *, count: int) -> dict:
             "gen0_status": "BLOCKED", "chosen": None, "release_approved": False}
 
 
-def _resource_watch(proc: subprocess.Popen, out: Path, *, started: float, timeout: int) -> None:
+def _resource_watch(proc: subprocess.Popen, out: Path, *, started: float, timeout: int,
+                    log: TextIO | None = None, phase: str = "unspecified") -> None:
     if proc.poll() is not None:
         raise RuntimeError("private benchmark/native server terminated unexpectedly")
     if time.monotonic() - started > timeout:
         raise TimeoutError("bounded private experiment exceeded wall-clock deadline")
-    if watchdog.unsafe(watchdog.sample(out)):
+    snapshot = watchdog.sample(out)
+    failures = watchdog.unsafe(snapshot)
+    if log is not None:
+        # Keep actual physical/commit/VRAM pressure as private, append-only,
+        # fsynced provenance for every observed live load/evaluator interval.
+        try:
+            record = {"phase": phase, "owned_native_pid": proc.pid,
+                      "elapsed_seconds": round(time.monotonic() - started, 3),
+                      "measurement": snapshot, "failures": failures}
+            encoded = json.dumps(record, sort_keys=True, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("invalid live resource telemetry cannot be recorded") from exc
+        log.write(encoded + "\n")
+        log.flush()
+        os.fsync(log.fileno())
+    if failures:
         raise RuntimeError("original Q4 runtime memory/commit/disk floor breached")
 
 
@@ -211,6 +235,7 @@ def run_private_public_benchmark(out: Path, *, count: int = PRIVATE_MAX_SMOKE) -
     task: subprocess.Popen | None = None
     ok = False
     started = time.monotonic()
+    resource_log = (out / "resource-samples.private.jsonl").open("x", encoding="utf8")
     try:
         with (out / "native.private.log").open("xb") as log:
             native = subprocess.Popen(server_cmd, cwd=out, stdin=subprocess.DEVNULL,
@@ -219,7 +244,9 @@ def run_private_public_benchmark(out: Path, *, count: int = PRIVATE_MAX_SMOKE) -
                                            "LLAMA_ARG_LOG_VERBOSITY": reap_serve.LOG_VERBOSITY},
                                       creationflags=subprocess.CREATE_NO_WINDOW)
             while True:
-                _resource_watch(native, out, started=started, timeout=HEALTH_TIMEOUT_SECONDS)
+                _resource_watch(native, out, started=started,
+                                timeout=HEALTH_TIMEOUT_SECONDS, log=resource_log,
+                                phase="native_model_load")
                 try:
                     with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=2) as r:
                         if r.status == 200:
@@ -243,6 +270,7 @@ def run_private_public_benchmark(out: Path, *, count: int = PRIVATE_MAX_SMOKE) -
             minimal_env["OPENAI_API_KEY"] = "local-source-bound-only"
             minimal_env["HF_HUB_OFFLINE"] = "1"
             minimal_env["PYTHON_DOTENV_DISABLED"] = "1"
+            minimal_env["PYTHONNOUSERSITE"] = "1"
             with (out / "official-benchmark.private.log").open("xb") as bench_log:
                 task = subprocess.Popen(bench_cmd, cwd=BENCH_ROOT, env=minimal_env,
                                         stdin=subprocess.DEVNULL, stdout=bench_log,
@@ -250,9 +278,8 @@ def run_private_public_benchmark(out: Path, *, count: int = PRIVATE_MAX_SMOKE) -
                                         creationflags=subprocess.CREATE_NO_WINDOW)
                 max_wall = MAX_SMOKE_WALL_SECONDS if count == PRIVATE_MAX_SMOKE else 12 * 3600
                 while task.poll() is None:
-                    _resource_watch(native, out, started=started, timeout=max_wall)
-                    if watchdog.unsafe(watchdog.sample(out)):
-                        raise RuntimeError("untrusted benchmark runtime resource floor breached")
+                    _resource_watch(native, out, started=started, timeout=max_wall,
+                                    log=resource_log, phase="official_task_evaluation")
                     time.sleep(3)
                 if task.returncode != 0:
                     raise RuntimeError("official benchmark exited nonzero; not a scored result")
@@ -262,13 +289,16 @@ def run_private_public_benchmark(out: Path, *, count: int = PRIVATE_MAX_SMOKE) -
                     raise ValueError("official benchmark result missing or unbounded")
                 ok = True
     finally:
-        # Kill only processes created by this runner, never protected services.
-        if task is not None and task.poll() is None:
-            watchdog.kill_owned_tree(task)
-        if native is not None and native.poll() is None:
-            watchdog.kill_owned_tree(native)
-        if native is not None:
-            watchdog.verify_native_shutdown(native.pid, PORT)
+        try:
+            # Kill only processes created by this runner, never protected services.
+            if task is not None and task.poll() is None:
+                watchdog.kill_owned_tree(task)
+            if native is not None and native.poll() is None:
+                watchdog.kill_owned_tree(native)
+            if native is not None:
+                watchdog.verify_native_shutdown(native.pid, PORT)
+        finally:
+            resource_log.close()
     return {"status": "RAW_PUBLIC_BENCHMARK_NEEDS_INDEPENDENT_ROW_AUDIT" if ok
             else "UNVERIFIED_INCOMPLETE",
             "public_requested": count, "private_output": str(out),
