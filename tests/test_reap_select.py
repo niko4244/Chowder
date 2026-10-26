@@ -292,6 +292,41 @@ def test_complete_new_v2_source_witnessed_quality_references_enable_only_quality
     assert report["release_approved"] is False
 
 
+def test_new_v2_forged_correct_nontermination_cannot_turn_gate1_fail_to_pass(tmp_path):
+    observation = _full_v2_rows(tmp_path)
+    _attest(tmp_path, "dense_v2", "gsm8k", 1319)
+    _attest(tmp_path, "dense_v2", "humaneval", 164)
+    _attest(tmp_path, "random128_v2", "gsm8k", 1319, fail=1000)
+    result_path = tmp_path / "reap128_v2" / "gsm8k.jsonl"
+    summary_path = result_path.parent / "summary.json"
+    rows = [json.loads(line) for line in result_path.read_text(encoding="utf-8").splitlines()]
+    # Genuine complete benchmark: 45 wrong answers, only 20 non-stops;
+    # termination remains inside Gate0's preregistered 2% tolerance.
+    for i in range(45):
+        rows[i]["correct"] = False
+        rows[i]["terminated"] = i >= 20
+
+    def reseal():
+        result_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["gsm8k"]["file_sha256"] = hashlib.sha256(result_path.read_bytes()).hexdigest()
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    reseal()
+    genuine = evaluate(tmp_path, observation)["gates"]["reap128_v2"]["gates"]
+    assert genuine["gate0"]["status"] == "PASS"
+    assert genuine["gate1"]["status"] == "FAIL"
+
+    # Falsify only correctness of NON-terminated responses. Production
+    # reap_eval._score always reports these as incorrect; rehashing the
+    # JSONL + summary must never turn the scientific Gate1 into PASS.
+    for row in rows[:20]:
+        row["correct"] = True
+    reseal()
+    with pytest.raises(GateError, match="nonterminated.*correct|correct.*nonterminated"):
+        evaluate(tmp_path, observation)
+
+
 @pytest.mark.parametrize("reference", ["dense_v2", "random128_v2"])
 def test_fresh_v2_controls_reject_foreign_model_with_consistent_resealed_witnesses(
     tmp_path, reference,

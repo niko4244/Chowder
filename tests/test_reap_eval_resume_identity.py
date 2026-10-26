@@ -80,6 +80,10 @@ def test_v2_full_source_pin_preserves_both_suite_summaries_across_reentry(
     arm = tmp_path / "reap128_v2"
     _serve(arm)
     monkeypatch.setattr(reap_eval, "_require_live_new_v2_server", lambda *_a, **_k: None)
+    # All three evaluator invocations model the same original live server.
+    # A different serving session must never reuse GSM8K's previous rows.
+    monkeypatch.setenv("REAP_BOUND_EVALUATION_SESSION", json.dumps({
+        "session_id": "a" * 32, "receipt": "serve.json"}))
     for suite, items in SUITES.items():
         monkeypatch.setitem(reap_eval.FROZEN_V2_QUALITY_SOURCES, suite,
                             (len(items), reap_eval._digest(items)))
@@ -97,6 +101,62 @@ def test_v2_full_source_pin_preserves_both_suite_summaries_across_reentry(
     assert final["humaneval"] == second_summary["humaneval"]
     assert (arm / "gsm8k.inputs.json").read_bytes() == gsm_witness
     assert (arm / "humaneval.jsonl").read_bytes() == human_bytes
+
+
+@pytest.mark.parametrize("previous_is_partial", [True, False])
+def test_new_v2_separate_serving_session_never_reuses_previous_same_suite_rows(
+    tmp_path, monkeypatch, previous_is_partial,
+):
+    """A resumed server may not turn earlier-session rows into its own quality cohort."""
+    arm = tmp_path / "reap128_v2"
+    _serve(arm)
+    monkeypatch.setattr(reap_eval, "_require_live_new_v2_server", lambda *_a, **_k: None)
+    for suite, items in SUITES.items():
+        monkeypatch.setitem(reap_eval.FROZEN_V2_QUALITY_SOURCES, suite,
+                            (len(items), reap_eval._digest(items)))
+    original = {"session_id": "a" * 32, "receipt": "serve.json"}
+    monkeypatch.setenv("REAP_BOUND_EVALUATION_SESSION", json.dumps(original))
+    _run(monkeypatch, tmp_path, SUITES, arm="reap128_v2", suites="gsm8k",
+         limit=1 if previous_is_partial else 0)
+    old_rows = (arm / "gsm8k.jsonl").read_bytes()
+    old_summary = (arm / "summary.json").read_bytes()
+
+    # The same authenticated published model and original input witness may
+    # exist, but the producer changed to another live original server PID.
+    # The authoritative first-session rows cannot be reused in its new quality
+    # cohort merely because the evaluator's model SHA and source digest match.
+    resumed = {"session_id": "b" * 32,
+               "receipt": "serve.resume-" + "b" * 32 + ".json"}
+    monkeypatch.setenv("REAP_BOUND_EVALUATION_SESSION", json.dumps(resumed))
+    called = []
+    with pytest.raises(ValueError, match="same-session|previous serving session"):
+        _run(monkeypatch, tmp_path, SUITES, arm="reap128_v2", suites="gsm8k",
+             called=called)
+    assert called == []
+    assert (arm / "gsm8k.jsonl").read_bytes() == old_rows
+    assert (arm / "summary.json").read_bytes() == old_summary
+    assert not (arm / ".summary.json.lock").exists()
+
+
+def test_new_v2_new_session_can_measure_distinct_preregistered_suite(
+    tmp_path, monkeypatch,
+):
+    arm = tmp_path / "reap128_v2"
+    _serve(arm)
+    monkeypatch.setattr(reap_eval, "_require_live_new_v2_server", lambda *_a, **_k: None)
+    for suite, items in SUITES.items():
+        monkeypatch.setitem(reap_eval.FROZEN_V2_QUALITY_SOURCES, suite,
+                            (len(items), reap_eval._digest(items)))
+    monkeypatch.setenv("REAP_BOUND_EVALUATION_SESSION", json.dumps({
+        "session_id": "a" * 32, "receipt": "serve.json"}))
+    _run(monkeypatch, tmp_path, SUITES, arm="reap128_v2", suites="gsm8k")
+    original_rows = (arm / "gsm8k.jsonl").read_bytes()
+    monkeypatch.setenv("REAP_BOUND_EVALUATION_SESSION", json.dumps({
+        "session_id": "b" * 32,
+        "receipt": "serve.resume-" + "b" * 32 + ".json"}))
+    _run(monkeypatch, tmp_path, SUITES, arm="reap128_v2", suites="humaneval")
+    assert (arm / "gsm8k.jsonl").read_bytes() == original_rows
+    assert set(json.loads((arm / "summary.json").read_text())) == {"gsm8k", "humaneval"}
 
 
 def test_source_witness_fsyncs_complete_json_before_exclusive_publication(

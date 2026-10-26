@@ -197,6 +197,12 @@ def _attested_rows(eval_dir: Path, arm: str, suite: str, expected: int) -> dict 
             raise GateError(f"{arm}/{suite}: unregistered v2 population requested")
         if set(rows) != frozen_ids:
             raise GateError(f"{arm}/{suite}: item IDs do not match the frozen official cohort")
+        # reap_eval._score applies `correct = terminated and scored_answer` on
+        # every suite. A re-sealed result marking an unfinished generation
+        # correct is impossible under the registered scoring policy, yet it
+        # could falsely elevate Gate1 while Gate0 remains within tolerance.
+        if any(row["correct"] and not row["terminated"] for row in rows.values()):
+            raise GateError(f"{arm}/{suite}: nonterminated response cannot be correct")
         _v2_input_witness(eval_dir, arm, suite)
     return rows
 

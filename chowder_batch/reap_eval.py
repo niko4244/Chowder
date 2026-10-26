@@ -490,13 +490,26 @@ def _run_suites(args: argparse.Namespace, out_dir: Path) -> None:
 
 def _run_suite(args: argparse.Namespace, out_dir: Path, suite: str,
                summary: dict, summary_bytes: bytes | None) -> bytes:
+    path = out_dir / f"{suite}.jsonl"
+    if args.arm in REGISTERED_V2_ARMS and path.exists():
+        # A new live llama-server session can measure a *different* registered
+        # suite, but may never adopt rows from an earlier serving session as
+        # its own complete quality cohort. The original serve.json is immutable;
+        # reap_serve places every later live session in a distinct resume
+        # receipt. The entry and exit ownership checks validate this context.
+        try:
+            context = json.loads(os.environ["REAP_BOUND_EVALUATION_SESSION"])
+        except (KeyError, ValueError, UnicodeError) as exc:
+            raise ValueError("REAP registered v2 existing rows lack a bound same-session owner") from exc
+        if not isinstance(context, dict) or context.get("receipt") != "serve.json":
+            raise ValueError("REAP registered v2 same-suite rows belong to a previous serving session; "
+                             "a resumed server must use a fresh experiment arm for that suite")
     items = _load(suite)
     # Bind the complete source population, not just an optional limited
     # first batch, so legitimate partial runs can resume full evaluation.
     input_witness = _bind_evaluation_inputs(out_dir, suite, items)
     if args.limit:
         items = items[: args.limit]
-    path = out_dir / f"{suite}.jsonl"
     done = _read_resume_rows(path, {str(it["id"]) for it in items},
                              out_dir / "summary.json", suite)
     todo = [it for it in items if it["id"] not in done]

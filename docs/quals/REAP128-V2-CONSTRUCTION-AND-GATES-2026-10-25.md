@@ -2155,3 +2155,43 @@ admission; changing context/cache alone has not resolved it. Full registered
 quality, fresh controls, placement and speed are `UNKNOWN`. Frozen
 Amendment4, historical REAP128-v1 Gate1 FAIL, Gen-0 `BLOCKED` and PR #282
 draft/unmerged remain unchanged.
+
+### October 25 — post-publication registered evaluation integrity corrections
+
+Two separate adversarial **CPU-only** audits exposed new false-admission
+paths in the scientific evidence pipeline, independent of the already pinned
+original model files and verified Q4 construction:
+
+1. An evaluator resumed under a **new live serving session** could reuse
+   earlier `gsm8k.jsonl` rows for the **same** registered v2 suite and
+   publish a full mixed-session summary. The original `.inputs.json` binds
+   model bytes and official benchmark source, but not which of the immutable
+   `serve.json` / `serve.resume-<session>.json` producers generated each row.
+   Adversarial RED fixtures used an earlier 1/2 partial or complete official
+   suite and a new serve-resume session; previously both were silently
+   admitted as same-session quality. The production evaluator now refuses
+   same-suite prior rows when the original authenticated active session is
+   a resumed serve receipt. A distinct subsequent HumanEval session remains
+   permitted; the original session itself may finish its own suite. The
+   existing Windows listener/PID/model/source checks are unchanged.
+2. The frozen selector accepted fully rehashed new-v2 official-ID/scored
+   benchmark rows containing `correct:true, terminated:false`. This is
+   **impossible** under the registered production scorer, which computes
+   `correct = terminated and score(...)`. A RED adversarial 1,319-item
+   GSM8K corpus had 45 legitimate wrong answers, including 20 nonstops,
+   yielding Gate0 PASS / Gate1 FAIL against the source-bound dense control.
+   Changing only those 20 nonterminated answers to `correct:true` and
+   resealing the JSONL/summary SHA incorrectly elevated the numerical Gate1
+   calculation. The selector now rejects this impossible per-item state for
+   every registered new-v2 arm, before computing the gates. No frozen
+   statistic, threshold, paired method, comparison precedence, or source
+   population has been altered.
+
+The new RED/GREEN cases and positive distinct-suite control are in
+`tests/test_reap_eval_resume_identity.py` and `tests/test_reap_select.py`.
+Original BF16, Q8, published Q4, 42 original chunk receipts and all published
+scientific evidence remain unchanged. Code/test regression PASS is **not**
+registered candidate quality or same-session throughput evidence. Until
+actual full official benchmark controls, candidate responses and GPU
+placement/speed are measured under safe admission, Gen-0 stays `BLOCKED`,
+`chosen:null`, release not approved and existing PR #282 draft/unmerged.
