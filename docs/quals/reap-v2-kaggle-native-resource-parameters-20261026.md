@@ -59,3 +59,19 @@ The original dense Q4 comparator is a separate pinned artifact, **21,166,757,984
 `chowder_batch/reap_kaggle_cgroup_admission.py` is a separate **read-only, fail-closed** cgroup-v2 attribution and resource preflight. It never writes a cgroup, frees cache, starts a model or certifies Windows commit. It requires consistent cap/current/peak, file/anonymous cache telemetry and OOM events; clean file-cache bytes are **descriptive only, not optimistically counted as free memory**. Its decision may only admit an experimental smoke attempt, never a frozen scientific gate. `tests/test_reap_kaggle_cgroup_admission.py` covers OOM, missing/duplicate/nonfinite values, insufficient resources, and the actual file-cache/cgroup misinterpretation. These tests and the earlier source-bound Windows admission regressions passed **36 tests** CPU-only, Ruff clean; they do not replace full model qualification.
 
 The frozen preregistration's paired-Wald-versus-paired-McNemar risk-difference CI ambiguity is still subject to the independent prospective review documented in `reap-v2-paired-ci-prospective-method-review-20261025.md`. Never choose a favored method after observing real v2-v1 results. Maintain the original fallback order and `BLOCKED` until complete authentic scientific gates are demonstrated.
+
+## 6. Consequential original Windows↔Kaggle single-item non-equivalence (2026-10-26)
+
+After the initial report, I independently scored the same canonical `gsm8k-0` prompt on the original Windows Q4 source-bound one-row smoke (`F:\reap128-v2-q4-real-gpu-smoke-20261025-2300\reap128_v2_q4\gsm8k.jsonl`) and the new Kaggle native one-row smoke (`F:\reap-v2-kaggle-q4-native-smoke-v2-output-20261026\reap-v2-kaggle-q4-native-smoke.json`) with the **unmodified original `reap_eval._score`** and original frozen full corpus identity. The same exact original Q4 GGUF SHA and exact request generation policy were used, both responses naturally terminated, but their decoded text and scores **differed**:
+
+| Canonical first official item | Windows 5060 Ti | Kaggle two T4 |
+|---|---|---|
+| Item | `gsm8k-0` | `gsm8k-0` |
+| `correct` under original scorer | `false` | `true` |
+| `terminated` | `true` | `true` |
+| Completion tokens | `242` | `259` |
+| Decoded response SHA-256 | `9d504106e27bd7c173b0ffe31b6bb9e974d0ceafc8b04718e4610d087eb7c03b` | `26d82eaf478d9ccdff0030f797d546b9008aa4a1f4dd64a8683a3ff3bae6ae0a` |
+
+Original native startup logs **both** showed 41/41 model layers GPU offloaded and identical `n_ctx=16384`, `n_seq_max=4`, `n_ctx_seq=4096`, `n_batch=2048`, `n_ubatch=512`, automatic flash attention and split cache values; however, the 320-MiB KV buffer was **on CUDA0 alone on Windows**, versus **160 MiB on CUDA0 plus 160 MiB on CUDA1 on Kaggle**. The hardware GPU architectures, device partitioning and CUDA-VMM allocator setting also differ. These details prove different actual serving placement; they do **not** isolate which component caused output divergence.
+
+**Scientific consequence:** exact source commit, model GGUF SHA, benchmark prompt and nominal flags are insufficient to establish matching numerical model inference across these two hosts. The original registered Windows-backed Amendment 4 gate **cannot automatically consume the Kaggle result**. Keep the full Kaggle 1,319/164-run result **provisional**, regardless of whether it happens to be better or worse, until independent reproducible source-to-output equivalence and the method governance requirements are settled. Do not cherry-pick the favorable first item, mix suites/sessions, replace the original native 5060 Ti control, or backfill a speed PASS from the two T4 setup.
