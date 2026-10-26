@@ -1940,3 +1940,64 @@ Until a successful public G: publication, independent full 733-tensor
 certificate, real BF16↔Q4 numerical reconstruction and mandatory actual
 quality/controls/GPU/throughput experiments exist, all missing gates remain
 `UNKNOWN`, Gen-0 stays `BLOCKED`, and PR #282 remains **draft**.
+
+### October 25 19:45 CDT — original complete Q4_K_M public publication PASS (construction only)
+
+The sole source-bound original `resume6` Q4 finalizer PID **66304**
+revalidated the frozen BF16 source and sealed private mixed-K assembly,
+completed the original deterministic full G: transfer, verified the original
+full output digest and all original tensor payload provenance, published the
+final G: `.reap-chunked.json`, and **exited code 0**. It released the sealed
+private F: merged GGUF after a final original SHA check. No chunk was
+requantized or copied into a second Q4 constructor, all **42 immutable
+original chunk receipts** survived, and all 42 verified temporary chunk
+payloads had been intentionally retired after the durable merge.
+
+Exact public artifact:
+
+- `G:\reap128-v2-q4_k_m-20261025.gguf` — **11,563,915,264 bytes**;
+  SHA-256 **`2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7`**
+  from the original durable merged GGUF and completed publisher receipt;
+- `G:\reap128-v2-q4_k_m-20261025.gguf.reap-chunked.json` —
+  **191,086 bytes**, independent *sidecar-file* SHA-256
+  **`cf16fbf9e6926719bab873bd74b7062fa22365a280451ce3db9a9f8dc3031f1c`**;
+- publication status `Q4_K_M_TENSOR_EXACT_CONSTRUCTED_NOT_QUALITY_QUALIFIED`,
+  exact source BF16 GGUF SHA
+  `80341aa776ad9b5f937c21b081b6d76de4a2ea277e5fb88c9ae2634a9da8f4c6`,
+  pinned original quantizer SHA, 42 original chunks and 733 claimed tensor
+  names/proofs with original 40×128/top-k-8 construction identity.
+
+The finalization needed an externally guarded **verified owner-only**
+read-only mapped-file working-set recovery during original-source checking:
+physical RAM was **4.131 → 25.408 GiB**, the sole original PID66304
+working set **21.662 → 0.235 GiB**. Process command, source SHA, original
+creation epoch, absent children/other quantizers, durable assembly/ledger,
+42 immutable receipts and resource limits were verified before this single
+targeted `EmptyWorkingSet` action; it did not touch other Ollama/llama.cpp
+processes or change any minimum RAM/commit/disk thresholds. This is host
+cache recovery evidence only, not candidate GPU placement or quality.
+
+At **19:45:59 CDT** new CPU verification admission measured **25.241 GiB**
+free physical RAM, **19.343 GiB** free Windows commit, F:/G:/I: free space
+**37.521 / 23.040 / 15.948 GiB**, no original Q4/Q8 supervisor or
+`llama-quantize` process, and the complete public model/sidecar. The
+independent post-publication full BF16/Q4 733-tensor SHA/shape/order/type
+and 42-immutable-receipt certificate was separately admitted and started.
+Its authoritative output and the actual BF16↔mixed-K reconstruction sample
+are **pending**, not retrospectively claimed from construction.
+
+After publication, the original SHA was additionally pinned in the
+registered `reap128_v2_q4` serving admission and new Q4 speed consumer.
+Adversarial CPU RED/GREEN tests also closed the ability for a nested
+same-session speed proof to disagree with its original `serve.json` session
+ID, PID or port for either candidate or dense comparator. The combined
+Q4-construction/certificate/numeric, evaluator, selector, serving, paired
+comparison and gates regression completed **333 passed**, 1 real pinned
+quantizer case deliberately excluded; Ruff and Git whitespace checks PASS.
+These remain code correctness tests, not fresh observed quality/performance.
+
+No genuine registered new-v2 model quality/control scores, original BF16
+CUDA numerical parity, new GPU placement, source-bound 200-item same-session
+Q4/dense speed, or canonical REAP160 requalification have yet passed.
+Preserve all original Amendment4 thresholds, historic REAP128-v1 Gate1
+**FAIL**, Gen-0 **BLOCKED** with no candidate chosen, and PR #282 **draft**.
