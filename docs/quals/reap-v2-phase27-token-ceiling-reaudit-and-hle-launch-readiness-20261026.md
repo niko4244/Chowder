@@ -223,9 +223,14 @@ No gate passes, so the selector stays BLOCKED with `chosen: null`.
 
 ## 8. Concrete next steps
 
-1. Collect the running `reap128v2-q4-hle-textonly-20261026` output, re-derive
-   its aggregates from the item-level rows, and audit it before reporting any
-   HLE figure.
+1. Collect the running `reap128v2-q4-hle-textonly-20261026` output and audit it
+   with `scripts/reap_v2_hle_collect.py`, which does **not** trust the kernel's
+   own summary: it reloads the pinned population, re-derives every aggregate
+   from the rows, and refuses the run on a summary disagreement, a row outside
+   the frozen canonical prefix, a duplicate or foreign session, a row over the
+   frozen token ceiling, a non-terminal kernel status, or any selection claim.
+   It was exercised on synthetic rows against the real parquet (7 passing tests,
+   including six refusal paths) before any collection.
 2. Collect the random128 control receipt when it reaches a terminal state and
    audit it against the hardened auditor.
 3. For the coding/agent rows (Terminal-Bench, DeepSWE, ProgramBench,
