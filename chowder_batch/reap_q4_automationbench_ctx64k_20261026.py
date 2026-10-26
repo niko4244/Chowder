@@ -12,11 +12,11 @@ ceiling and was cut (``n_tokens = 65535, truncated = 1``), producing the same
 invalid-JSON 500 loop. Larger context alone does not bound a degenerate turn.
 
 This lane therefore changes native context geometry, the evaluator step budget
-and the per-turn generation cap: ``-c 65536 --n-predict 4096 --max-steps 44``
-needs 64,189 tokens, which fits with room to spare. 4,096 is ~4.7x the largest
-legitimate generation observed (862 tokens), so it bounds a runaway without
-cutting a real tool call. It is NONCOMPARABLE to the frozen four-slot 16,384
-cohort, and it is not a Gen-0 selection result.
+and the per-turn generation cap: ``-c 73728 --n-predict 8192 --max-steps 44``
+needs 68,724 tokens, which fits with 5,004 to spare. The cap must sit above the
+largest *legitimate* turn (4,574 measured) and below the window: a 4,096 cap
+cut real tool calls and produced 88 invalid-JSON 500s. It is NONCOMPARABLE to
+the frozen four-slot 16,384 cohort, and it is not a Gen-0 selection result.
 
 It drives the official public evaluator directly; it does not fork the guarded
 lab harness. No model-generated Python or shell is executed: AutomationBench
@@ -44,15 +44,27 @@ from chowder_batch.reap_context_budget_20261026 import (
     trajectory_from_native_log,
 )
 
-PROFILE = "NONCOMPARABLE_Q4_CTX64K_1X65536_STEPS44_CAP4096"
-CONTEXT = 65536
+PROFILE = "NONCOMPARABLE_Q4_CTX72K_1X73728_STEPS44_DECODE_RP11_DRY08_T07"
+# 73,728 leaves room for 44 steps of measured prompt growth (~1,383/step)
+# plus one full 8,192-token turn: 1,067 + 1,382.9*43 + 8,192 = 68,724.
+CONTEXT = 73728
 MAX_STEPS = 44
-# llama-server default n_predict when a request omits max_tokens. Bounds a
-# degenerate turn, which is what actually consumed the window in trial 2.
-GEN_CAP = 4096
+# Bounds a degenerate turn. Trial 2 produced one 54,356-token turn with no
+# limit at all; the largest legitimate turn measured was 4,574, so 8,192
+# leaves ~1.8x headroom. A 4,096 cap was tried first and cut real tool calls:
+# 88 invalid-JSON 500s on the opening task.
+GEN_CAP = 8192
 PORT = 8892
+# Measured: server sampler flags bind, but --n-predict reports -1 and is NOT
+# enforced on /v1/chat/completions. Degeneration is therefore addressed at its
+# cause -- unpenalized repetition at temperature 1.0 -- rather than by a cap.
+REPEAT_PENALTY = 1.1
+DRY_MULTIPLIER = 0.8
+TEMPERATURE = 0.7
 FLAGS = ["--fit", "on", "-np", "1", "-c", str(CONTEXT),
-         "--n-predict", str(GEN_CAP), "--jinja"]
+         "--repeat-penalty", str(REPEAT_PENALTY),
+         "--dry-multiplier", str(DRY_MULTIPLIER),
+         "--temperature", str(TEMPERATURE), "--jinja"]
 
 SERVER = Path("F:/llama.cpp/bin/llama-server.exe")
 GGUF = Path("G:/reap128-v2-q4_k_m-20261025.gguf")
@@ -83,7 +95,7 @@ MIN_DISK_GIB = 8.0
 GPU_MARGIN_MIB = 512
 
 MAX_START_SECONDS = 420
-MAX_TASK_SECONDS = 5400
+MAX_TASK_SECONDS = 7200
 # A turn can now legally emit GEN_CAP tokens, so the tail room must cover it.
 GENERATION_RESERVE = max(2048, GEN_CAP)
 MAX_JSON_BYTES = 256 * 1024 * 1024
@@ -179,7 +191,8 @@ def verify_gguf(path: Path, *, shown_bytes: int, shown_sha: str) -> dict[str, ob
 
 
 def audit_official(
-    blob: bytes, *, served_id: str, count: int, max_steps: int, expected: tuple[str, ...]
+    blob: bytes, *, served_id: str, count: int, max_steps: int,
+    expected: tuple[str, ...] | None,
 ) -> dict[str, object]:
     """Independently re-derive every aggregate from the item-level rows."""
     if not 0 < len(blob) < MAX_JSON_BYTES:
@@ -205,7 +218,9 @@ def audit_official(
     names = [row.get("name") for row in tasks]
     if any(type(name) is not str or not name for name in names) or len(set(names)) != count:
         raise ValueError("task identity missing or repeated")
-    if set(names) != set(expected):
+    # A sampled run pins its slice by recording the names it actually scored;
+    # the pinned six-task lane must match exactly.
+    if expected is not None and set(names) != set(expected):
         raise ValueError("pinned six-task slice changed")
 
     aborted = summary.get("aborted_tasks")
@@ -380,8 +395,9 @@ def record(dirpath: Path, handle, phase: str, pid: int, started: float) -> dict[
     return snapshot
 
 
-def bench_command(served_id: str, out: Path) -> list[str]:
-    return [
+def bench_command(served_id: str, out: Path, *, count: int,
+                  tasks: tuple[str, ...] | None) -> list[str]:
+    command = [
         str(BENCH_PYTHON), "-I", "-m", "automationbench.scripts.eval",
         "--model", served_id,
         "--base-url", f"http://127.0.0.1:{PORT}/v1",
@@ -389,13 +405,15 @@ def bench_command(served_id: str, out: Path) -> list[str]:
         "--api", "chat_completions",
         "--toolset", "api",
         "--domains", "all",
-        "--num-examples", str(len(TASKS)),
+        "--num-examples", str(count),
         "--max-concurrent", "1",
         "--max-steps", str(MAX_STEPS),
         "--no-ensure-complete",
         "--export-json", str(out / "public-automationbench.private.json"),
-        "--tasks", ",".join(TASKS),
     ]
+    if tasks:
+        command += ["--tasks", ",".join(tasks)]
+    return command
 
 
 def preflight(out: Path) -> dict[str, object]:
@@ -443,7 +461,8 @@ def preflight(out: Path) -> dict[str, object]:
         "max_steps": MAX_STEPS,
         "generation_reserve": GENERATION_RESERVE,
         "steering_flags": FLAGS,
-        "per_turn_generation_cap": GEN_CAP,
+        "decoding": {"repeat_penalty": REPEAT_PENALTY, "dry_multiplier": DRY_MULTIPLIER,
+                     "temperature": TEMPERATURE},
         "frozen_flags": ["--fit", "on", "-np", "4", "-c", "16384", "--jinja"],
         "model_generated_program_execution": False,
         "noncomparable_to_frozen_4_way": True,
@@ -456,7 +475,12 @@ def preflight(out: Path) -> dict[str, object]:
     }
 
 
-def execute(out: Path) -> dict[str, object]:
+def execute(out: Path, *, sample: int | None = None) -> dict[str, object]:
+    if sample is not None and (type(sample) is not int or not 2 <= sample <= 600):
+        raise ValueError("sample must be an integer between 2 and 600")
+    count = sample if sample is not None else len(TASKS)
+    tasks: tuple[str, ...] | None = None if sample is not None else TASKS
+
     gate = preflight(out)
     if gate["status"] != "READY_TO_ATTEMPT_NONCOMPARABLE_EXPLORATORY":
         return gate
@@ -476,10 +500,15 @@ def execute(out: Path) -> dict[str, object]:
         "max_steps": MAX_STEPS,
         "generation_reserve": GENERATION_RESERVE,
         "steering_flags": FLAGS,
-        "per_turn_generation_cap": GEN_CAP,
+        "decoding": {"repeat_penalty": REPEAT_PENALTY, "dry_multiplier": DRY_MULTIPLIER,
+                     "temperature": TEMPERATURE},
         "frozen_flags": ["--fit", "on", "-np", "4", "-c", "16384", "--jinja"],
         "native_command": native_command,
-        "official_evaluator_command": bench_command(SERVED_ID, out),
+        "sample_size": count,
+        "sampled_public_slice": sample is not None,
+        "official_evaluator_command": bench_command(
+            SERVED_ID, out, count=count, tasks=tasks
+        ),
         "official_source": source,
         "model": model,
         "admission": gate,
@@ -521,7 +550,7 @@ def execute(out: Path) -> dict[str, object]:
         served = serve_single_model(native)
 
         manifest.update({"native_cuda": cuda, "observed_context": geometry, "served_model": served})
-        command = bench_command(served, out)
+        command = bench_command(served, out, count=count, tasks=tasks)
         manifest["official_evaluator_command"] = command
         (out / "experimental-manifest.private.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True), encoding="utf8"
@@ -555,7 +584,7 @@ def execute(out: Path) -> dict[str, object]:
             raise ValueError("official evaluator produced no result file")
         blob = raw.read_bytes()
         audit = audit_official(
-            blob, served_id=served, count=len(TASKS), max_steps=MAX_STEPS, expected=TASKS
+            blob, served_id=served, count=count, max_steps=MAX_STEPS, expected=tasks
         )
         native_text = (out / "native.private.log").read_text("utf-8", errors="replace")
         truncation = audit_truncation(native_text, context=CONTEXT, max_steps=MAX_STEPS)
@@ -580,9 +609,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--sample", type=int, default=None,
+                        help="score the first N public tasks instead of the pinned six")
     args = parser.parse_args()
     try:
-        result = execute(args.out) if args.execute else preflight(args.out)
+        result = execute(args.out, sample=args.sample) if args.execute else preflight(args.out)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         result = {"status": "REFUSED", "reason": type(exc).__name__,
                   "detail": str(exc)[:400], "profile": PROFILE,

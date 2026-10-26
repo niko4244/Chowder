@@ -8,6 +8,7 @@ import pytest
 
 from chowder_batch.reap_q4_automationbench_ctx64k_20261026 import (
     CONTEXT,
+    FLAGS,
     MAX_STEPS,
     TASKS,
     audit_official,
@@ -63,6 +64,15 @@ def blob(doc: dict) -> bytes:
 # --------------------------------------------------------------------------
 # geometry / cuda
 # --------------------------------------------------------------------------
+
+
+def test_decoding_is_anti_repetition_not_a_generation_cap():
+    # Measured: --n-predict is not enforced on the chat endpoint, while sampler
+    # flags do bind. The launch must therefore carry the decoder settings.
+    assert "--n-predict" not in FLAGS
+    rendered = " ".join(FLAGS)
+    assert "--repeat-penalty" in rendered and "--dry-multiplier" in rendered
+    assert "--temperature" in rendered
 
 
 def test_geometry_accepts_declared_context():
@@ -153,6 +163,14 @@ def test_audit_accepts_the_same_slice_in_a_different_order():
     audit = audit_official(blob(official_result()), served_id="reap128_v2_q4",
                            count=len(TASKS), max_steps=MAX_STEPS,
                            expected=tuple(reversed(TASKS)))
+    assert audit["completed_tasks"] == 6
+
+
+def test_sampled_run_pins_by_recorded_names_not_the_six_task_slice():
+    # A sampled launch scores whatever the evaluator selected; the audit then
+    # pins that recorded set by requiring count and uniqueness only.
+    audit = audit_official(blob(official_result()), served_id="reap128_v2_q4",
+                           count=len(TASKS), max_steps=MAX_STEPS, expected=None)
     assert audit["completed_tasks"] == 6
 
 
