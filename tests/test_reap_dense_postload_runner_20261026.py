@@ -66,6 +66,27 @@ def test_frozen_source_snapshot_keeps_exact_dense_model_identity_and_protocol():
     assert ast.literal_eval(flags[0]) == EXPECTED_FLAGS
 
 
+def test_material_host_admission_happens_before_first_large_gguf_read():
+    source = RUNNER.read_text(encoding="utf-8")
+    first_hash = source.index("weights=source('dense-q4_k_m.gguf'")
+    census = source.index("R['material_prehash_host_admission']=admit_material_dense_load(")
+    after_hash = source.index("R['material_new_host_preflight']=admit_material_dense_load(")
+    assert census < first_hash < after_hash
+    # If hashing itself pressures the cgroup, sampling must interrupt the
+    # 21.17-GB read rather than waiting until after the oversized input.
+    assert "check_runtime(host())" in source[source.index("def hash_file"):source.index("def source")]
+    assert "R['material_prehash_host']" in source
+
+
+def test_terminal_complete_requires_stopped_supervisor_and_no_fatal():
+    source = RUNNER.read_text(encoding="utf8")
+    terminal = source.index("R['status']='COMPLETE_DENSE_FIRST200_PROVISIONAL_NOT_FROZEN_WINDOWS_GATE'")
+    quiesce = source.index("stop.set();guard.join(timeout=12)")
+    final_abort = source.index("if guard.is_alive() or fatal:")
+    assert quiesce < final_abort < terminal
+    assert "check_runtime(host());check_owner()" in source[final_abort:terminal]
+
+
 @pytest.mark.parametrize("invalid", [
     {"cgroup_unused_gib": 29.444},
     {"cgroup_unused_gib": 33.451},
@@ -105,13 +126,30 @@ def test_provisioned_host_can_only_attempt_new_provisional_load():
 def test_postload_reclaim_must_be_actual_4_gib_and_14_gib_headroom(before, after):
     _, env = _functions()
     with pytest.raises((ValueError, RuntimeError)):
-        env["admit_dense_postload"](before, after)
+        env["admit_dense_postload"](before, after, 20.0, 15.0, 0, 0)
 
 
 def test_good_postload_is_only_provisional_not_a_gate_pass():
     _, env = _functions()
-    result = env["admit_dense_postload"](10.5, 26.0)
+    result = env["admit_dense_postload"](10.5, 26.0, 20.0, 4.0, 0, 0)
     assert result["measured_recovered_gib"] == pytest.approx(15.5)
+    assert result["measured_file_cache_decrease_gib"] == pytest.approx(16.0)
     assert result["status"] == "POSTLOAD_RECLAIM_ADMITTED_TO_PROVISIONAL_SCORING_ONLY"
     assert result["windows_gate_eligible"] is False
     assert result["speed_certified"] is False
+
+
+@pytest.mark.parametrize("pre,post,events_pre,events_post", [
+    (20.0, 17.0, 0, 0),
+    (20.0, 20.0, 0, 0),
+    (20.0, 10.0, 0, 1),
+    (20.0, 10.0, 1, 1),
+    (20.0, float("nan"), 0, 0),
+    (True, 1.0, 0, 0),
+    (20.0, 10.0, False, 0),
+    (20.0, 10.0, 0, None),
+])
+def test_dense_refuses_unproven_clean_cache_or_native_oom(pre, post, events_pre, events_post):
+    _, env = _functions()
+    with pytest.raises((RuntimeError, ValueError)):
+        env["admit_dense_postload"](10.5, 25.0, pre, post, events_pre, events_post)

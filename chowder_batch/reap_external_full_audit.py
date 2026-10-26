@@ -105,6 +105,11 @@ def _check_postload_resource_evidence(receipt: dict) -> dict:
     for record in (pre, post, before, after):
         gpu_min = [min(left, right) for left, right in zip(gpu_min, record["gpu"])]
     runtime_samples = 0
+    last_runtime_stamp = None
+    first_runtime_stamp = None
+    max_runtime_gap = 0.0
+    boot_ended = False
+    last_boot_seconds = -1.0
     for i, sample in enumerate(samples):
         if not isinstance(sample, dict):
             raise ValueError("malformed supervised resource sample")
@@ -129,16 +134,50 @@ def _check_postload_resource_evidence(receipt: dict) -> dict:
                 raise ValueError("native runtime watchdog timestamp malformed") from exc
             if parsed.utcoffset() != timedelta(0):
                 raise ValueError("native runtime watchdog timestamp is not UTC")
+            if last_runtime_stamp is not None:
+                gap = (parsed - last_runtime_stamp).total_seconds()
+                if not 0 < gap <= 15:
+                    raise ValueError("native scoring watchdog gap, ordering or sampling cadence invalid")
+                max_runtime_gap = max(max_runtime_gap, gap)
+            else:
+                first_runtime_stamp = parsed
+            last_runtime_stamp = parsed
+            boot_ended = True
             runtime_samples += 1
         elif ("seconds" not in sample or
               type(sample["seconds"]) not in (int, float) or
               not math.isfinite(sample["seconds"]) or sample["seconds"] < 0):
             raise ValueError("original startup sample has neither boot nor runtime time witness")
+        else:
+            seconds = sample["seconds"]
+            if boot_ended or seconds < last_boot_seconds:
+                raise ValueError("original native boot observation is out of recorded time order")
+            last_boot_seconds = seconds
         ram_min = min(ram_min, ram)
         unused_min = min(unused_min, unused)
         gpu_min = [min(left, right) for left, right in zip(gpu_min, gpu)]
-    if runtime_samples < 1:
-        raise ValueError("complete suite has no native scoring-time resource watchdog evidence")
+    if runtime_samples < 2 or first_runtime_stamp is None or last_runtime_stamp is None:
+        raise ValueError("complete suite lacks sustained scoring-time resource watchdog evidence")
+    suites = receipt.get("suite_results")
+    if not isinstance(suites, dict) or set(suites) != {"gsm8k", "humaneval"}:
+        raise ValueError("complete original suite durations unavailable for watchdog coverage")
+    expected_elapsed = 0.0
+    for suite, count in (("gsm8k", 1319), ("humaneval", 164)):
+        summary = suites[suite]
+        if not isinstance(summary, dict) or type(summary.get("n")) is not int or summary["n"] != count:
+            raise ValueError("original complete suite count missing from watchdog evidence")
+        wall = summary.get("suite_elapsed_wall_seconds")
+        if type(wall) not in (int, float) or not math.isfinite(wall) or wall <= 0:
+            raise ValueError("invalid original full-suite monotonic wall duration")
+        expected_elapsed += wall
+    measured_span = (last_runtime_stamp - first_runtime_stamp).total_seconds()
+    # Original notebooks start their 5-second watchdog immediately before
+    # GSM8K and stop it after all HumanEval requests. Compare independently
+    # sampled UTC duration to the two measured monotonic serving intervals,
+    # allowing 2% cross-clock tolerance but not missing entire sub-cohorts.
+    if not (0.98 * expected_elapsed - 2 <= measured_span <=
+            1.02 * expected_elapsed + 15):
+        raise ValueError("native watchdog does not cover measured full suite duration")
     return {
         "status": "COMPLETE_LINUX_SOURCE_MEASURED_POSTLOAD_RESOURCE_WITNESS",
         "initial_actual_gpu_free_mib": initial["gpu"],
@@ -148,6 +187,9 @@ def _check_postload_resource_evidence(receipt: dict) -> dict:
         "minimum_measured_physical_available_gib": ram_min,
         "monitored_sample_count": len(samples),
         "monitored_runtime_sample_count": runtime_samples,
+        "monitored_runtime_span_seconds": round(measured_span, 3),
+        "registered_full_suite_wall_seconds": round(expected_elapsed, 3),
+        "maximum_runtime_sample_gap_seconds": round(max_runtime_gap, 3),
         "minimum_observed_gpu_free_mib": gpu_min,
         "largest_sampled_drop_from_start_gpu_free_mib": [
             max(0, original - lowest) for original, lowest in zip(initial["gpu"], gpu_min)

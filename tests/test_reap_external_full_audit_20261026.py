@@ -3,7 +3,7 @@
 import copy
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -163,7 +163,8 @@ def _postload_receipt(arm="reap128_v2_q8"):
         return {"physical_free_gib": ram, "cgroup_unused_gib": unused,
                 "gpu_free_mib": list(gpu)}
     started = {"seconds": 1.0, **host(45.1, 29.444)}
-    runtime = {"time_utc": datetime.now(timezone.utc).isoformat(),
+    start_utc = datetime(2026, 10, 26, 9, 8, 18, tzinfo=timezone.utc)
+    runtime = {"time_utc": start_utc.isoformat(),
                **host(30.1, 27.83, (4900, 5000))}
     value.update(
         initial=host(45.1, 29.444),
@@ -174,9 +175,13 @@ def _postload_receipt(arm="reap128_v2_q8"):
         before_inference_host=host(30.2, 28.38, (5100, 5200)),
         after_inference_host=host(29.8, 26.76, (5110, 5190)),
         postload_clean_file_cache_recovered_gib=17.93,
+        suite_results={"gsm8k": {"n": 1319, "suite_elapsed_wall_seconds": 6.0},
+                       "humaneval": {"n": 164, "suite_elapsed_wall_seconds": 4.0}},
         samples=[started, {"seconds": 6.0, **host(32.1, 10.471)},
-                 runtime, {"time_utc": datetime.now(timezone.utc).isoformat(),
-                           **host(29.8, 26.76, (4700, 4800))}],
+                 runtime, {"time_utc": (start_utc + timedelta(seconds=5)).isoformat(),
+                           **host(29.8, 26.76, (4700, 4800))},
+                 {"time_utc": (start_utc + timedelta(seconds=10)).isoformat(),
+                  **host(29.8, 26.76, (4800, 4900))}],
     )
     return value
 
@@ -191,7 +196,10 @@ def test_complete_postload_arms_require_actual_source_bound_memory_recovery(arm)
     assert witness["measured_postload_recovery_gib"] == pytest.approx(17.93)
     assert witness["original_windows_commit_attested"] is False
     assert witness["model_fit_windows_gate_eligible"] is False
-    assert witness["monitored_runtime_sample_count"] == 2
+    assert witness["monitored_runtime_sample_count"] == 3
+    assert witness["monitored_runtime_span_seconds"] == pytest.approx(10)
+    assert witness["registered_full_suite_wall_seconds"] == pytest.approx(10)
+    assert witness["maximum_runtime_sample_gap_seconds"] == pytest.approx(5)
     assert witness["minimum_observed_gpu_free_mib"] == [4700, 4800]
     assert witness["largest_sampled_drop_from_start_gpu_free_mib"] == [10212, 10112]
     assert witness["gpu_peak_instantaneous_claimed"] is False
@@ -202,6 +210,16 @@ def test_complete_postload_arms_require_actual_source_bound_memory_recovery(arm)
     lambda r: r.pop("samples"),
     lambda r: r.update(samples=[]),
     lambda r: r.update(samples=r["samples"][:2]),
+    lambda r: r.update(samples=r["samples"][:3]),
+    lambda r: r["samples"][3].update(time_utc=r["samples"][2]["time_utc"]),
+    lambda r: r["samples"][4].update(time_utc=r["samples"][2]["time_utc"]),
+    lambda r: r["samples"][4].update(
+        time_utc=(datetime(2026, 10, 26, 10, tzinfo=timezone.utc)).isoformat()),
+    lambda r: r["suite_results"]["gsm8k"].update(suite_elapsed_wall_seconds=400),
+    lambda r: r["suite_results"]["gsm8k"].update(suite_elapsed_wall_seconds=float("nan")),
+    lambda r: r["suite_results"]["humaneval"].update(suite_elapsed_wall_seconds=True),
+    lambda r: r["suite_results"]["gsm8k"].update(n=1318),
+    lambda r: r["suite_results"].pop("humaneval"),
     lambda r: r["samples"][2].update(time_utc="not-a-date"),
     lambda r: r["samples"][2].update(time_utc="2026-10-26T13:00:00"),
     lambda r: r["samples"][2].pop("time_utc"),

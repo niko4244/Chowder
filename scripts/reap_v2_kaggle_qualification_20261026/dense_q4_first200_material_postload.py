@@ -25,7 +25,14 @@ def save():
 def hash_file(p):
     h=hashlib.sha256()
     with p.open('rb') as f:
-        for block in iter(lambda:f.read(8*1024*1024),b''):h.update(block)
+        read_bytes=0
+        for block in iter(lambda:f.read(8*1024*1024),b''):
+            h.update(block)
+            read_bytes+=len(block)
+            if p.stat().st_size>GIB and read_bytes%(256*1024*1024)==0:
+                # Reading 21 GiB is itself a container-memory operation.
+                # Never wait until model load to protect original floor.
+                check_runtime(host())
         # Read-only cache eviction after SHA verification: avoid pinning 21.17 GB
         # clean GGUF page-cache in a constrained Kaggle cgroup before CUDA load.
         # It does not modify or rewrite the immutable source model.
@@ -83,17 +90,45 @@ def admit_material_dense_load(start, disk_free_bytes):
             'minimum_unconsumed_cgroup_gib':MINIMUM_NEW_DENSE_CGROUP_GIB,
             'windows_gate_eligible':False,'speed_certified':False}
 
-def admit_dense_postload(before_unused_gib, after_unused_gib):
-    """A file-cache advisory is not credited until measured after full load."""
-    for key,value in (('before',before_unused_gib),('after',after_unused_gib)):
+def admit_dense_postload(before_unused_gib, after_unused_gib,
+                         before_file_gib, after_file_gib, oom_before, oom_after):
+    """Accept only actual file-cache recovery with no native cgroup OOM."""
+    for key,value in (('before',before_unused_gib),('after',after_unused_gib),
+                      ('file_before',before_file_gib),('file_after',after_file_gib)):
         if type(value) not in (int,float) or not math.isfinite(value) or value<0:
             raise ValueError('nonfinite/invalid '+key+' postload cgroup witness')
+    if (type(oom_before) is not int or type(oom_after) is not int or
+            oom_before!=0 or oom_after!=0):
+        raise ValueError('original dense cgroup has missing or nonzero OOM event')
     recovered=after_unused_gib-before_unused_gib
+    file_drop=before_file_gib-after_file_gib
     if recovered<4 or after_unused_gib<14 or before_unused_gib<10:
         raise RuntimeError('dense postload file-cache recovery or runtime reserve not proven')
+    if file_drop<4 or abs(file_drop-recovered)>max(1.0,recovered*0.1):
+        raise RuntimeError('dense cgroup unused improvement not attributable to clean file-cache decrease')
     return {'status':'POSTLOAD_RECLAIM_ADMITTED_TO_PROVISIONAL_SCORING_ONLY',
             'measured_recovered_gib':recovered,
+            'measured_file_cache_decrease_gib':file_drop,
             'windows_gate_eligible':False,'speed_certified':False}
+
+def cgroup_mem_evidence():
+    """Native cgroup-v2 clean-file charge and OOM events; refuse ambiguity."""
+    root=pathlib.Path('/sys/fs/cgroup')
+    def pairs(name):
+        rows=[line.split() for line in (root/name).read_text().splitlines()]
+        if any(len(row)!=2 for row in rows):
+            raise RuntimeError('malformed native cgroup '+name)
+        data={key:int(value) for key,value in rows}
+        if len(data)!=len(rows):raise RuntimeError('duplicate native cgroup metric')
+        return data
+    stats=pairs('memory.stat')
+    events=pairs('memory.events')
+    if 'file' not in stats or 'oom' not in events or 'oom_kill' not in events:
+        raise RuntimeError('missing original cgroup clean-file/OOM attribution')
+    if any(v<0 for v in (*stats.values(),*events.values())):
+        raise RuntimeError('invalid negative native cgroup counter')
+    return {'file_gib':stats['file']/GIB,'oom':events['oom'],
+            'oom_kill':events['oom_kill']}
 
 def remove_owned():
     global server
@@ -104,6 +139,12 @@ def remove_owned():
             except Exception:pass
 
 try:
+    # Original failed 29.444-GiB runner must fail BEFORE a large model SHA
+    # streams 21.17 GB through its already memory-constrained cgroup.
+    R['material_prehash_host']=host()
+    R['material_prehash_host_admission']=admit_material_dense_load(
+        R['material_prehash_host'],shutil.disk_usage(WORK).free)
+    check_runtime(R['material_prehash_host'])
     weights=source('dense-q4_k_m.gguf',21166757984,ORIGINAL_GGUF_SHA)
     receipt=None # Dense is an independently fixed reference, never the Q4 candidate sidecar
     gsm=source('gsm8k.json',484685,'4dae0860ba5b9785343070a4919504f0aa4eccb01a96108b5b851d23e059a522')
@@ -162,17 +203,27 @@ try:
         R['seconds_until_ready']=round(time.monotonic()-boot,1)
         # Mandatory independent postload recovery before FIRST official item.
         # This does not reduce registered serving concurrency/context/model.
-        R['pre_reclaim_host']=host()
+        R['pre_reclaim_host']=host();check_runtime(R['pre_reclaim_host'])
+        R['pre_reclaim_cgroup']=cgroup_mem_evidence()
+        if R['pre_reclaim_cgroup']['oom'] or R['pre_reclaim_cgroup']['oom_kill']:
+            raise RuntimeError('earlier native cgroup OOM event invalidates model load')
         if not (hasattr(os,'posix_fadvise') and hasattr(os,'POSIX_FADV_DONTNEED')):
             raise RuntimeError('required read-only clean model cache advisory unavailable')
         with weights.open('rb',buffering=0) as handle:
             os.posix_fadvise(handle.fileno(),0,0,os.POSIX_FADV_DONTNEED)
-        time.sleep(5)
+        for _ in range(5):
+            time.sleep(1)
+            check_runtime(host())
         R['post_reclaim_host']=host()
+        R['post_reclaim_cgroup']=cgroup_mem_evidence()
         check_runtime(R['post_reclaim_host'])
         R['postload_measured_admission']=admit_dense_postload(
             R['pre_reclaim_host']['cgroup_unused_gib'],
-            R['post_reclaim_host']['cgroup_unused_gib'])
+            R['post_reclaim_host']['cgroup_unused_gib'],
+            R['pre_reclaim_cgroup']['file_gib'],
+            R['post_reclaim_cgroup']['file_gib'],
+            R['pre_reclaim_cgroup']['oom']+R['pre_reclaim_cgroup']['oom_kill'],
+            R['post_reclaim_cgroup']['oom']+R['post_reclaim_cgroup']['oom_kill'])
         R['postload_clean_file_cache_recovered_gib']=round(
             R['postload_measured_admission']['measured_recovered_gib'],3)
         save()
@@ -240,6 +291,13 @@ try:
                 R['suite_results'][suite]=result;save()
             R['after_inference_host']=host();check_runtime(R['after_inference_host'])
             check_owner()
+            # An asynchronously fatal resource/owner sample must never race
+            # with the terminal COMPLETE receipt. Quiesce the actual watchdog
+            # and recheck the owner/limits before publishing final success.
+            stop.set();guard.join(timeout=12)
+            if guard.is_alive() or fatal:
+                raise RuntimeError('dense supervisor did not quiesce or reported a safety abort')
+            check_runtime(host());check_owner()
             R['status']='COMPLETE_DENSE_FIRST200_PROVISIONAL_NOT_FROZEN_WINDOWS_GATE'
             save()
         finally:
