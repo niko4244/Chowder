@@ -31,6 +31,18 @@ MODEL = "reap128_v2_q4"
 PORT = 8891
 PRIVATE_MAX_SMOKE = 1
 FULL_TASK_COUNT = 600
+# Source-pinned short-prompt research slice, chosen prospectively after the
+# initial task exhausted the frozen 4,096-token per-slot native context.
+# These are official PUBLIC tasks, not the full 600-task leaderboard cohort.
+SHORT_PUBLIC_TASKS = (
+    "sales.apply_project_label",
+    "sales.mark_vip_emails_read",
+    "sales.create_contact_for_account",
+    "sales.advance_opportunity_stage",
+    "marketing.event_followup_personalization",
+    "hr.visa_expiration_monitoring",
+)
+SHORT_PUBLIC_COUNT = len(SHORT_PUBLIC_TASKS)
 HEALTH_TIMEOUT_SECONDS = 300
 MAX_SMOKE_WALL_SECONDS = 1800
 PRIVATE_ROOT = Path("F:/reap-v2-automationbench-private-20261026")
@@ -74,9 +86,10 @@ def _source_check() -> dict:
         "import hashlib,json;"
         "d=get_combined_dataset(DEFAULT_DOMAINS);"
         "rows=[(str(x['example_id']),str(x['prompt'])) for x in d];"
+        "names=[json.loads(x['info'])['task_name'] for x in d];"
         "raw=json.dumps(rows,ensure_ascii=False,separators=(',',':')).encode('utf8');"
         "print(json.dumps({'n':len(rows),'domains':DEFAULT_DOMAINS,"
-        "'source_sha256':hashlib.sha256(raw).hexdigest()}))"
+        "'source_sha256':hashlib.sha256(raw).hexdigest(), 'names':names}))"
     )
     data = subprocess.run([str(BENCH_PYTHON), "-I", "-c", script],
                           capture_output=True, text=True, cwd=BENCH_ROOT,
@@ -87,6 +100,10 @@ def _source_check() -> dict:
                                          "support", "finance", "hr"]
             or source.get("source_sha256") != PUBLIC_600_PROMPTS_SHA256):
         raise ValueError("public benchmark population/source integrity mismatch")
+    actual_names = source.get("names")
+    if (not isinstance(actual_names, list) or len(actual_names) != FULL_TASK_COUNT
+            or any(actual_names.count(name) != 1 for name in SHORT_PUBLIC_TASKS)):
+        raise ValueError("named official short-slice task source mismatch")
     return {"source_git_commit": revision,
             "public_source_sha256": PUBLIC_600_PROMPTS_SHA256,
             "public_tasks": FULL_TASK_COUNT, "python": version.stdout.strip(),
@@ -94,8 +111,8 @@ def _source_check() -> dict:
 
 
 def _commands(out: Path, *, count: int, port: int = PORT) -> tuple[list[str], list[str]]:
-    if type(count) is not int or count not in (PRIVATE_MAX_SMOKE, FULL_TASK_COUNT):
-        raise ValueError("use exactly one discovery task or all 600 public tasks")
+    if type(count) is not int or count not in (PRIVATE_MAX_SMOKE, SHORT_PUBLIC_COUNT, FULL_TASK_COUNT):
+        raise ValueError("use exactly one discovery task, the pinned six-task slice or all 600 public tasks")
     if type(port) is not int or port != PORT:
         raise ValueError("reserved private loopback port required")
     native = [str(watchdog.SERVER), *reap_serve.FLAGS, "--host", "127.0.0.1",
@@ -110,6 +127,8 @@ def _commands(out: Path, *, count: int, port: int = PORT) -> tuple[list[str], li
         "--max-steps", "50", "--no-ensure-complete",
         "--export-json", str(out / "public-automationbench.private.json"),
     ]
+    if count == SHORT_PUBLIC_COUNT:
+        command.extend(("--tasks", ",".join(SHORT_PUBLIC_TASKS)))
     return native, command
 
 
@@ -142,7 +161,9 @@ def _read_only_status(out: Path, *, count: int) -> dict:
     return {"status": "READY_TO_ATTEMPT" if admitted["status"].startswith("ADMITTED_")
             else "REFUSED_RESOURCE_ADMISSION",
             "official_suite": "AutomationBench v1.0.6 PUBLIC",
-            "count_requested": count, "original_model_sha256": watchdog.MODEL_SHA,
+            "count_requested": count,
+            "named_public_slice": list(SHORT_PUBLIC_TASKS) if count == SHORT_PUBLIC_COUNT else None,
+            "original_model_sha256": watchdog.MODEL_SHA,
             "serving_flags": reap_serve.FLAGS,
             "admission": admitted, "current": live,
             "gen0_status": "BLOCKED", "chosen": None, "release_approved": False}
@@ -206,6 +227,59 @@ def _verify_native_cuda_startup(log_path: Path) -> dict:
             "measured_experts_offloaded": 0}
 
 
+def _triage_official_output(path: Path, *, count: int, served_id: str) -> dict:
+    """Distinguish completed official tasks from evaluator-aborted rollouts.
+
+    This is only a strict, source-bound census. A separate independent task
+    replay/review is still needed to certify completed benchmark scores.
+    Never put model completions or simulated API records in return values.
+    """
+    result = json.loads(path.read_bytes(), parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)))
+    if type(result) is not dict or set(result) != {"meta", "summary", "tasks", "usage_by_task"}:
+        raise ValueError("official result root schema mismatch")
+    meta, summary, tasks = result["meta"], result["summary"], result["tasks"]
+    if (type(meta) is not dict or type(summary) is not dict or type(tasks) is not list
+            or meta.get("benchmark_version") != "1.0.6"
+            or meta.get("model") != served_id or meta.get("toolset") != "api"
+            or meta.get("max_steps") != 50 or meta.get("total_tasks") != count
+            or len(tasks) != count):
+        raise ValueError("official evaluator identity/population mismatch")
+    names = [x.get("name") if isinstance(x, dict) else None for x in tasks]
+    if any(type(n) is not str or not n for n in names) or len(set(names)) != count:
+        raise ValueError("official evaluator has missing/repeated task names")
+    if count == SHORT_PUBLIC_COUNT and set(names) != set(SHORT_PUBLIC_TASKS):
+        raise ValueError("official pinned six-task slice changed")
+    aborted = summary.get("aborted_tasks")
+    if (not isinstance(aborted, list) or len(set(aborted)) != len(aborted)
+            or any(n not in names for n in aborted)):
+        raise ValueError("official aborted task identity mismatch")
+    for row in tasks:
+        if (type(row.get("passed")) is not bool
+                or type(row.get("score")) not in (int, float)
+                or not 0 <= row["score"] <= 1
+                or type(row.get("num_model_calls")) is not int
+                or type(row.get("num_tool_calls")) is not int
+                or row["num_model_calls"] < 0 or row["num_tool_calls"] < 0
+                or row["passed"] != (row["score"] == 1.0)):
+            raise ValueError("official task metric/schema malformed")
+    completed = [x for x in tasks if x["name"] not in aborted]
+    if (type(summary.get("passed_count")) is not int
+            or summary["passed_count"] != sum(x["passed"] for x in completed)
+            or any(x["passed"] for x in tasks if x["name"] in aborted)):
+        raise ValueError("official scorer summary/aborted-row mismatch")
+    return {
+        "completed_tasks": len(completed),
+        "aborted_unscored_tasks": len(aborted),
+        "independently_verified_passes": None,
+        "raw_official_passes": summary["passed_count"],
+        "model_calls": sum(x["num_model_calls"] for x in tasks),
+        "tool_calls": sum(x["num_tool_calls"] for x in tasks),
+        "raw_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "status": ("ALL_OFFICIAL_ROLLOUTS_ABORTED_UNSCORED" if not completed
+                   else "RAW_COMPLETED_PUBLIC_ROLLOUTS_NEED_INDEPENDENT_ROW_AUDIT"),
+    }
+
+
 def run_private_public_benchmark(out: Path, *, count: int = PRIVATE_MAX_SMOKE) -> dict:
     if os.name != "nt":
         raise ValueError("original registered Q4 Windows GPU host required")
@@ -225,6 +299,7 @@ def run_private_public_benchmark(out: Path, *, count: int = PRIVATE_MAX_SMOKE) -
     server_cmd, bench_cmd = _commands(out, count=count)
     out.mkdir(mode=0o700)
     private_manifest = {**approved, **confirmed,
+                        "named_public_slice": list(SHORT_PUBLIC_TASKS) if count == SHORT_PUBLIC_COUNT else None,
                         "server_command": server_cmd,
                         "benchmark_command": bench_cmd,
                         "score_source": "official_public_task_completed_correctly",
@@ -233,7 +308,7 @@ def run_private_public_benchmark(out: Path, *, count: int = PRIVATE_MAX_SMOKE) -
         json.dumps(private_manifest, sort_keys=True, indent=2), encoding="utf-8")
     native: subprocess.Popen | None = None
     task: subprocess.Popen | None = None
-    ok = False
+    outcome: dict | None = None
     started = time.monotonic()
     resource_log = (out / "resource-samples.private.jsonl").open("x", encoding="utf8")
     try:
@@ -276,7 +351,7 @@ def run_private_public_benchmark(out: Path, *, count: int = PRIVATE_MAX_SMOKE) -
                                         stdin=subprocess.DEVNULL, stdout=bench_log,
                                         stderr=subprocess.STDOUT, shell=False,
                                         creationflags=subprocess.CREATE_NO_WINDOW)
-                max_wall = MAX_SMOKE_WALL_SECONDS if count == PRIVATE_MAX_SMOKE else 12 * 3600
+                max_wall = MAX_SMOKE_WALL_SECONDS if count in (PRIVATE_MAX_SMOKE, SHORT_PUBLIC_COUNT) else 12 * 3600
                 while task.poll() is None:
                     _resource_watch(native, out, started=started, timeout=max_wall,
                                     log=resource_log, phase="official_task_evaluation")
@@ -287,7 +362,7 @@ def run_private_public_benchmark(out: Path, *, count: int = PRIVATE_MAX_SMOKE) -
                 if (not raw.is_file() or raw.is_symlink()
                         or not 0 < raw.stat().st_size <= MAX_PRIVATE_JSON_BYTES):
                     raise ValueError("official benchmark result missing or unbounded")
-                ok = True
+                outcome = _triage_official_output(raw, count=count, served_id=served_id)
     finally:
         try:
             # Kill only processes created by this runner, never protected services.
@@ -299,8 +374,8 @@ def run_private_public_benchmark(out: Path, *, count: int = PRIVATE_MAX_SMOKE) -
                 watchdog.verify_native_shutdown(native.pid, PORT)
         finally:
             resource_log.close()
-    return {"status": "RAW_PUBLIC_BENCHMARK_NEEDS_INDEPENDENT_ROW_AUDIT" if ok
-            else "UNVERIFIED_INCOMPLETE",
+    return {"status": outcome["status"] if outcome else "UNVERIFIED_INCOMPLETE",
+            "census": outcome,
             "public_requested": count, "private_output": str(out),
             "public_leaderboard_equivalent": False,
             "gen0_status": "BLOCKED", "chosen": None, "release_approved": False}
@@ -310,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--count", type=int, choices=(1, FULL_TASK_COUNT), default=1)
+    parser.add_argument("--count", type=int, choices=(1, SHORT_PUBLIC_COUNT, FULL_TASK_COUNT), default=1)
     args = parser.parse_args(argv)
     try:
         result = (run_private_public_benchmark(args.out, count=args.count) if args.execute
@@ -321,7 +396,8 @@ def main(argv: list[str] | None = None) -> int:
                   "release_approved": False}
     print(json.dumps(result, sort_keys=True, default=str))
     return 0 if result["status"] in ("READY_TO_ATTEMPT",
-                                     "RAW_PUBLIC_BENCHMARK_NEEDS_INDEPENDENT_ROW_AUDIT") else 2
+                                     "RAW_COMPLETED_PUBLIC_ROLLOUTS_NEED_INDEPENDENT_ROW_AUDIT",
+                                     "ALL_OFFICIAL_ROLLOUTS_ABORTED_UNSCORED") else 2
 
 
 if __name__ == "__main__":

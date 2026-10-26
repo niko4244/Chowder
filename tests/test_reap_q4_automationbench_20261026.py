@@ -4,6 +4,7 @@ These tests never load GGUF weights, open GPU ports or invoke model tools.
 """
 
 from pathlib import Path
+import json
 import subprocess
 from unittest.mock import MagicMock, patch
 
@@ -25,9 +26,71 @@ def test_frozen_q4_flags_and_official_evaluator_command():
     assert "--toolset" in command and command[command.index("--toolset") + 1] == "api"
 
 
+def test_six_named_public_tasks_retain_registered_serving_and_official_scorer():
+    native, command = ab._commands(Path("F:/private/out"), count=ab.SHORT_PUBLIC_COUNT)
+    assert native[1:8] == ["--fit", "on", "-np", "4", "-c", "16384", "--jinja"]
+    assert command[command.index("--num-examples") + 1] == str(ab.SHORT_PUBLIC_COUNT)
+    assert command[command.index("--tasks") + 1].split(",") == list(ab.SHORT_PUBLIC_TASKS)
+    assert len(set(ab.SHORT_PUBLIC_TASKS)) == 6
+    assert command[1:4] == ["-I", "-m", "automationbench.scripts.eval"]
+    assert command[command.index("--max-concurrent") + 1] == "1"
+    assert command[command.index("--max-steps") + 1] == "50"
+
+
+def test_full_600_unchanged_without_posthoc_task_filter():
+    native, command = ab._commands(Path("F:/private/out"), count=600)
+    assert "--tasks" not in command
+    assert command[command.index("--num-examples") + 1] == "600"
+
+
+def _official_fixture(tmp_path, *, aborted: list[str], second_passed: bool = False):
+    rows = [{"name": "domain.first", "score": 0.0, "passed": False,
+             "num_model_calls": 1, "num_tool_calls": 3},
+            {"name": "domain.second", "score": 1.0 if second_passed else 0.0,
+             "passed": second_passed, "num_model_calls": 2, "num_tool_calls": 1}]
+    data = {"meta": {"benchmark_version": "1.0.6", "model": "original-q4",
+                     "toolset": "api", "total_tasks": 2, "max_steps": 50},
+            "summary": {"aborted_tasks": aborted, "passed_count": int(second_passed)},
+            "tasks": rows, "usage_by_task": {}}
+    p = tmp_path / "official-private.json"
+    p.write_text(json.dumps(data), encoding="utf-8")
+    return p
+
+
+def test_all_official_aborts_are_not_scored_as_model_failures(tmp_path):
+    p = _official_fixture(tmp_path, aborted=["domain.first", "domain.second"])
+    receipt = ab._triage_official_output(p, count=2, served_id="original-q4")
+    assert receipt["status"] == "ALL_OFFICIAL_ROLLOUTS_ABORTED_UNSCORED"
+    assert receipt["completed_tasks"] == 0
+    assert receipt["aborted_unscored_tasks"] == 2
+    assert receipt["raw_official_passes"] == 0
+    assert receipt["independently_verified_passes"] is None
+    assert receipt["model_calls"] == 3 and receipt["tool_calls"] == 4
+
+
+def test_partial_official_completion_remains_uncertified(tmp_path):
+    p = _official_fixture(tmp_path, aborted=["domain.first"], second_passed=True)
+    receipt = ab._triage_official_output(p, count=2, served_id="original-q4")
+    assert receipt["completed_tasks"] == 1
+    assert receipt["raw_official_passes"] == 1
+    assert receipt["status"] == "RAW_COMPLETED_PUBLIC_ROLLOUTS_NEED_INDEPENDENT_ROW_AUDIT"
+
+
+def test_official_row_audit_rejects_aborted_claimed_pass(tmp_path):
+    p = _official_fixture(tmp_path, aborted=["domain.second"], second_passed=True)
+    with pytest.raises(ValueError, match="scorer"):
+        ab._triage_official_output(p, count=2, served_id="original-q4")
+
+
+def test_official_row_audit_rejects_wrong_model(tmp_path):
+    p = _official_fixture(tmp_path, aborted=[])
+    with pytest.raises(ValueError, match="identity"):
+        ab._triage_official_output(p, count=2, served_id="unrelated-model")
+
+
 @pytest.mark.parametrize("count", [0, 2, 599, 601, -1, True, "600"])
 def test_invalid_count_refuses(count):
-    with pytest.raises(ValueError, match="one discovery task or all 600"):
+    with pytest.raises(ValueError, match="one discovery task, the pinned six-task slice or all 600"):
         ab._commands(Path("F:/private/out"), count=count)
 
 
