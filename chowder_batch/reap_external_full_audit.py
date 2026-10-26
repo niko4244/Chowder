@@ -21,6 +21,7 @@ Q4_SHA = "2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7"
 Q8_SHA = "89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6"
 RANDOM_SHA = "601871e00403658708eb4eebf3b05f9dc54a93b326e31f2f87b48cb59f92241b"
 SERVER_SHA = "f10032228f1d80b0f6639cd3bcdcc7194bbc6638368641cac7f1396775b5186d"
+MAX_ORIGINAL_SERVER_LOG_BYTES = 32 * 1024 * 1024
 EVALUATOR_SHA = "9736714f21834a45c23599a50fa92ef3bebc6cf70967aca7e2329d26b4d73ee1"
 SCORER_SHA = "d2e59aca5c0a621bac8d4979d522c9b6107f811610567d21c92a2b53960860eb"
 MODELS = {
@@ -135,12 +136,41 @@ def _read_jsonl(path: Path) -> tuple[list[dict], str]:
     return rows, hashlib.sha256(raw).hexdigest()
 
 
-def audit(machine: Path, gsm8k: Path, humaneval: Path, arm: str,
+def _check_original_native_log(receipt: dict, log_bytes: bytes) -> dict:
+    """Verify original native CUDA placement and frozen four-way KV geometry."""
+    expected = receipt.get("server_log_sha256")
+    if (not isinstance(log_bytes, bytes) or len(log_bytes) > MAX_ORIGINAL_SERVER_LOG_BYTES
+            or not re.fullmatch(r"[0-9a-f]{64}", str(expected))
+            or expected != hashlib.sha256(log_bytes).hexdigest()
+            or receipt.get("server_log_bytes") != len(log_bytes)):
+        raise ValueError("original native server log byte length/hash mismatch")
+    text = log_bytes.decode("utf8", errors="replace")
+    required = (
+        r"load_tensors:\s+offloaded\s+41/41\s+layers to GPU",
+        r"llama_context:\s+n_ctx_seq_max\s*=\s*4|llama_context:\s+n_seq_max\s*=\s*4",
+        r"llama_context:\s+n_ctx\s*=\s*16384",
+        r"llama_context:\s+n_ctx_seq\s*=\s*4096",
+        r"llama_kv_cache:\s+size\s*=\s*320\.00\s+MiB",
+        r"llama_server:\s+model loaded",
+        r"llama_server:\s+listening on http://127\.0\.0\.1:8790",
+    )
+    if any(re.search(pattern, text) is None for pattern in required):
+        raise ValueError("pinned native CUDA offload/KV/loopback topology missing from original log")
+    return {"sha256": expected, "native_gpu_offloaded_layers": "41/41",
+            "n_seq_max": 4, "n_ctx": 16384, "n_ctx_seq": 4096,
+            "total_kv_buffer_mib": 320.0, "loopback_bound": True}
+
+
+def audit(machine: Path, gsm8k: Path, humaneval: Path, server_log: Path, arm: str,
           independent_humaneval: Path | None = None) -> dict:
     from chowder_batch.reap_eval import FROZEN_V2_QUALITY_SOURCES, _digest, _load
 
     receipt, receipt_sha = _read_json(machine, limit=2 * 1024 * 1024)
     _check_machine(receipt, arm)
+    if (server_log.is_symlink() or not server_log.is_file()
+            or server_log.stat().st_size > MAX_ORIGINAL_SERVER_LOG_BYTES):
+        raise ValueError("original complete native server log missing or unbounded")
+    native_placement = _check_original_native_log(receipt, server_log.read_bytes())
     if set(receipt["suite_results"]) != {"gsm8k", "humaneval"}:
         raise ValueError("no complete, unique full-suite machine summary")
     session = receipt["session_id"]
@@ -187,6 +217,7 @@ def audit(machine: Path, gsm8k: Path, humaneval: Path, arm: str,
         "model_sha256": MODELS[arm][3],
         "session_id": session,
         "original_machine_receipt_sha256": receipt_sha,
+        "original_native_cuda_placement": native_placement,
         "human_eval_independent_execution": replay,
         "suites": verified,
         "original_windows_gate_eligible": False,
@@ -202,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--machine", type=Path, required=True)
     parser.add_argument("--gsm8k", type=Path, required=True)
     parser.add_argument("--humaneval", type=Path, required=True)
+    parser.add_argument("--server-log", type=Path, required=True)
     parser.add_argument("--model", choices=list(MODELS), required=True)
     parser.add_argument("--independent-humaneval", type=Path)
     parser.add_argument("--out", type=Path, required=True)
@@ -209,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.out.is_symlink() or args.out.exists() or not args.out.parent.is_dir():
             raise ValueError("original external evidence audit output must be a new exclusive path")
-        result = audit(args.machine, args.gsm8k, args.humaneval,
+        result = audit(args.machine, args.gsm8k, args.humaneval, args.server_log,
                        args.model, args.independent_humaneval)
         with args.out.open("x", encoding="utf8", newline="\n") as stream:
             json.dump(result, stream, indent=2, sort_keys=True, allow_nan=False)

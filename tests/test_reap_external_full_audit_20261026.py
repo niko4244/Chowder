@@ -8,6 +8,7 @@ import pytest
 
 from chowder_batch.reap_external_full_audit import (
     FROZEN_FLAGS, Q4_SHA, SERVER_SHA, _check_machine, _check_rows,
+    _check_original_native_log,
 )
 
 
@@ -104,3 +105,38 @@ def test_complete_row_bytes_hash_exact_json_linewise(tmp_path):
     path.write_bytes(b"\n".join(json.dumps(row).encode() for row in rows) + b"\n")
     expected = hashlib.sha256(path.read_bytes()).hexdigest()
     assert expected != hashlib.sha256(path.read_bytes() + b" ").hexdigest()
+
+
+def _native_log_bytes():
+    return (b"I load_tensors: offloaded 41/41 layers to GPU\n"
+            b"I llama_context: n_seq_max = 4\n"
+            b"I llama_context: n_ctx = 16384\n"
+            b"I llama_context: n_ctx_seq = 4096\n"
+            b"I llama_kv_cache: size = 320.00 MiB\n"
+            b"I llama_server: model loaded\n"
+            b"I llama_server: listening on http://127.0.0.1:8790\n")
+
+
+def test_exact_original_cuda_native_log_attests_gpu_and_four_way_kv_geometry():
+    log = _native_log_bytes()
+    claim = {"server_log_sha256": hashlib.sha256(log).hexdigest(),
+             "server_log_bytes": len(log)}
+    result = _check_original_native_log(claim, log)
+    assert result["native_gpu_offloaded_layers"] == "41/41"
+    assert result["n_ctx"] == 16384
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda b: b.replace(b"41/41", b"40/41"),
+    lambda b: b.replace(b"n_seq_max = 4", b"n_seq_max = 2"),
+    lambda b: b.replace(b"n_ctx = 16384", b"n_ctx = 8192"),
+    lambda b: b.replace(b"n_ctx_seq = 4096", b"n_ctx_seq = 2048"),
+    lambda b: b.replace(b"320.00 MiB", b"80.00 MiB"),
+    lambda b: b.replace(b"127.0.0.1:8790", b"127.0.0.1:9999"),
+])
+def test_original_gpu_fit_log_fail_closed_even_if_mutated_log_is_rehashed(mutation):
+    log = mutation(_native_log_bytes())
+    claim = {"server_log_sha256": hashlib.sha256(log).hexdigest(),
+             "server_log_bytes": len(log)}
+    with pytest.raises(ValueError):
+        _check_original_native_log(claim, log)
