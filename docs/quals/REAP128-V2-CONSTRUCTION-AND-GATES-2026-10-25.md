@@ -2119,3 +2119,39 @@ Neither successful full model construction/certification nor descriptive
 quantization error/host feasibility can satisfy the frozen Amendment4
 selection gates. **Gen-0 remains BLOCKED, chosen null, no deployment,
 PR #282 remains draft and unmerged.**
+
+### October 25 21:05 CDT — corrected cache-disabled CPU smoke safety outcome
+
+The preceding 20:54 cache-disabled preflight refusal was an accurate
+observation *at that earlier time*, not the final outcome. Host physical RAM
+subsequently recovered enough to meet a separate, stricter starting
+admission. A fourth **CPU-only** original-published-Q4 smoke was then
+launched as sole owned child PID **34872**, with
+`CUDA_VISIBLE_DEVICES=-1`, `-ngl 0`, 128-token context, one predicted token,
+low batch/thread limits, and explicit `--cache-ram 0` (the documented
+8,192-MiB default cache disabled). It started with **23.336 GiB** free
+physical RAM and **20.817 GiB** free Windows commit, above both original
+and stricter starting requirements. The owner-only supervisor observed
+physical RAM fall to **5.638 GiB**, while free commit remained
+**11.343 GiB**, and correctly terminated **only its own** CLI child upon
+breach of the unchanged original **7/8-GiB** runtime floors. There was
+no one-token inference completion or quality result, and neither original
+GGUF nor unowned Ollama/llama.cpp service/GPU process was changed.
+
+The exact exclusive fourth refusal receipt
+`docs/quals/reap128-v2-q4-cpu-smoke-original-attempt4-20261025.json`
+is **1,725 bytes**, SHA-256
+`3c2a05f436ab793cd2d5b9933bfd9236734243da109ddfb9d9206e4c41b32cde`.
+The owner stdout/stderr log is **94 bytes**, SHA-256
+`443802f3ea759447256f6afac7eb08b591bc0aa586783b1a82f9b7751d85f15d`.
+The CUDA initialization message is from a CLI launch configured for
+**no CUDA visibility and zero GPU layers**; it is not proof of GPU
+placement or a completed CPU forward. The numeric sample and full source
+tensor certification remain valid, independently published construction
+evidence. After four distinct attempts, the present shared host has **no
+verified safe original-Q4 CPU inference**. No further model load should
+proceed without a *materially different* source-verified host resource
+admission; changing context/cache alone has not resolved it. Full registered
+quality, fresh controls, placement and speed are `UNKNOWN`. Frozen
+Amendment4, historical REAP128-v1 Gate1 FAIL, Gen-0 `BLOCKED` and PR #282
+draft/unmerged remain unchanged.
