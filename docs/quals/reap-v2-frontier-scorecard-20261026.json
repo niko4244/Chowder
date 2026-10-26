@@ -1,0 +1,77 @@
+{
+  "schema": "reap-v2-frontier-scorecard.v1",
+  "generated_utc": "2026-10-26T19:05:00+00:00",
+  "scientific_selection": {
+    "status": "BLOCKED",
+    "chosen": null,
+    "release_approved": false
+  },
+  "comparability_rules": [
+    "Only rows measured in this repository by the frozen evaluator on the full frozen populations are plotted as REAP measurements.",
+    "Published vendor numbers are reference scores from different harnesses and are never a same-harness win or loss.",
+    "A vendor number whose benchmark version or tool setting does not match the screenshot row is plotted hollow and marked with an asterisk.",
+    "No REAP score for any of the 11 screenshot environments is known; those cells are UNKNOWN (N/T), never zero."
+  ],
+  "measured": {
+    "reap128_v2_q4_k_m": {
+      "precision": "Q4_K_M",
+      "weight_bytes": 11563915264,
+      "weight_sha256": "2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7",
+      "session_id": "a2a6b83e345145839cc333561b2f3baf",
+      "evidence_status": "COMPLETE_LINUX_COHORT_VERIFIED_PROVISIONAL_NOT_WINDOWS_GATE",
+      "suites": {
+        "gsm8k": {"n": 1319, "correct": 1229, "accuracy": 0.9317664897649734, "completion_tokens": 456671, "suite_wall_seconds": 4639.15, "generated_tokens_per_wall_second": 98.43850705409398},
+        "humaneval": {"n": 164, "correct": 151, "accuracy": 0.9207317073170732, "completion_tokens": 40803, "suite_wall_seconds": 457.068, "generated_tokens_per_wall_second": 89.2711806558324}
+      }
+    },
+    "reap128_v2_q8_0": {
+      "precision": "Q8_0",
+      "weight_bytes": 19748435968,
+      "weight_sha256": "89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6",
+      "session_id": "95876063255e45159f57e29306e0e885",
+      "evidence_status": "COMPLETE_LINUX_COHORT_VERIFIED_PROVISIONAL_NOT_WINDOWS_GATE",
+      "suites": {
+        "gsm8k": {"n": 1319, "correct": 1220, "accuracy": 0.9249431387414708, "completion_tokens": 467560, "suite_wall_seconds": 5726.947, "generated_tokens_per_wall_second": 81.64210355011143},
+        "humaneval": {"n": 164, "correct": 152, "accuracy": 0.926829268292683, "completion_tokens": 40281, "suite_wall_seconds": 538.774, "generated_tokens_per_wall_second": 74.76418683900856}
+      }
+    }
+  },
+  "reference_models": {
+    "qwen3.8-27b": {
+      "label": "Qwen3.8-27B",
+      "source": "https://huggingface.co/Qwen/Qwen3.8-27B",
+      "kind": "published vendor card",
+      "scores": {
+        "HLE": {"value": 30.8, "harness_match": true, "note": "no tools"},
+        "DeepSWE 1.1": {"value": 42.2, "harness_match": true, "note": ""},
+        "NL2Repo-Bench": {"value": 42.3, "harness_match": true, "note": ""},
+        "Agents' Last Exam": {"value": 20.4, "harness_match": true, "note": "Pass@1"},
+        "Terminal-Bench 4.0": {"value": 73.0, "harness_match": false, "note": "vendor figure is Terminal-Bench 2.1, not 4.0"}
+      }
+    },
+    "opus-5.5": {
+      "label": "Opus 5.5",
+      "source": "https://www.anthropic.com/claude-opus-5-5",
+      "kind": "published vendor release",
+      "scores": {
+        "Terminal-Bench 4.0": {"value": 66.4, "harness_match": true, "note": "xhigh setting"},
+        "AutomationBench 1.0.6": {"value": 40.0, "harness_match": false, "note": "Zapier official test; harness not necessarily 1.0.6"},
+        "Chartography": {"value": 89.0, "harness_match": true, "note": "with tools"},
+        "HLE": {"value": 67.7, "harness_match": false, "note": "with tools; not the screenshot no-tools row"}
+      }
+    }
+  },
+  "screenshot_categories": [
+    {"name": "HLE", "mode": "no tools", "reap": "UNKNOWN"},
+    {"name": "Terminal-Bench 4.0", "mode": "agentic shell", "reap": "UNKNOWN"},
+    {"name": "DeepSWE 1.1", "mode": "agentic SWE", "reap": "UNKNOWN"},
+    {"name": "ProgramBench", "mode": "agentic coding", "reap": "UNKNOWN"},
+    {"name": "NL2Repo-Bench", "mode": "agentic coding", "reap": "UNKNOWN"},
+    {"name": "AutomationBench 1.0.6", "mode": "agentic automation", "reap": "UNKNOWN"},
+    {"name": "Agents' Last Exam", "mode": "agentic", "reap": "UNKNOWN"},
+    {"name": "Apex Bench v1.1", "mode": "agentic", "reap": "UNKNOWN"},
+    {"name": "Chartography", "mode": "with tools", "reap": "UNKNOWN"},
+    {"name": "BabyVision", "mode": "with tools", "reap": "UNKNOWN"},
+    {"name": "ZeroBench-main", "mode": "with tools", "reap": "UNKNOWN"}
+  ]
+}
