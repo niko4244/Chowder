@@ -226,6 +226,16 @@ def _certify_q4_speed_session(arm_dir: Path, *, eval_args: list[str], receipt: d
         return None
     if receipt.get("measured_experts_offloaded") is None:
         return None
+    # The *evaluator child* receives a source-root PYTHONPATH below, but the
+    # wrapper itself is invoked as `python chowder_batch/reap_serve.py`. That
+    # direct script invocation puts chowder_batch/, not the repository root,
+    # on sys.path. Source-bound first-200 certification must be able to import
+    # the same local evaluator even when the caller has no PYTHONPATH or an
+    # editable install. Resolve only relative to this trusted wrapper source.
+    repo_root = Path(__file__).resolve().parents[1]
+    for source_root in (repo_root / "src", repo_root):
+        if str(source_root) not in sys.path:
+            sys.path.insert(0, str(source_root))
     from chowder_batch import reap_eval
 
     for filename in ("gsm8k.inputs.json", "gsm8k.jsonl", "summary.json"):
