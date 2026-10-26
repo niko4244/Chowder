@@ -1,6 +1,6 @@
 # REAP128_v2 Kaggle source snapshots (provisional research)
 
-The eight `.py` files in this directory are exact-byte snapshots of the
+The nine `.py` files in this directory are exact-byte snapshots of the
 private Kaggle run sources used on October 26, 2026. The independent SHA-256
 manifest binds their local bytes. The original **GGUF model weights, private
 dataset contents, Kaggle credentials, raw completions, and API tokens are not
@@ -31,3 +31,10 @@ already generated an original-host-cgroup fail-closed abort; repeat attempts
 with the same inadequate host capacity are inappropriate. A standalone
 `candidate_q4_first200.py` run is scientifically useful only with a fully
 certified original dense comparator from a compatible serving setup.
+
+`human164_lowpriv_independent.py` independently re-executes all 164 recorded
+HumanEval programs in an isolated Kaggle CPU notebook without attaching a
+model, under limited CPU/memory/filesystem resources and reduced subprocess
+privileges. It matched all 164 original recorded correctness decisions (151
+passed), but this **cross-checks Linux scoring only**; it does not establish
+Windows/Linux numerical parity or qualify the frozen reference-model gates.

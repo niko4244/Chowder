@@ -21,7 +21,7 @@ def test_each_snapshot_is_exactly_hashed_source_without_private_model_bytes():
     assert manifest["schema"] == "chowder.reap128-v2-private-kaggle-runner-snapshots.v1"
     assert manifest["input_models_not_included"] is True
     assert manifest["frozen_core_flags"] == "--fit on -np 4 -c 16384 --jinja"
-    assert len(manifest["snapshots"]) == 8
+    assert len(manifest["snapshots"]) == 9
     names = [entry["file"] for entry in manifest["snapshots"]]
     assert len(names) == len(set(names))
     assert {p.name for p in SNAPSHOTS.iterdir()} == {
@@ -75,3 +75,18 @@ def test_original_linux_source_is_pinned_and_allocator_difference_disclosed():
     assert "7609846557c50f9d984719a9e1e8c5f3d02f807b" in source
     assert "-DGGML_CUDA_NO_VMM=ON" in source
     assert "cuda_vmm_disabled_due_to_missing_driver_link_target" in source
+
+
+def test_independent_humaneval_replay_never_loads_model_or_grants_candidate_privileges():
+    source = _source("human164_lowpriv_independent.py")
+    assert "original_windows_gate_eligible':False" in source
+    assert "no_model_loaded':True" in source
+    assert "enable_internet" not in source  # set by the private CPU notebook metadata
+    assert "resource.setrlimit(resource.RLIMIT_CPU" in source
+    assert "resource.setrlimit(resource.RLIMIT_AS" in source
+    assert "os.setgid(65534);os.setuid(65534)" in source
+    assert "sys.executable,'-I'" in source
+    assert "subprocess.run" in source and "timeout=12" in source
+    assert "len(data)!=164 or len(rows)!=164" in source
+    assert "matched!=164 or correct!=151" in source
+    assert "PASS_INDEPENDENT_ISOLATED_HUMANEVAL_FULL_164_PROVISIONAL_LINUX" in source
