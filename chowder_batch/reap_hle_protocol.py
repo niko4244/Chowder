@@ -186,7 +186,10 @@ def normalize_answer(text: str) -> str:
     return s
 
 
-_LETTER = re.compile(r"\b([A-Ea-e])\b")
+# HLE multiple-choice options run past E: the text-only split uses A through Q,
+# so an A-E-only parser silently refuses 101 legitimate items.
+_OPTION_UPPER = re.compile(r"(?<![A-Za-z])([A-Z])(?![A-Za-z])")
+_OPTION_LEADING = re.compile(r"^\(?([A-Za-z])\)?\s*(?:[.):\-]|$)")
 _ANSWER_LINE = re.compile(r"answer\s*[:\-]\s*(.*)", re.IGNORECASE)
 
 
@@ -206,10 +209,35 @@ def extract_final_answer(response: str) -> str:
     candidate = candidate.replace("**", "").strip()
     candidate = candidate.strip("*_` ")
     # "A" / "(A)" / "A." / "A) ..." all mean option A.
-    leading = re.match(r"^\(?([A-Ea-e])\)?\s*(?:[.):\-]|$)", candidate)
+    leading = _OPTION_LEADING.match(candidate)
     if leading:
         return leading.group(1)
     return candidate
+
+
+def option_letter(text: str, *, allow_i: bool = False) -> str | None:
+    """Return the single option letter in ``text``, or None if ambiguous.
+
+    HLE reference options are single uppercase letters and the text-only split
+    does use ``I`` as a real option, so reference parsing passes ``allow_i``.
+    Free text from a model may also contain the pronoun ``I``, so scanning for a
+    predicted letter excludes it unless the letter is explicit (leading form).
+    More than one distinct letter means the text is ambiguous, not gradeable.
+    """
+    if not isinstance(text, str):
+        return None
+
+    def keep(ch: str) -> bool:
+        return ch != "I" or allow_i
+
+    stripped = text.strip().strip("*_`() ")
+    if len(stripped) == 1 and stripped.isalpha():
+        return stripped.upper() if keep(stripped.upper()) else None
+    leading = _OPTION_LEADING.match(text.strip())
+    if leading:
+        return leading.group(1).upper()
+    letters = {m for m in _OPTION_UPPER.findall(text) if keep(m)}
+    return letters.pop() if len(letters) == 1 else None
 
 
 def grade(response: str, answer: str, answer_type: str) -> dict[str, Any]:
@@ -218,14 +246,24 @@ def grade(response: str, answer: str, answer_type: str) -> dict[str, Any]:
         raise ValueError("unrecognized HLE answer_type")
     predicted = extract_final_answer(response)
     if answer_type == "multipleChoice":
-        letters = _LETTER.findall(predicted) or _LETTER.findall(response)
-        expected = _LETTER.findall(answer)
-        if len(expected) != 1:
-            raise ValueError("multiple-choice reference is not a single option")
-        verdict = bool(letters) and letters[-1].upper() == expected[0].upper()
-        return {"correct": verdict, "predicted": predicted[:64], "reference": expected[0].upper()}
+        expected = option_letter(answer, allow_i=True)
+        if expected is None:
+            # Ungradeable references are reported, never raised: one odd row must
+            # not be able to abort a whole cohort.
+            return {"correct": False, "graded": False, "predicted": predicted[:64],
+                    "reference": str(answer)[:64]}
+        # A bare letter on the Answer: line is explicit, so "I" is the option,
+        # not the pronoun; only prose scanning needs the pronoun guard.
+        bare = predicted.strip().strip("*_`() ")
+        if len(bare) == 1 and bare.isalpha():
+            letters = bare.upper()
+        else:
+            letters = option_letter(predicted) or option_letter(response)
+        return {"correct": letters == expected, "graded": True,
+                "predicted": predicted[:64], "reference": expected}
     return {
         "correct": normalize_answer(predicted) == normalize_answer(answer),
+        "graded": True,
         "predicted": predicted[:64],
         "reference": normalize_answer(answer)[:64],
     }
@@ -234,19 +272,28 @@ def grade(response: str, answer: str, answer_type: str) -> dict[str, Any]:
 def summarize(scored: Iterable[Mapping[str, Any]], population: int) -> dict[str, Any]:
     """Aggregate completed items. Only descriptive statistics are reported."""
     rows = list(scored)
-    total = len(rows)
+    graded = [row for row in rows if row.get("graded", True)]
     by_type: dict[str, dict[str, int]] = {}
-    for row in rows:
+    for row in graded:
         bucket = by_type.setdefault(row["answer_type"], {"n": 0, "correct": 0})
         bucket["n"] += 1
         bucket["correct"] += int(bool(row["correct"]))
-    correct = sum(1 for row in rows if row["correct"])
+    correct = sum(1 for row in graded if row["correct"])
+    total = len(graded)
     return {
         "population_text_only_n": population,
-        "completed_n": total,
+        "completed_n": len(rows),
+        "graded_n": total,
+        "ungradeable_n": len(rows) - total,
         "correct": correct,
         "accuracy": (correct / total) if total else None,
-        "completion_fraction_of_population": (total / population) if population else None,
+        "completion_fraction_of_population": (len(rows) / population) if population else None,
+        "truncated_n": sum(1 for row in graded if row.get("truncated")),
+        "correct_among_untruncated": (
+            sum(1 for row in graded if not row.get("truncated") and row["correct"])
+            / sum(1 for row in graded if not row.get("truncated"))
+            if any(not row.get("truncated") for row in graded) else None
+        ),
         "by_answer_type": by_type,
         "official_judge_score": "UNAVAILABLE",
         "metric": "deterministic_non_official_normalized_match",

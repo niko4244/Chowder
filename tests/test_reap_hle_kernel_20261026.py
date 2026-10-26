@@ -96,14 +96,20 @@ def test_kernel_does_not_persist_questions_or_reference_answers(source):
     block = re.search(r'row = \{(.*?)\}', source, re.S)
     assert block, 'scored row literal not found'
     keys = set(re.findall(r"'([a-z_]+)':", block.group(1)))
-    assert keys == {'id', 'answer_type', 'correct', 'completion_tokens', 'seconds',
-                    'response_chars', 'eval_session_id'}
+    assert keys == {'id', 'answer_type', 'correct', 'graded', 'truncated',
+                    'completion_tokens', 'seconds', 'response_chars', 'eval_session_id'}
     assert 'question' not in keys and 'answer' not in keys
 
 
 def test_kernel_budget_stays_below_the_kaggle_session_limit(source):
     assert P.WALL_BUDGET_SECONDS <= 11 * 3600
     assert 'P.WALL_BUDGET_SECONDS' in source
+
+
+def test_kernel_tolerates_single_item_faults_but_still_fails_closed(source):
+    assert 'item_errors' in source
+    assert 'too many per-item scoring failures' in source
+    assert 'continue' in source
 
 
 def test_kernel_tears_down_its_own_process_group(source):

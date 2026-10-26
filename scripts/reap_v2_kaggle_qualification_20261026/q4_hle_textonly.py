@@ -37,9 +37,9 @@ PORT = 8791
 
 # PROTOCOL_FILE_SHA256 pins the exact imported source bytes;
 # PROTOCOL_MANIFEST_SHA256 pins the frozen protocol values it must produce.
-PROTOCOL_FILE_SHA256 = '49263b96dfbe700805538a1bc81cc75dc34a9ab2b94ae09a171fd0a0b005bfb7'
+PROTOCOL_FILE_SHA256 = 'cbacf0bb2215fce041ca62e991002d2772bee04891bc5e1773d3b0e2c44c49b2'
 PROTOCOL_MANIFEST_SHA256 = 'ebdb19e818257c21335889f9bea51c9939293444d315ba0211e21d2c599e70d8'
-PROTOCOL_BYTES = 10805
+PROTOCOL_BYTES = 13041
 HLE_PARQUET_SHA256 = '6d0ee0602e8aea6b159509577e884f48ecac7b8e3f6822a35f51335a446c726a'
 HLE_PARQUET_BYTES = 274276147
 HLE_TEXT_ONLY_N = 2158
@@ -277,6 +277,7 @@ try:
         try:
             deadline = time.monotonic() + P.WALL_BUDGET_SECONDS
             scored = []
+            item_errors = []
             pending = collections.deque(ordered)
             tail = collections.deque()
             with rows_path.open('x', encoding='utf-8') as handle, cf.ThreadPoolExecutor(max_workers=P.CONCURRENCY) as pool:
@@ -293,10 +294,20 @@ try:
                         if fatal:
                             raise RuntimeError('resource owner abort: ' + fatal[0])
                         item = inflight.pop(fut)
-                        text, tokens, elapsed = fut.result()
-                        verdict = P.grade(text, item['answer'], item['answer_type'])
+                        try:
+                            text, tokens, elapsed = fut.result()
+                            verdict = P.grade(text, item['answer'], item['answer_type'])
+                        except Exception as ex:
+                            # A single malformed item must not destroy a whole
+                            # cohort, but a systemic fault still fails closed.
+                            item_errors.append(f"{item['id']}: {type(ex).__name__}")
+                            if len(item_errors) > 5:
+                                raise RuntimeError('too many per-item scoring failures')
+                            continue
                         row = {'id': item['id'], 'answer_type': item['answer_type'],
-                               'correct': verdict['correct'], 'completion_tokens': tokens,
+                               'correct': verdict['correct'], 'graded': verdict['graded'],
+                               'truncated': tokens >= P.MAX_COMPLETION_TOKENS - 1,
+                               'completion_tokens': tokens,
                                'seconds': round(elapsed, 3), 'response_chars': len(text),
                                'eval_session_id': session}
                         scored.append(row)
@@ -317,6 +328,7 @@ try:
             summary = P.summarize(scored, len(text_rows))
             summary['planned_n'] = len(ordered)
             summary['not_attempted_n'] = len(tail)
+            summary['item_errors'] = item_errors
             summary['completion_tokens'] = sum(r['completion_tokens'] for r in scored)
             summary['generation_wall_seconds'] = round(sum(r['seconds'] for r in scored), 3)
             summary['session_id'] = session

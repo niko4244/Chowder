@@ -126,22 +126,52 @@ def test_grade_exact_match_and_multiple_choice():
     assert P.grade("Explanation: x\nAnswer: B", "B", "multipleChoice")["correct"] is True
     assert P.grade("Explanation: x\nAnswer: A", "B", "multipleChoice")["correct"] is False
     with pytest.raises(ValueError):
-        P.grade("Answer: A", "A and B", "multipleChoice")
-    with pytest.raises(ValueError):
         P.grade("Answer: A", "A", "freeform")
+
+
+@pytest.mark.parametrize("letter", ["F", "H", "J", "Q"])
+def test_options_past_e_are_graded_not_refused(letter):
+    # 101 text-only HLE multiple-choice items use options F-Q; an A-E parser
+    # raised on them and aborted an entire served cohort.
+    verdict = P.grade(f"Explanation: x\nAnswer: {letter}", letter, "multipleChoice")
+    assert verdict["correct"] is True and verdict["graded"] is True
+    assert P.grade(f"Explanation: x\nAnswer: {letter.lower()}. reasoning", letter,
+                   "multipleChoice")["correct"] is True
+
+
+def test_ambiguous_reference_is_reported_not_raised():
+    verdict = P.grade("Answer: A", "A and B", "multipleChoice")
+    assert verdict["graded"] is False and verdict["correct"] is False
+
+
+def test_option_letter_rejects_ordinary_words():
+    assert P.option_letter("I think the answer is C") == "C"
+    assert P.option_letter("I") is None
+    assert P.option_letter("yes") is None
+    assert P.option_letter("(D)") == "D"
+    # I is a genuine HLE option, so references may use it.
+    assert P.option_letter("I", allow_i=True) == "I"
+    assert P.grade("Answer: I", "I", "multipleChoice")["correct"] is True
+    # Two distinct letters cannot be resolved into one option.
+    assert P.option_letter("A or B") is None
 
 
 def test_summarize_reports_descriptive_only():
     scored = [
-        {"answer_type": "exactMatch", "correct": True},
-        {"answer_type": "exactMatch", "correct": False},
-        {"answer_type": "multipleChoice", "correct": True},
+        {"answer_type": "exactMatch", "correct": True, "graded": True, "truncated": False},
+        {"answer_type": "exactMatch", "correct": False, "graded": True, "truncated": True},
+        {"answer_type": "multipleChoice", "correct": True, "graded": True, "truncated": False},
+        {"answer_type": "multipleChoice", "correct": False, "graded": False, "truncated": False},
     ]
     summary = P.summarize(scored, population=10)
-    assert summary["completed_n"] == 3
+    assert summary["completed_n"] == 4
+    assert summary["graded_n"] == 3
+    assert summary["ungradeable_n"] == 1
     assert summary["correct"] == 2
     assert summary["accuracy"] == pytest.approx(2 / 3)
-    assert summary["completion_fraction_of_population"] == pytest.approx(0.3)
+    assert summary["completion_fraction_of_population"] == pytest.approx(0.4)
+    assert summary["truncated_n"] == 1
+    assert summary["correct_among_untruncated"] == pytest.approx(1.0)
     assert summary["by_answer_type"]["exactMatch"] == {"n": 2, "correct": 1}
     assert summary["official_judge_score"] == "UNAVAILABLE"
     assert summary["metric"] == "deterministic_non_official_normalized_match"
