@@ -273,3 +273,32 @@ def test_even_source_pinned_synthetic_mutants_are_refused(monkeypatch, corrupt):
     sources = synthetic_full_164(monkeypatch, corrupt)
     with pytest.raises(ValueError):
         v2.verify_original_q8_v2_attestation(**sources)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda trace: trace.update(end_monotonic_ns=trace["start_monotonic_ns"] + 10_000_000_000),
+    lambda trace: trace.update(elapsed_milliseconds=10_000),
+    lambda trace: trace.update(host_writable_mounts_visible=True),
+    lambda trace: trace.update(observer_outside_workload_namespaces=False),
+    lambda trace: trace.update(timeout_kill_observed=True),
+])
+def test_even_resealed_external_trace_claims_require_coherent_timing_and_contract(
+    monkeypatch, mutate,
+):
+    sources = synthetic_full_164(monkeypatch)
+    trace = json.loads(sources["external_trace_raws"][0])
+    mutate(trace)
+    sources["external_trace_raws"][0] = encoded(trace)
+    # Simulate a compromised/incorrectly approving independent witness source.
+    # Re-pin both the trace digest and whole witness to ensure the verification
+    # actually checks trace semantics, rather than merely recognizing its hash.
+    witness = json.loads(sources["external_witness_raw"])
+    witness["per_task"][0]["process_trace_sha256"] = hashlib.sha256(
+        sources["external_trace_raws"][0]
+    ).hexdigest()
+    sources["external_witness_raw"] = encoded(witness)
+    monkeypatch.setattr(v2, "APPROVED_INDEPENDENT_WITNESS_SHA256", hashlib.sha256(
+        sources["external_witness_raw"]
+    ).hexdigest())
+    with pytest.raises(ValueError):
+        v2.verify_original_q8_v2_attestation(**sources)

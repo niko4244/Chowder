@@ -222,6 +222,7 @@ def verify_original_q8_v2_attestation(
     matched = correct = executed = 0
     owners: set[str] = set()
     traces: set[str] = set()
+    process_identities: set[tuple[str, int, int]] = set()
     for index, (item, task, observed) in enumerate(zip(canonical, tasks, attestations)):
         if not all(isinstance(x, dict) for x in (item, task, observed)):
             raise ValueError("malformed individual runtime/witness source")
@@ -284,7 +285,18 @@ def verify_original_q8_v2_attestation(
                     or trace in traces):
                 raise ValueError("independent per-task execution, source or descendant witness missing")
             trace_record = _bound(external_trace_raws[index], trace, 256 * 1024)
-            if (trace_record.get("schema") != "chowder.reap-v2-independent-process-trace.v2"
+            trace_fields = {
+                "schema", "index", "id", "session_id", "model_sha256",
+                "program_sha256", "runtime_host_id", "runtime_image_sha256",
+                "sandbox_profile_sha256", "exclusive_cgroup_owner",
+                "independent_child_starttime_ticks", "child_pid", "start_monotonic_ns",
+                "end_monotonic_ns", "elapsed_milliseconds", "execution_status",
+                "observed_python_exit_code", "observer_outside_workload_namespaces",
+                "verified_no_egress", "observed_cgroup_empty_after",
+                "observed_descendants_extinct_after", "timeout_kill_observed",
+            }
+            if (set(trace_record) != trace_fields
+                    or trace_record.get("schema") != "chowder.reap-v2-independent-process-trace.v2"
                     or trace_record.get("index") != index
                     or trace_record.get("id") != ident
                     or trace_record.get("session_id") != SESSION
@@ -310,9 +322,17 @@ def verify_original_q8_v2_attestation(
                     or type(trace_record.get("elapsed_milliseconds")) is not int
                     or trace_record["elapsed_milliseconds"] <= 0
                     or trace_record["elapsed_milliseconds"] > 12000
+                    or abs(trace_record["elapsed_milliseconds"] - (
+                        trace_record["end_monotonic_ns"] -
+                        trace_record["start_monotonic_ns"]
+                    ) / 1_000_000) > 2
                     or trace_record.get("timeout_kill_observed") is not (
                         task["execution_status"] == "PYTHON_TIMEOUT_10S")):
                 raise ValueError("source-bound external runtime trace and descendant evidence missing")
+            identity = (host_id, trace_record["child_pid"], child_start)
+            if identity in process_identities:
+                raise ValueError("reused independent process identity across original tasks")
+            process_identities.add(identity)
             owners.add(owner)
             traces.add(trace)
             code = task.get("exit_code")
