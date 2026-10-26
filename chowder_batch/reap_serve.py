@@ -564,8 +564,20 @@ def main(argv: list[str] | None = None) -> int:
                 eval_py = str(Path(__file__).with_name("reap_eval.py"))
                 evaluator_env = None
                 if args.arm in REGISTERED_V2_EVALUATION_ARMS:
+                    # We launch reap_eval.py by its absolute *file* path;
+                    # Python otherwise puts chowder_batch/ (not its parent)
+                    # on sys.path. The registered child needs both the
+                    # project's chowder_batch and src/chowder packages, even
+                    # when this checkout is not editable-installed. Preserve
+                    # any caller-provided Python packages after these roots.
+                    repo_root = Path(__file__).resolve().parents[1]
+                    inherited_pythonpath = os.environ.get("PYTHONPATH")
                     evaluator_env = {
                         **os.environ,
+                        "PYTHONPATH": os.pathsep.join([
+                            str(repo_root), str(repo_root / "src"),
+                            *([inherited_pythonpath] if inherited_pythonpath else []),
+                        ]),
                         "REAP_BOUND_EVALUATION_SESSION": json.dumps({
                             "session_id": session, "server_pid": proc.pid,
                             "port": args.port, "model_sha256": digest,

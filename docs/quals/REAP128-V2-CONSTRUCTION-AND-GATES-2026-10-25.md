@@ -2195,3 +2195,96 @@ registered candidate quality or same-session throughput evidence. Until
 actual full official benchmark controls, candidate responses and GPU
 placement/speed are measured under safe admission, Gen-0 stays `BLOCKED`,
 `chosen:null`, release not approved and existing PR #282 draft/unmerged.
+
+### October 25 late — actual GPU serving and bounded registered scoring, no Gen-0 promotion
+
+Following the owner's explicit request to temporarily pause GPU model
+activity for the scientific tests, the standalone Spark 4B server on port
+8767 was quiesced after confirming four idle slots and no established
+clients. Its original exact argv was saved in
+`F:\reap-v2-spark-pause-restart-20261025-2230.json`.
+Ollama's models dynamically reloaded despite `ollama stop`, and Hermes's
+service supervisor relaunched the daemon after its first pause. An exact
+byte-backed temporary `restart_policy: never` lease was applied **only** to
+the Ollama service entry in `~/.hermes/services.yaml`. The supervisor still
+reported a subsequent Ollama relaunch, so neither exclusive GPU ownership
+nor stable resource isolation is claimed. This temporary configuration was
+fully restored to its original exact SHA-256
+`3485c5ae311e6be432422d8f5c9221a5af343db23f3fb96a8533b5926171cc86`;
+restore evidence is `F:\reap128-v2-ollama-service-restored-20261025.json`,
+SHA-256 `ddaa7ccb8874a9f8dbf9988d512dd8e7b97455bd4841f79fc275b27ab704bf17`.
+The original Spark invocation was relaunched as PID 81512 and passed
+`/health` HTTP 200 on port 8767; restart evidence
+`F:\reap-v2-spark-restored-20261025.json` SHA-256
+`8a65242b750acc6b69ccd64d9e984d4300befe838f8110eb115520a9a98d9bc1`.
+The unrelated port-8766 local model router and desktop/agent processes
+were not stopped.
+
+The official offline production input datasets were independently reloaded,
+matching *exactly* the pinned rendered source fingerprints: GSM8K 1,319
+items (`913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89`)
+and HumanEval 164 items
+(`49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420`).
+The genuinely published Q4
+`G:\reap128-v2-q4_k_m-20261025.gguf` was freshly full-file SHA-256
+attested by the **real Windows production** serving launcher, matching
+`2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7`.
+Under the exact registered `--fit on -np 4 -c 16384 --jinja` flags,
+the RTX 5060 Ti did successfully load the original Q4 model, independently
+recording **0 expert layers offloaded** and an original startup log digest.
+
+The first live GPU run reached healthy Q4 serving but its newly launched
+`reap_eval.py` child failed to import `chowder_batch` because direct
+script execution had placed the `chowder_batch/` directory, not the
+repository and `src/` package roots, on `sys.path`. The live original
+failure receipt `F:\reap128-v2-q4-real-gpu-smoke-20261025-2250/gpu-smoke-supervisor-receipt.json`
+is SHA-256 `0162cce2c7766d2149e7b2b582ceeef004c263cb4602483e10d4ca3aedf97525`.
+An adversarial RED production-launcher test reproduced the missing
+project imports; its GREEN correction explicitly binds both local package
+roots to the **registered evaluator child's** inherited `PYTHONPATH`
+without changing llama-server flags, GGUF bytes, decoding, scoring or
+benchmarks. Existing caller `PYTHONPATH` remains intact.
+
+The second **real source- and server-session-attested GPU experiment**
+executed to completion under unchanged 7-GiB free-physical-RAM and 8-GiB
+free-commit runtime floors:
+`F:\reap128-v2-q4-real-gpu-smoke-20261025-2300/gpu-smoke-supervisor-receipt.json`,
+SHA-256 `b005acf4a2ec5e1d4707d50eb5964f82cb1f62a81fc00f6cda5e56adeeb76f24`.
+It scored **one** genuine official `gsm8k-0` as incorrect but naturally
+terminated (242 generated tokens, measured per-row 99.324961 tokens/s),
+and **one** genuine `HumanEval/0` as correct and naturally terminated
+(173 tokens, 100.344789 tokens/s). The actual full source input witness,
+model/flags digest, live serving owner, JSONL and summary SHA receipts are
+retained in that experiment directory. **A sample size of one per suite
+cannot certify Gate0, Gate1, Gate2 or Q4 speed.** There is no automatic
+extrapolation or candidate PASS.
+
+A subsequent first-200 original registered Q4 speed run was admitted at
+**13,993 MiB** free VRAM, **21.41 GiB** free physical RAM and **28.84 GiB**
+free commit. It used the original frozen 4-concurrent production evaluator,
+genuine official GSM8K inputs, and original model session in
+`C:\llm-work\reap\eval-v2-isolated-20261025\reap128_v2_q4`.
+After **12 real rows**, a supervised host reading of **6.98 GiB free
+physical RAM** crossed the original 7-GiB floor; the supervisor stopped
+only its own evaluation/server descendants. No 200-row cohort or speed
+certificate was sealed. Its 12 partial rows and failure locks are retained
+as **non-gate abort evidence, never to be resumed under a new server**.
+The exclusive supervisor receipt
+`F:\reap128-v2-q4-registered-speed200-20261025-supervisor.json` is
+SHA-256 `836e4e886f11819075d75a461eec028f0453b9fd3d00e2c9553e0d3177dd81ed`.
+No runtime floor was weakened and no GPU benchmark result was silently
+reclassified as a scientific score.
+
+The canonical **unchanged frozen Amendment4 Gen-0 selector** was then
+actually re-executed against the preserved original full historical
+evaluation workspace and original D0/v2 observation and calibration
+receipts, including the partial Q4 attempt. Output:
+`F:\reap128-v2-post-real-gpu-abort-selection-20261025.json`,
+**9,698 bytes**, SHA-256
+`e36aa022c416a40308b1d02da4688fb73e8896cbd60ca587e6cb015e83205791`;
+real decision `{"status":"BLOCKED","chosen":null,"reason":"amendment 4 requires both REAP128_v2 and REAP160 full gates"}`.
+Historical REAP128-v1 Gate1 FAIL, missing full v2 official candidate/control
+GSM8K+HumanEval, missing Q4 200-row same-session candidate/dense
+throughput, REAP160 speed uncertainty, BF16 CUDA parity and final
+human approval all remain binding. This is **positive real GPU feasibility
+evidence but not Gen-0 scientific qualification, release or merge**.

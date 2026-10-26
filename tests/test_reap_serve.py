@@ -490,6 +490,31 @@ def _serve_args(gguf, out, arm="reap128_v2", port=8790):
             "--out", str(out), "--", "--port", str(port), "--arm", arm, "--out", str(out)]
 
 
+def test_registered_subprocess_evaluator_can_import_source_packages(tmp_path, monkeypatch):
+    """Registered Windows evaluator is launched by script path, not -m."""
+    _setup(monkeypatch)
+    gguf = tmp_path / "source.gguf"
+    gguf.write_bytes(b"fake-model-only-for-subprocess-environment")
+    # Preserve user-supplied Python import paths; require the project package
+    # and src package even when the caller did not install this checkout.
+    outside = str(tmp_path / "user-site")
+    monkeypatch.setenv("PYTHONPATH", outside)
+    captured = []
+
+    def run_evaluator(_server, _command, *, env=None):
+        captured.append(env)
+        return 0
+
+    monkeypatch.setattr(reap_serve, "_run_eval", run_evaluator)
+    assert reap_serve.main(_serve_args(gguf, tmp_path / "eval")) == 0
+    assert len(captured) == 1 and captured[0] is not None
+    paths = captured[0]["PYTHONPATH"].split(os.pathsep)
+    assert str(REPO) in paths
+    assert str(REPO / "src") in paths
+    assert outside in paths
+    assert captured[0]["REAP_BOUND_EVALUATION_SESSION"]
+
+
 def test_resume_preserves_original_serve_and_log(tmp_path, monkeypatch):
     _setup(monkeypatch)
     gguf = tmp_path / "model.gguf"
