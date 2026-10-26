@@ -2001,3 +2001,49 @@ CUDA numerical parity, new GPU placement, source-bound 200-item same-session
 Q4/dense speed, or canonical REAP160 requalification have yet passed.
 Preserve all original Amendment4 thresholds, historic REAP128-v1 Gate1
 **FAIL**, Gen-0 **BLOCKED** with no candidate chosen, and PR #282 **draft**.
+
+### October 25 20:40 CDT — independent full-Q4 certificate and real mixed-K reconstruction
+
+The independently launched full-model certificate completed successfully,
+separately from the construction publisher. It source-verified the original
+BF16 GGUF and the published 11,563,915,264-byte Q4 GGUF, full whole-file
+SHA-256, original pinned converter/quantizer provenance and sidecar,
+**733/733 exact tensor names/order/shapes/raw payload SHA-256**, 42 source-bound
+immutable chunk receipts, copied F32 tensor bytes, complete 40 decoder
+layers ×128 experts and top-k 8. The verified mixed types are **359 Q4_K,
+73 Q6_K and 301 F32**. It exited code 0 with status
+`INDEPENDENT_SOURCE_AND_733_MIXED_K_PAYLOADS_MATCH_NOT_QUALITY_GATE`.
+Its authoritative byte-exact receipt:
+
+- `docs/quals/reap128-v2-q4-independent-full-tensor-cert-20261025.json`;
+- **11,950 bytes**, SHA-256
+  `58a384ec4ec305a41f26839eb343a7cbcdeb33868ce38c7d4ca1e32169573d0f`.
+
+Next a separately launched CPU-only source-bound real BF16↔Q4 numerical
+sampler completed. It independently verified the 733-tensor inventory,
+source BF16 SHA
+`80341aa776ad9b5f937c21b081b6d76de4a2ea277e5fb88c9ae2634a9da8f4c6`,
+final Q4 SHA
+`2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7`,
+and published Q4 sidecar SHA
+`cf16fbf9e6926719bab873bd74b7062fa22365a280451ce3db9a9f8dc3031f1c`.
+It compared four deterministic 256-value reconstruction windows for each
+of **120 routed expert tensors** across all 40 layers, or **122,880 real
+values**, with **no omitted expert tensors**:
+
+| Actual sampled BF16↔Q4 measure | Result |
+| --- | ---: |
+| Maximum absolute error | `0.003823518753051758` |
+| Mean absolute error | `0.000555533053235043` |
+| Root mean squared error | `0.0007138570046274973` |
+
+The independently measured output source receipt is
+`F:\reap128-v2-q4-bf16-numeric-sample-20261025.json`, **121,601 bytes**,
+SHA-256 `925854285a579e7cd49232eb5a4a3d73f14e9a2ae12ee5b5a599f7483157a5d0`.
+Its status explicitly reads
+`DESCRIPTIVE_Q4_QUANTIZATION_SAMPLE_NOT_QUALITY_GATE`: these values do
+**not** establish output reasoning quality, registered GSM8K/HumanEval
+score, original BF16 CUDA parity, GPU placement or throughput. The original
+frozen Gen-0 Amendment4 selector cannot use them as a substitute for its
+mandatory genuine full benchmark and control evidence; selection stays
+`BLOCKED`, no model chosen and PR #282 draft/unmerged.

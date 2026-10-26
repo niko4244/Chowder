@@ -1,0 +1,4101 @@
+{
+  "compared_expert_tensors": 120,
+  "final_receipt_sha256": "cf16fbf9e6926719bab873bd74b7062fa22365a280451ce3db9a9f8dc3031f1c",
+  "limitations": "Sampled BF16-to-Q4 reconstruction only; not registered GSM8K, HumanEval, CUDA, GPU fit or throughput evidence.",
+  "max_abs_error": 0.003823518753051758,
+  "mean_abs_error": 0.000555533053235043,
+  "model": "G:\\reap128-v2-q4_k_m-20261025.gguf",
+  "omitted_expert_tensors": [],
+  "quantized_sha256": "2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7",
+  "quantizer_sha256": "eeb75877bd41d8d7b51d18129d873e6220014613baea349fa18e6b5d36c987de",
+  "root_mean_squared_error": 0.0007138570046274973,
+  "samples": [
+    {
+      "tensor": "blk.0.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0022039413452148438,
+          "offset": 0,
+          "sum_abs_error": 0.20151841640472412,
+          "sum_squared_error": 0.00022977526681700056
+        },
+        {
+          "count": 256,
+          "max_abs_error": 7.824384272660851e-38,
+          "offset": 44739072,
+          "sum_abs_error": 2.003042373801178e-35,
+          "sum_squared_error": 1.5672573247043194e-72
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016987919807434082,
+          "offset": 89478144,
+          "sum_abs_error": 0.12650495767593384,
+          "sum_squared_error": 9.229530889243165e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 7.824384272660851e-38,
+          "offset": 134217472,
+          "sum_abs_error": 2.003042373801178e-35,
+          "sum_squared_error": 1.5672573247043194e-72
+        }
+      ]
+    },
+    {
+      "tensor": "blk.0.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0017020702362060547,
+          "offset": 0,
+          "sum_abs_error": 0.15992853045463562,
+          "sum_squared_error": 0.00014330158070041676
+        },
+        {
+          "count": 256,
+          "max_abs_error": 7.824384272660851e-38,
+          "offset": 44739072,
+          "sum_abs_error": 2.003042373801178e-35,
+          "sum_squared_error": 1.5672573247043194e-72
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0013573169708251953,
+          "offset": 89478144,
+          "sum_abs_error": 0.13389647006988525,
+          "sum_squared_error": 0.0001013346489031619
+        },
+        {
+          "count": 256,
+          "max_abs_error": 7.824384272660851e-38,
+          "offset": 134217472,
+          "sum_abs_error": 2.003042373801178e-35,
+          "sum_squared_error": 1.5672573247043194e-72
+        }
+      ]
+    },
+    {
+      "tensor": "blk.0.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0003380775451660156,
+          "offset": 0,
+          "sum_abs_error": 0.013415515422821045,
+          "sum_squared_error": 2.3624586482640098e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0003204345703125,
+          "offset": 44739072,
+          "sum_abs_error": 0.013747692108154297,
+          "sum_squared_error": 2.4946332359832013e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00048828125,
+          "offset": 89478144,
+          "sum_abs_error": 0.020626306533813477,
+          "sum_squared_error": 4.138559475563852e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000396728515625,
+          "offset": 134217472,
+          "sum_abs_error": 0.013230323791503906,
+          "sum_squared_error": 2.2844587590498122e-06
+        }
+      ]
+    },
+    {
+      "tensor": "blk.1.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0013558268547058105,
+          "offset": 0,
+          "sum_abs_error": 0.1412290334701538,
+          "sum_squared_error": 0.00010594850759559904
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0024346113204956055,
+          "offset": 44739072,
+          "sum_abs_error": 0.17983341217041016,
+          "sum_squared_error": 0.00018543549865057685
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0014480948448181152,
+          "offset": 89478144,
+          "sum_abs_error": 0.13449758291244507,
+          "sum_squared_error": 9.889349938774217e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001677870750427246,
+          "offset": 134217472,
+          "sum_abs_error": 0.1432287096977234,
+          "sum_squared_error": 0.00011557567189512952
+        }
+      ]
+    },
+    {
+      "tensor": "blk.1.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0014189481735229492,
+          "offset": 0,
+          "sum_abs_error": 0.13678103685379028,
+          "sum_squared_error": 0.00010237274771540683
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015456676483154297,
+          "offset": 44739072,
+          "sum_abs_error": 0.16197943687438965,
+          "sum_squared_error": 0.00013670945571675475
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015255212783813477,
+          "offset": 89478144,
+          "sum_abs_error": 0.1502479910850525,
+          "sum_squared_error": 0.00012194004162680017
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015238523483276367,
+          "offset": 134217472,
+          "sum_abs_error": 0.1546945571899414,
+          "sum_squared_error": 0.00013349754559044413
+        }
+      ]
+    },
+    {
+      "tensor": "blk.1.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00051116943359375,
+          "offset": 0,
+          "sum_abs_error": 0.039531588554382324,
+          "sum_squared_error": 9.119578059824107e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00048828125,
+          "offset": 44739072,
+          "sum_abs_error": 0.03930211067199707,
+          "sum_squared_error": 8.86163695668074e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000762939453125,
+          "offset": 89478144,
+          "sum_abs_error": 0.04821515083312988,
+          "sum_squared_error": 1.436943676935698e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00048828125,
+          "offset": 134217472,
+          "sum_abs_error": 0.036611318588256836,
+          "sum_squared_error": 8.069114834086122e-06
+        }
+      ]
+    },
+    {
+      "tensor": "blk.2.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0018325448036193848,
+          "offset": 0,
+          "sum_abs_error": 0.1777598261833191,
+          "sum_squared_error": 0.00018060438463507467
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017859935760498047,
+          "offset": 44739072,
+          "sum_abs_error": 0.1551809310913086,
+          "sum_squared_error": 0.00013062906626259974
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017113685607910156,
+          "offset": 89478144,
+          "sum_abs_error": 0.15504199266433716,
+          "sum_squared_error": 0.00013776671289278397
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017604827880859375,
+          "offset": 134217472,
+          "sum_abs_error": 0.1443643569946289,
+          "sum_squared_error": 0.00011800961715380254
+        }
+      ]
+    },
+    {
+      "tensor": "blk.2.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0018219947814941406,
+          "offset": 0,
+          "sum_abs_error": 0.14943182468414307,
+          "sum_squared_error": 0.0001222471652937429
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016304254531860352,
+          "offset": 44739072,
+          "sum_abs_error": 0.15384948253631592,
+          "sum_squared_error": 0.000131922531451778
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015531182289123535,
+          "offset": 89478144,
+          "sum_abs_error": 0.14996761083602905,
+          "sum_squared_error": 0.00012364330706660098
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017434954643249512,
+          "offset": 134217472,
+          "sum_abs_error": 0.14957863092422485,
+          "sum_squared_error": 0.0001278815436940306
+        }
+      ]
+    },
+    {
+      "tensor": "blk.2.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00038909912109375,
+          "offset": 0,
+          "sum_abs_error": 0.036684513092041016,
+          "sum_squared_error": 7.67861528316871e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000457763671875,
+          "offset": 44739072,
+          "sum_abs_error": 0.04246622323989868,
+          "sum_squared_error": 1.054373008102516e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000392913818359375,
+          "offset": 89478144,
+          "sum_abs_error": 0.030396461486816406,
+          "sum_squared_error": 5.258574930167015e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00042724609375,
+          "offset": 134217472,
+          "sum_abs_error": 0.039148807525634766,
+          "sum_squared_error": 8.554073161803899e-06
+        }
+      ]
+    },
+    {
+      "tensor": "blk.3.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0013759136199951172,
+          "offset": 0,
+          "sum_abs_error": 0.1180897057056427,
+          "sum_squared_error": 8.346154057026212e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019335150718688965,
+          "offset": 44739072,
+          "sum_abs_error": 0.15855485200881958,
+          "sum_squared_error": 0.0001438305254346517
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019428133964538574,
+          "offset": 89478144,
+          "sum_abs_error": 0.16391974687576294,
+          "sum_squared_error": 0.00015310997642714597
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001618027687072754,
+          "offset": 134217472,
+          "sum_abs_error": 0.1361597180366516,
+          "sum_squared_error": 0.0001051405521188542
+        }
+      ]
+    },
+    {
+      "tensor": "blk.3.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0018159151077270508,
+          "offset": 0,
+          "sum_abs_error": 0.1430140733718872,
+          "sum_squared_error": 0.00011759445903436472
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018687248229980469,
+          "offset": 44739072,
+          "sum_abs_error": 0.15943628549575806,
+          "sum_squared_error": 0.0001460867435092439
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0014739036560058594,
+          "offset": 89478144,
+          "sum_abs_error": 0.13325047492980957,
+          "sum_squared_error": 0.00010121299254706173
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0014277100563049316,
+          "offset": 134217472,
+          "sum_abs_error": 0.14087516069412231,
+          "sum_squared_error": 0.00010634040660661981
+        }
+      ]
+    },
+    {
+      "tensor": "blk.3.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00069427490234375,
+          "offset": 0,
+          "sum_abs_error": 0.04559427499771118,
+          "sum_squared_error": 1.2756045624229273e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000396728515625,
+          "offset": 44739072,
+          "sum_abs_error": 0.0341801643371582,
+          "sum_squared_error": 6.614868652832229e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000457763671875,
+          "offset": 89478144,
+          "sum_abs_error": 0.03858447074890137,
+          "sum_squared_error": 8.651136397475057e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00052642822265625,
+          "offset": 134217472,
+          "sum_abs_error": 0.03952309489250183,
+          "sum_squared_error": 8.881850328101848e-06
+        }
+      ]
+    },
+    {
+      "tensor": "blk.4.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.001643538475036621,
+          "offset": 0,
+          "sum_abs_error": 0.1570349931716919,
+          "sum_squared_error": 0.0001381847130730307
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015145540237426758,
+          "offset": 44739072,
+          "sum_abs_error": 0.15298467874526978,
+          "sum_squared_error": 0.00012673805057161758
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016859769821166992,
+          "offset": 89478144,
+          "sum_abs_error": 0.16013306379318237,
+          "sum_squared_error": 0.0001462291756944012
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016988515853881836,
+          "offset": 134217472,
+          "sum_abs_error": 0.15864157676696777,
+          "sum_squared_error": 0.00014145666438025728
+        }
+      ]
+    },
+    {
+      "tensor": "blk.4.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0014520883560180664,
+          "offset": 0,
+          "sum_abs_error": 0.14100278913974762,
+          "sum_squared_error": 0.00010742182988487947
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0012933015823364258,
+          "offset": 44739072,
+          "sum_abs_error": 0.1376541256904602,
+          "sum_squared_error": 0.00010549421185501728
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018210411071777344,
+          "offset": 89478144,
+          "sum_abs_error": 0.15096211433410645,
+          "sum_squared_error": 0.0001339467324328325
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0020546317100524902,
+          "offset": 134217472,
+          "sum_abs_error": 0.18005603551864624,
+          "sum_squared_error": 0.0001818570787683882
+        }
+      ]
+    },
+    {
+      "tensor": "blk.4.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0004730224609375,
+          "offset": 0,
+          "sum_abs_error": 0.04199552536010742,
+          "sum_squared_error": 9.727849068497108e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00043487548828125,
+          "offset": 44739072,
+          "sum_abs_error": 0.03747028112411499,
+          "sum_squared_error": 7.886388761590979e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000335693359375,
+          "offset": 89478144,
+          "sum_abs_error": 0.022583484649658203,
+          "sum_squared_error": 3.0108917599136475e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0004334449768066406,
+          "offset": 134217472,
+          "sum_abs_error": 0.039159297943115234,
+          "sum_squared_error": 8.948129789132508e-06
+        }
+      ]
+    },
+    {
+      "tensor": "blk.5.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0019292235374450684,
+          "offset": 0,
+          "sum_abs_error": 0.17338818311691284,
+          "sum_squared_error": 0.00016591067062776688
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0022457242012023926,
+          "offset": 44739072,
+          "sum_abs_error": 0.18564587831497192,
+          "sum_squared_error": 0.00018904306672951066
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018367767333984375,
+          "offset": 89478144,
+          "sum_abs_error": 0.1684686243534088,
+          "sum_squared_error": 0.00015610183547298817
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002011418342590332,
+          "offset": 134217472,
+          "sum_abs_error": 0.15667927265167236,
+          "sum_squared_error": 0.00013701203498328596
+        }
+      ]
+    },
+    {
+      "tensor": "blk.5.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0018532872200012207,
+          "offset": 0,
+          "sum_abs_error": 0.1601700782775879,
+          "sum_squared_error": 0.0001488040067343377
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017209053039550781,
+          "offset": 44739072,
+          "sum_abs_error": 0.16018366813659668,
+          "sum_squared_error": 0.00014465653069350992
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015716552734375,
+          "offset": 89478144,
+          "sum_abs_error": 0.15279698371887207,
+          "sum_squared_error": 0.00013219107876238922
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017523765563964844,
+          "offset": 134217472,
+          "sum_abs_error": 0.1642012596130371,
+          "sum_squared_error": 0.00014493577486973663
+        }
+      ]
+    },
+    {
+      "tensor": "blk.5.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0023644566535949707,
+          "offset": 0,
+          "sum_abs_error": 0.1902529001235962,
+          "sum_squared_error": 0.00021094139749777696
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018061995506286621,
+          "offset": 44739072,
+          "sum_abs_error": 0.16293179988861084,
+          "sum_squared_error": 0.00014698645187394277
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015015602111816406,
+          "offset": 89478144,
+          "sum_abs_error": 0.1346750259399414,
+          "sum_squared_error": 9.90772769000614e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018911361694335938,
+          "offset": 134217472,
+          "sum_abs_error": 0.1583051085472107,
+          "sum_squared_error": 0.00014131084529012128
+        }
+      ]
+    },
+    {
+      "tensor": "blk.6.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0016851425170898438,
+          "offset": 0,
+          "sum_abs_error": 0.15251398086547852,
+          "sum_squared_error": 0.00012970906425380235
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018891692161560059,
+          "offset": 44739072,
+          "sum_abs_error": 0.17213910818099976,
+          "sum_squared_error": 0.00016757467766481682
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016423463821411133,
+          "offset": 89478144,
+          "sum_abs_error": 0.15337234735488892,
+          "sum_squared_error": 0.00013140167788705526
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001573324203491211,
+          "offset": 134217472,
+          "sum_abs_error": 0.14831650257110596,
+          "sum_squared_error": 0.0001301206113311082
+        }
+      ]
+    },
+    {
+      "tensor": "blk.6.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0015734434127807617,
+          "offset": 0,
+          "sum_abs_error": 0.15461993217468262,
+          "sum_squared_error": 0.0001296982435619043
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017578601837158203,
+          "offset": 44739072,
+          "sum_abs_error": 0.16407203674316406,
+          "sum_squared_error": 0.00015009365461793323
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016022920608520508,
+          "offset": 89478144,
+          "sum_abs_error": 0.15261274576187134,
+          "sum_squared_error": 0.00013199556503096233
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001924753189086914,
+          "offset": 134217472,
+          "sum_abs_error": 0.16049742698669434,
+          "sum_squared_error": 0.00014501913011599754
+        }
+      ]
+    },
+    {
+      "tensor": "blk.6.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.002017796039581299,
+          "offset": 0,
+          "sum_abs_error": 0.18747800588607788,
+          "sum_squared_error": 0.00018957024354548935
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016636848449707031,
+          "offset": 44739072,
+          "sum_abs_error": 0.17406880855560303,
+          "sum_squared_error": 0.0001672039873739095
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0009756088256835938,
+          "offset": 89478144,
+          "sum_abs_error": 0.0850064754486084,
+          "sum_squared_error": 4.013198707752963e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016303062438964844,
+          "offset": 134217472,
+          "sum_abs_error": 0.1556994915008545,
+          "sum_squared_error": 0.0001337179028837454
+        }
+      ]
+    },
+    {
+      "tensor": "blk.7.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.002075672149658203,
+          "offset": 0,
+          "sum_abs_error": 0.17243587970733643,
+          "sum_squared_error": 0.00016757532252142937
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016436576843261719,
+          "offset": 44739072,
+          "sum_abs_error": 0.14530855417251587,
+          "sum_squared_error": 0.00012459061023051277
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017325878143310547,
+          "offset": 89478144,
+          "sum_abs_error": 0.14721500873565674,
+          "sum_squared_error": 0.000122604605579113
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019382238388061523,
+          "offset": 134217472,
+          "sum_abs_error": 0.16234612464904785,
+          "sum_squared_error": 0.00015193662511592265
+        }
+      ]
+    },
+    {
+      "tensor": "blk.7.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0016668438911437988,
+          "offset": 0,
+          "sum_abs_error": 0.1501997709274292,
+          "sum_squared_error": 0.00012973467618593304
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016975998878479004,
+          "offset": 44739072,
+          "sum_abs_error": 0.14731597900390625,
+          "sum_squared_error": 0.0001248645935447712
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015708208084106445,
+          "offset": 89478144,
+          "sum_abs_error": 0.15671247243881226,
+          "sum_squared_error": 0.00013179031964583032
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015320777893066406,
+          "offset": 134217472,
+          "sum_abs_error": 0.1570652723312378,
+          "sum_squared_error": 0.00013810446149875588
+        }
+      ]
+    },
+    {
+      "tensor": "blk.7.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0005340576171875,
+          "offset": 0,
+          "sum_abs_error": 0.040855467319488525,
+          "sum_squared_error": 9.32630009842228e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0005950927734375,
+          "offset": 44739072,
+          "sum_abs_error": 0.03931629657745361,
+          "sum_squared_error": 9.467934276585765e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0002288818359375,
+          "offset": 89478144,
+          "sum_abs_error": 0.02159106731414795,
+          "sum_squared_error": 2.628882569410962e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0005035400390625,
+          "offset": 134217472,
+          "sum_abs_error": 0.042011380195617676,
+          "sum_squared_error": 1.0531000427249637e-05
+        }
+      ]
+    },
+    {
+      "tensor": "blk.8.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0018813610076904297,
+          "offset": 0,
+          "sum_abs_error": 0.20400166511535645,
+          "sum_squared_error": 0.00022620168880393976
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016822218894958496,
+          "offset": 44739072,
+          "sum_abs_error": 0.16133522987365723,
+          "sum_squared_error": 0.0001442486155269762
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018297433853149414,
+          "offset": 89478144,
+          "sum_abs_error": 0.1784907579421997,
+          "sum_squared_error": 0.0001784890871050493
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002103567123413086,
+          "offset": 134217472,
+          "sum_abs_error": 0.17224577814340591,
+          "sum_squared_error": 0.00016687148900157434
+        }
+      ]
+    },
+    {
+      "tensor": "blk.8.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0016151070594787598,
+          "offset": 0,
+          "sum_abs_error": 0.1454678624868393,
+          "sum_squared_error": 0.00011568770055370159
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015579462051391602,
+          "offset": 44739072,
+          "sum_abs_error": 0.14506793022155762,
+          "sum_squared_error": 0.0001161335379364914
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015079975128173828,
+          "offset": 89478144,
+          "sum_abs_error": 0.1556379795074463,
+          "sum_squared_error": 0.00013533343798144415
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018072128295898438,
+          "offset": 134217472,
+          "sum_abs_error": 0.16046512126922607,
+          "sum_squared_error": 0.00014622751648118992
+        }
+      ]
+    },
+    {
+      "tensor": "blk.8.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0015137195587158203,
+          "offset": 0,
+          "sum_abs_error": 0.13450384140014648,
+          "sum_squared_error": 9.949235793271782e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016870498657226562,
+          "offset": 44739072,
+          "sum_abs_error": 0.1594129204750061,
+          "sum_squared_error": 0.0001464812143687766
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0007755756378173828,
+          "offset": 89478144,
+          "sum_abs_error": 0.07697224617004395,
+          "sum_squared_error": 3.177219031158529e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018627047538757324,
+          "offset": 134217472,
+          "sum_abs_error": 0.1837865710258484,
+          "sum_squared_error": 0.00018711914814062425
+        }
+      ]
+    },
+    {
+      "tensor": "blk.9.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0015287995338439941,
+          "offset": 0,
+          "sum_abs_error": 0.15721291303634644,
+          "sum_squared_error": 0.00013449131927600888
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0026634931564331055,
+          "offset": 44739072,
+          "sum_abs_error": 0.2616431713104248,
+          "sum_squared_error": 0.00037635201411490016
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0024172067642211914,
+          "offset": 89478144,
+          "sum_abs_error": 0.168207049369812,
+          "sum_squared_error": 0.00015950844441192658
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017042756080627441,
+          "offset": 134217472,
+          "sum_abs_error": 0.16396039724349976,
+          "sum_squared_error": 0.0001505190494093256
+        }
+      ]
+    },
+    {
+      "tensor": "blk.9.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.001597285270690918,
+          "offset": 0,
+          "sum_abs_error": 0.14680886268615723,
+          "sum_squared_error": 0.00012655721846499546
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016408562660217285,
+          "offset": 44739072,
+          "sum_abs_error": 0.1514090895652771,
+          "sum_squared_error": 0.00012661907873834366
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017525553703308105,
+          "offset": 89478144,
+          "sum_abs_error": 0.13275259733200073,
+          "sum_squared_error": 0.00010070167042997014
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001704394817352295,
+          "offset": 134217472,
+          "sum_abs_error": 0.1472150683403015,
+          "sum_squared_error": 0.00012271086922410746
+        }
+      ]
+    },
+    {
+      "tensor": "blk.9.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.002079308032989502,
+          "offset": 0,
+          "sum_abs_error": 0.20029836893081665,
+          "sum_squared_error": 0.00022178354041457737
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002004861831665039,
+          "offset": 44739072,
+          "sum_abs_error": 0.17791078984737396,
+          "sum_squared_error": 0.000181731836150556
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002602100372314453,
+          "offset": 89478144,
+          "sum_abs_error": 0.22940975427627563,
+          "sum_squared_error": 0.0002965849613651983
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001776576042175293,
+          "offset": 134217472,
+          "sum_abs_error": 0.17643898725509644,
+          "sum_squared_error": 0.00016792519611286139
+        }
+      ]
+    },
+    {
+      "tensor": "blk.10.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0019767284393310547,
+          "offset": 0,
+          "sum_abs_error": 0.15559536218643188,
+          "sum_squared_error": 0.00014275155704623899
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001428365707397461,
+          "offset": 44739072,
+          "sum_abs_error": 0.14037394523620605,
+          "sum_squared_error": 0.00010924690076308252
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016657710075378418,
+          "offset": 89478144,
+          "sum_abs_error": 0.1680724024772644,
+          "sum_squared_error": 0.0001529561612478858
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001856088638305664,
+          "offset": 134217472,
+          "sum_abs_error": 0.16113513708114624,
+          "sum_squared_error": 0.00015008164060148488
+        }
+      ]
+    },
+    {
+      "tensor": "blk.10.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.001753091812133789,
+          "offset": 0,
+          "sum_abs_error": 0.1617347002029419,
+          "sum_squared_error": 0.00014419656947950443
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017005205154418945,
+          "offset": 44739072,
+          "sum_abs_error": 0.15502390265464783,
+          "sum_squared_error": 0.0001343498609900351
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017948746681213379,
+          "offset": 89478144,
+          "sum_abs_error": 0.17374378442764282,
+          "sum_squared_error": 0.00016765857286671348
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001897573471069336,
+          "offset": 134217472,
+          "sum_abs_error": 0.16990429162979126,
+          "sum_squared_error": 0.00016556237172338228
+        }
+      ]
+    },
+    {
+      "tensor": "blk.10.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0006103515625,
+          "offset": 0,
+          "sum_abs_error": 0.052573442459106445,
+          "sum_squared_error": 1.4933858494714514e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00045013427734375,
+          "offset": 44739072,
+          "sum_abs_error": 0.03948664665222168,
+          "sum_squared_error": 8.661050287628314e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00040012598037719727,
+          "offset": 89478144,
+          "sum_abs_error": 0.03185735642910004,
+          "sum_squared_error": 6.1151965555783505e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00042724609375,
+          "offset": 134217472,
+          "sum_abs_error": 0.03609299659729004,
+          "sum_squared_error": 7.297806092765313e-06
+        }
+      ]
+    },
+    {
+      "tensor": "blk.11.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0018917322158813477,
+          "offset": 0,
+          "sum_abs_error": 0.17791569232940674,
+          "sum_squared_error": 0.0001739406836378521
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015759468078613281,
+          "offset": 44739072,
+          "sum_abs_error": 0.16822659969329834,
+          "sum_squared_error": 0.00015554612052426364
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002055644989013672,
+          "offset": 89478144,
+          "sum_abs_error": 0.18088364601135254,
+          "sum_squared_error": 0.00018329518871951223
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001699686050415039,
+          "offset": 134217472,
+          "sum_abs_error": 0.1596381664276123,
+          "sum_squared_error": 0.00014607512770226094
+        }
+      ]
+    },
+    {
+      "tensor": "blk.11.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0019741058349609375,
+          "offset": 0,
+          "sum_abs_error": 0.18966960906982422,
+          "sum_squared_error": 0.00019491862713039154
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015946626663208008,
+          "offset": 44739072,
+          "sum_abs_error": 0.1427193284034729,
+          "sum_squared_error": 0.00011073371155490008
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015947818756103516,
+          "offset": 89478144,
+          "sum_abs_error": 0.15469801425933838,
+          "sum_squared_error": 0.0001317762339709816
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001628875732421875,
+          "offset": 134217472,
+          "sum_abs_error": 0.15952831506729126,
+          "sum_squared_error": 0.00014723967456475862
+        }
+      ]
+    },
+    {
+      "tensor": "blk.11.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0016396045684814453,
+          "offset": 0,
+          "sum_abs_error": 0.1522895097732544,
+          "sum_squared_error": 0.00012944706568873698
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015908479690551758,
+          "offset": 44739072,
+          "sum_abs_error": 0.14415764808654785,
+          "sum_squared_error": 0.00011832728036154094
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0009453296661376953,
+          "offset": 89478144,
+          "sum_abs_error": 0.0969791878014803,
+          "sum_squared_error": 5.144808761831446e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016846656799316406,
+          "offset": 134217472,
+          "sum_abs_error": 0.17003744840621948,
+          "sum_squared_error": 0.00016353707113481164
+        }
+      ]
+    },
+    {
+      "tensor": "blk.12.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0015236139297485352,
+          "offset": 0,
+          "sum_abs_error": 0.15226596593856812,
+          "sum_squared_error": 0.00012392000886407573
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018901824951171875,
+          "offset": 44739072,
+          "sum_abs_error": 0.17156362533569336,
+          "sum_squared_error": 0.00016152864486684848
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016089081764221191,
+          "offset": 89478144,
+          "sum_abs_error": 0.1524134874343872,
+          "sum_squared_error": 0.00013300026739671011
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001779794692993164,
+          "offset": 134217472,
+          "sum_abs_error": 0.15720272064208984,
+          "sum_squared_error": 0.00013923402079285552
+        }
+      ]
+    },
+    {
+      "tensor": "blk.12.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0019289255142211914,
+          "offset": 0,
+          "sum_abs_error": 0.16430747509002686,
+          "sum_squared_error": 0.00015040937766741536
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016601085662841797,
+          "offset": 44739072,
+          "sum_abs_error": 0.14922207593917847,
+          "sum_squared_error": 0.00012912095759887166
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0022568702697753906,
+          "offset": 89478144,
+          "sum_abs_error": 0.151303231716156,
+          "sum_squared_error": 0.00014672226587109094
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017257928848266602,
+          "offset": 134217472,
+          "sum_abs_error": 0.16597521305084229,
+          "sum_squared_error": 0.00014429802129711788
+        }
+      ]
+    },
+    {
+      "tensor": "blk.12.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0015603303909301758,
+          "offset": 0,
+          "sum_abs_error": 0.14823365211486816,
+          "sum_squared_error": 0.00011891812096109788
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0014965534210205078,
+          "offset": 44739072,
+          "sum_abs_error": 0.1437159776687622,
+          "sum_squared_error": 0.00011556931438860829
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0007328987121582031,
+          "offset": 89478144,
+          "sum_abs_error": 0.06570935249328613,
+          "sum_squared_error": 2.3182030737700643e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019267797470092773,
+          "offset": 134217472,
+          "sum_abs_error": 0.17422407865524292,
+          "sum_squared_error": 0.00016979237173231354
+        }
+      ]
+    },
+    {
+      "tensor": "blk.13.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0017409324645996094,
+          "offset": 0,
+          "sum_abs_error": 0.17375868558883667,
+          "sum_squared_error": 0.00016421974626368296
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018177032470703125,
+          "offset": 44739072,
+          "sum_abs_error": 0.14786425232887268,
+          "sum_squared_error": 0.0001264040505022379
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0020038485527038574,
+          "offset": 89478144,
+          "sum_abs_error": 0.14509660005569458,
+          "sum_squared_error": 0.00012378339136986938
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001448988914489746,
+          "offset": 134217472,
+          "sum_abs_error": 0.14015164971351624,
+          "sum_squared_error": 0.00010804481054993431
+        }
+      ]
+    },
+    {
+      "tensor": "blk.13.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0019059181213378906,
+          "offset": 0,
+          "sum_abs_error": 0.16838479042053223,
+          "sum_squared_error": 0.0001587535282965291
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00167083740234375,
+          "offset": 44739072,
+          "sum_abs_error": 0.15504443645477295,
+          "sum_squared_error": 0.00013398613741344434
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017441511154174805,
+          "offset": 89478144,
+          "sum_abs_error": 0.14804911613464355,
+          "sum_squared_error": 0.0001228873232435035
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019736886024475098,
+          "offset": 134217472,
+          "sum_abs_error": 0.16041940450668335,
+          "sum_squared_error": 0.00014899206321317138
+        }
+      ]
+    },
+    {
+      "tensor": "blk.13.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00048828125,
+          "offset": 0,
+          "sum_abs_error": 0.044837892055511475,
+          "sum_squared_error": 1.1467795541619807e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000457763671875,
+          "offset": 44739072,
+          "sum_abs_error": 0.03864705562591553,
+          "sum_squared_error": 8.596273701755308e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000335693359375,
+          "offset": 89478144,
+          "sum_abs_error": 0.022240594029426575,
+          "sum_squared_error": 2.8643374128112242e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00055694580078125,
+          "offset": 134217472,
+          "sum_abs_error": 0.04314911365509033,
+          "sum_squared_error": 1.0829276760659923e-05
+        }
+      ]
+    },
+    {
+      "tensor": "blk.14.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0018770694732666016,
+          "offset": 0,
+          "sum_abs_error": 0.1914944052696228,
+          "sum_squared_error": 0.00019942769040781627
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001720428466796875,
+          "offset": 44739072,
+          "sum_abs_error": 0.16101956367492676,
+          "sum_squared_error": 0.00014153819216744523
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001567244529724121,
+          "offset": 89478144,
+          "sum_abs_error": 0.13523077964782715,
+          "sum_squared_error": 0.00010116780347857457
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016483068466186523,
+          "offset": 134217472,
+          "sum_abs_error": 0.15751028060913086,
+          "sum_squared_error": 0.00013491867485981857
+        }
+      ]
+    },
+    {
+      "tensor": "blk.14.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0019371509552001953,
+          "offset": 0,
+          "sum_abs_error": 0.182839035987854,
+          "sum_squared_error": 0.00018324533134261856
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019510984420776367,
+          "offset": 44739072,
+          "sum_abs_error": 0.16739684343338013,
+          "sum_squared_error": 0.0001654688177659125
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019949674606323242,
+          "offset": 89478144,
+          "sum_abs_error": 0.14948701858520508,
+          "sum_squared_error": 0.00013011611358137998
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017919540405273438,
+          "offset": 134217472,
+          "sum_abs_error": 0.15572810173034668,
+          "sum_squared_error": 0.00013489198994420804
+        }
+      ]
+    },
+    {
+      "tensor": "blk.14.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0019453763961791992,
+          "offset": 0,
+          "sum_abs_error": 0.17945241928100586,
+          "sum_squared_error": 0.00017790389603078438
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017783641815185547,
+          "offset": 44739072,
+          "sum_abs_error": 0.1780657172203064,
+          "sum_squared_error": 0.00017505865308109492
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0009438991546630859,
+          "offset": 89478144,
+          "sum_abs_error": 0.08435893058776855,
+          "sum_squared_error": 3.98726031392016e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016304254531860352,
+          "offset": 134217472,
+          "sum_abs_error": 0.17360198497772217,
+          "sum_squared_error": 0.00016249242061405766
+        }
+      ]
+    },
+    {
+      "tensor": "blk.15.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0012075304985046387,
+          "offset": 0,
+          "sum_abs_error": 0.13112938404083252,
+          "sum_squared_error": 9.438385262683369e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016459822654724121,
+          "offset": 44739072,
+          "sum_abs_error": 0.1498500108718872,
+          "sum_squared_error": 0.00012730817991979393
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016974806785583496,
+          "offset": 89478144,
+          "sum_abs_error": 0.1488114595413208,
+          "sum_squared_error": 0.00012348470353629182
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016660690307617188,
+          "offset": 134217472,
+          "sum_abs_error": 0.1558762788772583,
+          "sum_squared_error": 0.000135196407839544
+        }
+      ]
+    },
+    {
+      "tensor": "blk.15.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0016331672668457031,
+          "offset": 0,
+          "sum_abs_error": 0.14733219146728516,
+          "sum_squared_error": 0.00012250059344154351
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019522905349731445,
+          "offset": 44739072,
+          "sum_abs_error": 0.18130779266357422,
+          "sum_squared_error": 0.0001806687364478421
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016044974327087402,
+          "offset": 89478144,
+          "sum_abs_error": 0.14465278387069702,
+          "sum_squared_error": 0.00012000275652113146
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018683671951293945,
+          "offset": 134217472,
+          "sum_abs_error": 0.18345379829406738,
+          "sum_squared_error": 0.0001783424330028538
+        }
+      ]
+    },
+    {
+      "tensor": "blk.15.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0017424821853637695,
+          "offset": 0,
+          "sum_abs_error": 0.1641230583190918,
+          "sum_squared_error": 0.0001533823329111783
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00168687105178833,
+          "offset": 44739072,
+          "sum_abs_error": 0.1684962511062622,
+          "sum_squared_error": 0.00015394244087474362
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0009799003601074219,
+          "offset": 89478144,
+          "sum_abs_error": 0.09605658054351807,
+          "sum_squared_error": 5.193540555126219e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0021154284477233887,
+          "offset": 134217472,
+          "sum_abs_error": 0.17933303117752075,
+          "sum_squared_error": 0.00017906135331102746
+        }
+      ]
+    },
+    {
+      "tensor": "blk.16.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0017151832580566406,
+          "offset": 0,
+          "sum_abs_error": 0.17434996366500854,
+          "sum_squared_error": 0.00016778837500552868
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001630544662475586,
+          "offset": 44739072,
+          "sum_abs_error": 0.1593608260154724,
+          "sum_squared_error": 0.00013707204334068024
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017976760864257812,
+          "offset": 89478144,
+          "sum_abs_error": 0.17353931069374084,
+          "sum_squared_error": 0.0001645899451725441
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015073418617248535,
+          "offset": 134217472,
+          "sum_abs_error": 0.14648056030273438,
+          "sum_squared_error": 0.00011684816370660656
+        }
+      ]
+    },
+    {
+      "tensor": "blk.16.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0021906495094299316,
+          "offset": 0,
+          "sum_abs_error": 0.18543130159378052,
+          "sum_squared_error": 0.00019283842894068925
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018328428268432617,
+          "offset": 44739072,
+          "sum_abs_error": 0.16623294353485107,
+          "sum_squared_error": 0.00015816609605678877
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001748204231262207,
+          "offset": 89478144,
+          "sum_abs_error": 0.1632646918296814,
+          "sum_squared_error": 0.00014606242956816118
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002035200595855713,
+          "offset": 134217472,
+          "sum_abs_error": 0.19793039560317993,
+          "sum_squared_error": 0.0002188595706051899
+        }
+      ]
+    },
+    {
+      "tensor": "blk.16.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00042831897735595703,
+          "offset": 0,
+          "sum_abs_error": 0.037856996059417725,
+          "sum_squared_error": 8.230824594335218e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000429689884185791,
+          "offset": 44739072,
+          "sum_abs_error": 0.04160279035568237,
+          "sum_squared_error": 9.636010499747272e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000244140625,
+          "offset": 89478144,
+          "sum_abs_error": 0.020978093147277832,
+          "sum_squared_error": 2.4978491950378157e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00061798095703125,
+          "offset": 134217472,
+          "sum_abs_error": 0.044883012771606445,
+          "sum_squared_error": 1.1610808599016309e-05
+        }
+      ]
+    },
+    {
+      "tensor": "blk.17.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.001828610897064209,
+          "offset": 0,
+          "sum_abs_error": 0.18224269151687622,
+          "sum_squared_error": 0.0001765822894803648
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017023086547851562,
+          "offset": 44739072,
+          "sum_abs_error": 0.14637136459350586,
+          "sum_squared_error": 0.00011878319310199004
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017194747924804688,
+          "offset": 89478144,
+          "sum_abs_error": 0.1528342366218567,
+          "sum_squared_error": 0.0001308897386742558
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017132759094238281,
+          "offset": 134217472,
+          "sum_abs_error": 0.162652850151062,
+          "sum_squared_error": 0.00014306527067731167
+        }
+      ]
+    },
+    {
+      "tensor": "blk.17.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0020841360092163086,
+          "offset": 0,
+          "sum_abs_error": 0.1575108766555786,
+          "sum_squared_error": 0.00014239783625669133
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016930103302001953,
+          "offset": 44739072,
+          "sum_abs_error": 0.14378058910369873,
+          "sum_squared_error": 0.00011457023718008941
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0013827681541442871,
+          "offset": 89478144,
+          "sum_abs_error": 0.13165688514709473,
+          "sum_squared_error": 9.628149816620635e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002305269241333008,
+          "offset": 134217472,
+          "sum_abs_error": 0.1852179765701294,
+          "sum_squared_error": 0.00019231837383415495
+        }
+      ]
+    },
+    {
+      "tensor": "blk.17.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.002060115337371826,
+          "offset": 0,
+          "sum_abs_error": 0.19075483083724976,
+          "sum_squared_error": 0.00019835868030426695
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017445683479309082,
+          "offset": 44739072,
+          "sum_abs_error": 0.15234768390655518,
+          "sum_squared_error": 0.0001271570645542397
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000880122184753418,
+          "offset": 89478144,
+          "sum_abs_error": 0.08573508262634277,
+          "sum_squared_error": 4.0164477894677475e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002846360206604004,
+          "offset": 134217472,
+          "sum_abs_error": 0.17144227027893066,
+          "sum_squared_error": 0.000170970135116022
+        }
+      ]
+    },
+    {
+      "tensor": "blk.18.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.001614987850189209,
+          "offset": 0,
+          "sum_abs_error": 0.17607778310775757,
+          "sum_squared_error": 0.0001650355761562139
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019354820251464844,
+          "offset": 44739072,
+          "sum_abs_error": 0.16517400741577148,
+          "sum_squared_error": 0.00015603580357037572
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017490386962890625,
+          "offset": 89478144,
+          "sum_abs_error": 0.15077471733093262,
+          "sum_squared_error": 0.00013284304696981053
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016540288925170898,
+          "offset": 134217472,
+          "sum_abs_error": 0.15851545333862305,
+          "sum_squared_error": 0.00014441368151096867
+        }
+      ]
+    },
+    {
+      "tensor": "blk.18.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.001833200454711914,
+          "offset": 0,
+          "sum_abs_error": 0.16405555605888367,
+          "sum_squared_error": 0.00014786748060746646
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001543879508972168,
+          "offset": 44739072,
+          "sum_abs_error": 0.14913266897201538,
+          "sum_squared_error": 0.0001240351415781049
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001589655876159668,
+          "offset": 89478144,
+          "sum_abs_error": 0.15121877193450928,
+          "sum_squared_error": 0.00012636263574705708
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0020041465759277344,
+          "offset": 134217472,
+          "sum_abs_error": 0.16884100437164307,
+          "sum_squared_error": 0.0001655430102829314
+        }
+      ]
+    },
+    {
+      "tensor": "blk.18.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.002466440200805664,
+          "offset": 0,
+          "sum_abs_error": 0.18086326122283936,
+          "sum_squared_error": 0.00020343820160917403
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016466379165649414,
+          "offset": 44739072,
+          "sum_abs_error": 0.16371876001358032,
+          "sum_squared_error": 0.0001505990549155456
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0008045434951782227,
+          "offset": 89478144,
+          "sum_abs_error": 0.06139248609542847,
+          "sum_squared_error": 2.2225037174194995e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017958283424377441,
+          "offset": 134217472,
+          "sum_abs_error": 0.16564124822616577,
+          "sum_squared_error": 0.00015190037101220355
+        }
+      ]
+    },
+    {
+      "tensor": "blk.19.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0019197463989257812,
+          "offset": 0,
+          "sum_abs_error": 0.15137088298797607,
+          "sum_squared_error": 0.00012607976124456854
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0022276639938354492,
+          "offset": 44739072,
+          "sum_abs_error": 0.16241788864135742,
+          "sum_squared_error": 0.00015116985773033775
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016319751739501953,
+          "offset": 89478144,
+          "sum_abs_error": 0.17027902603149414,
+          "sum_squared_error": 0.00015799793160908848
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015774965286254883,
+          "offset": 134217472,
+          "sum_abs_error": 0.15471535921096802,
+          "sum_squared_error": 0.00013643860759415816
+        }
+      ]
+    },
+    {
+      "tensor": "blk.19.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0016644001007080078,
+          "offset": 0,
+          "sum_abs_error": 0.1679304838180542,
+          "sum_squared_error": 0.0001551565502353469
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017895102500915527,
+          "offset": 44739072,
+          "sum_abs_error": 0.1622288767248392,
+          "sum_squared_error": 0.00014364111687740003
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0020428895950317383,
+          "offset": 89478144,
+          "sum_abs_error": 0.19588756561279297,
+          "sum_squared_error": 0.00020750403587044275
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017812252044677734,
+          "offset": 134217472,
+          "sum_abs_error": 0.15439748764038086,
+          "sum_squared_error": 0.00013391747506830143
+        }
+      ]
+    },
+    {
+      "tensor": "blk.19.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0005645751953125,
+          "offset": 0,
+          "sum_abs_error": 0.042679429054260254,
+          "sum_squared_error": 1.0705077087891368e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0004730224609375,
+          "offset": 44739072,
+          "sum_abs_error": 0.04122656583786011,
+          "sum_squared_error": 9.688615786984656e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00038909912109375,
+          "offset": 89478144,
+          "sum_abs_error": 0.03392484784126282,
+          "sum_squared_error": 6.608404853558625e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00042724609375,
+          "offset": 134217472,
+          "sum_abs_error": 0.04181903600692749,
+          "sum_squared_error": 9.743972729125971e-06
+        }
+      ]
+    },
+    {
+      "tensor": "blk.20.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0015202760696411133,
+          "offset": 0,
+          "sum_abs_error": 0.1373218297958374,
+          "sum_squared_error": 0.00010827372877031394
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016760826110839844,
+          "offset": 44739072,
+          "sum_abs_error": 0.17848020792007446,
+          "sum_squared_error": 0.0001726778183019917
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019180774688720703,
+          "offset": 89478144,
+          "sum_abs_error": 0.1734333038330078,
+          "sum_squared_error": 0.00017349336346228483
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018440485000610352,
+          "offset": 134217472,
+          "sum_abs_error": 0.19385629892349243,
+          "sum_squared_error": 0.0002033891848363112
+        }
+      ]
+    },
+    {
+      "tensor": "blk.20.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00157928466796875,
+          "offset": 0,
+          "sum_abs_error": 0.1435248851776123,
+          "sum_squared_error": 0.00011669865824615044
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016406774520874023,
+          "offset": 44739072,
+          "sum_abs_error": 0.15824556350708008,
+          "sum_squared_error": 0.0001388689268537746
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017673969268798828,
+          "offset": 89478144,
+          "sum_abs_error": 0.17910045385360718,
+          "sum_squared_error": 0.00016707867872511883
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00224989652633667,
+          "offset": 134217472,
+          "sum_abs_error": 0.17792457342147827,
+          "sum_squared_error": 0.00017974007107213197
+        }
+      ]
+    },
+    {
+      "tensor": "blk.20.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0016474723815917969,
+          "offset": 0,
+          "sum_abs_error": 0.15236079692840576,
+          "sum_squared_error": 0.0001294285666375572
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018279552459716797,
+          "offset": 44739072,
+          "sum_abs_error": 0.18439507484436035,
+          "sum_squared_error": 0.0001840385087064078
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0010647773742675781,
+          "offset": 89478144,
+          "sum_abs_error": 0.10894244909286499,
+          "sum_squared_error": 6.39697339259726e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001901865005493164,
+          "offset": 134217472,
+          "sum_abs_error": 0.16508615016937256,
+          "sum_squared_error": 0.00015530891302262262
+        }
+      ]
+    },
+    {
+      "tensor": "blk.21.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0017170906066894531,
+          "offset": 0,
+          "sum_abs_error": 0.15541160106658936,
+          "sum_squared_error": 0.000134009518362177
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018156170845031738,
+          "offset": 44739072,
+          "sum_abs_error": 0.1726263165473938,
+          "sum_squared_error": 0.0001652872311446174
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017709732055664062,
+          "offset": 89478144,
+          "sum_abs_error": 0.16349470615386963,
+          "sum_squared_error": 0.00014729467800123075
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017784833908081055,
+          "offset": 134217472,
+          "sum_abs_error": 0.16541582345962524,
+          "sum_squared_error": 0.00015302300971953287
+        }
+      ]
+    },
+    {
+      "tensor": "blk.21.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0018475055694580078,
+          "offset": 0,
+          "sum_abs_error": 0.18661189079284668,
+          "sum_squared_error": 0.00018469925868203063
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015228986740112305,
+          "offset": 44739072,
+          "sum_abs_error": 0.14811265468597412,
+          "sum_squared_error": 0.00012226396184189525
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016458630561828613,
+          "offset": 89478144,
+          "sum_abs_error": 0.16001927852630615,
+          "sum_squared_error": 0.00014087752408897813
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002043485641479492,
+          "offset": 134217472,
+          "sum_abs_error": 0.17676842212677002,
+          "sum_squared_error": 0.00017824430777579892
+        }
+      ]
+    },
+    {
+      "tensor": "blk.21.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.001926422119140625,
+          "offset": 0,
+          "sum_abs_error": 0.1768496036529541,
+          "sum_squared_error": 0.00017609953475528073
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017906427383422852,
+          "offset": 44739072,
+          "sum_abs_error": 0.14393842220306396,
+          "sum_squared_error": 0.00011981245945946739
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0008422732353210449,
+          "offset": 89478144,
+          "sum_abs_error": 0.0836414098739624,
+          "sum_squared_error": 3.7467273855895655e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001687765121459961,
+          "offset": 134217472,
+          "sum_abs_error": 0.1550295352935791,
+          "sum_squared_error": 0.00013761731160144564
+        }
+      ]
+    },
+    {
+      "tensor": "blk.22.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0017480850219726562,
+          "offset": 0,
+          "sum_abs_error": 0.14903223514556885,
+          "sum_squared_error": 0.00012617749540311252
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016660690307617188,
+          "offset": 44739072,
+          "sum_abs_error": 0.1640077829360962,
+          "sum_squared_error": 0.00014313079888950142
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001798391342163086,
+          "offset": 89478144,
+          "sum_abs_error": 0.16929221153259277,
+          "sum_squared_error": 0.0001578670551793948
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018672943115234375,
+          "offset": 134217472,
+          "sum_abs_error": 0.15998804569244385,
+          "sum_squared_error": 0.00014493319191899445
+        }
+      ]
+    },
+    {
+      "tensor": "blk.22.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0016294121742248535,
+          "offset": 0,
+          "sum_abs_error": 0.15826785564422607,
+          "sum_squared_error": 0.00014089648701087754
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015910863876342773,
+          "offset": 44739072,
+          "sum_abs_error": 0.15613681077957153,
+          "sum_squared_error": 0.00013216647463210052
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018594861030578613,
+          "offset": 89478144,
+          "sum_abs_error": 0.1755722165107727,
+          "sum_squared_error": 0.00017273505484283191
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019893646240234375,
+          "offset": 134217472,
+          "sum_abs_error": 0.1735086441040039,
+          "sum_squared_error": 0.000169792961969506
+        }
+      ]
+    },
+    {
+      "tensor": "blk.22.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00070953369140625,
+          "offset": 0,
+          "sum_abs_error": 0.05244028568267822,
+          "sum_squared_error": 1.6416831741139504e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000457763671875,
+          "offset": 44739072,
+          "sum_abs_error": 0.039446353912353516,
+          "sum_squared_error": 8.712876869765296e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000244140625,
+          "offset": 89478144,
+          "sum_abs_error": 0.018404364585876465,
+          "sum_squared_error": 2.0246192349304692e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0005557537078857422,
+          "offset": 134217472,
+          "sum_abs_error": 0.04858994483947754,
+          "sum_squared_error": 1.3665273343121953e-05
+        }
+      ]
+    },
+    {
+      "tensor": "blk.23.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0025167465209960938,
+          "offset": 0,
+          "sum_abs_error": 0.2380208969116211,
+          "sum_squared_error": 0.00031147147910814965
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019434690475463867,
+          "offset": 44739072,
+          "sum_abs_error": 0.16244828701019287,
+          "sum_squared_error": 0.00014994682035052165
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0014832019805908203,
+          "offset": 89478144,
+          "sum_abs_error": 0.15379607677459717,
+          "sum_squared_error": 0.00012450842532985007
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018301010131835938,
+          "offset": 134217472,
+          "sum_abs_error": 0.15731298923492432,
+          "sum_squared_error": 0.00014224255095030003
+        }
+      ]
+    },
+    {
+      "tensor": "blk.23.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.001946568489074707,
+          "offset": 0,
+          "sum_abs_error": 0.17748022079467773,
+          "sum_squared_error": 0.00018039991418561385
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016033649444580078,
+          "offset": 44739072,
+          "sum_abs_error": 0.164817214012146,
+          "sum_squared_error": 0.0001507967654177378
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001953601837158203,
+          "offset": 89478144,
+          "sum_abs_error": 0.15580976009368896,
+          "sum_squared_error": 0.00013893889617122568
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016925334930419922,
+          "offset": 134217472,
+          "sum_abs_error": 0.14996367692947388,
+          "sum_squared_error": 0.0001237688485140609
+        }
+      ]
+    },
+    {
+      "tensor": "blk.23.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0016585588455200195,
+          "offset": 0,
+          "sum_abs_error": 0.15617626905441284,
+          "sum_squared_error": 0.00013436597487626045
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016988515853881836,
+          "offset": 44739072,
+          "sum_abs_error": 0.15507030487060547,
+          "sum_squared_error": 0.00013259074049187802
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001259446144104004,
+          "offset": 89478144,
+          "sum_abs_error": 0.11018908023834229,
+          "sum_squared_error": 6.755910889921779e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016346573829650879,
+          "offset": 134217472,
+          "sum_abs_error": 0.16485601663589478,
+          "sum_squared_error": 0.00015309315136491364
+        }
+      ]
+    },
+    {
+      "tensor": "blk.24.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0017719268798828125,
+          "offset": 0,
+          "sum_abs_error": 0.1472986340522766,
+          "sum_squared_error": 0.000122074170153752
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002162933349609375,
+          "offset": 44739072,
+          "sum_abs_error": 0.16408157348632812,
+          "sum_squared_error": 0.00015349154136856669
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001585245132446289,
+          "offset": 89478144,
+          "sum_abs_error": 0.14539945125579834,
+          "sum_squared_error": 0.00011699870508863341
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015802383422851562,
+          "offset": 134217472,
+          "sum_abs_error": 0.16186201572418213,
+          "sum_squared_error": 0.00014385251951409828
+        }
+      ]
+    },
+    {
+      "tensor": "blk.24.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0019017457962036133,
+          "offset": 0,
+          "sum_abs_error": 0.16060888767242432,
+          "sum_squared_error": 0.00014496971353139543
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015043020248413086,
+          "offset": 44739072,
+          "sum_abs_error": 0.15525120496749878,
+          "sum_squared_error": 0.00013685073001923342
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016529560089111328,
+          "offset": 89478144,
+          "sum_abs_error": 0.14940178394317627,
+          "sum_squared_error": 0.00012783416404005266
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018996000289916992,
+          "offset": 134217472,
+          "sum_abs_error": 0.15873312950134277,
+          "sum_squared_error": 0.00014038193972965018
+        }
+      ]
+    },
+    {
+      "tensor": "blk.24.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0017240643501281738,
+          "offset": 0,
+          "sum_abs_error": 0.14498460292816162,
+          "sum_squared_error": 0.000117301517164492
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017912983894348145,
+          "offset": 44739072,
+          "sum_abs_error": 0.16727721691131592,
+          "sum_squared_error": 0.00015315997707432416
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0011539459228515625,
+          "offset": 89478144,
+          "sum_abs_error": 0.0997544527053833,
+          "sum_squared_error": 5.758779747822018e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015746355056762695,
+          "offset": 134217472,
+          "sum_abs_error": 0.14618384838104248,
+          "sum_squared_error": 0.00012446358560680437
+        }
+      ]
+    },
+    {
+      "tensor": "blk.25.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0018962621688842773,
+          "offset": 0,
+          "sum_abs_error": 0.16824191808700562,
+          "sum_squared_error": 0.00015631457006648475
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016013383865356445,
+          "offset": 44739072,
+          "sum_abs_error": 0.15948927402496338,
+          "sum_squared_error": 0.00014279891907875708
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001874685287475586,
+          "offset": 89478144,
+          "sum_abs_error": 0.18074902892112732,
+          "sum_squared_error": 0.00018487093577679303
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002067089080810547,
+          "offset": 134217472,
+          "sum_abs_error": 0.18109995126724243,
+          "sum_squared_error": 0.00018498774882047542
+        }
+      ]
+    },
+    {
+      "tensor": "blk.25.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00170975923538208,
+          "offset": 0,
+          "sum_abs_error": 0.16041100025177002,
+          "sum_squared_error": 0.00013621389301476938
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018690824508666992,
+          "offset": 44739072,
+          "sum_abs_error": 0.1436139941215515,
+          "sum_squared_error": 0.00012387743516839578
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016698837280273438,
+          "offset": 89478144,
+          "sum_abs_error": 0.15333813428878784,
+          "sum_squared_error": 0.00013465312622074066
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016318559646606445,
+          "offset": 134217472,
+          "sum_abs_error": 0.14725814945995808,
+          "sum_squared_error": 0.00012249864123576107
+        }
+      ]
+    },
+    {
+      "tensor": "blk.25.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00061798095703125,
+          "offset": 0,
+          "sum_abs_error": 0.04257774353027344,
+          "sum_squared_error": 1.1234298199269688e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0004254579544067383,
+          "offset": 44739072,
+          "sum_abs_error": 0.03780418634414673,
+          "sum_squared_error": 8.248109910624635e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0002346038818359375,
+          "offset": 89478144,
+          "sum_abs_error": 0.02315521240234375,
+          "sum_squared_error": 2.972510174004128e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00055694580078125,
+          "offset": 134217472,
+          "sum_abs_error": 0.045075953006744385,
+          "sum_squared_error": 1.1560386777631493e-05
+        }
+      ]
+    },
+    {
+      "tensor": "blk.26.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0020380020141601562,
+          "offset": 0,
+          "sum_abs_error": 0.1918579339981079,
+          "sum_squared_error": 0.0001947335935170713
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001901865005493164,
+          "offset": 44739072,
+          "sum_abs_error": 0.17850184440612793,
+          "sum_squared_error": 0.00017159501180685766
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002330303192138672,
+          "offset": 89478144,
+          "sum_abs_error": 0.15651917457580566,
+          "sum_squared_error": 0.0001397212317328922
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017166733741760254,
+          "offset": 134217472,
+          "sum_abs_error": 0.16347408294677734,
+          "sum_squared_error": 0.0001452450921988202
+        }
+      ]
+    },
+    {
+      "tensor": "blk.26.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0015996694564819336,
+          "offset": 0,
+          "sum_abs_error": 0.17124391347169876,
+          "sum_squared_error": 0.00015608420159912706
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015742778778076172,
+          "offset": 44739072,
+          "sum_abs_error": 0.16593581438064575,
+          "sum_squared_error": 0.0001501699028985115
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0025382041931152344,
+          "offset": 89478144,
+          "sum_abs_error": 0.17143934965133667,
+          "sum_squared_error": 0.00017341053403541196
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0014958977699279785,
+          "offset": 134217472,
+          "sum_abs_error": 0.13434725999832153,
+          "sum_squared_error": 0.00010187650866910758
+        }
+      ]
+    },
+    {
+      "tensor": "blk.26.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0024831295013427734,
+          "offset": 0,
+          "sum_abs_error": 0.19989317655563354,
+          "sum_squared_error": 0.00021776519833238694
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001764059066772461,
+          "offset": 44739072,
+          "sum_abs_error": 0.16813397407531738,
+          "sum_squared_error": 0.00015729521076224273
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0008263587951660156,
+          "offset": 89478144,
+          "sum_abs_error": 0.08822965621948242,
+          "sum_squared_error": 4.181248300483276e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0013396739959716797,
+          "offset": 134217472,
+          "sum_abs_error": 0.13042640686035156,
+          "sum_squared_error": 9.687963540727651e-05
+        }
+      ]
+    },
+    {
+      "tensor": "blk.27.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0017621517181396484,
+          "offset": 0,
+          "sum_abs_error": 0.1509411334991455,
+          "sum_squared_error": 0.00012726744631663678
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0020389556884765625,
+          "offset": 44739072,
+          "sum_abs_error": 0.19953811168670654,
+          "sum_squared_error": 0.00021442186881870384
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017004013061523438,
+          "offset": 89478144,
+          "sum_abs_error": 0.13776683807373047,
+          "sum_squared_error": 0.00010851097499653406
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018000602722167969,
+          "offset": 134217472,
+          "sum_abs_error": 0.1664680689573288,
+          "sum_squared_error": 0.00015738670070164495
+        }
+      ]
+    },
+    {
+      "tensor": "blk.27.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0017684698104858398,
+          "offset": 0,
+          "sum_abs_error": 0.1645824909210205,
+          "sum_squared_error": 0.00015254526513786004
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002215266227722168,
+          "offset": 44739072,
+          "sum_abs_error": 0.1938524842262268,
+          "sum_squared_error": 0.00021209570407521028
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015976428985595703,
+          "offset": 89478144,
+          "sum_abs_error": 0.15291588008403778,
+          "sum_squared_error": 0.00013095201432045123
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001964569091796875,
+          "offset": 134217472,
+          "sum_abs_error": 0.17134970426559448,
+          "sum_squared_error": 0.00016621577114861452
+        }
+      ]
+    },
+    {
+      "tensor": "blk.27.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.002283930778503418,
+          "offset": 0,
+          "sum_abs_error": 0.22157740592956543,
+          "sum_squared_error": 0.0002751242524823283
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017643570899963379,
+          "offset": 44739072,
+          "sum_abs_error": 0.16307169198989868,
+          "sum_squared_error": 0.00014930247452227263
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0013519525527954102,
+          "offset": 89478144,
+          "sum_abs_error": 0.09474456310272217,
+          "sum_squared_error": 5.3364917100395814e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019081830978393555,
+          "offset": 134217472,
+          "sum_abs_error": 0.1701056957244873,
+          "sum_squared_error": 0.00016644590049708086
+        }
+      ]
+    },
+    {
+      "tensor": "blk.28.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0017855167388916016,
+          "offset": 0,
+          "sum_abs_error": 0.1719467043876648,
+          "sum_squared_error": 0.00016140005059028795
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0023233890533447266,
+          "offset": 44739072,
+          "sum_abs_error": 0.2045532464981079,
+          "sum_squared_error": 0.00024328510793480973
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001338958740234375,
+          "offset": 89478144,
+          "sum_abs_error": 0.13560807704925537,
+          "sum_squared_error": 0.00010309082283299631
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018608570098876953,
+          "offset": 134217472,
+          "sum_abs_error": 0.17013591527938843,
+          "sum_squared_error": 0.00016192057293906714
+        }
+      ]
+    },
+    {
+      "tensor": "blk.28.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0022188425064086914,
+          "offset": 0,
+          "sum_abs_error": 0.22485339641571045,
+          "sum_squared_error": 0.0002675310636703898
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018184781074523926,
+          "offset": 44739072,
+          "sum_abs_error": 0.1602764129638672,
+          "sum_squared_error": 0.0001446964212945545
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001415848731994629,
+          "offset": 89478144,
+          "sum_abs_error": 0.1372469663619995,
+          "sum_squared_error": 0.00010672437046821415
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0021042823791503906,
+          "offset": 134217472,
+          "sum_abs_error": 0.204126238822937,
+          "sum_squared_error": 0.0002266894352587201
+        }
+      ]
+    },
+    {
+      "tensor": "blk.28.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00074005126953125,
+          "offset": 0,
+          "sum_abs_error": 0.04644060134887695,
+          "sum_squared_error": 1.2570817659707245e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00052642822265625,
+          "offset": 44739072,
+          "sum_abs_error": 0.04242229461669922,
+          "sum_squared_error": 1.017371232592268e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000232696533203125,
+          "offset": 89478144,
+          "sum_abs_error": 0.022507190704345703,
+          "sum_squared_error": 2.861020902855671e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00066375732421875,
+          "offset": 134217472,
+          "sum_abs_error": 0.044217050075531006,
+          "sum_squared_error": 1.1759552169365861e-05
+        }
+      ]
+    },
+    {
+      "tensor": "blk.29.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0015767812728881836,
+          "offset": 0,
+          "sum_abs_error": 0.15672624111175537,
+          "sum_squared_error": 0.00013915912840900546
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019016265869140625,
+          "offset": 44739072,
+          "sum_abs_error": 0.16600704193115234,
+          "sum_squared_error": 0.00015234360114391166
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0026934146881103516,
+          "offset": 89478144,
+          "sum_abs_error": 0.2215198278427124,
+          "sum_squared_error": 0.0002739447368824699
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0021518468856811523,
+          "offset": 134217472,
+          "sum_abs_error": 0.1890701949596405,
+          "sum_squared_error": 0.00019421446420953004
+        }
+      ]
+    },
+    {
+      "tensor": "blk.29.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.001944422721862793,
+          "offset": 0,
+          "sum_abs_error": 0.1723599135875702,
+          "sum_squared_error": 0.0001642947507223269
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001606583595275879,
+          "offset": 44739072,
+          "sum_abs_error": 0.14837421476840973,
+          "sum_squared_error": 0.00012399915908489767
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017459392547607422,
+          "offset": 89478144,
+          "sum_abs_error": 0.15643800795078278,
+          "sum_squared_error": 0.0001412152893467411
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0021758675575256348,
+          "offset": 134217472,
+          "sum_abs_error": 0.1772465705871582,
+          "sum_squared_error": 0.00018046418612982507
+        }
+      ]
+    },
+    {
+      "tensor": "blk.29.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0016632080078125,
+          "offset": 0,
+          "sum_abs_error": 0.169020414352417,
+          "sum_squared_error": 0.0001575931102593131
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019834041595458984,
+          "offset": 44739072,
+          "sum_abs_error": 0.17937695980072021,
+          "sum_squared_error": 0.0001750702465841414
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0007100701332092285,
+          "offset": 89478144,
+          "sum_abs_error": 0.06832778453826904,
+          "sum_squared_error": 2.564259462900509e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001926422119140625,
+          "offset": 134217472,
+          "sum_abs_error": 0.1732954978942871,
+          "sum_squared_error": 0.00017173548516780102
+        }
+      ]
+    },
+    {
+      "tensor": "blk.30.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00140380859375,
+          "offset": 0,
+          "sum_abs_error": 0.14242243766784668,
+          "sum_squared_error": 0.00011201030395113776
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002024412155151367,
+          "offset": 44739072,
+          "sum_abs_error": 0.18272948265075684,
+          "sum_squared_error": 0.00018539119588467656
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001573801040649414,
+          "offset": 89478144,
+          "sum_abs_error": 0.15076661109924316,
+          "sum_squared_error": 0.00012022870458849866
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019562244415283203,
+          "offset": 134217472,
+          "sum_abs_error": 0.18827003240585327,
+          "sum_squared_error": 0.0001894180789712152
+        }
+      ]
+    },
+    {
+      "tensor": "blk.30.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0015227794647216797,
+          "offset": 0,
+          "sum_abs_error": 0.15185904502868652,
+          "sum_squared_error": 0.0001240653996887886
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019876956939697266,
+          "offset": 44739072,
+          "sum_abs_error": 0.16964685916900635,
+          "sum_squared_error": 0.00015940702998307188
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002126932144165039,
+          "offset": 89478144,
+          "sum_abs_error": 0.15154902637004852,
+          "sum_squared_error": 0.00012906056113437536
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016543865203857422,
+          "offset": 134217472,
+          "sum_abs_error": 0.16106519103050232,
+          "sum_squared_error": 0.0001455049998719815
+        }
+      ]
+    },
+    {
+      "tensor": "blk.30.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.002094268798828125,
+          "offset": 0,
+          "sum_abs_error": 0.1818113923072815,
+          "sum_squared_error": 0.00018843864377160457
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001818537712097168,
+          "offset": 44739072,
+          "sum_abs_error": 0.16532105207443237,
+          "sum_squared_error": 0.00014936965910905542
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0021257400512695312,
+          "offset": 89478144,
+          "sum_abs_error": 0.15682506561279297,
+          "sum_squared_error": 0.00015454782160873037
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019420385360717773,
+          "offset": 134217472,
+          "sum_abs_error": 0.1950870156288147,
+          "sum_squared_error": 0.00021178903903873447
+        }
+      ]
+    },
+    {
+      "tensor": "blk.31.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0019097328186035156,
+          "offset": 0,
+          "sum_abs_error": 0.19238567352294922,
+          "sum_squared_error": 0.00020139206407066013
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015720725059509277,
+          "offset": 44739072,
+          "sum_abs_error": 0.14475888013839722,
+          "sum_squared_error": 0.00011550990255315696
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002149641513824463,
+          "offset": 89478144,
+          "sum_abs_error": 0.18997621536254883,
+          "sum_squared_error": 0.00020110282372343136
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001751542091369629,
+          "offset": 134217472,
+          "sum_abs_error": 0.16089701652526855,
+          "sum_squared_error": 0.00014206316214426806
+        }
+      ]
+    },
+    {
+      "tensor": "blk.31.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.002321183681488037,
+          "offset": 0,
+          "sum_abs_error": 0.18906468152999878,
+          "sum_squared_error": 0.00021486786694069337
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0014505386352539062,
+          "offset": 44739072,
+          "sum_abs_error": 0.14981883764266968,
+          "sum_squared_error": 0.0001238237920269114
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019276142120361328,
+          "offset": 89478144,
+          "sum_abs_error": 0.19621789455413818,
+          "sum_squared_error": 0.00021392698072020266
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019562244415283203,
+          "offset": 134217472,
+          "sum_abs_error": 0.16764017939567566,
+          "sum_squared_error": 0.00016662048617011038
+        }
+      ]
+    },
+    {
+      "tensor": "blk.31.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00054931640625,
+          "offset": 0,
+          "sum_abs_error": 0.04664134979248047,
+          "sum_squared_error": 1.3041530110058375e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0005645751953125,
+          "offset": 44739072,
+          "sum_abs_error": 0.04215448349714279,
+          "sum_squared_error": 1.0200560183248886e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00029754638671875,
+          "offset": 89478144,
+          "sum_abs_error": 0.026416897773742676,
+          "sum_squared_error": 4.048754576047031e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000568389892578125,
+          "offset": 134217472,
+          "sum_abs_error": 0.04545450210571289,
+          "sum_squared_error": 1.1845261951748398e-05
+        }
+      ]
+    },
+    {
+      "tensor": "blk.32.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.002481997013092041,
+          "offset": 0,
+          "sum_abs_error": 0.260354682803154,
+          "sum_squared_error": 0.00037027673347744816
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018926262855529785,
+          "offset": 44739072,
+          "sum_abs_error": 0.14882820844650269,
+          "sum_squared_error": 0.0001233693881736997
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018793344497680664,
+          "offset": 89478144,
+          "sum_abs_error": 0.1651022732257843,
+          "sum_squared_error": 0.0001582705658167427
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0031632184982299805,
+          "offset": 134217472,
+          "sum_abs_error": 0.26381397247314453,
+          "sum_squared_error": 0.00039928970386426954
+        }
+      ]
+    },
+    {
+      "tensor": "blk.32.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.002141594886779785,
+          "offset": 0,
+          "sum_abs_error": 0.18409061431884766,
+          "sum_squared_error": 0.00018869949261812735
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001598358154296875,
+          "offset": 44739072,
+          "sum_abs_error": 0.1607527732849121,
+          "sum_squared_error": 0.00014434173363042646
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0020599365234375,
+          "offset": 89478144,
+          "sum_abs_error": 0.17059040069580078,
+          "sum_squared_error": 0.000161390807988937
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00164109468460083,
+          "offset": 134217472,
+          "sum_abs_error": 0.15443766117095947,
+          "sum_squared_error": 0.00012568160022397024
+        }
+      ]
+    },
+    {
+      "tensor": "blk.32.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00258028507232666,
+          "offset": 0,
+          "sum_abs_error": 0.2133386731147766,
+          "sum_squared_error": 0.00026827414566454877
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017699003219604492,
+          "offset": 44739072,
+          "sum_abs_error": 0.13844335079193115,
+          "sum_squared_error": 0.00010956416877405672
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0010434985160827637,
+          "offset": 89478144,
+          "sum_abs_error": 0.08101281523704529,
+          "sum_squared_error": 3.6263695062821455e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018638372421264648,
+          "offset": 134217472,
+          "sum_abs_error": 0.19126975536346436,
+          "sum_squared_error": 0.00019758603136921238
+        }
+      ]
+    },
+    {
+      "tensor": "blk.33.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.002412080764770508,
+          "offset": 0,
+          "sum_abs_error": 0.16481554508209229,
+          "sum_squared_error": 0.00015317402908010536
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0020641088485717773,
+          "offset": 44739072,
+          "sum_abs_error": 0.18857693672180176,
+          "sum_squared_error": 0.00019307537188240076
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002299785614013672,
+          "offset": 89478144,
+          "sum_abs_error": 0.20648705959320068,
+          "sum_squared_error": 0.00023256663159543223
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016913414001464844,
+          "offset": 134217472,
+          "sum_abs_error": 0.16763901710510254,
+          "sum_squared_error": 0.00015425352211195786
+        }
+      ]
+    },
+    {
+      "tensor": "blk.33.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0016014575958251953,
+          "offset": 0,
+          "sum_abs_error": 0.1605287790298462,
+          "sum_squared_error": 0.00014143640898112153
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002443552017211914,
+          "offset": 44739072,
+          "sum_abs_error": 0.17794781923294067,
+          "sum_squared_error": 0.00018951628829100287
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0025800466537475586,
+          "offset": 89478144,
+          "sum_abs_error": 0.22898173332214355,
+          "sum_squared_error": 0.0003008852279648977
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017009973526000977,
+          "offset": 134217472,
+          "sum_abs_error": 0.16374480724334717,
+          "sum_squared_error": 0.0001508787057957761
+        }
+      ]
+    },
+    {
+      "tensor": "blk.33.ffn_down_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0020099282264709473,
+          "offset": 0,
+          "sum_abs_error": 0.18515324592590332,
+          "sum_squared_error": 0.00018656646104631136
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018868446350097656,
+          "offset": 44739072,
+          "sum_abs_error": 0.1884288787841797,
+          "sum_squared_error": 0.00018897889242452948
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0027582645416259766,
+          "offset": 89478144,
+          "sum_abs_error": 0.20941948890686035,
+          "sum_squared_error": 0.00025200865474062084
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0020433664321899414,
+          "offset": 134217472,
+          "sum_abs_error": 0.1762639284133911,
+          "sum_squared_error": 0.00018076068782590937
+        }
+      ]
+    },
+    {
+      "tensor": "blk.34.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0021948814392089844,
+          "offset": 0,
+          "sum_abs_error": 0.17771422863006592,
+          "sum_squared_error": 0.00017961961945900384
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018544197082519531,
+          "offset": 44739072,
+          "sum_abs_error": 0.18060922622680664,
+          "sum_squared_error": 0.00017973299804907583
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0025780200958251953,
+          "offset": 89478144,
+          "sum_abs_error": 0.23877955973148346,
+          "sum_squared_error": 0.0003367888735505975
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0021649599075317383,
+          "offset": 134217472,
+          "sum_abs_error": 0.20570099353790283,
+          "sum_squared_error": 0.00024292542121884253
+        }
+      ]
+    },
+    {
+      "tensor": "blk.34.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.001938939094543457,
+          "offset": 0,
+          "sum_abs_error": 0.18554657697677612,
+          "sum_squared_error": 0.00018563323857634373
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016777515411376953,
+          "offset": 44739072,
+          "sum_abs_error": 0.17087920010089874,
+          "sum_squared_error": 0.00016833227710777443
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017840862274169922,
+          "offset": 89478144,
+          "sum_abs_error": 0.1851816177368164,
+          "sum_squared_error": 0.0001924638050923022
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0027625560760498047,
+          "offset": 134217472,
+          "sum_abs_error": 0.1984652280807495,
+          "sum_squared_error": 0.00024231453251388757
+        }
+      ]
+    },
+    {
+      "tensor": "blk.34.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00042366981506347656,
+          "offset": 0,
+          "sum_abs_error": 0.042973995208740234,
+          "sum_squared_error": 1.0082987479620442e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00046539306640625,
+          "offset": 44739072,
+          "sum_abs_error": 0.037726595997810364,
+          "sum_squared_error": 8.28445161382696e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000274658203125,
+          "offset": 89478144,
+          "sum_abs_error": 0.022104859352111816,
+          "sum_squared_error": 2.7603783365748313e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00044089555740356445,
+          "offset": 134217472,
+          "sum_abs_error": 0.038413822650909424,
+          "sum_squared_error": 8.564992750592637e-06
+        }
+      ]
+    },
+    {
+      "tensor": "blk.35.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0017817020416259766,
+          "offset": 0,
+          "sum_abs_error": 0.15534460544586182,
+          "sum_squared_error": 0.00013685066473101415
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0020900964736938477,
+          "offset": 44739072,
+          "sum_abs_error": 0.17021220922470093,
+          "sum_squared_error": 0.0001653675174857483
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015680789947509766,
+          "offset": 89478144,
+          "sum_abs_error": 0.14241230487823486,
+          "sum_squared_error": 0.00011274881158840344
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019128918647766113,
+          "offset": 134217472,
+          "sum_abs_error": 0.18060344457626343,
+          "sum_squared_error": 0.0001879210305197887
+        }
+      ]
+    },
+    {
+      "tensor": "blk.35.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.001943349838256836,
+          "offset": 0,
+          "sum_abs_error": 0.18544626235961914,
+          "sum_squared_error": 0.00018342501499546415
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0016345977783203125,
+          "offset": 44739072,
+          "sum_abs_error": 0.16134679317474365,
+          "sum_squared_error": 0.00014799651613373044
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0015733838081359863,
+          "offset": 89478144,
+          "sum_abs_error": 0.15620636940002441,
+          "sum_squared_error": 0.0001410407959809845
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018766522407531738,
+          "offset": 134217472,
+          "sum_abs_error": 0.14913693070411682,
+          "sum_squared_error": 0.00012618168960631948
+        }
+      ]
+    },
+    {
+      "tensor": "blk.35.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00070953369140625,
+          "offset": 0,
+          "sum_abs_error": 0.055091798305511475,
+          "sum_squared_error": 1.7804489548467473e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00074005126953125,
+          "offset": 44739072,
+          "sum_abs_error": 0.04957097768783569,
+          "sum_squared_error": 1.470012135840193e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00034332275390625,
+          "offset": 89478144,
+          "sum_abs_error": 0.026245713233947754,
+          "sum_squared_error": 4.052308270274807e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00048065185546875,
+          "offset": 134217472,
+          "sum_abs_error": 0.0409277081489563,
+          "sum_squared_error": 9.777507184338674e-06
+        }
+      ]
+    },
+    {
+      "tensor": "blk.36.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0016589164733886719,
+          "offset": 0,
+          "sum_abs_error": 0.1551673412322998,
+          "sum_squared_error": 0.00013356324217284055
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019614696502685547,
+          "offset": 44739072,
+          "sum_abs_error": 0.18978744745254517,
+          "sum_squared_error": 0.00020109318390026942
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0022388696670532227,
+          "offset": 89478144,
+          "sum_abs_error": 0.218738853931427,
+          "sum_squared_error": 0.0002569356124588751
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0036112070083618164,
+          "offset": 134217472,
+          "sum_abs_error": 0.2554895877838135,
+          "sum_squared_error": 0.0003767727490640027
+        }
+      ]
+    },
+    {
+      "tensor": "blk.36.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0015416145324707031,
+          "offset": 0,
+          "sum_abs_error": 0.1474609375,
+          "sum_squared_error": 0.00012317713117226958
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019675493240356445,
+          "offset": 44739072,
+          "sum_abs_error": 0.19153732061386108,
+          "sum_squared_error": 0.00019636337857420472
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0020238757133483887,
+          "offset": 89478144,
+          "sum_abs_error": 0.18527722358703613,
+          "sum_squared_error": 0.00018567995120832848
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.003823518753051758,
+          "offset": 134217472,
+          "sum_abs_error": 0.29383525252342224,
+          "sum_squared_error": 0.0005161535883440038
+        }
+      ]
+    },
+    {
+      "tensor": "blk.36.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0005645751953125,
+          "offset": 0,
+          "sum_abs_error": 0.044686227571219206,
+          "sum_squared_error": 1.1270192286000564e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0006511211395263672,
+          "offset": 44739072,
+          "sum_abs_error": 0.05327099561691284,
+          "sum_squared_error": 1.6714170545384377e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0011138916015625,
+          "offset": 89478144,
+          "sum_abs_error": 0.060231029987335205,
+          "sum_squared_error": 2.2839843868638354e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0003662109375,
+          "offset": 134217472,
+          "sum_abs_error": 0.035379886627197266,
+          "sum_squared_error": 7.095428145476035e-06
+        }
+      ]
+    },
+    {
+      "tensor": "blk.37.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0023845434188842773,
+          "offset": 0,
+          "sum_abs_error": 0.23230183124542236,
+          "sum_squared_error": 0.0003104767878170378
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017753839492797852,
+          "offset": 44739072,
+          "sum_abs_error": 0.16777253150939941,
+          "sum_squared_error": 0.0001512968542130011
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002648591995239258,
+          "offset": 89478144,
+          "sum_abs_error": 0.21176761388778687,
+          "sum_squared_error": 0.00026143640797116063
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002037525177001953,
+          "offset": 134217472,
+          "sum_abs_error": 0.19808506965637207,
+          "sum_squared_error": 0.00022277158802808117
+        }
+      ]
+    },
+    {
+      "tensor": "blk.37.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0020656585693359375,
+          "offset": 0,
+          "sum_abs_error": 0.1831531524658203,
+          "sum_squared_error": 0.00018861968112560135
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017423629760742188,
+          "offset": 44739072,
+          "sum_abs_error": 0.16255521774291992,
+          "sum_squared_error": 0.00015324337391575682
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0024144649505615234,
+          "offset": 89478144,
+          "sum_abs_error": 0.17336559295654297,
+          "sum_squared_error": 0.00017744721299095545
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002061128616333008,
+          "offset": 134217472,
+          "sum_abs_error": 0.2139231562614441,
+          "sum_squared_error": 0.0002544031143720815
+        }
+      ]
+    },
+    {
+      "tensor": "blk.37.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.000579833984375,
+          "offset": 0,
+          "sum_abs_error": 0.049123167991638184,
+          "sum_squared_error": 1.400364313042246e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000457763671875,
+          "offset": 44739072,
+          "sum_abs_error": 0.03988903760910034,
+          "sum_squared_error": 8.70250639550818e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000274658203125,
+          "offset": 89478144,
+          "sum_abs_error": 0.023757204413414,
+          "sum_squared_error": 3.1843473566883773e-06
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000568389892578125,
+          "offset": 134217472,
+          "sum_abs_error": 0.05463540554046631,
+          "sum_squared_error": 1.6907077693417705e-05
+        }
+      ]
+    },
+    {
+      "tensor": "blk.38.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.001987934112548828,
+          "offset": 0,
+          "sum_abs_error": 0.18051254749298096,
+          "sum_squared_error": 0.00018339875295225738
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00147169828414917,
+          "offset": 44739072,
+          "sum_abs_error": 0.1518578827381134,
+          "sum_squared_error": 0.0001284113815467336
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0035810470581054688,
+          "offset": 89478144,
+          "sum_abs_error": 0.27644920349121094,
+          "sum_squared_error": 0.0004584309956499055
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0025637149810791016,
+          "offset": 134217472,
+          "sum_abs_error": 0.252077579498291,
+          "sum_squared_error": 0.000360468291773941
+        }
+      ]
+    },
+    {
+      "tensor": "blk.38.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.002009868621826172,
+          "offset": 0,
+          "sum_abs_error": 0.1814260482788086,
+          "sum_squared_error": 0.0001866519796749344
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0018283724784851074,
+          "offset": 44739072,
+          "sum_abs_error": 0.15358591079711914,
+          "sum_squared_error": 0.00012845629289159888
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0024012327194213867,
+          "offset": 89478144,
+          "sum_abs_error": 0.22974181175231934,
+          "sum_squared_error": 0.00028968900755899085
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001829385757446289,
+          "offset": 134217472,
+          "sum_abs_error": 0.18780183792114258,
+          "sum_squared_error": 0.0001895964990126231
+        }
+      ]
+    },
+    {
+      "tensor": "blk.38.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.000579833984375,
+          "offset": 0,
+          "sum_abs_error": 0.04472661018371582,
+          "sum_squared_error": 1.1323826868192555e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000553131103515625,
+          "offset": 44739072,
+          "sum_abs_error": 0.045598745346069336,
+          "sum_squared_error": 1.2324531383001158e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000728607177734375,
+          "offset": 89478144,
+          "sum_abs_error": 0.04672116041183472,
+          "sum_squared_error": 1.3499298365360346e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00061798095703125,
+          "offset": 134217472,
+          "sum_abs_error": 0.04220384359359741,
+          "sum_squared_error": 1.0494400751070998e-05
+        }
+      ]
+    },
+    {
+      "tensor": "blk.39.ffn_gate_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0020214319229125977,
+          "offset": 0,
+          "sum_abs_error": 0.1914336383342743,
+          "sum_squared_error": 0.00020424586170708636
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0022530555725097656,
+          "offset": 44739072,
+          "sum_abs_error": 0.17632269859313965,
+          "sum_squared_error": 0.0001761805172577624
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.001558542251586914,
+          "offset": 89478144,
+          "sum_abs_error": 0.14412230253219604,
+          "sum_squared_error": 0.00011605666427172423
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.002369403839111328,
+          "offset": 134217472,
+          "sum_abs_error": 0.20472168922424316,
+          "sum_squared_error": 0.00023281567750643717
+        }
+      ]
+    },
+    {
+      "tensor": "blk.39.ffn_up_exps.weight",
+      "type": "Q4_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.0020600557327270508,
+          "offset": 0,
+          "sum_abs_error": 0.17288970947265625,
+          "sum_squared_error": 0.00017097118640663211
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0021396279335021973,
+          "offset": 44739072,
+          "sum_abs_error": 0.16789281368255615,
+          "sum_squared_error": 0.00016452500649677404
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0017223358154296875,
+          "offset": 89478144,
+          "sum_abs_error": 0.1578947901725769,
+          "sum_squared_error": 0.00014682752326322657
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.0019420385360717773,
+          "offset": 134217472,
+          "sum_abs_error": 0.2025284767150879,
+          "sum_squared_error": 0.0002231422481457912
+        }
+      ]
+    },
+    {
+      "tensor": "blk.39.ffn_down_exps.weight",
+      "type": "Q6_K",
+      "windows": [
+        {
+          "count": 256,
+          "max_abs_error": 0.00054931640625,
+          "offset": 0,
+          "sum_abs_error": 0.043787240982055664,
+          "sum_squared_error": 1.0582808414483225e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00045168399810791016,
+          "offset": 44739072,
+          "sum_abs_error": 0.045483410358428955,
+          "sum_squared_error": 1.1399203199147223e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.000592350959777832,
+          "offset": 89478144,
+          "sum_abs_error": 0.05432403087615967,
+          "sum_squared_error": 1.7367663879497286e-05
+        },
+        {
+          "count": 256,
+          "max_abs_error": 0.00054931640625,
+          "offset": 134217472,
+          "sum_abs_error": 0.04293835163116455,
+          "sum_squared_error": 1.0186627477537513e-05
+        }
+      ]
+    }
+  ],
+  "schema": "chowder.reap128-v2-q4-bf16-numeric-sample.v1",
+  "source": "F:\\reap128-v2-bf16-intermediate-20261025.gguf",
+  "source_sha256": "80341aa776ad9b5f937c21b081b6d76de4a2ea277e5fb88c9ae2634a9da8f4c6",
+  "source_stage_sha256": "8754ba965efd50ec7d07b1b2e63940c096540b29c5446fd07efdc1b187ebb361",
+  "status": "DESCRIPTIVE_Q4_QUANTIZATION_SAMPLE_NOT_QUALITY_GATE",
+  "total_compared_values": 122880,
+  "verified_tensor_count": 733
+}
