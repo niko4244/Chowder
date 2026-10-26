@@ -89,17 +89,18 @@ def read_verified_cohort(suite: str, audit: dict, raw: bytes, *, expected_n: int
                 or not 1 <= runtime_n <= witness["monitored_sample_count"]
                 or witness.get("gpu_peak_instantaneous_claimed") is not False):
             raise ValueError("external Q8/control resource scoring-time GPU witness is missing or misrepresented")
-    # Original HumanEval scoring executes generated programs. A complete
-    # original-scored cohort alone is not an independently replayed code outcome.
-    # The full auditor emits this proof only after checking the separate
-    # 164/164 replay's exact row SHA, serving session and correctness count.
-    # Never describe an unreplayed arm as independently verified paired code.
+    # Historical audit v1 can contain a purported replay-PASS marker minted
+    # from six self-asserted JSON fields (no trusted producer, per-task
+    # execution evidence, or verified sandbox). Its well-formed SHA merely
+    # identifies the forged assertion. Historical Q4 replay is preserved as
+    # provisional research, not independently isolated v2 evidence.
+    # Until a strict, externally anchored replay-v2 verifier exists, no
+    # HumanEval paired comparison may inherit the legacy marker as a PASS.
     if suite == "humaneval":
-        replay = audit.get("human_eval_independent_execution")
-        if (not isinstance(replay, str) or not re.fullmatch(
-            r"PASS_FULL_164_LOW_PRIVILEGE_REEXECUTION_SHA256:[0-9a-f]{64}", replay
-        )):
-            raise ValueError("HumanEval paired comparison requires an independent full-164 code execution receipt for each arm")
+        raise ValueError(
+            "HumanEval paired comparison needs independent isolated replay v2; "
+            "legacy self-asserted replay PASS markers are not sufficient"
+        )
     summary = audit.get("suites", {}).get(suite)
     if (not isinstance(summary, dict) or type(summary.get("n")) is not int
             or summary["n"] != expected_n

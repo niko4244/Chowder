@@ -139,15 +139,13 @@ def test_humaneval_pair_refuses_missing_or_forged_independent_execution(unverifi
         compare("humaneval", q8, q8_bytes, q4, q4_bytes, expected_n=4)
 
 
-def test_humaneval_pair_admitted_only_after_both_independent_replays():
+def test_humaneval_pair_refuses_even_both_legacy_self_asserted_pass_markers():
     q8, q8_bytes = _side("reap128_v2_q8", "b" * 32, [True, False, True, False],
                          suite="humaneval")
     q4, q4_bytes = _side("reap128_v2_q4", "c" * 32, [True, True, False, False],
                          suite="humaneval")
-    result = compare("humaneval", q8, q8_bytes, q4, q4_bytes, expected_n=4)
-    assert result["candidate_only_correct"] == 1
-    assert result["reference_only_correct"] == 1
-    assert result["amendment4_eligibility"] is False
+    with pytest.raises(ValueError, match="HumanEval.*replay v2"):
+        compare("humaneval", q8, q8_bytes, q4, q4_bytes, expected_n=4)
 
 
 @pytest.mark.parametrize("mutation", [

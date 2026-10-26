@@ -380,15 +380,17 @@ def audit(machine: Path, gsm8k: Path, humaneval: Path, server_log: Path, arm: st
                            "generated_tokens_per_wall_second": result["completion_tokens"] / wall}
     replay = "PENDING_INDEPENDENT_LOW_PRIVILEGE_CODE_EXECUTION"
     if independent_humaneval is not None:
-        independent, replay_sha = _read_json(independent_humaneval, limit=2 * 1024 * 1024)
-        if (independent.get("status") != "PASS_INDEPENDENT_ISOLATED_HUMANEVAL_FULL_164_PROVISIONAL_LINUX"
-                or independent.get("original_row_sha256") != verified["humaneval"]["row_sha256"]
-                or independent.get("session_id") != session
-                or independent.get("independent_full_rows") != 164
-                or independent.get("matched_recorded_scores") != 164
-                or independent.get("correct") != verified["humaneval"]["correct"]):
-            raise ValueError("independent HumanEval re-execution outcome/session/row hash mismatch")
-        replay = f"PASS_FULL_164_LOW_PRIVILEGE_REEXECUTION_SHA256:{replay_sha}"
+        # The historical optional six-field JSON is entirely self-asserted.
+        # Its hash only identifies the statement, not executable isolation,
+        # individual task results, source code, or a trusted replay producer.
+        # Reject even perfectly matching *legacy* claims; do not silently
+        # convert an older Kaggle research replay into a verified sandbox.
+        # A future typed v2 format needs independently anchored producer,
+        # per-task and runtime provenance before ANY PASS can be emitted.
+        raise ValueError(
+            "independent HumanEval replay attestation v2 is not available: "
+            "legacy six-field self-assertions cannot certify isolated code execution"
+        )
     return {
         "schema": "chowder.reap-v2-original-population-external-independent-audit.v1",
         "status": "COMPLETE_LINUX_COHORT_VERIFIED_PROVISIONAL_NOT_WINDOWS_GATE",
