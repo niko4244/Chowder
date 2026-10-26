@@ -178,26 +178,33 @@ def compare(suite: str, candidate_audit: dict, candidate_raw: bytes,
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--suite", choices=tuple(SOURCE_COUNTS), required=True,
+                   help="explicit original suite; HumanEval requires independent replay v2")
     p.add_argument("--candidate-audit", type=Path, required=True)
-    p.add_argument("--candidate-gsm8k", type=Path, required=True)
-    p.add_argument("--candidate-humaneval", type=Path, required=True)
+    p.add_argument("--candidate-gsm8k", type=Path)
+    p.add_argument("--candidate-humaneval", type=Path)
     p.add_argument("--reference-audit", type=Path, required=True)
-    p.add_argument("--reference-gsm8k", type=Path, required=True)
-    p.add_argument("--reference-humaneval", type=Path, required=True)
+    p.add_argument("--reference-gsm8k", type=Path)
+    p.add_argument("--reference-humaneval", type=Path)
     p.add_argument("--out", type=Path, required=True)
     args = p.parse_args(argv)
     try:
         if args.out.exists() or args.out.is_symlink() or not args.out.parent.is_dir():
             raise ValueError("comparison report target must be new exclusive path")
+        selected = ((args.candidate_gsm8k, args.reference_gsm8k)
+                    if args.suite == "gsm8k" else
+                    (args.candidate_humaneval, args.reference_humaneval))
+        unused = ((args.candidate_humaneval, args.reference_humaneval)
+                  if args.suite == "gsm8k" else
+                  (args.candidate_gsm8k, args.reference_gsm8k))
+        if any(path is None for path in selected) or any(path is not None for path in unused):
+            raise ValueError("provide only the exact two original source files for the selected suite")
         candidate = _strict_json(_read_file(args.candidate_audit, 2 * 1024 * 1024))
         reference = _strict_json(_read_file(args.reference_audit, 2 * 1024 * 1024))
         suites = {
-            name: compare(name, candidate, _read_file(candidate_path, 64 * 1024 * 1024),
-                          reference, _read_file(reference_path, 64 * 1024 * 1024),
-                          expected_n=SOURCE_COUNTS[name])
-            for name, candidate_path, reference_path in (
-                ("gsm8k", args.candidate_gsm8k, args.reference_gsm8k),
-                ("humaneval", args.candidate_humaneval, args.reference_humaneval))
+            args.suite: compare(args.suite, candidate, _read_file(selected[0], 64 * 1024 * 1024),
+                                reference, _read_file(selected[1], 64 * 1024 * 1024),
+                                expected_n=SOURCE_COUNTS[args.suite])
         }
         report = {
             "schema": "reap-v2-sourcebound-external-paired-descriptive.v1",

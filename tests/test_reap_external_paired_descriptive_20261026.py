@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from chowder_batch.reap_external_paired_descriptive import compare, read_verified_cohort
+from chowder_batch.reap_external_paired_descriptive import compare, main, read_verified_cohort
 from chowder_batch.reap_external_full_audit import Q4_SHA, Q8_SHA, RANDOM_SHA
 
 
@@ -190,3 +190,61 @@ def test_paired_rows_refuse_duplicate_correctness_even_if_row_digest_updated():
     audit["suites"]["gsm8k"]["row_sha256"] = hashlib.sha256(altered).hexdigest()
     with pytest.raises(ValueError, match="cannot be decoded"):
         read_verified_cohort("gsm8k", audit, altered, expected_n=4)
+
+
+def _complete_original_gsm8k(model, session, correct_ids):
+    audit, _ = _side(model, session, [True, False, True, False])
+    rows = [{"id": f"gsm8k-{i}", "correct": i in correct_ids,
+             "terminated": True, "eval_session_id": session} for i in range(1319)]
+    raw = ("\n".join(json.dumps(row) for row in rows) + "\n").encode()
+    audit["suites"]["gsm8k"] = {
+        "n": 1319, "correct": len(correct_ids), "terminated": 1319,
+        "row_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    return audit, raw
+
+
+def test_cli_gsm8k_complete_original_population_without_unqualified_humaneval(tmp_path):
+    """RED: old CLI unconditionally requested HumanEval, which is blocked by design."""
+    candidate, candidate_rows = _complete_original_gsm8k(
+        "reap128_v2_q8", "b" * 32, {0, 1, 2})
+    reference, reference_rows = _complete_original_gsm8k(
+        "reap128_v2_q4", "a" * 32, {0, 1, 3})
+    paths = {}
+    for name, payload in (("candidate-audit", json.dumps(candidate).encode()),
+                          ("reference-audit", json.dumps(reference).encode()),
+                          ("candidate-gsm8k", candidate_rows),
+                          ("reference-gsm8k", reference_rows)):
+        path = tmp_path / name
+        path.write_bytes(payload)
+        paths[name] = path
+    out = tmp_path / "original-gsm8k-paired.json"
+    args = ["--suite", "gsm8k", "--out", str(out)]
+    for name, path in paths.items():
+        args += [f"--{name}", str(path)]
+    assert main(args) == 0
+    report = json.loads(out.read_text())
+    assert list(report["suites"]) == ["gsm8k"]
+    assert report["suites"]["gsm8k"]["n"] == 1319
+    assert report["suites"]["gsm8k"]["candidate_only_correct"] == 1
+    assert report["suites"]["gsm8k"]["reference_only_correct"] == 1
+    assert report["gen0_status"] == "BLOCKED"
+    assert report["chosen"] is None and report["release_approved"] is False
+
+
+def test_cli_humaneval_cannot_be_unlocked_by_suite_selection(tmp_path):
+    """The new suite selector must never turn a legacy replay into a v2 PASS."""
+    candidate, candidate_rows = _complete_original_gsm8k(
+        "reap128_v2_q8", "b" * 32, {0, 1, 2})
+    reference, reference_rows = _complete_original_gsm8k(
+        "reap128_v2_q4", "a" * 32, {0, 1, 3})
+    args = ["--suite", "humaneval", "--out", str(tmp_path / "refused.json")]
+    for name, payload in (("candidate-audit", json.dumps(candidate).encode()),
+                          ("reference-audit", json.dumps(reference).encode()),
+                          ("candidate-humaneval", candidate_rows),
+                          ("reference-humaneval", reference_rows)):
+        path = tmp_path / name
+        path.write_bytes(payload)
+        args += [f"--{name}", str(path)]
+    assert main(args) == 2
+    assert not (tmp_path / "refused.json").exists()
