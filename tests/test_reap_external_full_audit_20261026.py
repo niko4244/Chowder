@@ -7,7 +7,7 @@ import json
 import pytest
 
 from chowder_batch.reap_external_full_audit import (
-    FROZEN_FLAGS, Q4_SHA, SERVER_SHA, _check_machine, _check_rows,
+    FROZEN_FLAGS, Q4_SHA, Q8_SHA, RANDOM_SHA, SERVER_SHA, _check_machine, _check_rows,
     _check_original_native_log,
 )
 
@@ -140,3 +140,89 @@ def test_original_gpu_fit_log_fail_closed_even_if_mutated_log_is_rehashed(mutati
              "server_log_bytes": len(log)}
     with pytest.raises(ValueError):
         _check_original_native_log(claim, log)
+
+
+def _postload_receipt(arm="reap128_v2_q8"):
+    value = copy.deepcopy(_receipt())
+    identity = {
+        "reap128_v2_q8": (
+            "reap-v2-q8-original-full-with-measured-postload-cache-reclaim.v1",
+            "COMPLETE_Q8_RECLAIM_FULL_PROVISIONAL_NOT_FROZEN_WINDOWS_GATE",
+            "q8_sha256", Q8_SHA,
+        ),
+        "random128_v2_q8": (
+            "reap-v2-frozen-independent-random128-full-postload-reclaim.v1",
+            "COMPLETE_RANDOM128_RECLAIM_FULL_PROVISIONAL_NOT_FROZEN_WINDOWS_GATE",
+            "random128_sha256", RANDOM_SHA,
+        ),
+    }[arm]
+    value.update(schema=identity[0], status=identity[1])
+    value["data"] = {identity[2]: identity[3], "server_binary_sha256": SERVER_SHA}
+    def host(ram, unused, gpu=(14912, 14912)):
+        return {"physical_free_gib": ram, "cgroup_unused_gib": unused,
+                "gpu_free_mib": list(gpu)}
+    value.update(
+        initial=host(45.1, 29.444),
+        pre_reclaim_host=host(30.4, 10.471, (5200, 5300)),
+        post_reclaim_host=host(30.2, 28.401, (5200, 5300)),
+        pre_reclaim_cgroup={"file_gib": 19.127, "anon_gib": 0.339},
+        post_reclaim_cgroup={"file_gib": 1.238, "anon_gib": 0.339},
+        before_inference_host=host(30.2, 28.38, (5100, 5200)),
+        after_inference_host=host(29.8, 26.76, (5110, 5190)),
+        postload_clean_file_cache_recovered_gib=17.93,
+        samples=[host(45.1, 29.444), host(32.1, 10.471),
+                 host(30.1, 27.83), host(29.8, 26.76)],
+    )
+    return value
+
+
+@pytest.mark.parametrize("arm", ["reap128_v2_q8", "random128_v2_q8"])
+def test_complete_postload_arms_require_actual_source_bound_memory_recovery(arm):
+    from chowder_batch.reap_external_full_audit import _check_postload_resource_evidence
+    receipt = _postload_receipt(arm)
+    _check_machine(receipt, arm)
+    witness = _check_postload_resource_evidence(receipt)
+    assert witness["minimum_measured_cgroup_unused_gib"] == pytest.approx(10.471)
+    assert witness["measured_postload_recovery_gib"] == pytest.approx(17.93)
+    assert witness["original_windows_commit_attested"] is False
+    assert witness["model_fit_windows_gate_eligible"] is False
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda r: r.pop("initial"),
+    lambda r: r.pop("samples"),
+    lambda r: r.update(samples=[]),
+    lambda r: r.pop("pre_reclaim_cgroup"),
+    lambda r: r["pre_reclaim_cgroup"].update(file_gib=3.0),
+    lambda r: r["post_reclaim_cgroup"].update(file_gib=17.0),
+    lambda r: r["pre_reclaim_cgroup"].update(anon_gib=float("nan")),
+    lambda r: r.update(samples=[{"invalid": 1}]),
+    lambda r: r["initial"].update(cgroup_unused_gib=23.999),
+    lambda r: r["initial"].update(physical_free_gib=23.999),
+    lambda r: r["initial"].update(gpu_free_mib=[14912, 11000]),
+    lambda r: r["initial"].update(gpu_free_mib=[14912]),
+    lambda r: r["initial"].update(gpu_free_mib=[14912, True]),
+    lambda r: r["initial"].update(gpu_free_mib=[14912, 14912, 14912]),
+    lambda r: r["pre_reclaim_host"].update(cgroup_unused_gib=9.999),
+    lambda r: r["post_reclaim_host"].update(cgroup_unused_gib=13.999),
+    lambda r: r["post_reclaim_host"].update(cgroup_unused_gib=14.1),
+    lambda r: r.update(postload_clean_file_cache_recovered_gib=5.5),
+    lambda r: r.update(postload_clean_file_cache_recovered_gib=float("nan")),
+    lambda r: r.update(postload_clean_file_cache_recovered_gib=True),
+    lambda r: r["before_inference_host"].update(cgroup_unused_gib=9.999),
+    lambda r: r["after_inference_host"].update(cgroup_unused_gib=9.999),
+    lambda r: r["samples"][2].update(cgroup_unused_gib=9.999),
+    lambda r: r["samples"][1].update(physical_free_gib=6.999),
+    lambda r: r["post_reclaim_host"].update(physical_free_gib=float("inf")),
+    lambda r: r["samples"][0].update(gpu_free_mib=[14912, -1]),
+])
+@pytest.mark.parametrize("arm", ["reap128_v2_q8", "random128_v2_q8"])
+def test_postload_complete_run_rejects_breached_or_unattested_safety_margins(mutation, arm):
+    receipt = _postload_receipt(arm)
+    mutation(receipt)
+    with pytest.raises(ValueError):
+        _check_machine(receipt, arm)
+
+
+def test_existing_complete_q4_does_not_claim_postload_q8_resource_attestation():
+    _check_machine(_receipt(), "reap128_v2_q4")

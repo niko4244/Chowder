@@ -33,6 +33,20 @@ def _side(model, session, row_correct, suite="gsm8k"):
                                                 "loopback_bound": True},
              "suites": {suite: {"n": len(rows), "correct": sum(row_correct),
                                  "terminated": len(rows), "row_sha256": row_sha}}}
+    if model != "reap128_v2_q4":
+        audit["original_measured_postload_resource_witness"] = {
+            "status": "COMPLETE_LINUX_SOURCE_MEASURED_POSTLOAD_RESOURCE_WITNESS",
+            "initial_actual_gpu_free_mib": [14912, 14912],
+            "measured_postload_recovery_gib": 17.93,
+            "measured_file_cache_decrease_gib": 17.889,
+            "minimum_measured_cgroup_unused_gib": 10.471,
+            "minimum_measured_physical_available_gib": 29.8,
+            "monitored_sample_count": 4,
+            "original_windows_commit_attested": False,
+            "model_fit_windows_gate_eligible": False,
+        }
+    else:
+        audit["original_measured_postload_resource_witness"] = None
     if suite == "humaneval":
         audit["human_eval_independent_execution"] = (
             "PASS_FULL_164_LOW_PRIVILEGE_REEXECUTION_SHA256:" + "a" * 64
@@ -130,3 +144,28 @@ def test_humaneval_pair_admitted_only_after_both_independent_replays():
     assert result["candidate_only_correct"] == 1
     assert result["reference_only_correct"] == 1
     assert result["amendment4_eligibility"] is False
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda a: a.pop("original_measured_postload_resource_witness"),
+    lambda a: a.update(original_measured_postload_resource_witness=None),
+    lambda a: a["original_measured_postload_resource_witness"].update(
+        status="MAY_ATTEMPT_PROVISIONAL_SMOKE_ONLY"),
+    lambda a: a["original_measured_postload_resource_witness"].update(
+        original_windows_commit_attested=True),
+    lambda a: a["original_measured_postload_resource_witness"].update(
+        model_fit_windows_gate_eligible=True),
+    lambda a: a["original_measured_postload_resource_witness"].update(
+        minimum_measured_cgroup_unused_gib=9.99),
+    lambda a: a["original_measured_postload_resource_witness"].update(
+        measured_postload_recovery_gib=3.99),
+    lambda a: a["original_measured_postload_resource_witness"].update(
+        measured_file_cache_decrease_gib=3.99),
+    lambda a: a["original_measured_postload_resource_witness"].update(
+        monitored_sample_count=0),
+])
+def test_paired_q8_or_control_refuses_missing_or_forged_resource_admission(mutation):
+    q8, raw = _side("reap128_v2_q8", "b" * 32, [True, False, True, False])
+    mutation(q8)
+    with pytest.raises(ValueError, match="resource"):
+        read_verified_cohort("gsm8k", q8, raw, expected_n=4)

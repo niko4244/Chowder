@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -53,6 +54,28 @@ def read_verified_cohort(suite: str, audit: dict, raw: bytes, *, expected_n: int
             or audit["original_native_cuda_placement"].get("total_kv_buffer_mib") != 320.0
             or audit["original_native_cuda_placement"].get("loopback_bound") is not True):
         raise ValueError("external run is not an independently complete audited original session")
+    if audit["model"] != "reap128_v2_q4":
+        witness = audit.get("original_measured_postload_resource_witness")
+        if (not isinstance(witness, dict)
+                or witness.get("status") != "COMPLETE_LINUX_SOURCE_MEASURED_POSTLOAD_RESOURCE_WITNESS"
+                or witness.get("original_windows_commit_attested") is not False
+                or witness.get("model_fit_windows_gate_eligible") is not False
+                or type(witness.get("monitored_sample_count")) is not int
+                or witness["monitored_sample_count"] < 2):
+            raise ValueError("external Q8/control resource source-audit attestation is missing")
+        for key, minimum in (
+            ("minimum_measured_cgroup_unused_gib", 10),
+            ("minimum_measured_physical_available_gib", 7),
+            ("measured_postload_recovery_gib", 4),
+            ("measured_file_cache_decrease_gib", 4),
+        ):
+            value = witness.get(key)
+            if type(value) not in (int, float) or not math.isfinite(value) or value < minimum:
+                raise ValueError("external Q8/control resource witness has invalid measured safety values")
+        gpu = witness.get("initial_actual_gpu_free_mib")
+        if (not isinstance(gpu, list) or len(gpu) != 2
+                or any(type(v) is not int or v < 12288 for v in gpu)):
+            raise ValueError("external Q8/control resource native start VRAM admission absent")
     # Original HumanEval scoring executes generated programs. A complete
     # original-scored cohort alone is not an independently replayed code outcome.
     # The full auditor emits this proof only after checking the separate

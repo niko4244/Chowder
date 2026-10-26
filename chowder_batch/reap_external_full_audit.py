@@ -40,6 +40,90 @@ MODELS = {
     ),
 }
 
+def _check_postload_resource_evidence(receipt: dict) -> dict:
+    """Read the *measured* Q8/control cgroup admission, never infer Windows fit.
+
+    Original complete postload notebooks measure true unused cgroup capacity
+    independently of any theoretically reclaimable file cache. Their 10-GiB
+    stop protects the preregistered 8-GiB runtime floor. Checking final
+    hashes/rows without these measurements would allow a false resource PASS.
+    """
+    def amount(value: object, name: str) -> float:
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"missing/nonfinite/invalid measured {name}")
+        return float(value)
+
+    def host(field: str) -> dict:
+        value = receipt.get(field)
+        if not isinstance(value, dict):
+            raise ValueError(f"missing original postload resource witness {field}")
+        ram = amount(value.get("physical_free_gib"), field + ".physical_free_gib")
+        unused = amount(value.get("cgroup_unused_gib"), field + ".cgroup_unused_gib")
+        gpu = value.get("gpu_free_mib")
+        if (not isinstance(gpu, list) or len(gpu) != 2
+                or any(type(x) is not int or x < 0 for x in gpu)):
+            raise ValueError("missing or corrupt actual two-GPU VRAM inventory")
+        if ram < 7 or unused < 10:
+            raise ValueError("original real runtime RAM/cgroup safety floor violated")
+        return {"ram": ram, "unused": unused, "gpu": gpu}
+
+    initial = host("initial")
+    pre = host("pre_reclaim_host")
+    post = host("post_reclaim_host")
+    before = host("before_inference_host")
+    after = host("after_inference_host")
+    if (initial["ram"] < 24 or initial["unused"] < 24
+            or any(free < 12288 for free in initial["gpu"])):
+        raise ValueError("original pinned two-GPU native model-load admission not proven")
+    recovery = post["unused"] - pre["unused"]
+    reported = amount(receipt.get("postload_clean_file_cache_recovered_gib"),
+                      "reported postload recovery")
+    if (recovery < 4 or post["unused"] < 14
+            or before["unused"] < 10
+            or not math.isclose(recovery, reported, rel_tol=0, abs_tol=0.00101)):
+        raise ValueError("actual postload 4-GiB recovery/14-GiB headroom not proven")
+
+    def stats(field: str) -> dict:
+        value = receipt.get(field)
+        if not isinstance(value, dict):
+            raise ValueError(f"missing original cgroup file/anon attribution {field}")
+        return {k: amount(value.get(k + "_gib"), field + "." + k + "_gib")
+                for k in ("file", "anon")}
+
+    file_pre = stats("pre_reclaim_cgroup")
+    file_post = stats("post_reclaim_cgroup")
+    if file_pre["file"] - file_post["file"] < 4:
+        raise ValueError("claimed postload cache recovery has no measured file-cache drop")
+    samples = receipt.get("samples")
+    if not isinstance(samples, list) or not (2 <= len(samples) <= 20000):
+        raise ValueError("original monitored runtime resource samples missing or unbounded")
+    ram_min = min(initial["ram"], pre["ram"], post["ram"], before["ram"], after["ram"])
+    unused_min = min(initial["unused"], pre["unused"], post["unused"],
+                     before["unused"], after["unused"])
+    for i, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            raise ValueError("malformed supervised resource sample")
+        ram = amount(sample.get("physical_free_gib"), f"samples[{i}].ram")
+        unused = amount(sample.get("cgroup_unused_gib"), f"samples[{i}].cgroup")
+        gpu = sample.get("gpu_free_mib")
+        if (not isinstance(gpu, list) or len(gpu) != 2
+                or any(type(v) is not int or v < 0 for v in gpu)
+                or ram < 7 or unused < 10):
+            raise ValueError("unqualified/malformed sampled GPU/RAM/cgroup runtime")
+        ram_min = min(ram_min, ram)
+        unused_min = min(unused_min, unused)
+    return {
+        "status": "COMPLETE_LINUX_SOURCE_MEASURED_POSTLOAD_RESOURCE_WITNESS",
+        "initial_actual_gpu_free_mib": initial["gpu"],
+        "measured_postload_recovery_gib": reported,
+        "measured_file_cache_decrease_gib": round(file_pre["file"] - file_post["file"], 3),
+        "minimum_measured_cgroup_unused_gib": unused_min,
+        "minimum_measured_physical_available_gib": ram_min,
+        "monitored_sample_count": len(samples),
+        "original_windows_commit_attested": False,
+        "model_fit_windows_gate_eligible": False,
+    }
+
 
 def _check_machine(receipt: dict, arm: str) -> None:
     from chowder_batch.reap_eval import FROZEN_V2_QUALITY_SOURCES
@@ -66,6 +150,8 @@ def _check_machine(receipt: dict, arm: str) -> None:
         raise ValueError("frozen original model, evaluator or canonical input source SHA mismatch")
     if not isinstance(receipt.get("suite_results"), dict):
         raise ValueError("no complete external suite results in original serving session")
+    if arm in ("reap128_v2_q8", "random128_v2_q8"):
+        _check_postload_resource_evidence(receipt)
 
 
 def _number(value: object, label: str, *, nullable: bool = False) -> None:
@@ -167,6 +253,8 @@ def audit(machine: Path, gsm8k: Path, humaneval: Path, server_log: Path, arm: st
 
     receipt, receipt_sha = _read_json(machine, limit=2 * 1024 * 1024)
     _check_machine(receipt, arm)
+    resource_witness = (_check_postload_resource_evidence(receipt)
+                        if arm in ("reap128_v2_q8", "random128_v2_q8") else None)
     if (server_log.is_symlink() or not server_log.is_file()
             or server_log.stat().st_size > MAX_ORIGINAL_SERVER_LOG_BYTES):
         raise ValueError("original complete native server log missing or unbounded")
@@ -218,6 +306,7 @@ def audit(machine: Path, gsm8k: Path, humaneval: Path, server_log: Path, arm: st
         "session_id": session,
         "original_machine_receipt_sha256": receipt_sha,
         "original_native_cuda_placement": native_placement,
+        "original_measured_postload_resource_witness": resource_witness,
         "human_eval_independent_execution": replay,
         "suites": verified,
         "original_windows_gate_eligible": False,
