@@ -10,7 +10,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
+import psutil
 import subprocess
 import sys
 import time
@@ -64,6 +66,16 @@ def sample(parent: Path) -> dict:
 
 def unsafe(row: dict) -> list[str]:
     problems = []
+    if not isinstance(row, dict):
+        return ["resource telemetry missing or malformed; fail closed"]
+    for key in ("ram_available_gib", "commit_available_gib",
+                "disk_free_gib", "gpu_free_mib"):
+        value = row.get(key)
+        if (type(value) not in (int, float) or not math.isfinite(value)
+                or value < 0):
+            problems.append(f"invalid live resource measurement: {key}")
+    if problems:
+        return problems
     if row["ram_available_gib"] < ORIGINAL_RAM_RUNTIME_FLOOR_GIB:
         problems.append("physical RAM below 7 GiB safety floor")
     if row["commit_available_gib"] < ORIGINAL_COMMIT_RUNTIME_FLOOR_GIB:
@@ -71,6 +83,51 @@ def unsafe(row: dict) -> list[str]:
     if row["disk_free_gib"] < ORIGINAL_DISK_FLOOR_GIB:
         problems.append("disk below 8 GiB safety floor")
     return problems
+
+
+def bounded_telemetry_record(row: dict, failures: list[str]) -> dict:
+    """Always encode a finite fail-closed watchdog observation.
+
+    JSON permits NaN by default, whereas valid external receipts must never
+    contain it. Invalid measurements must therefore be replaced by a concrete
+    error census BEFORE writing the terminal ledger or stopping the child.
+    """
+    if not failures:
+        return row
+    fields = ("ram_available_gib", "commit_available_gib",
+              "disk_free_gib", "gpu_free_mib")
+    invalid = [key for key in fields if (
+        type(row.get(key)) not in (int, float)
+        or not math.isfinite(row[key]) or row[key] < 0
+    )] if isinstance(row, dict) else list(fields)
+    if invalid:
+        return {
+            "time_utc": datetime.now(timezone.utc).isoformat(),
+            "invalid_measurements": invalid,
+            "resource_monitor_abort": True,
+        }
+    return row
+
+
+def verify_native_shutdown(server_pid: int, port: int) -> bool:
+    """Fail closed if the registered native child or original port is still live.
+
+    This never terminates any other process, including a foreign process that
+    has reused the original port/PID after the owned wrapper exited.
+    """
+    if (type(server_pid) is not int or server_pid <= 0
+            or type(port) is not int or not 1 <= port <= 65535):
+        raise RuntimeError("registered native server shutdown identity missing")
+    try:
+        if psutil.pid_exists(server_pid):
+            raise RuntimeError("registered native server still resident after wrapper shutdown")
+        for conn in psutil.net_connections(kind="tcp"):
+            if (conn.status == psutil.CONN_LISTEN
+                    and conn.laddr and conn.laddr[1] == port):
+                raise RuntimeError("original native server port has a remaining listener")
+    except psutil.Error as exc:
+        raise RuntimeError("registered native shutdown census unavailable") from exc
+    return True
 
 
 def kill_owned_tree(proc: subprocess.Popen) -> None:
@@ -151,6 +208,7 @@ def run(*, out: Path, admission: Path) -> dict:
                     row = {"time_utc": datetime.now(timezone.utc).isoformat(),
                            "error": type(exc).__name__}
                     failures = ["resource telemetry missing; fail closed"]
+                row = bounded_telemetry_record(row, failures)
                 telemetry.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
                 telemetry.flush()
                 os.fsync(telemetry.fileno())
@@ -172,12 +230,17 @@ def run(*, out: Path, admission: Path) -> dict:
             payload = json.loads(serving.read_text(encoding="utf8"))
             metadata["serve_json_sha256"] = sha(serving)
             metadata["source_bound_speed_session"] = payload.get("speed_session")
+            metadata["native_shutdown_verified"] = verify_native_shutdown(
+                payload.get("server_pid"), PORT
+            )
         if results.is_file():
             metadata["partial_or_complete_rows"] = len(results.read_bytes().splitlines())
             metadata["rows_sha256"] = sha(results)
         if summary.is_file():
             metadata["summary_sha256"] = sha(summary)
-        if (metadata["child_exit_code"] == 0 and metadata.get("partial_or_complete_rows") == 200
+        if (metadata["child_exit_code"] == 0
+                and metadata.get("native_shutdown_verified") is True
+                and metadata.get("partial_or_complete_rows") == 200
                 and isinstance(metadata.get("source_bound_speed_session"), dict)):
             metadata["status"] = "COMPLETE_SOURCE_BOUND_200_CANDIDATE_ONLY"
         else:
