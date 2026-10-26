@@ -360,6 +360,7 @@ def _v2_speed_proof(root, arm="reap128_v2_q4"):
     offload_lines, offload_count = reap_serve.parse_offload(log.decode())
     assert offload_count == 0
     digest = (reap_serve.REGISTERED_DENSE_Q4_SHA256 if arm == "dense_v2_q4"
+              else reap_serve.REGISTERED_Q4_GGUF_SHA256 if arm == "reap128_v2_q4"
               else "a" * 64)
     model = {"gguf": "C:/models/dense-q4.gguf" if arm == "dense_v2_q4"
              else "C:/models/reap128-v2.gguf", "gguf_sha256": digest,
@@ -376,6 +377,7 @@ def _v2_speed_proof(root, arm="reap128_v2_q4"):
     entry = {"n": 200, "file_sha256": sha(rows.read_bytes())}
     (directory / "summary.json").write_text(json.dumps({"gsm8k": entry}), encoding="utf-8")
     receipt = {**model, "experts_offloaded": 0, "measured_experts_offloaded": 0,
+               "eval_session_id": "a" * 32, "server_pid": 321, "server_port": 8790,
                "offload_log_lines": offload_lines,
                "server_log_startup_bytes": len(log), "server_log_startup_sha256": sha(log),
                "speed_session": {"schema": "chowder.reap-q4-same-session-speed.v1",
@@ -415,6 +417,25 @@ def test_v2_speed_refuses_alien_model_for_new_dense_comparator(tmp_path):
         _v2_speed(tmp_path)
 
 
+def test_v2_speed_refuses_fully_resealed_foreign_candidate_q4_model(tmp_path):
+    directory, receipt = _v2_speed_proof(tmp_path)
+    assert _v2_speed(tmp_path)["status"] == "PASS"
+    # Forge all available model identity fields consistently; source cohort,
+    # decoded rows, pinned dense comparator and complete 200-row receipt remain
+    # authentic. Admission must require the original published Q4 whole SHA.
+    foreign = "f" * 64
+    receipt["gguf_sha256"] = foreign
+    receipt["speed_session"]["gguf_sha256"] = foreign
+    inputs = directory / "gsm8k.inputs.json"
+    witness = json.loads(inputs.read_text(encoding="utf-8"))
+    witness["model"]["gguf_sha256"] = foreign
+    inputs.write_text(json.dumps(witness), encoding="utf-8")
+    receipt["speed_session"]["inputs_sha256"] = hashlib.sha256(inputs.read_bytes()).hexdigest()
+    (directory / "serve.json").write_text(json.dumps(receipt), encoding="utf-8")
+    with pytest.raises(rg.GateError, match="foreign.*Q4|Q4.*foreign"):
+        _v2_speed(tmp_path)
+
+
 @pytest.mark.parametrize("arm", ["reap128_v2", "reap160_v2"])
 def test_new_v2_q4_speed_requires_original_complete_session_proof(tmp_path, arm):
     directory, receipt = _v2_speed_proof(tmp_path, f"{arm}_q4")
@@ -423,6 +444,25 @@ def test_new_v2_q4_speed_requires_original_complete_session_proof(tmp_path, arm)
     (directory / "serve.json").write_text(json.dumps(receipt), encoding="utf-8")
     result = _v2_speed(tmp_path, arm)
     assert result["status"] == "UNKNOWN" and "speed" in result["reason"]
+
+
+@pytest.mark.parametrize("speed_arm", ["reap128_v2_q4", "dense_v2_q4"])
+@pytest.mark.parametrize(("field", "forged"), [
+    ("session_id", "b" * 32), ("server_pid", 999), ("port", 8791),
+])
+def test_new_v2_speed_refuses_valid_but_different_parent_serving_session(
+    tmp_path, speed_arm, field, forged,
+):
+    _v2_speed_proof(tmp_path)
+    path = tmp_path / speed_arm / "serve.json"
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    # Valid fields, plausible original scoring and self-consistent row/source
+    # digests, but the nested claimed proof belongs to a *different* server
+    # session than its original serving receipt. The speed gate cannot PASS.
+    receipt["speed_session"][field] = forged
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    with pytest.raises(rg.GateError, match="session.*serving|serving.*session"):
+        _v2_speed(tmp_path)
 
 
 @pytest.mark.parametrize("tamper", [

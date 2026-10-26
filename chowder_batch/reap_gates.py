@@ -25,6 +25,7 @@ G0_TOL = 0.02
 G1_THRESH = -0.03
 G2_THRESH = -0.10
 SPEEDUP = 1.3
+PUBLISHED_REAP128_V2_Q4_SHA256 = "2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7"
 DEGENERATE_TRIGRAM = 0.5
 FROZEN_SUITE_SIZES = {"gsm8k": 1319, "humaneval": 164}
 FROZEN_SOURCE_SHA256 = {
@@ -176,6 +177,12 @@ def _verify_new_q4_speed_session(eval_dir, arm, receipt):
             or proof.get("suite") != "gsm8k"
             or type(proof.get("n")) is not int or proof["n"] != 200):
         raise GateError(f"{arm}: invalid Q4 same-session speed receipt")
+    if (receipt.get("eval_session_id") != proof["session_id"]
+            or type(receipt.get("server_pid")) is not int
+            or receipt["server_pid"] != proof["server_pid"]
+            or type(receipt.get("server_port")) is not int
+            or receipt["server_port"] != proof["port"]):
+        raise GateError(f"{arm}: Q4 speed session disagrees with original serving session")
     paths = {name: directory / name for name in
              ("server.log", "gsm8k.jsonl", "summary.json", "gsm8k.inputs.json")}
     if any(not p.is_file() or p.is_symlink() for p in paths.values()):
@@ -215,6 +222,9 @@ def _verify_new_q4_speed_session(eval_dir, arm, receipt):
                 or proof.get("summary_entry_sha256") != digest(json.dumps(
                     entry, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))):
             raise GateError(f"{arm}: Q4 same-session speed source/model/rows/summary receipt mismatch")
+        if (arm == "reap128_v2_q4"
+                and model["gguf_sha256"] != PUBLISHED_REAP128_V2_Q4_SHA256):
+            raise GateError(f"{arm}: foreign original published Q4 model SHA")
         prefix_size = receipt.get("server_log_startup_bytes")
         if type(prefix_size) is not int or not 1 <= prefix_size <= 64 * 1024 * 1024:
             raise GateError(f"{arm}: invalid Q4 startup log length")

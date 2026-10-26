@@ -281,9 +281,10 @@ def test_new_v2_serving_refuses_foreign_unpublished_gguf_before_model_launch(
     "source", "status", "digest", "groups", "experts", "tensor_sha", "receipt_missing",
 ])
 def test_q4_source_bound_server_preflight_refuses_resealed_or_partial_construction(
-    tmp_path, mutation,
+    tmp_path, monkeypatch, mutation,
 ):
     gguf, sha, path, record = _synthetic_registered_v2_model(tmp_path)
+    monkeypatch.setattr(reap_serve, "REGISTERED_Q4_GGUF_SHA256", sha, raising=False)
     if mutation == "source":
         record["source_gguf_sha256"] = "b" * 64
     elif mutation == "status":
@@ -304,8 +305,9 @@ def test_q4_source_bound_server_preflight_refuses_resealed_or_partial_constructi
         reap_serve._verify_registered_v2_construction(gguf.resolve(), "reap128_v2_q4", sha)
 
 
-def test_published_v2_construction_preflight_validates_source_but_not_quality(tmp_path):
+def test_published_v2_construction_preflight_validates_source_but_not_quality(tmp_path, monkeypatch):
     gguf, sha, _, record = _synthetic_registered_v2_model(tmp_path)
+    monkeypatch.setattr(reap_serve, "REGISTERED_Q4_GGUF_SHA256", sha, raising=False)
     assert reap_serve._verify_registered_v2_construction(
         gguf.resolve(), "reap128_v2_q4", sha,
     ) is None
@@ -317,6 +319,16 @@ def test_q8_new_v2_refuses_model_with_foreign_full_sha_even_if_self_sealed(tmp_p
     gguf, sha, _, _ = _synthetic_registered_v2_model(tmp_path, arm="reap128_v2")
     with pytest.raises(ValueError, match="construction"):
         reap_serve._verify_registered_v2_construction(gguf.resolve(), "reap128_v2", sha)
+
+
+def test_q4_new_v2_refuses_model_with_foreign_full_sha_even_if_self_sealed(tmp_path):
+    gguf, sha, _, _ = _synthetic_registered_v2_model(tmp_path, arm="reap128_v2_q4")
+    # The forged receipt agrees with the actual foreign bytes, original BF16
+    # source *claim*, 42 source groups and 733 tensor-shape/hash *claims*.
+    # It must not qualify as the original SHA-certified 2026-10-25 Q4 model.
+    assert sha != "2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7"
+    with pytest.raises(ValueError, match="construction"):
+        reap_serve._verify_registered_v2_construction(gguf.resolve(), "reap128_v2_q4", sha)
 
 
 def test_serve_json_and_eval_run(tmp_path, monkeypatch):

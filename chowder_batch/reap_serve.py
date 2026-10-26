@@ -38,6 +38,7 @@ REGISTERED_BF16_SHA256 = "80341aa776ad9b5f937c21b081b6d76de4a2ea277e5fb88c9ae263
 REGISTERED_STAGE_SHA256 = "7f9065d8036f7bd04c19a15f87540ad195658f46a80a1a09aa407b44c4836a94"
 REGISTERED_QUANTIZER_SHA256 = "eeb75877bd41d8d7b51d18129d873e6220014613baea349fa18e6b5d36c987de"
 REGISTERED_Q8_GGUF_SHA256 = "89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6"
+REGISTERED_Q4_GGUF_SHA256 = "2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7"
 
 _KEEP = re.compile(r"llama_params_fit|common_fit|n_cpu_moe|overflowing|offloaded \d+/\d+ layers|exps.*(?:overridden|CPU)", re.I)
 _CPU_MOE = re.compile(r"n_cpu_moe\s*[=:]?\s*(\d+)", re.I)
@@ -143,6 +144,7 @@ def _verify_registered_v2_construction(gguf: Path, arm: str, digest: str) -> Non
             or claimed.get("output_size_bytes") != gguf.stat().st_size
             or claimed.get("source_gguf_sha256") != REGISTERED_BF16_SHA256
             or (arm == "reap128_v2" and digest != REGISTERED_Q8_GGUF_SHA256)
+            or (arm == "reap128_v2_q4" and digest != REGISTERED_Q4_GGUF_SHA256)
             or claimed.get("frozen_stage_spec_sha256") != REGISTERED_STAGE_SHA256
             or claimed.get("quantizer_binary_sha256") != REGISTERED_QUANTIZER_SHA256
             or claimed.get("chunk_count") != 42
