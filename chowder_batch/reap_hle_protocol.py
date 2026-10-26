@@ -60,8 +60,11 @@ CONCURRENCY = 2
 # either finishes the population or reaches the wall-clock budget, then reports
 # the completed prefix as a deterministic pseudorandom sample of the text-only
 # population. Both the order rule and the budget are frozen here.
-PLANNED_MAX_SAMPLES = 1_200
-WALL_BUDGET_SECONDS = 32_400  # 9 h of a 12 h Kaggle GPU session
+PLANNED_MAX_SAMPLES = 600
+# 3 h, not the 9 h a 12 h Kaggle session could host: GPU quota is shared with an
+# unrelated control run that must not be starved, so this wave is sized to fit
+# alongside it. Chosen before execution, not after seeing any outcome.
+WALL_BUDGET_SECONDS = 10_800
 ORDER_RULE = "ascending sha256(id); completed prefix is an unbiased text-only sample"
 
 SUBSET_RULE = "text-only (empty image field only)"

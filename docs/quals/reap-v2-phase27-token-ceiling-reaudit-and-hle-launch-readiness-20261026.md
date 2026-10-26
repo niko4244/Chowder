@@ -115,7 +115,7 @@ Declared prospectively, before any outcome was observed:
 | Subset | text-only only (empty `image` field), **2,158** of 2,500 |
 | Answer types | 1,645 exactMatch, 513 multipleChoice |
 | Order | ascending `sha256(id)`; a completed prefix is an unbiased sample |
-| Budget | 1,200 items and 32,400 s (9 h) of a 12 h session |
+| Budget | 600 items and 10,800 s (3 h), sized to share GPU quota with the running control |
 | Prompt | official HLE `Explanation / Answer / Confidence` format, no tools |
 | Decoding | greedy, temperature 0, seed 0, max 8,192 completion tokens |
 | Serving | `--fit on -np 2 -c 16384 --jinja` (8,192 tokens per slot) |
@@ -154,25 +154,35 @@ own process group, and writes its receipt atomically.
   constants with separate tests, and the dry run proceeds to the dataset guard
   and refuses there, which is the intended ordering.
 
-### Why it was not launched
+### The consent boundary, and the authorised launch
 
 The only GPU environment that has actually admitted this model is Kaggle T4×2.
-Feeding HLE to it requires one of:
+Feeding HLE to it required one of two paths, both with external effects:
 
 1. uploading the access-gated parquet as a **private** Kaggle dataset, which the
    dataset card asks users not to re-upload; or
 2. storing a Hugging Face token in Kaggle Secrets and downloading at runtime,
-   which transmits a personal credential to a third party through a UI that
-   needs the operator present.
+   which transmits a personal credential to a third party.
 
-Both are data-handling decisions with external effects. Neither is a technical
-blocker, and neither is authorised by "enable access on Hugging Face", so this
-phase stops short of it and asks instead of assuming.
+Neither is authorised by "enable access on Hugging Face", so the boundary was
+put to the operator and **path 1 was chosen explicitly**. On that authorisation:
 
-Once the operator chooses a path, the launch sequence is: stage the frozen
-protocol file as an input dataset, create the private HLE input (or the secret),
-push the kernel with T4×2 and the pinned toolchain input, then collect
-`reap-q4-hle-textonly-*.jsonl` and its summary and audit them locally.
+| Object | Value |
+| --- | --- |
+| Private HLE input | `nikmarco/reap-hle-private-input-20261026` (262 MB parquet, private) |
+| Protocol input | `nikmarco/reap128v2-hle-protocol-20261026`, version 2 (source only) |
+| Model input | `nikmarco/reap128v2-q4-registered-20261025`, 11,563,915,264 bytes |
+| Kernel | `nikmarco/reap128v2-q4-hle-textonly-20261026`, T4×2, no internet, version 1 |
+
+The kernel is **private**, internet is disabled, and the dataset is readable
+only by this account's kernels. The declared wave was then resized from 1,200
+items / 9 h to 600 items / 3 h **before execution**, because GPU quota is shared
+with the unrelated random128 control and a 9 h concurrent job could have
+starved it of quota and killed it. That is a resource decision, not a
+post-outcome adjustment, and it is recorded in the protocol digest.
+
+Collection and audit: fetch `reap-q4-hle-textonly-*.jsonl` plus its summary from
+the kernel output and re-derive every aggregate locally from the rows.
 
 ## 6. Runtime and admission state
 
@@ -213,9 +223,9 @@ No gate passes, so the selector stays BLOCKED with `chosen: null`.
 
 ## 8. Concrete next steps
 
-1. Decide the HLE data-handling path (private Kaggle input dataset, or Kaggle
-   Secrets with an HF token); then launch `q4_hle_textonly.py` and collect the
-   text-only cohort.
+1. Collect the running `reap128v2-q4-hle-textonly-20261026` output, re-derive
+   its aggregates from the item-level rows, and audit it before reporting any
+   HLE figure.
 2. Collect the random128 control receipt when it reaches a terminal state and
    audit it against the hardened auditor.
 3. For the coding/agent rows (Terminal-Bench, DeepSWE, ProgramBench,
