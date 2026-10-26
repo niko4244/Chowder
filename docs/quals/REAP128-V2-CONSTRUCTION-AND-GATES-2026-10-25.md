@@ -2047,3 +2047,75 @@ score, original BF16 CUDA parity, GPU placement or throughput. The original
 frozen Gen-0 Amendment4 selector cannot use them as a substitute for its
 mandatory genuine full benchmark and control evidence; selection stays
 `BLOCKED`, no model chosen and PR #282 draft/unmerged.
+
+### October 25 20:54 CDT — real Q4 CPU-only smoke safely refused, no inference PASS
+
+The published 733-tensor source-certified G: mixed-K GGUF was submitted to
+the existing `C:\llama.cpp\bin\llama-cli.exe` for a deliberately bounded,
+single-token, **CPU-only** original-model smoke. The launch used
+`CUDA_VISIBLE_DEVICES=-1`, `-ngl 0`, low threads/batch, immutable original
+Q4 source SHA and one exclusive stdout/stderr log per attempt. A Python
+supervisor measured live Windows free physical RAM/commit and was authorized
+to terminate **only its newly launched llama-cli child** when the unchanged
+original runtime **7/8-GiB** free RAM/commit floors were crossed. No original
+GGUF, provider server, Ollama service, GPU allocator, benchmark outcome or
+frozen selector threshold was modified.
+
+The original first CLI invocation exited 1 before model loading, because
+`--no-conversation` was unsupported by the installed pinned executable;
+the empty scientific outcome is retained as an operational refusal. After
+CLI help validation, a corrected one-token, 512-context CPU invocation
+crossed the unchanged physical RAM runtime floor at **6.766 GiB**, despite
+12.088 GiB free commit; the supervisor terminated its own process and
+preserved a negative receipt. A second bounded 128-context attempt began
+with a stricter voluntary admission of **23.479 GiB** free physical RAM and
+**24.740 GiB** free commit but crossed the same original runtime floor at
+**6.819 GiB** (commit remained **12.736 GiB**); it was again aborted safely.
+All model services remained untouched, and neither run reported a finished
+token or finite CPU logits. Retaining the complete GGUF and tensor-source
+certificate means a host-resource abort is **not** evidence that the model
+would fail under an actually admitted inference environment.
+
+One further CPU design would disable llama.cpp's documented default
+8192-MiB prompt cache (`--cache-ram 0`) while retaining the stricter 20-GiB
+starting physical RAM requirement. It was **not launched** when actual free
+RAM measured **19.696 GiB**, and at the later 20:54 check only **15.523 GiB**
+were free. The original 12/16-GiB constructor and 7/8-GiB runtime minimums
+were **not relaxed**. No CPU smoke, GPU fit, original BF16 CUDA parity,
+HumanEval/GSM8K, true per-item paired model quality or genuine same-serving
+200-item throughput PASS exists. Original Gen-0 decision remains `BLOCKED`.
+
+The three real CPU smoke invocation/refusal logs and exact exclusive JSON
+receipts are preserved byte-for-byte as
+`docs/quals/reap128-v2-q4-cpu-smoke-original*-20261025.{json,log}`.
+They are **negative host/CLI feasibility evidence**, not measured decoding
+quality or an endorsement of model fit. The attempted fourth configuration
+was rejected at preflight before process creation; no artificial failure
+receipt or successful CPU inference is inferred from that refusal.
+
+### October 25 post-Q4 numerical evidence — actual frozen Gen-0 replay remains blocked
+
+The original selector was rerun on the independent historical workspace
+`C:\llm-work\reap\eval-v2-isolated-20261025` with preserved original
+`observe-v1/observation.json`, original frozen complete 704×40
+`observe-v2-bf16-atomic-20261024-222950-223f34d3/observation.json`,
+and the real `C:\llm-work\reap\calib-v2` dataset and manifest. It followed
+the independent Q4 full model certificate, Q4 reconstruction receipt and
+published Q4 model SHA/serving-session hardening; no historical rows,
+receipts or thresholds were changed.
+
+The real selector produced the 9,094-byte receipt
+`F:\reap128-v2-post-q4-numeric-safety-selection-20261025.json`, SHA-256
+`356579559ee96f5603c4d8113b063aa27f3f2b8965ff6a34c471fdadeac4f8d2`,
+with actual decision `{"status":"BLOCKED","chosen":null}` and
+`release_approved:false`. Historical REAP128 v1 gates were D0 PASS,
+Gate0 PASS, Gate1 **FAIL**, Gate2 PASS, control PASS and speed UNKNOWN;
+historical REAP160 D0/Gate0/Gate1/Gate2/control PASS but speed UNKNOWN.
+There were **no** registered new-v2 GSM8K/HumanEval quality/placement/
+same-session speed receipts; `reap128_v2` was correctly missing from the
+scored gate arms. The selector returned nonzero as intended for BLOCKED.
+
+Neither successful full model construction/certification nor descriptive
+quantization error/host feasibility can satisfy the frozen Amendment4
+selection gates. **Gen-0 remains BLOCKED, chosen null, no deployment,
+PR #282 remains draft and unmerged.**
