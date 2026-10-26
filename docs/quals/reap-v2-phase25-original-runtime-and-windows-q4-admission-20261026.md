@@ -64,12 +64,53 @@ Fresh, CPU-only host counters without stopping anyone's processes:
 `nvidia-smi` recorded RTX 5060 Ti total 16,311 MiB, used 15,486 MiB,
 free 565 MiB. Windows memory counters recorded committed 123,777,400,832
 bytes of commit limit 136,371,810,304; physical available 15,605 MiB.
+An independent later read-only Q4 forensic snapshot observed available
+RAM **15.1919 GiB**, available commit **18.7526 GiB** and free GPU VRAM
+**6,941 MiB**. The absolute numbers move with concurrent services, but
+both snapshots refuse the unchanged 29.3146-GiB RAM, 34.3146-GiB commit,
+12,288-MiB VRAM entry requirements. Neither is an allocator high-watermark.
 Transient host counters and WDDM accounting do not establish per-process
 peak device allocation. Protected concurrent listeners were present on
 11434 (Ollama), 7050 (Hermes), 8766 (router), 8767 (Spark).
 No arbitrary kill, pagefile adjustment, prompt-cache weakening, four-slot
 reduction, CPU expert spill, model rerun, CUDA consumption or service restart
 was admitted. The actual current measured host fails all three entry floors.
+
+### Integrated independent Q4 Windows launcher correction
+
+An independent contributor diagnosed a consequential admission spoof in
+`chowder_batch/reap_q4_windows_benchmark_watchdog_20261026.py`: before the
+fix, a user-controlled `decision.status:ADMITTED...` and loosened resource
+floors could reach the (mocked) native launch path without rederiving the
+original 12-row failure/cache budget. It was reproduced by synthetic **RED**
+tests, including Python `True == 1` evidence-type confusion.
+
+The integrated change now independently rehashes the immutable original
+aborted 12-row receipt and startup log, derives the authentic historical
+RAM/commit consumption and remaining prompt-cache allowance, recomputes
+the original admission decision with typed JSON and the unchanged floors,
+requires a finite fresh runtime sample, and blocks a run when the source,
+admission math, port ownership or physical/commit/VRAM/disk counters fail.
+Terminal `COMPLETE` now additionally requires the original 200 distinct
+rows, same native session/model/hash, exact frozen four-way serving flags,
+positive resource samples, valid speed/session witness, no abort reasons,
+normal child exit and proven native server shutdown. It does not reinterpret
+the historical 12-row abort as a valid partial full cohort.
+
+The contributor worked in a NEW isolated worktree at commit
+`e6bb6f86d766ab2222bff393ed0148fffd34404c` (cherry-picked to authorized
+mission branch as `7a98d328bfc0db2919ba1899c50b3d690ae6c144`). Their
+initial focused verification was **145 PASS**, Ruff and diff checks PASS.
+Following integration with the WSL/attestation changes, the bounded relevant
+18-source-file REAP test matrix passed **482 tests, 1 skipped**, Ruff and
+`git diff --check` clean. A separate extremely broad 57-file REAP suite
+was deliberately interrupted after its early passing sections because it
+included long synthetic full-model BF16 smoke work unrelated to this scoped
+CPU-only admission verification; the interrupted run is **not** counted as
+full-suite PASS. The 482-pass targeted matrix is the actual complete
+reported integration regression, not an extrapolation.
+No actual native Q4 server was launched to test an inadmissible resource
+configuration; scientific speed or numerical parity was not inferred.
 
 ## An actually tested alternative HumanEval sandbox: still refused
 
@@ -114,6 +155,9 @@ host-visible descendant PID/start identities, never writes a private
 generation, retains no private responses, changes no cgroup/mount/service,
 and now emits nonzero CLI status even when the harmless probe itself
 completes: another tool must NOT interpret program exit zero as authorization.
+An actual second fixed-benign Ubuntu run verified the corrected refusal
+status: all five isolation/runtime gaps remained, generated programs executed
+were zero, and the command returned **exit code 2**, not a misleading zero.
 Adversarial synthetic tests verify this never promotes to a HumanEval PASS.
 
 Independent v2 verifier review also confirmed the two actual external
