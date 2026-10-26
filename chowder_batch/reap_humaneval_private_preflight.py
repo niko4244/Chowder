@@ -18,7 +18,7 @@ from pathlib import Path
 
 from chowder_batch.reap_external_full_audit import (
     EVALUATOR_SHA, MODELS, Q8_SHA, RANDOM_SHA, SCORER_SHA,
-    _check_machine, _check_postload_resource_evidence,
+    _check_machine, _check_postload_resource_evidence, _strict_json,
 )
 
 CANONICAL_HUMANEVAL_RAW_SHA = "5144d31cf337b25ce262b780ed103b128b1e9d289d3c0d15f4fe34933bb705d5"
@@ -41,9 +41,7 @@ def _read_file(path: Path, maximum: int) -> bytes:
 
 def _json_object(raw: bytes) -> dict:
     try:
-        result = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(
-            ValueError("nonfinite JSON numerical constant")
-        ))
+        result = _strict_json(raw)
     except (ValueError, UnicodeDecodeError) as exc:
         raise ValueError("private source JSON invalid or unbounded") from exc
     if not isinstance(result, dict):
@@ -121,8 +119,8 @@ def preflight(*, arm: str, machine: dict, machine_sha: str,
             or _digest(rows_raw) != summary["row_sha256"]):
         raise ValueError("original complete independent audited result row SHA/format mismatch")
     try:
-        canon = json.loads(canonical_raw)
-        rows = [json.loads(line) for line in rows_raw.splitlines()]
+        canon = _strict_json(canonical_raw)
+        rows = [_strict_json(line) for line in rows_raw.splitlines()]
     except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError("original full HumanEval source/result cannot be decoded") from exc
     if (not isinstance(canon, list) or len(canon) != 164

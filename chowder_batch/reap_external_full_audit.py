@@ -275,11 +275,27 @@ def _check_rows(suite: str, source: list[dict], rows: list[dict], session: str) 
             "accuracy": correct / len(rows), "completion_tokens": total_tokens}
 
 
+def _strict_json(raw: bytes) -> object:
+    """Reject duplicate keys and unsupported numeric constants in evidence."""
+    def unique_pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate JSON evidence key")
+            result[key] = value
+        return result
+
+    def refuse_constant(value):
+        raise ValueError("invalid JSON numeric constant: " + value)
+
+    return json.loads(raw, object_pairs_hook=unique_pairs, parse_constant=refuse_constant)
+
+
 def _read_json(path: Path, *, limit: int) -> tuple[dict, str]:
     if path.is_symlink() or not path.is_file() or path.stat().st_size > limit:
         raise ValueError("external private evidence file missing, linked or unbounded")
     raw = path.read_bytes()
-    obj = json.loads(raw)
+    obj = _strict_json(raw)
     if not isinstance(obj, dict):
         raise ValueError("external provenance JSON is not an object")
     return obj, hashlib.sha256(raw).hexdigest()
@@ -291,7 +307,7 @@ def _read_jsonl(path: Path) -> tuple[list[dict], str]:
     raw = path.read_bytes()
     if not raw.endswith(b"\n"):
         raise ValueError("unflushed original output JSONL")
-    rows = [json.loads(line) for line in raw.splitlines()]
+    rows = [_strict_json(line) for line in raw.splitlines()]
     if not all(isinstance(row, dict) for row in rows):
         raise ValueError("original scored rows must be structured JSON objects")
     return rows, hashlib.sha256(raw).hexdigest()

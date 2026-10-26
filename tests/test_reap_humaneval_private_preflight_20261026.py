@@ -174,3 +174,13 @@ def test_original_private_source_pin_constants_and_no_code_execution_imports():
     assert "import resource" not in source
     assert "subprocess.run(" not in source
     assert "candidate_code_executed\": False" in source
+
+
+@pytest.mark.parametrize("source", [
+    b'{"status":"trusted","status":"spoofed"}',
+    b'{"suites":{"gsm8k":{"n":1319,"n":0}}}',
+    b'{"score":NaN}',
+])
+def test_preexecution_private_receipt_refuses_duplicate_fields_and_nonfinite_values(source):
+    with pytest.raises(ValueError):
+        entry._json_object(source)

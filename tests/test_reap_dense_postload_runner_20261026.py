@@ -87,6 +87,31 @@ def test_terminal_complete_requires_stopped_supervisor_and_no_fatal():
     assert "check_runtime(host());check_owner()" in source[final_abort:terminal]
 
 
+def test_dense_terminal_receipt_must_follow_owned_shutdown_and_bounded_log_hash():
+    source = RUNNER.read_text(encoding="utf8")
+    final_marker = source.index("R['status']='COMPLETE_DENSE_FIRST200_PROVISIONAL_NOT_FROZEN_WINDOWS_GATE'")
+    teardown = source.rindex("remove_owned()")
+    log_digest = source.rindex("R['server_log_sha256']=")
+    assert teardown < log_digest < final_marker
+    assert "logfile.read_bytes()" not in source
+    assert "MAX_ORIGINAL_SERVER_LOG_BYTES" in source
+
+
+def test_dense_runtime_detects_new_cgroup_oom_events_throughout_model_lifecycle():
+    source = RUNNER.read_text(encoding="utf8")
+    assert "R['material_initial_cgroup']=cgroup_mem_evidence()" in source
+    assert "check_cgroup_oom_delta()" in source[source.index("def check_runtime"):source.index("def admit_material_dense_load")]
+    assert "check_cgroup_oom_delta()" in source[source.rindex("        remove_owned()"):]
+
+
+def test_dense_original_gguf_path_metadata_never_silently_changes_after_hash():
+    source = RUNNER.read_text(encoding="utf8")
+    assert "if p.is_symlink()" in source
+    assert "def file_identity(" in source
+    assert "R['dense_original_verified_file_identity']=file_identity(weights)" in source
+    assert source.count("verify_dense_file_identity(weights)") >= 3
+
+
 @pytest.mark.parametrize("invalid", [
     {"cgroup_unused_gib": 29.444},
     {"cgroup_unused_gib": 33.451},

@@ -3,8 +3,8 @@
   "status": "SOURCE_ONLY_NEVER_EXECUTED_ON_KAGGLE",
   "historical_snapshot_manifest_sha256": "f52c2f2862b8f3acc3f690e0fca71ed50864b0f10ce17129343a4b8b8f73462a",
   "source_file": "dense_q4_first200_material_postload.py",
-  "source_bytes": 20437,
-  "source_sha256": "dab245e795018943cdc9d27a57fdb715bd3910dcb8f235785b3009b42d3f56f0",
+  "source_bytes": 23235,
+  "source_sha256": "603c789422a0a2e40e3d7eb76a4594aad7335ba5c61e501ea132ca34be754930",
   "frozen_dense_q4_sha256": "2c6d9466129e8802839566b35728e2506aaf1e8705cd137009e2f08feb9dd049",
   "immutable_previous_abort_sha256": "b2ef325bb9c3165439e669326746fdb9165a5a66975890c99cbfd56dda8c6c0a",
   "frozen_serve_flags": "--fit on -np 4 -c 16384 --jinja",
@@ -19,5 +19,8 @@
   "release_approved": false,
   "prehash_capacity_admission": "REQUIRED_BEFORE_FIRST_MODEL_GGUF_READ",
   "postload_file_cache_attribution": "REQUIRES_CGROUP_MEMORY_STAT_FILE_DECREASE_AND_NO_OOM",
-  "scoring_terminal_guard": "WATCHDOG_QUIESCED_NO_FATAL_BEFORE_COMPLETE"
+  "scoring_terminal_guard": "WATCHDOG_QUIESCED_NO_FATAL_BEFORE_COMPLETE",
+  "original_dense_path_identity_guard": "NON_SYMLINK_DEV_INO_SIZE_MTIME_CTIME_STABLE_BEFORE_AND_AFTER_MODEL",
+  "runtime_cgroup_event_guard": "RUN_START_ZERO_OOM_AND_NO_NEW_OOM_THROUGH_SHUTDOWN",
+  "complete_native_log_guard": "OWNED_PROCESS_EXIT_AND_BOUNDED_POSTSHUTDOWN_LOG_DIGEST_BEFORE_COMPLETE"
 }

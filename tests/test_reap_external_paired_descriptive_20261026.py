@@ -183,3 +183,12 @@ def test_paired_q8_or_control_refuses_missing_or_forged_resource_admission(mutat
     mutation(q8)
     with pytest.raises(ValueError, match="resource"):
         read_verified_cohort("gsm8k", q8, raw, expected_n=4)
+
+
+def test_paired_rows_refuse_duplicate_correctness_even_if_row_digest_updated():
+    audit, raw = _side("reap128_v2_q8", "b" * 32, [True, False, True, False])
+    altered = raw.replace(b'"correct": true', b'"correct": false, "correct": true', 1)
+    assert altered != raw
+    audit["suites"]["gsm8k"]["row_sha256"] = hashlib.sha256(altered).hexdigest()
+    with pytest.raises(ValueError, match="cannot be decoded"):
+        read_verified_cohort("gsm8k", audit, altered, expected_n=4)

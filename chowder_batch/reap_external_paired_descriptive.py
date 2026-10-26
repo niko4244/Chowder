@@ -15,7 +15,7 @@ import re
 import sys
 from pathlib import Path
 
-from chowder_batch.reap_external_full_audit import MODELS
+from chowder_batch.reap_external_full_audit import MODELS, _strict_json
 
 STATUS = "COMPLETE_LINUX_COHORT_VERIFIED_PROVISIONAL_NOT_WINDOWS_GATE"
 SOURCE_COUNTS = {"gsm8k": 1319, "humaneval": 164}
@@ -111,7 +111,7 @@ def read_verified_cohort(suite: str, audit: dict, raw: bytes, *, expected_n: int
             or hashlib.sha256(raw).hexdigest() != summary["row_sha256"]):
         raise ValueError("immutable complete audited source JSONL hash mismatch")
     try:
-        rows = [json.loads(line) for line in raw.splitlines()]
+        rows = [_strict_json(line) for line in raw.splitlines()]
     except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError("external original scored rows cannot be decoded") from exc
     if len(rows) != expected_n or not all(isinstance(row, dict) for row in rows):
@@ -188,8 +188,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.out.exists() or args.out.is_symlink() or not args.out.parent.is_dir():
             raise ValueError("comparison report target must be new exclusive path")
-        candidate = json.loads(_read_file(args.candidate_audit, 2 * 1024 * 1024))
-        reference = json.loads(_read_file(args.reference_audit, 2 * 1024 * 1024))
+        candidate = _strict_json(_read_file(args.candidate_audit, 2 * 1024 * 1024))
+        reference = _strict_json(_read_file(args.reference_audit, 2 * 1024 * 1024))
         suites = {
             name: compare(name, candidate, _read_file(candidate_path, 64 * 1024 * 1024),
                           reference, _read_file(reference_path, 64 * 1024 * 1024),

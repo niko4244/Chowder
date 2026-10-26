@@ -7,6 +7,7 @@ This is NOT a substitute for the historical immutable aborted runner.
 """
 import concurrent.futures as cf, datetime, hashlib, importlib.util, json, math, os, pathlib, shutil, signal, subprocess, sys, threading, time, types, urllib.request, uuid
 GIB=1024**3
+MAX_ORIGINAL_SERVER_LOG_BYTES=32*1024*1024
 ROOT=pathlib.Path('/kaggle/input');WORK=pathlib.Path('/kaggle/working')
 ORIGINAL_GGUF_SHA='2c6d9466129e8802839566b35728e2506aaf1e8705cd137009e2f08feb9dd049'
 PREVIOUS_INCOMPLETE_DENSE_RECEIPT_SHA='b2ef325bb9c3165439e669326746fdb9165a5a66975890c99cbfd56dda8c6c0a'
@@ -40,9 +41,23 @@ def hash_file(p):
             os.posix_fadvise(f.fileno(),0,0,os.POSIX_FADV_DONTNEED)
     return h.hexdigest()
 
+def file_identity(p):
+    s=p.stat()
+    return {'device':s.st_dev,'inode':s.st_ino,'size':s.st_size,
+            'mtime_ns':s.st_mtime_ns,'ctime_ns':s.st_ctime_ns}
+
+def verify_dense_file_identity(p):
+    if p.is_symlink() or file_identity(p)!=R['dense_original_verified_file_identity']:
+        raise RuntimeError('original verified dense model source path was swapped or mutated')
+
 def source(name,size,digest):
     matches=[p for p in ROOT.rglob(name) if p.is_file()]
-    if len(matches)!=1 or matches[0].stat().st_size!=size or hash_file(matches[0])!=digest:raise RuntimeError(name+' missing/size/hash mismatch')
+    if len(matches)!=1:raise RuntimeError(name+' missing or ambiguous')
+    p=matches[0]
+    if p.is_symlink():raise RuntimeError(name+' symlinked input prohibited')
+    identity=file_identity(p)
+    if identity['size']!=size or hash_file(p)!=digest or file_identity(p)!=identity:
+        raise RuntimeError(name+' missing/size/hash or stable-file-identity mismatch')
     return matches[0]
 
 def host():
@@ -64,6 +79,7 @@ def host():
 def check_runtime(h):
     if h['physical_free_gib']<7:raise RuntimeError('runtime original 7 GiB free physical RAM floor breached')
     if h['cgroup_unused_gib'] is None or h['cgroup_unused_gib']<10:raise RuntimeError('conservative 10 GiB cgroup stop before original 8 GiB runtime floor')
+    if 'material_initial_cgroup' in R:check_cgroup_oom_delta()
 
 def admit_material_dense_load(start, disk_free_bytes):
     """Refuse unchanged failed capacity. Never imply model fit or speed PASS."""
@@ -130,6 +146,15 @@ def cgroup_mem_evidence():
     return {'file_gib':stats['file']/GIB,'oom':events['oom'],
             'oom_kill':events['oom_kill']}
 
+def check_cgroup_oom_delta():
+    """Reject any per-run cgroup OOM/kill during hash, load or inference."""
+    start=R['material_initial_cgroup']
+    current=cgroup_mem_evidence()
+    for key in ('oom','oom_kill'):
+        if current[key]!=start[key] or start[key]!=0:
+            raise RuntimeError('dense cgroup OOM baseline or new event invalidates qualification')
+    return current
+
 def remove_owned():
     global server
     if server is not None and server.poll() is None:
@@ -141,11 +166,14 @@ def remove_owned():
 try:
     # Original failed 29.444-GiB runner must fail BEFORE a large model SHA
     # streams 21.17 GB through its already memory-constrained cgroup.
+    R['material_initial_cgroup']=cgroup_mem_evidence()
+    check_cgroup_oom_delta()
     R['material_prehash_host']=host()
     R['material_prehash_host_admission']=admit_material_dense_load(
         R['material_prehash_host'],shutil.disk_usage(WORK).free)
     check_runtime(R['material_prehash_host'])
     weights=source('dense-q4_k_m.gguf',21166757984,ORIGINAL_GGUF_SHA)
+    R['dense_original_verified_file_identity']=file_identity(weights)
     receipt=None # Dense is an independently fixed reference, never the Q4 candidate sidecar
     gsm=source('gsm8k.json',484685,'4dae0860ba5b9785343070a4919504f0aa4eccb01a96108b5b851d23e059a522')
     rows=json.loads(gsm.read_text(encoding='utf-8'))
@@ -185,6 +213,7 @@ try:
     R['material_new_host_preflight']=admit_material_dense_load(start,shutil.disk_usage(WORK).free)
     R['data']={'dense_q4_sha256':ORIGINAL_GGUF_SHA,'construction_receipt_not_applicable':True,'full_gsm8k_source_n':len(rows),'requested_cohort_n':200,'score_scope':'frozen first 200 source GSM8K, Linux PROVISIONAL not original Windows gate','server_binary_sha256':PINNED_BUILD_SHA,'previous_original_abort_sha256':PREVIOUS_INCOMPLETE_DENSE_RECEIPT_SHA}
     R['cmd']=[str(target),*FLAGS,'--port','8790','-m',str(weights)]
+    verify_dense_file_identity(weights)
     log=WORK/'reap-v2-kaggle-dense200-material-postload-server.log'
     with log.open('xb') as fp:
         server=subprocess.Popen(R['cmd'],env=env,stdout=fp,stderr=subprocess.STDOUT,start_new_session=True)
@@ -200,6 +229,7 @@ try:
             except Exception:pass
             time.sleep(3)
         if not ready:raise RuntimeError('original flags native GPU model did not become healthy in 420s')
+        verify_dense_file_identity(weights)
         R['seconds_until_ready']=round(time.monotonic()-boot,1)
         # Mandatory independent postload recovery before FIRST official item.
         # This does not reduce registered serving concurrency/context/model.
@@ -297,8 +327,12 @@ try:
             stop.set();guard.join(timeout=12)
             if guard.is_alive() or fatal:
                 raise RuntimeError('dense supervisor did not quiesce or reported a safety abort')
-            check_runtime(host());check_owner()
-            R['status']='COMPLETE_DENSE_FIRST200_PROVISIONAL_NOT_FROZEN_WINDOWS_GATE'
+            check_runtime(host());check_owner();verify_dense_file_identity(weights)
+            # A source-scored cohort is not a terminally verified native run
+            # until its owned process has exited and its bounded log is
+            # hashed after shutdown (no file writes from native owner).
+            R['provisional_scored_complete']=True
+            R['status']='SCORED_AWAITING_NATIVE_SHUTDOWN_AND_LOG'
             save()
         finally:
             stop.set();guard.join(timeout=12)
@@ -306,14 +340,32 @@ try:
 except Exception as e:
     R['status']='REFUSED_OR_ABORTED';R['error']=str(e)[:500];save()
 finally:
-    remove_owned()
     try:
+        remove_owned()
+        if server is not None and server.poll() is None:
+            raise RuntimeError('native model server survived owned termination')
+        if 'material_initial_cgroup' in R:check_cgroup_oom_delta()
         logfile=WORK/'reap-v2-kaggle-dense200-material-postload-server.log'
         if logfile.is_file():
-            data=logfile.read_bytes()
-            R['server_log_sha256']=hashlib.sha256(data).hexdigest()
-            R['server_log_bytes']=len(data)
-            R['server_log_excerpt']=data.decode('utf-8',errors='replace')[-2600:]
-    except Exception:pass
-    save()
+            size=logfile.stat().st_size
+            if size<=0 or size>MAX_ORIGINAL_SERVER_LOG_BYTES:
+                raise RuntimeError('native dense model server log missing, empty or exceeds bounded audit size')
+            digest=hashlib.sha256();tail=b'';n=0
+            with logfile.open('rb') as stream:
+                for block in iter(lambda:stream.read(1024*1024),b''):
+                    digest.update(block);n+=len(block);tail=(tail+block)[-5200:]
+            if n!=size:raise RuntimeError('native server log mutated while hashing')
+            R['server_log_sha256']=digest.hexdigest()
+            R['server_log_bytes']=size
+            R['server_log_excerpt']=tail.decode('utf-8',errors='replace')[-2600:]
+        elif R.get('provisional_scored_complete'):
+            raise RuntimeError('completed original dense200 missing native server log')
+        if (R.get('provisional_scored_complete') and
+                R['status']=='SCORED_AWAITING_NATIVE_SHUTDOWN_AND_LOG'):
+            R['status']='COMPLETE_DENSE_FIRST200_PROVISIONAL_NOT_FROZEN_WINDOWS_GATE'
+    except Exception as cleanup_error:
+        R['status']='REFUSED_OR_ABORTED'
+        R['cleanup_error']=str(cleanup_error)[:500]
+    finally:
+        save()
     print(json.dumps({k:v for k,v in R.items() if k not in ('samples','inference','server_log_excerpt')},sort_keys=True))

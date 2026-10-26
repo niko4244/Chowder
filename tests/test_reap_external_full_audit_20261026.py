@@ -258,3 +258,30 @@ def test_postload_complete_run_rejects_breached_or_unattested_safety_margins(mut
 
 def test_existing_complete_q4_does_not_claim_postload_q8_resource_attestation():
     _check_machine(_receipt(), "reap128_v2_q4")
+
+
+@pytest.mark.parametrize("source", [
+    b'{"model":"original","model":"substituted"}',
+    b'{"resource":{"unused":30,"unused":1}}',
+    b'{"status":"COMPLETE","status":"REFUSED"}',
+    b'{"safe":NaN}', b'{"safe":Infinity}', b'{"safe":-Infinity}',
+])
+def test_native_receipt_refuses_ambiguous_duplicate_keys_and_nonfinite_json(tmp_path, source):
+    from chowder_batch.reap_external_full_audit import _read_json
+    original = tmp_path / "untrusted-native-receipt.json"
+    original.write_bytes(source)
+    with pytest.raises(ValueError):
+        _read_json(original, limit=1024)
+
+
+@pytest.mark.parametrize("source", [
+    b'{"id":"gsm8k-0","correct":false,"correct":true}\n',
+    b'{"id":"gsm8k-0","eval_session_id":"a","eval_session_id":"b"}\n',
+    b'{"id":"gsm8k-0","completion_tokens":NaN}\n',
+])
+def test_native_rows_refuse_ambiguous_duplicate_keys_and_nonfinite_json(tmp_path, source):
+    from chowder_batch.reap_external_full_audit import _read_jsonl
+    path = tmp_path / "original-private-rows.jsonl"
+    path.write_bytes(source)
+    with pytest.raises(ValueError):
+        _read_jsonl(path)
