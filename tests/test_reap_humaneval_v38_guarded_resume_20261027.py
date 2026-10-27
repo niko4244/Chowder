@@ -15,6 +15,13 @@ def test_existing_native_prefix_verified_read_only_with_no_second_model(arm, mon
         pytest.skip("private original evidence is unavailable")
     monkeypatch.setattr(resume.v38, "_run_research_candidate",
                         lambda *_: pytest.fail("must not execute in read-only mode"))
+    if (root / (arm + "-complete.private.json")).exists():
+        # Full original completion is immutable. The guarded resumer MUST
+        # refuse reopening that population, even for its former prefix mode.
+        # The separate independent whole-suite certificate audits completion.
+        with pytest.raises(ValueError, match="already marked complete"):
+            resume.continue_original(arm, root, execute=False)
+        return
     report = resume.continue_original(arm, root, execute=False)
     assert report["verified_contiguous_rows"] >= (23 if arm == "q4" else 3)
     assert report["unknown_remaining_rows"] > 0
