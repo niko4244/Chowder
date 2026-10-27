@@ -20,6 +20,7 @@ from typing import TextIO
 import urllib.request
 
 from chowder_batch import reap_serve
+from chowder_batch.reap_automationbench_population_20261026 import verify_population
 from chowder_batch import reap_q4_windows_benchmark_watchdog_20261026 as watchdog
 from chowder_batch.reap_v2_lab import _fresh_admission
 
@@ -108,6 +109,40 @@ def _source_check() -> dict:
             "public_source_sha256": PUBLIC_600_PROMPTS_SHA256,
             "public_tasks": FULL_TASK_COUNT, "python": version.stdout.strip(),
             "public_not_private_leaderboard": True}
+
+
+def _full_official_source_rows() -> list[dict]:
+    """Regenerate the 600 authoritative identity/prompt/assertion rows.
+
+    The export's `id` is only an ordinal, not a source example_id. Its own
+    task-contract hashes are dropped by official v1.0.6 eval projection;
+    therefore never accept task-supplied hashes as proof of input identity.
+    """
+    _source_check()  # source Git, untracked files, runtime, original prompts
+    script = (
+        "from automationbench.domains import DEFAULT_DOMAINS,get_combined_dataset;"
+        "import hashlib,json;"
+        "d=get_combined_dataset(DEFAULT_DOMAINS);"
+        "rows=[(str(x['example_id']),str(x['prompt'])) for x in d];"
+        "source_sha=hashlib.sha256(json.dumps(rows,ensure_ascii=False,"
+        "separators=(',',':')).encode('utf8')).hexdigest();"
+        "payload=[{'example_id':int(x['example_id']),"
+        "'name':json.loads(x['info'])['task_name'],"
+        "'prompt':x['prompt'],'assertions':json.loads(x['info'])['assertions']}"
+        " for x in d];"
+        "print(json.dumps({'source_sha256':source_sha,'rows':payload},"
+        "ensure_ascii=False,separators=(',',':')))"
+    )
+    proc = subprocess.run([str(BENCH_PYTHON), "-I", "-c", script],
+                          cwd=BENCH_ROOT, capture_output=True, text=True,
+                          timeout=360, check=True)
+    manifest = json.loads(proc.stdout)
+    if (type(manifest) is not dict
+            or manifest.get("source_sha256") != PUBLIC_600_PROMPTS_SHA256
+            or type(manifest.get("rows")) is not list
+            or len(manifest["rows"]) != FULL_TASK_COUNT):
+        raise ValueError("full public source contract changed")
+    return manifest["rows"]
 
 
 def _commands(out: Path, *, count: int, port: int = PORT) -> tuple[list[str], list[str]]:
@@ -241,6 +276,9 @@ def _triage_official_output(path: Path, *, count: int, served_id: str) -> dict:
     if (type(meta) is not dict or type(summary) is not dict or type(tasks) is not list
             or meta.get("benchmark_version") != "1.0.6"
             or meta.get("model") != served_id or meta.get("toolset") != "api"
+            or (count == FULL_TASK_COUNT and meta.get("domains") !=
+                ["sales", "marketing", "operations", "support", "finance", "hr"])
+            or "partial" in meta
             or meta.get("max_steps") != 50 or meta.get("total_tasks") != count
             or len(tasks) != count):
         raise ValueError("official evaluator identity/population mismatch")
@@ -267,6 +305,14 @@ def _triage_official_output(path: Path, *, count: int, served_id: str) -> dict:
             or summary["passed_count"] != sum(x["passed"] for x in completed)
             or any(x["passed"] for x in tasks if x["name"] in aborted)):
         raise ValueError("official scorer summary/aborted-row mismatch")
+    full_population_proof = None
+    if count == FULL_TASK_COUNT:
+        # The pinned public task population and original prompts/declared
+        # assertions are the authority, NEVER arbitrary 600 exported names.
+        # This is a census/metric consistency check, not independent
+        # reexecution of world-state assertions or a Gen-0 release gate.
+        full_population_proof = verify_population(
+            _full_official_source_rows(), tasks, result["usage_by_task"], summary)
     return {
         "completed_tasks": len(completed),
         "aborted_unscored_tasks": len(aborted),
@@ -275,6 +321,7 @@ def _triage_official_output(path: Path, *, count: int, served_id: str) -> dict:
         "model_calls": sum(x["num_model_calls"] for x in tasks),
         "tool_calls": sum(x["num_tool_calls"] for x in tasks),
         "raw_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "full_public_population_proof": full_population_proof,
         "status": ("ALL_OFFICIAL_ROLLOUTS_ABORTED_UNSCORED" if not completed
                    else "RAW_COMPLETED_PUBLIC_ROLLOUTS_NEED_INDEPENDENT_ROW_AUDIT"),
     }

@@ -92,6 +92,11 @@ def test_eligible_receipt_but_lost_live_memory_refuses_before_model(monkeypatch,
     server.write_bytes(b"fake; never executed")
     monkeypatch.setattr(q4, "GGUF", model)
     monkeypatch.setattr(q4, "SERVER", server)
+    # Unit-test the *memory admission* branch independently from the live
+    # production port. A real original frozen 200-item run may own :8790.
+    # All production listener ownership checks remain unchanged.
+    monkeypatch.setattr("chowder_batch.reap_serve._require_free_loopback_port",
+                        lambda _port: None)
     monkeypatch.setattr(
         q4, "sample",
         lambda _: {**limit, "ram_available_gib": 29.314},
