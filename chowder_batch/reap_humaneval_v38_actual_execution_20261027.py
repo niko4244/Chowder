@@ -62,14 +62,28 @@ V37_PYTHON_EXECUTABLE_SHA256 = "73efccb6aa17a74869ef6f11e0a0118b0f27693ea85f36c7
 # this new loader + observer source SHA before ANY model response is runnable.
 V38_FIXED_HOLDOUT = "print('V38_EXACT_SOURCE_ONLY_HOLDOUT')\n"
 V38_FIXED_HOLDOUT_SHA256 = "0e684e1394f9263fb32556f8e1e5dc51c6f9891940a55ec3eae4ec87956fd156"
-V38_LOADER = r'''import hashlib,json,os,pathlib,resource,signal,subprocess,sys,time
+V38_LOADER = r'''import fcntl,hashlib,json,os,pathlib,resource,signal,subprocess,sys,time
 source=sys.stdin.buffer.read(2097153)
 if not 0<len(source)<=2097152 or hashlib.sha256(source).hexdigest()!=sys.argv[1]:raise SystemExit(70)
 if sys.version_info[:2]!=(3,13) or os.geteuid()!=65534:raise SystemExit(71)
 candidate=pathlib.Path('/work/candidate.py')
 with candidate.open('xb') as stream:stream.write(source)
 os.chmod(candidate,0o644)
-print(json.dumps({'stage':'PREEXEC_SOURCE_STAGED','sha256':hashlib.sha256(candidate.read_bytes()).hexdigest()}),flush=True)
+# Python executes an immutable kernel-sealed memfd, NEVER the mutable
+# candidate.py path. The outside VM host attests BOTH independently before
+# release, closing the observed source-path replacement TOCTOU gap.
+sealed=os.memfd_create('reap-v38-candidate',os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING)
+remaining=memoryview(source)
+while remaining:
+ written=os.write(sealed,remaining)
+ if written<=0:raise RuntimeError('sealed source write failed')
+ remaining=remaining[written:]
+os.lseek(sealed,0,os.SEEK_SET)
+required=fcntl.F_SEAL_SEAL|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_GROW|fcntl.F_SEAL_WRITE
+fcntl.fcntl(sealed,fcntl.F_ADD_SEALS,required)
+if fcntl.fcntl(sealed,fcntl.F_GET_SEALS)!=required:raise RuntimeError('candidate memfd not immutable')
+print(json.dumps({'stage':'PREEXEC_SOURCE_STAGED','sha256':hashlib.sha256(candidate.read_bytes()).hexdigest(),
+ 'sealed_fd':sealed,'sealed_sha256':hashlib.sha256(os.pread(sealed,len(source),0)).hexdigest()}),flush=True)
 limit=time.monotonic()+12
 while time.monotonic()<limit and not pathlib.Path('/work/release').exists():time.sleep(0.05)
 if not pathlib.Path('/work/release').exists():raise SystemExit(72)
@@ -79,8 +93,9 @@ def limit_resources():
  resource.setrlimit(resource.RLIMIT_NOFILE,(64,64))
  resource.setrlimit(resource.RLIMIT_CPU,(10,11))
  resource.setrlimit(resource.RLIMIT_CORE,(0,0))
-p=subprocess.Popen([sys.executable,'-I','candidate.py'],cwd='/work',stdin=subprocess.DEVNULL,
- stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,preexec_fn=limit_resources)
+p=subprocess.Popen([sys.executable,'-I','/proc/self/fd/'+str(sealed)],cwd='/work',stdin=subprocess.DEVNULL,
+ stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,preexec_fn=limit_resources,
+ pass_fds=(sealed,))
 timed_out=False
 try:stdout,stderr=p.communicate(timeout=10)
 except subprocess.TimeoutExpired:
@@ -88,13 +103,14 @@ except subprocess.TimeoutExpired:
  os.killpg(p.pid,signal.SIGKILL)
  stdout,stderr=p.communicate(timeout=3)
 if len(stdout)>65536 or len(stderr)>65536:raise SystemExit(73)
-print(json.dumps({'stage':'ORIGINAL_CANDIDATE_FINISHED','sha256':hashlib.sha256(candidate.read_bytes()).hexdigest(),
+print(json.dumps({'stage':'ORIGINAL_CANDIDATE_FINISHED','sha256':hashlib.sha256(os.pread(sealed,len(source),0)).hexdigest(),
  'candidate_exit':p.returncode,'timed_out':timed_out,'passed':p.returncode==0 and not timed_out,
  'generated_model_candidate_executed':True},sort_keys=True),flush=True)
 '''
 
-V38_VM_SOURCE_OBSERVER = r'''import hashlib,json,os,pathlib,stat as statlib,sys
-pid=int(sys.argv[1]);base=pathlib.Path('/proc')/str(pid)
+V38_VM_SOURCE_OBSERVER = r'''import fcntl,hashlib,json,os,pathlib,stat as statlib,sys
+pid=int(sys.argv[1]);sealed_fd=int(sys.argv[2]);base=pathlib.Path('/proc')/str(pid)
+if not 3<=sealed_fd<=64:raise RuntimeError('unbounded sealed fd number')
 process_stat=(base/'stat').read_text();start_ticks=int(process_stat[process_stat.rfind(')')+2:].split()[19])
 source=base/'root/work/candidate.py'
 fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
@@ -118,6 +134,25 @@ if len(cglines)!=1 or not cglines[0].startswith('0::/'):raise RuntimeError('no o
 cgroup=pathlib.Path('/sys/fs/cgroup')/cglines[0][3:].lstrip('/')
 if not cgroup.resolve().is_relative_to(pathlib.Path('/sys/fs/cgroup').resolve()):raise RuntimeError('cgroup escape')
 procs=[int(v) for v in (cgroup/'cgroup.procs').read_text().split()]
+memfds=[]
+for possible in procs:
+ handle=pathlib.Path('/proc')/str(possible)/'fd'/str(sealed_fd)
+ try:target=os.readlink(handle)
+ except (OSError,PermissionError):continue
+ if not target.startswith('/memfd:reap-v38-candidate (deleted)'):continue
+ opened=os.open(handle,os.O_RDONLY|os.O_CLOEXEC)
+ try:
+  filestat=os.fstat(opened)
+  required=fcntl.F_SEAL_SEAL|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_GROW|fcntl.F_SEAL_WRITE
+  seals=fcntl.fcntl(opened,fcntl.F_GET_SEALS)
+  if seals!=required or not statlib.S_ISREG(filestat.st_mode) or filestat.st_size!=len(raw):
+   raise RuntimeError('unsealed or malformed candidate memfd')
+  sealed_raw=os.pread(opened,len(raw)+1,0)
+  if sealed_raw!=raw:raise RuntimeError('memfd payload differs from staged source')
+  memfds.append({'pid':possible,'fd':sealed_fd,'sha256':hashlib.sha256(sealed_raw).hexdigest(),
+                 'inode':filestat.st_ino,'device':filestat.st_dev,'seals':seals})
+ finally:os.close(opened)
+if len(memfds)!=1:raise RuntimeError('unique independently readable sealed memfd missing')
 status=[]
 for p in procs:
  s={k.strip():v.strip() for row in (pathlib.Path('/proc')/str(p)/'status').read_text().splitlines()
@@ -145,14 +180,50 @@ for row in mounts:
  point=lhs[4]
  if '\\040' in point or '\\011' in point or not point.startswith('/'):raise RuntimeError('unsafe escaped mount path')
  parsed.append({'point':point,'source':rhs[1],'fstype':rhs[0],'options':lhs[5].split(',')})
-allowed={'/work','/tmp','/dev','/dev/pts','/dev/shm','/proc','/sys','/sys/fs/cgroup','/etc/hosts','/etc/hostname','/etc/resolv.conf'}
+# All mounts below are exact runtime-generated virtual filesystems from the
+# independent native Podman-VM capsule census. Unexpected host bind mounts are
+# rejected before generated Python is released.
+expected={
+ '/':('overlay','overlay'),
+ '/work':('tmpfs','tmpfs'),'/tmp':('tmpfs','tmpfs'),
+ '/run':('tmpfs','tmpfs'),'/var/tmp':('tmpfs','tmpfs'),
+ '/run/.containerenv':('tmpfs','tmpfs'),'/run/secrets':('tmpfs','tmpfs'),
+ '/etc/hosts':('tmpfs','tmpfs'),'/etc/hostname':('tmpfs','tmpfs'),
+ '/etc/resolv.conf':('tmpfs','tmpfs'),
+ '/dev':('tmpfs','tmpfs'),'/dev/pts':('devpts','devpts'),
+ '/dev/shm':('tmpfs','shm'),'/dev/mqueue':('mqueue','mqueue'),
+ '/dev/null':('devtmpfs','none'),'/dev/zero':('devtmpfs','none'),
+ '/dev/full':('devtmpfs','none'),'/dev/tty':('devtmpfs','none'),
+ '/dev/random':('devtmpfs','none'),'/dev/urandom':('devtmpfs','none'),
+ '/proc':('proc','proc'),'/proc/bus':('proc','proc'),'/proc/fs':('proc','proc'),
+ '/proc/irq':('proc','proc'),'/proc/sys':('proc','proc'),
+ '/proc/sysrq-trigger':('proc','proc'),'/proc/acpi':('tmpfs','tmpfs'),
+ '/proc/scsi':('tmpfs','tmpfs'),
+ '/proc/kcore':('devtmpfs','none'),'/proc/keys':('devtmpfs','none'),
+ '/proc/latency_stats':('devtmpfs','none'),
+ '/proc/timer_list':('devtmpfs','none'),'/proc/interrupts':('devtmpfs','none'),
+ '/sys':('sysfs','sysfs'),'/sys/fs/cgroup':('cgroup2','cgroup2'),
+ '/sys/firmware':('tmpfs','tmpfs'),'/sys/fs/selinux':('tmpfs','tmpfs')}
+read_only={'/','/tmp','/run/.containerenv','/run/secrets',
+ '/etc/hosts','/etc/hostname','/etc/resolv.conf','/sys','/sys/fs/cgroup',
+ '/proc/acpi','/proc/scsi','/proc/kcore','/proc/keys',
+ '/proc/latency_stats','/proc/timer_list','/proc/interrupts',
+ '/proc/bus','/proc/fs','/proc/irq','/proc/sys','/proc/sysrq-trigger',
+ '/sys/firmware','/sys/fs/selinux'}
 for m in parsed:
- if m['point'] not in allowed and m['point']!='/':raise RuntimeError('unreviewed container mount: '+repr(m))
- if m['point'] in ('/work','/tmp') and m['fstype']!='tmpfs':raise RuntimeError('unexpected work/tmp mount')
- if m['point']=='/' and 'ro' not in m['options']:raise RuntimeError('root mount writable')
+ if (m['point'] not in expected or
+    (m['fstype'],m['source'])!=expected[m['point']]):raise RuntimeError('unreviewed container mount: '+repr(m))
+ if m['point'] in read_only and 'ro' not in m['options']:raise RuntimeError('runtime mount not read only')
+ if m['point'] in ('/work','/tmp','/run','/var/tmp') and 'nodev' not in m['options']:raise RuntimeError('runtime scratch permits devices')
+ if m['point']=='/work' and 'noexec' not in m['options']:raise RuntimeError('source staging permits native executables')
+ if m['point']=='/run/secrets':
+  if list((base/'root/run/secrets').iterdir()):raise RuntimeError('container secret mount contains files')
+if len({m['point'] for m in parsed})!=len(parsed):raise RuntimeError('duplicate mount destination')
+if not {'/','/work','/tmp','/dev','/proc','/sys','/sys/fs/cgroup','/run/secrets'}.issubset({m['point'] for m in parsed}):raise RuntimeError('missing required sandbox mounts')
 names={n:os.readlink(str(base/'ns'/n)) for n in ('user','pid','mnt','net')}
 hostnames={n:os.readlink('/proc/self/ns/'+n) for n in ('user','pid','mnt','net')}
 result={'staged_program_sha256':hashlib.sha256(raw).hexdigest(),
+ 'immutable_executable_memfd':memfds[0],
  'staged_inode':{'device':file_stat.st_dev,'inode':file_stat.st_ino,'size':file_stat.st_size,'nlink':file_stat.st_nlink,'uid':file_stat.st_uid,'mode':file_stat.st_mode,'mtime_ns':file_stat.st_mtime_ns,'ctime_ns':file_stat.st_ctime_ns},
  'process_count':len(procs),'process_status':status,'container_pid':pid,
  'container_pid_start_ticks':start_ticks,
@@ -167,14 +238,14 @@ result={'staged_program_sha256':hashlib.sha256(raw).hexdigest(),
 print(json.dumps(result,sort_keys=True))
 '''
 
-# Exact source SHA identities were reviewed, and V37 fixed benign-negative
-# probes were witnessed. However, the V38 execution approval is NOT sufficient:
-# the actual runtime holdout invocation hit an external security-status block.
-# Until an independently accepted execution admission exists, retain both
-# research approval pins UNSET and never try a differently routed bypass.
-# Frozen original V2 Gate2 approvals also remain unchanged/unset.
-APPROVED_V38_RESEARCH_LOADER_SHA256: str | None = None
-APPROVED_V38_RESEARCH_HOST_OBSERVER_SHA256: str | None = None
+# 2026-10-27 independent worker-13 source review APPROVED these exact V38
+# research-only sources after the actual native sealed-memfd holdout, negative
+# controls and post-witness adversarial candidate.py replacement (the original
+# immutable sealed source still executed). This authorizes ONLY research
+# scoring of source-pinned original model-generated Q4/Q8 Python in an isolated
+# Podman VM, never frozen v2 Gate2, Gen-0 selection or release.
+APPROVED_V38_RESEARCH_LOADER_SHA256: str | None = "3319565d5d5a6aa210151a32bd367a136a08cfb530402c51f311143de2f08e66"
+APPROVED_V38_RESEARCH_HOST_OBSERVER_SHA256: str | None = "c4e5fd10ae77338337357ee250d8f5e19d925f74cf520c42b2e25b94cc519425"
 
 
 def _research_source_gaps() -> list[str]:
@@ -207,24 +278,47 @@ def _bounded_exec(args: list[str], *, timeout: int) -> subprocess.CompletedProce
     return result
 
 
-def _source_stage_host_observe(owner_pid: int, expected_sha: str) -> dict:
+def _source_stage_host_observe(owner_pid: int, expected_sha: str, sealed_fd: int) -> dict:
     if type(owner_pid) is not int or owner_pid <= 1 or not re.fullmatch("[0-9a-f]{64}", expected_sha):
         raise ValueError("invalid independent source owner binding")
+    if type(sealed_fd) is not int or not 3 <= sealed_fd <= 64:
+        raise ValueError("invalid immutable executable handle")
     token = base64.b64encode(V38_VM_SOURCE_OBSERVER.encode("utf-8")).decode("ascii")
-    command = ("python3 -c 'import base64;exec(base64.b64decode(\"" + token
-               + "\").decode(\"utf-8\"))' " + str(owner_pid))
+    command = ("sudo -n python3 -c 'import base64;exec(base64.b64decode(\"" + token
+               + "\").decode(\"utf-8\"))' " + str(owner_pid) + " " + str(sealed_fd))
     result = _bounded_exec(["podman", "machine", "ssh", "--", command], timeout=15)
     if result.returncode:
         raise RuntimeError("independent VM-host candidate.py source observer unavailable: "
-                           + result.stderr[-300:])
+                           + result.stderr[-1600:])
     evidence = v37._strict_json(result.stdout)
     ipv4 = evidence.get("ipv4_routes")
     ipv6 = evidence.get("ipv6_routes")
     mounts = evidence.get("mount_inventory")
     inode = evidence.get("staged_inode")
-    allowed_mounts = {"/", "/work", "/tmp", "/dev", "/dev/pts", "/dev/shm",
-                      "/proc", "/sys", "/sys/fs/cgroup", "/etc/hosts",
-                      "/etc/hostname", "/etc/resolv.conf"}
+    sealed = evidence.get("immutable_executable_memfd")
+    allowed_mounts = {
+        "/": ("overlay", "overlay"), "/work": ("tmpfs", "tmpfs"),
+        "/tmp": ("tmpfs", "tmpfs"), "/run": ("tmpfs", "tmpfs"),
+        "/var/tmp": ("tmpfs", "tmpfs"), "/run/.containerenv": ("tmpfs", "tmpfs"),
+        "/run/secrets": ("tmpfs", "tmpfs"),
+        "/etc/hosts": ("tmpfs", "tmpfs"), "/etc/hostname": ("tmpfs", "tmpfs"),
+        "/etc/resolv.conf": ("tmpfs", "tmpfs"),
+        "/dev": ("tmpfs", "tmpfs"), "/dev/pts": ("devpts", "devpts"),
+        "/dev/shm": ("tmpfs", "shm"), "/dev/mqueue": ("mqueue", "mqueue"),
+        "/dev/null": ("devtmpfs", "none"), "/dev/zero": ("devtmpfs", "none"),
+        "/dev/full": ("devtmpfs", "none"), "/dev/tty": ("devtmpfs", "none"),
+        "/dev/random": ("devtmpfs", "none"), "/dev/urandom": ("devtmpfs", "none"),
+        "/proc": ("proc", "proc"), "/proc/bus": ("proc", "proc"),
+        "/proc/fs": ("proc", "proc"), "/proc/irq": ("proc", "proc"),
+        "/proc/sys": ("proc", "proc"), "/proc/sysrq-trigger": ("proc", "proc"),
+        "/proc/acpi": ("tmpfs", "tmpfs"), "/proc/scsi": ("tmpfs", "tmpfs"),
+        "/proc/kcore": ("devtmpfs", "none"), "/proc/keys": ("devtmpfs", "none"),
+        "/proc/latency_stats": ("devtmpfs", "none"),
+        "/proc/timer_list": ("devtmpfs", "none"),
+        "/proc/interrupts": ("devtmpfs", "none"),
+        "/sys": ("sysfs", "sysfs"), "/sys/fs/cgroup": ("cgroup2", "cgroup2"),
+        "/sys/firmware": ("tmpfs", "tmpfs"), "/sys/fs/selinux": ("tmpfs", "tmpfs"),
+    }
     if (not isinstance(ipv4, list) or not ipv4
             or not isinstance(ipv4[0], str)
             or ipv4[0].split()[:2] != ["Iface", "Destination"]
@@ -237,14 +331,22 @@ def _source_stage_host_observe(owner_pid: int, expected_sha: str) -> dict:
             or not isinstance(mounts, list) or len(mounts) < 3
             or any(not isinstance(mount, dict)
                    or mount.get("point") not in allowed_mounts
-                   or (mount.get("point") in ("/work", "/tmp")
-                       and mount.get("fstype") != "tmpfs") for mount in mounts)
+                   or (mount.get("fstype"), mount.get("source"))
+                       != allowed_mounts[mount["point"]] for mount in mounts)
+            or len({m.get("point") for m in mounts}) != len(mounts)
             or not isinstance(inode, dict)
             or any(type(inode.get(k)) is not int for k in
                    ("device", "inode", "size", "nlink", "uid", "mode", "mtime_ns", "ctime_ns"))
             or inode["device"] <= 0 or inode["inode"] <= 0 or inode["size"] <= 0
             or inode["nlink"] != 1 or inode["uid"] == 0 or inode["mode"] & 0o022):
         raise RuntimeError("independent VM-host route/mount/staged-inode witness failed")
+    if (not isinstance(sealed, dict)
+            or sealed.get("sha256") != expected_sha or sealed.get("fd") != sealed_fd
+            or type(sealed.get("pid")) is not int
+            or sealed["pid"] not in evidence.get("cgroup_procs", [])
+            or type(sealed.get("inode")) is not int or sealed["inode"] <= 0
+            or sealed.get("seals") != 15):
+        raise RuntimeError("independent VM-host immutable-executable memfd witness failed")
     if (evidence.get("staged_program_sha256") != expected_sha
             or type(evidence.get("container_pid_start_ticks")) is not int
             or evidence["container_pid_start_ticks"] <= 0
@@ -276,10 +378,11 @@ def _new_research_container_argv(name: str) -> list[str]:
     return ["podman", "run", "--detach", "--pull=never", "--name", name,
             "--network=none", "--cgroupns=private", "--pid=private", "--ipc=private",
             "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
-            "--user=65534:65534", "--userns=keep-id", "--pids-limit=16",
+            "--user=65534:65534", "--userns=keep-id", "--passwd=false", "--pids-limit=16",
             "--memory=268435456", "--memory-swap=268435456", "--ulimit=core=0:0",
             "--tmpfs=/work:rw,nosuid,nodev,noexec,size=16m,mode=1777",
             "--tmpfs=/tmp:ro,nosuid,nodev,noexec,size=64k,mode=0555",
+            "--tmpfs=/run/secrets:ro,nosuid,nodev,noexec,size=64k,mode=0555,notmpcopyup",
             "--env=PYTHONDONTWRITEBYTECODE=1", "--workdir=/work",
             f"--entrypoint={v37.PYTHON_PATH}", V37_IMAGE_ID,
             "-I", "-c", "import time;time.sleep(45)"]
@@ -348,9 +451,13 @@ def _run_research_candidate(program: str, *, fixed_holdout_only: bool = False) -
         transport.stdin.flush()
         transport.stdin.close()
         first = v37._strict_json(_pipe_line_with_timeout(transport.stdout).decode("utf-8"))
-        if first != {"stage": "PREEXEC_SOURCE_STAGED", "sha256": digest}:
+        sealed_fd = first.get("sealed_fd")
+        if (first.get("stage") != "PREEXEC_SOURCE_STAGED"
+                or first.get("sha256") != digest or first.get("sealed_sha256") != digest
+                or type(sealed_fd) is not int or not 3 <= sealed_fd <= 64
+                or len(first) != 4):
             raise RuntimeError("outside-host preexecution candidate SHA does not match staged loader")
-        observed = _source_stage_host_observe(vm_pid, digest)
+        observed = _source_stage_host_observe(vm_pid, digest, sealed_fd)
         if owner not in observed.get("cgroup_path", "") or vm_pid != observed.get("container_pid"):
             raise RuntimeError("real VM-host staged source owner mismatch")
         permission = _bounded_exec(["podman", "exec", name, v37.PYTHON_PATH, "-I", "-c",
@@ -369,7 +476,7 @@ def _run_research_candidate(program: str, *, fixed_holdout_only: bool = False) -
         if transport.wait(timeout=6) != 0:
             raise RuntimeError("isolated candidate launcher failed after exit evidence")
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
-        refused = type(error).__name__ + ": " + str(error)[:300]
+        refused = type(error).__name__ + ": " + str(error)[:1600]
     finally:
         if transport is not None and transport.poll() is None:
             transport.kill()
@@ -697,7 +804,7 @@ def main(argv: list[str] | None = None) -> int:
                           "error_type": type(error).__name__,
                           "generated_programs_executed": 0,
                           "independent_score": None,
-                          "reason": str(error)[:500],
+                          "reason": str(error)[:1800],
                           "gen0_status": "BLOCKED"}, sort_keys=True), file=sys.stderr)
         return 2
 

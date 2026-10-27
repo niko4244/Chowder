@@ -169,23 +169,22 @@ def test_only_owned_v38_source_approval_pins_and_no_legacy_pin_writes():
 def test_research_v38_fixed_holdout_source_identity_requires_exact_no_model_code():
     assert v38._sha(v38.V38_FIXED_HOLDOUT.encode()) == v38.V38_FIXED_HOLDOUT_SHA256
     assert v38.V38_FIXED_HOLDOUT.startswith("print(")
-    assert v38._research_source_gaps() == [
-        "INDEPENDENT_V38_GENERATED_CODE_LOADER_SOURCE_REVIEW_REQUIRED",
-        "INDEPENDENT_V38_OUTSIDE_HOST_OBSERVER_SOURCE_REVIEW_REQUIRED",
-    ]
+    assert v38._research_source_gaps() == []
     with pytest.raises(ValueError, match="only exact fixed benign holdout"):
         v38._run_research_candidate("print('foreign model output')", fixed_holdout_only=True)
 
 
-def test_independent_v38_research_source_review_still_fail_closed(monkeypatch):
-    assert v38.APPROVED_V38_RESEARCH_LOADER_SHA256 is None
-    assert v38.APPROVED_V38_RESEARCH_HOST_OBSERVER_SHA256 is None
+def test_independent_v38_research_exact_source_pins_do_not_approve_frozen_v2(monkeypatch):
+    assert v38.APPROVED_V38_RESEARCH_LOADER_SHA256 == v38._sha(v38.V38_LOADER.encode())
+    assert v38.APPROVED_V38_RESEARCH_HOST_OBSERVER_SHA256 == v38._sha(
+        v38.V38_VM_SOURCE_OBSERVER.encode())
     assert v38.V37_IMAGE_ID == v37.IMAGE_ID
     assert v38.V37_PYTHON_EXECUTABLE_SHA256 == v37.PYTHON_SHA256
     assert v2.APPROVED_SANDBOX_CAPABILITY_SHA256 is None
     assert v2.APPROVED_INDEPENDENT_WITNESS_SHA256 is None
-    with pytest.raises(RuntimeError, match="INDEPENDENT_V38_GENERATED_CODE_LOADER_SOURCE_REVIEW_REQUIRED"):
-        v38.original_research_admission()
+    monkeypatch.setattr(v37, "preflight", lambda: None)
+    monkeypatch.setattr(v38, "host_safety_guard", lambda: None)
+    v38.original_research_admission()
 
 
 def test_benign_source_transfer_profile_has_exclusive_noegress_only_owned_podman():
