@@ -1,4 +1,4 @@
-"""Tests for the guard proxy: compaction, generation budget, runaway policy."""
+"""Tests for the guard proxy: compaction, budget, runaway policy, arg repair."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from chowder_batch.reap_context_guard_proxy_20261026 import (
+    ARGS_UNREPAIRABLE,
     GEN_CEILING_TOKENS,
     GEN_FLOOR_TOKENS,
     PROMPT_BUDGET_TOKENS,
@@ -20,6 +21,8 @@ from chowder_batch.reap_context_guard_proxy_20261026 import (
     generation_budget,
     is_runaway_error,
     prompt_tokens,
+    repair_json_string_params,
+    repair_tool_arguments,
     runaway_completion,
     start_guard,
     stop_guard,
@@ -155,6 +158,45 @@ class _Upstream(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
+        if UPSTREAM_BEHAVIOUR["mode"] == "toolcall_nested":
+            arguments = json.dumps({
+                "method": "POST", "url": "sales/notes",
+                "params": "", "body": '{"text":"hello",}'})
+            payload = json.dumps({
+                "id": "x", "object": "chat.completion", "created": 0,
+                "model": body.get("model", "m"),
+                "choices": [{"index": 0, "finish_reason": "tool_calls",
+                             "message": {"role": "assistant", "content": None,
+                                         "tool_calls": [{"id": "call_1", "type": "function",
+                                                          "function": {"name": "api_fetch",
+                                                                       "arguments": arguments}}]}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if UPSTREAM_BEHAVIOUR["mode"] in ("toolcall_truncated", "toolcall_broken"):
+            arguments = ("{\"query\":\"hello" if
+                         UPSTREAM_BEHAVIOUR["mode"] == "toolcall_truncated" else "not json")
+            payload = json.dumps({
+                "id": "x", "object": "chat.completion", "created": 0,
+                "model": body.get("model", "m"),
+                "choices": [{"index": 0, "finish_reason": "tool_calls",
+                             "message": {"role": "assistant", "content": None,
+                                         "tool_calls": [{"id": "call_1", "type": "function",
+                                                          "function": {"name": "search",
+                                                                       "arguments": arguments}}]}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if UPSTREAM_BEHAVIOUR["mode"] == "runaway":
             payload = json.dumps({"error": {"message":
                 "Failed to parse tool call arguments as JSON: missing closing quote"}}).encode()
@@ -225,6 +267,112 @@ def test_proxy_converts_a_runaway_500_into_a_stop(guard):
     assert body["choices"][0]["finish_reason"] == "stop"
     events = [json.loads(line) for line in receipt.read_text("utf8").splitlines()]
     assert any(e["event"] == RUNAWAY_REASON for e in events)
+
+
+def test_repair_leaves_valid_arguments_alone():
+    repaired, reason = repair_tool_arguments('{"a": 1}')
+    assert reason == "intact"
+    assert json.loads(repaired) == {"a": 1}
+
+
+def test_repair_turns_an_empty_argument_string_into_an_empty_object():
+    # The measured phase-36 failure: the workspace API answers
+    # `Invalid JSON: Expecting value: line 1 column 1 (char 0)` for "".
+    assert repair_tool_arguments("") == ("{}", "empty_arguments")
+    assert repair_tool_arguments("   ") == ("{}", "empty_arguments")
+
+
+def test_repair_closes_a_truncated_argument_object():
+    repaired, reason = repair_tool_arguments('{"query":"hello')
+    assert reason == "closed_truncation"
+    assert json.loads(repaired) == {"query": "hello"}
+
+
+def test_repair_drops_a_trailing_comma():
+    repaired, reason = repair_tool_arguments('{"a": 1,}')
+    assert reason == "trailing_comma"
+    assert json.loads(repaired) == {"a": 1}
+
+
+def test_repair_unwraps_a_markdown_fence():
+    repaired, reason = repair_tool_arguments('```json\n{"a":1}\n```')
+    assert reason == "unfenced"
+    assert json.loads(repaired) == {"a": 1}
+
+
+def test_repair_refuses_non_objects():
+    assert repair_tool_arguments("not json") == (None, "no_object")
+    assert repair_tool_arguments("[1,2]")[0] is None
+    assert repair_tool_arguments(None) == (None, "non_string")
+
+
+def test_repair_fixes_malformed_nested_params_and_body():
+    # The phase-36 shape: a valid outer object hiding malformed `params`/`body`.
+    args = {"method": "POST", "url": "x", "params": "", "body": '{"text":"hi",}'}
+    repaired, report = repair_json_string_params(args)
+    assert json.loads(repaired["body"]) == {"text": "hi"}
+    assert json.loads(repaired["params"]) == {}
+    assert {r["key"] for r in report} == {"params", "body"}
+    assert all(r["repaired"] for r in report)
+
+
+def test_repair_ignores_plain_scalar_parameters():
+    args = {"method": "GET", "url": "sales/notes", "body": "plain text"}
+    repaired, report = repair_json_string_params(args)
+    assert repaired == args
+    assert report == []
+
+
+def test_repair_reports_a_nested_body_it_cannot_fix():
+    # Looks like JSON (so it is treated as an encoded document) but cannot be
+    # made valid: it must be reported, never silently rewritten.
+    args = {"body": '{"a": 1 2}'}
+    repaired, report = repair_json_string_params(args)
+    assert report == [{"key": "body", "reason": "unparsable", "repaired": False}]
+    assert repaired["body"] == '{"a": 1 2}'
+
+
+def test_repair_leaves_a_plain_text_body_alone():
+    args = {"body": "not json at all"}
+    repaired, report = repair_json_string_params(args)
+    assert repaired == args
+    assert report == []
+
+
+def test_proxy_repairs_a_nested_body_before_dispatch(guard):
+    port, receipt = guard
+    UPSTREAM_BEHAVIOUR["mode"] = "toolcall_nested"
+    status, body = _post(port, {"model": "m", "messages": [{"role": "user", "content": "hi"}]})
+    assert status == 200
+    sent = json.loads(body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+    assert json.loads(sent["body"]) == {"text": "hello"}
+    assert json.loads(sent["params"]) == {}
+    events = [json.loads(line) for line in receipt.read_text("utf8").splitlines()]
+    assert events[-1]["tool_arguments_repaired"] == 1
+
+
+def test_proxy_repairs_a_truncated_tool_call_before_dispatch(guard):
+    port, receipt = guard
+    UPSTREAM_BEHAVIOUR["mode"] = "toolcall_truncated"
+    status, body = _post(port, {"model": "m", "messages": [{"role": "user", "content": "hi"}]})
+    assert status == 200
+    call = body["choices"][0]["message"]["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {"query": "hello"}
+    events = [json.loads(line) for line in receipt.read_text("utf8").splitlines()]
+    assert events[-1]["tool_arguments_repaired"] == 1
+    assert events[-1]["event"] == "forwarded"
+
+
+def test_proxy_ends_the_turn_when_arguments_cannot_be_repaired(guard):
+    port, receipt = guard
+    UPSTREAM_BEHAVIOUR["mode"] = "toolcall_broken"
+    status, body = _post(port, {"model": "m", "messages": [{"role": "user", "content": "hi"}]})
+    assert status == 200
+    assert body["choices"][0]["finish_reason"] == "stop"
+    assert "tool_calls" not in body["choices"][0]["message"]
+    events = [json.loads(line) for line in receipt.read_text("utf8").splitlines()]
+    assert events[-1]["event"] == ARGS_UNREPAIRABLE
+    assert events[-1]["tool_arguments_unrepairable"] == 1
 
 
 def test_proxy_compacts_before_forwarding(guard):
