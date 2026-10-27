@@ -185,10 +185,28 @@ def _native(folder: Path, receipt: dict, name: str) -> str:
             or "n_ctx_seq             = 8192" not in log
             or len(receipt.get("samples", [])) < 1):
         raise ValueError("native offload/context/log/sampling not independently attested")
+    initial = receipt.get("initial")
+    postload = receipt.get("after_postload_reclaim")
+    if (type(initial) is not dict or type(postload) is not dict
+            or type(initial.get("physical_free_gib")) not in (int, float)
+            or type(initial.get("cgroup_unused_gib")) not in (int, float)
+            or not math.isfinite(initial["physical_free_gib"])
+            or not math.isfinite(initial["cgroup_unused_gib"])
+            or initial["physical_free_gib"] < 24
+            or initial["cgroup_unused_gib"] < 24
+            or type(initial.get("gpu_free_mib")) is not list
+            or len(initial["gpu_free_mib"]) != 2
+            or any(type(g) is not int or g < 12288 for g in initial["gpu_free_mib"])
+            or type(postload.get("cgroup_unused_gib")) not in (int, float)
+            or not math.isfinite(postload["cgroup_unused_gib"])
+            or postload["cgroup_unused_gib"] < 14):
+        raise ValueError("original Q8 GPU/cgroup startup or postload admission missing")
     for sample in receipt["samples"]:
         if (type(sample) is not dict
                 or type(sample.get("physical_free_gib")) not in (int, float)
                 or type(sample.get("cgroup_unused_gib")) not in (int, float)
+                or not math.isfinite(sample["physical_free_gib"])
+                or not math.isfinite(sample["cgroup_unused_gib"])
                 or sample["physical_free_gib"] < 7
                 or sample["cgroup_unused_gib"] < 10
                 or type(sample.get("gpu_free_mib")) is not list
