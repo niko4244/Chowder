@@ -388,6 +388,32 @@ def _new_research_container_argv(name: str) -> list[str]:
             "-I", "-c", "import time;time.sleep(45)"]
 
 
+def _outside_host_cleanup_retry(observed: dict) -> dict:
+    """Repeat ONLY transient VM-host SSH timeouts; never admit live descendants.
+
+    Every attempt uses original unchanged v37 outside-VM /proc+cgroup
+    observer and requires strict kernel-side zero-live proof. A real
+    safety failure is not masked, and the generated Python time budget
+    remains unchanged.
+    """
+    binding = {"child": {"pid": observed["container_pid"],
+                         "start_ticks": observed["container_pid_start_ticks"]},
+               "descendants": {}, "cgroup_path": observed["cgroup_path"]}
+    for attempt in range(3):
+        try:
+            result = v37._vm_postcheck(binding)
+        except subprocess.TimeoutExpired:
+            if attempt == 2:
+                raise
+            continue
+        if (not isinstance(result, dict)
+                or result.get("same_owned_processes_live") != []
+                or result.get("cgroup_procs") != []):
+            raise RuntimeError("outside-VM-host cgroup/process extinction not verified")
+        return result
+    raise RuntimeError("unreachable original kernel cleanup witness")
+
+
 def _pipe_line_with_timeout(pipe, *, seconds: float = 12) -> bytes:
     received = queue.Queue(maxsize=1)
     threading.Thread(target=lambda: received.put(pipe.readline()), daemon=True).start()
@@ -489,8 +515,13 @@ def _run_research_candidate(program: str, *, fixed_holdout_only: bool = False) -
                 if _bounded_exec(["podman", "container", "exists", name], timeout=10).returncode != 0:
                     raise RuntimeError("owned container disappeared before audited teardown")
                 v37._inspect_owned(name, owner)
-                removed = _bounded_exec(["podman", "rm", "--force", name], timeout=12)
-                gone = _bounded_exec(["podman", "container", "exists", name], timeout=10)
+                # Under the 4-CPU Podman VM a native rm can exceed the old
+                # 12-second CLIENT response deadline even when the cgroup
+                # safely expires. Extend only HOST cleanup I/O headroom;
+                # original generated Python still has the exact 10-second
+                # execution watchdog. Never infer cleanup from elapsed time.
+                removed = _bounded_exec(["podman", "rm", "--force", name], timeout=45)
+                gone = _bounded_exec(["podman", "container", "exists", name], timeout=20)
                 owned_removed = removed.returncode == 0 and gone.returncode == 1
                 if not owned_removed:
                     raise RuntimeError("original candidate cgroup owner not removed")
@@ -498,9 +529,7 @@ def _run_research_candidate(program: str, *, fixed_holdout_only: bool = False) -
                 refused = "OWNED_RUNTIME_TEARDOWN_UNVERIFIED: " + type(error).__name__
     if observed is not None:
         try:
-            post = v37._vm_postcheck({"child": {"pid": observed["container_pid"],
-                                                "start_ticks": observed["container_pid_start_ticks"]},
-                                       "descendants": {}, "cgroup_path": observed["cgroup_path"]})
+            post = _outside_host_cleanup_retry(observed)
         except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
             refused = "OUTSIDE_HOST_PROCESS_TREE_EXTINCTION_UNVERIFIED: " + type(error).__name__
     if refused is not None or not owned_removed or post is None or record is None:
