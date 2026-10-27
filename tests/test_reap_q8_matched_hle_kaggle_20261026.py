@@ -53,6 +53,8 @@ def test_private_128_q8_replay_has_only_model_and_matched_subset_changes(tmp_pat
     assert prepared["official_hle_score_claimed"] is False
     assert "cgroup_unused_gib'] < 10" in source
     assert "verified_native_offload_41_of_41" in source
+    assert "LLAMA_ARG_LOG_VERBOSITY='4'" in source
+    assert "LLAMA_ARG_LOG_VERBOSITY='3'" not in source
     assert "P.MAX_COMPLETION_TOKENS != 8192 or P.TEMPERATURE != 0" in source
     assert "del rows\n    gc.collect()" in source
     assert "pa.default_memory_pool().release_unused()" in source

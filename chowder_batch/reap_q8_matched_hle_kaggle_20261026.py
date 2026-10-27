@@ -79,6 +79,10 @@ def build(out: Path) -> dict:
     source = _once(source, "Q4_GGUF_SHA256 = '2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7'",
                    f"Q8_GGUF_SHA256 = '{Q8_SHA256}'")
     source = _once(source, "Q4_GGUF_BYTES = 11563915264", f"Q8_GGUF_BYTES = {Q8_BYTES}")
+    # llama.cpp's native CUDA placement witnesses (offloaded 41/41 and
+    # n_ctx_seq) are only emitted with its original diagnostic verbosity 4.
+    # This adjusts logging only, never frozen serving/decoding flags.
+    source = _once(source, "LLAMA_ARG_LOG_VERBOSITY='3'", "LLAMA_ARG_LOG_VERBOSITY='4'")
     if "PROTOCOL_FILE_SHA256 = 'cbacf0bb2215fce041ca62e991002d2772bee04891bc5e1773d3b0e2c44c49b2'" not in source or "PROTOCOL_BYTES = 13041" not in source:
         raise ValueError("Q4 actually executed and current-mounted HLE protocol mismatch")
     source = _once(source, "weights = unique(P.Q4_GGUF_FILENAME, 'frozen Q4_K_M GGUF')",
