@@ -1,0 +1,99 @@
+"""Fail-closed checkpoint tests; never start a model, official task or GPU."""
+
+from pathlib import Path
+
+import pytest
+
+from chowder_batch import reap_q4_automationbench_full600_resumable_20261027 as r
+
+
+def test_owner_freezes_real_600_names_and_gen0_is_never_selected():
+    items = [{"id": str(i // 2), "name": f"task_{i}"}
+             for i in range(600)]
+    owner = r.exact_owner(items, "1" * 64, "2" * 64, "3" * 40)
+    assert owner["original_task_population"] == 600
+    assert owner["tasks"] == items
+    assert owner["native_flags"] == r.q4.FLAGS
+    assert owner["frozen_scientific_gate_eligible"] is False
+    assert owner["release_approved"] is False
+    assert owner["gen0_status"] == "BLOCKED"
+    assert owner["chosen"] is None
+
+
+def test_reject_missing_scored_item(tmp_path):
+    assert r.verify_item(tmp_path / "task-000", 0, {"id": "501",
+                                                    "name": "sales.multi_hop_lookup"},
+                         "a" * 64, "model") is None
+
+
+def test_reject_incomplete_nonempty_item(tmp_path):
+    item = tmp_path / "task-000"
+    item.mkdir()
+    (item / "official-evaluator.private.log").write_text("partial")
+    with pytest.raises(ValueError, match="incomplete"):
+        r.verify_item(item, 0, {"id": "501", "name": "sales.multi_hop_lookup"},
+                      "a" * 64, "model")
+
+
+def test_real_unscored_partial_is_archived_without_data_loss(tmp_path):
+    item = tmp_path / "task-000"
+    item.mkdir()
+    (item / "official-evaluator.private.log").write_bytes(b"original incomplete transcript")
+    archived = r.quarantine_unfinished_item(item)
+    assert not item.exists()
+    assert archived.name.startswith("task-000.unfinished-")
+    assert (archived / "official-evaluator.private.log").read_bytes() == (
+        b"original incomplete transcript")
+
+
+def test_reject_quarantine_if_scored_claim_exists(tmp_path):
+    item = tmp_path / "task-000"
+    item.mkdir()
+    (item / "receipt.json").write_bytes(b"potential completed receipt")
+    with pytest.raises(ValueError, match="not an unscored"):
+        r.quarantine_unfinished_item(item)
+
+
+def test_reject_foreign_unfinished_task_files(tmp_path):
+    item = tmp_path / "task-000"
+    item.mkdir()
+    (item / "untrusted.py").write_text("print('not executed')")
+    with pytest.raises(ValueError, match="foreign files"):
+        r.quarantine_unfinished_item(item)
+
+
+def test_reject_forged_original_score_receipt(tmp_path):
+    item = tmp_path / "task-000"
+    item.mkdir()
+    (item / "public-automationbench.private.json").write_text("{}")
+    receipt = {"schema": r.SCHEMA, "owner_sha256": "a" * 64,
+               "original_index": 0, "task": {"id": "501", "name": "sales.multi_hop_lookup"},
+               "served_id": "model", "status": "ORIGINAL_OFFICIAL_TASK_SCORED",
+               "raw_sha256": "b" * 64, "independent_score": {"passed_tasks": 1}}
+    (item / "receipt.json").write_bytes(r._canonical(receipt))
+    with pytest.raises(ValueError, match="drift"):
+        r.verify_item(item, 0, receipt["task"], "a" * 64, "model")
+
+
+@pytest.mark.parametrize("value", [0, -1, 601, 1.2, True])
+def test_reject_invalid_replay_budgets(tmp_path, value):
+    with pytest.raises(ValueError, match="max_new"):
+        r.run(tmp_path / "unused", execute=False, max_new=value)
+
+
+def test_reject_duplicate_or_nonfinite_receipts(tmp_path):
+    p = tmp_path / "bad.json"
+    p.write_text('{"x":1,"x":2}')
+    with pytest.raises(ValueError, match="duplicate"):
+        r._json(p)
+    p.write_text('{"x":NaN}')
+    with pytest.raises(ValueError):
+        r._json(p)
+
+
+def test_source_identity_count_is_strict():
+    assert r.POPULATION == 600
+    assert r.source_ids.PUBLIC_PROMPTS_SHA256 == (
+        "1c8feeec1f680b05b392a5d00fc634edb143c3e7bdd152c476af50cebcec57b5"
+    )
+    assert Path(r.q4.GGUF).suffix == ".gguf"

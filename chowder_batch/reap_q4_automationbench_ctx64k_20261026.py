@@ -43,6 +43,12 @@ from chowder_batch.reap_context_budget_20261026 import (
     assess,
     trajectory_from_native_log,
 )
+from chowder_batch.reap_context_guard_proxy_20261026 import (
+    POLICY_NAME,
+    start_guard,
+    stop_guard,
+    summarize,
+)
 
 PROFILE = "NONCOMPARABLE_Q4_CTX72K_1X73728_STEPS44_DECODE_RP11_DRY08_T07"
 # 73,728 leaves room for 44 steps of measured prompt growth (~1,383/step)
@@ -395,12 +401,16 @@ def record(dirpath: Path, handle, phase: str, pid: int, started: float) -> dict[
     return snapshot
 
 
+GUARD_PORT = 8894
+
+
 def bench_command(served_id: str, out: Path, *, count: int,
-                  tasks: tuple[str, ...] | None) -> list[str]:
+                  tasks: tuple[str, ...] | None,
+                  base_port: int = PORT) -> list[str]:
     command = [
         str(BENCH_PYTHON), "-I", "-m", "automationbench.scripts.eval",
         "--model", served_id,
-        "--base-url", f"http://127.0.0.1:{PORT}/v1",
+        "--base-url", f"http://127.0.0.1:{base_port}/v1",
         "--api-key-var", "OPENAI_API_KEY",
         "--api", "chat_completions",
         "--toolset", "api",
@@ -475,7 +485,7 @@ def preflight(out: Path) -> dict[str, object]:
     }
 
 
-def execute(out: Path, *, sample: int | None = None) -> dict[str, object]:
+def execute(out: Path, *, sample: int | None = None, guard: bool = False) -> dict[str, object]:
     if sample is not None and (type(sample) is not int or not 2 <= sample <= 600):
         raise ValueError("sample must be an integer between 2 and 600")
     count = sample if sample is not None else len(TASKS)
@@ -506,8 +516,10 @@ def execute(out: Path, *, sample: int | None = None) -> dict[str, object]:
         "native_command": native_command,
         "sample_size": count,
         "sampled_public_slice": sample is not None,
+        "guard_policy": POLICY_NAME if guard else None,
         "official_evaluator_command": bench_command(
-            SERVED_ID, out, count=count, tasks=tasks
+            SERVED_ID, out, count=count, tasks=tasks,
+            base_port=GUARD_PORT if guard else PORT,
         ),
         "official_source": source,
         "model": model,
@@ -524,6 +536,7 @@ def execute(out: Path, *, sample: int | None = None) -> dict[str, object]:
     )
 
     native = evaluator = None
+    guard_server = guard_thread = guard_state = None
     started = time.monotonic()
     telemetry = (out / "resources.private.jsonl").open("x", encoding="utf8")
     try:
@@ -550,7 +563,13 @@ def execute(out: Path, *, sample: int | None = None) -> dict[str, object]:
         served = serve_single_model(native)
 
         manifest.update({"native_cuda": cuda, "observed_context": geometry, "served_model": served})
-        command = bench_command(served, out, count=count, tasks=tasks)
+        if guard:
+            guard_server, guard_state, guard_thread = start_guard(
+                upstream_port=PORT, listen_port=GUARD_PORT, context=CONTEXT,
+                receipt_path=out / "guard-receipt.private.jsonl",
+            )
+        command = bench_command(served, out, count=count, tasks=tasks,
+                                base_port=GUARD_PORT if guard else PORT)
         manifest["official_evaluator_command"] = command
         (out / "experimental-manifest.private.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True), encoding="utf8"
@@ -593,12 +612,18 @@ def execute(out: Path, *, sample: int | None = None) -> dict[str, object]:
                         "model": model, "official_source": source},
                        indent=2, sort_keys=True), encoding="utf8"
         )
-        return {"profile": PROFILE, "official_audit": audit,
-                "truncation_audit": truncation, "private_path": str(out)}
+        result = {"profile": PROFILE, "official_audit": audit,
+                  "truncation_audit": truncation, "private_path": str(out)}
+        if guard_state is not None:
+            result["guard"] = summarize(guard_state.counters)
+            manifest["guard_counters"] = result["guard"]
+        return result
     finally:
         try:
             if evaluator is not None:
                 kill_tree(evaluator)
+            if guard_server is not None and guard_thread is not None:
+                stop_guard(guard_server, guard_thread)
             if native is not None:
                 kill_tree(native)
         finally:
@@ -611,9 +636,12 @@ def main() -> int:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--sample", type=int, default=None,
                         help="score the first N public tasks instead of the pinned six")
+    parser.add_argument("--guard", action="store_true",
+                        help="route through the compaction + runaway-policy proxy")
     args = parser.parse_args()
     try:
-        result = execute(args.out, sample=args.sample) if args.execute else preflight(args.out)
+        result = (execute(args.out, sample=args.sample, guard=args.guard)
+                  if args.execute else preflight(args.out))
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         result = {"status": "REFUSED", "reason": type(exc).__name__,
                   "detail": str(exc)[:400], "profile": PROFILE,
