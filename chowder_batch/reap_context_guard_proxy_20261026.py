@@ -41,6 +41,7 @@ sees and how a runaway is handled.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -63,7 +64,21 @@ TOOL_CONTENT_TAIL = 200
 CHARS_PER_TOKEN = 3.5
 ELISION_MARK = " ...[elided {n} chars]... "
 
-POLICY_NAME = "guard.v3"
+# Record-resolution arm, selected once at import so the owner fingerprint of a
+# dataset differs between arms and they can never be silently merged.
+RECORD_RESOLUTION = os.environ.get("REAP_RECORD_RESOLUTION", "") == "1"
+# With record resolution OFF the model-facing behaviour is identical to guard.v3,
+# so the base label stays `guard.v3` and an existing guard.v3 dataset can resume.
+# Only the armed arm gets a new label, and therefore a new owner fingerprint.
+POLICY_NAME = "guard.v3+rr" if RECORD_RESOLUTION else "guard.v3"
+RECORD_RESOLUTION_MARKER = "[record-resolution.v1]"
+RECORD_RESOLUTION_DIRECTIVE = (
+    RECORD_RESOLUTION_MARKER + " Before any write (an api_fetch with method POST, "
+    "PUT, PATCH or DELETE), first perform a read that returns the exact record id "
+    "you are about to modify, and name that id in your reasoning. Never write to "
+    "an id that you have not observed in a prior tool result from this episode. "
+    "If you cannot resolve the id, say so instead of writing."
+)
 RUNAWAY_REASON = "RUNAWAY_TURN_TERMINATED"
 ARGS_REPAIRED = "TOOL_ARGUMENTS_REPAIRED"
 ARGS_UNREPAIRABLE = "TOOL_ARGUMENTS_UNREPAIRABLE"
@@ -404,6 +419,23 @@ def repair_tool_calls(payload: bytes) -> tuple[bytes, list[dict[str, Any]]]:
     return json.dumps(body).encode(), report
 
 
+def apply_record_resolution(
+    messages: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Prepend the record-resolution directive once, as a system turn.
+
+    Idempotent: a conversation that already carries the marker is returned
+    unchanged, so a long episode does not accumulate copies of the rule.
+    """
+    prepared = [dict(m) for m in messages]
+    for message in prepared:
+        if message.get("role") in ("system", "developer") and isinstance(
+                message.get("content"), str) and RECORD_RESOLUTION_MARKER in message["content"]:
+            return prepared, False
+    prepared.insert(0, {"role": "system", "content": RECORD_RESOLUTION_DIRECTIVE})
+    return prepared, True
+
+
 def is_runaway_error(status: int, body: bytes) -> bool:
     if status < 500:
         return False
@@ -440,10 +472,12 @@ def runaway_completion(model: str, *, reason: str = RUNAWAY_REASON) -> dict[str,
 
 
 class GuardState:
-    def __init__(self, *, upstream_port: int, context: int, receipt_path: Path) -> None:
+    def __init__(self, *, upstream_port: int, context: int, receipt_path: Path,
+                 record_resolution: bool = RECORD_RESOLUTION) -> None:
         self.upstream = f"http://127.0.0.1:{upstream_port}"
         self.context = context
         self.receipt_path = receipt_path
+        self.record_resolution = record_resolution
         self.lock = threading.Lock()
         self.index = 0
         self.counters = {
@@ -453,6 +487,7 @@ class GuardState:
             "runaway_terminated": 0,
             "tool_arguments_repaired": 0,
             "tool_arguments_unrepairable": 0,
+            "record_resolution_injected": 0,
         }
 
     def record(self, entry: dict[str, Any]) -> None:
@@ -480,6 +515,12 @@ def _forward(state: GuardState, path: str, payload: bytes | None, method: str) -
 
 def _handle_chat(state: GuardState, body: dict[str, Any]) -> tuple[int, bytes, str, dict[str, Any]]:
     messages = body.get("messages") or []
+    injected = False
+    if state.record_resolution:
+        messages, injected = apply_record_resolution(messages)
+        if injected:
+            with state.lock:
+                state.counters["record_resolution_injected"] += 1
     compacted, stats = compact_messages(messages)
     if stats["strategy"] != "unchanged":
         with state.lock:
@@ -514,6 +555,8 @@ def _handle_chat(state: GuardState, body: dict[str, Any]) -> tuple[int, bytes, s
     entry = {
         "event": "forwarded",
         "policy": POLICY_NAME,
+        "record_resolution": state.record_resolution,
+        "record_resolution_injected": 1 if injected else 0,
         "max_tokens": body.get("max_tokens"),
         "requested_max_tokens": requested,
         "tool_arguments_repaired": len(restored),
@@ -577,8 +620,11 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def start_guard(*, upstream_port: int, listen_port: int, context: int,
-                receipt_path: Path) -> tuple[ThreadingHTTPServer, GuardState, threading.Thread]:
-    state = GuardState(upstream_port=upstream_port, context=context, receipt_path=receipt_path)
+                receipt_path: Path,
+                record_resolution: bool = RECORD_RESOLUTION
+                ) -> tuple[ThreadingHTTPServer, GuardState, threading.Thread]:
+    state = GuardState(upstream_port=upstream_port, context=context,
+                       receipt_path=receipt_path, record_resolution=record_resolution)
     handler = type("GuardHandler", (_Handler,), {"state": state})
     server = ThreadingHTTPServer(("127.0.0.1", listen_port), handler)
     server.daemon_threads = True

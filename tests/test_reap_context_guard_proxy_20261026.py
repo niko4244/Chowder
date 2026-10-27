@@ -12,6 +12,9 @@ import pytest
 
 from chowder_batch.reap_context_guard_proxy_20261026 import (
     ARGS_UNREPAIRABLE,
+    RECORD_RESOLUTION_DIRECTIVE,
+    RECORD_RESOLUTION_MARKER,
+    apply_record_resolution,
     GEN_CEILING_TOKENS,
     GEN_FLOOR_TOKENS,
     PROMPT_BUDGET_TOKENS,
@@ -373,6 +376,51 @@ def test_proxy_ends_the_turn_when_arguments_cannot_be_repaired(guard):
     events = [json.loads(line) for line in receipt.read_text("utf8").splitlines()]
     assert events[-1]["event"] == ARGS_UNREPAIRABLE
     assert events[-1]["tool_arguments_unrepairable"] == 1
+
+
+def test_record_resolution_is_injected_once_as_a_system_turn():
+    prepared, injected = apply_record_resolution([{"role": "user", "content": "hi"}])
+    assert injected is True
+    assert prepared[0]["role"] == "system"
+    assert RECORD_RESOLUTION_MARKER in prepared[0]["content"]
+    assert prepared[1] == {"role": "user", "content": "hi"}
+
+
+def test_record_resolution_is_idempotent():
+    once, _ = apply_record_resolution([{"role": "user", "content": "hi"}])
+    twice, injected = apply_record_resolution(once)
+    assert injected is False
+    assert twice == once
+    assert sum(1 for m in twice
+               if RECORD_RESOLUTION_MARKER in str(m.get("content"))) == 1
+
+
+def test_record_resolution_demands_a_prior_read_and_a_named_id():
+    assert "first perform a read" in RECORD_RESOLUTION_DIRECTIVE
+    assert "Never write to an id" in RECORD_RESOLUTION_DIRECTIVE
+
+
+def test_proxy_injects_record_resolution_only_when_armed(tmp_path: Path):
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    UPSTREAM_BEHAVIOUR["mode"] = "ok"
+    try:
+        for armed, expected in ((True, 1), (False, 0)):
+            receipt = tmp_path / f"armed-{armed}.jsonl"
+            server, _, thread = start_guard(
+                upstream_port=upstream.server_address[1], listen_port=0,
+                context=73728, receipt_path=receipt, record_resolution=armed)
+            try:
+                _post(server.server_address[1],
+                      {"model": "m", "messages": [{"role": "user", "content": "hi"}]})
+            finally:
+                stop_guard(server, thread)
+            events = [json.loads(line) for line in receipt.read_text("utf8").splitlines()]
+            assert events[-1]["record_resolution"] is armed
+            assert events[-1]["record_resolution_injected"] == expected
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
 
 
 def test_proxy_compacts_before_forwarding(guard):
