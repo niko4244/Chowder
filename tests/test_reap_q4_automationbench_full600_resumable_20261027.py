@@ -20,6 +20,29 @@ def test_owner_freezes_real_600_names_and_gen0_is_never_selected():
     assert owner["chosen"] is None
 
 
+def test_name_based_selection_maps_identity_to_index():
+    tasks = [{"id": "1", "name": "sales.a"}, {"id": "2", "name": "sales.b"},
+             {"id": "3", "name": "sales.c"}]
+    assert r.select_task_indices(tasks, ["sales.c", "sales.a"]) == [2, 0]
+
+
+def test_name_based_selection_defaults_to_the_whole_population():
+    tasks = [{"id": "1", "name": "a"}, {"id": "2", "name": "b"}]
+    assert r.select_task_indices(tasks) == [0, 1]
+    assert r.select_task_indices(tasks, []) == [0, 1]
+
+
+def test_names_are_deduplicated_without_reordering():
+    tasks = [{"id": "1", "name": "a"}, {"id": "2", "name": "b"}]
+    assert r.select_task_indices(tasks, ["b", "b", "a"]) == [1, 0]
+
+
+def test_an_unknown_name_is_refused_rather_than_silently_skipped():
+    tasks = [{"id": "1", "name": "a"}]
+    with pytest.raises(ValueError, match="unknown task name"):
+        r.select_task_indices(tasks, ["a", "sales.not_real"])
+
+
 def test_reject_missing_scored_item(tmp_path):
     assert r.verify_item(tmp_path / "task-000", 0, {"id": "501",
                                                     "name": "sales.multi_hop_lookup"},

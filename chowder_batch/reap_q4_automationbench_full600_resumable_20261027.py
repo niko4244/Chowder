@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from collections.abc import Sequence
 import json
 import os
 import shutil
@@ -126,6 +127,23 @@ def original_task_census() -> tuple[list[dict], str]:
             or len({t["id"] for t in data["items"]}) != 570):
         raise ValueError("original 600 official task identities no longer match frozen source")
     return data["items"], data["sha"]
+
+
+def select_task_indices(tasks: list[dict], names: Sequence[str] | None = None) -> list[int]:
+    """Map pre-registered task *names* to population indices.
+
+    The evaluator selects by index (``--skip``), so a fixed block can only be
+    pre-registered honestly by identity. Unknown names raise instead of silently
+    running a different block than the one registered.
+    """
+    if not names:
+        return list(range(len(tasks)))
+    index = {task.get("name"): position for position, task in enumerate(tasks)}
+    wanted = list(dict.fromkeys(names))
+    missing = [name for name in wanted if name not in index]
+    if missing:
+        raise ValueError("unknown task name(s): " + ", ".join(missing))
+    return [index[name] for name in wanted]
 
 
 def exact_owner(tasks: list[dict], source_sha: str, model_sha: str,
@@ -255,7 +273,8 @@ def _override_read_only_gate(gate: dict, *, bypass_conservative: bool) -> dict:
 
 
 def run(out: Path, *, execute: bool, max_new: int = 600,
-        bypass_conservative: bool = False) -> dict:
+        bypass_conservative: bool = False,
+        only: Sequence[str] | None = None) -> dict:
     if not isinstance(max_new, int) or isinstance(max_new, bool) or not 1 <= max_new <= 600:
         raise ValueError("max_new must be within full original population")
     if not execute:
@@ -329,7 +348,8 @@ def run(out: Path, *, execute: bool, max_new: int = 600,
             upstream_port=q4.PORT, listen_port=q4.GUARD_PORT,
             context=q4.CONTEXT, receipt_path=out /
             f"guard-session-{int(time.time())}.private.jsonl")
-        for idx, task in enumerate(tasks):
+        for idx in select_task_indices(tasks, only):
+            task = tasks[idx]
             itemdir = out / f"task-{idx:03}"
             if itemdir.is_dir() and not (itemdir / "receipt.json").exists():
                 archived = quarantine_unfinished_item(itemdir)
@@ -415,13 +435,17 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--max-new", type=int, default=600)
+    parser.add_argument("--only-tasks", nargs="*", default=None, metavar="NAME",
+                        help="Pre-register a fixed block by task identity instead of "
+                             "population index; unknown names are refused.")
     parser.add_argument("--bypass-conservative-resource-admission", action="store_true",
                         help="Experimental Q4 native source only; retains real allocator "
                              "fit, running OS reserves, provenance, and all original gates.")
     args = parser.parse_args()
     try:
         result = run(args.out, execute=args.execute, max_new=args.max_new,
-                     bypass_conservative=args.bypass_conservative_resource_admission)
+                     bypass_conservative=args.bypass_conservative_resource_admission,
+                     only=args.only_tasks)
         print(json.dumps(result, sort_keys=True, indent=2), flush=True)
         return 0 if result["status"] != "REFUSED_NATIVE_RESOURCE_ADMISSION" else 2
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError,
