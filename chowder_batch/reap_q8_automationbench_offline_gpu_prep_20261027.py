@@ -98,7 +98,7 @@ def replace_once(source: str, old: str, new: str) -> str:
 
 
 def patch_kernel(source: str, preflight: str, *, profile: str) -> str:
-    """Preserve original evaluator, model, flags and scoring; only add CPU install."""
+    """Add offline CPU admission and exact-set preflight; preserve official scoring."""
     if profile not in original.PROFILES or sha(preflight.encode()) != PREFLIGHT_SHA:
         raise ValueError("unsupported arm or offline installer source drift")
     ast.parse(source)
@@ -139,6 +139,31 @@ def patch_kernel(source: str, preflight: str, *, profile: str) -> str:
         source,
         "'PYTHONPATH':str(source),'PYTHONDONTWRITEBYTECODE':'1'",
         "'PYTHONPATH':str(OFFLINE_PACKAGES)+os.pathsep+str(source),'PYTHONDONTWRITEBYTECODE':'1'",
+    )
+    # The completed v2 native receipt proved that the full 600-question source
+    # hash and all six task identities match, but source iteration orders two
+    # sales tasks before their frozen Q4 export positions. Require exact unique
+    # membership here; the unchanged official-output gate below still requires
+    # the Q4 export order. Never alter the official evaluator or task scorer.
+    source = replace_once(
+        source,
+        "    if (result.get('n') != 600 or result.get('prompt_sha') != CFG['public_prompt_sha256']\n"
+        "            or result.get('domains') != ['sales','marketing','operations','support','finance','hr']\n"
+        "            or [x['name'] for x in result['selected']] != CFG['tasks']):\n"
+        "        raise RuntimeError('source prompt/population/order does not match Q4 exact selected tasks')\n"
+        "    R['official_task_contracts'] = result['selected']\n",
+        "    names = [x['name'] for x in result['selected']]\n"
+        "    if (result.get('n') != 600 or result.get('prompt_sha') != CFG['public_prompt_sha256']\n"
+        "            or result.get('domains') != ['sales','marketing','operations','support','finance','hr']\n"
+        "            or len(names) != len(CFG['tasks']) or len(set(names)) != len(names)\n"
+        "            or set(names) != set(CFG['tasks'])\n"
+        "            or len({x['example_id'] for x in result['selected']}) != len(names)\n"
+        "            or any(not isinstance(x['contract'],str) or\n"
+        "                   re.fullmatch(r'[0-9a-f]{64}',x['contract']) is None for x in result['selected'])):\n"
+        "        raise RuntimeError('source prompt/population/unique task identities do not match Q4')\n"
+        "    by_name = {x['name']:x for x in result['selected']}\n"
+        "    R['official_source_selected_order'] = names\n"
+        "    R['official_task_contracts'] = [by_name[name] for name in CFG['tasks']]\n",
     )
     source = replace_once(
         source,

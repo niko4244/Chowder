@@ -4,7 +4,9 @@ import ast
 import hashlib
 import io
 import json
+import re
 import tarfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,9 +14,13 @@ from chowder_batch import reap_q8_automationbench_kaggle_20261026 as original
 from chowder_batch import reap_q8_automationbench_offline_gpu_prep_20261027 as prep
 
 
-def source():
-    config = {"profile": "six", "native_flags": list(original.PROFILES["six"]["flags"])}
-    return original.KERNEL_TEMPLATE.replace("__LOCKED_CONFIG_LITERAL__", repr(json.dumps(config)))
+def source(profile="six"):
+    """Use the immutable notebook that was actually submitted, not a new render."""
+    folder, filename, expected_sha = prep.gate.Q8_NOTEBOOKS[profile]
+    path = prep.PRIVATE_ROOT / folder / filename
+    raw = path.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == expected_sha
+    return raw.decode("utf-8")
 
 
 def installer():
@@ -25,7 +31,7 @@ def installer():
 
 @pytest.mark.parametrize("profile", ["six", "guard2"])
 def test_patches_only_offline_bootstrap_and_preserves_original_official_protocol(profile):
-    before = source()
+    before = source(profile)
     after = prep.patch_kernel(before, installer(), profile=profile)
     ast.parse(after)
     assert "OFFLINE_PACKAGES, offline_proof = bootstrap_offline(archive)" in after
@@ -49,6 +55,70 @@ def test_patches_only_offline_bootstrap_and_preserves_original_official_protocol
     ):
         assert unchanged in before and unchanged in after
     assert after.count("def bootstrap_offline(archive):") == 1
+    assert "R['official_source_selected_order'] = names" in after
+    assert "or set(names) != set(CFG['tasks'])" in after
+    assert "or [x.get('name') for x in tasks]!=CFG['tasks']" in after
+
+
+def _replay_population_preflight(profile, selected, *, prompt_sha=None):
+    """Execute only the extracted preflight with a fixed synthetic source reply."""
+    patched = prep.patch_kernel(source(profile), installer(), profile=profile)
+    function = next(node for node in ast.parse(patched).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "prove_population")
+    payload = {"n": 600, "prompt_sha": prompt_sha or original.PUBLIC_PROMPTS_SHA256,
+               "domains": ["sales", "marketing", "operations", "support", "finance", "hr"],
+               "selected": selected}
+    fake_process = SimpleNamespace(
+        run=lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(payload)))
+    state = {"CFG": {"tasks": list(original.PROFILES[profile]["task_names"]),
+                     "public_prompt_sha256": original.PUBLIC_PROMPTS_SHA256},
+             "R": {}, "subprocess": fake_process, "json": json, "re": re,
+             "limited_env": lambda _: {}}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "<synthetic-preflight>", "exec"), state)
+    state["prove_population"]("python", "official-source")
+    return state["R"]
+
+
+def _selected(profile):
+    names = list(original.PROFILES[profile]["task_names"])
+    # The authentic source iterates the six tasks in a different order from
+    # the original Q4 official-result export, despite identical identities.
+    if profile == "six":
+        names = names[2:4] + names[:2] + names[4:]
+    return [{"name": name, "example_id": index + 1,
+             "contract": hashlib.sha256(name.encode()).hexdigest()}
+            for index, name in enumerate(names)]
+
+
+@pytest.mark.parametrize("profile", ["six", "guard2"])
+def test_source_order_difference_is_admitted_without_reordering_official_evaluator(profile):
+    selected = _selected(profile)
+    receipt = _replay_population_preflight(profile, selected)
+    assert receipt["official_source_selected_order"] == [row["name"] for row in selected]
+    assert [row["name"] for row in receipt["official_task_contracts"]] == list(
+        original.PROFILES[profile]["task_names"])
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "foreign", "missing", "contract", "example_id"])
+def test_population_preflight_refuses_identity_and_contract_forgery(mutation):
+    selected = _selected("six")
+    if mutation == "duplicate":
+        selected[-1]["name"] = selected[0]["name"]
+    elif mutation == "foreign":
+        selected[-1]["name"] = "sales.forged_task"
+    elif mutation == "missing":
+        selected.pop()
+    elif mutation == "contract":
+        selected[-1]["contract"] = "0" * 63 + "X"
+    else:
+        selected[-1]["example_id"] = selected[0]["example_id"]
+    with pytest.raises(RuntimeError, match="unique task identities"):
+        _replay_population_preflight("six", selected)
+
+
+def test_population_preflight_refuses_changed_full_600_prompt_hash():
+    with pytest.raises(RuntimeError, match="unique task identities"):
+        _replay_population_preflight("six", _selected("six"), prompt_sha="0" * 64)
 
 
 def test_rejects_modified_cpu_bootstrap_source():

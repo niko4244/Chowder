@@ -404,11 +404,21 @@ def prove_population(exe, source):
                             capture_output=True,text=True,timeout=900)
     if output.returncode: raise RuntimeError('pinned official full-600 source loader failed before CUDA load')
     result = json.loads(output.stdout)
+    names = [x['name'] for x in result['selected']]
     if (result.get('n') != 600 or result.get('prompt_sha') != CFG['public_prompt_sha256']
             or result.get('domains') != ['sales','marketing','operations','support','finance','hr']
-            or [x['name'] for x in result['selected']] != CFG['tasks']):
-        raise RuntimeError('source prompt/population/order does not match Q4 exact selected tasks')
-    R['official_task_contracts'] = result['selected']
+            or len(names) != len(CFG['tasks']) or len(set(names)) != len(names)
+            or set(names) != set(CFG['tasks'])
+            or len({x['example_id'] for x in result['selected']}) != len(names)
+            or any(not isinstance(x['contract'],str) or
+                   re.fullmatch(r'[0-9a-f]{64}',x['contract']) is None for x in result['selected'])):
+        raise RuntimeError('source prompt/population/unique task identities do not match Q4')
+    # The upstream dataset iteration order differs from the official evaluator's
+    # exported task order. Preserve both: require the same exact unique source
+    # tasks here, then enforce the frozen Q4 export order on scored output below.
+    by_name = {x['name']:x for x in result['selected']}
+    R['official_source_selected_order'] = names
+    R['official_task_contracts'] = [by_name[name] for name in CFG['tasks']]
 
 def limited_env(source):
     allowed = ('PATH','HOME','TMPDIR','TMP','LANG','LC_ALL','LD_LIBRARY_PATH')
