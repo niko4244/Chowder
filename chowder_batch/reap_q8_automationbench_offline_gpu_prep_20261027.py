@@ -9,8 +9,13 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import inspect
 import json
+import os
 from pathlib import Path
+import re
+import shutil
+import tarfile
 
 from chowder_batch import reap_q8_automationbench_cpu_receipt_gate_20261027 as gate
 from chowder_batch import reap_q8_automationbench_kaggle_20261026 as original
@@ -21,6 +26,65 @@ PREFLIGHT_SOURCE = Path(__file__).with_name("reap_q8_automationbench_offline_cpu
 PREFLIGHT_SHA = "6fe8953ed5ef07065f7983af9abdd1dbf731f3f853871309ad783673af099bce"
 WHEEL_DATASET = "nikmarco/reap128v2-automationbench-wheels-cp313-20261027"
 SOURCE_DATASET = "nikmarco/reap128v2-automationbench-sourcebin-20261027"
+WHEEL_TAR_SHA = gate.WHEEL_TAR_SHA
+WHEEL_TAR_BYTES = gate.WHEEL_TAR_BYTES
+WORK = Path("/kaggle/working")
+
+
+def sha_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def stage_wheels(archive, destination):
+    """Stage only the 109 exact regular wheelhouse members from the pinned tar.bin.
+
+    Kaggle mounts the uploaded .tar.bin, NOT its contents. Keep the strict
+    archive identity, member count, name, type, byte and exclusive-path checks
+    before writing any untrusted archive content to private scratch.
+    """
+    if (not archive.is_file() or archive.is_symlink()
+            or archive.name != "automationbench-cp313-glibc235-original-108-locked-wheels.tar.bin"
+            or archive.stat().st_size != WHEEL_TAR_BYTES
+            or sha_file(archive) != WHEEL_TAR_SHA):
+        raise RuntimeError("mounted original locked 108-wheel tar identity mismatch")
+    if (destination.exists() or destination.is_symlink()
+            or destination.parent != WORK or not WORK.is_dir()):
+        raise RuntimeError("wheelhouse scratch must be a new exclusive Kaggle working path")
+    with tarfile.open(archive, mode="r:") as source:
+        members = source.getmembers()
+        if (len(members) != 109 or any(not member.isfile() for member in members)
+                or any(not re.fullmatch(r"[A-Za-z0-9_.+-]+", member.name)
+                       for member in members)
+                or len({member.name for member in members}) != 109
+                or sum(member.size for member in members) > 144 * 1024 * 1024
+                or any(member.size <= 0 or member.size > 100 * 1024 * 1024
+                       for member in members)):
+            raise RuntimeError("locked wheelhouse tar members unsafe or incomplete")
+        names = {member.name for member in members}
+        manifest_name = "reap-q8-automationbench-offline-wheelhouse-manifest.json"
+        if (manifest_name not in names
+                or sum(name.endswith(".whl") for name in names) != 108
+                or names != {manifest_name} | {name for name in names if name.endswith(".whl")}):
+            raise RuntimeError("original wheelhouse 108 wheel plus manifest population mismatch")
+        destination.mkdir(mode=0o700)
+        for member in members:
+            src = source.extractfile(member)
+            if src is None:
+                raise RuntimeError("wheelhouse member has no regular-file stream")
+            with src, (destination / member.name).open("xb") as out:
+                shutil.copyfileobj(src, out, length=1024 * 1024)
+                out.flush()
+                os.fsync(out.fileno())
+                if not hasattr(os, "posix_fadvise") or not hasattr(os, "POSIX_FADV_DONTNEED"):
+                    raise RuntimeError("locked wheelhouse page-cache reclaim unavailable")
+                os.posix_fadvise(out.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+            if (destination / member.name).stat().st_size != member.size:
+                raise RuntimeError("wheelhouse extracted member size changed")
+    return destination, destination / manifest_name
 
 
 def sha(data: bytes) -> str:
@@ -40,6 +104,10 @@ def patch_kernel(source: str, preflight: str, *, profile: str) -> str:
     ast.parse(source)
     injected = (
         "\n# Exact source-locked CPython3.13 offline bootstrap, before any GPU load.\n"
+        f"WHEEL_TAR_SHA = {WHEEL_TAR_SHA!r}\n"
+        f"WHEEL_TAR_BYTES = {WHEEL_TAR_BYTES!r}\n"
+        "WORK = pathlib.Path('/kaggle/working')\n"
+        + inspect.getsource(stage_wheels) + "\n"
         f"OFFLINE_BOOTSTRAP_SOURCE = {preflight!r}\n"
         f"OFFLINE_BOOTSTRAP_SHA = {PREFLIGHT_SHA!r}\n"
         "OFFLINE_PACKAGES = None\n"
@@ -47,8 +115,8 @@ def patch_kernel(source: str, preflight: str, *, profile: str) -> str:
         "def bootstrap_offline(archive):\n"
         "    if hashlib.sha256(OFFLINE_BOOTSTRAP_SOURCE.encode()).hexdigest() != OFFLINE_BOOTSTRAP_SHA:\n"
         "        raise RuntimeError('offline source SHA mismatch')\n"
-        "    manifest = unique('reap-q8-automationbench-offline-wheelhouse-manifest.json')\n"
-        "    wheels = manifest.parent\n"
+        "    wheel_tar = unique('automationbench-cp313-glibc235-original-108-locked-wheels.tar.bin')\n"
+        "    wheels, manifest = stage_wheels(wheel_tar, WORK / ('reap-q8-wheelhouse-' + CFG['profile']))\n"
         "    if len(list(wheels.glob('*.whl'))) != 108:\n"
         "        raise RuntimeError('original offline 108-wheel population changed')\n"
         "    namespace = {'__name__': 'reap_q8_locked_offline_bootstrap', '__file__': '<source-pinned>'}\n"
@@ -76,7 +144,8 @@ def patch_kernel(source: str, preflight: str, *, profile: str) -> str:
         source,
         "    R['finished_utc']=datetime.datetime.now(datetime.timezone.utc).isoformat()\n",
         "    # Only own temporary scratch trees; preserve official output and native logs.\n"
-        "    for owned in (OFFLINE_TARGET, WORK / 'automationbench-pinned-official-source'):\n"
+        "    for owned in (OFFLINE_TARGET, WORK / ('reap-q8-wheelhouse-' + CFG['profile']),\n"
+        "                  WORK / 'automationbench-pinned-official-source'):\n"
         "        try:\n"
         "            if owned.is_dir() and not owned.is_symlink(): shutil.rmtree(owned)\n"
         "        except OSError as cleanup_error:\n"
@@ -115,7 +184,10 @@ def prepare(profile: str, destination: Path, receipt: Path) -> dict:
         destination, owned_roots=(original.OFFICIAL_SOURCE, gate.Q4_PRIVATE_ROOT, Path(__file__).resolve().parents[1])
     )
     new_name = f"reap128v2-q8-automationbench-{profile}-offline108-20261027.py"
-    slug = f"nikmarco/reap128v2-q8-automationbench-{profile}-offline108-20261027"
+    # Kaggle derives the actual notebook slug from its title. Match that
+    # identity explicitly so a retry updates the same private notebook rather
+    # than silently creating a second experiment under a different slug.
+    slug = f"nikmarco/reap128v2-q8-{profile}-original-offline108-private"
     meta = dict(original_metadata)
     meta.update({"id": slug, "title": f"reap128v2 Q8 {profile} original offline108 private",
                  "code_file": new_name,
