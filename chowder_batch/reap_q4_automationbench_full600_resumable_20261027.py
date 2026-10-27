@@ -12,7 +12,12 @@ to frozen four-slot Gen0 evaluation; no release approval is inferred.
 
 Requirements:
   - Windows, original GGUF hash, original official source and python3.13
-  - free GPU >= 12800MiB before load; RAM >=29.3146GiB, commit >=34.3146GiB
+  - default admission: GPU >=12800MiB; RAM >=29.3146GiB,
+    commit >=34.3146GiB
+  - explicit --bypass-conservative-resource-admission permits the previously
+    verified runtime minima with actual native allocator-fit GPU measurement,
+    but NEVER bypasses existing owned ports, source/score hashes, original
+    benchmark tasks, runtime host minimums, or frozen Gen0 gates
   - free 8892/8894; no concurrent model serving
   - same protected guard policy as previous genuine pilot
 
@@ -46,6 +51,20 @@ MAX_ITEM_SECONDS = 2400
 ORIGINAL_RAM_RUNTIME_FLOOR_GIB = 7
 ORIGINAL_COMMIT_RUNTIME_FLOOR_GIB = 8
 ORIGINAL_DISK_RUNTIME_FLOOR_GIB = 8
+# Measured in source-pinned REAL Q4 llama-server native startup (MiB):
+# CUDA model 10619.88 + f16 KV 1440 + recurrent 62.81 + compute 172.05.
+# A WDDM host observation showed another 260MiB unaccounted reserved.
+# This minimum is physical GPU allocator fit, NOT the original conservative
+# 12,288+512MiB prestart threshold; it is exploratory only.
+MEASURED_NATIVE_CUDA_REQUIRED_MIB = 10619.88 + 1440 + 62.81 + 172.05
+MEASURED_WDDM_UNACCOUNTED_MIB = 260
+OVERRIDE_GPU_MIN_FREE_MIB = int(
+    MEASURED_NATIVE_CUDA_REQUIRED_MIB + MEASURED_WDDM_UNACCOUNTED_MIB + 1
+)
+OVERRIDABLE_PREFLIGHT_BLOCKERS = frozenset({
+    "RAM_BELOW_FROZEN_FLOOR", "COMMIT_BELOW_FROZEN_FLOOR",
+    "GPU_FREE_BELOW_64K_FLOOR",
+})
 
 
 def _digest(path: Path) -> str:
@@ -187,23 +206,63 @@ def _safe_resource(out: Path) -> dict:
     return state
 
 
-def _native_prestart(out: Path) -> dict:
-    """Apply the original 72K admission floors at EACH resumed native load."""
+def _native_prestart(out: Path, *, bypass_conservative: bool = False) -> dict:
+    """Explicitly opt out of conservative floor, not physical allocator fit.
+
+    This applies solely to the noncomparable experimental tool-evaluator arm,
+    never original frozen 4-slot release Gate0/Gate1/Gate2. At ~200MiB free
+    VRAM while an instance is running, *both* modes categorically refuse a
+    second model load. This is intentional and not an arbitrary policy limit.
+    """
     state = _safe_resource(out)
     state["gpu_free_mib"] = q4.gpu_free_mib()
-    if (state["ram_available_gib"] < q4.MIN_RAM_GIB
-            or state["commit_available_gib"] < q4.MIN_COMMIT_GIB
-            or state["gpu_free_mib"] < q4.MIN_GPU_MIB + q4.GPU_MARGIN_MIB):
+    if bypass_conservative:
+        if (state["gpu_free_mib"] < OVERRIDE_GPU_MIN_FREE_MIB
+                or state["ram_available_gib"] < ORIGINAL_RAM_RUNTIME_FLOOR_GIB
+                or state["commit_available_gib"] < ORIGINAL_COMMIT_RUNTIME_FLOOR_GIB):
+            raise RuntimeError("physical native allocator fit or running OS reserve unavailable")
+        state["prestart_admission"] = "EXPLICIT_CONSERVATIVE_FLOOR_BYPASS_NONCOMPARABLE"
+        state["measured_required_native_gpu_mib"] = OVERRIDE_GPU_MIN_FREE_MIB
+    elif (state["ram_available_gib"] < q4.MIN_RAM_GIB
+          or state["commit_available_gib"] < q4.MIN_COMMIT_GIB
+          or state["gpu_free_mib"] < q4.MIN_GPU_MIB + q4.GPU_MARGIN_MIB):
         raise RuntimeError("original full600 resumed native load below 72k model floors")
     return state
 
 
-def run(out: Path, *, execute: bool, max_new: int = 600) -> dict:
+def _override_read_only_gate(gate: dict, *, bypass_conservative: bool) -> dict:
+    """Keep all provenance/context/port blockers even with resource opt-out."""
+    if not bypass_conservative:
+        return gate
+    other = [b for b in gate["blockers"] if b not in OVERRIDABLE_PREFLIGHT_BLOCKERS]
+    measured = gate["measured"]
+    allowed = (measured["ram_available_gib"] >= ORIGINAL_RAM_RUNTIME_FLOOR_GIB
+               and measured["commit_available_gib"] >= ORIGINAL_COMMIT_RUNTIME_FLOOR_GIB
+               and measured["disk_free_gib"] >= ORIGINAL_DISK_RUNTIME_FLOOR_GIB
+               and measured["gpu_free_mib"] >= OVERRIDE_GPU_MIN_FREE_MIB)
+    if not allowed:
+        other.append("PHYSICAL_ALLOCATION_OR_RUNNING_OS_RESERVE_UNAVAILABLE")
+    return {**gate, "blockers": other,
+            "status": "READY_TO_ATTEMPT_NONCOMPARABLE_EXPLORATORY"
+            if not other else "REFUSED",
+            "explicit_conservative_resource_bypass": True,
+            "resource_bypass_only_not_security_or_scientific_bypass": True,
+            "gpu_native_measured_allocator_fit_floor_mib": OVERRIDE_GPU_MIN_FREE_MIB,
+            "ignored_only_conservative_resource_blockers": sorted(
+                set(gate["blockers"]) & OVERRIDABLE_PREFLIGHT_BLOCKERS),
+            "frozen_gen0_status": "BLOCKED",
+            "release_approved": False}
+
+
+def run(out: Path, *, execute: bool, max_new: int = 600,
+        bypass_conservative: bool = False) -> dict:
     if not isinstance(max_new, int) or isinstance(max_new, bool) or not 1 <= max_new <= 600:
         raise ValueError("max_new must be within full original population")
     if not execute:
         return {"status": "READ_ONLY_ORIGINAL_600_PREFLIGHT",
-                "decision": q4.preflight(out), "model_executed": False}
+                "decision": _override_read_only_gate(
+                    q4.preflight(out), bypass_conservative=bypass_conservative),
+                "model_executed": False}
     source = q4.verify_official_source()
     tasks, source_sha = original_task_census()
     # Registered exact original model hash, checked before *any* model inference.
@@ -215,7 +274,8 @@ def run(out: Path, *, execute: bool, max_new: int = 600) -> dict:
         if out.is_symlink() or _json(out / "owner.json") != owner:
             raise ValueError("cannot resume another source/model/serving owner")
     else:
-        admission = q4.preflight(out)
+        admission = _override_read_only_gate(
+            q4.preflight(out), bypass_conservative=bypass_conservative)
         if admission["status"] != "READY_TO_ATTEMPT_NONCOMPARABLE_EXPLORATORY":
             return {"status": "REFUSED_NATIVE_RESOURCE_ADMISSION", "admission": admission}
         out.mkdir(mode=0o700)
@@ -231,7 +291,18 @@ def run(out: Path, *, execute: bool, max_new: int = 600) -> dict:
             raise ValueError("unowned directory in private original benchmark")
     if not q4.port_is_free(q4.PORT) or not q4.port_is_free(q4.GUARD_PORT):
         raise ValueError("original native Q4/guard ports already in use")
-    _native_prestart(out)
+    prestart = _native_prestart(out, bypass_conservative=bypass_conservative)
+    if bypass_conservative:
+        admission_path = out / f"explicit-conservative-resource-bypass-{int(time.time())}.private.json"
+        with admission_path.open("x", encoding="utf-8") as admission_log:
+            json.dump({
+                "schema": SCHEMA, "mode": "NONCOMPARABLE_EXPLORATORY_ONLY",
+                "explicit_bypass_of_only_conservative_prestart_thresholds": True,
+                "native_measurement": prestart, "model_sha256": q4.GGUF_SHA,
+                "owner_sha256": owner_hash, "frozen_gen0_status": "BLOCKED",
+                "release_approved": False,
+            }, admission_log, sort_keys=True)
+            admission_log.write("\n")
     native = None
     server = None
     thread = None
@@ -344,9 +415,13 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--max-new", type=int, default=600)
+    parser.add_argument("--bypass-conservative-resource-admission", action="store_true",
+                        help="Experimental Q4 native source only; retains real allocator "
+                             "fit, running OS reserves, provenance, and all original gates.")
     args = parser.parse_args()
     try:
-        result = run(args.out, execute=args.execute, max_new=args.max_new)
+        result = run(args.out, execute=args.execute, max_new=args.max_new,
+                     bypass_conservative=args.bypass_conservative_resource_admission)
         print(json.dumps(result, sort_keys=True, indent=2), flush=True)
         return 0 if result["status"] != "REFUSED_NATIVE_RESOURCE_ADMISSION" else 2
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError,

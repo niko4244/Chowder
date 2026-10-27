@@ -97,3 +97,81 @@ def test_source_identity_count_is_strict():
         "1c8feeec1f680b05b392a5d00fc634edb143c3e7bdd152c476af50cebcec57b5"
     )
     assert Path(r.q4.GGUF).suffix == ".gguf"
+
+
+def original_gate(*, ram=12, commit=20, gpu=12600, blockers=None):
+    return {
+        "status": "REFUSED",
+        "blockers": blockers if blockers is not None else [
+            "RAM_BELOW_FROZEN_FLOOR", "COMMIT_BELOW_FROZEN_FLOOR",
+            "GPU_FREE_BELOW_64K_FLOOR",
+        ],
+        "measured": {
+            "ram_available_gib": ram, "commit_available_gib": commit,
+            "gpu_free_mib": gpu, "disk_free_gib": 25,
+        },
+    }
+
+
+def test_explicit_bypass_admits_measured_72k_allocator_not_old_padded_floor():
+    original = original_gate()
+    result = r._override_read_only_gate(original, bypass_conservative=True)
+    assert result["status"] == "READY_TO_ATTEMPT_NONCOMPARABLE_EXPLORATORY"
+    assert result["explicit_conservative_resource_bypass"] is True
+    assert result["frozen_gen0_status"] == "BLOCKED"
+    assert result["release_approved"] is False
+    assert 12500 <= r.OVERRIDE_GPU_MIN_FREE_MIB < r.q4.MIN_GPU_MIB + r.q4.GPU_MARGIN_MIB
+    assert original["status"] == "REFUSED"  # no original scorer/gate mutation
+
+
+def test_default_resource_floors_stay_frozen_without_explicit_opt_in():
+    original = original_gate()
+    assert r._override_read_only_gate(original, bypass_conservative=False) is original
+    assert r.q4.MIN_GPU_MIB == 12288
+    assert r.q4.MIN_RAM_GIB == 29.3145986328125
+    assert r.q4.MIN_COMMIT_GIB == 34.3145986328125
+
+
+@pytest.mark.parametrize("block", [
+    "TARGET_PORT_IN_USE", "OUTPUT_DIRECTORY_ALREADY_EXISTS",
+    "EPISODE_CANNOT_FIT_DECLARED_CONTEXT",
+    "PRIOR_TRAJECTORY_UNAVAILABLE_TO_ADMIT", "DISK_BELOW_FROZEN_FLOOR",
+])
+def test_explicit_opt_in_cannot_override_source_ports_or_original_context(block):
+    result = r._override_read_only_gate(
+        original_gate(blockers=[block, "RAM_BELOW_FROZEN_FLOOR"]),
+        bypass_conservative=True,
+    )
+    assert result["status"] == "REFUSED"
+    assert block in result["blockers"]
+    assert "RAM_BELOW_FROZEN_FLOOR" not in result["blockers"]
+
+
+@pytest.mark.parametrize("overrides", [
+    {"ram": 6.99}, {"commit": 7.99}, {"gpu": 233},
+    {"gpu": 12500}, {"ram": 0}, {"commit": -1},
+])
+def test_override_never_doubles_up_host_oom_or_oversubscribed_gpu(overrides):
+    result = r._override_read_only_gate(
+        original_gate(**overrides), bypass_conservative=True,
+    )
+    assert result["status"] == "REFUSED"
+    assert "PHYSICAL_ALLOCATION_OR_RUNNING_OS_RESERVE_UNAVAILABLE" in result["blockers"]
+
+
+def test_admitted_explicit_override_runtime_retains_native_allocator_fit(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        r.q4, "memory_snapshot",
+        lambda: {"ram_available_gib": 12, "commit_available_gib": 21},
+    )
+    monkeypatch.setattr(r.q4, "gpu_free_mib", lambda: 12600)
+    monkeypatch.setattr(
+        r.shutil, "disk_usage",
+        lambda _path: type("Disk", (), {"free": 20 * 1024 ** 3})(),
+    )
+    result = r._native_prestart(tmp_path, bypass_conservative=True)
+    assert result["prestart_admission"] == (
+        "EXPLICIT_CONSERVATIVE_FLOOR_BYPASS_NONCOMPARABLE")
+    assert result["measured_required_native_gpu_mib"] == r.OVERRIDE_GPU_MIN_FREE_MIB
+    with pytest.raises(RuntimeError, match="72k model floors"):
+        r._native_prestart(tmp_path, bypass_conservative=False)
