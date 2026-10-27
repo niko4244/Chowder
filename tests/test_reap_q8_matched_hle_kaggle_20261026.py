@@ -54,6 +54,13 @@ def test_private_128_q8_replay_has_only_model_and_matched_subset_changes(tmp_pat
     assert "cgroup_unused_gib'] < 10" in source
     assert "verified_native_offload_41_of_41" in source
     assert "P.MAX_COMPLETION_TOKENS != 8192 or P.TEMPERATURE != 0" in source
+    assert "del rows\n    gc.collect()" in source
+    assert "pa.default_memory_pool().release_unused()" in source
+    assert "R['post_input_memory_reclamation'] = host()" in source
+    assert "os.posix_fadvise(parquet_handle.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)" in source
+    assert source.count("COMPLETE_Q8_MATCHED_HLE_TEXT_ONLY_RESEARCH_NOT_OFFICIAL_JUDGE") == 1
+    assert source.count("BUDGET_TRUNCATED_Q8_MATCHED_HLE_TEXT_ONLY_RESEARCH_NOT_OFFICIAL_JUDGE") == 1
+    assert "COMPLETE_Q8_HLE_TEXT_ONLY_RESEARCH_NOT_OFFICIAL_JUDGE'" not in source
     assert "R['matched_q4_row_sha256']" not in source  # source is metadata key, not mutable result update
     compile(source, "private_kaggle_q8_hle", "exec")
 

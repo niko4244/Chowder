@@ -88,6 +88,23 @@ def build(out: Path) -> dict:
                    "ordered = [x for x in P.canonical_order(text_rows) if x['id'] in MATCHED_Q4_IDS]\n"
                    "    if len(ordered) != 128 or {x['id'] for x in ordered} != MATCHED_Q4_IDS:\n"
                    "        raise RuntimeError('matched Q4 HLE 128 IDs missing or duplicated in frozen dataset')")
+    source = _once(source,
+                   "        'order_rule': P.ORDER_RULE, 'wall_budget_seconds': P.WALL_BUDGET_SECONDS,\n"
+                   f"    }}\n\n    weights = unique('{Q8_FILENAME}', 'original Q8_0 GGUF')",
+                   "        'order_rule': P.ORDER_RULE, 'wall_budget_seconds': P.WALL_BUDGET_SECONDS,\n"
+                   "    }\n"
+                   "    # Free image-bearing full-population rows after validating text-only\n"
+                   "    # IDs. This is memory housekeeping, not a prompt/dataset change.\n"
+                   "    # The text_rows/ordered lists retain the exact chosen row objects.\n"
+                   "    import gc\n"
+                   "    del rows\n"
+                   "    gc.collect()\n"
+                   "    import pyarrow as pa\n"
+                   "    pa.default_memory_pool().release_unused()\n"
+                   "    with parquet.open('rb', buffering=0) as parquet_handle:\n"
+                   "        os.posix_fadvise(parquet_handle.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)\n"
+                   "    R['post_input_memory_reclamation'] = host()\n\n"
+                   f"    weights = unique('{Q8_FILENAME}', 'original Q8_0 GGUF')")
     source = _once(source, 'PORT = 8791', 'PORT = 8792')
     source = _once(source, "if h['cgroup_unused_gib'] is None or h['cgroup_unused_gib'] < 8:",
                    "if h['cgroup_unused_gib'] is None or h['cgroup_unused_gib'] < 10:")
@@ -119,8 +136,12 @@ def build(out: Path) -> dict:
     source = source.replace('Q4_K_M', 'Q8_0')
     source = source.replace('Q4 HLE', 'Q8 matched HLE')
     source = source.replace('Q4_HLE_', 'Q8_HLE_')
-    source = source.replace('COMPLETE_Q4_HLE_', 'COMPLETE_Q8_MATCHED_HLE_')
-    source = source.replace('BUDGET_TRUNCATED_Q4_HLE_', 'BUDGET_TRUNCATED_Q8_MATCHED_HLE_')
+    # Apply the status conversion AFTER the broad Q4_HLE_ -> Q8_HLE_ rename.
+    # The independent paired auditor requires this exact completed status.
+    source = _once(source, 'COMPLETE_Q8_HLE_TEXT_ONLY_RESEARCH_NOT_OFFICIAL_JUDGE',
+                   'COMPLETE_Q8_MATCHED_HLE_TEXT_ONLY_RESEARCH_NOT_OFFICIAL_JUDGE')
+    source = _once(source, 'BUDGET_TRUNCATED_Q8_HLE_TEXT_ONLY_RESEARCH_NOT_OFFICIAL_JUDGE',
+                   'BUDGET_TRUNCATED_Q8_MATCHED_HLE_TEXT_ONLY_RESEARCH_NOT_OFFICIAL_JUDGE')
     source = source.replace("'schema': 'reap-v2-q4-k-m-text-only-hle-research.v1'",
                             "'schema': 'reap-v2-q8-matched128-text-only-hle-research.v1'")
     # The original protocol remains SHA-bound and unchanged; only the GGUF is
