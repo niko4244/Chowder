@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import tarfile
 
 from chowder_batch import reap_q8_automationbench_cpu_receipt_gate_20261027 as gate
@@ -87,6 +88,52 @@ def stage_wheels(archive, destination):
     return destination, destination / manifest_name
 
 
+def reclaim_clean_offline_cache(roots, profile):
+    """Advise away clean scratch file cache without changing resource floors.
+
+    Only the three newly owned Kaggle scratch trees are eligible.  A symlink,
+    special file, race, missing advisory, or unbounded tree fails closed.
+    This cannot reclaim anonymous RAM and never changes the cgroup limits.
+    """
+    if (not hasattr(os, "posix_fadvise") or not hasattr(os, "POSIX_FADV_DONTNEED")
+            or not hasattr(os, "O_NOFOLLOW")):
+        raise RuntimeError("safe prelaunch clean-cache reclaim unavailable")
+    if profile not in ("six", "guard2") or len(roots) != 3 or len(set(roots)) != 3:
+        raise RuntimeError("expected three exclusive offline scratch trees")
+    count = total = 0
+    for root in roots:
+        if (root.parent != WORK or root.is_symlink() or not root.is_dir()
+                or root.name not in {
+                    "reap-q8-offline108-" + profile,
+                    "reap-q8-wheelhouse-" + profile,
+                    "automationbench-pinned-official-source",
+                }):
+            raise RuntimeError("prelaunch reclaim path outside owned scratch")
+        for entry in root.rglob("*"):
+            if entry.is_symlink():
+                raise RuntimeError("symlink in owned prelaunch scratch")
+            mode = entry.stat(follow_symlinks=False).st_mode
+            if stat.S_ISDIR(mode):
+                continue
+            if not stat.S_ISREG(mode):
+                raise RuntimeError("nonregular prelaunch scratch file")
+            count += 1
+            if count > 100_000:
+                raise RuntimeError("prelaunch scratch file count unbounded")
+            fd = os.open(entry, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                current = os.fstat(fd)
+                if not stat.S_ISREG(current.st_mode):
+                    raise RuntimeError("prelaunch scratch file substituted")
+                total += current.st_size
+                if total > 8 * 1024 ** 3:
+                    raise RuntimeError("prelaunch scratch bytes unbounded")
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            finally:
+                os.close(fd)
+    return {"advised_files": count, "advised_bytes": total}
+
+
 def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -107,7 +154,9 @@ def patch_kernel(source: str, preflight: str, *, profile: str) -> str:
         f"WHEEL_TAR_SHA = {WHEEL_TAR_SHA!r}\n"
         f"WHEEL_TAR_BYTES = {WHEEL_TAR_BYTES!r}\n"
         "WORK = pathlib.Path('/kaggle/working')\n"
+        + "import stat\n"
         + inspect.getsource(stage_wheels) + "\n"
+        + inspect.getsource(reclaim_clean_offline_cache) + "\n"
         f"OFFLINE_BOOTSTRAP_SOURCE = {preflight!r}\n"
         f"OFFLINE_BOOTSTRAP_SHA = {PREFLIGHT_SHA!r}\n"
         "OFFLINE_PACKAGES = None\n"
@@ -139,6 +188,23 @@ def patch_kernel(source: str, preflight: str, *, profile: str) -> str:
         source,
         "'PYTHONPATH':str(source),'PYTHONDONTWRITEBYTECODE':'1'",
         "'PYTHONPATH':str(OFFLINE_PACKAGES)+os.pathsep+str(source),'PYTHONDONTWRITEBYTECODE':'1'",
+    )
+    # The v3 native Kaggle receipt refused at the unchanged 29.443-GiB
+    # prelaunch cgroup floor, after successful original source admission.
+    # Reclaim only clean file-backed scratch pages, measure both snapshots,
+    # and retain the exact same fail-closed GPU/physical/cgroup admission.
+    source = replace_once(
+        source,
+        "    gc.collect()\n    initial = snapshot()\n    check_resources(initial, prelaunch=True)\n",
+        "    gc.collect()\n"
+        "    R['prelaunch_before_clean_reclaim'] = snapshot()\n"
+        "    R['prelaunch_clean_reclaim'] = reclaim_clean_offline_cache((\n"
+        "        OFFLINE_TARGET, WORK / ('reap-q8-wheelhouse-' + CFG['profile']),\n"
+        "        WORK / 'automationbench-pinned-official-source'), CFG['profile'])\n"
+        "    time.sleep(3)\n"
+        "    initial = snapshot()\n"
+        "    R['prelaunch'] = initial\n"
+        "    check_resources(initial, prelaunch=True)\n",
     )
     # The completed v2 native receipt proved that the full 600-question source
     # hash and all six task identities match, but source iteration orders two

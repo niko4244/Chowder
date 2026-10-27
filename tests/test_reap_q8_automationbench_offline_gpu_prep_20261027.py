@@ -58,6 +58,11 @@ def test_patches_only_offline_bootstrap_and_preserves_original_official_protocol
     assert "R['official_source_selected_order'] = names" in after
     assert "or set(names) != set(CFG['tasks'])" in after
     assert "or [x.get('name') for x in tasks]!=CFG['tasks']" in after
+    assert "R['prelaunch_before_clean_reclaim'] = snapshot()" in after
+    assert "R['prelaunch_clean_reclaim'] = reclaim_clean_offline_cache" in after
+    assert "R['prelaunch'] = initial\n    check_resources(initial, prelaunch=True)" in after
+    assert "if s['cgroup'] < (29.443 if prelaunch else 10)" in after
+    assert "if postload['cgroup'] < 14" in after
 
 
 def _replay_population_preflight(profile, selected, *, prompt_sha=None):
@@ -198,3 +203,67 @@ def test_original_mounted_tar_rejects_hash_drift_before_writes(tmp_path, monkeyp
     with pytest.raises(RuntimeError, match="identity mismatch"):
         prep.stage_wheels(source, destination)
     assert not destination.exists()
+
+
+def _reclaim_roots(tmp_path, monkeypatch, profile="six"):
+    monkeypatch.setattr(prep, "WORK", tmp_path)
+    monkeypatch.setattr(prep.os, "POSIX_FADV_DONTNEED", 4, raising=False)
+    monkeypatch.setattr(prep.os, "O_NOFOLLOW", 0, raising=False)
+    advised = []
+    monkeypatch.setattr(prep.os, "posix_fadvise", lambda *args: advised.append(args),
+                        raising=False)
+    roots = tuple(tmp_path / name for name in (
+        f"reap-q8-offline108-{profile}", f"reap-q8-wheelhouse-{profile}",
+        "automationbench-pinned-official-source",
+    ))
+    for root in roots:
+        root.mkdir()
+    return roots, advised
+
+
+def test_prelaunch_reclaim_only_advises_owned_clean_files(tmp_path, monkeypatch):
+    roots, advised = _reclaim_roots(tmp_path, monkeypatch)
+    (roots[0] / "installed").mkdir()
+    (roots[0] / "installed" / "package.py").write_bytes(b"python")
+    (roots[1] / "pinned.whl").write_bytes(b"wheel")
+    (roots[2] / "pyproject.toml").write_bytes(b"source")
+    before = [(root / name).read_bytes() for root, name in zip(
+        roots, ("installed/package.py", "pinned.whl", "pyproject.toml"))]
+    proof = prep.reclaim_clean_offline_cache(roots, "six")
+    assert proof == {"advised_files": 3, "advised_bytes": 17}
+    assert len(advised) == 3
+    assert [(root / name).read_bytes() for root, name in zip(
+        roots, ("installed/package.py", "pinned.whl", "pyproject.toml"))] == before
+
+
+@pytest.mark.parametrize("attack", ["missing", "foreign", "duplicate", "wrong_profile", "no_advisory"])
+def test_prelaunch_reclaim_refuses_unowned_or_unsupported_paths(tmp_path, monkeypatch, attack):
+    roots, _ = _reclaim_roots(tmp_path, monkeypatch)
+    profile = "six"
+    if attack == "missing":
+        roots[0].rmdir()
+    elif attack == "foreign":
+        foreign = tmp_path / "unowned"
+        foreign.mkdir()
+        roots = (foreign, *roots[1:])
+    elif attack == "duplicate":
+        roots = (roots[0], roots[0], roots[2])
+    elif attack == "wrong_profile":
+        profile = "guard2"
+    else:
+        monkeypatch.delattr(prep.os, "posix_fadvise")
+    with pytest.raises(RuntimeError, match="scratch|exclusive|unavailable"):
+        prep.reclaim_clean_offline_cache(roots, profile)
+
+
+def test_prelaunch_reclaim_refuses_symlink_before_advising(tmp_path, monkeypatch):
+    roots, advised = _reclaim_roots(tmp_path, monkeypatch)
+    target = tmp_path / "outside"
+    target.write_bytes(b"secret")
+    try:
+        (roots[0] / "bad").symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("host disallows unprivileged symlink creation")
+    with pytest.raises(RuntimeError, match="symlink"):
+        prep.reclaim_clean_offline_cache(roots, "six")
+    assert not advised
