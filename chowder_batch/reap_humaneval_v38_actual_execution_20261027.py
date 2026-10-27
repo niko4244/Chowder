@@ -93,11 +93,25 @@ print(json.dumps({'stage':'ORIGINAL_CANDIDATE_FINISHED','sha256':hashlib.sha256(
  'generated_model_candidate_executed':True},sort_keys=True),flush=True)
 '''
 
-V38_VM_SOURCE_OBSERVER = r'''import hashlib,json,os,pathlib,sys
+V38_VM_SOURCE_OBSERVER = r'''import hashlib,json,os,pathlib,stat as statlib,sys
 pid=int(sys.argv[1]);base=pathlib.Path('/proc')/str(pid)
-stat=(base/'stat').read_text();start_ticks=int(stat[stat.rfind(')')+2:].split()[19])
+process_stat=(base/'stat').read_text();start_ticks=int(process_stat[process_stat.rfind(')')+2:].split()[19])
 source=base/'root/work/candidate.py'
-raw=source.read_bytes()
+fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+try:
+ file_stat=os.fstat(fd)
+ path_stat=os.stat(source,follow_symlinks=False)
+ if not statlib.S_ISREG(file_stat.st_mode) or file_stat.st_nlink!=1 or file_stat.st_size<=0:raise RuntimeError('untrusted staged inode')
+ if (file_stat.st_dev,file_stat.st_ino)!=(path_stat.st_dev,path_stat.st_ino):raise RuntimeError('staged inode changed')
+ if file_stat.st_uid==0 or file_stat.st_mode&0o022:raise RuntimeError('staged inode ownership/mode unsafe')
+ raw=b''
+ while len(raw)<=2097152:
+  part=os.read(fd,min(65536,2097153-len(raw)))
+  if not part:break
+  raw+=part
+ after=os.fstat(fd)
+ if (file_stat.st_dev,file_stat.st_ino,file_stat.st_size,file_stat.st_mtime_ns,file_stat.st_ctime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns):raise RuntimeError('staged inode mutated during read')
+finally:os.close(fd)
 if len(raw)>2097152:raise RuntimeError('unbounded candidate.py staged bytes')
 cglines=(base/'cgroup').read_text().strip().splitlines()
 if len(cglines)!=1 or not cglines[0].startswith('0::/'):raise RuntimeError('no owner cgroup v2')
@@ -111,15 +125,41 @@ for p in procs:
  status.append({'pid':p,'nnp':s.get('NoNewPrivs'),'seccomp':s.get('Seccomp'),
                 'capeff':s.get('CapEff'),'uid':s.get('Uid')})
 ifaces=[row.split(':',1)[0].strip() for row in (base/'net/dev').read_text().splitlines() if ':' in row]
+ipv4=(base/'net/route').read_text().splitlines()
+if not ipv4 or ipv4[0].split()[:2]!=['Iface','Destination']:raise RuntimeError('malformed IPv4 route table')
+for row in ipv4[1:]:
+ cols=row.split()
+ if len(cols)<11 or cols[0]!='lo' or cols[1]=='00000000':raise RuntimeError('unexpected IPv4 route')
+ipv6=(base/'net/ipv6_route').read_text().splitlines()
+for row in ipv6:
+ cols=row.split()
+ if len(cols)<10 or cols[-1]!='lo':raise RuntimeError('unexpected IPv6 route')
+mounts=(base/'mountinfo').read_text().splitlines()
+if len(mounts)<3:raise RuntimeError('missing mount inventory')
+parsed=[]
+for row in mounts:
+ parts=row.split(' - ',1)
+ if len(parts)!=2:raise RuntimeError('bad mountinfo field delimiter')
+ lhs,rhs=parts[0].split(),parts[1].split()
+ if len(lhs)<6 or len(rhs)<3 or not lhs[0].isdigit():raise RuntimeError('malformed mountinfo record')
+ point=lhs[4]
+ if '\\040' in point or '\\011' in point or not point.startswith('/'):raise RuntimeError('unsafe escaped mount path')
+ parsed.append({'point':point,'source':rhs[1],'fstype':rhs[0],'options':lhs[5].split(',')})
+allowed={'/work','/tmp','/dev','/dev/pts','/dev/shm','/proc','/sys','/sys/fs/cgroup','/etc/hosts','/etc/hostname','/etc/resolv.conf'}
+for m in parsed:
+ if m['point'] not in allowed and m['point']!='/':raise RuntimeError('unreviewed container mount: '+repr(m))
+ if m['point'] in ('/work','/tmp') and m['fstype']!='tmpfs':raise RuntimeError('unexpected work/tmp mount')
+ if m['point']=='/' and 'ro' not in m['options']:raise RuntimeError('root mount writable')
 names={n:os.readlink(str(base/'ns'/n)) for n in ('user','pid','mnt','net')}
 hostnames={n:os.readlink('/proc/self/ns/'+n) for n in ('user','pid','mnt','net')}
 result={'staged_program_sha256':hashlib.sha256(raw).hexdigest(),
+ 'staged_inode':{'device':file_stat.st_dev,'inode':file_stat.st_ino,'size':file_stat.st_size,'nlink':file_stat.st_nlink,'uid':file_stat.st_uid,'mode':file_stat.st_mode,'mtime_ns':file_stat.st_mtime_ns,'ctime_ns':file_stat.st_ctime_ns},
  'process_count':len(procs),'process_status':status,'container_pid':pid,
  'container_pid_start_ticks':start_ticks,
  'cgroup_path':str(cgroup.resolve()),'cgroup_procs':procs,
  'pids_max':(cgroup/'pids.max').read_text().strip(),
  'memory_max':(cgroup/'memory.max').read_text().strip(),
- 'net_interfaces':ifaces,'child_ns':names,'observer_ns':hostnames,
+ 'net_interfaces':ifaces,'ipv4_routes':ipv4,'ipv6_routes':ipv6,'mount_inventory':parsed,'child_ns':names,'observer_ns':hostnames,
  'read_only_root':bool(os.statvfs(base/'root').f_flag&os.ST_RDONLY),
  'read_only_tmp':bool(os.statvfs(base/'root/tmp').f_flag&os.ST_RDONLY),
  'writable_work':not bool(os.statvfs(base/'root/work').f_flag&os.ST_RDONLY),
@@ -178,6 +218,33 @@ def _source_stage_host_observe(owner_pid: int, expected_sha: str) -> dict:
         raise RuntimeError("independent VM-host candidate.py source observer unavailable: "
                            + result.stderr[-300:])
     evidence = v37._strict_json(result.stdout)
+    ipv4 = evidence.get("ipv4_routes")
+    ipv6 = evidence.get("ipv6_routes")
+    mounts = evidence.get("mount_inventory")
+    inode = evidence.get("staged_inode")
+    allowed_mounts = {"/", "/work", "/tmp", "/dev", "/dev/pts", "/dev/shm",
+                      "/proc", "/sys", "/sys/fs/cgroup", "/etc/hosts",
+                      "/etc/hostname", "/etc/resolv.conf"}
+    if (not isinstance(ipv4, list) or not ipv4
+            or not isinstance(ipv4[0], str)
+            or ipv4[0].split()[:2] != ["Iface", "Destination"]
+            or any(not isinstance(row, str) or len(row.split()) < 11
+                   or row.split()[0] != "lo" or row.split()[1] == "00000000"
+                   for row in ipv4[1:])
+            or not isinstance(ipv6, list)
+            or any(not isinstance(row, str) or len(row.split()) < 10
+                   or row.split()[-1] != "lo" for row in ipv6)
+            or not isinstance(mounts, list) or len(mounts) < 3
+            or any(not isinstance(mount, dict)
+                   or mount.get("point") not in allowed_mounts
+                   or (mount.get("point") in ("/work", "/tmp")
+                       and mount.get("fstype") != "tmpfs") for mount in mounts)
+            or not isinstance(inode, dict)
+            or any(type(inode.get(k)) is not int for k in
+                   ("device", "inode", "size", "nlink", "uid", "mode", "mtime_ns", "ctime_ns"))
+            or inode["device"] <= 0 or inode["inode"] <= 0 or inode["size"] <= 0
+            or inode["nlink"] != 1 or inode["uid"] == 0 or inode["mode"] & 0o022):
+        raise RuntimeError("independent VM-host route/mount/staged-inode witness failed")
     if (evidence.get("staged_program_sha256") != expected_sha
             or type(evidence.get("container_pid_start_ticks")) is not int
             or evidence["container_pid_start_ticks"] <= 0
