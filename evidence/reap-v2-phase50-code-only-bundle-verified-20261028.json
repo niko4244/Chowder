@@ -1,0 +1,28 @@
+{
+  "archive_bytes": 305300,
+  "archive_path": "evidence/reap-v2-dedicated-original-code-only-runner-phase50-20261028.zip",
+  "archive_sha256": "d2b90f4826024f5d1645d88d0b920db3f16867d6167656a0b80d31fa33c1a2a4",
+  "frozen_flags": [
+    "--fit",
+    "on",
+    "-np",
+    "4",
+    "-c",
+    "16384",
+    "--jinja"
+  ],
+  "gen0": {
+    "chosen": null,
+    "release_approved": false,
+    "status": "BLOCKED"
+  },
+  "independent_humaneval_approvals_present": false,
+  "model_executed": false,
+  "models_embedded": false,
+  "previous_phase49_archive_sha256": "ed300b628a0e527f59135aabc7bb570bc77fc3799299c37603bed0935a8bc99d",
+  "schema": "chowder.reap-v2-phase50-immutable-code-only-runner.v1",
+  "source_files": 41,
+  "source_git_head": "e84c63ec1bff465366a9aadc9b1e44e4f560e12a",
+  "status": "SOURCE_AND_ABI_VERIFIED_NO_MODEL_EXECUTION",
+  "zip_members_with_manifest": 42
+}
