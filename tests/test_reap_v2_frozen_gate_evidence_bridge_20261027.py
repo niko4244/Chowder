@@ -199,6 +199,57 @@ def test_synthetic_complete_reviewer_pins_delegate_exact_science_to_original_sel
     assert gate["statistic"] == pytest.approx(expected, abs=1e-14)
 
 
+def _reseal_legacy_for_adversarial_test(root, obs, monkeypatch, arm, suite, mutate):
+    """Test-only resealing simulates an attacker controlling legacy summaries."""
+    path = root / arm / f"{suite}.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    mutate(rows)
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    summary_path = root / arm / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary[suite]["file_sha256"] = _sha(path)
+    _write(summary_path, summary)
+    monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
+                        reap_select._input_digests(root, obs, None, None))
+
+
+def test_resealed_matching_noncanonical_legacy_pair_cannot_enter_frozen_bridge(
+    synthetic, monkeypatch,
+):
+    root, obs = synthetic
+    def forge(rows):
+        for index, item in enumerate(rows):
+            item["id"] = f"fabricated-gsm8k-{index}"
+
+    for arm in ("dense", "reap128", "random128"):
+        _reseal_legacy_for_adversarial_test(root, obs, monkeypatch, arm, "gsm8k", forge)
+    # Legacy pairs have identical forged IDs and internally consistent SHAs;
+    # the frozen selector alone would not establish the official task cohort.
+    result = bridge.bridge_frozen_evidence(root, obs)
+    assert result["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
+    assert "historical task IDs are not canonical" in result["reason"]
+    assert result["chosen"] is None and result["release_approved"] is False
+
+
+@pytest.mark.parametrize("arm,suite", [
+    ("dense", "gsm8k"), ("reap128", "humaneval"),
+    ("random128", "gsm8k"), ("dense_q4", "gsm8k"),
+])
+def test_resealed_legacy_correct_nontermination_refused_by_independent_bridge(
+    synthetic, monkeypatch, arm, suite,
+):
+    root, obs = synthetic
+    def forge(rows):
+        rows[0]["correct"] = True
+        rows[0]["terminated"] = False
+
+    _reseal_legacy_for_adversarial_test(root, obs, monkeypatch, arm, suite, forge)
+    result = bridge.bridge_frozen_evidence(root, obs)
+    assert result["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
+    assert "historical scorer semantics invalid" in result["reason"]
+    assert result["chosen"] is None and result["release_approved"] is False
+
+
 @pytest.mark.parametrize("kind", [
     "unpin", "new_unapproved_file", "alter_scored_row", "wrong_review_sha",
     "foreign_q8_model", "wrong_slot_count", "cross_session", "wrong_host_speed",

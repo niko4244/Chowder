@@ -42,16 +42,30 @@ def _reject_nonfinite(value: str) -> None:
 
 
 def parse_complete_journal(raw: bytes) -> list[dict]:
-    """Reject torn writes rather than interpreting an in-flight row as a case."""
+    """Parse only original UTF-8 JSONL with consistent LF or Windows CRLF.
+
+    ``bytes.splitlines()`` also accepts bare CR as a record boundary, while
+    ``json.loads(bytes)`` accepts a UTF-8 BOM. Neither framing is emitted by
+    the original JSONL writer; admitting it would blur source-bound row counts.
+    """
     if not raw or not raw.endswith(b"\n"):
         raise ValueError("generation journal is empty or has an in-flight partial row")
     rows = []
-    for index, line in enumerate(raw.splitlines(), 1):
+    newline_style = None
+    for index, framed in enumerate(raw.split(b"\n")[:-1], 1):
+        style = "CRLF" if framed.endswith(b"\r") else "LF"
+        if newline_style is None:
+            newline_style = style
+        elif style != newline_style:
+            raise ValueError(f"mixed generation journal line endings at {index}")
+        line = framed[:-1] if style == "CRLF" else framed
         if not line:
             raise ValueError(f"blank generation row {index}")
+        if b"\r" in line:
+            raise ValueError(f"bare CR in generation row {index}")
         try:
             row = json.loads(
-                line, object_pairs_hook=_unique_object,
+                line.decode("utf-8"), object_pairs_hook=_unique_object,
                 parse_constant=_reject_nonfinite,
             )
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -168,6 +182,9 @@ def inspect() -> dict:
         source.extend((row["question_id"], name)
                       for row in lcb.read_jsonl(lcb.DATA / name))
     raw = (lcb.OUT / "gen_q4.jsonl").read_bytes()
+    journal_sha256 = hashlib.sha256(raw).hexdigest()
+    if journal_sha256 != checkpoint["generation_journal_sha256"]:
+        raise ValueError("original generation journal changed after checkpoint source audit")
     result = classify(source, parse_complete_journal(raw))
     if result["contiguous_successful_prefix"] < checkpoint["scored_prefix"]:
         raise ValueError("official checkpoint includes failed transport cases")
@@ -176,7 +193,7 @@ def inspect() -> dict:
     return {
         "schema": SCHEMA,
         **result,
-        "generation_journal_sha256": hashlib.sha256(raw).hexdigest(),
+        "generation_journal_sha256": journal_sha256,
         "source_dataset_sha256": checkpoint["source_dataset_sha256"],
         "source_git_commit": checkpoint["source_git_commit"],
         "generator_source_sha256": checkpoint["generator_source_sha256"],

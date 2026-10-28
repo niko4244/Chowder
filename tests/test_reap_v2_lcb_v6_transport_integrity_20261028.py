@@ -177,6 +177,25 @@ def test_valid_journal_parsing():
     assert audit.parse_complete_journal((json.dumps(record) + "\n").encode()) == [record]
 
 
+def test_original_windows_crlf_journal_parses_without_rewriting_records():
+    records = [row(*SOURCE[0]), row(*SOURCE[1])]
+    original = b"".join((json.dumps(item) + "\r\n").encode("utf-8")
+                        for item in records)
+    assert audit.parse_complete_journal(original) == records
+
+
+@pytest.mark.parametrize("malformed", [
+    b'{"question_id":"a"}\r{"question_id":"b"}\n',
+    b'{"question_id":"a"}\r\n{"question_id":"b"}\n',
+    b'{"question_id":"a"}\n{"question_id":"b"}\r\n',
+    b'\xef\xbb\xbf{"question_id":"a"}\n',
+    b'{"question_id":"a"}\r\r\n',
+])
+def test_rejects_nonoriginal_or_ambiguous_journal_framing(malformed):
+    with pytest.raises(ValueError):
+        audit.parse_complete_journal(malformed)
+
+
 @pytest.mark.parametrize("malformed", [
     b'{"question_id":"wrong","question_id":"a"}\n',
     b'{"question_id":"a","usage":{"tokens":1,"tokens":2}}\n',
@@ -256,3 +275,53 @@ def test_atomic_snapshot_link_failure_leaves_no_torn_certificate(
         audit._seal_exclusive_snapshot(target, journal, result)
     assert not target.exists()
     assert not list(tmp_path.glob("*.pending-*"))
+
+
+def test_inspect_rejects_valid_same_length_journal_rewrite_after_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """Old checkpoint counts cannot certify a different valid journal body."""
+    original = (json.dumps(row(*SOURCE[0], code="print(1)")) + "\n").encode()
+    rewritten = (json.dumps(row(*SOURCE[0], code="print(2)")) + "\n").encode()
+    assert len(original) == len(rewritten)
+    journal = tmp_path / "gen_q4.jsonl"
+    journal.write_bytes(rewritten)
+    checkpoint = {
+        "generation_journal_sha256": hashlib.sha256(original).hexdigest(),
+        "checkpoint_sha256": "checkpoint-hash",
+        "scored_prefix": 1, "correct": 1,
+        "source_dataset_sha256": {}, "source_git_commit": "pinned",
+        "generator_source_sha256": "generator", "evaluator_source_sha256": "evaluator",
+    }
+    monkeypatch.setattr(audit.lcb, "OUT", tmp_path)
+    monkeypatch.setattr(audit.lcb, "DATA", tmp_path)
+    monkeypatch.setattr(audit.lcb, "FILES", ("test.jsonl",))
+    monkeypatch.setattr(audit.lcb, "read_jsonl", lambda _path: [{"question_id": "a"}])
+    monkeypatch.setattr(audit.lcb, "inspect", lambda: checkpoint)
+    monkeypatch.setattr(audit.lcb, "sha", lambda _path: "checkpoint-hash")
+    with pytest.raises(ValueError, match="changed after checkpoint source audit"):
+        audit.inspect()
+
+
+def test_inspect_retains_same_journal_digest_when_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    original = (json.dumps(row(*SOURCE[0])) + "\n").encode()
+    (tmp_path / "gen_q4.jsonl").write_bytes(original)
+    digest = hashlib.sha256(original).hexdigest()
+    checkpoint = {
+        "generation_journal_sha256": digest,
+        "checkpoint_sha256": "checkpoint-hash",
+        "scored_prefix": 1, "correct": 1,
+        "source_dataset_sha256": {}, "source_git_commit": "pinned",
+        "generator_source_sha256": "generator", "evaluator_source_sha256": "evaluator",
+    }
+    monkeypatch.setattr(audit.lcb, "OUT", tmp_path)
+    monkeypatch.setattr(audit.lcb, "DATA", tmp_path)
+    monkeypatch.setattr(audit.lcb, "FILES", ("test.jsonl",))
+    monkeypatch.setattr(audit.lcb, "read_jsonl", lambda _path: [{"question_id": "a"}])
+    monkeypatch.setattr(audit.lcb, "inspect", lambda: checkpoint)
+    monkeypatch.setattr(audit.lcb, "sha", lambda _path: "checkpoint-hash")
+    result = audit.inspect()
+    assert result["generation_journal_sha256"] == digest
+    assert result["official_complete_score"] is None

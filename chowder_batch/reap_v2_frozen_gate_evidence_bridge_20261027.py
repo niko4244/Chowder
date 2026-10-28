@@ -34,6 +34,18 @@ COHORTS = {
     "reap128_v2_q4": {"gsm8k": 200},
     "dense_v2_q4": {"gsm8k": 200},
 }
+# Historical rows predate the v2 .inputs.json witness. They still must use
+# the original registered task IDs and scoring semantics. Validate them at
+# this independent admission boundary without modifying the frozen selector.
+HISTORICAL_COHORTS = {
+    "dense": {"gsm8k": 1319, "humaneval": 164},
+    "random128": {"gsm8k": 1319},
+    "reap128": {"gsm8k": 1319, "humaneval": 164},
+    "reap160": {"gsm8k": 1319, "humaneval": 164},
+    "dense_q4": {"gsm8k": 200},
+    "reap128_q4": {"gsm8k": 200},
+    "reap160_q4": {"gsm8k": 200},
+}
 MODEL_SHA256 = {
     "reap128_v2": Q8_V2_SHA256,
     "dense_v2": reap_select.FROZEN_REFERENCE_MODEL_SHA256["dense_v2"],
@@ -146,6 +158,33 @@ def _verify_pins(
         _require(not path.is_symlink() and path.is_file() and digest == expected[name],
                  f"independently approved source SHA mismatch: {path.name}")
     return observed
+
+
+def _verify_historical_canonical_rows(root: Path) -> None:
+    """Reject re-sealed legacy rows with forged IDs or impossible correctness.
+
+    Original frozen ``reap_select`` checks canonical IDs for new v2 arms,
+    not historical arms. This independent bridge must not allow two legacy
+    arms with matching *noncanonical* IDs to create a valid-looking pairing.
+    """
+    for arm, suites in HISTORICAL_COHORTS.items():
+        for suite, count in suites.items():
+            path = root / arm / f"{suite}.jsonl"
+            if not path.exists():
+                continue
+            _require(path.is_file() and not path.is_symlink(),
+                     f"{arm}/{suite}: historical row path invalid")
+            rows = reap_select._attested_rows(root, arm, suite, count)
+            _require(rows is not None, f"{arm}/{suite}: historical source summary absent")
+            canonical = ({f"gsm8k-{i}" for i in range(count)} if suite == "gsm8k"
+                         else {f"HumanEval/{i}" for i in range(count)})
+            _require(set(rows) == canonical,
+                     f"{arm}/{suite}: historical task IDs are not canonical")
+            _require(all(type(row.get("correct")) is bool
+                         and type(row.get("terminated")) is bool
+                         and not (row["correct"] and not row["terminated"])
+                         for row in rows.values()),
+                     f"{arm}/{suite}: historical scorer semantics invalid")
 
 
 def _verify_original_sessions(root: Path, review: dict) -> dict[str, dict]:
@@ -369,6 +408,7 @@ def bridge_frozen_evidence(
         observer_v2 = Path(observation_v2) if observation_v2 is not None else None
         calibration = Path(calibration_v2) if calibration_v2 is not None else None
         first = _verify_pins(root, observer, observer_v2, calibration)
+        _verify_historical_canonical_rows(root)
         review_path = root / "frozen-independent-review.json"
         review_raw = review_path.read_bytes() if review_path.is_file() and not review_path.is_symlink() else b""
         _require(_sha(review_raw) == APPROVED_INDEPENDENT_REVIEW_SHA256,
