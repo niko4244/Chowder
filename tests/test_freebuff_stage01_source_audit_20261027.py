@@ -100,6 +100,16 @@ def test_fixture_curve_tampering_fails_closed() -> None:
         verify_curves(grouped, changed, 288)
 
 
+def test_fixture_omitted_entire_codec_curve_fails_closed() -> None:
+    """An empty set of self-consistent curves must not certify measured arms."""
+    grouped = group_scores(fixture_rows())
+    changed = deepcopy(fixture_curve())
+    changed["curves"] = []
+    changed["signed_deltas"] = []
+    with pytest.raises(EvidenceError, match="curve coverage"):
+        verify_curves(grouped, changed, 288)
+
+
 def test_fixture_signed_delta_tampering_fails_closed() -> None:
     grouped = group_scores(fixture_rows())
     changed = deepcopy(fixture_curve())

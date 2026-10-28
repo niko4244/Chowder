@@ -105,6 +105,7 @@ def verify_curves(grouped: dict, curves: dict, expected_rows: int) -> None:
         block = (curve["layer"], curve["expert"])
         for option in curve["options"]:
             codec = option["codec"]
+            require(codec != baselines, "baseline codec cannot be an intervention curve")
             require((block, codec) not in observed_options, "duplicate curve codec")
             observed_options.add((block, codec))
             require(math.isclose(option["bits_per_param"], curves["codecs"][codec]), "wrong codec bits")
@@ -125,6 +126,12 @@ def verify_curves(grouped: dict, curves: dict, expected_rows: int) -> None:
                 observed_signed.add((*block, domain, codec))
             require(math.isclose(option["mean_damage"], sum(damage) / 3, abs_tol=1e-12), "mean damage mismatch")
     require(len(observed_signed) == len(curves["signed_deltas"]), "extra signed delta rows")
+    expected_options = {
+        ((layer, expert), codec)
+        for layer, expert, _, codec in grouped
+        if codec != baselines
+    }
+    require(observed_options == expected_options, "intervention curve coverage mismatch")
 
 
 def summarize(grouped: dict) -> list[dict]:
