@@ -1,0 +1,200 @@
+"""Read-only independent consistency audit of an *incomplete* LCB v6 checkpoint.
+
+Never execute candidate code, contact the model server, or treat a checkpoint
+as a full official score. The original execution sandbox and serving session
+need separate durable attestations before any frozen qualification admission.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+from pathlib import Path
+import subprocess
+
+DATA = Path("F:/lcb-data/raw")
+OUT = Path("F:/lcb-out")
+SOURCE = Path("F:/lcb-src")
+RUNTIME = Path("F:/lcb-runtime")
+GENERATOR = Path("F:/lcb_gen.py")
+EVALUATOR = Path("F:/lcb_eval.py")
+FILES = tuple(f"test{n if n > 1 else ''}.jsonl" for n in range(1, 7))
+SOURCE_COMMIT = "28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24"
+DATA_SHAS = (
+    "2bd02b38beb48e8c46b5b9987095d999ff38cd8efc255ea5d58974317c48f63f",
+    "095df7c5daf15f882c51a9deb84085cff1e073495a5dbcf95015a564d485f3a3",
+    "28ed26cc83363ce3f1fe2d5fad9f8393077beb1907b167a31bd3b32f80801b79",
+    "d711138ddaebfcf5f8ec6a4283ee677298c0f5c5d374a235af92aaf0584510da",
+    "7f77571c2a6df0c2a72a3277650309f67e01e0008e18117e624633df53f81214",
+    "bb4c364f71921c4495a6ad15abe1a927350b720009f4933e2e71f8af0f6fd1f5",
+)
+GENERATOR_SHA = "9df4f3e4c1d6b6ec6cc1cb1843be2aead122a9bd6244c926332792092e5fb99d"
+EVALUATOR_SHA = "5217d8e2d1ddcb88fbea8383ac856b8f12e8d19117c2591345d27ac11de261c9"
+SCHEMA = "chowder.reap-v2-lcb-v6-readonly-checkpoint-consistency.v1"
+
+
+def sha(path: Path) -> str:
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"missing or linked source: {path}")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"missing or linked journal: {path}")
+    rows = []
+    with path.open(encoding="utf-8") as stream:
+        for index, line in enumerate(stream, 1):
+            if not line.strip():
+                raise ValueError(f"blank journal line {index}")
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError(f"non-object journal line {index}")
+            rows.append(row)
+    return rows
+
+
+def checkpoint_consistency(data: Path, generations: Path, metrics: Path) -> dict:
+    """Verify per-item accounting without running untrusted candidate code."""
+    source_ids = []
+    source_files = {}
+    source_shas = {}
+    for name in FILES:
+        path = data / name
+        source_shas[name] = sha(path)
+        for row in read_jsonl(path):
+            qid = row["question_id"]
+            if not isinstance(qid, str) or not qid or qid in source_files:
+                raise ValueError("invalid or duplicate canonical question ID")
+            source_ids.append(qid)
+            source_files[qid] = name
+
+    gen_sha = sha(generations)
+    generated = read_jsonl(generations)
+    if not generated or len(generated) > len(source_ids):
+        raise ValueError("empty or excessive model-generation prefix")
+    ids = [r.get("question_id") for r in generated]
+    if ids != source_ids[:len(ids)]:
+        raise ValueError("generation IDs are not the canonical source prefix")
+    for row in generated:
+        if (row.get("source_file") != source_files[row["question_id"]]
+                or row.get("task") != "LCB_generation"
+                or row.get("prompt_style") != "OpenAIChat"
+                or row.get("max_tokens") != 4096
+                or row.get("temperature") != 0.2
+                or row.get("top_p") != 0.95
+                or not isinstance(row.get("code"), str)):
+            raise ValueError("generation source/prompt/parameter mismatch")
+
+    metrics_sha = sha(metrics)
+    report = json.loads(metrics.read_text(encoding="utf-8"))
+    details = report["detail"]
+    n = len(details)
+    if (report.get("release") != "release_v6"
+            or report.get("dataset") != "livecodebench/code_generation_lite"
+            or report.get("problems_total") != len(source_ids)
+            or report.get("scored_population") != n
+            or report.get("missing") != len(source_ids) - n
+            or not 0 < n <= len(generated)):
+        raise ValueError("official checkpoint population/identity mismatch")
+    if [r.get("question_id") for r in details] != sorted(ids[:n]):
+        raise ValueError("checkpoint per-item IDs differ from generated prefix")
+    if (report.get("empty_code") != sum(not r["code"].strip() for r in generated[:n])
+            or report.get("transport_errors") != sum(bool(r.get("error")) for r in generated[:n])):
+        raise ValueError("checkpoint empty/error accounting mismatch")
+
+    per_item = report["metrics"]["detail"]["pass@1"]
+    if set(per_item) != {str(i) for i in range(n)}:
+        raise ValueError("checkpoint pass@1 index population mismatch")
+    passed = 0
+    for i, row in enumerate(details):
+        tests = row.get("score")
+        if (not isinstance(tests, list) or not tests
+                or any(type(v) is not bool and (type(v) is not int or v not in (-3, -4))
+                       for v in tests)):
+            raise ValueError("invalid official per-test outcome encoding")
+        good = all(v is True for v in tests)
+        passed += good
+        if per_item[str(i)] != float(good):
+            raise ValueError("checkpoint per-item pass@1 contradicts test outcomes")
+    accuracy = passed / n
+    if not math.isclose(report["metrics"]["pass@1"], accuracy, abs_tol=1e-12):
+        raise ValueError("checkpoint aggregate pass@1 contradicts test outcomes")
+    return {
+        "schema": SCHEMA,
+        "status": "PARTIAL_CHECKPOINT_INTERNAL_CONSISTENCY_ONLY",
+        "source_population": len(source_ids),
+        "generated_prefix": len(generated),
+        "scored_prefix": n,
+        "correct": passed,
+        "incorrect": n - passed,
+        "pass_at_1_scored_prefix": accuracy,
+        "unscored_source_tasks": len(source_ids) - n,
+        "source_dataset_sha256": source_shas,
+        "generation_journal_sha256": gen_sha,
+        "checkpoint_sha256": metrics_sha,
+        "original_serving_session_independently_attested": False,
+        "cpu_code_isolation_independently_attested": False,
+        "full_official_score": None,
+        "frozen_gen0_status": "BLOCKED",
+        "chosen": None,
+        "release_approved": False,
+    }
+
+
+def inspect() -> dict:
+    repo_head = subprocess.check_output(
+        ["git", "-C", str(SOURCE), "rev-parse", "HEAD"], timeout=15,
+    ).decode().strip()
+    if repo_head != SOURCE_COMMIT or subprocess.check_output(
+        ["git", "-C", str(SOURCE), "status", "--porcelain"], timeout=15,
+    ).strip():
+        raise ValueError("original LiveCodeBench repository source drift")
+    if sha(GENERATOR) != GENERATOR_SHA or sha(EVALUATOR) != EVALUATOR_SHA:
+        raise ValueError("generation or evaluation driver source drift")
+    for file in (SOURCE / "lcb_runner").rglob("*.py"):
+        if sha(file) != sha(RUNTIME / file.relative_to(SOURCE)):
+            raise ValueError("official evaluator runtime source drift")
+    result = checkpoint_consistency(
+        DATA, OUT / "gen_q4.jsonl", OUT / "metrics_q4_checkpoint.json",
+    )
+    if tuple(result["source_dataset_sha256"].values()) != DATA_SHAS:
+        raise ValueError("original LiveCodeBench dataset source hash drift")
+    return {
+        **result,
+        "source_git_commit": SOURCE_COMMIT,
+        "generator_source_sha256": GENERATOR_SHA,
+        "evaluator_source_sha256": EVALUATOR_SHA,
+        "research_only": True,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--snapshot", type=Path)
+    args = parser.parse_args()
+    try:
+        result = inspect()
+        if args.snapshot is not None:
+            target = args.snapshot
+            if (not target.is_absolute() or target.exists() or target.is_symlink()
+                    or target.parent.resolve() != Path("F:/").resolve()):
+                raise ValueError("new exclusive F: snapshot path required")
+            with target.open("xb") as stream:
+                stream.write((json.dumps(result, sort_keys=True, indent=2) + "\n").encode())
+        print(json.dumps(result, sort_keys=True, indent=2))
+        return 0
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        print(json.dumps({"status": "REFUSED_UNATTESTED_LCB_CHECKPOINT",
+                          "reason": str(exc)[:350], "frozen_gen0_status": "BLOCKED"}))
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
