@@ -396,6 +396,8 @@ def assess_bound_receipts(
         or not math.isfinite(terminal["child_create_time_unix"])
     ):
         issues.append("CHILD_RUNTIME_EXIT_UNVERIFIED")
+    if terminal.get("exit_code") != 0 or terminal.get("breaches") != []:
+        issues.append("CLEAN_ROOT_EXIT_AND_EMPTY_BREACHES_UNPROVEN")
     if (
         terminal.get("post_close_descendant_extinction_independently_witnessed")
         is not True
@@ -403,6 +405,65 @@ def assess_bound_receipts(
         issues.append("OWNED_TREE_EXTINCTION_UNVERIFIED")
     if terminal.get("owned_job_handle_closed_with_kill_on_close") is not True:
         issues.append("OWNED_JOB_CLOSE_UNVERIFIED")
+    # Phase49 terminal integrity must be independently checked here as well:
+    # an owner may exit zero while server/evaluator still run, then
+    # TerminateJobObject would make a postclose extinction witness appear
+    # clean. Native BasicAccounting.TotalProcesses detects unseen ephemeral
+    # helpers that polling never observed. No PID is opened or signaled.
+    if (terminal.get("pre_cleanup_natural_owned_tree_extinction_witnessed") is not True
+            or type(terminal.get("pre_cleanup_live_owned_descendant_count")) is not int
+            or terminal["pre_cleanup_live_owned_descendant_count"] != 0):
+        issues.append("NATURAL_OWNED_TREE_EXIT_NOT_ATTESTED")
+    if terminal.get("all_private_job_lifetime_processes_source_witnessed") is not True:
+        issues.append("PRIVATE_JOB_UNOBSERVED_LIFETIME_PROCESS")
+    accounting = terminal.get("pre_cleanup_private_job_lifetime_accounting")
+    roles = terminal.get("original_live_job_owned_role_identities")
+    if not isinstance(roles, dict) or set(roles) != {"root", "server", "evaluator"}:
+        issues.append("COMPLETE_ORIGINAL_JOB_ROLES_UNVERIFIED")
+        roles = {}
+    role_pids = set()
+    for name, identity in roles.items():
+        if (not isinstance(identity, dict)
+                or type(identity.get("pid")) is not int or identity["pid"] <= 0
+                or type(identity.get("birth")) not in (int, float)
+                or not math.isfinite(identity["birth"])
+                or identity["birth"] <= 0
+                or identity["pid"] in role_pids):
+            issues.append("PRIVATE_JOB_ROLE_PID_IDENTITY_INVALID")
+        else:
+            role_pids.add(identity["pid"])
+            if name == "root" and (
+                identity["pid"] != terminal.get("child_pid")
+                or type(terminal.get("child_create_time_unix")) not in (int, float)
+                or not math.isfinite(terminal["child_create_time_unix"])
+                or abs(identity["birth"] - terminal["child_create_time_unix"]) > 2
+            ):
+                issues.append("PRIVATE_JOB_ROOT_BIRTH_DRIFT")
+    if (not isinstance(accounting, dict)
+            or type(accounting.get("total_processes")) is not int
+            or accounting["total_processes"] < 3
+            or type(accounting.get("active_processes")) is not int
+            or accounting["active_processes"] != 0
+            or type(accounting.get("total_page_fault_count")) is not int
+            or accounting["total_page_fault_count"] < 0
+            or (role_pids and accounting["total_processes"] < len(role_pids))):
+        issues.append("PRIVATE_JOB_LIFETIME_ACCOUNTING_INVALID")
+    if (terminal.get("fully_witnessed_native_fit") is not True
+            or terminal.get("original_live_job_root_server_evaluator_lineage_witnessed") is not True
+            or not isinstance(terminal.get("original_native_fit_source_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", terminal["original_native_fit_source_sha256"])):
+        issues.append("ORIGINAL_NATIVE_FIT_AND_LINEAGE_NOT_BOTH_WITNESSED")
+    samples = terminal.get("observations")
+    if (not isinstance(samples, list) or not samples
+            or not any(
+                isinstance(s, dict)
+                and s.get("original_live_owned_job_lineage_status") ==
+                    "OWNER_BOUND_ACTIVE_OBSERVED_ONLY"
+                and s.get("original_native_fit_source_status") ==
+                    "NATIVE_SOURCE_FIT_VERIFIED_RUNTIME_ONLY"
+                for s in samples
+            )):
+        issues.append("NATIVE_ACTIVE_FIT_SAMPLE_MISSING")
     return _failure("RECEIPTS_CONSISTENT_NOT_SCIENTIFIC_APPROVAL", issues)
 
 

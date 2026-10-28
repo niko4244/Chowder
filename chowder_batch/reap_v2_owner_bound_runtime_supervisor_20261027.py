@@ -1037,33 +1037,35 @@ def _run_authorized(
         while True:
             code = owner.exit_code()
             if code is not None:
-                # Root exit(0) alone is NOT proof the original evaluator or
-                # native server exited naturally. Observe remaining members
-                # from the still-open private Job BEFORE termination. Cleaning
-                # up unfinished descendants could otherwise manufacture a
-                # clean runtime witness from post-kill extinction.
-                live_at_root_exit = owner.member_ids()
-                pre_cleanup_lifetime_accounting = owner.lifetime_process_counts()
-                pre_cleanup_live_descendant_count = len([
-                    pid for pid in live_at_root_exit if pid != owner.pid
-                ])
-                complete_owned_job_lifetime_census_witnessed = (
-                    lineage_ledger is not None
-                    and pre_cleanup_lifetime_accounting["total_processes"]
-                    == len(lineage_ledger.pid_births)
-                    and pre_cleanup_lifetime_accounting["active_processes"]
-                    == len(live_at_root_exit)
-                )
-                pre_cleanup_owned_tree_naturally_empty = (
-                    pre_cleanup_live_descendant_count == 0
-                    and len(live_at_root_exit) == len(set(live_at_root_exit))
-                    and owner.verify_member_births(live_at_root_exit)
-                )
-                if not pre_cleanup_owned_tree_naturally_empty:
-                    breached = ["CHILD_ZERO_WITH_RUNNING_OR_UNVERIFIED_OWNED_DESCENDANTS"]
-                if not complete_owned_job_lifetime_census_witnessed:
-                    breached.append("OWNED_JOB_UNOBSERVED_TRANSIENT_CHILDREN_OR_CENSUS_DRIFT")
-                if code != 0 or not watched_fit or not watched_lineage:
+                if code == 0 and watched_fit and watched_lineage:
+                    # Windows can retain its authentic OS-created conhost
+                    # AFTER the registered root exits zero. Never kill it
+                    # and call the forced cleanup natural. Bound a short
+                    # independently witnessed wait, with exact private Job,
+                    # role/image/argv/parent and lifetime total checks.
+                    from chowder_batch import reap_v2_phase50_postexit_job_drain_20261028 as drain
+
+                    post = drain.witness_natural_drain(
+                        owner, ledger=lineage_ledger, study=study, model=model,
+                        server=server, output=output, port=port,
+                    )
+                    pre_cleanup_lifetime_accounting = post[
+                        "pre_cleanup_private_job_lifetime_accounting"
+                    ]
+                    pre_cleanup_live_descendant_count = post[
+                        "pre_cleanup_live_owned_descendant_count"
+                    ]
+                    complete_owned_job_lifetime_census_witnessed = post[
+                        "all_private_job_lifetime_processes_source_witnessed"
+                    ]
+                    pre_cleanup_owned_tree_naturally_empty = post[
+                        "pre_cleanup_natural_owned_tree_extinction_witnessed"
+                    ]
+                    if post["status"] != "NATURALLY_DRAINED":
+                        breached.append(post["reason"])
+                else:
+                    # An unqualified or nonzero root has no post-exit grace.
+                    # Only the actual private Job is ever cleaned up.
                     breached.append("CHILD_NONZERO_OR_NATIVE_FIT_OR_LINEAGE_UNWITNESSED")
                 cancel_owned_job(owner)
                 break
@@ -1131,6 +1133,35 @@ def _run_authorized(
             if (watched_fit and observation["owned_listener"] is not True
                     and not in_qualified_shutdown):
                 faults.append("OWNED_LISTENER_LOST")
+            # Diagnostic source observability must include an ACTIVE first
+            # sample and the sample immediately preceding any physical/commit
+            # safety abort. Earlier 1-in-32 post-check sampling omitted the
+            # critical memory cliff and retained only maxima, which cannot
+            # distinguish native working set from shared host pressure.
+            # This is read-only and cannot override a single resource fault.
+            near_floor = (
+                observation["physical_available_bytes"] <= 12 * GIB
+                or observation["commit_headroom_bytes"] <= 16 * GIB
+            )
+            if (lineage_proof["status"] == "OWNER_BOUND_ACTIVE_OBSERVED_ONLY"
+                    and len(owned_memory_samples) < 128
+                    and (not owned_memory_samples or len(samples) % 32 == 0
+                         or near_floor or faults)):
+                try:
+                    diagnostic = memory_witness.sample_owned_memory(
+                        owner, lineage_ledger,
+                    )
+                    diagnostic["host_physical_available_bytes"] = observation[
+                        "physical_available_bytes"
+                    ]
+                    diagnostic["host_commit_headroom_bytes"] = observation[
+                        "commit_headroom_bytes"
+                    ]
+                    diagnostic["host_wddm_gpu_free_mib"] = observation["gpu"]["free_mib"]
+                    diagnostic["frozen_elapsed_seconds"] = observation["elapsed_seconds"]
+                    owned_memory_samples.append(diagnostic)
+                except memory_witness.MemoryWitnessRefused:
+                    owned_memory_sample_unavailable += 1
             if faults:
                 breached = sorted(set(faults))
                 cancel_owned_job(owner)
@@ -1139,19 +1170,6 @@ def _run_authorized(
                     and native_proof["status"] == "NATIVE_SOURCE_FIT_VERIFIED_RUNTIME_ONLY"):
                 watched_fit = True
                 native_fit_source_sha256 = native_proof["source_sha256"]
-            # Optional source-bound diagnostic ONLY: sample exact already
-            # verified private-Job PID+birth role identities, at bounded 1/32
-            # cadence. A process can exit between two read-only censuses:
-            # report an UNKNOWN sample, not a false peak or model failure.
-            # Frozen admission floors and original inference are unchanged.
-            if (lineage_proof["status"] == "OWNER_BOUND_ACTIVE_OBSERVED_ONLY"
-                    and len(samples) % 32 == 0 and len(owned_memory_samples) < 128):
-                try:
-                    owned_memory_samples.append(memory_witness.sample_owned_memory(
-                        owner, lineage_ledger,
-                    ))
-                except memory_witness.MemoryWitnessRefused:
-                    owned_memory_sample_unavailable += 1
             if len(samples) >= MAX_SAMPLES:
                 breached = ["SAMPLE_LIMIT"]
                 cancel_owned_job(owner)
@@ -1245,6 +1263,7 @@ def _run_authorized(
         "original_owned_memory_sample_summary": memory_witness.summarize_samples(
             owned_memory_samples
         ),
+        "original_owned_memory_samples": owned_memory_samples,
         "original_owned_memory_sample_unavailable_count": owned_memory_sample_unavailable,
         "original_live_job_owned_role_identities": (
             {role: {"pid": birth[0], "birth": birth[1]}

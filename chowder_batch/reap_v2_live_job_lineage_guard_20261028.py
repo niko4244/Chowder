@@ -18,7 +18,6 @@ import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass, field
 import math
-import os
 from pathlib import Path
 import re
 import sys
@@ -143,6 +142,37 @@ def _frozen_listener_probe_script(port: int) -> str:
     )
 
 
+def _native_system_directory() -> Path | None:
+    """Use the Windows kernel's OS directory, never inherited SystemRoot/PATH.
+
+    An attacker controlling the launched evaluator's inherited environment
+    must not authorize an arbitrary conhost/nvidia-smi/powershell executable.
+    No global security configuration or process operation is performed.
+    """
+    if sys.platform != "win32":
+        return None
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetSystemDirectoryW(buffer, len(buffer))
+    if not 0 < length < len(buffer):
+        return None
+    directory = Path(buffer.value)
+    return directory if directory.is_absolute() and directory.is_dir() else None
+
+
+def _native_helper_image(record: dict, relative: str) -> bool:
+    system32 = _native_system_directory()
+    image = record.get("image_path")
+    if (system32 is None or not isinstance(image, str)
+            or not Path(image).is_absolute()):
+        return False
+    expected = system32 / relative
+    try:
+        return (expected.is_file() and not expected.is_symlink()
+                and Path(image).resolve(strict=True) == expected.resolve(strict=True))
+    except (OSError, ValueError):
+        return False
+
+
 def _frozen_helper(record: dict, root_pid: int, port: int) -> str | None:
     """Allow only OS console host and frozen read-only wrapper helpers.
 
@@ -165,19 +195,16 @@ def _frozen_helper(record: dict, root_pid: int, port: int) -> str | None:
         # A general extra Python/cmd/PowerShell invocation is NOT allowed.
         # Bind the real executable to Windows System32, the exact 0xNN
         # console identifier argv and the created Job root as parent.
-        systemroot = os.environ.get("SystemRoot")
-        if (systemroot
-                and Path(str(record.get("image_path", ""))).resolve(strict=False)
-                == (Path(systemroot) / "System32" / "conhost.exe").resolve(strict=False)):
+        if _native_helper_image(record, "conhost.exe"):
             return "native_windows_console_host"
     if exe in ("nvidia-smi", "nvidia-smi.exe") and args[1:] == [
         "--query-gpu=memory.used", "--format=csv,noheader,nounits",
-    ]:
+    ] and _native_helper_image(record, "nvidia-smi.exe"):
         return "gpu_memory_readonly"
     if exe == "powershell.exe" and args[1:] == [
         "-NoProfile", "-NonInteractive", "-Command",
         _frozen_listener_probe_script(port),
-    ]:
+    ] and _native_helper_image(record, "WindowsPowerShell/v1.0/powershell.exe"):
         return "frozen_listener_owner_readonly"
     return None
 

@@ -41,6 +41,7 @@ SOURCES = (
     "chowder_batch/reap_v2_live_job_lineage_guard_20261028.py",
     "chowder_batch/reap_v2_phase49_resource_diagnostics_20261028.py",
     "chowder_batch/reap_v2_phase49_owned_memory_witness_20261028.py",
+    "chowder_batch/reap_v2_phase50_postexit_job_drain_20261028.py",
     "chowder_batch/reap_v2_owner_bound_runtime_supervisor_20261027.py",
     "chowder_batch/reap_v2_original_humaneval_frozen_executor_20261027.py",
     "chowder_batch/reap_v2_humaneval_certificate_verifier_20261027.py",
@@ -72,6 +73,7 @@ SOURCES = (
     "docs/quals/reap-v2-phase47-original-native-supervisor-portable-humaneval-20261027.md",
     "docs/quals/reap-v2-phase48-original-source-fit-and-receipt-integrity-20261027.md",
     "docs/quals/reap-v2-phase49-resource-job-lineage-and-human164-frozen-intake-20261028.md",
+    "docs/quals/reap-v2-phase50-natural-win32-job-drain-and-source-bound-sustained-resources-20261028.md",
     "docs/quals/reap-frozen-scoring-source-fingerprints-20261025.json",
 )
 METADATA_NAME = "ORIGINAL-REAP-PORTABLE-ENTRY-MANIFEST.json"

@@ -201,6 +201,7 @@ def original_four_slot_watchdog(raw: bytes, terminal: dict) -> dict:
     mins = {"ram_available_gib": math.inf, "commit_available_gib": math.inf,
             "disk_free_gib": math.inf, "gpu_free_mib": math.inf}
     last = None
+    first_values = None
     for line in lines:
         item = strict_json(line)
         if set(item) != {*mins, "time_utc"}:
@@ -214,11 +215,25 @@ def original_four_slot_watchdog(raw: bytes, terminal: dict) -> dict:
         last = stamp
         for key in mins:
             mins[key] = min(mins[key], valid_number(item[key], key))
+        if first_values is None:
+            first_values = {key: item[key] for key in mins}
     if (mins["ram_available_gib"] < 7
             or mins["commit_available_gib"] < 8
             or mins["disk_free_gib"] < 8):
         raise ValueError("original four-slot GSM8K native runtime reserve breached")
+    # The earlier 12-row conservative attempt floor is NOT sufficient to
+    # predict a sustained full1319 run: the preserved complete-session
+    # source shows a larger host-wide decline. These are analytic prestart
+    # resource estimates only, never authorization or model-attributed usage.
+    full_ram_decline = first_values["ram_available_gib"] - mins["ram_available_gib"]
+    full_commit_decline = first_values["commit_available_gib"] - mins["commit_available_gib"]
     return {"sample_count": len(lines), "sampled_host_minimums": mins,
+            "first_sampled_host_values": first_values,
+            "maximum_host_physical_decline_from_first_sample_gib": full_ram_decline,
+            "maximum_host_commit_decline_from_first_sample_gib": full_commit_decline,
+            "conservative_full1319_physical_prestart_gib": 7 + 2 + full_ram_decline,
+            "conservative_full1319_commit_prestart_gib": 8 + 2 + full_commit_decline,
+            "not_model_attributed_not_execution_approval": True,
             "status": "PASS_HISTORICAL_FOUR_SLOT_HOST_RAM_COMMIT_DISK_FLOORS",
             "host_gpu_free_is_not_model_exclusive_peak": True,
             "model_specific_four_slot_working_set_and_peak": "UNKNOWN",

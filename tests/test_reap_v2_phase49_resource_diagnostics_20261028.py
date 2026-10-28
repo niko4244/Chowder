@@ -197,3 +197,32 @@ def test_red_four_slot_host_reserved_minima_never_pretend_process_peak():
     # Synthetic input cannot satisfy authentic pinned 822-row original source.
     with pytest.raises(ValueError, match="terminal/session"):
         phase49.original_four_slot_watchdog(b'{}\n', {"status": "fake"})
+
+
+def test_original_full1319_source_based_prestart_floor_exceeds_aborted_12_row_estimate():
+    """A stronger envelope comes from 822 real frozen-session host samples.
+
+    These are *host-wide* drops, not isolated native-process allocation nor
+    authority to start an original model on this protected shared machine.
+    """
+    try:
+        report = phase49.audit_preserved()
+    except (OSError, ValueError):
+        pytest.skip("archived original pinned F-drive scientific receipts not mounted")
+    full = report["frozen_four_slot_gsm8k1319_historical_watchdog"]
+    partial = report["original_first200_conservative_prestart_sizing"]
+    assert full["sample_count"] == 822
+    assert full["conservative_full1319_physical_prestart_gib"] == pytest.approx(
+        36.80861282348633
+    )
+    assert full["conservative_full1319_commit_prestart_gib"] == pytest.approx(
+        43.51658248901367
+    )
+    assert full["conservative_full1319_physical_prestart_gib"] > partial[
+        "historical_conservative_first200_ram_start_gib"
+    ]
+    assert full["conservative_full1319_commit_prestart_gib"] > partial[
+        "historical_conservative_first200_commit_start_gib"
+    ]
+    assert full["not_model_attributed_not_execution_approval"] is True
+    assert report["execution_approved"] is False

@@ -295,6 +295,26 @@ def test_receipt_cross_binding_undischarged_postclose_proof_refuses(tmp_path):
         },
         "owned_job_handle_closed_with_kill_on_close": True,
         "post_close_descendant_extinction_independently_witnessed": False,
+        "exit_code": 0, "breaches": [],
+        "pre_cleanup_live_owned_descendant_count": 0,
+        "pre_cleanup_natural_owned_tree_extinction_witnessed": True,
+        "all_private_job_lifetime_processes_source_witnessed": True,
+        "pre_cleanup_private_job_lifetime_accounting": {
+            "total_processes": 3, "active_processes": 0,
+            "total_page_fault_count": 0,
+        },
+        "original_live_job_owned_role_identities": {
+            "root": {"pid": 1001, "birth": 1729000000.0},
+            "server": {"pid": 1002, "birth": 1729000001.0},
+            "evaluator": {"pid": 1003, "birth": 1729000002.0},
+        },
+        "fully_witnessed_native_fit": True,
+        "original_live_job_root_server_evaluator_lineage_witnessed": True,
+        "original_native_fit_source_sha256": "f" * 64,
+        "observations": [{
+            "original_live_owned_job_lineage_status": "OWNER_BOUND_ACTIVE_OBSERVED_ONLY",
+            "original_native_fit_source_status": "NATIVE_SOURCE_FIT_VERIFIED_RUNTIME_ONLY",
+        }],
         "gen0": guard.GEN0_BLOCKED,
     }
     assert (
@@ -320,6 +340,28 @@ def test_receipt_cross_binding_undischarged_postclose_proof_refuses(tmp_path):
     )
     assert good["status"] == "RECEIPTS_CONSISTENT_NOT_SCIENTIFIC_APPROVAL"
     assert good["gen0"]["release_approved"] is False
+    for key, falsified in (
+        ("all_private_job_lifetime_processes_source_witnessed", False),
+        ("pre_cleanup_natural_owned_tree_extinction_witnessed", False),
+        ("original_live_job_root_server_evaluator_lineage_witnessed", False),
+        ("fully_witnessed_native_fit", False),
+        ("pre_cleanup_live_owned_descendant_count", 1),
+        ("exit_code", 84),
+        ("breaches", ["ALREADY_ABORTED"]),
+        ("observations", []),
+        ("pre_cleanup_private_job_lifetime_accounting", {
+            "total_processes": 1, "active_processes": 0,
+            "total_page_fault_count": 0,
+        }),
+    ):
+        bad_result = guard.assess_bound_receipts(
+            initial,
+            {**final, "post_close_descendant_extinction_independently_witnessed": True,
+             key: falsified},
+            study=study, model=MODEL, server=SERVER,
+            output=tmp_path / "out", port=8790,
+        )
+        assert bad_result["status"] == "REFUSED", (key, bad_result)
     bad = guard.assess_bound_receipts(
         initial,
         {**final, "original_offline_source_proof": {"sha256": "0" * 64}},

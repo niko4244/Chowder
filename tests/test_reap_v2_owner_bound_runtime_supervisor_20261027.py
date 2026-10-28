@@ -308,7 +308,7 @@ def test_full_owned_lifecycle_with_injected_native_job_only(
             return [self.pid, 9001] if integrity_fault == "lingering_child" else []
 
         def lifetime_process_counts(self):
-            return {"total_processes": 2 if integrity_fault in ("lingering_child", "missed_transient") else 1,
+            return {"total_processes": 4 if integrity_fault == "missed_transient" else 3,
                     "active_processes": 2 if integrity_fault == "lingering_child" else 0,
                     "total_page_fault_count": 0}
 
@@ -376,8 +376,11 @@ def test_full_owned_lifecycle_with_injected_native_job_only(
         if integrity_fault == "lineage":
             return {"status": "REFUSED", "reasons": ["SYNTHETIC_FOREIGN_OWNED_CHILD"], "roles": {}}
         ledger.full_active_witnessed = True
-        ledger.roles["root"] = (owner.pid, 1234567890.5)
-        ledger.pid_births[owner.pid] = 1234567890.5
+        ledger.roles.update({"root": (owner.pid, 1234567890.5),
+                             "server": (9001, 1234567891.5),
+                             "evaluator": (9002, 1234567892.5)})
+        ledger.pid_births.update({owner.pid: 1234567890.5,
+                                  9001: 1234567891.5, 9002: 1234567892.5})
         return {"status": "OWNER_BOUND_ACTIVE_OBSERVED_ONLY", "reasons": [],
                 "roles": {"root": owner.pid, "server": 9001, "evaluator": 9002}}
     monkeypatch.setattr(lineage, "capture_live_job_lineage", fake_lineage)
@@ -434,12 +437,12 @@ def test_full_owned_lifecycle_with_injected_native_job_only(
         assert out["original_live_job_root_server_evaluator_lineage_witnessed"] is False
     if integrity_fault == "lingering_child":
         if not breach:
-            assert "CHILD_ZERO_WITH_RUNNING_OR_UNVERIFIED_OWNED_DESCENDANTS" in out["breaches"]
+            assert "UNRECOGNIZED_POSTEXIT_JOB_LINEAGE" in out["breaches"]
             assert out["pre_cleanup_live_owned_descendant_count"] == 1
             assert out["pre_cleanup_natural_owned_tree_extinction_witnessed"] is False
     if integrity_fault == "missed_transient" and not breach:
-        assert "OWNED_JOB_UNOBSERVED_TRANSIENT_CHILDREN_OR_CENSUS_DRIFT" in out["breaches"]
-        assert out["pre_cleanup_natural_owned_tree_extinction_witnessed"] is True
+        assert "UNSEEN_JOB_HELPER_LIFETIME_PROCESS" in out["breaches"]
+        assert out["pre_cleanup_natural_owned_tree_extinction_witnessed"] is False
         assert out["all_private_job_lifetime_processes_source_witnessed"] is False
     elif not breach and integrity_fault is None:
         assert out["pre_cleanup_natural_owned_tree_extinction_witnessed"] is True

@@ -201,6 +201,47 @@ def test_real_windows_system32_conhost_child_is_narrowly_allowed(monkeypatch):
         assert "UNEXPECTED_JOB_CHILD" in eval_once(bad)["reasons"]
 
 
+def test_real_os_kernel_directory_not_spoofable_by_inherited_systemroot(monkeypatch):
+    if sys.platform != "win32":
+        pytest.skip("native Windows system directory is an OS-provided identity")
+    native = guard._native_system_directory()
+    assert native is not None and (native / "conhost.exe").is_file()
+    monkeypatch.setenv("SystemRoot", "C:/user-controlled-systemroot")
+    assert guard._native_system_directory() == native
+    observed = {
+        "pid": 4004, "parent": 4001, "job_member": True,
+        "image_path": str(native / "conhost.exe"),
+        "argv": [str(native / "conhost.exe"), "0x4"],
+    }
+    assert guard._frozen_helper(observed, 4001, PORT) == "native_windows_console_host"
+    observed["image_path"] = "C:/user-controlled-systemroot/conhost.exe"
+    assert guard._frozen_helper(observed, 4001, PORT) is None
+
+
+@pytest.mark.parametrize("executable,args,expected", [
+    ("nvidia-smi.exe", ["--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+     "gpu_memory_readonly"),
+    ("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+                        guard._frozen_listener_probe_script(PORT)],
+     "frozen_listener_owner_readonly"),
+])
+def test_read_only_frozen_external_helper_image_must_match_kernel_directory(
+    executable, args, expected,
+):
+    if sys.platform != "win32":
+        pytest.skip("native Windows kernel32 system directory required")
+    directory = guard._native_system_directory()
+    rel = ("WindowsPowerShell/v1.0/powershell.exe" if executable == "powershell.exe"
+           else executable)
+    image = directory / rel
+    assert image.is_file()
+    record = {"pid": 4020, "parent": 4001, "job_member": True,
+              "image_path": str(image), "argv": [str(image), *args]}
+    assert guard._frozen_helper(record, 4001, PORT) == expected
+    record["image_path"] = str(directory / "wrong" / executable)
+    assert guard._frozen_helper(record, 4001, PORT) is None
+
+
 def test_ledger_prevents_role_replacement_and_missing_terminal_history():
     ledger = guard.LineageLedger(root_pid=4001, root_birth=1793000000.0)
     assert (
