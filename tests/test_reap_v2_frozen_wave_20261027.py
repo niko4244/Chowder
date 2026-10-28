@@ -73,9 +73,8 @@ def test_unavailable_models_are_marked_blocked_not_fake_execution(tmp_path: Path
 def test_execution_is_refused_without_direct_fresh_admission(tmp_path: Path, monkeypatch):
     s = wave.STUDIES[0]
     calls = []
-    monkeypatch.setattr(wave, "admit_for_execution", lambda **_: (False, ["ACTIVE_MODEL_SERVER"] ))
     monkeypatch.setattr(wave.subprocess, "run", lambda *a, **k: calls.append((a, k)))
-    with pytest.raises(wave.AdmissionRefused, match="ACTIVE_MODEL_SERVER"):
+    with pytest.raises(wave.AdmissionRefused, match="EXPLICIT_OWNED_RUN"):
         wave.execute(s, model=tmp_path / "model.gguf", output=tmp_path / "fresh",
                      server=tmp_path / "llama-server.exe", port=8795)
     assert not calls
@@ -104,3 +103,71 @@ def test_positive_capacity_probe_is_not_permission_to_launch_model(tmp_path: Pat
     assert observed["arm"] == "q4"
     assert not allowed
     assert "NO_INDEPENDENT_NATIVE_LAUNCH_OWNER_ADMISSION" in reasons
+
+
+def test_explicit_owned_run_calls_only_private_job_supervisor(tmp_path: Path, monkeypatch):
+    from chowder_batch import reap_v2_owner_bound_runtime_supervisor_20261027 as owner
+
+    invocations = []
+    def fake_safe_owner(**kwargs):
+        invocations.append(kwargs)
+        return {"status": "CHILD_EXIT_ZERO_RUNTIME_WITNESSED_ONLY",
+                "gen0": {"status": "BLOCKED", "chosen": None, "release_approved": False}}
+
+    monkeypatch.setattr(owner, "run_frozen_arm", fake_safe_owner)
+    expected = wave.study_for("dense_v2_q4")
+    result = wave.execute(expected, model=tmp_path / "original.gguf",
+                          server=tmp_path / "llama-server.exe",
+                          output=tmp_path / "new-wave", receipt_dir=tmp_path / "receipts",
+                          port=8790, execute_authorized=True)
+    assert result["gen0"]["status"] == "BLOCKED"
+    assert len(invocations) == 1
+    assert invocations[0]["study"] == expected
+    assert invocations[0]["execute_authorized"] is True
+    assert invocations[0]["receipt_dir"] == tmp_path / "receipts"
+    assert not (tmp_path / "new-wave").exists()
+
+
+def test_execute_only_flag_cannot_bypass_independent_owner(tmp_path: Path):
+    with pytest.raises(wave.AdmissionRefused, match="EXPLICIT_OWNED_RUN"):
+        wave.execute(wave.STUDIES[0], model=tmp_path / "missing.gguf",
+                     output=tmp_path / "never_created", server=tmp_path / "missing.exe",
+                     port=8790, receipt_dir=tmp_path, execute_authorized=False)
+    assert not (tmp_path / "never_created").exists()
+
+
+def test_cli_rebinds_identical_structural_frozen_study_to_canonical_module(tmp_path: Path,
+                                                                          monkeypatch):
+    from dataclasses import make_dataclass
+    from chowder_batch import reap_v2_owner_bound_runtime_supervisor_20261027 as owner
+
+    other_type = make_dataclass("OtherModuleStudy", [
+        ("arm", str), ("suite", str), ("limit", int), ("model_sha256", str)
+    ], frozen=True)
+    original = wave.study_for("reap128_v2_q4")
+    separate_class = other_type(original.arm, original.suite, original.limit,
+                                original.model_sha256)
+    handed = []
+
+    def fake_owner(**kw):
+        handed.append(kw["study"])
+        return {"status": "CHILD_EXIT_ZERO_RUNTIME_WITNESSED_ONLY",
+                "gen0": {"status": "BLOCKED", "chosen": None, "release_approved": False}}
+
+    monkeypatch.setattr(owner, "run_frozen_arm", fake_owner)
+    wave.execute(separate_class, model=tmp_path / "model.gguf",
+                 server=tmp_path / "server.exe", output=tmp_path / "new",
+                 receipt_dir=tmp_path, port=8790, execute_authorized=True)
+    assert len(handed) == 1
+    assert type(handed[0]) is wave.Study
+    assert handed[0] == original
+
+
+def test_cli_cannot_normalize_foreign_model_as_original_study(tmp_path: Path):
+    original = wave.study_for("reap128_v2_q4")
+    from dataclasses import replace
+    fake = replace(original, model_sha256="0" * 64)
+    with pytest.raises(wave.AdmissionRefused, match="STUDY_IDENTITY_CHANGED"):
+        wave.execute(fake, model=tmp_path / "model.gguf",
+                     server=tmp_path / "server.exe", output=tmp_path / "new",
+                     receipt_dir=tmp_path, port=8790, execute_authorized=True)

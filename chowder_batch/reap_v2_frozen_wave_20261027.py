@@ -1,11 +1,12 @@
 """Frozen original Q4/Q8/dense/control GSM8K execution wave on a dedicated host.
 
 Plan mode never loads weights or modifies files. An explicit `--execute --arm X`
-request remains REFUSED until an independently validated native launch-owner
-supervisor can safely isolate and stop ONLY its own child without touching
-protected services. The planned original commands are directly executable on
-genuinely qualified dedicated hardware through existing `reap_serve`; merely
-observing memory capacity is not authorization to run them. Preserve native
+request requires `--authorize-owned-run --receipt-dir` and an independently
+qualified original Windows physical host. This routes through the native
+CREATE_SUSPENDED+private Job Object owner supervisor, which authorizes ONLY the
+child process it created and cancels only its Job on pressure or owner drift.
+Its original offline source lock and fresh full-byte model hash must PASS first;
+merely observing memory capacity is not authorization to run. Preserve native
 model weights, benchmark files and services. The
 existing `reap_serve.py`/`reap_eval.py` perform actual independent model load,
 bound live serving receipts, original GSM8K inference and scoring. NEVER
@@ -172,17 +173,35 @@ def admit_for_execution(*, study: Study, model: Path, server: Path, port: int) -
     return False, ["NO_INDEPENDENT_NATIVE_LAUNCH_OWNER_ADMISSION"]
 
 
-def execute(study: Study, *, model: Path, output: Path, server: Path, port: int) -> dict:
+def execute(study: Study, *, model: Path, output: Path, server: Path, port: int,
+            receipt_dir: Path | None = None, execute_authorized: bool = False) -> dict:
+    if execute_authorized is not True or receipt_dir is None:
+        raise AdmissionRefused("EXPLICIT_OWNED_RUN_AND_NEW_RECEIPT_DIRECTORY_REQUIRED")
     validate_fresh_output(output, study.arm)
     assert_frozen_code_identity()
-    allowed, blockers = admit_for_execution(study=study, model=model, server=server, port=port)
-    if not allowed:
-        raise AdmissionRefused("; ".join(blockers))
-    # An unqualified new parent owner may not run unattended even if a future
-    # resource snapshot looks good. The original reap_serve owns and stops its
-    # child, but a separate bounded RAM/commit/KV runtime watcher is still
-    # required to qualify automatic sequential campaign admission.
-    raise AdmissionRefused("native owner-bound launch is not qualified")
+    # `python -m ...` executes this file as __main__; the owner supervisor
+    # imports its canonical chowder_batch module, producing a different Python
+    # Study dataclass *type* despite the same four frozen fields. Rebind only
+    # after exact value-wise source/model/policy validation. Without this,
+    # every correctly authorized native CLI run fails FROZEN_STUDY_DRIFT before
+    # its real RAM/GPU admission is even inspected.
+    from chowder_batch import reap_v2_frozen_wave_20261027 as registered_wave
+
+    registered = registered_wave.study_for(study.arm)
+    if (study.arm, study.suite, study.limit, study.model_sha256) != (
+        registered.arm, registered.suite, registered.limit, registered.model_sha256
+    ):
+        raise AdmissionRefused("REGISTERED_FROZEN_STUDY_IDENTITY_CHANGED")
+    # Deliberately no direct subprocess or launching based on a caller-supplied
+    # admission JSON. The supervisor rereads Windows physical capacity, ports,
+    # GPUs, original model bytes and canonical offline sources before creating
+    # its own private, kill-on-close Job, including the serving wrapper itself.
+    from chowder_batch.reap_v2_owner_bound_runtime_supervisor_20261027 import run_frozen_arm
+
+    return run_frozen_arm(
+        study=registered, model=model, server=server, output=output,
+        receipt_dir=receipt_dir, port=port, execute_authorized=True,
+    )
 
 
 def main() -> int:
@@ -194,6 +213,10 @@ def main() -> int:
     cli.add_argument("--out", type=Path, default=Path("C:/dedicated-reap/eval-wave-v1"))
     cli.add_argument("--port", type=int, default=8790)
     cli.add_argument("--execute", action="store_true")
+    cli.add_argument("--authorize-owned-run", action="store_true",
+                     help="Explicitly authorize only a fresh supervised child on admitted hardware")
+    cli.add_argument("--receipt-dir", type=Path,
+                     help="Existing empty exclusive receipt folder on admitted dedicated host")
     cli.add_argument("--snapshot", type=Path, help="New, exclusive JSON plan path")
     args = cli.parse_args()
     try:
@@ -201,7 +224,9 @@ def main() -> int:
             if args.arm is None or args.model is None:
                 raise AdmissionRefused("--execute requires one --arm and --model")
             result = execute(study_for(args.arm), model=args.model, output=args.out,
-                             server=args.server, port=args.port)
+                             server=args.server, port=args.port,
+                             receipt_dir=args.receipt_dir,
+                             execute_authorized=args.authorize_owned_run)
         else:
             result = plan(lambda arm: args.models_dir / (arm + ".gguf"),
                           output=args.out, server=args.server, port=args.port)
@@ -214,8 +239,8 @@ def main() -> int:
                 file.flush()
                 os.fsync(file.fileno())
         print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
-        return 0 if not args.execute else 2
-    except (AdmissionRefused, OSError, ValueError, TypeError) as exc:
+        return 0 if not args.execute or result.get("status") == "CHILD_EXIT_ZERO_RUNTIME_WITNESSED_ONLY" else 2
+    except (AdmissionRefused, OSError, ValueError, RuntimeError, TypeError) as exc:
         print(json.dumps({"status": "REFUSED_NOT_ADMITTED", "reason": str(exc),
                           "model_executed": False, "gen0": {
                               "status": "BLOCKED", "chosen": None, "release_approved": False}}))
