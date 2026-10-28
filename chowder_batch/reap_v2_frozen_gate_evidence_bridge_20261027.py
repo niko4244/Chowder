@@ -75,6 +75,10 @@ APPROVED_HUMANEVAL_CERTIFICATE_INPUT_SHA256: dict[str, str] = {}
 APPROVED_HISTORICAL_REAP160_REVIEW_SHA256: str | None = None
 APPROVED_HISTORICAL_REAP160_MODEL_SHA256: dict[str, str] = {}
 APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256: dict[str, str] = {}
+# Historical reap_eval._score never wrote eval_session_id into original JSONL.
+# Independently observed per-item native lineage must therefore be separately
+# source-approved; NEVER retrofit or reserialize the immutable scored rows.
+APPROVED_HISTORICAL_ITEM_LINEAGE_SHA256: dict[str, str] = {}
 CERTIFICATE_INPUT_FIELDS = frozenset({
     "capture_path", "witness_path", "capability_path", "broker_path",
     "review_path", "trace_dir", "serve_path", "owner_review_path",
@@ -203,6 +207,64 @@ def _verify_historical_canonical_rows(root: Path) -> None:
                      f"{arm}/{suite}: historical scorer semantics invalid")
 
 
+def _verify_historical_item_lineage(
+    root: Path, arm: str, suite: str, rows: dict, serve: dict, record: dict,
+) -> None:
+    """Join independently source-approved native traces to untouched score rows."""
+    key = f"{arm}/{suite}"
+    pinned = APPROVED_HISTORICAL_ITEM_LINEAGE_SHA256.get(key)
+    declared = record.get("item_lineage_sha256")
+    _require(_hex(pinned) and isinstance(declared, dict)
+             and declared.get(suite) == pinned,
+             f"{key}: independent original native item-lineage approval absent")
+    path = root / arm / f"{suite}.native-lineage.jsonl"
+    _require(path.is_file() and not path.is_symlink(),
+             f"{key}: original native item-lineage trace missing")
+    raw = path.read_bytes()
+    _require(0 < len(raw) <= 4 * 1024 * 1024 and _sha(raw) == pinned,
+             f"{key}: original native item-lineage SHA mismatch")
+    lines = raw.splitlines(keepends=True)
+    _require(len(lines) == len(rows), f"{key}: original native item-lineage incomplete")
+    fields = {"id", "eval_session_id", "gguf_sha256", "server_pid", "server_port",
+              "native_response_sha256", "scored_row_sha256", "completion_tokens",
+              "seconds", "predicted_per_second"}
+    for (task_id, row), line in zip(rows.items(), lines, strict=True):
+        _require(line.endswith(b"\n") and not line.startswith(b"\xef\xbb\xbf")
+                 and b"\r" not in line.rstrip(b"\r\n"),
+                 f"{key}: original native item-lineage framing invalid")
+        try:
+            trace = json.loads(line.decode("utf-8"),
+                               object_pairs_hook=_reject_duplicate_json_keys,
+                               parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite")))
+        except (ValueError, UnicodeError) as exc:
+            raise FrozenEvidenceError(f"{key}: original native item-lineage JSON invalid") from exc
+        scored = json.dumps(row, sort_keys=True, separators=(",", ":"),
+                            ensure_ascii=False, allow_nan=False).encode("utf-8")
+        _require(isinstance(trace, dict) and set(trace) == fields
+                 and trace["id"] == task_id
+                 and trace["eval_session_id"] == serve["eval_session_id"]
+                 and trace["gguf_sha256"] == serve["gguf_sha256"]
+                 and type(trace["server_pid"]) is int
+                 and trace["server_pid"] == serve["server_pid"]
+                 and type(trace["server_port"]) is int
+                 and trace["server_port"] == serve["server_port"]
+                 and isinstance(row.get("text"), str)
+                 and _hex(trace["native_response_sha256"])
+                 and trace["native_response_sha256"] == _sha(row["text"].encode("utf-8"))
+                 and _hex(trace["scored_row_sha256"])
+                 and trace["scored_row_sha256"] == _sha(scored)
+                 and type(trace["completion_tokens"]) is int
+                 and trace["completion_tokens"] == row.get("completion_tokens")
+                 and type(trace["seconds"]) in (float, int)
+                 and math.isfinite(trace["seconds"])
+                 and trace["seconds"] == row.get("seconds")
+                 and (trace["predicted_per_second"] is None
+                      or (type(trace["predicted_per_second"]) in (float, int)
+                          and math.isfinite(trace["predicted_per_second"])))
+                 and trace["predicted_per_second"] == row.get("predicted_per_second"),
+                 f"{key}/{task_id}: original native item-lineage disagrees with score")
+
+
 def _verify_historical_reap160_prerequisite(root: Path) -> None:
     """Require separately pinned native REAP160 evidence before v2 fallback selection.
 
@@ -211,9 +273,22 @@ def _verify_historical_reap160_prerequisite(root: Path) -> None:
     historical *prerequisite* rather than only the arm ultimately chosen.
     This never changes the frozen selector or its fallback order.
     """
-    arms = {"reap160", "reap160_q4", "dense_q4"}
+    # The historical fallback is a *paired* quality/control comparison, not
+    # an isolated REAP160 score. Its dense and random128 Q8 reference rows
+    # must carry independently approved model/session/host provenance too.
+    arms = {"reap160", "dense", "random128", "reap160_q4", "dense_q4"}
+    quality_arms = {"reap160", "dense", "random128"}
     speed_arms = {"reap160_q4", "dense_q4"}
+    expected_lineage = {f"{arm}/{suite}" for arm, suites in (
+        ("reap160", ("gsm8k", "humaneval")),
+        ("dense", ("gsm8k", "humaneval")),
+        ("random128", ("gsm8k",)),
+        ("reap160_q4", ("gsm8k",)),
+        ("dense_q4", ("gsm8k",)),
+    ) for suite in suites}
     _require(_hex(APPROVED_HISTORICAL_REAP160_REVIEW_SHA256)
+             and set(APPROVED_HISTORICAL_ITEM_LINEAGE_SHA256) == expected_lineage
+             and all(_hex(value) for value in APPROVED_HISTORICAL_ITEM_LINEAGE_SHA256.values())
              and set(APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256) == speed_arms
              and all(_hex(value) for value in APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256.values())
              and set(APPROVED_HISTORICAL_REAP160_MODEL_SHA256) == arms
@@ -243,6 +318,8 @@ def _verify_historical_reap160_prerequisite(root: Path) -> None:
              and set(review.get("arms", {})) == arms,
              "historical REAP160 native prerequisite review incomplete")
     for arm, suites in (("reap160", ("gsm8k", "humaneval")),
+                        ("dense", ("gsm8k", "humaneval")),
+                        ("random128", ("gsm8k",)),
                         ("reap160_q4", ("gsm8k",)),
                         ("dense_q4", ("gsm8k",))):
         record = review["arms"][arm]
@@ -269,7 +346,9 @@ def _verify_historical_reap160_prerequisite(root: Path) -> None:
                  and _hex(record.get("physical_host_sha256"))
                  and _hex(record.get("hardware_profile_sha256"))
                  and isinstance(record.get("rows_sha256"), dict)
-                 and set(record["rows_sha256"]) == set(suites),
+                 and set(record["rows_sha256"]) == set(suites)
+                 and isinstance(record.get("item_lineage_sha256"), dict)
+                 and set(record["item_lineage_sha256"]) == set(suites),
                  f"{arm}: historical native model/session/rows provenance incomplete")
         source_rows = {}
         for suite in suites:
@@ -282,9 +361,11 @@ def _verify_historical_reap160_prerequisite(root: Path) -> None:
             expected_n = 200 if arm in speed_arms else (1319 if suite == "gsm8k" else 164)
             rows = reap_select._attested_rows(root, arm, suite, expected_n)
             _require(isinstance(rows, dict)
-                     and all(row.get("eval_session_id") == session
+                     and all(("eval_session_id" not in row
+                              or row["eval_session_id"] == session)
                              for row in rows.values()),
                      f"{arm}/{suite}: historical original per-item serving session mismatch")
+            _verify_historical_item_lineage(root, arm, suite, rows, serve, record)
             source_rows[suite] = rows
         if arm in speed_arms:
             offloaded = serve.get("experts_offloaded")
@@ -315,7 +396,13 @@ def _verify_historical_reap160_prerequisite(root: Path) -> None:
             lines, measured = reap_serve.parse_offload(
                 startup.decode("utf-8", errors="replace")
             )
-            _require(measured == offloaded and serve.get("offload_log_lines") == lines,
+            # parse_offload may infer a count from n_cpu_moe before the server
+            # has finished fitting or loading even one model layer. A count
+            # alone is not evidence that a native model was successfully fit.
+            fit_complete = any("successfully fit" in line.lower() for line in lines)
+            loaded_layers = any(reap_serve._ALL_LAYERS.search(line) for line in lines)
+            _require(fit_complete and loaded_layers
+                     and measured == offloaded and serve.get("offload_log_lines") == lines,
                      f"{arm}: historical native fit/offload log disagrees with serving receipt")
             rows = source_rows["gsm8k"]
             _require(isinstance(rows, dict) and len(rows) == 200
@@ -328,6 +415,13 @@ def _verify_historical_reap160_prerequisite(root: Path) -> None:
                              and row["predicted_per_second"] > 0
                              for row in rows.values()),
                      f"{arm}: historical original first200 native timing rows incomplete")
+    _require(all(
+        review["arms"][arm]["physical_host_sha256"]
+        == review["arms"]["reap160"]["physical_host_sha256"]
+        and review["arms"][arm]["hardware_profile_sha256"]
+        == review["arms"]["reap160"]["hardware_profile_sha256"]
+        for arm in quality_arms
+    ), "historical REAP160/dense/random128 Q8 quality comparator host or profile differs")
     _require(review["arms"]["reap160_q4"]["physical_host_sha256"]
              == review["arms"]["dense_q4"]["physical_host_sha256"]
              and review["arms"]["reap160_q4"]["hardware_profile_sha256"]

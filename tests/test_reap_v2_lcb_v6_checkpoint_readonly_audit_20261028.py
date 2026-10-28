@@ -170,3 +170,42 @@ def test_checkpoint_rejects_duplicate_canonical_json_keys(evidence):
     path.write_bytes(b'{"question_id":"id5","question_id":"forged"}\n')
     with pytest.raises(ValueError, match="duplicate"):
         audit.checkpoint_consistency(*evidence)
+
+
+def test_runtime_python_inventory_must_be_symmetric_and_source_bound(tmp_path):
+    source = tmp_path / "source"
+    runtime = tmp_path / "runtime"
+    original = source / "lcb_runner"
+    copied = runtime / "lcb_runner"
+    original.mkdir(parents=True)
+    copied.mkdir(parents=True)
+    (original / "__init__.py").write_text("# pinned original\n", encoding="utf-8")
+    (copied / "__init__.py").write_text("# pinned original\n", encoding="utf-8")
+    audit.verify_runtime_python_sources(source, runtime)
+
+    # An extra importable runtime module previously escaped the one-way
+    # source inventory comparison despite having no source-controlled peer.
+    extra = copied / "injected.py"
+    extra.write_text("# unreviewed runtime code\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="inventory drift"):
+        audit.verify_runtime_python_sources(source, runtime)
+    extra.unlink()
+
+    # A forged timestamp-valid .pyc can execute despite matching .py sources.
+    cache = copied / "__pycache__"
+    cache.mkdir()
+    (cache / "__init__.cpython-311.pyc").write_bytes(b"unreviewed bytecode")
+    with pytest.raises(ValueError, match="unreviewed importable bytecode"):
+        audit.verify_runtime_python_sources(source, runtime)
+    (cache / "__init__.cpython-311.pyc").unlink()
+    cache.rmdir()
+
+    # An empty/sparse source tree must not make the source loop vacuously pass.
+    (original / "__init__.py").unlink()
+    with pytest.raises(ValueError, match="inventory drift"):
+        audit.verify_runtime_python_sources(source, runtime)
+
+    (original / "__init__.py").write_text("# pinned original\n", encoding="utf-8")
+    (copied / "__init__.py").write_text("# altered runtime\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="runtime source drift"):
+        audit.verify_runtime_python_sources(source, runtime)

@@ -184,6 +184,7 @@ def test_live_production_has_no_security_or_source_approval():
     assert bridge.APPROVED_HISTORICAL_REAP160_REVIEW_SHA256 is None
     assert not bridge.APPROVED_HISTORICAL_REAP160_MODEL_SHA256
     assert not bridge.APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256
+    assert not bridge.APPROVED_HISTORICAL_ITEM_LINEAGE_SHA256
     blocked = bridge.bridge_frozen_evidence("Z:/nonexistent", "Z:/observer.json")
     assert blocked["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
     assert blocked["chosen"] is None and blocked["release_approved"] is False
@@ -373,26 +374,30 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
 ):
     """Synthetic-only positive schema plus original-byte tamper rejection."""
     root, obs = synthetic
-    models = {"reap160": "d" * 64, "reap160_q4": "e" * 64,
+    models = {"reap160": "d" * 64, "dense": "1" * 64,
+              "random128": "2" * 64, "reap160_q4": "e" * 64,
               "dense_q4": bridge.Q4_DENSE_SHA256}
-    sessions = {"reap160": "c" * 32, "reap160_q4": "f" * 32,
+    sessions = {"reap160": "c" * 32, "dense": "3" * 32,
+                "random128": "4" * 32, "reap160_q4": "f" * 32,
                 "dense_q4": "9" * 32}
     for arm, suites in (("reap160", ("gsm8k", "humaneval")),
+                        ("dense", ("gsm8k", "humaneval")),
+                        ("random128", ("gsm8k",)),
                         ("reap160_q4", ("gsm8k",)),
                         ("dense_q4", ("gsm8k",))):
         _write(root / arm / "serve.json", {
             "gguf_sha256": models[arm], "eval_session_id": sessions[arm],
             "flags": reap_select.FROZEN_SERVE_FLAGS, "experts_offloaded": 0,
             "measured_experts_offloaded": 0,
-            "server_pid": {"reap160": 101, "reap160_q4": 102, "dense_q4": 103}[arm],
-            "server_port": {"reap160": 8901, "reap160_q4": 8902,
-                            "dense_q4": 8903}[arm],
+            "server_pid": {"reap160": 101, "dense": 104, "random128": 105,
+                           "reap160_q4": 102, "dense_q4": 103}[arm],
+            "server_port": {"reap160": 8901, "dense": 8904, "random128": 8905,
+                            "reap160_q4": 8902, "dense_q4": 8903}[arm],
         })
         for suite in suites:
             _rows(root, arm, suite, 164 if suite == "humaneval" else
                   (200 if arm.endswith("_q4") else 1319), 0,
-                  source_witness=False, speed=25.0,
-                  session_id=sessions[arm])
+                  source_witness=False, speed=25.0)
     native_logs = {}
     for arm in ("reap160_q4", "dense_q4"):
         native_log = root / arm / "server.log"
@@ -404,6 +409,40 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
         serve["offload_log_lines"] = fit_lines
         _write(serve_path, serve)
         native_logs[arm] = _sha(native_log)
+    # Match the immutable original reap_eval._score writer: scored rows do NOT
+    # contain eval_session_id. Independent external native traces, not edited
+    # historical JSONL, must authenticate their serving-session lineage.
+    lineage_pins = {}
+    lineage_by_arm = {}
+    for arm in models:
+        lineage_by_arm[arm] = {}
+        for suite in (("gsm8k", "humaneval") if arm in ("reap160", "dense")
+                      else ("gsm8k",)):
+            rows = [json.loads(line) for line in
+                    (root / arm / f"{suite}.jsonl").read_text(encoding="utf-8").splitlines()]
+            assert all("eval_session_id" not in row for row in rows)
+            traces = []
+            for row in rows:
+                canonical = json.dumps(row, sort_keys=True, separators=(",", ":"),
+                                       ensure_ascii=False, allow_nan=False).encode("utf-8")
+                traces.append({
+                    "id": row["id"], "eval_session_id": sessions[arm],
+                    "gguf_sha256": models[arm],
+                    "server_pid": {"reap160": 101, "dense": 104, "random128": 105,
+                                   "reap160_q4": 102, "dense_q4": 103}[arm],
+                    "server_port": {"reap160": 8901, "dense": 8904, "random128": 8905,
+                                    "reap160_q4": 8902, "dense_q4": 8903}[arm],
+                    "native_response_sha256": hashlib.sha256(row["text"].encode()).hexdigest(),
+                    "scored_row_sha256": hashlib.sha256(canonical).hexdigest(),
+                    "completion_tokens": row["completion_tokens"],
+                    "seconds": row["seconds"],
+                    "predicted_per_second": row["predicted_per_second"],
+                })
+            trace_path = root / arm / f"{suite}.native-lineage.jsonl"
+            trace_path.write_text("".join(json.dumps(item) + "\n" for item in traces),
+                                  encoding="utf-8")
+            lineage_by_arm[arm][suite] = _sha(trace_path)
+            lineage_pins[f"{arm}/{suite}"] = _sha(trace_path)
     monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
                         reap_select._input_digests(root, obs, None, None))
     review = {
@@ -427,9 +466,10 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
                 "hardware_profile_sha256": "b" * 64,
                 "rows_sha256": {
                     suite: _sha(root / arm / f"{suite}.jsonl")
-                    for suite in (("gsm8k", "humaneval") if arm == "reap160"
+                    for suite in (("gsm8k", "humaneval") if arm in ("reap160", "dense")
                                   else ("gsm8k",))
                 },
+                "item_lineage_sha256": lineage_by_arm[arm],
             }
             for arm in models
         },
@@ -440,11 +480,65 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_MODEL_SHA256", models)
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256",
                         native_logs)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_ITEM_LINEAGE_SHA256",
+                        lineage_pins)
+    bridge._verify_historical_reap160_prerequisite(root)
+    # Even after source reapproval, a forged native response cannot be joined
+    # to the original scored row by session and task ID alone.
+    trace_path = root / "random128" / "gsm8k.native-lineage.jsonl"
+    original_trace = trace_path.read_bytes()
+    trace_path.unlink()
+    with pytest.raises(bridge.FrozenEvidenceError, match="native item-lineage trace missing"):
+        bridge._verify_historical_reap160_prerequisite(root)
+    trace_path.write_bytes(original_trace)
+    traces = [json.loads(line) for line in original_trace.splitlines()]
+    traces[0]["native_response_sha256"] = "0" * 64
+    trace_path.write_text("".join(json.dumps(item) + "\n" for item in traces),
+                          encoding="utf-8")
+    lineage_pins["random128/gsm8k"] = _sha(trace_path)
+    review["arms"]["random128"]["item_lineage_sha256"]["gsm8k"] = _sha(trace_path)
+    _write(path, review)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
+    with pytest.raises(bridge.FrozenEvidenceError, match="native item-lineage disagrees"):
+        bridge._verify_historical_reap160_prerequisite(root)
+    trace_path.write_bytes(original_trace)
+    lineage_pins["random128/gsm8k"] = _sha(trace_path)
+    review["arms"]["random128"]["item_lineage_sha256"]["gsm8k"] = _sha(trace_path)
+    _write(path, review)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
+    bridge._verify_historical_reap160_prerequisite(root)
+    # Historical Q8 reference/control arms are not interchangeable with a
+    # self-reported REAP160 success. Every comparator needs its own source pin.
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_MODEL_SHA256",
+                        {k: v for k, v in models.items() if k != "random128"})
+    with pytest.raises(bridge.FrozenEvidenceError, match="source-owned approval"):
+        bridge._verify_historical_reap160_prerequisite(root)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_MODEL_SHA256", models)
+    review["arms"]["random128"]["physical_host_sha256"] = "0" * 64
+    _write(path, review)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
+    with pytest.raises(bridge.FrozenEvidenceError, match="Q8 quality comparator host"):
+        bridge._verify_historical_reap160_prerequisite(root)
+    review["arms"]["random128"]["physical_host_sha256"] = "a" * 64
+    _write(path, review)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
     bridge._verify_historical_reap160_prerequisite(root)
     # A separately SHA-approved log cannot contradict the declared offload
     # count; the actual original startup text must be parsed, not merely pinned.
     native_log = root / "reap160_q4" / "server.log"
-    native_log.write_text("llama_params_fit: n_cpu_moe = 1\n", encoding="utf-8")
+    # Even a source-reapproved, count-consistent zero is not a completed
+    # original --fit. A lone n_cpu_moe line previously passed this boundary.
+    native_log.write_text("llama_params_fit: n_cpu_moe = 0\n", encoding="utf-8")
+    native_logs["reap160_q4"] = _sha(native_log)
+    review["native_q4_server_log_sha256"] = dict(native_logs)
+    _write(path, review)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256",
+                        dict(native_logs))
+    with pytest.raises(bridge.FrozenEvidenceError, match="native fit/offload log disagrees"):
+        bridge._verify_historical_reap160_prerequisite(root)
+    native_log.write_text("llama_params_fit: successfully fit\n"
+                          "llama_params_fit: n_cpu_moe = 0\n", encoding="utf-8")
     native_logs["reap160_q4"] = _sha(native_log)
     review["native_q4_server_log_sha256"] = dict(native_logs)
     _write(path, review)
@@ -477,7 +571,7 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
                         reap_select._input_digests(root, obs, None, None))
     with pytest.raises(bridge.FrozenEvidenceError, match="per-item serving session mismatch"):
         bridge._verify_historical_reap160_prerequisite(root)
-    rows[0]["eval_session_id"] = sessions["reap160_q4"]
+    rows[0].pop("eval_session_id")
     rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     summary["gsm8k"]["file_sha256"] = _sha(rows_path)
     _write(summary_path, summary)

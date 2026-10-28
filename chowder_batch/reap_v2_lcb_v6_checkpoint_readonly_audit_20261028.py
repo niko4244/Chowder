@@ -46,6 +46,33 @@ def sha(path: Path) -> str:
     return digest.hexdigest()
 
 
+def verify_runtime_python_sources(source: Path, runtime: Path) -> None:
+    """Require matching Python sources and refuse unreviewed runtime bytecode.
+
+    A source-to-runtime one-way walk misses extra runtime modules that Python
+    can import during evaluation. Precompiled bytecode/extensions can also
+    override source imports without a Git-pinned executable-code identity.
+    """
+    original = source / "lcb_runner"
+    copied = runtime / "lcb_runner"
+    if (not original.is_dir() or original.is_symlink()
+            or not copied.is_dir() or copied.is_symlink()):
+        raise ValueError("original evaluator runtime package missing or linked")
+    for tree in (original, copied):
+        if any(path.is_symlink() for path in tree.rglob("*")):
+            raise ValueError("official evaluator runtime contains linked package paths")
+    if any(path.suffix.lower() in {".pyc", ".pyd", ".so", ".dll"}
+           for path in runtime.rglob("*")):
+        raise ValueError("official evaluator runtime contains unreviewed importable bytecode")
+    source_files = {p.relative_to(original): p for p in original.rglob("*.py")}
+    runtime_files = {p.relative_to(copied): p for p in copied.rglob("*.py")}
+    if not source_files or source_files.keys() != runtime_files.keys():
+        raise ValueError("official evaluator runtime Python inventory drift")
+    for relative, file in source_files.items():
+        if sha(file) != sha(runtime_files[relative]):
+            raise ValueError(f"official evaluator runtime source drift: {relative}")
+
+
 def read_jsonl(path: Path) -> list[dict]:
     if not path.is_file() or path.is_symlink():
         raise ValueError(f"missing or linked journal: {path}")
@@ -238,9 +265,7 @@ def inspect(*, include_canonical: bool = False) -> dict:
         raise ValueError("original LiveCodeBench repository source drift")
     if sha(GENERATOR) != GENERATOR_SHA or sha(EVALUATOR) != EVALUATOR_SHA:
         raise ValueError("generation or evaluation driver source drift")
-    for file in (SOURCE / "lcb_runner").rglob("*.py"):
-        if sha(file) != sha(RUNTIME / file.relative_to(SOURCE)):
-            raise ValueError("official evaluator runtime source drift")
+    verify_runtime_python_sources(SOURCE, RUNTIME)
     result = checkpoint_consistency(
         DATA, OUT / "gen_q4.jsonl", OUT / "metrics_q4_checkpoint.json",
         include_canonical=include_canonical,
