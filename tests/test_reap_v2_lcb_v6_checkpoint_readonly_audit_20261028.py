@@ -209,3 +209,31 @@ def test_runtime_python_inventory_must_be_symmetric_and_source_bound(tmp_path):
     (copied / "__init__.py").write_text("# altered runtime\n", encoding="utf-8")
     with pytest.raises(ValueError, match="runtime source drift"):
         audit.verify_runtime_python_sources(source, runtime)
+
+
+@pytest.mark.parametrize("relative", [
+    "sitecustomize.py",
+    "usercustomize.py",
+    "unreviewed.py",
+    "injected.pyw",
+    "startup.pth",
+    "imports.zip",
+    "imports.pyz",
+    "imports.egg",
+    "imports.whl",
+    "legacy.pyo",
+    "lcb_runner/startup.pth",
+    "lcb_runner/imports.zip",
+])
+def test_runtime_refuses_unreviewed_executable_import_paths(tmp_path, relative):
+    source = tmp_path / "source"
+    runtime = tmp_path / "runtime"
+    for tree in (source, runtime):
+        package = tree / "lcb_runner"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("# original\n", encoding="utf-8")
+    injected = runtime / relative
+    injected.parent.mkdir(parents=True, exist_ok=True)
+    injected.write_bytes(b"unreviewed executable import path")
+    with pytest.raises(ValueError, match="unreviewed.*(source|import|bytecode)"):
+        audit.verify_runtime_python_sources(source, runtime)

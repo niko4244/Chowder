@@ -47,23 +47,31 @@ def sha(path: Path) -> str:
 
 
 def verify_runtime_python_sources(source: Path, runtime: Path) -> None:
-    """Require matching Python sources and refuse unreviewed runtime bytecode.
+    """Require matching Python sources and refuse unreviewed executable imports.
 
     A source-to-runtime one-way walk misses extra runtime modules that Python
-    can import during evaluation. Precompiled bytecode/extensions can also
-    override source imports without a Git-pinned executable-code identity.
+    can import during evaluation. Precompiled bytecode, importable archives,
+    startup .pth files and top-level Python modules can override or augment
+    the original source without a Git-pinned executable-code identity.
     """
     original = source / "lcb_runner"
     copied = runtime / "lcb_runner"
     if (not original.is_dir() or original.is_symlink()
-            or not copied.is_dir() or copied.is_symlink()):
+            or not copied.is_dir() or copied.is_symlink()
+            or runtime.is_symlink()):
         raise ValueError("original evaluator runtime package missing or linked")
-    for tree in (original, copied):
+    for tree in (original, runtime):
         if any(path.is_symlink() for path in tree.rglob("*")):
             raise ValueError("official evaluator runtime contains linked package paths")
-    if any(path.suffix.lower() in {".pyc", ".pyd", ".so", ".dll"}
-           for path in runtime.rglob("*")):
-        raise ValueError("official evaluator runtime contains unreviewed importable bytecode")
+    unreviewed_suffixes = {
+        ".pyc", ".pyo", ".pyw", ".pyd", ".so", ".dll",
+        ".zip", ".egg", ".whl", ".pyz", ".pth",
+    }
+    for path in runtime.rglob("*"):
+        if path.suffix.lower() in unreviewed_suffixes:
+            raise ValueError("official evaluator runtime contains unreviewed importable bytecode or archive")
+        if path.suffix.lower() == ".py" and not path.is_relative_to(copied):
+            raise ValueError("official evaluator runtime contains unreviewed Python source outside package")
     source_files = {p.relative_to(original): p for p in original.rglob("*.py")}
     runtime_files = {p.relative_to(copied): p for p in copied.rglob("*.py")}
     if not source_files or source_files.keys() != runtime_files.keys():
