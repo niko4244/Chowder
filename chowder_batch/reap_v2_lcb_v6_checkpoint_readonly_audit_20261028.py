@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 
@@ -60,23 +61,100 @@ def read_jsonl(path: Path) -> list[dict]:
     return rows
 
 
-def checkpoint_consistency(data: Path, generations: Path, metrics: Path) -> dict:
+def _unique_keys(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate source/evidence JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(value: str) -> None:
+    raise ValueError(f"nonfinite source/evidence JSON: {value}")
+
+
+def _stable_jsonl(path: Path, *, source_only: bool = False) -> tuple[list, str]:
+    """Hash and parse each original source/journal byte through ONE open handle.
+
+    Dataset shards are multi-gigabyte; only canonical IDs are retained for
+    source files. A separate sha(path)/read_jsonl(path) permits version swaps.
+    """
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"missing or linked source: {path}")
+    before = path.stat()
+    digest = hashlib.sha256()
+    rows = []
+    with path.open("rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise ValueError("source file replaced before read")
+        for index, raw_line in enumerate(stream, 1):
+            digest.update(raw_line)
+            row = json.loads(
+                raw_line.decode("utf-8"), object_pairs_hook=_unique_keys,
+                parse_constant=_reject_nonfinite,
+            )
+            if not raw_line.endswith(b"\n"):
+                raise ValueError(f"unterminated source/evidence row {index}")
+            if not isinstance(row, dict):
+                raise ValueError(f"non-object source/evidence row {index}")
+            if source_only:
+                qid = row.get("question_id")
+                if not isinstance(qid, str) or not qid:
+                    raise ValueError(f"invalid canonical question ID {index}")
+                rows.append(qid)
+            else:
+                rows.append(row)
+        finished = os.fstat(stream.fileno())
+    after = path.stat()
+    identities = {(s.st_dev, s.st_ino) for s in (before, opened, finished, after)}
+    if (len(identities) != 1 or before.st_size != finished.st_size
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != finished.st_mtime_ns
+            or before.st_mtime_ns != after.st_mtime_ns):
+        raise ValueError("source/evidence file changed during read")
+    return rows, digest.hexdigest()
+
+
+def _stable_json(path: Path) -> tuple[dict, str]:
+    """Return parsed metrics and SHA of the same exact opened bytes."""
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"missing or linked metrics: {path}")
+    before = path.stat()
+    with path.open("rb") as stream:
+        opened = os.fstat(stream.fileno())
+        raw = stream.read()
+        finished = os.fstat(stream.fileno())
+    after = path.stat()
+    if (len({(s.st_dev, s.st_ino) for s in (before, opened, finished, after)}) != 1
+            or before.st_size != len(raw) or after.st_size != len(raw)
+            or before.st_mtime_ns != finished.st_mtime_ns
+            or before.st_mtime_ns != after.st_mtime_ns):
+        raise ValueError("metrics file changed during read")
+    report = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_keys,
+                        parse_constant=_reject_nonfinite)
+    if not isinstance(report, dict):
+        raise ValueError("non-object metrics checkpoint")
+    return report, hashlib.sha256(raw).hexdigest()
+
+
+def checkpoint_consistency(data: Path, generations: Path, metrics: Path, *,
+                           include_canonical: bool = False) -> dict:
     """Verify per-item accounting without running untrusted candidate code."""
     source_ids = []
     source_files = {}
     source_shas = {}
     for name in FILES:
         path = data / name
-        source_shas[name] = sha(path)
-        for row in read_jsonl(path):
-            qid = row["question_id"]
+        ids, source_shas[name] = _stable_jsonl(path, source_only=True)
+        for qid in ids:
             if not isinstance(qid, str) or not qid or qid in source_files:
                 raise ValueError("invalid or duplicate canonical question ID")
             source_ids.append(qid)
             source_files[qid] = name
 
-    gen_sha = sha(generations)
-    generated = read_jsonl(generations)
+    generated, gen_sha = _stable_jsonl(generations)
     if not generated or len(generated) > len(source_ids):
         raise ValueError("empty or excessive model-generation prefix")
     ids = [r.get("question_id") for r in generated]
@@ -92,8 +170,7 @@ def checkpoint_consistency(data: Path, generations: Path, metrics: Path) -> dict
                 or not isinstance(row.get("code"), str)):
             raise ValueError("generation source/prompt/parameter mismatch")
 
-    metrics_sha = sha(metrics)
-    report = json.loads(metrics.read_text(encoding="utf-8"))
+    report, metrics_sha = _stable_json(metrics)
     details = report["detail"]
     n = len(details)
     if (report.get("release") != "release_v6"
@@ -126,7 +203,7 @@ def checkpoint_consistency(data: Path, generations: Path, metrics: Path) -> dict
     accuracy = passed / n
     if not math.isclose(report["metrics"]["pass@1"], accuracy, abs_tol=1e-12):
         raise ValueError("checkpoint aggregate pass@1 contradicts test outcomes")
-    return {
+    result = {
         "schema": SCHEMA,
         "status": "PARTIAL_CHECKPOINT_INTERNAL_CONSISTENCY_ONLY",
         "source_population": len(source_ids),
@@ -146,9 +223,12 @@ def checkpoint_consistency(data: Path, generations: Path, metrics: Path) -> dict
         "chosen": None,
         "release_approved": False,
     }
+    if include_canonical:
+        result["_canonical_source"] = [(qid, source_files[qid]) for qid in source_ids]
+    return result
 
 
-def inspect() -> dict:
+def inspect(*, include_canonical: bool = False) -> dict:
     repo_head = subprocess.check_output(
         ["git", "-C", str(SOURCE), "rev-parse", "HEAD"], timeout=15,
     ).decode().strip()
@@ -163,6 +243,7 @@ def inspect() -> dict:
             raise ValueError("official evaluator runtime source drift")
     result = checkpoint_consistency(
         DATA, OUT / "gen_q4.jsonl", OUT / "metrics_q4_checkpoint.json",
+        include_canonical=include_canonical,
     )
     if tuple(result["source_dataset_sha256"].values()) != DATA_SHAS:
         raise ValueError("original LiveCodeBench dataset source hash drift")

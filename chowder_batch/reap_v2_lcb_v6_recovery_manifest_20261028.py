@@ -77,12 +77,10 @@ def build_inventory(source: list[tuple[str, str]], rows: list[dict], *,
 def inspect() -> dict:
     # This audits the frozen original Git source, six dataset hashes, original
     # generator/evaluator source and independent partial-checkpoint consistency.
-    provenance = transport.inspect()
-    source = [
-        (row["question_id"], name)
-        for name in lcb.FILES
-        for row in lcb.read_jsonl(lcb.DATA / name)
-    ]
+    # Reuse canonical IDs from the independently hashed/parsed same-handle
+    # source audit; do not reopen mutable multi-GB shards without rehashing.
+    provenance = transport.inspect(include_canonical=True)
+    source = provenance.pop("_canonical_source")
     path = lcb.OUT / "gen_q4.jsonl"
     if path.is_symlink() or not path.is_file():
         raise ValueError("original generation journal is not a regular file")

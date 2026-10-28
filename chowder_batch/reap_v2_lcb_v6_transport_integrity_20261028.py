@@ -172,15 +172,14 @@ def classify(source: list[tuple[str, str]], rows: list[dict]) -> dict:
     }
 
 
-def inspect() -> dict:
+def inspect(*, include_canonical: bool = False) -> dict:
     # The existing independent source/metric auditor validates Git identity,
     # all six original dataset SHAs, frozen generator/evaluator SHAs and the
     # official scored prefix. It never runs generated programs.
-    checkpoint = lcb.inspect()
-    source = []
-    for name in lcb.FILES:
-        source.extend((row["question_id"], name)
-                      for row in lcb.read_jsonl(lcb.DATA / name))
+    # The checkpoint auditor hashes and parses each multi-GB canonical shard
+    # through one stable handle. Reopening here reintroduces a source-swap race.
+    checkpoint = lcb.inspect(include_canonical=True)
+    source = checkpoint.pop("_canonical_source")
     raw = (lcb.OUT / "gen_q4.jsonl").read_bytes()
     journal_sha256 = hashlib.sha256(raw).hexdigest()
     if journal_sha256 != checkpoint["generation_journal_sha256"]:
@@ -190,7 +189,7 @@ def inspect() -> dict:
         raise ValueError("official checkpoint includes failed transport cases")
     if lcb.sha(lcb.OUT / "metrics_q4_checkpoint.json") != checkpoint["checkpoint_sha256"]:
         raise ValueError("official checkpoint changed during transport audit")
-    return {
+    result = {
         "schema": SCHEMA,
         **result,
         "generation_journal_sha256": journal_sha256,
@@ -204,6 +203,9 @@ def inspect() -> dict:
         "cpu_code_isolation_independently_attested": False,
         "research_only": True,
     }
+    if include_canonical:
+        result["_canonical_source"] = source
+    return result
 
 
 def _verify_original_journal(journal: Path, expected_sha256: str) -> None:

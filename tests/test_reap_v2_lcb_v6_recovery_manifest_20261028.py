@@ -87,8 +87,9 @@ def test_inspect_refuses_writer_race_without_creating_recovery_artifact(
     monkeypatch.setattr(inventory.lcb, "read_jsonl", lambda _: [
         {"question_id": SOURCE[0][0]},
     ])
-    monkeypatch.setattr(inventory.transport, "inspect", lambda: {
+    monkeypatch.setattr(inventory.transport, "inspect", lambda **_: {
         "generation_journal_sha256": "0" * 64,
+        "_canonical_source": SOURCE,
     })
     with pytest.raises(ValueError, match="changed between"):
         inventory.inspect()
@@ -108,10 +109,11 @@ def test_inspect_refuses_second_hash_drift(tmp_path, monkeypatch):
         {"question_id": SOURCE[0][0]},
     ])
     monkeypatch.setattr(inventory.lcb, "sha", lambda _: "f" * 64)
-    monkeypatch.setattr(inventory.transport, "inspect", lambda: {
+    monkeypatch.setattr(inventory.transport, "inspect", lambda **_: {
         "generation_journal_sha256": digest,
         "unresolved_source_cases": 0,
         "journal_rows": 1,
+        "_canonical_source": SOURCE,
     })
     with pytest.raises(ValueError, match="changed while"):
         inventory.inspect()

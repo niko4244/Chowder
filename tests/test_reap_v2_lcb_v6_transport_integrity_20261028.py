@@ -297,7 +297,9 @@ def test_inspect_rejects_valid_same_length_journal_rewrite_after_checkpoint(
     monkeypatch.setattr(audit.lcb, "DATA", tmp_path)
     monkeypatch.setattr(audit.lcb, "FILES", ("test.jsonl",))
     monkeypatch.setattr(audit.lcb, "read_jsonl", lambda _path: [{"question_id": "a"}])
-    monkeypatch.setattr(audit.lcb, "inspect", lambda: checkpoint)
+    monkeypatch.setattr(audit.lcb, "inspect", lambda **_: {
+        **checkpoint, "_canonical_source": SOURCE,
+    })
     monkeypatch.setattr(audit.lcb, "sha", lambda _path: "checkpoint-hash")
     with pytest.raises(ValueError, match="changed after checkpoint source audit"):
         audit.inspect()
@@ -320,7 +322,9 @@ def test_inspect_retains_same_journal_digest_when_unchanged(
     monkeypatch.setattr(audit.lcb, "DATA", tmp_path)
     monkeypatch.setattr(audit.lcb, "FILES", ("test.jsonl",))
     monkeypatch.setattr(audit.lcb, "read_jsonl", lambda _path: [{"question_id": "a"}])
-    monkeypatch.setattr(audit.lcb, "inspect", lambda: checkpoint)
+    monkeypatch.setattr(audit.lcb, "inspect", lambda **_: {
+        **checkpoint, "_canonical_source": SOURCE,
+    })
     monkeypatch.setattr(audit.lcb, "sha", lambda _path: "checkpoint-hash")
     result = audit.inspect()
     assert result["generation_journal_sha256"] == digest

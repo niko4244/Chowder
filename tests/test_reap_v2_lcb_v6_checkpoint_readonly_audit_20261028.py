@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -120,4 +122,51 @@ def test_rejects_truncated_generation_line(evidence):
 def test_rejects_missing_source_file(evidence):
     (evidence[0] / audit.FILES[3]).unlink()
     with pytest.raises(ValueError, match="missing"):
+        audit.checkpoint_consistency(*evidence)
+
+
+def test_checkpoint_hash_and_metrics_parse_use_identical_bytes(evidence, monkeypatch):
+    """A forged second metrics read must not pair with the original file hash."""
+    metrics = evidence[2]
+    original_digest = hashlib.sha256(metrics.read_bytes()).hexdigest()
+    forged = json.loads(metrics.read_text())
+    forged["metrics"]["pass@1"] = 1.0
+    forged["metrics"]["detail"]["pass@1"] = {str(i): 1.0 for i in range(3)}
+    forged["detail"] = [
+        {"question_id": f"id{i}", "score": [True]} for i in range(3)
+    ]
+    original_read_text = Path.read_text
+
+    def swapped_read_text(self, *args, **kwargs):
+        if self == metrics:
+            return json.dumps(forged)
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", swapped_read_text)
+    result = audit.checkpoint_consistency(*evidence)
+    assert result["correct"] == 1
+    assert result["checkpoint_sha256"] == original_digest
+
+
+def test_checkpoint_canonical_source_never_uses_unhashed_second_read(
+    evidence, monkeypatch,
+):
+    """Unscored source IDs cannot be replaced after a different source SHA."""
+    original_read_jsonl = audit.read_jsonl
+
+    def forged_second_read(path):
+        if path == evidence[0] / audit.FILES[-1]:
+            return [{"question_id": "fabricated-unscored-task"}]
+        return original_read_jsonl(path)
+
+    monkeypatch.setattr(audit, "read_jsonl", forged_second_read)
+    result = audit.checkpoint_consistency(*evidence, include_canonical=True)
+    assert result["_canonical_source"][-1] == ("id5", audit.FILES[-1])
+    assert result["source_population"] == 6
+
+
+def test_checkpoint_rejects_duplicate_canonical_json_keys(evidence):
+    path = evidence[0] / audit.FILES[-1]
+    path.write_bytes(b'{"question_id":"id5","question_id":"forged"}\n')
+    with pytest.raises(ValueError, match="duplicate"):
         audit.checkpoint_consistency(*evidence)
