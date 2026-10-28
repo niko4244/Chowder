@@ -1,6 +1,8 @@
 """Adversarial, CPU-only tests: no candidate code or model server is used."""
 
 import json
+import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -52,7 +54,11 @@ def test_empty_genuine_model_response_is_not_transport_failure():
     lambda r: r.update(question_id="wrong"),
     lambda r: r.update(source_file="test6.jsonl"),
     lambda r: r.update(max_tokens=1024),
+    lambda r: r.update(max_tokens=4096.0),
+    lambda r: r.update(max_tokens=True),
     lambda r: r.update(temperature=0.7),
+    lambda r: r.update(temperature="0.2"),
+    lambda r: r.update(top_p="0.95"),
     lambda r: r.update(prompt_style="other"),
     lambda r: r.update(error=123),
     lambda r: r.update(raw=42),
@@ -69,6 +75,13 @@ def test_rejects_error_with_candidate_text():
     record = row(*SOURCE[0], error="timeout")
     record["code"] = "print('fabricated')"
     with pytest.raises(ValueError, match="candidate text"):
+        audit.classify(SOURCE, [record])
+
+
+def test_success_cannot_claim_extracted_code_from_empty_model_content():
+    record = row(*SOURCE[0])
+    record["raw"] = ""
+    with pytest.raises(ValueError, match="without model response"):
         audit.classify(SOURCE, [record])
 
 
@@ -158,3 +171,53 @@ def test_rejects_duplicate_or_out_of_order_source_id():
 def test_rejects_more_than_source_population():
     with pytest.raises(ValueError, match="excessive"):
         audit.classify(SOURCE, [row(*SOURCE[0])] * 4)
+
+
+def test_atomic_exclusive_transport_snapshot_preserves_existing_certificate(
+    tmp_path: Path,
+):
+    journal = tmp_path / "journal.jsonl"
+    raw = (json.dumps(row(*SOURCE[0])) + "\n").encode()
+    journal.write_bytes(raw)
+    result = {"generation_journal_sha256": hashlib.sha256(raw).hexdigest(),
+              "official_complete_score": None}
+    target = tmp_path / "snapshot.json"
+    audit._seal_exclusive_snapshot(target, journal, result)
+    assert json.loads(target.read_text()) == result
+    assert not list(tmp_path.glob("*.pending-*"))
+    with pytest.raises(FileExistsError):
+        audit._seal_exclusive_snapshot(target, journal, result)
+    assert json.loads(target.read_text()) == result
+
+
+def test_atomic_snapshot_refuses_mutated_journal_without_publication(
+    tmp_path: Path,
+):
+    journal = tmp_path / "journal.jsonl"
+    original = (json.dumps(row(*SOURCE[0])) + "\n").encode()
+    journal.write_bytes(original)
+    result = {"generation_journal_sha256": hashlib.sha256(original).hexdigest()}
+    journal.write_bytes(original + b"additional unverified record\n")
+    target = tmp_path / "unsealed.json"
+    with pytest.raises(ValueError, match="changed before evidence seal"):
+        audit._seal_exclusive_snapshot(target, journal, result)
+    assert not target.exists()
+
+
+def test_atomic_snapshot_link_failure_leaves_no_torn_certificate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    journal = tmp_path / "journal.jsonl"
+    raw = (json.dumps(row(*SOURCE[0])) + "\n").encode()
+    journal.write_bytes(raw)
+    result = {"generation_journal_sha256": hashlib.sha256(raw).hexdigest()}
+
+    def reject_link(_source: Path, _target: Path) -> None:
+        raise OSError("simulated disk full before atomic publication")
+
+    monkeypatch.setattr(audit.os, "link", reject_link)
+    target = tmp_path / "unsealed.json"
+    with pytest.raises(OSError, match="disk full"):
+        audit._seal_exclusive_snapshot(target, journal, result)
+    assert not target.exists()
+    assert not list(tmp_path.glob("*.pending-*"))

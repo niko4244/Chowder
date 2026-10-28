@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,13 @@ def test_missing_explicit_error_key_cannot_be_witnessed_as_success() -> None:
     item = row("a", "test.jsonl")
     del item["error"]
     with pytest.raises(ValueError, match="missing original transport status"):
+        make(encode(item))
+
+
+def test_forged_extracted_code_from_empty_content_cannot_be_witnessed() -> None:
+    item = row("a", "test.jsonl")
+    item["raw"] = ""
+    with pytest.raises(ValueError, match="without model response"):
         make(encode(item))
 
 
@@ -180,6 +188,46 @@ def test_exact_official_python_runtime_copy(tmp_path: Path) -> None:
     (runtime / "lcb_runner" / "eval.py").unlink()
     with pytest.raises(ValueError, match="file set drift"):
         witness.verify_runtime_copy(source, runtime)
+
+
+def test_source_bound_canonical_single_pass_matches_exact_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "test.jsonl"
+    raw = b'{"question_id":"a","input":"first"}\n{"question_id":"b","input":"second"}\n'
+    source.write_bytes(raw)
+    expected = hashlib.sha256(raw).hexdigest()
+
+    def reject_second_read(_path: Path) -> list[dict]:
+        raise AssertionError("source must never be parsed by a second read")
+
+    monkeypatch.setattr(witness.lcb, "read_jsonl", reject_second_read)
+    entries, digest = witness.read_source_bound_canonical(source, "test.jsonl", expected)
+    assert entries == [("a", "test.jsonl"), ("b", "test.jsonl")]
+    assert digest == expected
+    source.write_bytes(raw.replace(b"first", b"other"))
+    with pytest.raises(ValueError, match="SHA drift"):
+        witness.read_source_bound_canonical(source, "test.jsonl", expected)
+
+
+@pytest.mark.parametrize("raw", [
+    b'{"question_id":"a","question_id":"b"}\n',
+    b'{"question_id":"a","nested":{"x":1,"x":2}}\n',
+    b'{"question_id":"a","input":NaN}\n',
+    b'{"question_id":"a"}',
+    b'{"question_id":"a"}\n\n',
+    b'{"question_id":""}\n',
+    b'\xff\n',
+])
+def test_source_bound_canonical_refuses_ambiguous_or_partial_rows(
+    tmp_path: Path, raw: bytes,
+) -> None:
+    source = tmp_path / "test.jsonl"
+    source.write_bytes(raw)
+    with pytest.raises(ValueError):
+        witness.read_source_bound_canonical(
+            source, "test.jsonl", hashlib.sha256(raw).hexdigest(),
+        )
 
 
 def test_unverified_bytecode_is_disclosed_not_execution_attested(tmp_path: Path) -> None:

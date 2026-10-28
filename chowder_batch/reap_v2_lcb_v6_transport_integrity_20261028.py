@@ -11,7 +11,9 @@ import argparse
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import tempfile
 
 from chowder_batch import reap_v2_lcb_v6_checkpoint_readonly_audit_20261028 as lcb
 
@@ -84,13 +86,20 @@ def classify(source: list[tuple[str, str]], rows: list[dict]) -> dict:
                 or row.get("source_file") != filename
                 or row.get("task") != "LCB_generation"
                 or row.get("prompt_style") != "OpenAIChat"
-                or row.get("max_tokens") != 4096
-                or row.get("temperature") != 0.2
-                or row.get("top_p") != 0.95
+                or type(row.get("max_tokens")) is not int
+                or row["max_tokens"] != 4096
+                or type(row.get("temperature")) is not float
+                or row["temperature"] != 0.2
+                or type(row.get("top_p")) is not float
+                or row["top_p"] != 0.95
                 or not isinstance(row.get("code"), str)
                 or not isinstance(row.get("raw"), str)):
             raise ValueError(f"canonical source/prompt/parameters mismatch at {i}")
         if error is None:
+            # The frozen generator obtains code solely from extract_code(raw).
+            # Empty model content cannot yield a nonempty extracted candidate.
+            if not row["raw"] and row["code"]:
+                raise ValueError(f"candidate code without model response at {i}")
             for field in ("prompt_tokens", "completion_tokens"):
                 value = row[field]
                 if value is not None and (type(value) is not int or value < 0):
@@ -166,6 +175,44 @@ def inspect() -> dict:
     }
 
 
+def _verify_original_journal(journal: Path, expected_sha256: str) -> None:
+    """Recheck original evidence bytes and file identity before publication."""
+    if not journal.is_file() or journal.is_symlink():
+        raise ValueError("original generation journal missing or linked")
+    before = journal.stat()
+    with journal.open("rb") as stream:
+        opened = os.fstat(stream.fileno())
+        digest = hashlib.sha256()
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+        finished = os.fstat(stream.fileno())
+    after = journal.stat()
+    identities = {(s.st_dev, s.st_ino) for s in (before, opened, finished, after)}
+    if len(identities) != 1 or digest.hexdigest() != expected_sha256:
+        raise ValueError("original generation journal changed before evidence seal")
+
+
+def _seal_exclusive_snapshot(target: Path, journal: Path, result: dict) -> None:
+    """Publish a complete certificate atomically, never a torn public file."""
+    expected = result["generation_journal_sha256"]
+    _verify_original_journal(journal, expected)
+    pending = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=target.parent, prefix=f".{target.name}.pending-",
+            delete=False,
+        ) as stream:
+            pending = Path(stream.name)
+            stream.write((json.dumps(result, sort_keys=True, indent=2) + "\n").encode())
+            stream.flush()
+            os.fsync(stream.fileno())
+        _verify_original_journal(journal, expected)
+        os.link(pending, target)  # exclusive, atomic, never overwrites
+    finally:
+        if pending is not None:
+            pending.unlink(missing_ok=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path)
@@ -177,8 +224,7 @@ def main() -> int:
             if (not target.is_absolute() or target.exists() or target.is_symlink()
                     or target.parent.resolve() != Path("F:/").resolve()):
                 raise ValueError("new exclusive F: snapshot path required")
-            with target.open("xb") as stream:
-                stream.write((json.dumps(result, sort_keys=True, indent=2) + "\n").encode())
+            _seal_exclusive_snapshot(target, lcb.OUT / "gen_q4.jsonl", result)
         print(json.dumps(result, sort_keys=True, indent=2))
         return 0
     except (OSError, ValueError, KeyError, TypeError) as exc:

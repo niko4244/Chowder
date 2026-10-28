@@ -108,6 +108,44 @@ def inventory_unverified_runtime_artifacts(runtime: Path) -> dict:
     }
 
 
+def read_source_bound_canonical(
+    path: Path, filename: str, expected_sha256: str,
+) -> tuple[list[tuple[str, str]], str]:
+    """Hash and parse the *same* canonical bytes in one bounded-memory pass.
+
+    A separate sha(path) followed by read_jsonl(path) can authenticate one
+    version of a mutable file while consuming a different version. The original
+    LCB source files are also very large, so never load an entire file into RAM.
+    """
+    initial = _regular_unlinked(path)
+    digest = hashlib.sha256()
+    canonical = []
+    with path.open("rb") as stream:
+        if not _same_identity(initial, os.fstat(stream.fileno())):
+            raise ValueError("canonical dataset replaced before source read")
+        for index, raw_line in enumerate(stream, 1):
+            digest.update(raw_line)
+            if not raw_line.endswith(b"\n") or not raw_line.strip():
+                raise ValueError(f"incomplete or blank canonical source row {index}")
+            try:
+                row = json.loads(
+                    raw_line.decode("utf-8"),
+                    object_pairs_hook=transport._unique_object,
+                    parse_constant=transport._reject_nonfinite,
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(f"invalid canonical source row {index}") from exc
+            if not isinstance(row, dict) or not isinstance(row.get("question_id"), str) or not row["question_id"]:
+                raise ValueError(f"invalid canonical question ID at row {index}")
+            canonical.append((row["question_id"], filename))
+        if not _same_identity(initial, os.fstat(stream.fileno())):
+            raise ValueError("canonical dataset replaced during source read")
+    actual = digest.hexdigest()
+    if actual != expected_sha256:
+        raise ValueError(f"original dataset SHA drift: {filename}")
+    return canonical, actual
+
+
 def source_provenance() -> tuple[list[tuple[str, str]], dict]:
     """Independently validate frozen Git, all six datasets and both drivers."""
     head = subprocess.check_output(
@@ -127,13 +165,9 @@ def source_provenance() -> tuple[list[tuple[str, str]], dict]:
     hashes = {}
     for filename, expected in zip(lcb.FILES, lcb.DATA_SHAS, strict=True):
         path = lcb.DATA / filename
-        digest = lcb.sha(path)
-        if digest != expected:
-            raise ValueError(f"original dataset SHA drift: {filename}")
+        source_rows, digest = read_source_bound_canonical(path, filename, expected)
         hashes[filename] = digest
-        canonical.extend(
-            (row["question_id"], filename) for row in lcb.read_jsonl(path)
-        )
+        canonical.extend(source_rows)
     if len(canonical) != 1055 or len({item[0] for item in canonical}) != 1055:
         raise ValueError("original canonical task population mismatch")
     return canonical, {
