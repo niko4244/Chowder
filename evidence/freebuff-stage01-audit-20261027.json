@@ -1,0 +1,267 @@
+{
+  "reap_gen0": {
+    "chosen": null,
+    "release_approved": false,
+    "status": "BLOCKED"
+  },
+  "schema": "chowder-freebuff-stage01-external-source-locked-audit-v1",
+  "scope": "archived October 14 codec methodology holdouts only; not original REAP128_v2 or its eleven frontiers",
+  "stage0": {
+    "ceiling_seconds": 7200,
+    "duplicated_dense_block_labels": [
+      0,
+      27
+    ],
+    "holdout_items_per_domain": 48,
+    "manifest_integrity_note": "Manifest verified flags/source hashes observed; large serialized model payloads were not independently rehashed.",
+    "model": "Qwen2.5-1.5B-Instruct (dense; NOT REAP128_v2)",
+    "raw_rows": 864,
+    "sha256": {
+      "allocation_plan.json": "e3b8e5ffd6a246ee3c6e8bcf44c7f4a5ba5ebbd62fa58d0497353d2c7159b038",
+      "arm-int8/arm_manifest.json": "a4189aa1069d5419a0f0f7d2a80f6e41562bbb6366c34470c07ac82b3c1c0ed9",
+      "arm-nf4/arm_manifest.json": "ac1d31872ac7e5f64112e99f54e2e5387906ac525a988a992cacd29d1ef8af34",
+      "block_rate_curves.json": "6397b93cfda076906038113ee19a7aa3ab4d2023b5a05e2bc399438652c9abf8",
+      "blocks.json": "b4673a87b72ce537c66c16d96fd5fa8552118e9ee7d58c67933a281f716051bd",
+      "rows.jsonl": "48676aedb333fb5a8b8c4bee94182eb796e83ff3c688bf9537b145adc4f4e362",
+      "stage_0_report.json": "aa8fe621eb8ee5f5fc4158e3b4b4ddd62f1dd468dec43536c8017dd59cf4c0ec",
+      "suites.json": "18f65891dbbd9895474393e87daba2b769df9a2fce9d6f05478eb83f892fcea1"
+    },
+    "source": "G:/freebuff-stage0/run",
+    "status": "completed_holdout_with_runtime_ceiling_failure",
+    "summary_scores": [
+      {
+        "codec": "bf16",
+        "correct": 19,
+        "domain": "gsm8k-numeric",
+        "expert": 0,
+        "layer": 0,
+        "total": 48
+      },
+      {
+        "codec": "int8",
+        "correct": 20,
+        "domain": "gsm8k-numeric",
+        "expert": 0,
+        "layer": 0,
+        "total": 48
+      },
+      {
+        "codec": "nf4",
+        "correct": 18,
+        "domain": "gsm8k-numeric",
+        "expert": 0,
+        "layer": 0,
+        "total": 48
+      },
+      {
+        "codec": "bf16",
+        "correct": 7,
+        "domain": "math500-numeric",
+        "expert": 0,
+        "layer": 0,
+        "total": 48
+      },
+      {
+        "codec": "int8",
+        "correct": 8,
+        "domain": "math500-numeric",
+        "expert": 0,
+        "layer": 0,
+        "total": 48
+      },
+      {
+        "codec": "nf4",
+        "correct": 8,
+        "domain": "math500-numeric",
+        "expert": 0,
+        "layer": 0,
+        "total": 48
+      },
+      {
+        "codec": "bf16",
+        "correct": 1,
+        "domain": "mmlu-lettered",
+        "expert": 0,
+        "layer": 0,
+        "total": 48
+      },
+      {
+        "codec": "int8",
+        "correct": 1,
+        "domain": "mmlu-lettered",
+        "expert": 0,
+        "layer": 0,
+        "total": 48
+      },
+      {
+        "codec": "nf4",
+        "correct": 1,
+        "domain": "mmlu-lettered",
+        "expert": 0,
+        "layer": 0,
+        "total": 48
+      }
+    ],
+    "unique_logical_model_domain_codec_items": 432,
+    "wall_seconds": 7815.2
+  },
+  "stage1": {
+    "baseline_rows": 2304,
+    "completed_altered_arms": [
+      "pruned-l8e54",
+      "crit2bit-l8e54",
+      "pruned-l8e49"
+    ],
+    "derived_subset_rows_not_additional_tests": 432,
+    "frozen_block_count": 16,
+    "fully_paired_two_codec_experts": [
+      54
+    ],
+    "global_allocation": "refused_no_feasible_plan",
+    "global_target_bits": 1.0,
+    "holdout_items_per_domain": 48,
+    "model": "allenai/OLMoE-1B-7B-0924 (NOT REAP128_v2)",
+    "post_estate_decode_profile": "exit_1",
+    "raw_rows": 2736,
+    "real_width_moe_block_profile": "exit_139_segmentation_fault",
+    "sha256": {
+      "../calibration/corpus_build_report.json": "40e339b74b331540b12497614496f19246faae7613c742500b54a8de205288b9",
+      "../criticality.json": "a8f7748a55b3e1cd27d596ef869429182952bc3f137aae664630f7c92e2c9c48",
+      "../finisher.log": "08ad0256c19d4bb50c924683cbc42544a4e72d2909b73c4989533cfe89b3c0fb",
+      "../profiler.log": "babacdd1d9179441cf159469cabf6c32e7e703584a88102c53ef1f204f56d4d2",
+      "block_rate_curves.json": "be0c46be888fae8ae2f7e8d5ab3a650cee83bc7eb9441cb13ab9d2c54fd99280",
+      "blocks.json": "2b1bf4c788c9dc70f23a6b15065623c9db391d0d4b534f4b9ed6423372c39c6c",
+      "blocks_partial.json": "4539fedb29e8496a0e9654ab2c29df46dedcf89e6b16dd4dc932c4874a6cec8e",
+      "ledger.jsonl": "78cef1e07014c9d1a8e5f82dca69d4d571af0c7adfd4603919b9a22847ce7f51",
+      "rows.jsonl": "55ecaf2b3ed396dfc68d81748bb1c3404a3f04198a689a08aa22b75cd5c43028",
+      "rows_partial_derived.jsonl": "8b383bb6e8d54b67a5fd68dffe0d564a791106a615828d46ff185c7e02eeda91"
+    },
+    "source": "G:/freebuff-stage1/run",
+    "started_without_scored_rows": [
+      "crit2bit-l8e49"
+    ],
+    "status": "incomplete_campaign_no_global_allocation_or_verified_native_profile",
+    "summary_scores_measured_blocks": [
+      {
+        "codec": "bf16",
+        "correct": 1,
+        "domain": "gsm8k-numeric",
+        "expert": 49,
+        "layer": 8,
+        "total": 48
+      },
+      {
+        "codec": "pruned",
+        "correct": 2,
+        "domain": "gsm8k-numeric",
+        "expert": 49,
+        "layer": 8,
+        "total": 48
+      },
+      {
+        "codec": "bf16",
+        "correct": 4,
+        "domain": "math500-numeric",
+        "expert": 49,
+        "layer": 8,
+        "total": 48
+      },
+      {
+        "codec": "pruned",
+        "correct": 3,
+        "domain": "math500-numeric",
+        "expert": 49,
+        "layer": 8,
+        "total": 48
+      },
+      {
+        "codec": "bf16",
+        "correct": 0,
+        "domain": "mmlu-lettered",
+        "expert": 49,
+        "layer": 8,
+        "total": 48
+      },
+      {
+        "codec": "pruned",
+        "correct": 0,
+        "domain": "mmlu-lettered",
+        "expert": 49,
+        "layer": 8,
+        "total": 48
+      },
+      {
+        "codec": "bf16",
+        "correct": 1,
+        "domain": "gsm8k-numeric",
+        "expert": 54,
+        "layer": 8,
+        "total": 48
+      },
+      {
+        "codec": "crit2bit",
+        "correct": 1,
+        "domain": "gsm8k-numeric",
+        "expert": 54,
+        "layer": 8,
+        "total": 48
+      },
+      {
+        "codec": "pruned",
+        "correct": 1,
+        "domain": "gsm8k-numeric",
+        "expert": 54,
+        "layer": 8,
+        "total": 48
+      },
+      {
+        "codec": "bf16",
+        "correct": 4,
+        "domain": "math500-numeric",
+        "expert": 54,
+        "layer": 8,
+        "total": 48
+      },
+      {
+        "codec": "crit2bit",
+        "correct": 2,
+        "domain": "math500-numeric",
+        "expert": 54,
+        "layer": 8,
+        "total": 48
+      },
+      {
+        "codec": "pruned",
+        "correct": 5,
+        "domain": "math500-numeric",
+        "expert": 54,
+        "layer": 8,
+        "total": 48
+      },
+      {
+        "codec": "bf16",
+        "correct": 0,
+        "domain": "mmlu-lettered",
+        "expert": 54,
+        "layer": 8,
+        "total": 48
+      },
+      {
+        "codec": "crit2bit",
+        "correct": 0,
+        "domain": "mmlu-lettered",
+        "expert": 54,
+        "layer": 8,
+        "total": 48
+      },
+      {
+        "codec": "pruned",
+        "correct": 0,
+        "domain": "mmlu-lettered",
+        "expert": 54,
+        "layer": 8,
+        "total": 48
+      }
+    ]
+  }
+}
