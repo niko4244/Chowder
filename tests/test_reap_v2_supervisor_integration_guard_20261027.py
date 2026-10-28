@@ -329,7 +329,7 @@ def test_receipt_cross_binding_undischarged_postclose_proof_refuses(tmp_path):
             port=8790,
         )["reasons"]
     )
-    good = guard.assess_bound_receipts(
+    no_longer_missing_extinction = guard.assess_bound_receipts(
         initial,
         {**final, "post_close_descendant_extinction_independently_witnessed": True},
         study=study,
@@ -338,8 +338,13 @@ def test_receipt_cross_binding_undischarged_postclose_proof_refuses(tmp_path):
         output=tmp_path / "out",
         port=8790,
     )
-    assert good["status"] == "RECEIPTS_CONSISTENT_NOT_SCIENTIFIC_APPROVAL"
-    assert good["gen0"]["release_approved"] is False
+    # Extinction alone is insufficient: this legacy fixture has no original
+    # completion-port source or native event journal, both now mandatory.
+    assert no_longer_missing_extinction["status"] == "REFUSED"
+    assert "OWNED_TREE_EXTINCTION_UNVERIFIED" not in no_longer_missing_extinction["reasons"]
+    assert "ORIGINAL_PRIVATE_JOB_EVENT_SOURCE_REQUIRED" in no_longer_missing_extinction["reasons"]
+    assert "ORIGINAL_PRIVATE_JOB_EVENT_JOURNAL_ABSENT" in no_longer_missing_extinction["reasons"]
+    assert no_longer_missing_extinction["gen0"]["release_approved"] is False
     for key, falsified in (
         ("all_private_job_lifetime_processes_source_witnessed", False),
         ("pre_cleanup_natural_owned_tree_extinction_witnessed", False),
@@ -447,6 +452,23 @@ def test_phase51_independent_receipt_replay_requires_kernel_events_and_source_ex
         )
     assert evaluate(terminal)["status"] == "RECEIPTS_CONSISTENT_NOT_SCIENTIFIC_APPROVAL"
     import copy
+    # The original Windows supervisor ALWAYS requires the native completion
+    # port. Removing or falsifying that source requirement must not turn a
+    # forged/missing event journal into a consistent original-run receipt.
+    for invalid in ("missing", None, False, 0, "false"):
+        forged_start = copy.deepcopy(start)
+        if invalid == "missing":
+            del forged_start["native_job_completion_port_required"]
+        else:
+            forged_start["native_job_completion_port_required"] = invalid
+        forged_terminal = copy.deepcopy(terminal)
+        forged_terminal["original_private_job_notification_journal"] = None
+        rejected = guard.assess_bound_receipts(
+            forged_start, forged_terminal, study=study, model=MODEL,
+            server=SERVER, output=out, port=8790,
+        )
+        assert rejected["status"] == "REFUSED", (invalid, rejected)
+        assert "ORIGINAL_PRIVATE_JOB_EVENT_SOURCE_REQUIRED" in rejected["reasons"]
     forged = copy.deepcopy(terminal)
     forged["original_private_job_notification_journal"]["births"][1003]["argv"][-1] = "999"
     assert "PRIVATE_JOB_EVENT_SOURCE_REPLAY_REFUSED" in evaluate(forged)["reasons"]
