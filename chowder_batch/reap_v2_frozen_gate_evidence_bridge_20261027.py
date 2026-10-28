@@ -76,12 +76,25 @@ def _hex(value: object, width: int = 64) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{" + str(width) + r"}", value) is not None
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict:
+    """Refuse ambiguous independent receipts, including nested duplicate keys."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate independent receipt JSON key: {key}")
+        result[key] = value
+    return result
+
+
 def _json_file(path: Path, *, max_bytes: int = 512 * 1024) -> dict:
     _require(path.is_file() and not path.is_symlink(), f"missing independent receipt: {path.name}")
     _require(0 < path.stat().st_size <= max_bytes, "independent receipt size invalid")
     try:
-        result = json.loads(path.read_bytes().decode("utf-8"),
-                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite")))
+        result = json.loads(
+            path.read_bytes().decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite")),
+        )
     except (ValueError, UnicodeError) as exc:
         raise FrozenEvidenceError("independent receipt JSON invalid") from exc
     _require(isinstance(result, dict), "independent receipt must be a JSON object")

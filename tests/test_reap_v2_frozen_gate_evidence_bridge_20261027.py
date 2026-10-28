@@ -25,6 +25,30 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+@pytest.mark.parametrize("payload", [
+    '{"schema":"approved","schema":"denied"}',
+    '{"schema":"approved","nested":{"status":"approved","status":"denied"}}',
+    '{"schema":"approved","arms":[{"owner":1,"owner":2}]}',
+    '{"schema":"approved","count":NaN}',
+    '{"schema":"approved","count":Infinity}',
+])
+def test_independent_receipt_json_rejects_ambiguous_keys_and_nonfinite(
+    tmp_path: Path, payload: str,
+):
+    path = tmp_path / "independent-review.json"
+    path.write_text(payload, encoding="utf-8")
+    with pytest.raises(bridge.FrozenEvidenceError, match="independent receipt JSON invalid"):
+        bridge._json_file(path)
+
+
+def test_independent_receipt_json_preserves_unambiguous_nested_receipts(
+    tmp_path: Path,
+):
+    path = tmp_path / "independent-review.json"
+    path.write_text('{"arms":{"q8":{"approved":true}},"count":164}', encoding="utf-8")
+    assert bridge._json_file(path) == {"arms": {"q8": {"approved": True}}, "count": 164}
+
+
 def _rows(root, arm, suite, n, failures, *, source_witness, speed=0.0):
     folder = root / arm
     folder.mkdir(exist_ok=True)
