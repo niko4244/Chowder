@@ -11,13 +11,16 @@ SOURCE = [("a", "test.jsonl"), ("b", "test.jsonl"), ("c", "test2.jsonl")]
 
 
 def row(qid, filename, *, error=None, code="print(1)"):
-    return {
+    result = {
         "question_id": qid, "source_file": filename,
         "task": "LCB_generation", "prompt_style": "OpenAIChat",
         "max_tokens": 4096, "temperature": 0.2, "top_p": 0.95,
         "code": "" if error else code, "raw": "" if error else code,
-        "finish_reason": None if error else "stop", "error": error,
+        "error": error, "elapsed_s": 1.0,
     }
+    if error is None:
+        result.update(finish_reason="stop", prompt_tokens=10, completion_tokens=20)
+    return result
 
 
 def test_transport_errors_are_missing_not_incorrect():
@@ -66,6 +69,46 @@ def test_rejects_error_with_candidate_text():
     record = row(*SOURCE[0], error="timeout")
     record["code"] = "print('fabricated')"
     with pytest.raises(ValueError, match="candidate text"):
+        audit.classify(SOURCE, [record])
+
+
+@pytest.mark.parametrize("key", [
+    "error", "finish_reason", "prompt_tokens", "completion_tokens", "elapsed_s",
+])
+def test_missing_mandatory_success_field_never_counts_as_model_response(key):
+    record = row(*SOURCE[0])
+    del record[key]
+    with pytest.raises(ValueError):
+        audit.classify(SOURCE, [record])
+
+
+@pytest.mark.parametrize("key", ["error", "elapsed_s"])
+def test_missing_mandatory_failure_field_never_counts_as_response(key):
+    record = row(*SOURCE[0], error="timeout")
+    del record[key]
+    with pytest.raises(ValueError):
+        audit.classify(SOURCE, [record])
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda r: r.update(prompt_tokens=True),
+    lambda r: r.update(completion_tokens=-1),
+    lambda r: r.update(elapsed_s=float("nan")),
+    lambda r: r.update(elapsed_s=-1.0),
+    lambda r: r.update(elapsed_s="1.0"),
+    lambda r: r.update(unexpected_field="unattested"),
+])
+def test_nonoriginal_success_field_values_or_extras_refused(mutation):
+    record = row(*SOURCE[0])
+    mutation(record)
+    with pytest.raises(ValueError):
+        audit.classify(SOURCE, [record])
+
+
+def test_failure_cannot_claim_success_only_fields():
+    record = row(*SOURCE[0], error="timeout")
+    record.update(finish_reason="stop", prompt_tokens=10, completion_tokens=20)
+    with pytest.raises(ValueError, match="field set mismatch"):
         audit.classify(SOURCE, [record])
 
 

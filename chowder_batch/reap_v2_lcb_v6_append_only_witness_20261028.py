@@ -23,6 +23,10 @@ from chowder_batch import reap_v2_lcb_v6_transport_integrity_20261028 as transpo
 
 SCHEMA = "chowder.reap-v2-lcb-v6-live-append-only-prefix-witness.v1"
 MAX_INFLIGHT_TAIL = 1024 * 1024
+IMPORTABLE_NON_SOURCE_SUFFIXES = frozenset({
+    ".pyc", ".pyo", ".pyd", ".so", ".dll", ".zip", ".egg", ".whl",
+    ".pyz", ".pth",
+})
 
 
 def _sha_bytes(data: bytes) -> str:
@@ -72,7 +76,7 @@ def verify_append_only(prefix: bytes, subsequent: bytes) -> int:
 
 
 def verify_runtime_copy(source: Path, runtime: Path) -> int:
-    """Match the entire executable Python runtime, not just known source files."""
+    """Match all .py source files; this does NOT attest executable bytecode."""
     source_files = {
         path.relative_to(source) for path in (source / "lcb_runner").rglob("*.py")
     }
@@ -83,6 +87,25 @@ def verify_runtime_copy(source: Path, runtime: Path) -> int:
         if lcb.sha(source / relative) != lcb.sha(runtime / relative):
             raise ValueError("official evaluator runtime SHA drift")
     return len(source_files)
+
+
+def inventory_unverified_runtime_artifacts(runtime: Path) -> dict:
+    """Disclose importable non-.py files excluded from source-only parity.
+
+    Their hashes describe observed bytes, not which code an evaluator loaded.
+    Interpreter identity, import paths, environment and sandbox remain unproven.
+    """
+    artifacts = {}
+    for path in sorted(runtime.rglob("*")):
+        if path.suffix.lower() in IMPORTABLE_NON_SOURCE_SUFFIXES:
+            if not path.is_file() or path.is_symlink():
+                raise ValueError("unverified runtime importable artifact is linked")
+            artifacts[path.relative_to(runtime).as_posix()] = lcb.sha(path)
+    return {
+        "unverified_importable_non_source_artifact_count": len(artifacts),
+        "unverified_importable_non_source_artifact_sha256": artifacts,
+        "runtime_execution_provenance_independently_attested": False,
+    }
 
 
 def source_provenance() -> tuple[list[tuple[str, str]], dict]:
@@ -119,6 +142,9 @@ def source_provenance() -> tuple[list[tuple[str, str]], dict]:
         "generator_source_sha256": lcb.GENERATOR_SHA,
         "evaluator_source_sha256": lcb.EVALUATOR_SHA,
         "runtime_python_files_cross_hashed": runtime_count,
+        **inventory_unverified_runtime_artifacts(lcb.RUNTIME),
+        "source_non_python_importable_artifacts_unverified":
+            inventory_unverified_runtime_artifacts(lcb.SOURCE / "lcb_runner"),
         "partial_checkpoint_sha256_not_a_score": lcb.sha(
             lcb.OUT / "metrics_q4_checkpoint.json"
         ),

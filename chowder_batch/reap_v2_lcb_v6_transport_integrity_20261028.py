@@ -10,11 +10,19 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 
 from chowder_batch import reap_v2_lcb_v6_checkpoint_readonly_audit_20261028 as lcb
 
 SCHEMA = "chowder.reap-v2-lcb-v6-transport-integrity.v1"
+BASE_ROW_KEYS = frozenset({
+    "question_id", "source_file", "task", "prompt_style", "max_tokens",
+    "temperature", "top_p", "raw", "code", "error", "elapsed_s",
+})
+SUCCESS_ROW_KEYS = BASE_ROW_KEYS | {
+    "finish_reason", "prompt_tokens", "completion_tokens",
+}
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict:
@@ -62,6 +70,15 @@ def classify(source: list[tuple[str, str]], rows: list[dict]) -> dict:
     nonerror_empty = 0
     transport_failures = 0
     for i, row in enumerate(rows):
+        if not isinstance(row, dict) or "error" not in row:
+            raise ValueError(f"missing original transport status at {i}")
+        error = row["error"]
+        required_keys = SUCCESS_ROW_KEYS if error is None else BASE_ROW_KEYS
+        if set(row) != required_keys:
+            raise ValueError(f"original generation row field set mismatch at {i}")
+        elapsed = row["elapsed_s"]
+        if type(elapsed) is not float or not math.isfinite(elapsed) or elapsed < 0:
+            raise ValueError(f"invalid original generation elapsed time at {i}")
         qid, filename = source[i]
         if (row.get("question_id") != qid
                 or row.get("source_file") != filename
@@ -73,8 +90,11 @@ def classify(source: list[tuple[str, str]], rows: list[dict]) -> dict:
                 or not isinstance(row.get("code"), str)
                 or not isinstance(row.get("raw"), str)):
             raise ValueError(f"canonical source/prompt/parameters mismatch at {i}")
-        error = row.get("error")
         if error is None:
+            for field in ("prompt_tokens", "completion_tokens"):
+                value = row[field]
+                if value is not None and (type(value) is not int or value < 0):
+                    raise ValueError(f"invalid original model token usage at {i}")
             if first_error is not None:
                 successful_after_error += 1
             if not row["code"].strip():

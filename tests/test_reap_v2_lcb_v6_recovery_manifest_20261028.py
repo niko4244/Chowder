@@ -14,13 +14,16 @@ SHA = "a" * 64
 
 
 def row(qid, filename, *, error=None, code="print(1)"):
-    return {
+    result = {
         "question_id": qid, "source_file": filename,
         "task": "LCB_generation", "prompt_style": "OpenAIChat",
         "max_tokens": 4096, "temperature": 0.2, "top_p": 0.95,
         "code": "" if error else code, "raw": "" if error else code,
-        "finish_reason": None if error else "stop", "error": error,
+        "error": error, "elapsed_s": 1.0,
     }
+    if error is None:
+        result.update(finish_reason="stop", prompt_tokens=10, completion_tokens=20)
+    return result
 
 
 def test_partition_never_conflates_missing_with_incorrect():
@@ -49,6 +52,13 @@ def test_empty_extracted_code_is_still_model_response():
                                        journal_sha256=SHA)
     assert len(report["responded_original_session_unattested"]) == 1
     assert not report["failed_transport_not_model_answers"]
+
+
+def test_missing_error_key_cannot_diverge_from_transport_witness():
+    item = row(*SOURCE[0])
+    del item["error"]
+    with pytest.raises(ValueError, match="missing original transport status"):
+        inventory.build_inventory(SOURCE, [item], journal_sha256=SHA)
 
 
 @pytest.mark.parametrize("source,rows,digest", [
@@ -104,3 +114,79 @@ def test_inspect_refuses_second_hash_drift(tmp_path, monkeypatch):
     })
     with pytest.raises(ValueError, match="changed while"):
         inventory.inspect()
+
+
+def _seal_fixture(tmp_path):
+    journal = tmp_path / "original.jsonl"
+    raw = (json.dumps(row(*SOURCE[0])) + "\n").encode("utf-8")
+    journal.write_bytes(raw)
+    result = inventory.build_inventory(
+        SOURCE, [row(*SOURCE[0])], journal_sha256=hashlib.sha256(raw).hexdigest(),
+    )
+    return journal, raw, result
+
+
+def test_exclusive_recovery_seal_is_atomic_and_never_overwrites(tmp_path):
+    journal, raw, result = _seal_fixture(tmp_path)
+    target = tmp_path / "sealed.json"
+    inventory._seal_exclusive_inventory(target, journal, result)
+    assert json.loads(target.read_text(encoding="utf-8")) == result
+    assert journal.read_bytes() == raw
+    assert not list(tmp_path.glob(".*.pending-*"))
+    original = target.read_bytes()
+    with pytest.raises(FileExistsError):
+        inventory._seal_exclusive_inventory(target, journal, result)
+    assert target.read_bytes() == original
+    assert not list(tmp_path.glob(".*.pending-*"))
+
+
+def test_exclusive_recovery_seal_refuses_changed_journal_before_publish(
+    tmp_path, monkeypatch,
+):
+    journal, raw, result = _seal_fixture(tmp_path)
+    original_verify = inventory._verify_complete_journal
+    calls = 0
+
+    def change_after_first_verification(path, expected_sha256):
+        nonlocal calls
+        identity = original_verify(path, expected_sha256)
+        calls += 1
+        if calls == 1:
+            journal.write_bytes(raw + b"unauthorized append")
+        return identity
+
+    monkeypatch.setattr(inventory, "_verify_complete_journal",
+                        change_after_first_verification)
+    target = tmp_path / "must-not-exist.json"
+    with pytest.raises(ValueError, match="changed before evidence seal"):
+        inventory._seal_exclusive_inventory(target, journal, result)
+    assert calls == 1
+    assert not target.exists()
+    assert not list(tmp_path.glob(".*.pending-*"))
+
+
+def test_exclusive_recovery_seal_refuses_publication_error_without_partial_file(
+    tmp_path, monkeypatch,
+):
+    journal, raw, result = _seal_fixture(tmp_path)
+
+    def fail_link(_source, _target):
+        raise OSError("publication refused")
+
+    monkeypatch.setattr(inventory.os, "link", fail_link)
+    target = tmp_path / "must-not-exist.json"
+    with pytest.raises(OSError, match="publication refused"):
+        inventory._seal_exclusive_inventory(target, journal, result)
+    assert journal.read_bytes() == raw
+    assert not target.exists()
+    assert not list(tmp_path.glob(".*.pending-*"))
+
+
+def test_exclusive_recovery_seal_rejects_nonblocked_certificate(tmp_path):
+    journal, raw, result = _seal_fixture(tmp_path)
+    result["frozen_gen0"]["release_approved"] = True
+    target = tmp_path / "must-not-exist.json"
+    with pytest.raises(ValueError, match="fail-closed"):
+        inventory._seal_exclusive_inventory(target, journal, result)
+    assert journal.read_bytes() == raw
+    assert not target.exists()

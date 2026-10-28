@@ -19,7 +19,7 @@ FAILURE = (
 
 def row(qid: str, source: str, *, error: str | None = None,
         code: str = "print(1)") -> dict:
-    return {
+    result = {
         "question_id": qid,
         "source_file": source,
         "task": "LCB_generation",
@@ -30,8 +30,11 @@ def row(qid: str, source: str, *, error: str | None = None,
         "raw": "" if error else "candidate confidential text",
         "code": "" if error else code,
         "error": error,
-        "finish_reason": None,
+        "elapsed_s": 1.0,
     }
+    if error is None:
+        result.update(finish_reason="stop", prompt_tokens=10, completion_tokens=20)
+    return result
 
 
 def encode(*rows: dict) -> bytes:
@@ -74,6 +77,13 @@ def test_empty_code_without_transport_error_is_still_response() -> None:
     assert result["transport_classification"]["successful_transport_rows"] == 1
     assert result["transport_classification"]["model_responses_with_empty_code"] == 1
     assert result["transport_classification"]["failed_transport_rows_not_scored"] == 0
+
+
+def test_missing_explicit_error_key_cannot_be_witnessed_as_success() -> None:
+    item = row("a", "test.jsonl")
+    del item["error"]
+    with pytest.raises(ValueError, match="missing original transport status"):
+        make(encode(item))
 
 
 @pytest.mark.parametrize("initial,later", [
@@ -170,6 +180,36 @@ def test_exact_official_python_runtime_copy(tmp_path: Path) -> None:
     (runtime / "lcb_runner" / "eval.py").unlink()
     with pytest.raises(ValueError, match="file set drift"):
         witness.verify_runtime_copy(source, runtime)
+
+
+def test_unverified_bytecode_is_disclosed_not_execution_attested(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    cache = runtime / "lcb_runner" / "__pycache__"
+    cache.mkdir(parents=True)
+    bytecode = cache / "evaluator.cpython-313.pyc"
+    bytecode.write_bytes(b"unverified executable bytecode")
+    archive = runtime / "optional.zip"
+    archive.write_bytes(b"unverified import archive")
+    report = witness.inventory_unverified_runtime_artifacts(runtime)
+    assert report["unverified_importable_non_source_artifact_count"] == 2
+    assert report["runtime_execution_provenance_independently_attested"] is False
+    assert report["unverified_importable_non_source_artifact_sha256"] == {
+        "lcb_runner/__pycache__/evaluator.cpython-313.pyc": witness._sha_bytes(
+            bytecode.read_bytes()),
+        "optional.zip": witness._sha_bytes(archive.read_bytes()),
+    }
+    assert "unverified executable bytecode" not in json.dumps(report)
+
+
+def test_empty_non_source_inventory_is_still_not_execution_attestation(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "module.py").write_text("pass\n", encoding="utf-8")
+    report = witness.inventory_unverified_runtime_artifacts(runtime)
+    assert report["unverified_importable_non_source_artifact_count"] == 0
+    assert report["runtime_execution_provenance_independently_attested"] is False
 
 
 def test_final_seal_verifies_file_identity_and_prefix(tmp_path: Path) -> None:
