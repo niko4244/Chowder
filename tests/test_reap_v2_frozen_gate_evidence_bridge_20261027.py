@@ -49,7 +49,8 @@ def test_independent_receipt_json_preserves_unambiguous_nested_receipts(
     assert bridge._json_file(path) == {"arms": {"q8": {"approved": True}}, "count": 164}
 
 
-def _rows(root, arm, suite, n, failures, *, source_witness, speed=0.0):
+def _rows(root, arm, suite, n, failures, *, source_witness, speed=0.0,
+          session_id=None):
     folder = root / arm
     folder.mkdir(exist_ok=True)
     output = folder / f"{suite}.jsonl"
@@ -60,6 +61,8 @@ def _rows(root, arm, suite, n, failures, *, source_witness, speed=0.0):
                      "trigram_ratio": 0.9, "completion_tokens": 12,
                      "seconds": 1.0, "predicted_per_second": speed,
                      "text": "SYNTHETIC TEST ONLY"})
+        if session_id is not None:
+            rows[-1]["eval_session_id"] = session_id
     output.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     summary_path = folder / "summary.json"
     summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
@@ -388,11 +391,18 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
         for suite in suites:
             _rows(root, arm, suite, 164 if suite == "humaneval" else
                   (200 if arm.endswith("_q4") else 1319), 0,
-                  source_witness=False, speed=25.0)
+                  source_witness=False, speed=25.0,
+                  session_id=sessions[arm])
     native_logs = {}
     for arm in ("reap160_q4", "dense_q4"):
         native_log = root / arm / "server.log"
-        native_log.write_text("SYNTHETIC TEST ONLY: original fit receipt\n", encoding="utf-8")
+        fit_lines = ["llama_params_fit: successfully fit",
+                     "llama_model_load: offloaded 40/40 layers to GPU"]
+        native_log.write_text("\n".join(fit_lines) + "\n", encoding="utf-8")
+        serve_path = root / arm / "serve.json"
+        serve = json.loads(serve_path.read_text(encoding="utf-8"))
+        serve["offload_log_lines"] = fit_lines
+        _write(serve_path, serve)
         native_logs[arm] = _sha(native_log)
     monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
                         reap_select._input_digests(root, obs, None, None))
@@ -431,6 +441,51 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256",
                         native_logs)
     bridge._verify_historical_reap160_prerequisite(root)
+    # A separately SHA-approved log cannot contradict the declared offload
+    # count; the actual original startup text must be parsed, not merely pinned.
+    native_log = root / "reap160_q4" / "server.log"
+    native_log.write_text("llama_params_fit: n_cpu_moe = 1\n", encoding="utf-8")
+    native_logs["reap160_q4"] = _sha(native_log)
+    review["native_q4_server_log_sha256"] = dict(native_logs)
+    _write(path, review)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256",
+                        dict(native_logs))
+    with pytest.raises(bridge.FrozenEvidenceError, match="native fit/offload log disagrees"):
+        bridge._verify_historical_reap160_prerequisite(root)
+    native_log.write_text("llama_params_fit: successfully fit\n"
+                          "llama_model_load: offloaded 40/40 layers to GPU\n", encoding="utf-8")
+    native_logs["reap160_q4"] = _sha(native_log)
+    review["native_q4_server_log_sha256"] = dict(native_logs)
+    _write(path, review)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256",
+                        dict(native_logs))
+    # Resealed rows must not override the actual serving-session identity.
+    rows_path = root / "reap160_q4" / "gsm8k.jsonl"
+    rows = [json.loads(line) for line in rows_path.read_text(encoding="utf-8").splitlines()]
+    rows[0]["eval_session_id"] = "0" * 32
+    rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    summary_path = root / "reap160_q4" / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["gsm8k"]["file_sha256"] = _sha(rows_path)
+    _write(summary_path, summary)
+    review["arms"]["reap160_q4"]["rows_sha256"]["gsm8k"] = _sha(rows_path)
+    _write(path, review)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
+    monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
+                        reap_select._input_digests(root, obs, None, None))
+    with pytest.raises(bridge.FrozenEvidenceError, match="per-item serving session mismatch"):
+        bridge._verify_historical_reap160_prerequisite(root)
+    rows[0]["eval_session_id"] = sessions["reap160_q4"]
+    rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    summary["gsm8k"]["file_sha256"] = _sha(rows_path)
+    _write(summary_path, summary)
+    review["arms"]["reap160_q4"]["rows_sha256"]["gsm8k"] = _sha(rows_path)
+    _write(path, review)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
+    monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
+                        reap_select._input_digests(root, obs, None, None))
     review["arms"]["dense_q4"]["physical_host_sha256"] = "0" * 64
     _write(path, review)
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))

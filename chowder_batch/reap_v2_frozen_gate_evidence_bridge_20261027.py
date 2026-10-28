@@ -19,7 +19,7 @@ import math
 from pathlib import Path
 import re
 
-from chowder_batch import reap_gates, reap_select
+from chowder_batch import reap_gates, reap_select, reap_serve
 
 SCHEMA = "chowder.reap-v2-frozen-gate-evidence-bridge.v1"
 REVIEW_SCHEMA = "chowder.reap-v2-independent-original-frozen-review.v1"
@@ -271,6 +271,7 @@ def _verify_historical_reap160_prerequisite(root: Path) -> None:
                  and isinstance(record.get("rows_sha256"), dict)
                  and set(record["rows_sha256"]) == set(suites),
                  f"{arm}: historical native model/session/rows provenance incomplete")
+        source_rows = {}
         for suite in suites:
             rows_path = root / arm / f"{suite}.jsonl"
             _require(rows_path.is_file() and not rows_path.is_symlink()
@@ -278,6 +279,13 @@ def _verify_historical_reap160_prerequisite(root: Path) -> None:
                      and APPROVED_ORIGINAL_ARTIFACT_SHA256.get(str(rows_path))
                      == record["rows_sha256"][suite],
                      f"{arm}/{suite}: original historical REAP160 rows not independently bound")
+            expected_n = 200 if arm in speed_arms else (1319 if suite == "gsm8k" else 164)
+            rows = reap_select._attested_rows(root, arm, suite, expected_n)
+            _require(isinstance(rows, dict)
+                     and all(row.get("eval_session_id") == session
+                             for row in rows.values()),
+                     f"{arm}/{suite}: historical original per-item serving session mismatch")
+            source_rows[suite] = rows
         if arm in speed_arms:
             offloaded = serve.get("experts_offloaded")
             _require(type(offloaded) is int and offloaded >= 0
@@ -285,13 +293,31 @@ def _verify_historical_reap160_prerequisite(root: Path) -> None:
                      and serve.get("measured_experts_offloaded") == offloaded,
                      f"{arm}: historical original fit/offload receipt invalid")
             native_log = directory / "server.log"
-            _require(native_log.is_file() and not native_log.is_symlink()
-                     and _sha(native_log.read_bytes())
+            _require(native_log.is_file() and not native_log.is_symlink(),
+                     f"{arm}: historical Q4 native server log missing")
+            native_log_raw = native_log.read_bytes()
+            _require(_sha(native_log_raw)
                      == APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256[arm]
                      and review.get("native_q4_server_log_sha256")
                      == APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256,
                      f"{arm}: historical Q4 native server log not independently pinned")
-            rows = reap_select._attested_rows(root, arm, "gsm8k", 200)
+            # Parse the very bytes authenticated above. A review's claim of
+            # successful --fit, or two matching JSON offload counts, cannot
+            # substitute for the original native placement/fit log.
+            startup = native_log_raw
+            if "server_log_startup_sha256" in serve:
+                size = serve.get("server_log_startup_bytes")
+                _require(type(size) is int
+                         and 1 <= size <= min(len(native_log_raw), 64 * 1024 * 1024)
+                         and _sha(native_log_raw[:size]) == serve["server_log_startup_sha256"],
+                         f"{arm}: historical native startup log prefix mismatch")
+                startup = native_log_raw[:size]
+            lines, measured = reap_serve.parse_offload(
+                startup.decode("utf-8", errors="replace")
+            )
+            _require(measured == offloaded and serve.get("offload_log_lines") == lines,
+                     f"{arm}: historical native fit/offload log disagrees with serving receipt")
+            rows = source_rows["gsm8k"]
             _require(isinstance(rows, dict) and len(rows) == 200
                      and all(type(row.get("completion_tokens")) is int
                              and row["completion_tokens"] > 0
