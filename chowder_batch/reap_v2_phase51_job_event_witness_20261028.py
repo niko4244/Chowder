@@ -298,12 +298,23 @@ class PrivateJobEvents:
             # after the caller has confirmed natural process-tree extinction.
             with self._lock:
                 self._quiet_polls = 0
-            deadline = time.monotonic() + 0.35
+            # A registered 200ms native queue wait needs at least 400ms for
+            # two genuine timeouts. Keep bounded scheduler slack rather than
+            # falsely refusing a healthy queue at the old fixed 350ms cap.
+            drain_budget = max(0.35, 2 * self._wait_ms / 1000 + 0.25)
+            deadline = time.monotonic() + drain_budget
             while time.monotonic() < deadline:
                 with self._lock:
                     if self._quiet_polls >= 2 or self._faults:
                         break
                 time.sleep(0.01)
+            # A deadline is not a successful queue drain.  If the native
+            # reader never observed two fresh empty polls, the final event
+            # packet stream is unverified even when all packets seen so far
+            # happen to reconcile with cumulative Job accounting.
+            with self._lock:
+                if self._quiet_polls < 2 and not self._faults:
+                    self._faults.append("PRIVATE_JOB_EVENT_TERMINAL_DRAIN_UNVERIFIED")
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=1.0)

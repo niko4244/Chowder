@@ -180,6 +180,62 @@ def test_terminal_stop_requires_fresh_empty_polls_not_prior_idle_history(monkeyp
     assert receipt["gen0"]["release_approved"] is False
 
 
+@pytest.mark.parametrize("fresh_timeouts", [0, 1])
+def test_terminal_stop_refuses_without_two_fresh_empty_polls(monkeypatch, fresh_timeouts):
+    reader = job_events.PrivateJobEvents(kernel=object(), job=1234,
+                                         member_check=lambda _: True)
+
+    class RunningReader:
+        def is_alive(self):
+            return not reader._stop.is_set()
+
+        def join(self, timeout):
+            assert reader._stop.is_set()
+
+    reader._thread = RunningReader()
+    def incomplete_drain(_seconds):
+        with reader._lock:
+            if reader._quiet_polls < fresh_timeouts:
+                reader._quiet_polls += 1
+
+    monkeypatch.setattr(job_events.time, "sleep", incomplete_drain)
+    receipt = reader.stop()
+    assert "PRIVATE_JOB_EVENT_TERMINAL_DRAIN_UNVERIFIED" in receipt["faults"]
+    assert receipt["gen0"]["release_approved"] is False
+
+
+def test_terminal_stop_allows_two_slow_native_timeouts_at_registered_200ms(monkeypatch):
+    reader = job_events.PrivateJobEvents(kernel=object(), job=1234,
+                                         member_check=lambda _: True,
+                                         event_wait_ms=200)
+
+    class RunningReader:
+        def is_alive(self):
+            return not reader._stop.is_set()
+
+        def join(self, timeout):
+            assert reader._stop.is_set()
+
+    reader._thread = RunningReader()
+    clock = [0.0]
+    polls = [0]
+
+    def simulated_slow_native_poll(_seconds):
+        polls[0] += 1
+        clock[0] += 0.2
+        # One 200ms scheduler delay occurs between two legitimate native
+        # timeouts. A fixed 350ms deadline cannot admit this valid schedule.
+        if polls[0] in (1, 3):
+            with reader._lock:
+                reader._quiet_polls += 1
+
+    monkeypatch.setattr(job_events.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(job_events.time, "sleep", simulated_slow_native_poll)
+    receipt = reader.stop()
+    assert polls[0] >= 3
+    assert receipt["faults"] == []
+
+
 def test_handle_close_failure_still_closes_other_owned_handles_and_port():
     class CloseHandle:
         def __init__(self):
