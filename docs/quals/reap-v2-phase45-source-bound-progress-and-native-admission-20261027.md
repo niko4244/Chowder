@@ -84,8 +84,34 @@ reap_original600_guardv3_git_memory_audit_worker11_20261027.py` gives:
 - The original 73,728-context, **one-slot** guard.v3 setting is noncomparable
   with frozen `--fit on -np 4 -c 16384 --jinja` even when all 600 finish.
   Original guard.v1 historical 43/600 strict0 is a DIFFERENT policy/session;
-  its archived score is separately recorded, not reverified as current and
+  independently reverified with its own historical pinned Git source below,
   never pooled with guard.v3.
+
+**Additional completed read-only source-lock repair:** A retired original
+guard.v1 historical auditor previously refused the current working tree's
+legitimate newer guard/runner code, so the archived 43-task score had been
+historical only. The new additive
+`chowder_batch/reap_original600_guardv1_git_memory_audit_20261027.py`
+source-loads its original runner/scorer from **Git `ea453b2f9ea85e8729673e401b0d6caec49986b7`**
+in isolated module memory, confirms the original guard.v1 source SHA
+`7b4fc9799c581a76c9a84d764871e5ff47cb286759addf12c1231885f44d0fc8`
+and owner SHA `849309859a5c1ef8736ee67668b33d8fbbf1dc3334b246451af4c4e5d46f220a`,
+then recomputes the actual **43/600 completed, 0 strict**, **35/240**
+positive and **223/223** exclusion assertions; next item 43 remains
+unscored. It observed 1,314 model calls and 1,751 tool calls from the
+historical original receipts, without new inference, task changes or source
+relabelling. Its compact result is saved at
+`evidence/reap-v2-original600-guardv1-git-audited-20261027.json`.
+Run the original evidence recheck and adversarial tests with:
+
+```powershell
+python -m chowder_batch.reap_original600_guardv1_git_memory_audit_20261027
+python -m pytest -q tests/test_reap_original600_guardv1_git_memory_audit_20261027.py
+```
+
+Both v1 and v3 audit scripts refuse source or ownership drift, and their
+historical results are **separate partial experimental populations**, not a
+single scored 130/600 cohort and not frozen Gen-0 evidence.
 
 Read-only exact pinned scorer:
 

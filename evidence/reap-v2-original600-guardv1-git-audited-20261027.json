@@ -1,0 +1,40 @@
+{
+  "active_unscored_indices": [
+    43
+  ],
+  "chosen": null,
+  "completed_scored_tasks": 43,
+  "frozen_four_slot_comparable": false,
+  "frozen_gen0_status": "BLOCKED",
+  "historic_git_commit": "ea453b2f9ea85e8729673e401b0d6caec49986b7",
+  "historic_guard_source_sha256": "7b4fc9799c581a76c9a84d764871e5ff47cb286759addf12c1231885f44d0fc8",
+  "historic_runner_source_sha256": "38e7646ad259afdeaadc308d0e6f0da7d44dd3d93ccf59a43e90fccbdff0ede7",
+  "model": "REAP128_v2 Q4_K_M",
+  "model_executed_for_this_audit": false,
+  "model_gguf_sha256": "2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7",
+  "noncomparable_to_frozen_four_slot": true,
+  "official_complete_600_claim_allowed": false,
+  "official_source_commit": "4a8e1061254004d9dac807054eed33fad7d1ff14",
+  "official_version": "1.0.6",
+  "original_prompt_sha256": "1c8feeec1f680b05b392a5d00fc634edb143c3e7bdd152c476af50cebcec57b5",
+  "owner_sha256": "849309859a5c1ef8736ee67668b33d8fbbf1dc3334b246451af4c4e5d46f220a",
+  "registered_population": 600,
+  "release_approved": false,
+  "schema": "chowder.original-automationbench600-live-independent-audit.v1",
+  "source_lock": "chowder.original600-guardv1-inmemory-git-historical-audit.v1",
+  "status": "PARTIAL_AUTHENTIC_OFFICIAL_TOOL_EVALUATOR_EXECUTION",
+  "strict_pass_rate_completed": 0.0,
+  "totals": {
+    "excluded_assertions": 223,
+    "excluded_assertions_passed": 223,
+    "input_tokens": 22069396,
+    "model_calls": 1314,
+    "model_time_s": 9888.002,
+    "output_tokens": 470417,
+    "positive_assertions": 240,
+    "positive_assertions_passed": 35,
+    "strict_passes": 0,
+    "tool_calls": 1751,
+    "tool_time_s": 17.675000000000008
+  }
+}
