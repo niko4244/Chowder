@@ -148,6 +148,30 @@ def test_verify_append_only_requires_newline_terminated_prefix() -> None:
         witness.verify_append_only(b"partial", b"partial-more")
 
 
+def test_exact_official_python_runtime_copy(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    runtime = tmp_path / "runtime"
+    for root in (source, runtime):
+        folder = root / "lcb_runner"
+        folder.mkdir(parents=True)
+        (folder / "__init__.py").write_text("", encoding="utf-8")
+        (folder / "eval.py").write_text("def score(): return 1\n", encoding="utf-8")
+    assert witness.verify_runtime_copy(source, runtime) == 2
+    extra = runtime / "injected.py"
+    extra.write_text("print('unapproved')\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="file set drift"):
+        witness.verify_runtime_copy(source, runtime)
+    extra.unlink()
+    (runtime / "lcb_runner" / "eval.py").write_text(
+        "def score(): return 0\n", encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="SHA drift"):
+        witness.verify_runtime_copy(source, runtime)
+    (runtime / "lcb_runner" / "eval.py").unlink()
+    with pytest.raises(ValueError, match="file set drift"):
+        witness.verify_runtime_copy(source, runtime)
+
+
 def test_final_seal_verifies_file_identity_and_prefix(tmp_path: Path) -> None:
     path = tmp_path / "journal.jsonl"
     prefix = encode(row("a", "test.jsonl"))
@@ -180,3 +204,52 @@ def test_final_seal_refuses_rewritten_prefix(tmp_path: Path) -> None:
     path.write_bytes(prefix.replace(b"candidate", b"malicious"))
     with pytest.raises(ValueError, match="prefix changed"):
         witness._verify_prefix_still_present(path, receipt)
+
+
+def test_exclusive_snapshot_publishes_only_verified_prefix(tmp_path: Path) -> None:
+    journal = tmp_path / "journal.jsonl"
+    prefix = encode(row("a", "test.jsonl"))
+    journal.write_bytes(prefix)
+    info = journal.stat()
+    receipt = {
+        "prefix_bytes": len(prefix),
+        "prefix_sha256": witness._sha_bytes(prefix),
+        "journal_file_identity": {"device": info.st_dev, "inode": info.st_ino},
+    }
+    target = tmp_path / "sealed.json"
+    witness._seal_exclusive_snapshot(target, journal, receipt)
+    assert json.loads(target.read_text()) == receipt
+    assert not list(tmp_path.glob("*.pending-*"))
+    with pytest.raises(FileExistsError):
+        witness._seal_exclusive_snapshot(target, journal, receipt)
+    assert json.loads(target.read_text()) == receipt
+
+
+def test_exclusive_snapshot_does_not_publish_if_final_check_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = tmp_path / "journal.jsonl"
+    prefix = encode(row("a", "test.jsonl"))
+    journal.write_bytes(prefix)
+    info = journal.stat()
+    receipt = {
+        "prefix_bytes": len(prefix),
+        "prefix_sha256": witness._sha_bytes(prefix),
+        "journal_file_identity": {"device": info.st_dev, "inode": info.st_ino},
+    }
+    original = witness._verify_prefix_still_present
+    checks = 0
+
+    def reject_second(path: Path, data: dict) -> None:
+        nonlocal checks
+        checks += 1
+        original(path, data)
+        if checks == 2:
+            raise ValueError("prefix changed during final verification")
+
+    monkeypatch.setattr(witness, "_verify_prefix_still_present", reject_second)
+    target = tmp_path / "unsealed.json"
+    with pytest.raises(ValueError, match="final verification"):
+        witness._seal_exclusive_snapshot(target, journal, receipt)
+    assert not target.exists()
+    assert not list(tmp_path.glob("*.pending-*"))

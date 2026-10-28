@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import tempfile
 
 from chowder_batch import reap_v2_lcb_v6_checkpoint_readonly_audit_20261028 as lcb
 from chowder_batch import reap_v2_lcb_v6_transport_integrity_20261028 as transport
@@ -70,6 +71,20 @@ def verify_append_only(prefix: bytes, subsequent: bytes) -> int:
     return len(subsequent) - len(prefix)
 
 
+def verify_runtime_copy(source: Path, runtime: Path) -> int:
+    """Match the entire executable Python runtime, not just known source files."""
+    source_files = {
+        path.relative_to(source) for path in (source / "lcb_runner").rglob("*.py")
+    }
+    runtime_files = {path.relative_to(runtime) for path in runtime.rglob("*.py")}
+    if not source_files or source_files != runtime_files:
+        raise ValueError("official evaluator runtime Python file set drift")
+    for relative in sorted(source_files):
+        if lcb.sha(source / relative) != lcb.sha(runtime / relative):
+            raise ValueError("official evaluator runtime SHA drift")
+    return len(source_files)
+
+
 def source_provenance() -> tuple[list[tuple[str, str]], dict]:
     """Independently validate frozen Git, all six datasets and both drivers."""
     head = subprocess.check_output(
@@ -84,13 +99,7 @@ def source_provenance() -> tuple[list[tuple[str, str]], dict]:
         raise ValueError("original generation driver SHA drift")
     if lcb.sha(lcb.EVALUATOR) != lcb.EVALUATOR_SHA:
         raise ValueError("original evaluator SHA drift")
-    runtime_count = 0
-    for file in (lcb.SOURCE / "lcb_runner").rglob("*.py"):
-        if lcb.sha(file) != lcb.sha(lcb.RUNTIME / file.relative_to(lcb.SOURCE)):
-            raise ValueError("official evaluator runtime SHA drift")
-        runtime_count += 1
-    if runtime_count == 0:
-        raise ValueError("missing original evaluator runtime")
+    runtime_count = verify_runtime_copy(lcb.SOURCE, lcb.RUNTIME)
     canonical = []
     hashes = {}
     for filename, expected in zip(lcb.FILES, lcb.DATA_SHAS, strict=True):
@@ -194,6 +203,28 @@ def _verify_prefix_still_present(path: Path, witness: dict) -> None:
         raise ValueError("original journal prefix changed before evidence seal")
 
 
+def _seal_exclusive_snapshot(target: Path, journal: Path, witness: dict) -> None:
+    """Publish only after verification; never leave a refused public witness."""
+    _verify_prefix_still_present(journal, witness)
+    pending = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=target.parent, prefix=f".{target.name}.pending-",
+            delete=False,
+        ) as stream:
+            pending = Path(stream.name)
+            stream.write((json.dumps(witness, sort_keys=True, indent=2) + "\n").encode())
+            stream.flush()
+            os.fsync(stream.fileno())
+        _verify_prefix_still_present(journal, witness)
+        # Hard-link creation is atomic and refuses an existing destination;
+        # unlike os.replace, it cannot overwrite another evidence certificate.
+        os.link(pending, target)
+    finally:
+        if pending is not None:
+            pending.unlink(missing_ok=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path)
@@ -206,12 +237,7 @@ def main() -> int:
             if (not target.is_absolute() or target.exists() or target.is_symlink()
                     or target.parent.resolve() != Path("F:/").resolve()):
                 raise ValueError("new exclusive F: witness path required")
-            _verify_prefix_still_present(lcb.OUT / "gen_q4.jsonl", witness)
-            with target.open("xb") as stream:
-                stream.write(
-                    (json.dumps(witness, sort_keys=True, indent=2) + "\n").encode()
-                )
-            _verify_prefix_still_present(lcb.OUT / "gen_q4.jsonl", witness)
+            _seal_exclusive_snapshot(target, lcb.OUT / "gen_q4.jsonl", witness)
         print(json.dumps(witness, sort_keys=True, indent=2))
         return 0
     except (OSError, ValueError, KeyError, TypeError,
