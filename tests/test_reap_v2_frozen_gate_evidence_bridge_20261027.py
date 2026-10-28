@@ -178,6 +178,9 @@ def test_live_production_has_no_security_or_source_approval():
     assert bridge.APPROVED_INDEPENDENT_REVIEW_SHA256 is None
     assert not bridge.APPROVED_HUMANEVAL_SECURITY_SHA256
     assert not bridge.APPROVED_HUMANEVAL_CERTIFICATE_INPUT_SHA256
+    assert bridge.APPROVED_HISTORICAL_REAP160_REVIEW_SHA256 is None
+    assert not bridge.APPROVED_HISTORICAL_REAP160_MODEL_SHA256
+    assert not bridge.APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256
     blocked = bridge.bridge_frozen_evidence("Z:/nonexistent", "Z:/observer.json")
     assert blocked["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
     assert blocked["chosen"] is None and blocked["release_approved"] is False
@@ -305,6 +308,8 @@ def test_optional_mcnemar_ambiguity_does_not_veto_mandatory_v1_fail_fallback(
         gates = report["gates"]["reap128_v2"]["gates"]
         for name in reap_select.REQUIRED:
             gates[name]["status"] = "PASS"
+            if "computed_status" in gates[name]:
+                gates[name]["computed_status"] = "PASS"
         report["decision"] = {
             "status": "SELECTED", "chosen": "reap128_v2",
             "reason": "synthetic mandatory fallback after historical v1 failure",
@@ -312,11 +317,147 @@ def test_optional_mcnemar_ambiguity_does_not_veto_mandatory_v1_fail_fallback(
         return report
 
     monkeypatch.setattr(bridge.reap_select, "evaluate", simulate_complete_frozen_fallback)
+    # This test isolates the optional-statistics branch. The separate
+    # historical REAP160 native prerequisite has its own adversarial tests.
+    monkeypatch.setattr(bridge, "_verify_historical_reap160_prerequisite",
+                        lambda root: None)
     result = bridge.bridge_frozen_evidence(root, obs)
     assert result["status"] == "SOURCE_APPROVED_ORIGINAL_EVIDENCE_EVALUATED"
     assert result["chosen"] == "reap128_v2"
     assert result["amendment4"].startswith("BLOCKED_PENDING")
     assert result["release_approved"] is False
+
+
+def test_forged_reap160_speed_fail_cannot_satisfy_v2_fallback_prerequisite(
+    synthetic, monkeypatch,
+):
+    """A bogus negative offload must not count as a genuinely scored REAP160."""
+    root, obs = synthetic
+    _write(root / "reap160" / "serve.json", {"experts_offloaded": 0})
+    _rows(root, "reap160", "gsm8k", 1319, 0, source_witness=False)
+    _rows(root, "reap160", "humaneval", 164, 0, source_witness=False)
+    _write(root / "reap160_q4" / "serve.json", {"experts_offloaded": -1})
+    assert not (root / "reap160_q4" / "gsm8k.jsonl").exists()
+    monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
+                        reap_select._input_digests(root, obs, None, None))
+    original_evaluate = reap_select.evaluate
+
+    def synthetic_all_v2_gates_pass(*args, **kwargs):
+        report = original_evaluate(*args, **kwargs)
+        reap160 = report["gates"]["reap160"]
+        assert reap160["gates"]["speed"]["status"] == "FAIL"
+        assert reap_select._complete(reap160)
+        assert not (root / "reap160_q4" / "gsm8k.jsonl").exists()
+        v2 = report["gates"]["reap128_v2"]
+        for gate in reap_select.REQUIRED:
+            v2["gates"][gate]["status"] = "PASS"
+            if "computed_status" in v2["gates"][gate]:
+                v2["gates"][gate]["computed_status"] = "PASS"
+        # Exercise the actual frozen fallback selector, not a forged decision.
+        report["decision"] = reap_select.select(report["gates"])
+        assert report["decision"]["chosen"] == "reap128_v2"
+        return report
+
+    monkeypatch.setattr(bridge.reap_select, "evaluate", synthetic_all_v2_gates_pass)
+    result = bridge.bridge_frozen_evidence(root, obs)
+    assert result["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
+    assert "historical REAP160 prerequisite" in result["reason"]
+    assert result["chosen"] is None and result["release_approved"] is False
+
+
+def test_historical_reap160_requires_separate_source_pinned_native_review(
+    synthetic, monkeypatch,
+):
+    """Synthetic-only positive schema plus original-byte tamper rejection."""
+    root, obs = synthetic
+    models = {"reap160": "d" * 64, "reap160_q4": "e" * 64,
+              "dense_q4": bridge.Q4_DENSE_SHA256}
+    sessions = {"reap160": "c" * 32, "reap160_q4": "f" * 32,
+                "dense_q4": "9" * 32}
+    for arm, suites in (("reap160", ("gsm8k", "humaneval")),
+                        ("reap160_q4", ("gsm8k",)),
+                        ("dense_q4", ("gsm8k",))):
+        _write(root / arm / "serve.json", {
+            "gguf_sha256": models[arm], "eval_session_id": sessions[arm],
+            "flags": reap_select.FROZEN_SERVE_FLAGS, "experts_offloaded": 0,
+            "measured_experts_offloaded": 0,
+            "server_pid": {"reap160": 101, "reap160_q4": 102, "dense_q4": 103}[arm],
+            "server_port": {"reap160": 8901, "reap160_q4": 8902,
+                            "dense_q4": 8903}[arm],
+        })
+        for suite in suites:
+            _rows(root, arm, suite, 164 if suite == "humaneval" else
+                  (200 if arm.endswith("_q4") else 1319), 0,
+                  source_witness=False, speed=25.0)
+    native_logs = {}
+    for arm in ("reap160_q4", "dense_q4"):
+        native_log = root / arm / "server.log"
+        native_log.write_text("SYNTHETIC TEST ONLY: original fit receipt\n", encoding="utf-8")
+        native_logs[arm] = _sha(native_log)
+    monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
+                        reap_select._input_digests(root, obs, None, None))
+    review = {
+        "schema": bridge.HISTORICAL_REAP160_SCHEMA,
+        "status": "INDEPENDENTLY_APPROVED_ORIGINAL_REAP160_PREREQUISITE",
+        "native_windows_server_owner_verified": True,
+        "independent_model_bytes_verified": True,
+        "per_item_session_binding_verified": True,
+        "original_executable_scorer_verified": True,
+        "same_hardware_speed_pair_verified": True,
+        "original_q4_offload_fit_verified": True,
+        "native_first200_speed_verified": True,
+        "native_q4_server_log_sha256": native_logs,
+        "canonical_source_sha256": reap_gates.FROZEN_SOURCE_SHA256,
+        "original_scored_counts": {"gsm8k": 1319, "humaneval": 164,
+                                   "first200_speed": 200},
+        "arms": {
+            arm: {
+                "model_sha256": models[arm], "session_id": sessions[arm],
+                "physical_host_sha256": "a" * 64,
+                "hardware_profile_sha256": "b" * 64,
+                "rows_sha256": {
+                    suite: _sha(root / arm / f"{suite}.jsonl")
+                    for suite in (("gsm8k", "humaneval") if arm == "reap160"
+                                  else ("gsm8k",))
+                },
+            }
+            for arm in models
+        },
+    }
+    path = root / "reap160.frozen-prerequisite-review.json"
+    _write(path, review)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_MODEL_SHA256", models)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256",
+                        native_logs)
+    bridge._verify_historical_reap160_prerequisite(root)
+    review["arms"]["dense_q4"]["physical_host_sha256"] = "0" * 64
+    _write(path, review)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
+    with pytest.raises(bridge.FrozenEvidenceError, match="speed comparator host"):
+        bridge._verify_historical_reap160_prerequisite(root)
+    review["arms"]["dense_q4"]["physical_host_sha256"] = "a" * 64
+    _write(path, review)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
+    # Even a separately pinned review cannot turn an invalid negative offload
+    # into a legitimate completed original first200 speed measurement.
+    serve_path = root / "reap160_q4" / "serve.json"
+    bad_serve = json.loads(serve_path.read_text(encoding="utf-8"))
+    bad_serve["experts_offloaded"] = -1
+    bad_serve["measured_experts_offloaded"] = -1
+    _write(serve_path, bad_serve)
+    monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
+                        reap_select._input_digests(root, obs, None, None))
+    with pytest.raises(bridge.FrozenEvidenceError, match="fit/offload receipt invalid"):
+        bridge._verify_historical_reap160_prerequisite(root)
+    bad_serve["experts_offloaded"] = bad_serve["measured_experts_offloaded"] = 0
+    _write(serve_path, bad_serve)
+    monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
+                        reap_select._input_digests(root, obs, None, None))
+    with (root / "reap160_q4" / "gsm8k.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write('{"id":"gsm8k-0","correct":true}\n')
+    with pytest.raises(bridge.FrozenEvidenceError, match="rows not independently bound"):
+        bridge._verify_historical_reap160_prerequisite(root)
 
 
 def test_malformed_independent_rows_digest_map_fails_closed(synthetic, monkeypatch):

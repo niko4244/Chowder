@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 
@@ -23,6 +24,7 @@ from chowder_batch import reap_gates, reap_select
 SCHEMA = "chowder.reap-v2-frozen-gate-evidence-bridge.v1"
 REVIEW_SCHEMA = "chowder.reap-v2-independent-original-frozen-review.v1"
 SECURITY_SCHEMA = "chowder.reap-v2-independent-frozen-humaneval-security.v1"
+HISTORICAL_REAP160_SCHEMA = "chowder.reap-v2-independent-historical-reap160-prerequisite.v1"
 
 Q8_V2_SHA256 = "89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6"
 Q4_DENSE_SHA256 = "2c6d9466129e8802839566b35728e2506aaf1e8705cd137009e2f08feb9dd049"
@@ -65,6 +67,14 @@ APPROVED_HUMANEVAL_SECURITY_SHA256: dict[str, str] = {}
 # external trace reviewer pins. A JSON's self-reported digest or success label
 # can never install either authority; both production maps remain EMPTY.
 APPROVED_HUMANEVAL_CERTIFICATE_INPUT_SHA256: dict[str, str] = {}
+# REAP160 is a mandatory *scored prerequisite* after historical v1 Gate0/1
+# failure, even if the frozen selector ultimately chooses REAP128_v2 first.
+# Neither an archived summary nor a selected-v2 decision authenticates its
+# original model, native serving, per-item scoring, or first200 speed. No
+# production historical REAP160 authority has yet been independently admitted.
+APPROVED_HISTORICAL_REAP160_REVIEW_SHA256: str | None = None
+APPROVED_HISTORICAL_REAP160_MODEL_SHA256: dict[str, str] = {}
+APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256: dict[str, str] = {}
 CERTIFICATE_INPUT_FIELDS = frozenset({
     "capture_path", "witness_path", "capability_path", "broker_path",
     "review_path", "trace_dir", "serve_path", "owner_review_path",
@@ -191,6 +201,113 @@ def _verify_historical_canonical_rows(root: Path) -> None:
                          and not (row["correct"] and not row["terminated"])
                          for row in rows.values()),
                      f"{arm}/{suite}: historical scorer semantics invalid")
+
+
+def _verify_historical_reap160_prerequisite(root: Path) -> None:
+    """Require separately pinned native REAP160 evidence before v2 fallback selection.
+
+    The original frozen selector legitimately computes from historical rows;
+    this independent admission boundary must additionally authenticate the
+    historical *prerequisite* rather than only the arm ultimately chosen.
+    This never changes the frozen selector or its fallback order.
+    """
+    arms = {"reap160", "reap160_q4", "dense_q4"}
+    speed_arms = {"reap160_q4", "dense_q4"}
+    _require(_hex(APPROVED_HISTORICAL_REAP160_REVIEW_SHA256)
+             and set(APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256) == speed_arms
+             and all(_hex(value) for value in APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256.values())
+             and set(APPROVED_HISTORICAL_REAP160_MODEL_SHA256) == arms
+             and APPROVED_HISTORICAL_REAP160_MODEL_SHA256.get("dense_q4") == Q4_DENSE_SHA256
+             and all(_hex(value) for value in APPROVED_HISTORICAL_REAP160_MODEL_SHA256.values()),
+             "historical REAP160 prerequisite has no independent source-owned approval")
+    path = root / "reap160.frozen-prerequisite-review.json"
+    _require(path.is_file() and not path.is_symlink(),
+             "historical REAP160 independent native review missing")
+    raw = path.read_bytes()
+    _require(_sha(raw) == APPROVED_HISTORICAL_REAP160_REVIEW_SHA256,
+             "historical REAP160 independent review SHA mismatch")
+    review = _json_bytes(raw)
+    _require(review.get("schema") == HISTORICAL_REAP160_SCHEMA
+             and review.get("status") == "INDEPENDENTLY_APPROVED_ORIGINAL_REAP160_PREREQUISITE"
+             and review.get("native_windows_server_owner_verified") is True
+             and review.get("independent_model_bytes_verified") is True
+             and review.get("per_item_session_binding_verified") is True
+             and review.get("original_executable_scorer_verified") is True
+             and review.get("same_hardware_speed_pair_verified") is True
+             and review.get("original_q4_offload_fit_verified") is True
+             and review.get("native_first200_speed_verified") is True
+             and review.get("canonical_source_sha256") == reap_gates.FROZEN_SOURCE_SHA256
+             and review.get("original_scored_counts") == {
+                 "gsm8k": 1319, "humaneval": 164, "first200_speed": 200,
+             }
+             and set(review.get("arms", {})) == arms,
+             "historical REAP160 native prerequisite review incomplete")
+    for arm, suites in (("reap160", ("gsm8k", "humaneval")),
+                        ("reap160_q4", ("gsm8k",)),
+                        ("dense_q4", ("gsm8k",))):
+        record = review["arms"][arm]
+        _require(isinstance(record, dict), "historical REAP160 arm review malformed")
+        serve_path = root / arm / "serve.json"
+        serve = _json_file(serve_path)
+        session = serve.get("eval_session_id")
+        directory = root / arm
+        _require(not (directory / ".serve.lock").exists()
+                 and not any(directory.glob("serve.resume-*.json"))
+                 and not any(directory.glob("server.resume-*.log"))
+                 and not any(directory.glob(".serve-pending-*.json")),
+                 f"{arm}: historical serving session resumed or incomplete")
+        _require(_hex(session, 32)
+                 and serve.get("gguf_sha256") == APPROVED_HISTORICAL_REAP160_MODEL_SHA256[arm]
+                 and serve.get("flags") == reap_select.FROZEN_SERVE_FLAGS
+                 and type(serve.get("server_pid")) is int and serve["server_pid"] > 0
+                 and type(serve.get("server_port")) is int
+                 and 0 < serve["server_port"] < 65536
+                 and APPROVED_ORIGINAL_ARTIFACT_SHA256.get(str(serve_path))
+                 == _sha(serve_path.read_bytes())
+                 and record.get("model_sha256") == serve["gguf_sha256"]
+                 and record.get("session_id") == session
+                 and _hex(record.get("physical_host_sha256"))
+                 and _hex(record.get("hardware_profile_sha256"))
+                 and isinstance(record.get("rows_sha256"), dict)
+                 and set(record["rows_sha256"]) == set(suites),
+                 f"{arm}: historical native model/session/rows provenance incomplete")
+        for suite in suites:
+            rows_path = root / arm / f"{suite}.jsonl"
+            _require(rows_path.is_file() and not rows_path.is_symlink()
+                     and record["rows_sha256"][suite] == _sha(rows_path.read_bytes())
+                     and APPROVED_ORIGINAL_ARTIFACT_SHA256.get(str(rows_path))
+                     == record["rows_sha256"][suite],
+                     f"{arm}/{suite}: original historical REAP160 rows not independently bound")
+        if arm in speed_arms:
+            offloaded = serve.get("experts_offloaded")
+            _require(type(offloaded) is int and offloaded >= 0
+                     and (arm != "dense_q4" or offloaded == 0)
+                     and serve.get("measured_experts_offloaded") == offloaded,
+                     f"{arm}: historical original fit/offload receipt invalid")
+            native_log = directory / "server.log"
+            _require(native_log.is_file() and not native_log.is_symlink()
+                     and _sha(native_log.read_bytes())
+                     == APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256[arm]
+                     and review.get("native_q4_server_log_sha256")
+                     == APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256,
+                     f"{arm}: historical Q4 native server log not independently pinned")
+            rows = reap_select._attested_rows(root, arm, "gsm8k", 200)
+            _require(isinstance(rows, dict) and len(rows) == 200
+                     and all(type(row.get("completion_tokens")) is int
+                             and row["completion_tokens"] > 0
+                             and type(row.get("seconds")) in (int, float)
+                             and math.isfinite(row["seconds"]) and row["seconds"] > 0
+                             and type(row.get("predicted_per_second")) in (int, float)
+                             and math.isfinite(row["predicted_per_second"])
+                             and row["predicted_per_second"] > 0
+                             for row in rows.values()),
+                     f"{arm}: historical original first200 native timing rows incomplete")
+    _require(review["arms"]["reap160_q4"]["physical_host_sha256"]
+             == review["arms"]["dense_q4"]["physical_host_sha256"]
+             and review["arms"]["reap160_q4"]["hardware_profile_sha256"]
+             == review["arms"]["dense_q4"]["hardware_profile_sha256"]
+             and len({review["arms"][arm]["session_id"] for arm in arms}) == len(arms),
+             "historical REAP160/dense Q4 speed comparator host or sessions differ")
 
 
 def _verify_original_sessions(root: Path, review: dict) -> dict[str, dict]:
@@ -320,6 +437,7 @@ def _verify_humaneval_certificates(root: Path, serving: dict[str, dict]) -> None
         != serving["dense_v2"]["session_id"],
         "original Q8/dense full164 must use distinct sessions on same physical host/profile",
     )
+    verified_certificates = {}
     for arm in arms:
         manifest = root / f"{arm}.frozen-humaneval-certificate-inputs.json"
         _require(manifest.is_file() and not manifest.is_symlink(),
@@ -340,6 +458,7 @@ def _verify_humaneval_certificates(root: Path, serving: dict[str, dict]) -> None
         # Never forward an unreviewed `canonical_path` override. The verifier
         # uses its own exact originally archived canonical source/hash.
         certificate = cert.verify_arm(arm=arm, **paths)
+        verified_certificates[arm] = certificate
         # Certificate exporter uses a separate source-reviewed JSONL writer,
         # while the unchanged original reap_eval writer uses its own key
         # order, spacing and seconds precision. NEVER require those distinct
@@ -402,6 +521,11 @@ def _verify_humaneval_certificates(root: Path, serving: dict[str, dict]) -> None
                      and expected.get("terminated") is finish[1]
                      and not (item[1] and not finish[1]),
                      f"{arm}/{key}: frozen official row differs from verified external trace")
+    # Individual trace reviews establish per-arm uniqueness, not that the
+    # candidate and dense cohorts used distinct real Python executions.
+    cert.verify_disjoint_execution_lineage(
+        verified_certificates["reap128_v2"], verified_certificates["dense_v2"],
+    )
 
 
 def _blocked(reason: str) -> dict:
@@ -483,9 +607,19 @@ def bridge_frozen_evidence(
         if report["decision"].get("chosen") == "reap128_v2":
             _require(report["decision"].get("status") == "SELECTED"
                      and all(isinstance(gates[name], dict)
-                             and gates[name].get("status") == "PASS"
+                             and reap_select._status(report["gates"]["reap128_v2"], name)
+                             == "PASS"
                              for name in reap_select.REQUIRED),
                      "frozen v2 selected without all mandatory original gates PASS")
+            historical_v1 = report["gates"].get("reap128")
+            _require(isinstance(historical_v1, dict),
+                     "historical v1 selection prerequisite absent")
+            if any(reap_select._status(historical_v1, name) == "FAIL"
+                   for name in ("gate0", "gate1")):
+                # The frozen mandatory fallback requires BOTH v2 and REAP160
+                # to be genuinely scored, not just the winning v2 arm. A
+                # synthetic or unreviewed REAP160 row set cannot satisfy it.
+                _verify_historical_reap160_prerequisite(root)
         return {
             "schema": SCHEMA, "status": "SOURCE_APPROVED_ORIGINAL_EVIDENCE_EVALUATED",
             "gate0": gates["gate0"]["status"],

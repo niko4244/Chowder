@@ -85,6 +85,11 @@ def _stage(tmp_path, monkeypatch):
                 (f"HumanEval/{i}", 0.75, 20, 1.23, 16.3)
                 for i in range(164)
             ],
+            "executed_with_verified_trace": 163,
+            "verified_process_identities": tuple(
+                ("1" * 64, (1000 if arm == "reap128_v2" else 2000) + i,
+                 100000 + i) for i in range(164) if i != 7
+            ),
         }
 
     monkeypatch.setattr(cert, "verify_arm", mock_verified_original_trace)
@@ -113,6 +118,26 @@ def test_missing_independent_manifest_pins_fail_before_trace_read(tmp_path, monk
 def test_source_locked_trace_and_original_item_join_synthetic_only(tmp_path, monkeypatch):
     root, serving, _ = _stage(tmp_path, monkeypatch)
     assert bridge._verify_humaneval_certificates(root, serving) is None
+
+
+def test_original_gate2_intake_rejects_cross_arm_python_process_replay(
+    tmp_path, monkeypatch,
+):
+    root, serving, _ = _stage(tmp_path, monkeypatch)
+    original_verify = cert.verify_arm
+    candidate_first = ("1" * 64, 1000, 100000)
+
+    def replay_one_process(*, arm, **kwargs):
+        result = original_verify(arm=arm, **kwargs)
+        if arm == "dense_v2":
+            result["verified_process_identities"] = (
+                candidate_first, *result["verified_process_identities"][1:]
+            )
+        return result
+
+    monkeypatch.setattr(cert, "verify_arm", replay_one_process)
+    with pytest.raises(cert.CertificateRefusal, match="reuse one executed Python process"):
+        bridge._verify_humaneval_certificates(root, serving)
 
 
 @pytest.mark.parametrize("tamper", [

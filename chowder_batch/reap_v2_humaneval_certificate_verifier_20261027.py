@@ -358,6 +358,9 @@ def verify_arm(
         "runtime_host_sha256": cap["runtime_host_sha256"],
         "python_executable_sha256": cap["python_executable_sha256"],
         "executed_with_verified_trace": len(seen_traces),
+        # Internal independently observed process identities. Two distinct
+        # model-serving arms must not credit the same Python execution twice.
+        "verified_process_identities": tuple(sorted(seen_processes)),
         "nonterminated_original_nonpasses": EXPECTED_COUNT - len(seen_traces),
         "correct": expected_correct, "population": EXPECTED_COUNT,
         "outcomes": tuple((row["id"], row["correct"]) for row in grade["outcomes"]),
@@ -382,6 +385,36 @@ def verify_arm(
     }
 
 
+def verify_disjoint_execution_lineage(candidate: dict, dense: dict) -> None:
+    """Reject reusing one actual sandbox process across distinct original arms.
+
+    PID alone can legitimately recur after exit; the host, PID and kernel
+    process-start identity together identify an execution. Cgroup paths may
+    also be reused sequentially, so they are not used as a cross-arm key.
+    """
+    identities = []
+    for name, certificate in (("candidate", candidate), ("dense", dense)):
+        _require(isinstance(certificate, dict), f"{name}: original certificate absent")
+        count = certificate.get("executed_with_verified_trace")
+        processes = certificate.get("verified_process_identities")
+        _require(type(count) is int and 0 <= count <= EXPECTED_COUNT
+                 and type(processes) in (tuple, list) and len(processes) == count,
+                 f"{name}: original verified process inventory incomplete")
+        normalized = []
+        for process in processes:
+            _require(type(process) in (tuple, list) and len(process) == 3
+                     and _hex(process[0]) and type(process[1]) is int
+                     and process[1] > 0 and type(process[2]) is int
+                     and process[2] > 0,
+                     f"{name}: original process identity invalid")
+            normalized.append(tuple(process))
+        _require(len(set(normalized)) == count,
+                 f"{name}: original process identity repeated within arm")
+        identities.append(set(normalized))
+    _require(not identities[0].intersection(identities[1]),
+             "original Q8 and dense HumanEval reuse one executed Python process")
+
+
 def verify_paired_gate2(*, candidate: dict[str, Any], dense: dict[str, Any]) -> dict:
     """Reverify both full original arms from disk and compute §4 paired Wald.
 
@@ -393,6 +426,7 @@ def verify_paired_gate2(*, candidate: dict[str, Any], dense: dict[str, Any]) -> 
              "paired original evidence paths not supplied")
     arm_result = verify_arm(arm="reap128_v2", **candidate)
     dense_result = verify_arm(arm="dense_v2", **dense)
+    verify_disjoint_execution_lineage(arm_result, dense_result)
     _require(arm_result["physical_host_sha256"] == dense_result["physical_host_sha256"],
              "original Q8 and dense comparisons used different physical Windows hosts")
     _require(arm_result["session_id"] != dense_result["session_id"],

@@ -234,6 +234,7 @@ def test_genuine_original_archived_sources_remain_research_only():
 def test_synthetic_full_review_produces_diagnostic_only(specimens):
     result = certificate.verify_arm(**specimens["args"])
     assert result["correct"] == result["executed_with_verified_trace"] == 162
+    assert len(result["verified_process_identities"]) == 162
     assert result["nonterminated_original_nonpasses"] == 2
     assert result["population"] == 164
     assert result["gate2"].startswith("UNKNOWN")
@@ -343,6 +344,8 @@ def test_paired_original_gate2_statistic_is_exact_sample_sd_wald_on_item_ids(mon
             pass_ids = set(range(110))
         return {"physical_host_sha256": "a" * 64,
                 "session_id": "1" * 32 if arm == "reap128_v2" else "2" * 32,
+                "executed_with_verified_trace": 0,
+                "verified_process_identities": (),
                 "frozen_source_items_sha256": certificate.SOURCE_HUMANEVAL164_SHA256,
                 "outcomes": tuple((f"HumanEval/{i}", i in pass_ids) for i in range(n)),
                 "correct": len(pass_ids)}
@@ -370,8 +373,37 @@ def test_paired_gate2_refuses_incomparable_runs(monkeypatch, mode):
             "b" if mode == "different_host" else "a")) * 64,
             "session_id": ("1" if arm == "reap128_v2" else (
                 "1" if mode == "same_session" else "2")) * 32,
+            "executed_with_verified_trace": 0,
+            "verified_process_identities": (),
             "frozen_source_items_sha256": certificate.SOURCE_HUMANEVAL164_SHA256,
             "outcomes": tuple(rows), "correct": 164}
     monkeypatch.setattr(certificate, "verify_arm", lambda **kwargs: fake_arm(kwargs["arm"]))
     with pytest.raises(certificate.CertificateRefusal):
         certificate.verify_paired_gate2(candidate={}, dense={})
+
+
+def test_paired_original_gate2_refuses_reused_python_process_identity(monkeypatch):
+    shared = ("1" * 64, 1234, 567890)
+
+    def synthetic_arm(arm):
+        return {
+            "physical_host_sha256": "a" * 64,
+            "session_id": "1" * 32 if arm == "reap128_v2" else "2" * 32,
+            "executed_with_verified_trace": 1,
+            "verified_process_identities": (shared,),
+            "frozen_source_items_sha256": certificate.SOURCE_HUMANEVAL164_SHA256,
+            "outcomes": tuple((f"HumanEval/{i}", True) for i in range(164)),
+            "correct": 164,
+        }
+
+    monkeypatch.setattr(certificate, "verify_arm", lambda **kwargs: synthetic_arm(kwargs["arm"]))
+    with pytest.raises(certificate.CertificateRefusal, match="reuse one executed Python process"):
+        certificate.verify_paired_gate2(candidate={}, dense={})
+
+
+def test_paired_process_lineage_allows_distinct_kernel_start_identity():
+    candidate = {"executed_with_verified_trace": 1,
+                 "verified_process_identities": (("1" * 64, 1234, 567890),)}
+    dense = {"executed_with_verified_trace": 1,
+             "verified_process_identities": (("1" * 64, 1234, 567891),)}
+    certificate.verify_disjoint_execution_lineage(candidate, dense)
