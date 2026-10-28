@@ -365,6 +365,17 @@ def verify_arm(
         # semantics available to the official frozen intake. Never equate a
         # forged selector row's `terminated` field with independent capture.
         "termination_outcomes": tuple((case["id"], case["finished"]) for case in cases),
+        # An equal correctness/termination bit does not prove the original
+        # evaluator scored THIS native response. The admission bridge must
+        # independently bind every original row's raw text to captured bytes.
+        "native_response_sha256_outcomes": tuple(
+            (case["id"], case["native_response_sha256"]) for case in cases
+        ),
+        "native_health_outcomes": tuple(
+            (case["id"], case["trigram_ratio"], case["completion_tokens"],
+             round(case["seconds"], 2), case["predicted_per_second"])
+            for case in cases
+        ),
         "selector_rows_sha256": prepared["summary_entry"]["file_sha256"],
         "gate2": "UNKNOWN_UNTIL_PAIRED_SOURCE_BOUND_DENSE_AND_FROZEN_SELECTOR",
         "chosen": None, "release_approved": False,

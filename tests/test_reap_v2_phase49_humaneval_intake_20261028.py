@@ -34,7 +34,10 @@ def _stage(tmp_path, monkeypatch):
         serving[arm] = {"session_id": session, "physical_host_sha256": "c" * 64,
                         "hardware_profile_sha256": "e" * 64}
         cases[arm] = {
-            f"HumanEval/{i}": {"id": f"HumanEval/{i}", "correct": i != 7, "terminated": i != 7}
+            f"HumanEval/{i}": {"id": f"HumanEval/{i}", "correct": i != 7,
+                                 "terminated": i != 7, "text": f"native-original-{arm}-{i}",
+                                 "trigram_ratio": 0.75, "completion_tokens": 20,
+                                 "seconds": 1.23, "predicted_per_second": 16.3}
             for i in range(164)
         }
         path = root / (arm + ".frozen-humaneval-certificate-inputs.json")
@@ -74,6 +77,14 @@ def _stage(tmp_path, monkeypatch):
             "chosen": None, "release_approved": False,
             "outcomes": [(f"HumanEval/{i}", i != 7) for i in range(164)],
             "termination_outcomes": [(f"HumanEval/{i}", i != 7) for i in range(164)],
+            "native_response_sha256_outcomes": [
+                (f"HumanEval/{i}", _sha(f"native-original-{arm}-{i}".encode("utf-8")))
+                for i in range(164)
+            ],
+            "native_health_outcomes": [
+                (f"HumanEval/{i}", 0.75, 20, 1.23, 16.3)
+                for i in range(164)
+            ],
         }
 
     monkeypatch.setattr(cert, "verify_arm", mock_verified_original_trace)
@@ -104,7 +115,41 @@ def test_source_locked_trace_and_original_item_join_synthetic_only(tmp_path, mon
     assert bridge._verify_humaneval_certificates(root, serving) is None
 
 
-@pytest.mark.parametrize("tamper", ["manifest", "correct", "terminated", "missing", "session", "host", "rows", "serve_path", "cross_host", "cross_profile", "same_session"])
+@pytest.mark.parametrize("tamper", [
+    "missing_hashes", "reordered_hashes", "wrong_hash", "missing_health",
+    "reordered_health", "wrong_health",
+])
+def test_original_native_response_and_health_witness_cannot_be_omitted_or_reordered(
+    tmp_path, monkeypatch, tamper
+):
+    root, serving, _ = _stage(tmp_path, monkeypatch)
+    verified = cert.verify_arm
+
+    def forged_certificate(*, arm, **kwargs):
+        result = verified(arm=arm, **kwargs)
+        if arm == "reap128_v2":
+            if tamper == "missing_hashes":
+                del result["native_response_sha256_outcomes"]
+            elif tamper == "reordered_hashes":
+                rows = result["native_response_sha256_outcomes"]
+                rows[0], rows[1] = rows[1], rows[0]
+            elif tamper == "wrong_hash":
+                result["native_response_sha256_outcomes"][0] = ("HumanEval/0", "0" * 64)
+            elif tamper == "missing_health":
+                del result["native_health_outcomes"]
+            elif tamper == "reordered_health":
+                rows = result["native_health_outcomes"]
+                rows[0], rows[1] = rows[1], rows[0]
+            elif tamper == "wrong_health":
+                result["native_health_outcomes"][0] = ("HumanEval/0", 0.0, 20, 1.23, 16.3)
+        return result
+
+    monkeypatch.setattr(cert, "verify_arm", forged_certificate)
+    with pytest.raises(bridge.FrozenEvidenceError):
+        bridge._verify_humaneval_certificates(root, serving)
+
+
+@pytest.mark.parametrize("tamper", ["manifest", "correct", "terminated", "response", "trigram", "tokens", "duration", "rate", "missing", "session", "host", "rows", "serve_path", "cross_host", "cross_profile", "same_session"])
 def test_original_trace_intake_never_promotes_disagreed_certificate(
     tmp_path, monkeypatch, tamper
 ):
@@ -116,6 +161,17 @@ def test_original_trace_intake_never_promotes_disagreed_certificate(
         cases["reap128_v2"]["HumanEval/6"]["correct"] = False
     elif tamper == "terminated":
         cases["dense_v2"]["HumanEval/5"]["terminated"] = False
+    elif tamper == "response":
+        # Same ID, grade and termination but a different original generation.
+        cases["reap128_v2"]["HumanEval/6"]["text"] = "substituted model response"
+    elif tamper == "trigram":
+        cases["reap128_v2"]["HumanEval/6"]["trigram_ratio"] = 0.1
+    elif tamper == "tokens":
+        cases["reap128_v2"]["HumanEval/6"]["completion_tokens"] = 21
+    elif tamper == "duration":
+        cases["reap128_v2"]["HumanEval/6"]["seconds"] = 0.01
+    elif tamper == "rate":
+        cases["reap128_v2"]["HumanEval/6"]["predicted_per_second"] = 9999.0
     elif tamper == "missing":
         del cases["dense_v2"]["HumanEval/2"]
     elif tamper == "session":

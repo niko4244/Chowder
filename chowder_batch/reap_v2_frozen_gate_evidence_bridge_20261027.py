@@ -366,20 +366,38 @@ def _verify_humaneval_certificates(root: Path, serving: dict[str, dict]) -> None
         rows = reap_select._attested_rows(root, arm, "humaneval", 164)
         correct = certificate.get("outcomes")
         terminated = certificate.get("termination_outcomes")
+        response_hashes = certificate.get("native_response_sha256_outcomes")
+        health = certificate.get("native_health_outcomes")
         _require(isinstance(rows, dict)
                  and type(correct) in (list, tuple) and len(correct) == 164
-                 and type(terminated) in (list, tuple) and len(terminated) == 164,
+                 and type(terminated) in (list, tuple) and len(terminated) == 164
+                 and type(response_hashes) in (list, tuple) and len(response_hashes) == 164
+                 and type(health) in (list, tuple) and len(health) == 164,
                  f"{arm}: complete independent per-item certificate absent")
         for i in range(164):
             key = f"HumanEval/{i}"
             expected = rows.get(key)
             item = correct[i]
             finish = terminated[i]
+            response = response_hashes[i]
+            metrics = health[i]
             _require(isinstance(expected, dict)
                      and type(item) in (tuple, list) and len(item) == 2
                      and type(finish) in (tuple, list) and len(finish) == 2
-                     and item[0] == finish[0] == key
+                     and type(response) in (tuple, list) and len(response) == 2
+                     and type(metrics) in (tuple, list) and len(metrics) == 5
+                     and item[0] == finish[0] == response[0] == metrics[0] == key
                      and type(item[1]) is bool and type(finish[1]) is bool
+                     and _hex(response[1])
+                     and isinstance(expected.get("text"), str)
+                     and _sha(expected["text"].encode("utf-8")) == response[1]
+                     and type(expected.get("trigram_ratio")) in (float, int)
+                     and expected["trigram_ratio"] == metrics[1]
+                     and type(expected.get("completion_tokens")) is int
+                     and expected["completion_tokens"] == metrics[2]
+                     and type(expected.get("seconds")) in (float, int)
+                     and expected["seconds"] == metrics[3]
+                     and expected.get("predicted_per_second") == metrics[4]
                      and expected.get("correct") is item[1]
                      and expected.get("terminated") is finish[1]
                      and not (item[1] and not finish[1]),
