@@ -250,6 +250,26 @@ def test_resealed_legacy_correct_nontermination_refused_by_independent_bridge(
     assert result["chosen"] is None and result["release_approved"] is False
 
 
+@pytest.mark.parametrize("unreviewed", ["reap160", "reap160_v2", "reap128"])
+def test_unreviewed_frozen_fallback_cannot_be_promoted_by_independent_bridge(
+    synthetic, monkeypatch, unreviewed,
+):
+    root, obs = synthetic
+    original_evaluate = reap_select.evaluate
+
+    def select_unreviewed(*args, **kwargs):
+        report = original_evaluate(*args, **kwargs)
+        report["decision"] = {"status": "SELECTED", "chosen": unreviewed,
+                              "reason": "synthetic unreviewed fallback"}
+        return report
+
+    monkeypatch.setattr(bridge.reap_select, "evaluate", select_unreviewed)
+    result = bridge.bridge_frozen_evidence(root, obs)
+    assert result["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
+    assert "fallback without independent original admission" in result["reason"]
+    assert result["chosen"] is None and result["release_approved"] is False
+
+
 @pytest.mark.parametrize("kind", [
     "unpin", "new_unapproved_file", "alter_scored_row", "wrong_review_sha",
     "foreign_q8_model", "wrong_slot_count", "cross_session", "wrong_host_speed",

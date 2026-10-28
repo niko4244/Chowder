@@ -435,6 +435,12 @@ def bridge_frozen_evidence(
         _require(report["paired_method"]["status"] == "UNRESOLVED"
                  and report["release_approved"] is False,
                  "Amendment4 method conflict or frozen release guard was lost")
+        # The frozen selector may legitimately choose a later fallback, but
+        # this bridge has no independent native/model/security approvals for
+        # reap160, reap160_v2 or historical reap128. A selection is not an
+        # admission certificate: refuse rather than return an unreviewed arm.
+        _require(report["decision"].get("chosen") in (None, "reap128_v2"),
+                 "frozen selector chose fallback without independent original admission")
         return {
             "schema": SCHEMA, "status": "SOURCE_APPROVED_ORIGINAL_EVIDENCE_EVALUATED",
             "gate0": gates["gate0"]["status"],
