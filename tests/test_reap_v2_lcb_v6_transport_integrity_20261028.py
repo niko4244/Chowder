@@ -86,6 +86,27 @@ def test_valid_journal_parsing():
     assert audit.parse_complete_journal((json.dumps(record) + "\n").encode()) == [record]
 
 
+@pytest.mark.parametrize("malformed", [
+    b'{"question_id":"wrong","question_id":"a"}\n',
+    b'{"question_id":"a","usage":{"tokens":1,"tokens":2}}\n',
+    b'{"question_id":"a","elapsed_s":NaN}\n',
+    b'{"question_id":"a","elapsed_s":Infinity}\n',
+    b'{"question_id":"a","elapsed_s":-Infinity}\n',
+    b'{"question_id":"\xff"}\n',
+])
+def test_rejects_ambiguous_or_nonstandard_json_receipts(malformed):
+    with pytest.raises(ValueError):
+        audit.parse_complete_journal(malformed)
+
+
+def test_valid_unicode_and_nested_unique_receipt():
+    record = row(*SOURCE[0])
+    record["raw"] = "é\u2603"
+    record["usage"] = {"prompt": 1, "completion": 2}
+    raw = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+    assert audit.parse_complete_journal(raw) == [record]
+
+
 def test_rejects_duplicate_or_out_of_order_source_id():
     with pytest.raises(ValueError, match="canonical"):
         audit.classify(SOURCE, [row(*SOURCE[0]), row(*SOURCE[0])])

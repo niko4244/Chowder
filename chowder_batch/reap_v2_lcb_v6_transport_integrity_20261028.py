@@ -17,6 +17,20 @@ from chowder_batch import reap_v2_lcb_v6_checkpoint_readonly_audit_20261028 as l
 SCHEMA = "chowder.reap-v2-lcb-v6-transport-integrity.v1"
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict:
+    """Do not let JSON's last-key-wins behavior conceal contradictory receipts."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON journal key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(value: str) -> None:
+    raise ValueError(f"non-finite JSON journal constant: {value}")
+
+
 def parse_complete_journal(raw: bytes) -> list[dict]:
     """Reject torn writes rather than interpreting an in-flight row as a case."""
     if not raw or not raw.endswith(b"\n"):
@@ -26,7 +40,10 @@ def parse_complete_journal(raw: bytes) -> list[dict]:
         if not line:
             raise ValueError(f"blank generation row {index}")
         try:
-            row = json.loads(line)
+            row = json.loads(
+                line, object_pairs_hook=_unique_object,
+                parse_constant=_reject_nonfinite,
+            )
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"invalid generation row {index}") from exc
         if not isinstance(row, dict):
