@@ -241,6 +241,65 @@ def test_synthetic_full_review_produces_diagnostic_only(specimens):
     assert result["release_approved"] is False and result["chosen"] is None
 
 
+def test_pinned_python_exit_after_original_ten_second_deadline_refuses(specimens):
+    # The frozen reap_eval subprocess.run(timeout=10) cannot score a Python
+    # exit observed at 11.5 seconds as correct, even with all test-only hashes
+    # independently re-pinned and the outer 12-second teardown cap respected.
+    args = specimens["args"]
+    proof = specimens["witness"]["per_case"][0]
+    proof["elapsed_milliseconds"] = 11_500
+    path = args["trace_dir"] / "000.json"
+    trace = json.loads(path.read_text(encoding="utf-8"))
+    trace["elapsed_milliseconds"] = 11_500
+    trace["execution_finished_ns"] = trace["execution_release_ns"] + 11_500_000_000
+    raw = _json(path, trace)
+    proof["independent_trace_sha256"] = certificate._sha(raw)
+    specimens["review"]["case_trace_sha256"][0] = certificate._sha(raw)
+    _repin_receipts(specimens)
+    with pytest.raises(certificate.CertificateRefusal, match="original 10-second timeout"):
+        certificate.verify_arm(**args)
+
+
+def test_pinned_premature_timeout_cannot_replace_original_ten_second_grader(specimens):
+    args = specimens["args"]
+    proof = specimens["witness"]["per_case"][0]
+    proof.update(status="PYTHON_TIMEOUT_10S", correct=False,
+                 exit_code=None, timeout_kill_observed=True)
+    specimens["witness"]["independent_correct"] = 161
+    path = args["trace_dir"] / "000.json"
+    trace = json.loads(path.read_text(encoding="utf-8"))
+    trace.update(execution_status="PYTHON_TIMEOUT_10S", correct=False,
+                 exit_code=None, timeout_kill_observed=True)
+    raw = _json(path, trace)
+    proof["independent_trace_sha256"] = certificate._sha(raw)
+    specimens["review"]["case_trace_sha256"][0] = certificate._sha(raw)
+    _repin_receipts(specimens)
+    with pytest.raises(certificate.CertificateRefusal, match="original 10-second timeout"):
+        certificate.verify_arm(**args)
+
+
+def test_real_ten_second_timeout_with_bounded_cleanup_stays_nonpass(specimens):
+    args = specimens["args"]
+    proof = specimens["witness"]["per_case"][0]
+    proof.update(status="PYTHON_TIMEOUT_10S", correct=False,
+                 exit_code=None, timeout_kill_observed=True,
+                 elapsed_milliseconds=10_500)
+    specimens["witness"]["independent_correct"] = 161
+    path = args["trace_dir"] / "000.json"
+    trace = json.loads(path.read_text(encoding="utf-8"))
+    trace.update(execution_status="PYTHON_TIMEOUT_10S", correct=False,
+                 exit_code=None, timeout_kill_observed=True,
+                 elapsed_milliseconds=10_500,
+                 execution_finished_ns=trace["execution_release_ns"] + 10_500_000_000)
+    raw = _json(path, trace)
+    proof["independent_trace_sha256"] = certificate._sha(raw)
+    specimens["review"]["case_trace_sha256"][0] = certificate._sha(raw)
+    _repin_receipts(specimens)
+    result = certificate.verify_arm(**args)
+    assert result["correct"] == 161
+    assert result["release_approved"] is False
+
+
 @pytest.mark.parametrize(("mutation", "error"), [
     ("unpin_review", "security approval"),
     ("missing_trace", "missing, linked or oversized"),

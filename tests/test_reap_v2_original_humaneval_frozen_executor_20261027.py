@@ -126,6 +126,15 @@ def test_source_only_capture_builds_original_python_without_running_it(synthetic
     assert b"return 17" in source
 
 
+@pytest.mark.parametrize("invalid_rate", [-1.0, float("nan"), True, "20"])
+def test_reopened_native_capture_rejects_invalid_token_rate(synthetic_original, invalid_rate):
+    case = _capture(17, synthetic_original)
+    case["predicted_per_second"] = invalid_rate
+    tasks = frozen.canonical_tasks(synthetic_original[0])
+    with pytest.raises(frozen.FrozenExecutionRefusal, match="native token-rate"):
+        frozen._candidate_packet(case, tasks)
+
+
 def test_unterminated_generation_is_never_sent_for_execution(synthetic_original):
     case = _capture(2, synthetic_original, finish="length")
     assert case["candidate_program_sha256"] is None
@@ -370,6 +379,24 @@ def test_only_independently_pinned_synthetic_164_case_witness_can_build_selector
     assert prepared["release_approved"] is False
 
 
+def test_original_timeout_after_ten_seconds_is_strict_nonpass(synthetic_approved_replay):
+    cases, witness, path, canonical, monkeypatch = synthetic_approved_replay
+    witness["per_case"][0].update(status="PYTHON_TIMEOUT_10S", correct=False,
+                                  exit_code=None, timeout_kill_observed=True,
+                                  elapsed_milliseconds=10_500)
+    witness["independent_correct"] = 161
+    monkeypatch.setattr(frozen, "APPROVED_OUTSIDE_HOST_WITNESS_SHA256",
+                        {"reap128_v2": _sha(_write(path, witness))})
+    grade = frozen.score_frozen_164(
+        cases, path, arm="reap128_v2",
+        capability_path=Path("C:/SYNTHETIC-CAPABILITY"),
+        broker_path=Path("C:/SYNTHETIC-BROKER"), canonical=canonical,
+    )
+    assert grade["correct"] == 161
+    assert grade["outcomes"][0]["correct"] is False
+    assert grade["release_approved"] is False
+
+
 @pytest.mark.parametrize(("mutation", "error"), [
     ("wrong_original_program", "candidate SHA mismatch"),
     ("reused_owner", "isolation and independent process"),
@@ -377,6 +404,8 @@ def test_only_independently_pinned_synthetic_164_case_witness_can_build_selector
     ("false_egress", "isolation and independent process"),
     ("missing_teardown", "isolation and independent process"),
     ("falsified_pass_exit", "exit and original pass"),
+    ("late_success", "original 10-second timeout"),
+    ("premature_timeout", "original 10-second timeout"),
     ("unterminated_executed", "unterminated response was executed"),
     ("wrong_session", "case/order/candidate SHA mismatch"),
     ("wrong_aggregate", "aggregate"),
@@ -400,6 +429,12 @@ def test_fabricated_source_pinned_external_witness_still_fails_semantic_attestat
     elif mutation == "falsified_pass_exit":
         rows[0]["correct"] = True
         rows[0]["exit_code"] = 1
+    elif mutation == "late_success":
+        rows[0]["elapsed_milliseconds"] = 11_500
+    elif mutation == "premature_timeout":
+        rows[0].update(status="PYTHON_TIMEOUT_10S", correct=False,
+                       exit_code=None, timeout_kill_observed=True)
+        witness["independent_correct"] = 161
     elif mutation == "unterminated_executed":
         rows[5]["child_pid"] = 1234
     elif mutation == "wrong_session":

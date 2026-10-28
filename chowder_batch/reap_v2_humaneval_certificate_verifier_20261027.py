@@ -238,9 +238,17 @@ def _verify_trace(raw: bytes, case: dict, proof: dict, cap: dict,
     seen_owners.add(owner)
     seen_trace_hashes.add(digest)
     seen_cgroups.add(cgroup)
+    # The original executable grader uses subprocess.run(timeout=10). The
+    # 12-second outside-host watchdog includes termination/teardown grace;
+    # it must never extend the interval in which a PYTHON_EXIT can count as
+    # an original scored execution. Without a separately authenticated child
+    # exit timestamp, a late completion is not certifiable as pre-deadline.
     _require(trace["elapsed_milliseconds"] <= 12000
+             and (trace["execution_status"] != "PYTHON_EXIT"
+                  or trace["elapsed_milliseconds"] <= 10000)
              and (trace["execution_status"] != "PYTHON_TIMEOUT_10S"
-                  or (trace["exit_code"] is None and trace["correct"] is False)),
+                  or (trace["elapsed_milliseconds"] >= 10000
+                      and trace["exit_code"] is None and trace["correct"] is False)),
              "original 10-second timeout or nonpass rule broken")
 
 

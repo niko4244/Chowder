@@ -396,6 +396,12 @@ def _candidate_packet(case: dict, tasks: list[dict]) -> tuple[dict, bytes | None
           and math.isfinite(case["trigram_ratio"])
           and case["trigram_ratio"] == round(reap_eval._trigram_ratio(response), 4),
           "captured frozen evaluator token/health metrics invalid")
+    # Reopened, source-pinned captures must enforce the same native timing
+    # domain as capture_case, not merely trust an externally resealed digest.
+    pps = case.get("predicted_per_second")
+    _need(pps is None or (type(pps) in (int, float)
+                          and math.isfinite(pps) and pps >= 0),
+          "captured original native token-rate witness invalid")
     return case, raw
 
 
@@ -559,10 +565,15 @@ def score_frozen_164(cases: list[dict], independent_witness_path: Path,
         owners.add(owner)
         pids.add(child)
         if proof["status"] == "PYTHON_TIMEOUT_10S":
-            _need(proof.get("correct") is False and proof.get("exit_code") is None
+            _need(proof["elapsed_milliseconds"] >= 10000
+                  and proof.get("correct") is False and proof.get("exit_code") is None
                   and proof.get("timeout_kill_observed") is True,
-                  "independently timed-out generated Python cannot pass")
+                  "original 10-second timeout duration or nonpass rule broken")
         else:
+            # The outside-host 12-second cap permits timeout cleanup, not a
+            # scored Python exit after reap_eval's original 10-second limit.
+            _need(proof["elapsed_milliseconds"] <= 10000,
+                  "original 10-second timeout exceeded by Python exit")
             _need(type(proof.get("exit_code")) is int
                   and proof["correct"] is (proof["exit_code"] == 0)
                   and proof.get("timeout_kill_observed") is False,
