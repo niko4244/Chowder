@@ -1,0 +1,283 @@
+"""Read-only admission bridge for the *original* frozen v2 selector.
+
+Source-controlled approval SHA pins are intentionally EMPTY. An ordinary
+receipt, its self-reported PASS, a caller-provided hash, or the completed
+research-only Q4/Q8 HumanEval runs cannot authorize a frozen Gen-0 gate.
+Only independently reviewed, source-pinned native original evidence can be
+passed to the unchanged ``reap_select.evaluate`` and its deterministic selector.
+
+This module performs no model inference, generated-code execution, networking,
+container launch, file mutation, or release authorization. Tests replace pins
+with explicitly SYNTHETIC adversarial specimens in isolated test processes.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+import re
+
+from chowder_batch import reap_gates, reap_select
+
+SCHEMA = "chowder.reap-v2-frozen-gate-evidence-bridge.v1"
+REVIEW_SCHEMA = "chowder.reap-v2-independent-original-frozen-review.v1"
+SECURITY_SCHEMA = "chowder.reap-v2-independent-frozen-humaneval-security.v1"
+
+Q8_V2_SHA256 = "89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6"
+Q4_DENSE_SHA256 = "2c6d9466129e8802839566b35728e2506aaf1e8705cd137009e2f08feb9dd049"
+
+COHORTS = {
+    "reap128_v2": {"gsm8k": 1319, "humaneval": 164},
+    "dense_v2": {"gsm8k": 1319, "humaneval": 164},
+    "random128_v2": {"gsm8k": 1319},
+    "reap128_v2_q4": {"gsm8k": 200},
+    "dense_v2_q4": {"gsm8k": 200},
+}
+MODEL_SHA256 = {
+    "reap128_v2": Q8_V2_SHA256,
+    "dense_v2": reap_select.FROZEN_REFERENCE_MODEL_SHA256["dense_v2"],
+    "random128_v2": reap_select.FROZEN_REFERENCE_MODEL_SHA256["random128_v2"],
+    "reap128_v2_q4": reap_gates.PUBLISHED_REAP128_V2_Q4_SHA256,
+    "dense_v2_q4": Q4_DENSE_SHA256,
+}
+
+# Source-owned pins must be entered only after independent review of *actual*
+# original frozen model, scorer, native serving and benchmark records. The map
+# keys are absolute artifact paths; changing it at runtime is test-only.
+APPROVED_ORIGINAL_ARTIFACT_SHA256: dict[str, str] = {}
+APPROVED_INDEPENDENT_REVIEW_SHA256: str | None = None
+APPROVED_HUMANEVAL_SECURITY_SHA256: dict[str, str] = {}
+
+
+class FrozenEvidenceError(ValueError):
+    """An original scientific or security prerequisite is unverified."""
+
+
+def _require(condition: bool, reason: str) -> None:
+    if not condition:
+        raise FrozenEvidenceError(reason)
+
+
+def _sha(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _hex(value: object, width: int = 64) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{" + str(width) + r"}", value) is not None
+
+
+def _json_file(path: Path, *, max_bytes: int = 512 * 1024) -> dict:
+    _require(path.is_file() and not path.is_symlink(), f"missing independent receipt: {path.name}")
+    _require(0 < path.stat().st_size <= max_bytes, "independent receipt size invalid")
+    try:
+        result = json.loads(path.read_bytes().decode("utf-8"),
+                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite")))
+    except (ValueError, UnicodeError) as exc:
+        raise FrozenEvidenceError("independent receipt JSON invalid") from exc
+    _require(isinstance(result, dict), "independent receipt must be a JSON object")
+    return result
+
+
+def _verify_pins(
+    root: Path, observation: Path, observation_v2: Path | None,
+    calibration_v2: Path | None,
+) -> dict[str, str]:
+    _require(bool(APPROVED_ORIGINAL_ARTIFACT_SHA256), "independently approved artifact pins absent")
+    _require(_hex(APPROVED_INDEPENDENT_REVIEW_SHA256), "independent protocol review pin absent")
+    _require(set(APPROVED_HUMANEVAL_SECURITY_SHA256) == {"reap128_v2", "dense_v2"}
+             and all(_hex(v) for v in APPROVED_HUMANEVAL_SECURITY_SHA256.values()),
+             "independent original HumanEval security approvals absent")
+    _require(root.is_dir() and not root.is_symlink(), "original frozen evaluation root invalid")
+
+    # Snapshot *every* source file that the unchanged selector will consume.
+    # A new unpinned candidate/control/score is a refusal, never a new PASS.
+    observed = reap_select._input_digests(root, observation, observation_v2, calibration_v2)
+    required = {observation}
+    _require((observation_v2 is None) == (calibration_v2 is None),
+             "v2 D0 observer and frozen calibration must be supplied together")
+    if observation_v2 is not None and calibration_v2 is not None:
+        required.update({observation_v2, calibration_v2 / "calibration.jsonl",
+                         calibration_v2 / "calibration-manifest.json"})
+    for arm, suites in COHORTS.items():
+        directory = root / arm
+        _require(not (directory / ".serve.lock").exists()
+                 and not any(directory.glob("serve.resume-*.json"))
+                 and not any(directory.glob("server.resume-*.log"))
+                 and not any(directory.glob(".serve-pending-*.json")),
+                 f"{arm}: resumed or incomplete native serving session cannot be certified")
+        required.add(directory / "serve.json")
+        required.add(directory / "summary.json")
+        for suite in suites:
+            required.add(directory / f"{suite}.jsonl")
+            required.add(directory / f"{suite}.inputs.json")
+        if arm.endswith("_q4"):
+            required.add(directory / "server.log")
+    _require(all(path.is_file() and not path.is_symlink() for path in required),
+             "original Q8/dense/control/Q4 source or serving cohort incomplete")
+    expected = APPROVED_ORIGINAL_ARTIFACT_SHA256
+    _require(all(_hex(v) for v in expected.values()), "invalid source-owned artifact SHA pin")
+    _require(set(expected) == set(observed) and required.issubset({Path(p) for p in observed}),
+             "original selector artifacts not fully pinned or an unreviewed artifact appeared")
+    for name, digest in observed.items():
+        path = Path(name)
+        _require(not path.is_symlink() and path.is_file() and digest == expected[name],
+                 f"independently approved source SHA mismatch: {path.name}")
+    return observed
+
+
+def _verify_original_sessions(root: Path, review: dict) -> dict[str, dict]:
+    _require(review.get("schema") == REVIEW_SCHEMA
+             and review.get("status") == "INDEPENDENTLY_APPROVED_ORIGINAL_FROZEN_EVIDENCE"
+             and review.get("native_windows_server_owner_verified") is True
+             and review.get("same_hardware_speed_pair_verified") is True
+             and review.get("no_cross_session_row_pooling") is True
+             and set(review.get("arms", {})) == set(COHORTS),
+             "original independent Windows serving review not approved")
+    approvals = review["arms"]
+    serving = {}
+    for arm, suites in COHORTS.items():
+        record = approvals[arm]
+        _require(isinstance(record, dict), "original native arm approval invalid")
+        serve = _json_file(root / arm / "serve.json")
+        source_model = MODEL_SHA256[arm]
+        session = serve.get("eval_session_id")
+        _require(_hex(session, 32)
+                 and serve.get("flags") == reap_select.FROZEN_SERVE_FLAGS
+                 and serve.get("gguf_sha256") == source_model
+                 and type(serve.get("server_pid")) is int and serve["server_pid"] > 0
+                 and type(serve.get("server_port")) is int and 0 < serve["server_port"] < 65536,
+                 f"{arm}: native original model, serving geometry or session invalid")
+        _require(record.get("model_sha256") == source_model
+                 and record.get("session_id") == session
+                 and _hex(record.get("hardware_profile_sha256"))
+                 and _hex(record.get("physical_host_sha256"))
+                 and record.get("independent_model_bytes_verified") is True
+                 and record.get("native_windows_server_owner_verified") is True
+                 and record.get("per_item_session_binding_verified") is True
+                 and record.get("nonresumed_complete_cohort") is True
+                 and set(record.get("rows_sha256", {})) == set(suites),
+                 f"{arm}: independent original model and item-session provenance incomplete")
+        for suite, n in suites.items():
+            # The existing source witness validates official item fingerprint,
+            # frozen prompt/decode, scoring and independently pinned model SHAs.
+            witness = reap_select._v2_input_witness(root, arm, suite)
+            rows = reap_select._attested_rows(root, arm, suite, n)
+            _require(rows is not None, f"{arm}/{suite}: original rows absent")
+            expected_ids = ({f"gsm8k-{i}" for i in range(n)} if suite == "gsm8k"
+                            else {f"HumanEval/{i}" for i in range(n)})
+            _require(set(rows) == expected_ids
+                     and witness["model"]["gguf_sha256"] == source_model
+                     and record["rows_sha256"].get(suite)
+                     == _sha((root / arm / f"{suite}.jsonl").read_bytes()),
+                     f"{arm}/{suite}: independent original per-item receipt mismatch")
+            _require(all(type(row.get("correct")) is bool
+                         and type(row.get("terminated")) is bool
+                         and not (row["correct"] and not row["terminated"])
+                         and ("eval_session_id" not in row or row["eval_session_id"] == session)
+                         for row in rows.values()),
+                     f"{arm}/{suite}: scorer semantics or recorded item session mismatch")
+        serving[arm] = {"session_id": session,
+                        "hardware_profile_sha256": record["hardware_profile_sha256"],
+                        "physical_host_sha256": record["physical_host_sha256"]}
+    _require(serving["reap128_v2_q4"]["hardware_profile_sha256"]
+             == serving["dense_v2_q4"]["hardware_profile_sha256"]
+             and serving["reap128_v2_q4"]["physical_host_sha256"]
+             == serving["dense_v2_q4"]["physical_host_sha256"],
+             "original first200 Q4 speed runs do not share an approved physical host/profile")
+    return serving
+
+
+def _verify_humaneval_security(root: Path, serving: dict[str, dict]) -> None:
+    for arm in ("reap128_v2", "dense_v2"):
+        path = root / f"{arm}.frozen-humaneval-security.json"
+        _require(path.is_file() and not path.is_symlink(), "original HumanEval security review absent")
+        raw = path.read_bytes()
+        _require(_sha(raw) == APPROVED_HUMANEVAL_SECURITY_SHA256[arm],
+                 "original independently approved HumanEval security SHA mismatch")
+        proof = _json_file(path)
+        controls = proof.get("controls")
+        _require(proof.get("schema") == SECURITY_SCHEMA
+                 and proof.get("status") == "INDEPENDENTLY_APPROVED_FROZEN_GATE2_EXECUTION"
+                 and proof.get("arm") == arm
+                 and proof.get("model_sha256") == MODEL_SHA256[arm]
+                 and proof.get("session_id") == serving[arm]["session_id"]
+                 and proof.get("canonical_source_sha256") == reap_gates.FROZEN_SOURCE_SHA256["humaneval"]
+                 and proof.get("original_rows_sha256")
+                 == _sha((root / arm / "humaneval.jsonl").read_bytes())
+                 and type(proof.get("source_bound_cases")) is int
+                 and proof["source_bound_cases"] == 164
+                 and _hex(proof.get("independent_observer_implementation_sha256"))
+                 and isinstance(controls, dict)
+                 and set(controls) == {
+                     "original_python_I_ten_second_timeout", "per_case_original_program_sha_verified",
+                     "isolated_nonprivileged_process", "network_egress_denied",
+                     "host_filesystem_and_secrets_denied", "memory_and_pid_limits_enforced",
+                     "independent_process_tree_extinction", "no_unreviewed_generated_code_execution",
+                 }
+                 and all(value is True for value in controls.values()),
+                 f"{arm}: original independent execution sandbox not approved")
+
+
+def _blocked(reason: str) -> dict:
+    return {
+        "schema": SCHEMA, "status": "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE",
+        "reason": reason, "gate0": "UNKNOWN", "gate1": "UNKNOWN", "gate2": "UNKNOWN",
+        "control": "UNKNOWN", "speed": "UNKNOWN",
+        "selection": reap_select.select({}),
+        "amendment4": "BLOCKED_PENDING_INDEPENDENT_PREREG_METHOD_RECONCILIATION",
+        "chosen": None, "release_approved": False,
+    }
+
+
+def bridge_frozen_evidence(
+    eval_dir: str | Path, observation: str | Path,
+    observation_v2: str | Path | None = None,
+    calibration_v2: str | Path | None = None,
+) -> dict:
+    """Read and admit pinned *original* evidence into the unmodified selector.
+
+    Approval SHA pins live only in this reviewed source module, never in the
+    supplied evaluation files or call arguments. Returns BLOCKED/UNKNOWN for
+    missing or invalid evidence. ``release_approved`` is always False, even if
+    the frozen deterministic selector eventually returns SELECTED.
+    """
+    try:
+        root = Path(eval_dir)
+        observer = Path(observation)
+        observer_v2 = Path(observation_v2) if observation_v2 is not None else None
+        calibration = Path(calibration_v2) if calibration_v2 is not None else None
+        first = _verify_pins(root, observer, observer_v2, calibration)
+        review_path = root / "frozen-independent-review.json"
+        review_raw = review_path.read_bytes() if review_path.is_file() and not review_path.is_symlink() else b""
+        _require(_sha(review_raw) == APPROVED_INDEPENDENT_REVIEW_SHA256,
+                 "independent reviewed original native-serving manifest SHA mismatch")
+        serving = _verify_original_sessions(root, _json_file(review_path))
+        _verify_humaneval_security(root, serving)
+
+        # Only the existing original frozen gate engine calculates scientific
+        # outcomes. Its paired Wald is statistics.stdev (sample SD), not a
+        # discordance-only McNemar substitution; it preserves Amendment4 block.
+        report = reap_select.evaluate(root, observer, observer_v2, calibration)
+        _require(reap_select._input_digests(root, observer, observer_v2, calibration) == first,
+                 "frozen selector inputs changed during independent validation")
+        gates = report["gates"].get("reap128_v2", {}).get("gates", {})
+        _require(set(reap_select.REQUIRED).issubset(gates),
+                 "original v2 gate set was not computed by frozen selector")
+        _require(report["paired_method"]["status"] == "UNRESOLVED"
+                 and report["release_approved"] is False,
+                 "Amendment4 method conflict or frozen release guard was lost")
+        return {
+            "schema": SCHEMA, "status": "SOURCE_APPROVED_ORIGINAL_EVIDENCE_EVALUATED",
+            "gate0": gates["gate0"]["status"],
+            "gate1": gates["gate1"].get("computed_status", gates["gate1"]["status"]),
+            "gate2": gates["gate2"].get("computed_status", gates["gate2"]["status"]),
+            "control": gates["control"].get("computed_status", gates["control"]["status"]),
+            "speed": gates["speed"].get("computed_status", gates["speed"]["status"]),
+            "frozen_selector": report, "selection": report["decision"],
+            "amendment4": "BLOCKED_PENDING_INDEPENDENT_PREREG_METHOD_RECONCILIATION",
+            "chosen": report["decision"].get("chosen"), "release_approved": False,
+        }
+    except (FrozenEvidenceError, reap_gates.GateError, ValueError, TypeError,
+            KeyError, OSError, UnicodeError, OverflowError, ZeroDivisionError) as exc:
+        return _blocked(str(exc)[:500])

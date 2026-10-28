@@ -1,0 +1,28 @@
+{
+  "amendment4_optional_nonzero_margin_paired_mcnemar_ci": "BLOCKED_UNRESOLVED_PROSPECTIVE_METHOD",
+  "authentic_historical_selector": {
+    "chosen": null,
+    "reason": "amendment 4 requires both REAP128_v2 and REAP160 full gates",
+    "status": "BLOCKED"
+  },
+  "current_v2_control": "UNKNOWN",
+  "current_v2_gate0": "UNKNOWN",
+  "current_v2_gate1": "UNKNOWN",
+  "current_v2_gate2": "UNKNOWN",
+  "current_v2_speed": "UNKNOWN",
+  "full_new_source_population_scored_here": false,
+  "gen0": {
+    "chosen": null,
+    "release_approved": false,
+    "status": "BLOCKED"
+  },
+  "historical_v1_gate1": {
+    "lower_bound": -0.03780741197234255,
+    "status": "FAIL",
+    "strict_margin": -0.03
+  },
+  "reap160_native_speed": "UNKNOWN",
+  "schema": "chowder.reap-v2-historical-v1-amendment4-replay.v1",
+  "source_sha256": "7043980b1a5551131c348d720704382eeee42b63001afcccd9f031b7528bb42e",
+  "status": "HISTORICAL_ORIGINAL_V1_REPLAY_ONLY"
+}
