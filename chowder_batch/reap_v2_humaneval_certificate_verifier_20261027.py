@@ -361,6 +361,10 @@ def verify_arm(
         "nonterminated_original_nonpasses": EXPECTED_COUNT - len(seen_traces),
         "correct": expected_correct, "population": EXPECTED_COUNT,
         "outcomes": tuple((row["id"], row["correct"]) for row in grade["outcomes"]),
+        # Keep the independently source-bound original generation termination
+        # semantics available to the official frozen intake. Never equate a
+        # forged selector row's `terminated` field with independent capture.
+        "termination_outcomes": tuple((case["id"], case["finished"]) for case in cases),
         "selector_rows_sha256": prepared["summary_entry"]["file_sha256"],
         "gate2": "UNKNOWN_UNTIL_PAIRED_SOURCE_BOUND_DENSE_AND_FROZEN_SELECTOR",
         "chosen": None, "release_approved": False,

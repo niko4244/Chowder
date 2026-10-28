@@ -105,6 +105,7 @@ def validate_sample(
     *,
     startup_grace_seconds: int = MAX_STARTUP_GRACE_SECONDS,
     max_runtime_seconds: int = MAX_WALL_SECONDS,
+    allow_witnessed_shutdown: bool = False,
 ) -> list[str]:
     """Pure fail-closed runtime bounds; does not launch or kill processes."""
     if not isinstance(sample, dict) or not _number(startup_grace_seconds):
@@ -170,6 +171,13 @@ def validate_sample(
         failures.append("GPU_RUNTIME_FLOOR")
     ready = sample.get("native_started") is True
     residence = sample.get("native_residency")
+    # A native server can legitimately close its listener after the original
+    # evaluator exits, while the source-approved wrapper persists briefly to
+    # flush receipts. Only the private Job watcher may set this flag after
+    # witnessing a FULL active lineage and bounded authorized shutdown.
+    # Host RAM, commit, disk, GPU and owner integrity checks still apply.
+    if allow_witnessed_shutdown is True:
+        return sorted(set(failures))
     if ready and not isinstance(residence, dict):
         failures.append("NATIVE_RESIDENCY_MISSING")
     if (
@@ -405,6 +413,21 @@ class _IO_COUNTERS(ctypes.Structure):
     ]
 
 
+class _JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
+    """Win32 class 1 lifetime process totals, NOT sampled live PID count."""
+
+    _fields_ = [
+        ("TotalUserTime", ctypes.c_int64),
+        ("TotalKernelTime", ctypes.c_int64),
+        ("ThisPeriodTotalUserTime", ctypes.c_int64),
+        ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+        ("TotalPageFaultCount", wintypes.DWORD),
+        ("TotalProcesses", wintypes.DWORD),
+        ("ActiveProcesses", wintypes.DWORD),
+        ("TotalTerminatedProcesses", wintypes.DWORD),
+    ]
+
+
 class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
     _fields_ = [
         ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
@@ -599,6 +622,29 @@ class _WindowsOwnedJob:
             for i in range(in_list)
         ]
 
+    def lifetime_process_counts(self) -> dict[str, int]:
+        """Query the OWNED Job handle's cumulative born/active process census.
+
+        A child can be created and exit between sampling intervals. Active
+        member enumeration alone cannot establish all original child commands
+        were inspected. Missing birth/argv evidence must block clean runtime.
+        """
+        if not self.active or not self.job:
+            raise SupervisorRefused("PRIVATE_JOB_NOT_ACTIVE")
+        info = _JOBOBJECT_BASIC_ACCOUNTING_INFORMATION()
+        self._call(
+            "QueryInformationJobObject",
+            self.job, 1, ctypes.byref(info), ctypes.sizeof(info), None,
+            types=[wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                   wintypes.DWORD, ctypes.c_void_p],
+        )
+        total = int(info.TotalProcesses)
+        active = int(info.ActiveProcesses)
+        if total < 1 or active > total:
+            raise SupervisorRefused("PRIVATE_JOB_LIFETIME_ACCOUNTING_INVALID")
+        return {"total_processes": total, "active_processes": active,
+                "total_page_fault_count": int(info.TotalPageFaultCount)}
+
     def verify_member_births(self, members: list[int]) -> bool:
         """No job-member PID may change create-time within this observation."""
         if not self.active:
@@ -776,10 +822,23 @@ def _watch_sample(
     now = time.monotonic()
     memory = native.read_windows_memory()
     gpu = native.read_gpu()
-    members = owner.member_ids()
-    process_identified = bool(
-        members and owner.pid in members and owner.verify_member_births(members)
-    )
+    # Windows helper children can naturally exit between the native Job
+    # member enumeration and psutil's create-time lookup. Such a torn read
+    # must NEVER prove ownership, but must not automatically kill an otherwise
+    # qualified 1,319-item run either. Retry a strictly bounded fresh Job
+    # census; persistent ambiguity and PID substitution still fail closed.
+    members = []
+    process_identified = False
+    for attempt in range(3):
+        members = owner.member_ids()
+        if (members and owner.pid in members and
+                len(members) == len(set(members)) and
+                owner.verify_member_births(members) and
+                set(members) == set(owner.member_ids())):
+            process_identified = True
+            break
+        if attempt < 2:
+            time.sleep(0.02)
     census = native.read_active_processes_and_ports(port)
     foreign = [
         c
@@ -944,8 +1003,17 @@ def _run_authorized(
     samples = []
     breached = []
     watched_fit = False
+    watched_lineage = False
+    lineage_ledger = None
+    lineage_shutdown_started = None
+    owned_memory_samples = []
+    owned_memory_sample_unavailable = 0
     native_fit_source_sha256 = None
     code = None
+    pre_cleanup_live_descendant_count = None
+    pre_cleanup_owned_tree_naturally_empty = False
+    pre_cleanup_lifetime_accounting = None
+    complete_owned_job_lifetime_census_witnessed = False
     job_close_confirmed = False
     t0 = time.monotonic()
     try:
@@ -962,11 +1030,41 @@ def _run_authorized(
         # must never be mistaken for an extinct child because birth-time
         # representations differed by milliseconds.
         owner.member_births[owner.pid] = psutil.Process(owner.pid).create_time()
+        from chowder_batch import reap_v2_live_job_lineage_guard_20261028 as lineage
+        from chowder_batch import reap_v2_phase49_owned_memory_witness_20261028 as memory_witness
+
+        lineage_ledger = lineage.LineageLedger.from_owned_job(owner)
         while True:
             code = owner.exit_code()
             if code is not None:
-                if code != 0 or not watched_fit:
-                    breached = ["CHILD_NONZERO_OR_NATIVE_FIT_UNWITNESSED"]
+                # Root exit(0) alone is NOT proof the original evaluator or
+                # native server exited naturally. Observe remaining members
+                # from the still-open private Job BEFORE termination. Cleaning
+                # up unfinished descendants could otherwise manufacture a
+                # clean runtime witness from post-kill extinction.
+                live_at_root_exit = owner.member_ids()
+                pre_cleanup_lifetime_accounting = owner.lifetime_process_counts()
+                pre_cleanup_live_descendant_count = len([
+                    pid for pid in live_at_root_exit if pid != owner.pid
+                ])
+                complete_owned_job_lifetime_census_witnessed = (
+                    lineage_ledger is not None
+                    and pre_cleanup_lifetime_accounting["total_processes"]
+                    == len(lineage_ledger.pid_births)
+                    and pre_cleanup_lifetime_accounting["active_processes"]
+                    == len(live_at_root_exit)
+                )
+                pre_cleanup_owned_tree_naturally_empty = (
+                    pre_cleanup_live_descendant_count == 0
+                    and len(live_at_root_exit) == len(set(live_at_root_exit))
+                    and owner.verify_member_births(live_at_root_exit)
+                )
+                if not pre_cleanup_owned_tree_naturally_empty:
+                    breached = ["CHILD_ZERO_WITH_RUNNING_OR_UNVERIFIED_OWNED_DESCENDANTS"]
+                if not complete_owned_job_lifetime_census_witnessed:
+                    breached.append("OWNED_JOB_UNOBSERVED_TRANSIENT_CHILDREN_OR_CENSUS_DRIFT")
+                if code != 0 or not watched_fit or not watched_lineage:
+                    breached.append("CHILD_NONZERO_OR_NATIVE_FIT_OR_LINEAGE_UNWITNESSED")
                 cancel_owned_job(owner)
                 break
             observation = _watch_sample(
@@ -977,32 +1075,83 @@ def _run_authorized(
                 gpu_uuid=latest["gpu"]["uuid"],
                 started=t0,
             )
+            # This is a FRESH Win32 private-Job-handle/psutil/port census,
+            # NOT a reconstructed start receipt. Process PIDs, parent graph,
+            # executable allowlist and Job limits must all be observed live.
+            # A complete root + llama-server + frozen evaluator plus listener
+            # is required before a clean native fit can be promoted.
+            lineage_proof = lineage.capture_live_job_lineage(
+                owner, study=study, model=model, server=server,
+                output=output, port=port,
+                phase="auto",
+                ledger=lineage_ledger,
+            )
+            in_qualified_shutdown = watched_lineage and lineage_proof["status"] in (
+                "PENDING_SHUTDOWN", "JOB_MEMBERS_EMPTY_NEEDS_POSTCLOSE_WITNESS",
+                "PENDING_TRANSIENT_JOB_CENSUS",
+            )
             faults = validate_sample(
                 observation,
                 startup_grace_seconds=startup_grace_seconds,
                 max_runtime_seconds=max_runtime_seconds,
+                allow_witnessed_shutdown=in_qualified_shutdown,
             )
-            native_proof = verify_owned_original_native_fit(
-                observation, output=output, arm=study.arm, model=model,
+            if lineage_proof["status"] == "REFUSED":
+                faults.extend(lineage_proof["reasons"] or ["LIVE_PRIVATE_JOB_LINEAGE_REFUSED"])
+            elif lineage_proof["status"] == "OWNER_BOUND_ACTIVE_OBSERVED_ONLY":
+                watched_lineage = True
+                lineage_shutdown_started = None
+            elif watched_lineage and lineage_proof["status"] in (
+                "PENDING_SHUTDOWN", "JOB_MEMBERS_EMPTY_NEEDS_POSTCLOSE_WITNESS",
+                "PENDING_TRANSIENT_JOB_CENSUS",
+            ):
+                if lineage_shutdown_started is None:
+                    lineage_shutdown_started = time.monotonic()
+                if time.monotonic() - lineage_shutdown_started > 30:
+                    faults.append("OWNED_JOB_SHUTDOWN_EXCEEDED_BOUND")
+            elif observation["startup_seconds"] >= startup_grace_seconds:
+                faults.append("FULL_FROZEN_OWNER_SERVER_EVALUATOR_LINEAGE_UNWITNESSED")
+            native_proof = (
+                {"status": "PENDING_BOUNDED_NATIVE_SHUTDOWN_AFTER_WITNESSED_FIT",
+                 "reasons": [], "source_sha256": native_fit_source_sha256}
+                if in_qualified_shutdown and watched_fit
+                else verify_owned_original_native_fit(
+                    observation, output=output, arm=study.arm, model=model,
+                )
             )
             if native_proof["status"] == "REFUSED":
                 faults.extend(native_proof["reasons"])
-            elif (
+            elif (not in_qualified_shutdown and
                 native_proof["status"] != "NATIVE_SOURCE_FIT_VERIFIED_RUNTIME_ONLY"
                 and observation["startup_seconds"] >= startup_grace_seconds
             ):
                 faults.append("FROZEN_ORIGINAL_SUCCESSFUL_FIT_SOURCE_NOT_WITNESSED")
             if observation["gpu_source_identity_matches_preflight"] is not True:
                 faults.append("PHYSICAL_GPU_CHANGED")
-            if watched_fit and observation["owned_listener"] is not True:
+            if (watched_fit and observation["owned_listener"] is not True
+                    and not in_qualified_shutdown):
                 faults.append("OWNED_LISTENER_LOST")
             if faults:
                 breached = sorted(set(faults))
                 cancel_owned_job(owner)
                 break
-            if native_proof["status"] == "NATIVE_SOURCE_FIT_VERIFIED_RUNTIME_ONLY":
+            if (watched_lineage
+                    and native_proof["status"] == "NATIVE_SOURCE_FIT_VERIFIED_RUNTIME_ONLY"):
                 watched_fit = True
                 native_fit_source_sha256 = native_proof["source_sha256"]
+            # Optional source-bound diagnostic ONLY: sample exact already
+            # verified private-Job PID+birth role identities, at bounded 1/32
+            # cadence. A process can exit between two read-only censuses:
+            # report an UNKNOWN sample, not a false peak or model failure.
+            # Frozen admission floors and original inference are unchanged.
+            if (lineage_proof["status"] == "OWNER_BOUND_ACTIVE_OBSERVED_ONLY"
+                    and len(samples) % 32 == 0 and len(owned_memory_samples) < 128):
+                try:
+                    owned_memory_samples.append(memory_witness.sample_owned_memory(
+                        owner, lineage_ledger,
+                    ))
+                except memory_witness.MemoryWitnessRefused:
+                    owned_memory_sample_unavailable += 1
             if len(samples) >= MAX_SAMPLES:
                 breached = ["SAMPLE_LIMIT"]
                 cancel_owned_job(owner)
@@ -1017,6 +1166,8 @@ def _run_authorized(
                     "native_residency": observation["native_residency"],
                     "original_native_fit_source_sha256": native_proof["source_sha256"],
                     "original_native_fit_source_status": native_proof["status"],
+                    "original_live_owned_job_lineage_status": lineage_proof["status"],
+                    "original_live_owned_job_roles": lineage_proof["roles"],
                     "owned_listener": observation["owned_listener"],
                     "model_log_bytes": observation["model_log_bytes"],
                     "job_process_count": observation["job_process_count"],
@@ -1034,6 +1185,8 @@ def _run_authorized(
         # Never treat KILL_ON_JOB_CLOSE alone as observed descendant
         # extinction; verify only the original PID+create-time identities.
         owned_births = dict(owner.member_births)
+        if lineage_ledger is not None:
+            owned_births.update(lineage_ledger.pid_births)
         if owner.pid is not None and owner.birth is not None:
             owned_births.setdefault(owner.pid, owner.birth)
         try:
@@ -1049,6 +1202,7 @@ def _run_authorized(
             except Exception:
                 breached = sorted(set(breached + ["PRIVATE_JOB_CLOSE_RETRY_FAILED"]))
     from chowder_batch import reap_v2_supervisor_integration_guard_20261027 as guard
+    from chowder_batch import reap_v2_phase49_owned_memory_witness_20261028 as memory_witness
 
     extinction = guard.observe_descendant_extinction(owned_births)
     if extinction["status"] != "OWNED_DESCENDANTS_EXTINCT_OBSERVED_ONLY":
@@ -1069,7 +1223,10 @@ def _run_authorized(
         "child_create_time_unix": owner.birth,
         "status": (
             "CHILD_EXIT_ZERO_RUNTIME_WITNESSED_ONLY"
-            if code == 0 and watched_fit and descendants_extinct and not breached
+            if (code == 0 and watched_fit and watched_lineage
+                and pre_cleanup_owned_tree_naturally_empty
+                and complete_owned_job_lifetime_census_witnessed and descendants_extinct
+                and not breached)
             else "REFUSED_RUNTIME_ABORTED"
         ),
         "breaches": breached,
@@ -1077,9 +1234,23 @@ def _run_authorized(
         "real_native_child_started": owner.pid is not None,
         "owned_job_handle_closed_with_kill_on_close": job_close_confirmed,
         "post_close_descendant_extinction_independently_witnessed": descendants_extinct,
+        "pre_cleanup_live_owned_descendant_count": pre_cleanup_live_descendant_count,
+        "pre_cleanup_natural_owned_tree_extinction_witnessed": pre_cleanup_owned_tree_naturally_empty,
+        "pre_cleanup_private_job_lifetime_accounting": pre_cleanup_lifetime_accounting,
+        "all_private_job_lifetime_processes_source_witnessed": complete_owned_job_lifetime_census_witnessed,
         "post_close_descendant_witnessed_count": extinction.get("checked_child_pid_count"),
         "observations": samples,
         "fully_witnessed_native_fit": watched_fit,
+        "original_live_job_root_server_evaluator_lineage_witnessed": watched_lineage,
+        "original_owned_memory_sample_summary": memory_witness.summarize_samples(
+            owned_memory_samples
+        ),
+        "original_owned_memory_sample_unavailable_count": owned_memory_sample_unavailable,
+        "original_live_job_owned_role_identities": (
+            {role: {"pid": birth[0], "birth": birth[1]}
+             for role, birth in lineage_ledger.roles.items()}
+            if lineage_ledger is not None else {}
+        ),
         "original_native_fit_source_sha256": native_fit_source_sha256,
         "model_sha256": study.model_sha256,
         "original_offline_source_proof": source_lock,

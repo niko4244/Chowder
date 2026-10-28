@@ -163,6 +163,23 @@ def test_startup_pending_expires():
     assert "STARTUP_GRACE_EXPIRED" in failures
 
 
+def test_authorized_postfit_shutdown_is_not_mistaken_for_startup_after_900_seconds():
+    observed = runtime(
+        owned_listener=False, native_started=False,
+        native_residency=None, startup_seconds=1000, elapsed_seconds=1000,
+    )
+    assert "STARTUP_GRACE_EXPIRED" in supervisor.validate_sample(
+        observed, startup_grace_seconds=900
+    )
+    assert supervisor.validate_sample(
+        observed, startup_grace_seconds=900, allow_witnessed_shutdown=True
+    ) == []
+    observed["physical_available_bytes"] = 1
+    assert "RAM_RUNTIME_FLOOR" in supervisor.validate_sample(
+        observed, startup_grace_seconds=900, allow_witnessed_shutdown=True
+    )
+
+
 def test_native_log_parser_rejects_offload_and_kv_mismatch():
     okay = (
         "llama_new_context_with_model: n_ctx = 16384\n"
@@ -257,7 +274,7 @@ def test_cancel_never_uses_foreign_pid_or_taskkill():
 
 
 @pytest.mark.parametrize("breach", [False, True])
-@pytest.mark.parametrize("integrity_fault", [None, "source_receipt", "start_receipt", "job_close"])
+@pytest.mark.parametrize("integrity_fault", [None, "source_receipt", "start_receipt", "job_close", "lineage", "lingering_child", "missed_transient"])
 def test_full_owned_lifecycle_with_injected_native_job_only(
     tmp_path, monkeypatch, breach, integrity_fault
 ):
@@ -286,6 +303,17 @@ def test_full_owned_lifecycle_with_injected_native_job_only(
         def exit_code(self):
             self.count += 1
             return 0 if self.count > 2 else None
+
+        def member_ids(self):
+            return [self.pid, 9001] if integrity_fault == "lingering_child" else []
+
+        def lifetime_process_counts(self):
+            return {"total_processes": 2 if integrity_fault in ("lingering_child", "missed_transient") else 1,
+                    "active_processes": 2 if integrity_fault == "lingering_child" else 0,
+                    "total_page_fault_count": 0}
+
+        def verify_member_births(self, ids):
+            return all(pid == self.pid for pid in ids)
 
         def terminate_owned(self):
             assert self.active
@@ -343,6 +371,22 @@ def test_full_owned_lifecycle_with_injected_native_job_only(
 
     monkeypatch.setattr(supervisor, "_watch_sample", fake_sample)
     from chowder_batch import reap_v2_supervisor_integration_guard_20261027 as guard
+    from chowder_batch import reap_v2_live_job_lineage_guard_20261028 as lineage
+    def fake_lineage(owner, *, ledger, **kwargs):
+        if integrity_fault == "lineage":
+            return {"status": "REFUSED", "reasons": ["SYNTHETIC_FOREIGN_OWNED_CHILD"], "roles": {}}
+        ledger.full_active_witnessed = True
+        ledger.roles["root"] = (owner.pid, 1234567890.5)
+        ledger.pid_births[owner.pid] = 1234567890.5
+        return {"status": "OWNER_BOUND_ACTIVE_OBSERVED_ONLY", "reasons": [],
+                "roles": {"root": owner.pid, "server": 9001, "evaluator": 9002}}
+    monkeypatch.setattr(lineage, "capture_live_job_lineage", fake_lineage)
+    # The synthetic FakeJob has no native Windows handles. This boundary is
+    # mocked solely for lifecycle tests; separate benign Job tests prove the
+    # real from_owned_job native PID+handle witness.
+    monkeypatch.setattr(lineage.LineageLedger, "from_owned_job", classmethod(
+        lambda cls, owner: cls(root_pid=owner.pid, root_birth=1234567890.5)
+    ))
     # Synthetic transport fixtures never constitute native fit proof or a
     # genuine Windows process census. Mock these boundaries explicitly here;
     # separate tests exercise the authentic source, timeout and PID witnesses.
@@ -382,8 +426,23 @@ def test_full_owned_lifecycle_with_injected_native_job_only(
     assert terminal["original_offline_source_proof"]["source_offline_verified"] is True
     if breach:
         assert "RAM_RUNTIME_FLOOR" in out["breaches"]
-    else:
+    elif integrity_fault != "lineage":
         assert out["fully_witnessed_native_fit"]
+        assert out["original_live_job_root_server_evaluator_lineage_witnessed"]
+    if integrity_fault == "lineage":
+        assert "SYNTHETIC_FOREIGN_OWNED_CHILD" in out["breaches"]
+        assert out["original_live_job_root_server_evaluator_lineage_witnessed"] is False
+    if integrity_fault == "lingering_child":
+        if not breach:
+            assert "CHILD_ZERO_WITH_RUNNING_OR_UNVERIFIED_OWNED_DESCENDANTS" in out["breaches"]
+            assert out["pre_cleanup_live_owned_descendant_count"] == 1
+            assert out["pre_cleanup_natural_owned_tree_extinction_witnessed"] is False
+    if integrity_fault == "missed_transient" and not breach:
+        assert "OWNED_JOB_UNOBSERVED_TRANSIENT_CHILDREN_OR_CENSUS_DRIFT" in out["breaches"]
+        assert out["pre_cleanup_natural_owned_tree_extinction_witnessed"] is True
+        assert out["all_private_job_lifetime_processes_source_witnessed"] is False
+    elif not breach and integrity_fault is None:
+        assert out["pre_cleanup_natural_owned_tree_extinction_witnessed"] is True
     if integrity_fault == "source_receipt":
         assert "ORIGINAL_OFFLINE_SOURCE_RECEIPT_CHANGED_AFTER_RUN" in out["breaches"]
     if integrity_fault == "start_receipt":
@@ -397,6 +456,53 @@ def test_other_background_process_never_becomes_job_owner():
     assert supervisor.validate_sample(
         runtime(root_owner_valid=False, foreign_ports=[{"port": 8890, "pid": 55032}])
     ) == ["FOREIGN_LISTENER", "ROOT_PID_REUSED_OR_FOREIGN"]
+
+
+def test_native_job_member_census_transient_helper_exit_retries_without_false_pass(
+    tmp_path, monkeypatch,
+):
+    # Real Windows psutil may lose a short-lived original nvidia-smi or
+    # PowerShell helper between Job ID enumeration and PID create-time read.
+    # The first torn census is not certified; the subsequent coherent one is.
+    class Job:
+        pid = 3212
+        scans = 0
+
+        def member_ids(self):
+            self.scans += 1
+            return [self.pid, 4321] if self.scans == 1 else [self.pid]
+
+        def verify_member_births(self, members):
+            return 4321 not in members
+
+        def owner_valid(self):
+            return True
+
+        def is_member(self, pid):
+            return pid == self.pid
+
+    monkeypatch.setattr(supervisor.native, "read_windows_memory",
+                        lambda: {"physical_available_bytes": 10 * supervisor.GIB,
+                                 "commit_headroom_bytes": 12 * supervisor.GIB})
+    monkeypatch.setattr(supervisor.native, "read_gpu", lambda: runtime()["gpu"])
+    monkeypatch.setattr(supervisor.native, "read_active_processes_and_ports",
+                        lambda port: {"listeners": [], "active_conflicts": []})
+    monkeypatch.setattr(supervisor.time, "sleep", lambda _: None)
+    job = Job()
+    sample = supervisor._watch_sample(
+        job, output=tmp_path / "fresh", arm="reap128_v2_q4",
+        port=8790, gpu_uuid=runtime()["gpu"]["uuid"], started=0,
+    )
+    assert job.scans >= 3
+    assert sample["job_processes_valid"] is True
+    assert sample["job_process_count"] == 1
+    # Repeated PID identity contradictions cannot be blessed by retries.
+    monkeypatch.setattr(Job, "verify_member_births", lambda self, ids: False)
+    second = supervisor._watch_sample(
+        Job(), output=tmp_path / "fresh", arm="reap128_v2_q4",
+        port=8790, gpu_uuid=runtime()["gpu"]["uuid"], started=0,
+    )
+    assert second["job_processes_valid"] is False
 
 
 @pytest.mark.parametrize("tamper", [None, "gsm_hash", "network", "exit"])

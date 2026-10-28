@@ -48,6 +48,15 @@ MODEL_SHA256 = {
 APPROVED_ORIGINAL_ARTIFACT_SHA256: dict[str, str] = {}
 APPROVED_INDEPENDENT_REVIEW_SHA256: str | None = None
 APPROVED_HUMANEVAL_SECURITY_SHA256: dict[str, str] = {}
+# Each per-arm input manifest is separately source-approved by an independent
+# reviewer. The certifier also demands its OWN source-controlled independent
+# external trace reviewer pins. A JSON's self-reported digest or success label
+# can never install either authority; both production maps remain EMPTY.
+APPROVED_HUMANEVAL_CERTIFICATE_INPUT_SHA256: dict[str, str] = {}
+CERTIFICATE_INPUT_FIELDS = frozenset({
+    "capture_path", "witness_path", "capability_path", "broker_path",
+    "review_path", "trace_dir", "serve_path", "owner_review_path",
+})
 
 
 class FrozenEvidenceError(ValueError):
@@ -185,6 +194,14 @@ def _verify_original_sessions(root: Path, review: dict) -> dict[str, dict]:
              and serving["reap128_v2_q4"]["physical_host_sha256"]
              == serving["dense_v2_q4"]["physical_host_sha256"],
              "original first200 Q4 speed runs do not share an approved physical host/profile")
+    _require(len({item["session_id"] for item in serving.values()}) == len(serving),
+             "two incompatible original model weights share one claimed serving session")
+    _require(all(
+        serving[arm]["physical_host_sha256"] == serving["reap128_v2"]["physical_host_sha256"]
+        and serving[arm]["hardware_profile_sha256"]
+        == serving["reap128_v2"]["hardware_profile_sha256"]
+        for arm in ("dense_v2", "random128_v2")
+    ), "original full1319 Q8/dense/random comparisons do not share physical host/profile")
     return serving
 
 
@@ -217,6 +234,97 @@ def _verify_humaneval_security(root: Path, serving: dict[str, dict]) -> None:
                  }
                  and all(value is True for value in controls.values()),
                  f"{arm}: original independent execution sandbox not approved")
+
+
+def _verify_humaneval_certificates(root: Path, serving: dict[str, dict]) -> None:
+    """Reopen 164 original external traces before the unchanged frozen selector.
+
+    The approved path manifests are not certificates. The independent verifier
+    reopens and hashes actual per-case traces and recomputes the score, while
+    this bridge *independently* matches each source-bound scored row and its
+    item termination against the full original frozen serving session.
+    """
+    from chowder_batch import reap_v2_humaneval_certificate_verifier_20261027 as cert
+
+    arms = ("reap128_v2", "dense_v2")
+    _require(set(APPROVED_HUMANEVAL_CERTIFICATE_INPUT_SHA256) == set(arms)
+             and all(_hex(value) for value in APPROVED_HUMANEVAL_CERTIFICATE_INPUT_SHA256.values()),
+             "original independent HumanEval certificate input approvals absent")
+    _require(not cert.approval_gaps(),
+             "original outside-host HumanEval independent trace approvals absent")
+    _require(
+        serving["reap128_v2"]["physical_host_sha256"]
+        == serving["dense_v2"]["physical_host_sha256"]
+        and serving["reap128_v2"]["hardware_profile_sha256"]
+        == serving["dense_v2"]["hardware_profile_sha256"]
+        and serving["reap128_v2"]["session_id"]
+        != serving["dense_v2"]["session_id"],
+        "original Q8/dense full164 must use distinct sessions on same physical host/profile",
+    )
+    for arm in arms:
+        manifest = root / f"{arm}.frozen-humaneval-certificate-inputs.json"
+        _require(manifest.is_file() and not manifest.is_symlink(),
+                 f"{arm}: independently reviewed certificate input manifest absent")
+        raw = manifest.read_bytes()
+        _require(0 < len(raw) <= 64 * 1024
+                 and _sha(raw) == APPROVED_HUMANEVAL_CERTIFICATE_INPUT_SHA256[arm],
+                 f"{arm}: independently reviewed certificate manifest SHA mismatch")
+        inputs = _json_file(manifest, max_bytes=64 * 1024)
+        _require(set(inputs) == CERTIFICATE_INPUT_FIELDS
+                 and all(type(value) is str and value for value in inputs.values()),
+                 f"{arm}: original certificate input path set invalid")
+        paths = {key: Path(value) for key, value in inputs.items()}
+        _require(all(p.is_absolute() for p in paths.values()),
+                 f"{arm}: original certificate path not absolute")
+        _require(paths["serve_path"] == root / arm / "serve.json",
+                 f"{arm}: independent execution certificate serving source differs from original selector")
+        # Never forward an unreviewed `canonical_path` override. The verifier
+        # uses its own exact originally archived canonical source/hash.
+        certificate = cert.verify_arm(arm=arm, **paths)
+        # Certificate exporter uses a separate source-reviewed JSONL writer,
+        # while the unchanged original reap_eval writer uses its own key
+        # order, spacing and seconds precision. NEVER require those distinct
+        # serializations to share a byte SHA: verify the original bytes from
+        # independently approved source pins, and join all original per-item
+        # scored/terminated semantics to external trace outcomes instead.
+        original_rows_path = root / arm / "humaneval.jsonl"
+        _require(original_rows_path.is_file() and not original_rows_path.is_symlink()
+                 and APPROVED_ORIGINAL_ARTIFACT_SHA256.get(str(original_rows_path))
+                 == _sha(original_rows_path.read_bytes()),
+                 f"{arm}: original evaluator row bytes not independently pinned")
+        _require(certificate.get("status") == "INDEPENDENT_164_CERTIFICATE_RECOMPUTED_NOT_RELEASE"
+                 and certificate.get("model_sha256") == MODEL_SHA256[arm]
+                 and certificate.get("session_id") == serving[arm]["session_id"]
+                 and certificate.get("physical_host_sha256") == serving[arm]["physical_host_sha256"]
+                 and certificate.get("population") == 164
+                 and certificate.get("canonical_source_sha256") == cert.CANONICAL_RAW_SHA256
+                 and certificate.get("frozen_source_items_sha256")
+                 == reap_gates.FROZEN_SOURCE_SHA256["humaneval"]
+                 and _hex(certificate.get("selector_rows_sha256"))
+                 and certificate.get("chosen") is None
+                 and certificate.get("release_approved") is False,
+                 f"{arm}: independently verified original certificate identity mismatch")
+        rows = reap_select._attested_rows(root, arm, "humaneval", 164)
+        correct = certificate.get("outcomes")
+        terminated = certificate.get("termination_outcomes")
+        _require(isinstance(rows, dict)
+                 and type(correct) in (list, tuple) and len(correct) == 164
+                 and type(terminated) in (list, tuple) and len(terminated) == 164,
+                 f"{arm}: complete independent per-item certificate absent")
+        for i in range(164):
+            key = f"HumanEval/{i}"
+            expected = rows.get(key)
+            item = correct[i]
+            finish = terminated[i]
+            _require(isinstance(expected, dict)
+                     and type(item) in (tuple, list) and len(item) == 2
+                     and type(finish) in (tuple, list) and len(finish) == 2
+                     and item[0] == finish[0] == key
+                     and type(item[1]) is bool and type(finish[1]) is bool
+                     and expected.get("correct") is item[1]
+                     and expected.get("terminated") is finish[1]
+                     and not (item[1] and not finish[1]),
+                     f"{arm}/{key}: frozen official row differs from verified external trace")
 
 
 def _blocked(reason: str) -> dict:
@@ -254,6 +362,7 @@ def bridge_frozen_evidence(
                  "independent reviewed original native-serving manifest SHA mismatch")
         serving = _verify_original_sessions(root, _json_file(review_path))
         _verify_humaneval_security(root, serving)
+        _verify_humaneval_certificates(root, serving)
 
         # Only the existing original frozen gate engine calculates scientific
         # outcomes. Its paired Wald is statistics.stdev (sample SD), not a
@@ -261,6 +370,12 @@ def bridge_frozen_evidence(
         report = reap_select.evaluate(root, observer, observer_v2, calibration)
         _require(reap_select._input_digests(root, observer, observer_v2, calibration) == first,
                  "frozen selector inputs changed during independent validation")
+        # Original selector input digests do not contain the separately
+        # independently reviewed execution traces. Re-read/re-hash all
+        # original 164-case external traces and approved manifest bytes
+        # AFTER selector grading too, rejecting concurrent certificate edits
+        # or trace replacement rather than trusting a one-time precheck.
+        _verify_humaneval_certificates(root, serving)
         gates = report["gates"].get("reap128_v2", {}).get("gates", {})
         _require(set(reap_select.REQUIRED).issubset(gates),
                  "original v2 gate set was not computed by frozen selector")

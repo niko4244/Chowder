@@ -141,6 +141,11 @@ def synthetic(tmp_path, monkeypatch):
     monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256", pins)
     monkeypatch.setattr(bridge, "APPROVED_INDEPENDENT_REVIEW_SHA256", _sha(review_path))
     monkeypatch.setattr(bridge, "APPROVED_HUMANEVAL_SECURITY_SHA256", security_pins)
+    # Only this synthetic fixture bypasses the otherwise mandatory externally
+    # reviewed trace-file intake; real production approval maps remain empty.
+    # Independent end-to-end certificate path refusal/row joins are tested in
+    # test_reap_v2_phase49_humaneval_intake_20261028.py.
+    monkeypatch.setattr(bridge, "_verify_humaneval_certificates", lambda root, serving: None)
     return root, obs
 
 
@@ -148,6 +153,7 @@ def test_live_production_has_no_security_or_source_approval():
     assert not bridge.APPROVED_ORIGINAL_ARTIFACT_SHA256
     assert bridge.APPROVED_INDEPENDENT_REVIEW_SHA256 is None
     assert not bridge.APPROVED_HUMANEVAL_SECURITY_SHA256
+    assert not bridge.APPROVED_HUMANEVAL_CERTIFICATE_INPUT_SHA256
     blocked = bridge.bridge_frozen_evidence("Z:/nonexistent", "Z:/observer.json")
     assert blocked["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
     assert blocked["chosen"] is None and blocked["release_approved"] is False
