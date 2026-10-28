@@ -270,6 +270,67 @@ def test_unreviewed_frozen_fallback_cannot_be_promoted_by_independent_bridge(
     assert result["chosen"] is None and result["release_approved"] is False
 
 
+def test_unresolved_amendment_cannot_expose_selected_v2_as_gen0_choice(
+    synthetic, monkeypatch,
+):
+    """Synthetic selector output cannot override the unresolved prereg method."""
+    root, obs = synthetic
+    original_evaluate = reap_select.evaluate
+
+    def select_while_unresolved(*args, **kwargs):
+        report = original_evaluate(*args, **kwargs)
+        assert report["paired_method"]["status"] == "UNRESOLVED"
+        report["decision"] = {
+            "status": "SELECTED", "chosen": "reap128_v2",
+            "reason": "synthetic selected result despite unresolved method",
+        }
+        return report
+
+    monkeypatch.setattr(bridge.reap_select, "evaluate", select_while_unresolved)
+    result = bridge.bridge_frozen_evidence(root, obs)
+    assert result["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
+    assert "Amendment4" in result["reason"]
+    assert result["chosen"] is None and result["release_approved"] is False
+
+
+def test_malformed_independent_rows_digest_map_fails_closed(synthetic, monkeypatch):
+    """Malformed independently pinned reviewer data must return BLOCKED, not crash."""
+    root, obs = synthetic
+    review_path = root / "frozen-independent-review.json"
+    review = json.loads(review_path.read_text())
+    arm = "reap128_v2"
+    review["arms"][arm]["rows_sha256"] = list(bridge.COHORTS[arm])
+    _write(review_path, review)
+    monkeypatch.setattr(bridge, "APPROVED_INDEPENDENT_REVIEW_SHA256", _sha(review_path))
+    result = bridge.bridge_frozen_evidence(root, obs)
+    assert result["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
+    assert result["chosen"] is None and result["release_approved"] is False
+
+
+@pytest.mark.parametrize("which", ["review", "security"])
+def test_independently_pinned_authority_changed_during_grading_is_refused(
+    synthetic, monkeypatch, which,
+):
+    """Selector input digests do not cover external review/security manifests."""
+    root, obs = synthetic
+    path = (root / "frozen-independent-review.json" if which == "review"
+            else root / "reap128_v2.frozen-humaneval-security.json")
+    original_evaluate = reap_select.evaluate
+
+    def change_review_during_grading(*args, **kwargs):
+        report = original_evaluate(*args, **kwargs)
+        evidence = json.loads(path.read_text())
+        evidence["status"] = "REVOKED_DURING_SYNTHETIC_TEST"
+        _write(path, evidence)
+        return report
+
+    monkeypatch.setattr(bridge.reap_select, "evaluate", change_review_during_grading)
+    result = bridge.bridge_frozen_evidence(root, obs)
+    assert result["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
+    assert "review/security changed during grading" in result["reason"]
+    assert result["chosen"] is None and result["release_approved"] is False
+
+
 @pytest.mark.parametrize("kind", [
     "unpin", "new_unapproved_file", "alter_scored_row", "wrong_review_sha",
     "foreign_q8_model", "wrong_slot_count", "cross_session", "wrong_host_speed",

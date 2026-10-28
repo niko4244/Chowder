@@ -98,12 +98,12 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
-def _json_file(path: Path, *, max_bytes: int = 512 * 1024) -> dict:
-    _require(path.is_file() and not path.is_symlink(), f"missing independent receipt: {path.name}")
-    _require(0 < path.stat().st_size <= max_bytes, "independent receipt size invalid")
+def _json_bytes(raw: bytes, *, max_bytes: int = 512 * 1024) -> dict:
+    """Parse the exact bytes independently hashed, never reopen after approval."""
+    _require(0 < len(raw) <= max_bytes, "independent receipt size invalid")
     try:
         result = json.loads(
-            path.read_bytes().decode("utf-8"),
+            raw.decode("utf-8"),
             object_pairs_hook=_reject_duplicate_json_keys,
             parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite")),
         )
@@ -111,6 +111,12 @@ def _json_file(path: Path, *, max_bytes: int = 512 * 1024) -> dict:
         raise FrozenEvidenceError("independent receipt JSON invalid") from exc
     _require(isinstance(result, dict), "independent receipt must be a JSON object")
     return result
+
+
+def _json_file(path: Path, *, max_bytes: int = 512 * 1024) -> dict:
+    _require(path.is_file() and not path.is_symlink(), f"missing independent receipt: {path.name}")
+    _require(0 < path.stat().st_size <= max_bytes, "independent receipt size invalid")
+    return _json_bytes(path.read_bytes(), max_bytes=max_bytes)
 
 
 def _verify_pins(
@@ -217,6 +223,7 @@ def _verify_original_sessions(root: Path, review: dict) -> dict[str, dict]:
                  and record.get("native_windows_server_owner_verified") is True
                  and record.get("per_item_session_binding_verified") is True
                  and record.get("nonresumed_complete_cohort") is True
+                 and isinstance(record.get("rows_sha256"), dict)
                  and set(record.get("rows_sha256", {})) == set(suites),
                  f"{arm}: independent original model and item-session provenance incomplete")
         for suite, n in suites.items():
@@ -264,7 +271,7 @@ def _verify_humaneval_security(root: Path, serving: dict[str, dict]) -> None:
         raw = path.read_bytes()
         _require(_sha(raw) == APPROVED_HUMANEVAL_SECURITY_SHA256[arm],
                  "original independently approved HumanEval security SHA mismatch")
-        proof = _json_file(path)
+        proof = _json_bytes(raw)
         controls = proof.get("controls")
         _require(proof.get("schema") == SECURITY_SCHEMA
                  and proof.get("status") == "INDEPENDENTLY_APPROVED_FROZEN_GATE2_EXECUTION"
@@ -321,7 +328,7 @@ def _verify_humaneval_certificates(root: Path, serving: dict[str, dict]) -> None
         _require(0 < len(raw) <= 64 * 1024
                  and _sha(raw) == APPROVED_HUMANEVAL_CERTIFICATE_INPUT_SHA256[arm],
                  f"{arm}: independently reviewed certificate manifest SHA mismatch")
-        inputs = _json_file(manifest, max_bytes=64 * 1024)
+        inputs = _json_bytes(raw, max_bytes=64 * 1024)
         _require(set(inputs) == CERTIFICATE_INPUT_FIELDS
                  and all(type(value) is str and value for value in inputs.values()),
                  f"{arm}: original certificate input path set invalid")
@@ -413,10 +420,9 @@ def bridge_frozen_evidence(
         review_raw = review_path.read_bytes() if review_path.is_file() and not review_path.is_symlink() else b""
         _require(_sha(review_raw) == APPROVED_INDEPENDENT_REVIEW_SHA256,
                  "independent reviewed original native-serving manifest SHA mismatch")
-        serving = _verify_original_sessions(root, _json_file(review_path))
+        serving = _verify_original_sessions(root, _json_bytes(review_raw))
         _verify_humaneval_security(root, serving)
         _verify_humaneval_certificates(root, serving)
-
         # Only the existing original frozen gate engine calculates scientific
         # outcomes. Its paired Wald is statistics.stdev (sample SD), not a
         # discordance-only McNemar substitution; it preserves Amendment4 block.
@@ -429,6 +435,17 @@ def bridge_frozen_evidence(
         # AFTER selector grading too, rejecting concurrent certificate edits
         # or trace replacement rather than trusting a one-time precheck.
         _verify_humaneval_certificates(root, serving)
+        # The selector's input digest set excludes independently approved
+        # review/security manifests. Recheck them after grading as well.
+        review_files = {review_path: APPROVED_INDEPENDENT_REVIEW_SHA256}
+        review_files.update({
+            root / f"{arm}.frozen-humaneval-security.json": digest
+            for arm, digest in APPROVED_HUMANEVAL_SECURITY_SHA256.items()
+        })
+        for path, digest in review_files.items():
+            _require(path.is_file() and not path.is_symlink()
+                     and _sha(path.read_bytes()) == digest,
+                     "independently approved review/security changed during grading")
         gates = report["gates"].get("reap128_v2", {}).get("gates", {})
         _require(set(reap_select.REQUIRED).issubset(gates),
                  "original v2 gate set was not computed by frozen selector")
@@ -441,6 +458,13 @@ def bridge_frozen_evidence(
         # admission certificate: refuse rather than return an unreviewed arm.
         _require(report["decision"].get("chosen") in (None, "reap128_v2"),
                  "frozen selector chose fallback without independent original admission")
+        # The unresolved preregistered paired-method ambiguity cannot be
+        # silently promoted into a Gen-0 choice even if the unchanged frozen
+        # selector reports a nominally passing candidate. Preserve the frozen
+        # selector untouched; this independent admission boundary fails closed.
+        _require(report["decision"].get("status") == "BLOCKED"
+                 and report["decision"].get("chosen") is None,
+                 "Amendment4 unresolved: frozen selection cannot be promoted")
         return {
             "schema": SCHEMA, "status": "SOURCE_APPROVED_ORIGINAL_EVIDENCE_EVALUATED",
             "gate0": gates["gate0"]["status"],
