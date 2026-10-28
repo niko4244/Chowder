@@ -228,7 +228,7 @@ def validate_frozen_command(
         raise ValueError("FROZEN_NATIVE_CHILD_COMMAND_INVALID")
 
 
-def write_receipt_exclusive(path: Path, payload: dict) -> None:
+def write_receipt_exclusive(path: Path, payload: dict) -> str:
     """Only caller-owned, new, fsynced receipt; never overwrite prior evidence."""
     target = Path(path)
     if (
@@ -256,6 +256,7 @@ def write_receipt_exclusive(path: Path, payload: dict) -> None:
             os.link(pending, target)
     finally:
         pending.unlink(missing_ok=True)
+    return hashlib.sha256(raw).hexdigest()
 
 
 def verify_frozen_sources_offline(*, receipt_path: Path) -> dict:
@@ -665,13 +666,20 @@ class _WindowsOwnedJob:
 
     def close(self):
         self.active = False
+        errors = []
         for name in ("thread", "process", "job"):
             handle = getattr(self, name)
             if handle:
                 try:
                     self._close(handle)
-                finally:
+                except Exception:
+                    # Attempt the remaining handles, especially KILL_ON_JOB_CLOSE.
+                    # Never certify the private Job as closed on partial failure.
+                    errors.append(name)
+                else:
                     setattr(self, name, None)
+        if errors:
+            raise SupervisorRefused("PRIVATE_JOB_HANDLE_CLOSE_UNVERIFIED:" + ",".join(errors))
 
 
 def cancel_owned_job(owner) -> None:
@@ -679,6 +687,81 @@ def cancel_owned_job(owner) -> None:
     if getattr(owner, "active", None) is not True:
         raise SupervisorRefused("CANNOT_CANCEL_UNBOUND_OR_FOREIGN_PROCESS")
     owner.terminate_owned()
+
+
+def verify_owned_original_native_fit(
+    observation: dict, *, output: Path, arm: str, model: Path,
+) -> dict:
+    """Read owned native startup source; never promote layer counts alone.
+
+    The original `parse_native_residency` can see 41/41 layers, KV and context
+    before the frozen fitter confirms success. This companion independent
+    parser requires the actual source-native `common_fit_params: successfully
+    fit` line AND original 4x4096 context, 128/8 routed experts, exact GGUF
+    and no CPU expert spill. Missing source is PENDING, not PASS. Contradictory
+    source is REFUSED and must cancel only the private Job Object.
+    """
+    from chowder_batch import reap_v2_supervisor_integration_guard_20261027 as guard
+
+    if observation.get("native_started") is not True or observation.get("owned_listener") is not True:
+        return {"status": "PENDING_NATIVE_SOURCE_NOT_READY", "reasons": [],
+                "source_sha256": None}
+    source_path = output / arm / "server.log"
+    if source_path.is_symlink():
+        return {"status": "REFUSED", "reasons": ["OWNED_NATIVE_SOURCE_LINKED"],
+                "source_sha256": None}
+    if not source_path.is_file():
+        return {"status": "PENDING_NATIVE_SOURCE_NOT_READY", "reasons": [],
+                "source_sha256": None}
+    try:
+        if source_path.stat().st_size > MAX_LOG_BYTES:
+            return {"status": "REFUSED", "reasons": ["OWNED_NATIVE_LOG_TOO_LARGE"],
+                    "source_sha256": None}
+        with source_path.open("rb") as handle:
+            raw = handle.read(guard.MAX_SOURCE_BYTES)
+    except OSError:
+        return {"status": "REFUSED", "reasons": ["OWNED_NATIVE_SOURCE_UNREADABLE"],
+                "source_sha256": None}
+    proof = guard.assess_runtime_integration(
+        observation, startup=raw, expected_model=Path(model)
+    )
+    if proof["status"] == "RUNTIME_INTEGRATION_OBSERVED_ONLY":
+        return {"status": "NATIVE_SOURCE_FIT_VERIFIED_RUNTIME_ONLY", "reasons": [],
+                "source_sha256": proof["source_fit_sha256"]}
+    # A partially written log may be missing fit, slots or KV; that is never
+    # a PASS. Proven source/model or resource CONTRADICTIONS stop immediately.
+    hard = {
+        "NATIVE_MODEL_IDENTITY", "NATIVE_LAYER_OFFLOAD", "NATIVE_EXPERT_GEOMETRY",
+        "NATIVE_FROZEN_CONTEXT", "NATIVE_FROZEN_SLOTS", "NATIVE_CPU_EXPERT_OFFLOAD",
+        "NATIVE_KV_UNBOUNDED", "NATIVE_SOURCE_RUNTIME_MISMATCH",
+    }
+    reasons = proof.get("reasons", [])
+    if hard.intersection(reasons):
+        return {"status": "REFUSED", "reasons": sorted(set(reasons)),
+                "source_sha256": proof.get("source_fit_sha256")}
+    return {"status": "PENDING_NATIVE_SOURCE_FIT_UNPROVEN", "reasons": [],
+            "source_sha256": proof.get("source_fit_sha256")}
+
+
+def verify_frozen_source_receipt_unchanged(proof: dict) -> bool:
+    """Rehash the original offline input witness after the entire owned run."""
+    if not isinstance(proof, dict) or proof.get("source_offline_verified") is not True:
+        return False
+    receipt = proof.get("receipt")
+    digest = proof.get("sha256")
+    if (not isinstance(receipt, str) or not isinstance(digest, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", digest)):
+        return False
+    path = Path(receipt)
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        return False
+    try:
+        if not 0 < path.stat().st_size <= 65536:
+            return False
+        with path.open("rb") as f:
+            return hashlib.sha256(f.read()).hexdigest() == digest
+    except OSError:
+        return False
 
 
 def _watch_sample(
@@ -841,7 +924,7 @@ def _run_authorized(
         server.stat().st_mtime_ns,
     )
     # Publishing the start intent is exclusive and durable BEFORE creation.
-    write_receipt_exclusive(
+    start_receipt_sha256 = write_receipt_exclusive(
         start_receipt,
         {
             "schema": SCHEMA,
@@ -861,7 +944,9 @@ def _run_authorized(
     samples = []
     breached = []
     watched_fit = False
+    native_fit_source_sha256 = None
     code = None
+    job_close_confirmed = False
     t0 = time.monotonic()
     try:
         if born_stat != (
@@ -872,6 +957,11 @@ def _run_authorized(
         ):
             raise SupervisorRefused("FROZEN_BINARY_CHANGED_BEFORE_LAUNCH")
         owner.start(cmd, wave.REPO)
+        # Record Windows PSUTIL birth-time precision (rather than only raw
+        # FILETIME) before any watcher sample. A PID-reused/foreign process
+        # must never be mistaken for an extinct child because birth-time
+        # representations differed by milliseconds.
+        owner.member_births[owner.pid] = psutil.Process(owner.pid).create_time()
         while True:
             code = owner.exit_code()
             if code is not None:
@@ -892,6 +982,16 @@ def _run_authorized(
                 startup_grace_seconds=startup_grace_seconds,
                 max_runtime_seconds=max_runtime_seconds,
             )
+            native_proof = verify_owned_original_native_fit(
+                observation, output=output, arm=study.arm, model=model,
+            )
+            if native_proof["status"] == "REFUSED":
+                faults.extend(native_proof["reasons"])
+            elif (
+                native_proof["status"] != "NATIVE_SOURCE_FIT_VERIFIED_RUNTIME_ONLY"
+                and observation["startup_seconds"] >= startup_grace_seconds
+            ):
+                faults.append("FROZEN_ORIGINAL_SUCCESSFUL_FIT_SOURCE_NOT_WITNESSED")
             if observation["gpu_source_identity_matches_preflight"] is not True:
                 faults.append("PHYSICAL_GPU_CHANGED")
             if watched_fit and observation["owned_listener"] is not True:
@@ -900,9 +1000,9 @@ def _run_authorized(
                 breached = sorted(set(faults))
                 cancel_owned_job(owner)
                 break
-            watched_fit |= bool(
-                observation["native_started"] and observation["owned_listener"]
-            )
+            if native_proof["status"] == "NATIVE_SOURCE_FIT_VERIFIED_RUNTIME_ONLY":
+                watched_fit = True
+                native_fit_source_sha256 = native_proof["source_sha256"]
             if len(samples) >= MAX_SAMPLES:
                 breached = ["SAMPLE_LIMIT"]
                 cancel_owned_job(owner)
@@ -915,6 +1015,8 @@ def _run_authorized(
                     "gpu_free_mib": observation["gpu"]["free_mib"],
                     "gpu_uuid": observation["gpu"]["uuid"],
                     "native_residency": observation["native_residency"],
+                    "original_native_fit_source_sha256": native_proof["source_sha256"],
+                    "original_native_fit_source_status": native_proof["status"],
                     "owned_listener": observation["owned_listener"],
                     "model_log_bytes": observation["model_log_bytes"],
                     "job_process_count": observation["job_process_count"],
@@ -929,7 +1031,37 @@ def _run_authorized(
             except Exception:
                 breached.append("JOB_CANCEL_FAILED")
     finally:
-        owner.close()
+        # Never treat KILL_ON_JOB_CLOSE alone as observed descendant
+        # extinction; verify only the original PID+create-time identities.
+        owned_births = dict(owner.member_births)
+        if owner.pid is not None and owner.birth is not None:
+            owned_births.setdefault(owner.pid, owner.birth)
+        try:
+            owner.close()
+            job_close_confirmed = True
+        except Exception:
+            breached = sorted(set(breached + ["PRIVATE_JOB_HANDLE_CLOSE_UNVERIFIED"]))
+            # Retry only the original owner handles. Never kill or open a PID
+            # from a system census. Even a successful retry cannot erase the
+            # initial uncertainty or promote this run to scientific evidence.
+            try:
+                owner.close()
+            except Exception:
+                breached = sorted(set(breached + ["PRIVATE_JOB_CLOSE_RETRY_FAILED"]))
+    from chowder_batch import reap_v2_supervisor_integration_guard_20261027 as guard
+
+    extinction = guard.observe_descendant_extinction(owned_births)
+    if extinction["status"] != "OWNED_DESCENDANTS_EXTINCT_OBSERVED_ONLY":
+        for _ in range(10):
+            time.sleep(0.1)
+            extinction = guard.observe_descendant_extinction(owned_births)
+            if extinction["status"] == "OWNED_DESCENDANTS_EXTINCT_OBSERVED_ONLY":
+                break
+    descendants_extinct = extinction["status"] == "OWNED_DESCENDANTS_EXTINCT_OBSERVED_ONLY"
+    if not descendants_extinct:
+        breached = sorted(set(breached + extinction["reasons"] + ["OWNED_DESCENDANTS_NOT_EXTINCT"]))
+    if not verify_frozen_source_receipt_unchanged(source_lock):
+        breached = sorted(set(breached + ["ORIGINAL_OFFLINE_SOURCE_RECEIPT_CHANGED_AFTER_RUN"]))
     result = {
         "schema": SCHEMA,
         "arm": study.arm,
@@ -937,22 +1069,49 @@ def _run_authorized(
         "child_create_time_unix": owner.birth,
         "status": (
             "CHILD_EXIT_ZERO_RUNTIME_WITNESSED_ONLY"
-            if code == 0 and watched_fit and not breached
+            if code == 0 and watched_fit and descendants_extinct and not breached
             else "REFUSED_RUNTIME_ABORTED"
         ),
         "breaches": breached,
         "exit_code": code,
         "real_native_child_started": owner.pid is not None,
-        "owned_job_handle_closed_with_kill_on_close": True,
-        "post_close_descendant_extinction_independently_witnessed": False,
+        "owned_job_handle_closed_with_kill_on_close": job_close_confirmed,
+        "post_close_descendant_extinction_independently_witnessed": descendants_extinct,
+        "post_close_descendant_witnessed_count": extinction.get("checked_child_pid_count"),
         "observations": samples,
         "fully_witnessed_native_fit": watched_fit,
+        "original_native_fit_source_sha256": native_fit_source_sha256,
         "model_sha256": study.model_sha256,
         "original_offline_source_proof": source_lock,
         "scientific_gate": "UNKNOWN",
         "speed_gate": "UNKNOWN",
         "gen0": dict(native.GEN0_BLOCKED),
     }
+    # The source-controlled independent observer verifies the *joined*
+    # original owner-start and terminal evidence before even calling this a
+    # clean runtime exit. This does not score a single benchmark row.
+    try:
+        if start_receipt.is_symlink() or not start_receipt.is_file():
+            raise SupervisorRefused("OWNER_START_RECEIPT_CHANGED")
+        raw = start_receipt.read_bytes()
+        if not 0 < len(raw) <= 2 * 2**20:
+            raise SupervisorRefused("OWNER_START_RECEIPT_CHANGED")
+        if hashlib.sha256(raw).hexdigest() != start_receipt_sha256:
+            raise SupervisorRefused("OWNER_START_RECEIPT_CHANGED")
+        original_start = json.loads(raw, parse_constant=lambda _: (_ for _ in ()).throw(
+            ValueError("nonfinite")))
+        joining = guard.assess_bound_receipts(
+            original_start, result, study=study, model=model,
+            server=server, output=output, port=port,
+        )
+    except (OSError, TypeError, ValueError, UnicodeError, SupervisorRefused):
+        joining = {"status": "REFUSED", "reasons": ["OWNER_START_RECEIPT_CHANGED"]}
+    result["original_owner_receipt_consistency"] = joining
+    if result["status"] == "CHILD_EXIT_ZERO_RUNTIME_WITNESSED_ONLY" and joining["status"] != (
+        "RECEIPTS_CONSISTENT_NOT_SCIENTIFIC_APPROVAL"
+    ):
+        result["breaches"] = sorted(set(result["breaches"] + joining["reasons"]))
+        result["status"] = "REFUSED_RUNTIME_ABORTED"
     write_receipt_exclusive(terminal_receipt, result)
     return result
 

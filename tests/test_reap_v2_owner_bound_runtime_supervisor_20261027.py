@@ -1,5 +1,6 @@
 """CPU-only adversarial owner-bound runtime checks; never start a model."""
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -255,15 +256,10 @@ def test_cancel_never_uses_foreign_pid_or_taskkill():
         supervisor.cancel_owned_job(SimpleNamespace(active=False))
 
 
-@pytest.mark.parametrize(
-    "breach,expected_status",
-    [
-        (False, "CHILD_EXIT_ZERO_RUNTIME_WITNESSED_ONLY"),
-        (True, "REFUSED_RUNTIME_ABORTED"),
-    ],
-)
+@pytest.mark.parametrize("breach", [False, True])
+@pytest.mark.parametrize("integrity_fault", [None, "source_receipt", "start_receipt", "job_close"])
 def test_full_owned_lifecycle_with_injected_native_job_only(
-    tmp_path, monkeypatch, breach, expected_status
+    tmp_path, monkeypatch, breach, integrity_fault
 ):
     """No real subprocess or model: mock owner verifies the critical control path."""
     model = tmp_path / "q4.gguf"
@@ -278,6 +274,7 @@ def test_full_owned_lifecycle_with_injected_native_job_only(
             self.birth = None
             self.active = False
             self.count = 0
+            self.member_births = {}
 
         def start(self, command, cwd):
             assert command[1].endswith("reap_serve.py")
@@ -297,6 +294,14 @@ def test_full_owned_lifecycle_with_injected_native_job_only(
         def close(self):
             self.active = False
             events.append("close")
+            if integrity_fault == "source_receipt":
+                receipt = tmp_path / "reap128_v2_q4.original-offline-source.json"
+                receipt.write_bytes(receipt.read_bytes() + b"TAMPER")
+            if integrity_fault == "start_receipt":
+                receipt = tmp_path / "reap128_v2_q4.owner-start.json"
+                receipt.write_bytes(receipt.read_bytes() + b" ")
+            if integrity_fault == "job_close":
+                raise OSError("synthetic private Job close failure")
 
     original = wave.study_for("reap128_v2_q4")
     observed = {
@@ -318,15 +323,15 @@ def test_full_owned_lifecycle_with_injected_native_job_only(
     monkeypatch.setattr(
         supervisor.native, "read_active_processes_and_ports", lambda _: {}
     )
-    monkeypatch.setattr(
-        supervisor,
-        "verify_frozen_sources_offline",
-        lambda **kwargs: {
-            "receipt": str(kwargs["receipt_path"]),
-            "sha256": "b" * 64,
-            "source_offline_verified": True,
-        },
-    )
+    def fake_original_source(*, receipt_path):
+        # A mock explicitly creates source bytes: the production supervisor
+        # must still independently rehash them after the owned Job closes.
+        raw = b"synthetic test fixture; never a real original source certificate\n"
+        receipt_path.write_bytes(raw)
+        return {"receipt": str(receipt_path), "sha256": hashlib.sha256(raw).hexdigest(),
+                "source_offline_verified": True}
+
+    monkeypatch.setattr(supervisor, "verify_frozen_sources_offline", fake_original_source)
     monkeypatch.setattr(supervisor.time, "sleep", lambda _: None)
 
     def fake_sample(*args, **kwargs):
@@ -337,6 +342,21 @@ def test_full_owned_lifecycle_with_injected_native_job_only(
         return data
 
     monkeypatch.setattr(supervisor, "_watch_sample", fake_sample)
+    from chowder_batch import reap_v2_supervisor_integration_guard_20261027 as guard
+    # Synthetic transport fixtures never constitute native fit proof or a
+    # genuine Windows process census. Mock these boundaries explicitly here;
+    # separate tests exercise the authentic source, timeout and PID witnesses.
+    monkeypatch.setattr(supervisor, "verify_owned_original_native_fit", lambda *a, **k: {
+        "status": "NATIVE_SOURCE_FIT_VERIFIED_RUNTIME_ONLY", "reasons": [],
+        "source_sha256": "f" * 64,
+    })
+    monkeypatch.setattr(guard, "observe_descendant_extinction", lambda births: {
+        "status": "OWNED_DESCENDANTS_EXTINCT_OBSERVED_ONLY", "reasons": [],
+        "checked_child_pid_count": len(births),
+    })
+    monkeypatch.setattr(supervisor.psutil, "Process", lambda pid: SimpleNamespace(
+        create_time=lambda: 1234567890.5,
+    ))
     out = supervisor._run_authorized(
         study=original,
         model=model,
@@ -349,9 +369,13 @@ def test_full_owned_lifecycle_with_injected_native_job_only(
         startup_grace_seconds=30,
         owner_factory=FakeJob,
     )
+    expected_status = (
+        "REFUSED_RUNTIME_ABORTED" if breach or integrity_fault
+        else "CHILD_EXIT_ZERO_RUNTIME_WITNESSED_ONLY"
+    )
     assert out["status"] == expected_status
     assert out["gen0"]["status"] == "BLOCKED"
-    assert events == ["start", "terminate-owned-job", "close"]
+    assert events == ["start", "terminate-owned-job", "close", *(["close"] if integrity_fault == "job_close" else [])]
     assert (tmp_path / "reap128_v2_q4.owner-start.json").is_file()
     terminal = json.loads((tmp_path / "reap128_v2_q4.owner-terminal.json").read_text())
     assert terminal["status"] == expected_status
@@ -360,6 +384,13 @@ def test_full_owned_lifecycle_with_injected_native_job_only(
         assert "RAM_RUNTIME_FLOOR" in out["breaches"]
     else:
         assert out["fully_witnessed_native_fit"]
+    if integrity_fault == "source_receipt":
+        assert "ORIGINAL_OFFLINE_SOURCE_RECEIPT_CHANGED_AFTER_RUN" in out["breaches"]
+    if integrity_fault == "start_receipt":
+        assert "OWNER_START_RECEIPT_CHANGED" in out["original_owner_receipt_consistency"]["reasons"]
+    if integrity_fault == "job_close":
+        assert "PRIVATE_JOB_HANDLE_CLOSE_UNVERIFIED" in out["breaches"]
+        assert out["owned_job_handle_closed_with_kill_on_close"] is False
 
 
 def test_other_background_process_never_becomes_job_owner():

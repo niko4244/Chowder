@@ -70,6 +70,34 @@ def test_unavailable_models_are_marked_blocked_not_fake_execution(tmp_path: Path
     assert not (tmp_path / "cohort").exists()
 
 
+def test_existing_real_five_original_models_have_correct_paths_and_sidecars(tmp_path: Path):
+    from chowder_batch import reap_v2_dedicated_runner_admission_20261027 as native
+
+    result = wave.plan(
+        lambda arm: Path(native.FROZEN_MODELS[wave.NATIVE_ADMISSION_ARM[arm]].original_path),
+        output=tmp_path / "original-never-started", server=Path("F:/llama.cpp/bin/llama-server.exe"),
+        port=8790,
+    )
+    assert len(result["studies"]) == 5
+    assert all(entry["status"] == "PREPARED_NOT_EXECUTED_REQUIRES_FRESH_ADMISSION"
+               for entry in result["studies"])
+    assert result["model_execution_occurred"] is False
+    assert result["gen0"]["chosen"] is None
+    assert not (tmp_path / "original-never-started").exists()
+
+
+def test_original_relocated_model_is_not_reported_ready(tmp_path: Path):
+    relocated = tmp_path / "dense_v2_q4.gguf"
+    relocated.write_bytes(b"not an original model, fixture only")
+    result = wave.plan(
+        lambda arm: relocated if arm == "dense_v2_q4" else tmp_path / (arm + ".gguf"),
+        output=tmp_path / "out", server=Path("F:/llama.cpp/bin/llama-server.exe"),
+        port=8790,
+    )
+    assert result["studies"][0]["status"] == "BLOCKED_MODEL_SIZE_MISMATCH"
+    assert all(item["status"].startswith("BLOCKED") for item in result["studies"])
+
+
 def test_execution_is_refused_without_direct_fresh_admission(tmp_path: Path, monkeypatch):
     s = wave.STUDIES[0]
     calls = []
@@ -107,6 +135,7 @@ def test_positive_capacity_probe_is_not_permission_to_launch_model(tmp_path: Pat
 
 def test_explicit_owned_run_calls_only_private_job_supervisor(tmp_path: Path, monkeypatch):
     from chowder_batch import reap_v2_owner_bound_runtime_supervisor_20261027 as owner
+    from chowder_batch import reap_v2_original_artifact_portability_20261027 as transport
 
     invocations = []
     def fake_safe_owner(**kwargs):
@@ -115,6 +144,7 @@ def test_explicit_owned_run_calls_only_private_job_supervisor(tmp_path: Path, mo
                 "gen0": {"status": "BLOCKED", "chosen": None, "release_approved": False}}
 
     monkeypatch.setattr(owner, "run_frozen_arm", fake_safe_owner)
+    monkeypatch.setattr(transport, "preflight", lambda *a, **k: {"synthetic_test_only": True})
     expected = wave.study_for("dense_v2_q4")
     result = wave.execute(expected, model=tmp_path / "original.gguf",
                           server=tmp_path / "llama-server.exe",
@@ -140,6 +170,7 @@ def test_cli_rebinds_identical_structural_frozen_study_to_canonical_module(tmp_p
                                                                           monkeypatch):
     from dataclasses import make_dataclass
     from chowder_batch import reap_v2_owner_bound_runtime_supervisor_20261027 as owner
+    from chowder_batch import reap_v2_original_artifact_portability_20261027 as transport
 
     other_type = make_dataclass("OtherModuleStudy", [
         ("arm", str), ("suite", str), ("limit", int), ("model_sha256", str)
@@ -155,6 +186,7 @@ def test_cli_rebinds_identical_structural_frozen_study_to_canonical_module(tmp_p
                 "gen0": {"status": "BLOCKED", "chosen": None, "release_approved": False}}
 
     monkeypatch.setattr(owner, "run_frozen_arm", fake_owner)
+    monkeypatch.setattr(transport, "preflight", lambda *a, **k: {"synthetic_test_only": True})
     wave.execute(separate_class, model=tmp_path / "model.gguf",
                  server=tmp_path / "server.exe", output=tmp_path / "new",
                  receipt_dir=tmp_path, port=8790, execute_authorized=True)

@@ -36,8 +36,11 @@ PINNED_ORIGINAL_CODE = {
 SOURCES = (
     "chowder_batch/reap_v2_dedicated_portable_bundle_20261027.py",
     "chowder_batch/reap_v2_original_offline_source_lock_20261027.py",
+    "chowder_batch/reap_v2_original_artifact_portability_20261027.py",
+    "chowder_batch/reap_v2_supervisor_integration_guard_20261027.py",
     "chowder_batch/reap_v2_owner_bound_runtime_supervisor_20261027.py",
     "chowder_batch/reap_v2_original_humaneval_frozen_executor_20261027.py",
+    "chowder_batch/reap_v2_humaneval_certificate_verifier_20261027.py",
     "chowder_batch/reap_v2_dedicated_runner_admission_20261027.py",
     "chowder_batch/reap_v2_frozen_wave_20261027.py",
     "chowder_batch/reap_v2_live_resource_witness_20261027.py",
@@ -64,6 +67,7 @@ SOURCES = (
     "docs/quals/REAP128-V2-CONSTRUCTION-AND-GATES-2026-10-25.md",
     "docs/quals/reap-v2-phase46-original-frozen-wave-and-real-resource-admission-20261027.md",
     "docs/quals/reap-v2-phase47-original-native-supervisor-portable-humaneval-20261027.md",
+    "docs/quals/reap-v2-phase48-original-source-fit-and-receipt-integrity-20261027.md",
     "docs/quals/reap-frozen-scoring-source-fingerprints-20261025.json",
 )
 METADATA_NAME = "ORIGINAL-REAP-PORTABLE-ENTRY-MANIFEST.json"

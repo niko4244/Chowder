@@ -123,6 +123,9 @@ def command(study: Study, *, model: Path, output: Path, server: Path, port: int)
 
 def plan(model_for, *, output: Path, server: Path, port: int) -> dict:
     assert_frozen_code_identity()
+    from chowder_batch import reap_v2_original_artifact_portability_20261027 as transport
+    from chowder_batch import reap_v2_dedicated_runner_admission_20261027 as native
+
     entries = []
     for study in STUDIES:
         model = Path(model_for(study.arm))
@@ -130,10 +133,26 @@ def plan(model_for, *, output: Path, server: Path, port: int) -> dict:
             status = "BLOCKED_MISSING_MODEL"
         elif study.arm in EXPECTED_BYTES and model.stat().st_size != EXPECTED_BYTES[study.arm]:
             status = "BLOCKED_MODEL_SIZE_MISMATCH"
+        elif transport._identity(model) != transport._identity(Path(
+            native.FROZEN_MODELS[NATIVE_ADMISSION_ARM[study.arm]].original_path
+        )):
+            status = "BLOCKED_ORIGINAL_MODEL_PATH_RELOCATION"
+        elif study.arm in ("reap128_v2", "reap128_v2_q4"):
+            try:
+                transport.preflight(study, model)
+            except transport.OriginalTransportRefused:
+                status = "BLOCKED_ORIGINAL_GGUF_CONSTRUCTION_RECEIPT"
+            else:
+                status = "PREPARED_NOT_EXECUTED_REQUIRES_FRESH_ADMISSION"
         elif (output / study.arm).exists():
             status = "BLOCKED_PREEXISTING_SESSION"
         else:
             status = "PREPARED_NOT_EXECUTED_REQUIRES_FRESH_ADMISSION"
+        if status == "PREPARED_NOT_EXECUTED_REQUIRES_FRESH_ADMISSION":
+            if (output / study.arm).exists():
+                status = "BLOCKED_PREEXISTING_SESSION"
+            elif not server.is_file() or server.is_symlink():
+                status = "BLOCKED_MISSING_NATIVE_SERVER"
         entries.append({"arm": study.arm, "suite": study.suite,
                         "item_count": study.limit or 1319,
                         "original_gguf_sha256": study.model_sha256,
@@ -192,6 +211,14 @@ def execute(study: Study, *, model: Path, output: Path, server: Path, port: int,
         registered.arm, registered.suite, registered.limit, registered.model_sha256
     ):
         raise AdmissionRefused("REGISTERED_FROZEN_STUDY_IDENTITY_CHANGED")
+    # Original published v2 Q4/Q8 construction receipts bind *absolute Windows
+    # drive paths*. Silently copying a sidecar to C:\dedicated-reap\models
+    # would cause reap_serve's unchanged immutable source verification to
+    # refuse AFTER an expensive full-GGUF hash. Check immutable path, 733
+    # expert tensor inventory and sidecar first, with zero model inference.
+    from chowder_batch.reap_v2_original_artifact_portability_20261027 import preflight
+
+    preflight(registered, Path(model))
     # Deliberately no direct subprocess or launching based on a caller-supplied
     # admission JSON. The supervisor rereads Windows physical capacity, ports,
     # GPUs, original model bytes and canonical offline sources before creating
@@ -208,8 +235,9 @@ def main() -> int:
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("--arm", help="One original registered arm; required for --execute")
     cli.add_argument("--model", type=Path, help="Original model GGUF (execute only)")
-    cli.add_argument("--models-dir", type=Path, default=Path("C:/dedicated-reap/models"))
-    cli.add_argument("--server", type=Path, default=Path(reap_serve.DEFAULT_SERVER))
+    cli.add_argument("--models-dir", type=Path,
+                     help="Override model root for analysis only; relocated original bytes cannot qualify")
+    cli.add_argument("--server", type=Path, default=Path("F:/llama.cpp/bin/llama-server.exe"))
     cli.add_argument("--out", type=Path, default=Path("C:/dedicated-reap/eval-wave-v1"))
     cli.add_argument("--port", type=int, default=8790)
     cli.add_argument("--execute", action="store_true")
@@ -228,7 +256,11 @@ def main() -> int:
                              receipt_dir=args.receipt_dir,
                              execute_authorized=args.authorize_owned_run)
         else:
-            result = plan(lambda arm: args.models_dir / (arm + ".gguf"),
+            from chowder_batch import reap_v2_dedicated_runner_admission_20261027 as native
+
+            result = plan(lambda arm: (args.models_dir / (arm + ".gguf")
+                          if args.models_dir is not None
+                          else Path(native.FROZEN_MODELS[NATIVE_ADMISSION_ARM[arm]].original_path)),
                           output=args.out, server=args.server, port=args.port)
         if args.snapshot:
             if args.snapshot.is_symlink() or args.snapshot.exists():
