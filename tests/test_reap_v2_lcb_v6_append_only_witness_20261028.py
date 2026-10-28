@@ -28,7 +28,7 @@ def row(qid: str, source: str, *, error: str | None = None,
         "max_tokens": 4096,
         "temperature": 0.2,
         "top_p": 0.95,
-        "raw": "" if error else "candidate confidential text",
+        "raw": "" if error else f"candidate confidential text\n```python\n{code}\n```",
         "code": "" if error else code,
         "error": error,
         "elapsed_s": 1.0,
@@ -90,7 +90,7 @@ def test_missing_explicit_error_key_cannot_be_witnessed_as_success() -> None:
 def test_forged_extracted_code_from_empty_content_cannot_be_witnessed() -> None:
     item = row("a", "test.jsonl")
     item["raw"] = ""
-    with pytest.raises(ValueError, match="without model response"):
+    with pytest.raises(ValueError, match="disagrees with original extraction"):
         make(encode(item))
 
 

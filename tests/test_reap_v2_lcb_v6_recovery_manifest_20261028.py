@@ -18,7 +18,8 @@ def row(qid, filename, *, error=None, code="print(1)"):
         "question_id": qid, "source_file": filename,
         "task": "LCB_generation", "prompt_style": "OpenAIChat",
         "max_tokens": 4096, "temperature": 0.2, "top_p": 0.95,
-        "code": "" if error else code, "raw": "" if error else code,
+        "code": "" if error else code,
+        "raw": "" if error else f"```python\n{code}\n```",
         "error": error, "elapsed_s": 1.0,
     }
     if error is None:

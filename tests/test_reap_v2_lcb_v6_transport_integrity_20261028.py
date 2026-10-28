@@ -17,7 +17,8 @@ def row(qid, filename, *, error=None, code="print(1)"):
         "question_id": qid, "source_file": filename,
         "task": "LCB_generation", "prompt_style": "OpenAIChat",
         "max_tokens": 4096, "temperature": 0.2, "top_p": 0.95,
-        "code": "" if error else code, "raw": "" if error else code,
+        "code": "" if error else code,
+        "raw": "" if error else f"```python\n{code}\n```",
         "error": error, "elapsed_s": 1.0,
     }
     if error is None:
@@ -81,8 +82,42 @@ def test_rejects_error_with_candidate_text():
 def test_success_cannot_claim_extracted_code_from_empty_model_content():
     record = row(*SOURCE[0])
     record["raw"] = ""
-    with pytest.raises(ValueError, match="without model response"):
+    with pytest.raises(ValueError, match="disagrees with original extraction"):
         audit.classify(SOURCE, [record])
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("", ""),
+    ("plain response without code fences", ""),
+    ("```python\nprint(1)\n```", "print(1)"),
+    ("```python\nold\n```\n```python\nnew\n```", "new"),
+    ("prefix ```python\nx\nclosing ``` suffix", "x"),
+    ("```python\n\n```", ""),
+    ("```python\r\nprint(1)\r\n```", "print(1)\r"),
+])
+def test_pinned_openai_chat_extraction_semantics(raw, expected):
+    assert audit._extract_original_openai_chat_code(raw) == expected
+
+
+@pytest.mark.parametrize(("raw", "forged"), [
+    ("analysis only", "print('fabricated')"),
+    ("```python\nprint(1)\n```", "print(2)"),
+    ("```python\nfirst\n```\n```python\nlast\n```", "first"),
+    ("```python\nprint(1)\n```", "print(1)\n"),
+])
+def test_forged_extracted_candidate_never_counts_as_model_response(raw, forged):
+    record = row(*SOURCE[0])
+    record.update(raw=raw, code=forged)
+    with pytest.raises(ValueError, match="disagrees with original extraction"):
+        audit.classify(SOURCE, [record])
+
+
+def test_exact_source_extraction_counts_as_unattested_response_only():
+    record = row(*SOURCE[0])
+    record.update(raw="Explanation\n```python\nprint(1)\n```", code="print(1)")
+    result = audit.classify(SOURCE, [record])
+    assert result["successful_transport_rows"] == 1
+    assert result["official_complete_score"] is None
 
 
 @pytest.mark.parametrize("key", [

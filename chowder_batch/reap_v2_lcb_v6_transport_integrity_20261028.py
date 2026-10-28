@@ -62,6 +62,20 @@ def parse_complete_journal(raw: bytes) -> list[dict]:
     return rows
 
 
+def _extract_original_openai_chat_code(raw: str) -> str:
+    """Mirror pinned LCB extraction_utils.extract_code(OpenAIChat), without imports.
+
+    The frozen generator stores this exact deterministic extraction of its
+    response. Never execute the extracted text or import evaluator runtime code.
+    The original implementation selects the final two lines containing ```.
+    """
+    lines = raw.split("\n")
+    fences = [index for index, line in enumerate(lines) if "```" in line]
+    if len(fences) < 2:
+        return ""
+    return "\n".join(lines[fences[-2] + 1:fences[-1]])
+
+
 def classify(source: list[tuple[str, str]], rows: list[dict]) -> dict:
     """Classify original canonical generations without inferring any scores."""
     if not rows or len(rows) > len(source):
@@ -96,10 +110,10 @@ def classify(source: list[tuple[str, str]], rows: list[dict]) -> dict:
                 or not isinstance(row.get("raw"), str)):
             raise ValueError(f"canonical source/prompt/parameters mismatch at {i}")
         if error is None:
-            # The frozen generator obtains code solely from extract_code(raw).
-            # Empty model content cannot yield a nonempty extracted candidate.
-            if not row["raw"] and row["code"]:
-                raise ValueError(f"candidate code without model response at {i}")
+            # The frozen generator stores exactly extract_code(raw, OpenAIChat).
+            # A plausible-looking response is not evidence for arbitrary code.
+            if row["code"] != _extract_original_openai_chat_code(row["raw"]):
+                raise ValueError(f"candidate code disagrees with original extraction at {i}")
             for field in ("prompt_tokens", "completion_tokens"):
                 value = row[field]
                 if value is not None and (type(value) is not int or value < 0):
