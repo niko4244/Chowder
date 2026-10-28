@@ -88,8 +88,8 @@ def witness_natural_drain(
                 if refresh_births is not None:
                     checkpoint = refresh_births()
                     if (not isinstance(checkpoint, dict)
-                            or checkpoint.get("status") ==
-                            "REFUSED"):
+                            or checkpoint.get("status") !=
+                            "EVENT_BIRTHS_SOURCE_MATCHED_NOT_EXHAUSTIVE"):
                         return _report(
                             "REFUSED", "PRIVATE_JOB_COMPLETION_BIRTH_SOURCE_REFUSED",
                             [], latest, index + 1,

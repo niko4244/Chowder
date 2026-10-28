@@ -151,6 +151,35 @@ def test_unexpected_kernel_reader_exception_fails_closed_without_a_packet():
     assert reader.snapshot()["gen0"]["chosen"] is None
 
 
+def test_terminal_stop_requires_fresh_empty_polls_not_prior_idle_history(monkeypatch):
+    reader = job_events.PrivateJobEvents(kernel=object(), job=1234,
+                                         member_check=lambda _: True)
+    # A long-lived model server may have accumulated thousands of idle polls
+    # before the final native process exits and queues its exit notification.
+    reader._quiet_polls = 999
+    observed = []
+
+    class RunningReader:
+        def is_alive(self):
+            return not reader._stop.is_set()
+
+        def join(self, timeout):
+            assert reader._stop.is_set()
+
+    reader._thread = RunningReader()
+
+    def fresh_timeout(_seconds):
+        observed.append(reader._quiet_polls)
+        with reader._lock:
+            reader._quiet_polls += 1
+
+    monkeypatch.setattr(job_events.time, "sleep", fresh_timeout)
+    receipt = reader.stop()
+    assert observed == [0, 1]
+    assert receipt["faults"] == []
+    assert receipt["gen0"]["release_approved"] is False
+
+
 def test_handle_close_failure_still_closes_other_owned_handles_and_port():
     class CloseHandle:
         def __init__(self):

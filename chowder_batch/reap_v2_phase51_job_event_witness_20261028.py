@@ -293,6 +293,11 @@ class PrivateJobEvents:
         # empty polls, rather than truncating the final event stream at once.
         # A lost Windows packet is still fatal via cumulative Job accounting.
         if self._thread is not None and self._thread.is_alive() and not self._stop.is_set():
+            # Earlier idle polls do not prove that the queue is empty *after*
+            # the final Job member exits. Require two new timeout observations
+            # after the caller has confirmed natural process-tree extinction.
+            with self._lock:
+                self._quiet_polls = 0
             deadline = time.monotonic() + 0.35
             while time.monotonic() < deadline:
                 with self._lock:

@@ -133,6 +133,26 @@ def test_fake_delayed_birth_checkpoint_or_timeout_never_grants_completion():
     assert timeout["reason"] == "UNSEEN_JOB_HELPER_LIFETIME_PROCESS"
 
 
+@pytest.mark.parametrize("unverified", [
+    {"status": "NO_COMPLETION_PORT_SYNTHETIC_TEST_ONLY"},
+    {"status": "PENDING"},
+    {"status": "NATURALLY_DRAINED"},
+    {"status": "REFUSED"},
+    {},
+    None,
+])
+def test_unverified_event_refresh_cannot_approve_even_matching_job_totals(unverified):
+    job = OwnedJob([[], []], total=3)
+    out = drain.witness_natural_drain(
+        job, ledger=_ledger(), study=object(), model=Path("G:/original.gguf"),
+        server=Path("F:/native.exe"), output=Path("C:/scratch"), port=8790,
+        refresh_births=lambda: unverified, polls=2, sleep=lambda _: None,
+    )
+    assert out["status"] == "REFUSED"
+    assert out["reason"] == "PRIVATE_JOB_COMPLETION_BIRTH_SOURCE_REFUSED"
+    assert out["gen0"]["chosen"] is None
+
+
 def test_conhost_never_witnessed_or_foreign_child_fails_closed():
     job = OwnedJob([[110, 113], [], [], []], total=4)
     unknown = _observe(job, _ledger(), lambda *a, **k: {
