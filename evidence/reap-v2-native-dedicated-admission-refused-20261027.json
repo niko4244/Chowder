@@ -1,0 +1,152 @@
+{
+  "arm": "q4",
+  "cgroup_free_not_measured_by_native_windows": true,
+  "dedicated_gpu_free_40g_is_provisioning_not_frozen_scientific_gate": true,
+  "native_binary": {
+    "historical_native_binary_source_pin_established": false,
+    "observed_sha256": null,
+    "path": "F:\\llama.cpp\\bin\\llama-server.exe"
+  },
+  "never_launches_model": true,
+  "observed": {
+    "active_conflicts": [
+      {
+        "create_time": 1793088670.547716,
+        "name": "podman.exe",
+        "pid": 5040
+      },
+      {
+        "create_time": 1793111658.0039809,
+        "name": "ollama.exe",
+        "pid": 30416
+      },
+      {
+        "create_time": 1793159728.2525904,
+        "name": "podman.exe",
+        "pid": 31000
+      },
+      {
+        "create_time": 1793092960.6470656,
+        "name": "podman.exe",
+        "pid": 38316
+      },
+      {
+        "create_time": 1793158314.0826097,
+        "name": "python.exe",
+        "pid": 40080
+      },
+      {
+        "create_time": 1793156769.439325,
+        "name": "llama-server.exe",
+        "pid": 55032
+      }
+    ],
+    "commit_headroom_bytes": 25831424000,
+    "commit_limit_bytes": 112107528192,
+    "commit_total_bytes": 86276104192,
+    "disk_free_bytes": 19352117248,
+    "gpu": {
+      "free_mib": 3702,
+      "name": "NVIDIA GeForce RTX 5060 Ti",
+      "reserved_mib": 260,
+      "total_mib": 16311,
+      "used_mib": 12349,
+      "utilization_pct": 85,
+      "uuid": "GPU-1f8a38ab-03e6-b417-324d-d10c326803c5"
+    },
+    "listeners": [
+      {
+        "pid": 55032,
+        "port": 8890
+      }
+    ],
+    "model_bytes_verified": false,
+    "model_full_sha256": null,
+    "model_sha256_verified": false,
+    "native_binary_sha256_verified": false,
+    "physical_available_bytes": 10906746880,
+    "physical_total_bytes": 68613722112,
+    "port_census_complete": true,
+    "process_census_complete": true,
+    "server_full_sha256": null,
+    "time_utc": "2026-10-28T03:57:24.606527+00:00"
+  },
+  "original_model": {
+    "bytes": 11563915264,
+    "canonical_path": "G:/reap128-v2-q4_k_m-20261025.gguf",
+    "selected_runner_path": "G:\\reap128-v2-q4_k_m-20261025.gguf",
+    "sha256": "2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7"
+  },
+  "platform_required": "Windows",
+  "port": 8790,
+  "proposed_command": [
+    "F:\\llama.cpp\\bin\\llama-server.exe",
+    "--fit",
+    "on",
+    "-np",
+    "4",
+    "-c",
+    "16384",
+    "--jinja",
+    "-m",
+    "G:\\reap128-v2-q4_k_m-20261025.gguf",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "8790"
+  ],
+  "recheck_before_any_run": true,
+  "registered_flags": [
+    "--fit",
+    "on",
+    "-np",
+    "4",
+    "-c",
+    "16384",
+    "--jinja"
+  ],
+  "report": {
+    "capacity_is_not_measured_model_fit": true,
+    "execution_approved": false,
+    "floors": {
+      "commit_headroom_bytes": 51539607552,
+      "dedicated_gpu_free_mib": 40960,
+      "dedicated_gpu_total_mib": 49152,
+      "disk_free_bytes": 8589934592,
+      "original_native_gpu_free_mib": 12288,
+      "physical_available_bytes": 51539607552,
+      "runtime_commit_floor_bytes": 8589934592,
+      "runtime_ram_floor_bytes": 7516192768
+    },
+    "frozen_flags": [
+      "--fit",
+      "on",
+      "-np",
+      "4",
+      "-c",
+      "16384",
+      "--jinja"
+    ],
+    "gen0": {
+      "chosen": null,
+      "release_approved": false,
+      "status": "BLOCKED"
+    },
+    "reasons": [
+      "ACTIVE_LISTENERS",
+      "ACTIVE_PROCESSES",
+      "COMMIT_48G_FREE",
+      "GPU_12G_NATIVE_FLOOR",
+      "GPU_40G_DEDICATED",
+      "GPU_48G_CLASS",
+      "GPU_NOT_IDLE",
+      "MODEL_BYTES",
+      "MODEL_SHA",
+      "RAM_48G_FREE",
+      "SERVER_SHA"
+    ],
+    "status": "REFUSED"
+  },
+  "requires_independent_per_arm_postload_fit_and_numerical_evidence": true,
+  "schema": "chowder.reap-v2-dedicated-windows-runner-admission.v1"
+}
