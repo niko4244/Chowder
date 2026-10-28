@@ -1,0 +1,154 @@
+"""Read-only source-locked audit of LiveCodeBench generation transport failures.
+
+This does not execute generated Python, contact a model endpoint, repair a
+journal, or certify an original serving session. Failed HTTP requests are
+*missing generations*, never wrong model answers or completed benchmark cases.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
+from chowder_batch import reap_v2_lcb_v6_checkpoint_readonly_audit_20261028 as lcb
+
+SCHEMA = "chowder.reap-v2-lcb-v6-transport-integrity.v1"
+
+
+def parse_complete_journal(raw: bytes) -> list[dict]:
+    """Reject torn writes rather than interpreting an in-flight row as a case."""
+    if not raw or not raw.endswith(b"\n"):
+        raise ValueError("generation journal is empty or has an in-flight partial row")
+    rows = []
+    for index, line in enumerate(raw.splitlines(), 1):
+        if not line:
+            raise ValueError(f"blank generation row {index}")
+        try:
+            row = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid generation row {index}") from exc
+        if not isinstance(row, dict):
+            raise ValueError(f"non-object generation row {index}")
+        rows.append(row)
+    return rows
+
+
+def classify(source: list[tuple[str, str]], rows: list[dict]) -> dict:
+    """Classify original canonical generations without inferring any scores."""
+    if not rows or len(rows) > len(source):
+        raise ValueError("empty or excessive generation population")
+    first_error = None
+    errors = 0
+    successful_after_error = 0
+    nonerror_empty = 0
+    transport_failures = 0
+    for i, row in enumerate(rows):
+        qid, filename = source[i]
+        if (row.get("question_id") != qid
+                or row.get("source_file") != filename
+                or row.get("task") != "LCB_generation"
+                or row.get("prompt_style") != "OpenAIChat"
+                or row.get("max_tokens") != 4096
+                or row.get("temperature") != 0.2
+                or row.get("top_p") != 0.95
+                or not isinstance(row.get("code"), str)
+                or not isinstance(row.get("raw"), str)):
+            raise ValueError(f"canonical source/prompt/parameters mismatch at {i}")
+        error = row.get("error")
+        if error is None:
+            if first_error is not None:
+                successful_after_error += 1
+            if not row["code"].strip():
+                nonerror_empty += 1
+            if not isinstance(row.get("finish_reason"), (str, type(None))):
+                raise ValueError(f"invalid model finish reason at {i}")
+        elif isinstance(error, str) and error.strip():
+            if row["raw"] or row["code"]:
+                raise ValueError(f"transport error has candidate text at {i}")
+            if first_error is None:
+                first_error = i
+            errors += 1
+            if ("URLError" in error and "WinError 10061" in error
+                    and "actively refused" in error):
+                transport_failures += 1
+        else:
+            raise ValueError(f"invalid transport error encoding at {i}")
+    return {
+        "source_population": len(source),
+        "journal_rows": len(rows),
+        "successful_transport_rows": len(rows) - errors,
+        "model_responses_with_empty_code": nonerror_empty,
+        "failed_transport_rows_not_scored": errors,
+        "connection_refused_rows": transport_failures,
+        "first_failed_source_index_zero_based": first_error,
+        "first_failed_question_id": source[first_error][0] if first_error is not None else None,
+        "successes_after_first_failure": successful_after_error,
+        "contiguous_successful_prefix": first_error if first_error is not None else len(rows),
+        "unresolved_source_cases": len(source) - (len(rows) - errors),
+        "retry_requires_new_source_bound_session_and_independent_admission": bool(errors),
+        "original_model_serving_session_independently_attested": False,
+        "candidate_code_execution_authorized": False,
+        "official_complete_score": None,
+        "status": "TRANSPORT_FAILURES_UNSCORED" if errors else "NO_TRANSPORT_FAILURES_OBSERVED",
+        "frozen_gen0_status": "BLOCKED",
+        "chosen": None,
+        "release_approved": False,
+    }
+
+
+def inspect() -> dict:
+    # The existing independent source/metric auditor validates Git identity,
+    # all six original dataset SHAs, frozen generator/evaluator SHAs and the
+    # official scored prefix. It never runs generated programs.
+    checkpoint = lcb.inspect()
+    source = []
+    for name in lcb.FILES:
+        source.extend((row["question_id"], name)
+                      for row in lcb.read_jsonl(lcb.DATA / name))
+    raw = (lcb.OUT / "gen_q4.jsonl").read_bytes()
+    result = classify(source, parse_complete_journal(raw))
+    if result["contiguous_successful_prefix"] < checkpoint["scored_prefix"]:
+        raise ValueError("official checkpoint includes failed transport cases")
+    if lcb.sha(lcb.OUT / "metrics_q4_checkpoint.json") != checkpoint["checkpoint_sha256"]:
+        raise ValueError("official checkpoint changed during transport audit")
+    return {
+        "schema": SCHEMA,
+        **result,
+        "generation_journal_sha256": hashlib.sha256(raw).hexdigest(),
+        "source_dataset_sha256": checkpoint["source_dataset_sha256"],
+        "source_git_commit": checkpoint["source_git_commit"],
+        "generator_source_sha256": checkpoint["generator_source_sha256"],
+        "evaluator_source_sha256": checkpoint["evaluator_source_sha256"],
+        "previously_scored_prefix_internal_consistency_only": checkpoint["scored_prefix"],
+        "previously_scored_prefix_passes_internal_consistency_only": checkpoint["correct"],
+        "official_checkpoint_sha256": checkpoint["checkpoint_sha256"],
+        "cpu_code_isolation_independently_attested": False,
+        "research_only": True,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--snapshot", type=Path)
+    args = parser.parse_args()
+    try:
+        result = inspect()
+        if args.snapshot is not None:
+            target = args.snapshot
+            if (not target.is_absolute() or target.exists() or target.is_symlink()
+                    or target.parent.resolve() != Path("F:/").resolve()):
+                raise ValueError("new exclusive F: snapshot path required")
+            with target.open("xb") as stream:
+                stream.write((json.dumps(result, sort_keys=True, indent=2) + "\n").encode())
+        print(json.dumps(result, sort_keys=True, indent=2))
+        return 0
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(json.dumps({"status": "REFUSED_LCB_TRANSPORT_AUDIT",
+                          "reason": str(exc)[:350], "frozen_gen0_status": "BLOCKED"}))
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
