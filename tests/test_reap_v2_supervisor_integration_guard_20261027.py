@@ -374,6 +374,105 @@ def test_receipt_cross_binding_undischarged_postclose_proof_refuses(tmp_path):
     assert "ORIGINAL_OFFLINE_SOURCE_MISMATCH" in bad["reasons"]
 
 
+def test_phase51_independent_receipt_replay_requires_kernel_events_and_source_exact_argv(tmp_path):
+    from chowder_batch import reap_v2_phase51_job_event_witness_20261028 as event_api
+    study = wave.study_for("reap128_v2_q4")
+    out = tmp_path / "unique-original"
+    cmd = wave.command(study, model=MODEL, server=SERVER, output=out, port=8790)
+    start = {
+        "schema": supervisor.SCHEMA, "arm": study.arm,
+        "model_sha256": study.model_sha256,
+        "status": "PRELAUNCH_SOURCE_AND_CAPACITY_VERIFIED", "command": cmd,
+        "native_server_sha256": "a" * 64, "native_job_completion_port_required": True,
+        "original_offline_source_proof": {
+            "sha256": "b" * 64, "source_offline_verified": True},
+        "gen0": guard.GEN0_BLOCKED,
+    }
+    identities = {
+        1001: {"pid": 1001, "birth": 1729000000.0, "parent": 8,
+               "argv": cmd, "image_path": sys.executable, "job_member": True},
+        1002: {"pid": 1002, "birth": 1729000001.0, "parent": 1001,
+               "argv": [str(SERVER), *wave.FLAGS, "--port", "8790", "-m", str(MODEL)],
+               "image_path": str(SERVER), "job_member": True},
+        1003: {"pid": 1003, "birth": 1729000002.0, "parent": 1001,
+               "argv": [sys.executable, str(wave.REPO / "chowder_batch" / "reap_eval.py"),
+                        *cmd[cmd.index("--") + 1:]],
+               "image_path": sys.executable, "job_member": True},
+    }
+    journal = {
+        "schema": event_api.SCHEMA, "status": "OBSERVED_ONLY_NOT_APPROVED",
+        "events": [{"message": 6, "pid": pid, "birth_identity_captured": True}
+                   for pid in identities] +
+                  [{"message": 7, "pid": pid, "birth_identity_captured": False}
+                   for pid in identities] +
+                  [{"message": 4, "pid": 0, "birth_identity_captured": False}],
+        "births": identities, "faults": [],
+    }
+    terminal = {
+        "schema": supervisor.SCHEMA, "arm": study.arm,
+        "model_sha256": study.model_sha256,
+        "status": "CHILD_EXIT_ZERO_RUNTIME_WITNESSED_ONLY",
+        "child_pid": 1001, "child_create_time_unix": 1729000000.0,
+        "exit_code": 0, "breaches": [],
+        "original_offline_source_proof": {
+            "sha256": "b" * 64, "source_offline_verified": True},
+        "owned_job_handle_closed_with_kill_on_close": True,
+        "post_close_descendant_extinction_independently_witnessed": True,
+        "pre_cleanup_natural_owned_tree_extinction_witnessed": True,
+        "pre_cleanup_live_owned_descendant_count": 0,
+        "all_private_job_lifetime_processes_source_witnessed": True,
+        "pre_cleanup_private_job_lifetime_accounting": {
+            "total_processes": 3, "active_processes": 0,
+            "total_page_fault_count": 8,
+        },
+        "original_live_job_owned_role_identities": {
+            "root": {"pid": 1001, "birth": 1729000000.0},
+            "server": {"pid": 1002, "birth": 1729000001.0},
+            "evaluator": {"pid": 1003, "birth": 1729000002.0},
+        },
+        "fully_witnessed_native_fit": True,
+        "original_live_job_root_server_evaluator_lineage_witnessed": True,
+        "original_native_fit_source_sha256": "f" * 64,
+        "observations": [{
+            "original_live_owned_job_lineage_status": "OWNER_BOUND_ACTIVE_OBSERVED_ONLY",
+            "original_native_fit_source_status": "NATIVE_SOURCE_FIT_VERIFIED_RUNTIME_ONLY",
+        }],
+        "original_private_job_notification_journal": journal,
+        "gen0": guard.GEN0_BLOCKED,
+    }
+    def evaluate(src):
+        return guard.assess_bound_receipts(
+            start, src, study=study, model=MODEL,
+            server=SERVER, output=out, port=8790,
+        )
+    assert evaluate(terminal)["status"] == "RECEIPTS_CONSISTENT_NOT_SCIENTIFIC_APPROVAL"
+    import copy
+    forged = copy.deepcopy(terminal)
+    forged["original_private_job_notification_journal"]["births"][1003]["argv"][-1] = "999"
+    assert "PRIVATE_JOB_EVENT_SOURCE_REPLAY_REFUSED" in evaluate(forged)["reasons"]
+    forged = copy.deepcopy(terminal)
+    forged["original_private_job_notification_journal"]["events"].pop()
+    assert "PRIVATE_JOB_EVENT_SOURCE_REPLAY_REFUSED" in evaluate(forged)["reasons"]
+    for malformed in (
+        {"message": 7, "pid": 1001},  # duplicate root exit
+        {"message": 7, "pid": 9999},  # no matching birth
+        {"message": 8, "pid": 1002},  # abnormal exit
+        {"message": 4, "pid": 9999},  # invalid active-zero PID
+    ):
+        forged = copy.deepcopy(terminal)
+        forged["original_private_job_notification_journal"]["events"].append(malformed)
+        assert "PRIVATE_JOB_EVENT_SOURCE_REPLAY_REFUSED" in evaluate(forged)["reasons"]
+    forged = copy.deepcopy(terminal)
+    forged["original_private_job_notification_journal"]["faults"].append("UNKNOWN_SOURCE")
+    assert "PRIVATE_JOB_EVENT_SOURCE_REPLAY_REFUSED" in evaluate(forged)["reasons"]
+    forged = copy.deepcopy(terminal)
+    forged["original_private_job_notification_journal"] = None
+    assert "ORIGINAL_PRIVATE_JOB_EVENT_JOURNAL_ABSENT" in evaluate(forged)["reasons"]
+    forged = copy.deepcopy(terminal)
+    forged["pre_cleanup_private_job_lifetime_accounting"]["total_processes"] = 4
+    assert "PRIVATE_JOB_COMPLETION_PORT_LIFETIME_GAP" in evaluate(forged)["reasons"]
+
+
 def test_benign_windows_owned_pid_creation_and_natural_extinction():
     """Harmless Python sleep child only; never kill or signal other processes."""
     if sys.platform != "win32":

@@ -46,6 +46,7 @@ def witness_natural_drain(
     output: Path,
     port: int,
     capture=None,
+    refresh_births=None,
     polls: int = MAX_POLLS,
     sleep=None,
 ) -> dict:
@@ -84,11 +85,26 @@ def witness_natural_drain(
                 if (second or second_counts["active_processes"] != 0
                         or second_counts["total_processes"] != latest["total_processes"]):
                     continue
+                if refresh_births is not None:
+                    checkpoint = refresh_births()
+                    if (not isinstance(checkpoint, dict)
+                            or checkpoint.get("status") ==
+                            "REFUSED"):
+                        return _report(
+                            "REFUSED", "PRIVATE_JOB_COMPLETION_BIRTH_SOURCE_REFUSED",
+                            [], latest, index + 1,
+                        )
                 if latest["total_processes"] != len(ledger.pid_births):
-                    return _report(
-                        "REFUSED", "UNSEEN_JOB_HELPER_LIFETIME_PROCESS",
-                        [], latest, index + 1,
-                    )
+                    # The OS may deliver already-queued NEW_PROCESS packets
+                    # just after the final Job active count became zero.
+                    # Only a newly source-vetted PID+birth/image/argv from
+                    # the original completion port can close this deficit;
+                    # merely waiting for or counting a raw event cannot.
+                    if refresh_births is not None and index + 1 < polls:
+                        sleeper(POLL_SECONDS)
+                        continue
+                    return _report("REFUSED", "UNSEEN_JOB_HELPER_LIFETIME_PROCESS",
+                                   [], latest, index + 1)
                 return _report("NATURALLY_DRAINED", None, [], latest, index + 1)
             proof = probe(
                 owner, study=study, model=model, server=server,

@@ -457,6 +457,7 @@ class _WindowsOwnedJob:
         self.birth = None
         self.active = False
         self.member_births = {}
+        self.event_witness = None
 
     def _call(self, name: str, *args, result_type=wintypes.BOOL, types=None):
         api = getattr(self.kernel, name)
@@ -496,6 +497,15 @@ class _WindowsOwnedJob:
                 ctypes.sizeof(policy),
                 types=[wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD],
             )
+            # Install the event source on this *empty private Job* before the
+            # root exists or can spawn even a one-instant helper. Win32 Job
+            # notifications are NOT guaranteed delivery or command proof;
+            # the native lifetime counter remains authoritative for missing
+            # process detection and uncertain births fail closed.
+            from chowder_batch.reap_v2_phase51_job_event_witness_20261028 import PrivateJobEvents
+            self.event_witness = PrivateJobEvents(
+                kernel=self.kernel, job=self.job, member_check=self.is_member,
+            ).attach_before_resume()
             startup = _STARTUPINFO()
             startup.cb = ctypes.sizeof(startup)
             process = _PROCESS_INFORMATION()
@@ -542,6 +552,17 @@ class _WindowsOwnedJob:
             observed = psutil.Process(self.pid)
             if abs(observed.create_time() - self.birth) > 2:
                 raise SupervisorRefused("CREATED_SUSPENDED_PID_START_IDENTITY_MISMATCH")
+            # The watcher additionally calls is_member(), which requires an
+            # established active owner. Mark it only after our suspended
+            # root's Job membership and birth are verified, BEFORE the first
+            # queued root NEW_PROCESS can be consumed by the event thread.
+            # Any later startup failure terminates only our direct HANDLE and
+            # closes the private kill-on-close Job in the existing except.
+            self.active = True
+            # Consume the already-associated private Job's event stream while
+            # the root is still suspended. Starting after ResumeThread allows
+            # a fast subprocess to exit before its argv can be inspected.
+            self.event_witness.start()
             self._call(
                 "ResumeThread",
                 self.thread,
@@ -550,7 +571,6 @@ class _WindowsOwnedJob:
             )
             self._close(self.thread)
             self.thread = None
-            self.active = True
             return self
         except Exception:
             # Child was suspended and is a direct, locally created process
@@ -713,6 +733,13 @@ class _WindowsOwnedJob:
     def close(self):
         self.active = False
         errors = []
+        if self.event_witness is not None:
+            try:
+                self.event_witness.close()
+            except Exception:
+                errors.append("job_completion_port")
+            else:
+                self.event_witness = None
         for name in ("thread", "process", "job"):
             handle = getattr(self, name)
             if handle:
@@ -991,6 +1018,7 @@ def _run_authorized(
             "arm": study.arm,
             "model_sha256": study.model_sha256,
             "native_server_sha256": snap["server_full_sha256"],
+            "native_job_completion_port_required": True,
             "original_offline_source_proof": source_lock,
             "command": cmd,
             "native_admission": decision,
@@ -1014,7 +1042,9 @@ def _run_authorized(
     pre_cleanup_owned_tree_naturally_empty = False
     pre_cleanup_lifetime_accounting = None
     complete_owned_job_lifetime_census_witnessed = False
+    private_job_event_source_receipt = None
     job_close_confirmed = False
+    from chowder_batch import reap_v2_live_job_lineage_guard_20261028 as lineage
     t0 = time.monotonic()
     try:
         if born_stat != (
@@ -1030,14 +1060,38 @@ def _run_authorized(
         # must never be mistaken for an extinct child because birth-time
         # representations differed by milliseconds.
         owner.member_births[owner.pid] = psutil.Process(owner.pid).create_time()
-        from chowder_batch import reap_v2_live_job_lineage_guard_20261028 as lineage
         from chowder_batch import reap_v2_phase49_owned_memory_witness_20261028 as memory_witness
 
         lineage_ledger = lineage.LineageLedger.from_owned_job(owner)
         while True:
+            # Promptly consume exactly captured NEW_PROCESS native PID births
+            # before a helper exits between ordinary 1-30s sample ticks.
+            # Only revalidate full parent/argv/image/Job/birth records from
+            # still-live processes; absent/unsafe event evidence never creates
+            # a self-approved child.
+            if getattr(owner, "event_witness", None) is not None:
+                private_job_event_source_receipt = owner.event_witness.snapshot()
+                journal = lineage.reconcile_event_births(
+                    private_job_event_source_receipt, ledger=lineage_ledger,
+                    study=study, model=model, server=server,
+                    output=output, port=port,
+                )
+                if journal["status"] == "REFUSED":
+                    breached.extend(journal["reasons"])
+                    cancel_owned_job(owner)
+                    break
             code = owner.exit_code()
             if code is not None:
                 if code == 0 and watched_fit and watched_lineage:
+                    if getattr(owner, "event_witness", None) is not None:
+                        private_job_event_source_receipt = owner.event_witness.snapshot()
+                        journal = lineage.reconcile_event_births(
+                            private_job_event_source_receipt, ledger=lineage_ledger,
+                            study=study, model=model, server=server,
+                            output=output, port=port,
+                        )
+                        if journal["status"] == "REFUSED":
+                            breached.extend(journal["reasons"])
                     # Windows can retain its authentic OS-created conhost
                     # AFTER the registered root exits zero. Never kill it
                     # and call the forced cleanup natural. Bound a short
@@ -1048,6 +1102,15 @@ def _run_authorized(
                     post = drain.witness_natural_drain(
                         owner, ledger=lineage_ledger, study=study, model=model,
                         server=server, output=output, port=port,
+                        refresh_births=(
+                            lambda: lineage.reconcile_event_births(
+                                owner.event_witness.snapshot(), ledger=lineage_ledger,
+                                study=study, model=model, server=server,
+                                output=output, port=port,
+                            )
+                            if getattr(owner, "event_witness", None) is not None
+                            else {"status": "NO_COMPLETION_PORT_SYNTHETIC_TEST_ONLY"}
+                        ),
                     )
                     pre_cleanup_lifetime_accounting = post[
                         "pre_cleanup_private_job_lifetime_accounting"
@@ -1202,6 +1265,30 @@ def _run_authorized(
     finally:
         # Never treat KILL_ON_JOB_CLOSE alone as observed descendant
         # extinction; verify only the original PID+create-time identities.
+        if getattr(owner, "event_witness", None) is not None:
+            try:
+                private_job_event_source_receipt = owner.event_witness.stop()
+                if lineage_ledger is None:
+                    breached.append("PRIVATE_JOB_EVENT_SOURCE_WITHOUT_LINEAGE_LEDGER")
+                else:
+                    final_journal = lineage.reconcile_event_births(
+                        private_job_event_source_receipt, ledger=lineage_ledger,
+                        study=study, model=model, server=server,
+                        output=output, port=port,
+                        require_natural_exit_events=(
+                            pre_cleanup_owned_tree_naturally_empty is True
+                        ),
+                    )
+                    if final_journal["status"] == "REFUSED":
+                        breached.extend(final_journal["reasons"])
+                    if (pre_cleanup_lifetime_accounting is not None
+                            and pre_cleanup_lifetime_accounting["total_processes"] !=
+                            len(lineage_ledger.pid_births)):
+                        breached.append("PRIVATE_JOB_COMPLETION_EVENT_LIFETIME_COUNT_DRIFT")
+            except Exception:
+                breached.append("PRIVATE_JOB_EVENT_TERMINAL_VERIFICATION_FAILED")
+        # Include identities discovered during the *final* queue drain in
+        # independent postclose extinction checks, not just polling births.
         owned_births = dict(owner.member_births)
         if lineage_ledger is not None:
             owned_births.update(lineage_ledger.pid_births)
@@ -1255,6 +1342,7 @@ def _run_authorized(
         "pre_cleanup_live_owned_descendant_count": pre_cleanup_live_descendant_count,
         "pre_cleanup_natural_owned_tree_extinction_witnessed": pre_cleanup_owned_tree_naturally_empty,
         "pre_cleanup_private_job_lifetime_accounting": pre_cleanup_lifetime_accounting,
+        "original_private_job_notification_journal": private_job_event_source_receipt,
         "all_private_job_lifetime_processes_source_witnessed": complete_owned_job_lifetime_census_witnessed,
         "post_close_descendant_witnessed_count": extinction.get("checked_child_pid_count"),
         "observations": samples,

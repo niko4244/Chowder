@@ -464,6 +464,36 @@ def assess_bound_receipts(
                 for s in samples
             )):
         issues.append("NATIVE_ACTIVE_FIT_SAMPLE_MISSING")
+    if start.get("native_job_completion_port_required") is True:
+        # Phase51 native Job source is bound BEFORE root ResumeThread. Check
+        # the raw event packet/source identities independently of the main
+        # supervisor. Windows may drop NEW/EXIT packets; we must refuse, not
+        # infer a command from an unauthenticated PID or cumulative count.
+        journal = terminal.get("original_private_job_notification_journal")
+        if not isinstance(journal, dict) or not isinstance(roles.get("root"), dict):
+            issues.append("ORIGINAL_PRIVATE_JOB_EVENT_JOURNAL_ABSENT")
+        else:
+            from chowder_batch import reap_v2_live_job_lineage_guard_20261028 as source
+            birth = roles["root"].get("birth")
+            root_pid = roles["root"].get("pid")
+            if (type(root_pid) is not int or root_pid <= 0
+                    or type(birth) not in (int, float)
+                    or not math.isfinite(birth) or birth <= 0):
+                issues.append("ORIGINAL_EVENT_ROOT_IDENTITY_INVALID")
+            else:
+                ledger = source.LineageLedger(root_pid=root_pid, root_birth=birth)
+                result = source.reconcile_event_births(
+                    journal, ledger=ledger, study=study, model=model, server=server,
+                    output=output, port=port, require_natural_exit_events=True,
+                )
+                if result["status"] != "EVENT_BIRTHS_SOURCE_MATCHED_NOT_EXHAUSTIVE":
+                    issues.append("PRIVATE_JOB_EVENT_SOURCE_REPLAY_REFUSED")
+                elif (not isinstance(accounting, dict)
+                        or len(ledger.pid_births) != accounting.get("total_processes")
+                        or not role_pids.issubset(set(ledger.pid_births))):
+                    issues.append("PRIVATE_JOB_COMPLETION_PORT_LIFETIME_GAP")
+    elif start.get("native_job_completion_port_required") not in (None, False):
+        issues.append("INVALID_JOB_EVENT_SOURCE_REQUIREMENT")
     return _failure("RECEIPTS_CONSISTENT_NOT_SCIENTIFIC_APPROVAL", issues)
 
 

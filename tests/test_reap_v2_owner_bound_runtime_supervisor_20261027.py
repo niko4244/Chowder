@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -285,6 +286,54 @@ def test_full_owned_lifecycle_with_injected_native_job_only(
     server.write_bytes(b"dummy")
     events = []
 
+    class FakeEventWitness:
+        """Synthetic kernel packet fixture; never confused with real IOCP."""
+
+        def __init__(self, command):
+            evaluator = [
+                sys.executable, str(wave.REPO / "chowder_batch" / "reap_eval.py"),
+                *command[command.index("--") + 1:],
+            ]
+            native_server = [
+                str(server), *wave.FLAGS, "--port", "8790", "-m", str(model),
+            ]
+            self.births = {
+                pid: {
+                    "pid": pid, "birth": birth, "parent": parent,
+                    "argv": argv, "image_path": argv[0], "job_member": True,
+                }
+                for pid, birth, parent, argv in (
+                    (1234, 1234567890.5, 0, command),
+                    (9001, 1234567891.5, 1234, native_server),
+                    (9002, 1234567892.5, 1234, evaluator),
+                )
+            }
+
+        def snapshot(self):
+            from chowder_batch import reap_v2_phase51_job_event_witness_20261028 as witness
+            return {
+                "schema": witness.SCHEMA, "status": "OBSERVED_ONLY_NOT_APPROVED",
+                "events": [
+                    {"message": witness.NEW_PROCESS, "pid": pid,
+                     "birth_identity_captured": True}
+                    for pid in self.births
+                ] + [
+                    {"message": witness.EXIT_PROCESS, "pid": pid,
+                     "birth_identity_captured": False}
+                    for pid in self.births
+                ] + [{"message": witness.ACTIVE_PROCESS_ZERO, "pid": 0,
+                      "birth_identity_captured": False}],
+                "births": self.births, "faults": [], "read_only": True,
+                "gen0": {"status": "BLOCKED", "chosen": None,
+                         "release_approved": False},
+            }
+
+        def stop(self):
+            return self.snapshot()
+
+        def close(self):
+            return None
+
     class FakeJob:
         def __init__(self):
             self.pid = None
@@ -292,12 +341,14 @@ def test_full_owned_lifecycle_with_injected_native_job_only(
             self.active = False
             self.count = 0
             self.member_births = {}
+            self.event_witness = None
 
         def start(self, command, cwd):
             assert command[1].endswith("reap_serve.py")
             self.active = True
             self.pid = 1234
             self.birth = 1234567890.5
+            self.event_witness = FakeEventWitness(command)
             events.append("start")
 
         def exit_code(self):

@@ -86,6 +86,53 @@ def test_unseen_short_lived_child_still_blocks_when_job_has_drained():
     assert out["reason"] == "UNSEEN_JOB_HELPER_LIFETIME_PROCESS"
 
 
+def test_source_verified_delayed_kernel_birth_may_close_postroot_count_gap():
+    ledger = _ledger()
+    job = OwnedJob([[], [], [], [], []], total=4)
+    attempts = []
+
+    def refresh():
+        attempts.append(True)
+        if len(attempts) == 2:
+            # Represents a completion-port NEW_PROCESS packet whose real
+            # PID+birth+argv+parent+image and Job membership were all verified
+            # by the separate source-bound frozen helper checker.
+            ledger.pid_births[113] = 1003.0
+        return {"status": "EVENT_BIRTHS_SOURCE_MATCHED_NOT_EXHAUSTIVE"}
+
+    result = drain.witness_natural_drain(
+        job, ledger=ledger, study=object(), model=Path("G:/original.gguf"),
+        server=Path("F:/native.exe"), output=Path("C:/scratch"), port=8790,
+        capture=lambda *args, **kw: pytest.fail("no remaining live child"),
+        refresh_births=refresh, polls=4, sleep=lambda _: None,
+    )
+    assert len(attempts) == 2
+    assert result["status"] == "NATURALLY_DRAINED"
+    assert result["polls"] == 2
+    assert result["gen0"]["status"] == "BLOCKED"
+
+
+def test_fake_delayed_birth_checkpoint_or_timeout_never_grants_completion():
+    ledger = _ledger()
+    job = OwnedJob([[], [], [], [], []], total=4)
+    bad = drain.witness_natural_drain(
+        job, ledger=ledger, study=object(), model=Path("G:/original.gguf"),
+        server=Path("F:/native.exe"), output=Path("C:/scratch"), port=8790,
+        refresh_births=lambda: {"status": "REFUSED", "reasons": ["SPOOFED_IMAGE"]},
+        polls=3, sleep=lambda _: None,
+    )
+    assert bad["reason"] == "PRIVATE_JOB_COMPLETION_BIRTH_SOURCE_REFUSED"
+    job2 = OwnedJob([[], [], [], [], []], total=4)
+    timeout = drain.witness_natural_drain(
+        job2, ledger=_ledger(), study=object(), model=Path("G:/original.gguf"),
+        server=Path("F:/native.exe"), output=Path("C:/scratch"), port=8790,
+        refresh_births=lambda: {"status": "EVENT_BIRTHS_SOURCE_MATCHED_NOT_EXHAUSTIVE"},
+        polls=3, sleep=lambda _: None,
+    )
+    assert timeout["status"] == "REFUSED"
+    assert timeout["reason"] == "UNSEEN_JOB_HELPER_LIFETIME_PROCESS"
+
+
 def test_conhost_never_witnessed_or_foreign_child_fails_closed():
     job = OwnedJob([[110, 113], [], [], []], total=4)
     unknown = _observe(job, _ledger(), lambda *a, **k: {

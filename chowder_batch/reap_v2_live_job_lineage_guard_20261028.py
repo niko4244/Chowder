@@ -209,6 +209,153 @@ def _frozen_helper(record: dict, root_pid: int, port: int) -> str | None:
     return None
 
 
+def reconcile_event_births(
+    journal: dict,
+    *,
+    ledger: LineageLedger,
+    study: wave.Study,
+    model: Path,
+    server: Path,
+    output: Path,
+    port: int,
+    require_natural_exit_events: bool = False,
+) -> dict:
+    """Admit only *actual live witnessed* native Job event process identities.
+
+    Job completion notifications are a lossy diagnostic transport; a NEW
+    packet's opaque PID is NOT a trustworthy process identity. The consumer
+    must have captured immutable source-matching process image, argv, parent,
+    birth and membership while the child still existed. The authoritative
+    Job TotalProcesses must still match every independently validated birth
+    before any native runtime terminal can claim natural completeness.
+    Never infer 'approved' for a missed or uninspectable helper.
+    """
+    from chowder_batch import reap_v2_phase51_job_event_witness_20261028 as events
+
+    reasons: list[str] = []
+    if (not isinstance(ledger, LineageLedger)
+            or not isinstance(journal, dict)
+            or journal.get("schema") != events.SCHEMA
+            or journal.get("status") != "OBSERVED_ONLY_NOT_APPROVED"
+            or not isinstance(journal.get("events"), list)
+            or not isinstance(journal.get("births"), dict)
+            or not isinstance(journal.get("faults"), list)):
+        return _result("REFUSED", ["JOB_EVENT_JOURNAL_UNTRUSTED"])
+    if journal["faults"]:
+        reasons.extend(str(s) for s in journal["faults"])
+    try:
+        study = integration.rebind_wave_study(study)
+        cmd = wave.command(study, model=model, server=server, output=output, port=port)
+        expected_commands = {
+            "root": cmd,
+            "server": [str(server), *wave.FLAGS, "--port", str(port), "-m", str(model)],
+            "evaluator": [sys.executable, str(wave.REPO / "chowder_batch" / "reap_eval.py"),
+                          *cmd[cmd.index("--") + 1:]],
+        }
+    except (ValueError, TypeError, AttributeError):
+        return _result("REFUSED", ["REGISTERED_FROZEN_COMMAND_UNAVAILABLE"])
+    from_events = set()
+    departures = set()
+    active_zero_count = 0
+    for event in journal["events"]:
+        if not isinstance(event, dict) or type(event.get("message")) is not int:
+            reasons.append("MALFORMED_OWNED_JOB_EVENT")
+            continue
+        kind = event["message"]
+        pid = event.get("pid")
+        if kind == events.NEW_PROCESS:
+            if not _pid(pid) or pid in from_events:
+                reasons.append("REPEATED_OR_INVALID_JOB_BIRTH")
+            else:
+                from_events.add(pid)
+            if event.get("birth_identity_captured") is not True:
+                reasons.append("UNWITNESSED_JOB_EVENT_PROCESS_IMAGE_OR_ARGV")
+        elif kind in (events.EXIT_PROCESS, events.ABNORMAL_EXIT_PROCESS):
+            if not _pid(pid) or pid in departures or pid not in from_events:
+                reasons.append("UNMATCHED_OR_DUPLICATE_JOB_EXIT_PACKET")
+            else:
+                departures.add(pid)
+            if kind == events.ABNORMAL_EXIT_PROCESS:
+                reasons.append("ABNORMAL_PRIVATE_JOB_PROCESS_EXIT")
+        elif kind == events.ACTIVE_PROCESS_ZERO:
+            active_zero_count += 1
+            if pid != 0 or active_zero_count > 1:
+                reasons.append("INVALID_OR_DUPLICATE_JOB_ZERO_PACKET")
+        else:
+            reasons.append("UNREGISTERED_JOB_EVENT_KIND")
+    if require_natural_exit_events and (
+        departures != from_events or active_zero_count != 1 or not from_events
+    ):
+        reasons.append("INCOMPLETE_PRIVATE_JOB_NATURAL_EXIT_EVENTS")
+    births = {}
+    for key, record in journal["births"].items():
+        # JSON object keys are strings after independent receipt reload.
+        # Accept only canonical decimal PIDs; prevent ambiguous "01401" and
+        # mixed int/string duplicates from bypassing a per-PID source join.
+        if type(key) is int and key > 0:
+            pid_key = key
+        elif isinstance(key, str) and key.isascii() and key.isdecimal():
+            try:
+                pid_key = int(key)
+            except ValueError:
+                reasons.append("EVENT_PID_NOT_CANONICAL")
+                continue
+            if str(pid_key) != key:
+                reasons.append("EVENT_PID_NOT_CANONICAL")
+                continue
+        else:
+            reasons.append("EVENT_PID_NOT_CANONICAL")
+            continue
+        if pid_key in births:
+            reasons.append("DUPLICATE_EVENT_PID_BIRTH_KEY")
+        else:
+            births[pid_key] = record
+    if set(births) != from_events:
+        reasons.append("EVENT_PID_TO_SOURCE_IDENTITY_JOIN_MISMATCH")
+    verified: dict[int, float] = {}
+    for pid, record in births.items():
+        if (not _pid(pid) or not isinstance(record, dict)
+                or record.get("pid") != pid or not _birth(record.get("birth"))
+                or not isinstance(record.get("argv"), list)
+                or not isinstance(record.get("image_path"), str)
+                or record.get("job_member") is not True):
+            reasons.append("EVENT_CHILD_IDENTITY_MALFORMED")
+            continue
+        role = _role(record, ledger.root_pid)
+        if role in expected_commands:
+            wanted = expected_commands[role]
+            if (record["argv"] != wanted
+                    or Path(record["image_path"]).resolve(strict=False)
+                    != Path(wanted[0]).resolve(strict=False)
+                    or (role == "root" and (
+                        pid != ledger.root_pid or
+                        abs(record["birth"] - ledger.root_birth) > 0.002))
+                    or (role != "root" and record.get("parent") != ledger.root_pid)):
+                reasons.append("OWNED_EVENT_FROZEN_ROLE_COMMAND_OR_BIRTH_CHANGED")
+                continue
+        else:
+            if (_frozen_helper(record, ledger.root_pid, port) is None
+                    or record["birth"] < ledger.root_birth):
+                reasons.append("UNKNOWN_JOB_EVENT_HELPER_COMMAND_OR_IMAGE")
+                continue
+        previous = ledger.pid_births.get(pid)
+        if previous is not None and abs(previous - record["birth"]) > 0.002:
+            reasons.append("JOB_EVENT_PID_BIRTH_REUSED")
+        else:
+            verified[pid] = record["birth"]
+    if reasons:
+        return _result("REFUSED", reasons)
+    ledger.pid_births.update(verified)
+    return {
+        "schema": SCHEMA,
+        "status": "EVENT_BIRTHS_SOURCE_MATCHED_NOT_EXHAUSTIVE",
+        "source_bound_birth_count": len(verified),
+        "job_total_processes_compared": False,
+        "scientific_gate": "UNKNOWN",
+        "gen0": dict(GEN0),
+    }
+
+
 def assess_lineage_snapshot(
     snapshot: dict,
     *,
