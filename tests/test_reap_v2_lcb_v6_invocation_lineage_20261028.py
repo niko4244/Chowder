@@ -69,3 +69,23 @@ def test_truncated_log_invalid_utf8_and_wrong_population_refused():
             lineage.audit_invocation_log(raw, _rows(), expected_population=4)
     with pytest.raises(ValueError, match="canonical population"):
         lineage.audit_invocation_log(_log(), _rows(), expected_population=1055)
+
+
+@pytest.mark.parametrize("bad", [
+    lambda raw: raw.replace(b"\n", b"\r"),
+    lambda raw: raw.replace(b"\n", b"\x0b"),
+    lambda raw: raw.replace(b"\n", b"\xe2\x80\xa8"),
+    lambda raw: raw.replace(b"\n", b"\r\n", 1),
+    lambda raw: raw.replace(b"\n", b"\r\n")[:-2],
+    lambda raw: b"\xef\xbb\xbf" + raw,
+    lambda raw: raw.replace(b"\n", b"\r\r\n"),
+])
+def test_nonoriginal_log_framing_must_not_establish_invocation_lineage(bad):
+    with pytest.raises(ValueError, match="framing|UTF-8|newline"):
+        lineage.audit_invocation_log(bad(_log()), _rows(), expected_population=4)
+
+
+def test_original_windows_crlf_log_framing_is_accepted():
+    log = _log().replace(b"\n", b"\r\n")
+    result = lineage.audit_invocation_log(log, _rows(), expected_population=4)
+    assert result["observed_invocation_appended_rows"] == 3

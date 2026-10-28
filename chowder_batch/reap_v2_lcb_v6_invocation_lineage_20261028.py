@@ -29,16 +29,43 @@ PROGRESS = re.compile(
 )
 
 
+def _original_framed_log_lines(log_bytes: bytes) -> list[str]:
+    """Accept only consistently LF/CRLF-framed original UTF-8 log records.
+
+    ``str.splitlines`` silently accepts bare CR, VT, FF and Unicode line
+    separators. Those are not original generator log record boundaries and
+    must not manufacture an apparently complete invocation lineage.
+    """
+    if (not log_bytes.endswith(b"\n") or log_bytes.startswith(b"\xef\xbb\xbf")):
+        raise ValueError("original invocation log newline/UTF-8 framing invalid")
+    style = None
+    lines = []
+    for framed in log_bytes.split(b"\n")[:-1]:
+        current = "CRLF" if framed.endswith(b"\r") else "LF"
+        if style is not None and current != style:
+            raise ValueError("mixed original invocation log newline framing")
+        style = current
+        raw_line = framed[:-1] if current == "CRLF" else framed
+        if (not raw_line or b"\r" in raw_line or b"\x0b" in raw_line
+                or b"\x0c" in raw_line or b"\x00" in raw_line):
+            raise ValueError("nonoriginal invocation log record framing")
+        try:
+            line = raw_line.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("generation log is not valid UTF-8") from exc
+        if any(char in line for char in ("\x85", "\u2028", "\u2029")):
+            raise ValueError("nonoriginal Unicode invocation log newline")
+        lines.append(line)
+    return lines
+
+
 def audit_invocation_log(
     log_bytes: bytes, rows: list[dict], *, expected_population: int = 1055,
 ) -> dict:
     """Prove log-to-row agreement without treating preexisting rows as this run."""
     if not log_bytes or not rows:
         raise ValueError("complete log and original journal rows required")
-    try:
-        lines = log_bytes.decode("utf-8").splitlines()
-    except UnicodeDecodeError as exc:
-        raise ValueError("generation log is not valid UTF-8") from exc
+    lines = _original_framed_log_lines(log_bytes)
     if len(lines) < 2 or lines[-1] != "GEN_DONE":
         raise ValueError("generation log lacks complete termination")
     header = HEADER.fullmatch(lines[0])
