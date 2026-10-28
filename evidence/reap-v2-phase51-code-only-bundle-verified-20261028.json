@@ -1,0 +1,19 @@
+{
+  "schema": "chowder.reap-v2-phase51-code-only-bundle-verified.v1",
+  "status": "SOURCE_AND_ABI_VERIFIED_NO_MODEL_EXECUTION",
+  "source_git_head": "778fd5d83021b4a6c405527d3c47931cdd6a314e",
+  "archive": "evidence/reap-v2-dedicated-original-code-only-runner-phase51-20261028.zip",
+  "archive_sha256": "1e96bab488217f0159479d8b328f9c5f77dbc54c5e8c92894cb4efc77ab03141",
+  "archive_bytes": 320499,
+  "source_file_count": 43,
+  "source_and_abi_verified": true,
+  "model_gguf_bytes_embedded": 0,
+  "model_executed": false,
+  "scientific_qualification_complete": false,
+  "gen0": {
+    "status": "BLOCKED",
+    "chosen": null,
+    "release_approved": false
+  },
+  "evidence_class": "SOURCE_ONLY_NO_MODEL_EXECUTION"
+}
