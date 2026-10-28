@@ -458,13 +458,16 @@ def bridge_frozen_evidence(
         # admission certificate: refuse rather than return an unreviewed arm.
         _require(report["decision"].get("chosen") in (None, "reap128_v2"),
                  "frozen selector chose fallback without independent original admission")
-        # The unresolved preregistered paired-method ambiguity cannot be
-        # silently promoted into a Gen-0 choice even if the unchanged frozen
-        # selector reports a nominally passing candidate. Preserve the frozen
-        # selector untouched; this independent admission boundary fails closed.
-        _require(report["decision"].get("status") == "BLOCKED"
-                 and report["decision"].get("chosen") is None,
-                 "Amendment4 unresolved: frozen selection cannot be promoted")
+        # A selected v2 must have every mandatory frozen gate genuinely PASS.
+        # Do NOT impose the unresolved optional paired-McNemar replacement
+        # criterion on Amendment4's distinct ordered fallback after v1 failure.
+        # The unchanged frozen selector owns that scientific precedence.
+        if report["decision"].get("chosen") == "reap128_v2":
+            _require(report["decision"].get("status") == "SELECTED"
+                     and all(isinstance(gates[name], dict)
+                             and gates[name].get("status") == "PASS"
+                             for name in reap_select.REQUIRED),
+                     "frozen v2 selected without all mandatory original gates PASS")
         return {
             "schema": SCHEMA, "status": "SOURCE_APPROVED_ORIGINAL_EVIDENCE_EVALUATED",
             "gate0": gates["gate0"]["status"],

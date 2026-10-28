@@ -270,10 +270,10 @@ def test_unreviewed_frozen_fallback_cannot_be_promoted_by_independent_bridge(
     assert result["chosen"] is None and result["release_approved"] is False
 
 
-def test_unresolved_amendment_cannot_expose_selected_v2_as_gen0_choice(
+def test_incomplete_mandatory_gate_cannot_expose_selected_v2_as_gen0_choice(
     synthetic, monkeypatch,
 ):
-    """Synthetic selector output cannot override the unresolved prereg method."""
+    """Synthetic SELECTED cannot override missing original speed admission."""
     root, obs = synthetic
     original_evaluate = reap_select.evaluate
 
@@ -289,8 +289,34 @@ def test_unresolved_amendment_cannot_expose_selected_v2_as_gen0_choice(
     monkeypatch.setattr(bridge.reap_select, "evaluate", select_while_unresolved)
     result = bridge.bridge_frozen_evidence(root, obs)
     assert result["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
-    assert "Amendment4" in result["reason"]
+    assert "mandatory original gates PASS" in result["reason"]
     assert result["chosen"] is None and result["release_approved"] is False
+
+
+def test_optional_mcnemar_ambiguity_does_not_veto_mandatory_v1_fail_fallback(
+    synthetic, monkeypatch,
+):
+    """Test-only: mandatory ordered fallback is distinct from optional replacement."""
+    root, obs = synthetic
+    original_evaluate = reap_select.evaluate
+
+    def simulate_complete_frozen_fallback(*args, **kwargs):
+        report = original_evaluate(*args, **kwargs)
+        gates = report["gates"]["reap128_v2"]["gates"]
+        for name in reap_select.REQUIRED:
+            gates[name]["status"] = "PASS"
+        report["decision"] = {
+            "status": "SELECTED", "chosen": "reap128_v2",
+            "reason": "synthetic mandatory fallback after historical v1 failure",
+        }
+        return report
+
+    monkeypatch.setattr(bridge.reap_select, "evaluate", simulate_complete_frozen_fallback)
+    result = bridge.bridge_frozen_evidence(root, obs)
+    assert result["status"] == "SOURCE_APPROVED_ORIGINAL_EVIDENCE_EVALUATED"
+    assert result["chosen"] == "reap128_v2"
+    assert result["amendment4"].startswith("BLOCKED_PENDING")
+    assert result["release_approved"] is False
 
 
 def test_malformed_independent_rows_digest_map_fails_closed(synthetic, monkeypatch):
