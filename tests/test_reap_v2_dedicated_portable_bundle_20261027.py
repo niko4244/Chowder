@@ -110,3 +110,14 @@ def test_no_uncommitted_or_untracked_file_can_enter_portable_bundle(monkeypatch)
     monkeypatch.setattr(bundle, "_git_blob", lambda *_a, **_k: b"mismatched git content")
     with pytest.raises(bundle.BundleRefused, match="uncommitted original source"):
         bundle.committed_payloads()
+
+
+def test_actual_git_windows_crlf_normalization_preserves_original_frozen_sha():
+    payload, head = bundle.committed_payloads()
+    assert len(head) == 40
+    assert len(payload) == len(bundle.SOURCES)
+    assert payload["chowder_batch/reap_eval.py"].count(b"\r\n") > 500
+    for name, digest in bundle.PINNED_ORIGINAL_CODE.items():
+        assert bundle.sha(payload[name]) == digest
+    assert bundle.verify_bytes(bundle.deterministic_bytes(
+        payload, bundle.manifest(payload, head))) ["gen0"]["status"] == "BLOCKED"

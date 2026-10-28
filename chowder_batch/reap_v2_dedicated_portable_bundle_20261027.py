@@ -98,13 +98,26 @@ def committed_payloads(*, root: Path = REPO) -> tuple[dict[str, bytes], str]:
             raise BundleRefused("original source missing or symlink: " + name)
         expected = _git_blob(name, root=root)
         current = file.read_bytes()
-        if current != expected:
+        # This checkout uses Windows Git autocrlf: Git's immutable index blob
+        # is LF but the original production evaluator/scorer byte SHA pins
+        # refer to CRLF Windows files. Byte-equality against `git show` would
+        # incorrectly refuse every valid historical source. Admit ONLY the
+        # safe and deterministic LF<->CRLF checkout transformation; a single
+        # other changed byte, embedded bare CR, or binary payload refuses.
+        if b"\r" in expected or b"\r" in current.replace(b"\r\n", b""):
+            raise BundleRefused("mixed or unexpected original source line endings: " + name)
+        if current.replace(b"\r\n", b"\n") != expected:
             raise BundleRefused("uncommitted original source change: " + name)
-        if name in PINNED_ORIGINAL_CODE and sha(current) != PINNED_ORIGINAL_CODE[name]:
+        # Always pack the EXACT frozen original Windows CRLF bytes. This is
+        # reproducible on any checkout and preserves original evaluator SHA
+        # 9736714..., scorer SHA d2e59..., serve SHA f62a0..., even when the
+        # Git transport stored their canonical text as LF.
+        win_bytes = expected.replace(b"\n", b"\r\n")
+        if name in PINNED_ORIGINAL_CODE and sha(win_bytes) != PINNED_ORIGINAL_CODE[name]:
             raise BundleRefused("historical frozen evaluator/scorer SHA drift: " + name)
-        if len(current) > 4 * 1024 * 1024:
+        if len(win_bytes) > 4 * 1024 * 1024:
             raise BundleRefused("unbounded non-source file in portable bundle")
-        payload[name] = current
+        payload[name] = win_bytes
     if len(payload) != len(SOURCES) or len(set(payload)) != len(SOURCES):
         raise BundleRefused("missing or duplicated original source")
     return payload, head
