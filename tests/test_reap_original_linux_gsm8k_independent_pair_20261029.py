@@ -96,6 +96,19 @@ def test_rejects_forged_repetition_metric(canonical, synthetic_rows):
         pair.regrade_rows(_raw(rows), canonical, "source-bound-session")
 
 
+def test_mutable_production_scorer_cannot_approve_forged_answer(
+        canonical, synthetic_rows, monkeypatch):
+    """The new archived regrader must not inherit the dirty bridge's scorer risk."""
+    from chowder.evaluators import scoring
+
+    monkeypatch.setattr(scoring, "score", lambda *_args, **_kwargs: 1.0)
+    rows = [row.copy() for row in synthetic_rows]
+    rows[0]["text"] = "No numeric answer"
+    rows[0]["correct"] = True
+    with pytest.raises(pair.IndependentPairError, match="canonical answer"):
+        pair.regrade_rows(_raw(rows), canonical, "source-bound-session")
+
+
 def test_pinned_reader_rejects_changed_bytes(tmp_path):
     path = tmp_path / "source.jsonl"
     path.write_bytes(b"source\n")
