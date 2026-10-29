@@ -23,6 +23,40 @@ def test_historical_git_source_survives_later_runner_commit() -> None:
     ]
 
 
+@pytest.mark.parametrize("optimization_flag", ["-O", "-OO"])
+def test_optimized_python_refuses_historical_scoring_before_evidence(
+    optimization_flag: str,
+) -> None:
+    """Pinned source uses assertions: optimized bytecode is not the same grader."""
+    result = subprocess.run(
+        [sys.executable, optimization_flag, "-m",
+         "chowder_batch.reap_original600_guardv3_git_pinned_reader_20261027"],
+        cwd=reader.REPO, capture_output=True, text=True, timeout=25,
+    )
+    assert result.returncode == 2
+    refusal = json.loads(result.stdout)
+    assert refusal["status"] == "REFUSED_HISTORICAL_SOURCE_OR_EVIDENCE"
+    assert "requires Python assertions enabled" in refusal["reason"]
+    assert refusal["gen0_status"] == "BLOCKED"
+
+
+def test_optimized_direct_historical_loader_refused() -> None:
+    code = (
+        "from chowder_batch import reap_original600_guardv3_git_pinned_reader_20261027 as r\n"
+        "try:\n"
+        "    r.historical_modules()\n"
+        "except ValueError as exc:\n"
+        "    if 'requires Python assertions enabled' in str(exc):\n"
+        "        raise SystemExit(0)\n"
+        "raise SystemExit(3)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", code], cwd=reader.REPO,
+        capture_output=True, text=True, timeout=25,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
 def test_git_source_tamper_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     actual = reader.git_bytes
 

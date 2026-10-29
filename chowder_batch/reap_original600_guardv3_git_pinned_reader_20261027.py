@@ -56,6 +56,17 @@ def sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _require_assertions_enabled() -> None:
+    """Original pinned scorer uses assert for evidence-type/timing validation.
+
+    Python -O/-OO and PYTHONOPTIMIZE remove those original checks at compile
+    time. Immutable source hashes do not make optimized bytecode equivalent.
+    Refuse before loading the original scorer or inspecting evidence.
+    """
+    if sys.flags.optimize != 0 or not __debug__:
+        raise ValueError("historical guard.v3 scorer requires Python assertions enabled")
+
+
 def git_bytes(path: str) -> bytes:
     return subprocess.check_output(
         ["git", "show", f"{COMMIT}:{path}"], cwd=REPO, timeout=20,
@@ -103,6 +114,7 @@ def _load(name: str, raw: bytes) -> types.ModuleType:
 
 
 def historical_modules():
+    _require_assertions_enabled()
     import chowder_batch  # noqa: F401 - initializes only the namespace package
 
     package_paths = list(chowder_batch.__path__)
@@ -166,6 +178,7 @@ def _assert_ordinary_tree(root: Path) -> None:
 
 
 def inspect(root: Path = ROOT) -> dict:
+    _require_assertions_enabled()
     if root != ROOT or not root.is_dir() or root.is_symlink():
         raise ValueError("only the original ordinary guard.v3 evidence root is allowed")
     _assert_ordinary_tree(root)
