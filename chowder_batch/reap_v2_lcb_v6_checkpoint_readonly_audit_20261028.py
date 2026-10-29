@@ -59,13 +59,23 @@ def _reject_linked_or_reparse(path: Path) -> None:
         raise ValueError("official evaluator source/runtime contains reparse path")
 
 
-def verify_source_python_git_inventory(source: Path) -> int:
-    """Require every evaluator Python module to belong to the pinned Git tree.
+def _pinned_git(source: Path, *args: str) -> bytes:
+    """Read the specified Git object without ambient Git overrides/replacements."""
+    environment = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return subprocess.check_output(
+        ["git", "-C", str(source), *args], timeout=20, env=environment,
+    )
 
-    A clean ``git status --porcelain`` does not report ignored files. An
-    ignored, executable ``lcb_runner/*.py`` copied into the runtime could
-    otherwise pass source/runtime byte parity without belonging to the
-    independently authenticated source commit.
+
+def verify_source_python_git_inventory(source: Path) -> int:
+    """Require exact pinned Git blobs, not only tracked names or clean status.
+
+    Git's assume-unchanged/skip-worktree index flags can hide modified tracked
+    Python from ``git status``. Use the immutable commit tree, bypassing index
+    flags and replacement refs. The original Windows checkout has CRLF files
+    while Git stores LF; permit *only* that byte-exact newline conversion,
+    never arbitrary Git clean filters or modified executable Python.
     """
     original = source / "lcb_runner"
     if not original.is_dir() or original.is_symlink():
@@ -74,9 +84,9 @@ def verify_source_python_git_inventory(source: Path) -> int:
         _reject_linked_or_reparse(path)
     for path in original.rglob("*"):
         _reject_linked_or_reparse(path)
-    tracked_raw = subprocess.check_output(
-        ["git", "-C", str(source), "ls-files", "-z", "--", "lcb_runner"],
-        timeout=15,
+    tracked_raw = _pinned_git(
+        source, "ls-tree", "-r", "-z", "--name-only", SOURCE_COMMIT,
+        "--", "lcb_runner",
     )
     tracked = {
         Path(os.fsdecode(item)).relative_to("lcb_runner")
@@ -86,6 +96,13 @@ def verify_source_python_git_inventory(source: Path) -> int:
     actual = {path.relative_to(original) for path in original.rglob("*.py")}
     if not tracked or tracked != actual:
         raise ValueError("original evaluator Python files differ from pinned Git inventory")
+    for relative in sorted(tracked):
+        git_path = "lcb_runner/" + relative.as_posix()
+        pinned_bytes = _pinned_git(source, "show", f"{SOURCE_COMMIT}:{git_path}")
+        live_bytes = (original / relative).read_bytes()
+        if (live_bytes != pinned_bytes
+                and live_bytes.replace(b"\r\n", b"\n") != pinned_bytes):
+            raise ValueError(f"original evaluator pinned Git blob drift: {git_path}")
     return len(tracked)
 
 
@@ -309,17 +326,14 @@ def checkpoint_consistency(data: Path, generations: Path, metrics: Path, *,
 
 
 def inspect(*, include_canonical: bool = False) -> dict:
-    repo_head = subprocess.check_output(
-        ["git", "-C", str(SOURCE), "rev-parse", "HEAD"], timeout=15,
-    ).decode().strip()
-    if repo_head != SOURCE_COMMIT or subprocess.check_output(
-        ["git", "-C", str(SOURCE), "status", "--porcelain"], timeout=15,
-    ).strip():
+    repo_head = _pinned_git(SOURCE, "rev-parse", "HEAD").decode().strip()
+    if repo_head != SOURCE_COMMIT or _pinned_git(SOURCE, "status", "--porcelain").strip():
         raise ValueError("original LiveCodeBench repository source drift")
     if sha(GENERATOR) != GENERATOR_SHA or sha(EVALUATOR) != EVALUATOR_SHA:
         raise ValueError("generation or evaluation driver source drift")
     verify_source_python_git_inventory(SOURCE)
     verify_runtime_python_sources(SOURCE, RUNTIME)
+    verify_source_python_git_inventory(SOURCE)
     result = checkpoint_consistency(
         DATA, OUT / "gen_q4.jsonl", OUT / "metrics_q4_checkpoint.json",
         include_canonical=include_canonical,

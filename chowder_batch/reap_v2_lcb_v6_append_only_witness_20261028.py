@@ -77,6 +77,11 @@ def verify_append_only(prefix: bytes, subsequent: bytes) -> int:
 
 def verify_runtime_copy(source: Path, runtime: Path) -> int:
     """Match all .py source files; this does NOT attest executable bytecode."""
+    for tree in (source, source / "lcb_runner", runtime):
+        lcb._reject_linked_or_reparse(tree)
+    for tree in (source / "lcb_runner", runtime):
+        for path in tree.rglob("*"):
+            lcb._reject_linked_or_reparse(path)
     source_files = {
         path.relative_to(source) for path in (source / "lcb_runner").rglob("*.py")
     }
@@ -148,19 +153,17 @@ def read_source_bound_canonical(
 
 def source_provenance() -> tuple[list[tuple[str, str]], dict]:
     """Independently validate frozen Git, all six datasets and both drivers."""
-    head = subprocess.check_output(
-        ["git", "-C", str(lcb.SOURCE), "rev-parse", "HEAD"], timeout=15,
-    ).decode("utf-8").strip()
-    dirty = subprocess.check_output(
-        ["git", "-C", str(lcb.SOURCE), "status", "--porcelain"], timeout=15,
-    )
+    head = lcb._pinned_git(lcb.SOURCE, "rev-parse", "HEAD").decode("utf-8").strip()
+    dirty = lcb._pinned_git(lcb.SOURCE, "status", "--porcelain")
     if head != lcb.SOURCE_COMMIT or dirty.strip():
         raise ValueError("original LiveCodeBench Git source identity drift")
     if lcb.sha(lcb.GENERATOR) != lcb.GENERATOR_SHA:
         raise ValueError("original generation driver SHA drift")
     if lcb.sha(lcb.EVALUATOR) != lcb.EVALUATOR_SHA:
         raise ValueError("original evaluator SHA drift")
+    lcb.verify_source_python_git_inventory(lcb.SOURCE)
     runtime_count = verify_runtime_copy(lcb.SOURCE, lcb.RUNTIME)
+    lcb.verify_source_python_git_inventory(lcb.SOURCE)
     canonical = []
     hashes = {}
     for filename, expected in zip(lcb.FILES, lcb.DATA_SHAS, strict=True):

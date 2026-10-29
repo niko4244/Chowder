@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import hashlib
 from pathlib import Path
+import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -188,6 +190,78 @@ def test_exact_official_python_runtime_copy(tmp_path: Path) -> None:
     (runtime / "lcb_runner" / "eval.py").unlink()
     with pytest.raises(ValueError, match="file set drift"):
         witness.verify_runtime_copy(source, runtime)
+
+
+@pytest.mark.parametrize("marked", ["runtime", "runtime/lcb_runner", "runtime/lcb_runner/nested"])
+def test_live_witness_runtime_copy_refuses_ntfs_junction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, marked: str,
+) -> None:
+    source = tmp_path / "source"
+    runtime = tmp_path / "runtime"
+    for tree in (source, runtime):
+        package = tree / "lcb_runner"
+        (package / "nested").mkdir(parents=True)
+        (package / "nested" / "__init__.py").write_text("# original\n", encoding="utf-8")
+    original_lstat = witness.lcb.os.lstat
+
+    def reparse_lstat(path, *args, **kwargs):
+        if str(path) == str(tmp_path / marked):
+            return SimpleNamespace(st_file_attributes=0x400)
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(witness.lcb.os, "lstat", reparse_lstat)
+    with pytest.raises(ValueError, match="reparse"):
+        witness.verify_runtime_copy(source, runtime)
+
+
+@pytest.mark.parametrize("source_attack", ["ignored", "assume-unchanged", "skip-worktree"])
+def test_live_source_witness_refuses_unpinned_python_even_with_clean_git_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_attack: str,
+) -> None:
+    """A research witness must not call source/runtime parity Git authentication."""
+    source = tmp_path / "source"
+    runtime = tmp_path / "runtime"
+    for tree in (source, runtime):
+        package = tree / "lcb_runner"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("# pinned source\n", encoding="utf-8")
+    (source / ".gitignore").write_text("/lcb_runner/ignored.py\n", encoding="utf-8")
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(source), *args], stderr=subprocess.PIPE, timeout=15,
+        )
+
+    git("init", "-q")
+    git("add", ".gitignore", "lcb_runner/__init__.py")
+    git("-c", "user.name=Qualification Test", "-c", "user.email=test@example.invalid",
+        "commit", "-qm", "Pinned original")
+    if source_attack == "ignored":
+        for tree in (source, runtime):
+            (tree / "lcb_runner" / "ignored.py").write_text(
+                "# unreviewed executable module\n", encoding="utf-8",
+            )
+    else:
+        git("update-index", "--" + source_attack, "--", "lcb_runner/__init__.py")
+        for tree in (source, runtime):
+            (tree / "lcb_runner" / "__init__.py").write_text(
+                "# hidden tracked source modification\n", encoding="utf-8",
+            )
+    assert not git("status", "--porcelain").strip()
+    generator = tmp_path / "generator.py"
+    evaluator = tmp_path / "evaluator.py"
+    generator.write_text("# generator\n", encoding="utf-8")
+    evaluator.write_text("# evaluator\n", encoding="utf-8")
+    monkeypatch.setattr(witness.lcb, "SOURCE", source)
+    monkeypatch.setattr(witness.lcb, "RUNTIME", runtime)
+    monkeypatch.setattr(witness.lcb, "SOURCE_COMMIT", git("rev-parse", "HEAD").decode().strip())
+    monkeypatch.setattr(witness.lcb, "GENERATOR", generator)
+    monkeypatch.setattr(witness.lcb, "GENERATOR_SHA", witness.lcb.sha(generator))
+    monkeypatch.setattr(witness.lcb, "EVALUATOR", evaluator)
+    monkeypatch.setattr(witness.lcb, "EVALUATOR_SHA", witness.lcb.sha(evaluator))
+    monkeypatch.setattr(witness.lcb, "DATA", tmp_path / "missing-dataset")
+    with pytest.raises(ValueError, match="(pinned Git|Git blob)"):
+        witness.source_provenance()
 
 
 def test_source_bound_canonical_single_pass_matches_exact_bytes(

@@ -274,7 +274,7 @@ def test_runtime_refuses_unreviewed_executable_import_paths(tmp_path, relative):
     "lcb_runner/nested/ignored.py",
 ])
 def test_git_pinned_runtime_refuses_ignored_source_python_even_if_copied(
-    tmp_path, relative,
+    tmp_path, relative, monkeypatch,
 ):
     """A clean Git status and matching runtime bytes cannot authorize ignored code."""
     source = tmp_path / "source"
@@ -295,6 +295,7 @@ def test_git_pinned_runtime_refuses_ignored_source_python_even_if_copied(
     git("add", ".gitignore", "lcb_runner/__init__.py")
     git("-c", "user.name=Qualification Test", "-c", "user.email=test@example.invalid",
         "commit", "-qm", "Pinned original")
+    monkeypatch.setattr(audit, "SOURCE_COMMIT", git("rev-parse", "HEAD").decode().strip())
     assert audit.verify_source_python_git_inventory(source) == 1
 
     for tree in (source, runtime):
@@ -304,4 +305,67 @@ def test_git_pinned_runtime_refuses_ignored_source_python_even_if_copied(
     assert not git("status", "--porcelain").strip()
     audit.verify_runtime_python_sources(source, runtime)
     with pytest.raises(ValueError, match="pinned Git inventory"):
+        audit.verify_source_python_git_inventory(source)
+
+
+@pytest.mark.parametrize("index_flag", ["--assume-unchanged", "--skip-worktree"])
+def test_git_pinned_source_refuses_index_hidden_tracked_byte_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, index_flag: str,
+) -> None:
+    """Clean status and source/runtime parity cannot replace a pinned Git blob."""
+    source = tmp_path / "source"
+    runtime = tmp_path / "runtime"
+    for tree in (source, runtime):
+        package = tree / "lcb_runner"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("# original\n", encoding="utf-8")
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(source), *args], stderr=subprocess.PIPE, timeout=15,
+        )
+
+    git("init", "-q")
+    git("add", "lcb_runner/__init__.py")
+    git("-c", "user.name=Qualification Test", "-c", "user.email=test@example.invalid",
+        "commit", "-qm", "Pinned original")
+    monkeypatch.setattr(audit, "SOURCE_COMMIT", git("rev-parse", "HEAD").decode().strip())
+    assert audit.verify_source_python_git_inventory(source) == 1
+    git("update-index", index_flag, "--", "lcb_runner/__init__.py")
+    for tree in (source, runtime):
+        (tree / "lcb_runner" / "__init__.py").write_text(
+            "# modified executable source\n", encoding="utf-8",
+        )
+    assert not git("status", "--porcelain").strip()
+    audit.verify_runtime_python_sources(source, runtime)
+    with pytest.raises(ValueError, match="pinned Git blob drift"):
+        audit.verify_source_python_git_inventory(source)
+
+
+def test_pinned_git_accepts_only_exact_checkout_newline_conversion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    module = source / "lcb_runner" / "__init__.py"
+    module.parent.mkdir(parents=True)
+    module.write_bytes(b"def score():\n    return 1\n")
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(source), *args], stderr=subprocess.PIPE, timeout=15,
+        )
+
+    git("init", "-q")
+    git("add", "lcb_runner/__init__.py")
+    git("-c", "user.name=Qualification Test", "-c", "user.email=test@example.invalid",
+        "commit", "-qm", "Pinned LF source")
+    original_head = git("rev-parse", "HEAD").decode().strip()
+    monkeypatch.setattr(audit, "SOURCE_COMMIT", original_head)
+    module.write_bytes(b"def score():\r\n    return 1\r\n")
+    assert audit.verify_source_python_git_inventory(source) == 1
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "untrusted-git-dir"))
+    monkeypatch.setenv("GIT_NO_REPLACE_OBJECTS", "0")
+    assert audit._pinned_git(source, "rev-parse", "HEAD").decode().strip() == original_head
+    module.write_bytes(b"def score():\r\n    return 0\r\n")
+    with pytest.raises(ValueError, match="pinned Git blob drift"):
         audit.verify_source_python_git_inventory(source)
