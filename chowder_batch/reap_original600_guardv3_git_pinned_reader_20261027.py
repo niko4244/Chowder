@@ -172,22 +172,30 @@ def inspect(root: Path = ROOT) -> dict:
     owner = root / "owner.json"
     if owner.is_symlink() or not owner.is_file() or sha(owner.read_bytes()) != OWNER_SHA:
         raise ValueError("original guard.v3 owner SHA drift")
-    runner, audit = historical_modules()
-    result = audit.inspect(root)
-    if (result["owner_sha256"] != OWNER_SHA
-            or result["official_complete_600_claim_allowed"] !=
-               (result["completed_scored_tasks"] == 600)
-            or result["noncomparable_to_frozen_four_slot"] is not True
-            or result["frozen_gen0_status"] != "BLOCKED"
-            or result["chosen"] is not None
-            or result["release_approved"] is not False):
-        raise ValueError("historical result has invalid provenance or release state")
-    sessions = []
-    for path in sorted(root.iterdir()):
-        if re.fullmatch(r"(native-session-\d+\.private\.log|guard-session-\d+\.private\.jsonl)", path.name):
-            if path.is_symlink() or not path.is_file():
-                raise ValueError("linked/nonfile original native session")
-            sessions.append({"name": path.name, "sha256": runner._digest(path)})
+    from chowder_batch.reap_original600_guardv3_stable_snapshot_20261029 import stable_snapshot
+
+    # The historical scorer opens the same files repeatedly for hashing,
+    # JSON parsing and WorldState reconstruction. Never let those reads race
+    # with changes to F:; run them against a handle-locked, byte-identical
+    # private copy. The context manager rechecks F: after scoring, and always
+    # removes the temporary copy. It does not write into original evidence.
+    with stable_snapshot(root, REPO) as stable:
+        runner, audit = historical_modules()
+        result = audit.inspect(stable)
+        if (result["owner_sha256"] != OWNER_SHA
+                or result["official_complete_600_claim_allowed"] !=
+                   (result["completed_scored_tasks"] == 600)
+                or result["noncomparable_to_frozen_four_slot"] is not True
+                or result["frozen_gen0_status"] != "BLOCKED"
+                or result["chosen"] is not None
+                or result["release_approved"] is not False):
+            raise ValueError("historical result has invalid provenance or release state")
+        sessions = []
+        for path in sorted(stable.iterdir()):
+            if re.fullmatch(r"(native-session-\d+\.private\.log|guard-session-\d+\.private\.jsonl)", path.name):
+                if path.is_symlink() or not path.is_file():
+                    raise ValueError("linked/nonfile original native session")
+                sessions.append({"name": path.name, "sha256": runner._digest(path)})
     # A contributor may add a junction while the original scorer is reading.
     # Recheck the complete tree before reporting any authenticated result.
     _assert_ordinary_tree(root)
@@ -196,6 +204,7 @@ def inspect(root: Path = ROOT) -> dict:
             "historical_guard_policy": "guard.v3", "session_evidence": sessions,
             "checkpoint_may_span_distinct_native_sessions": True,
             "native_sessions_pooled_for_frozen_comparison": False,
+            "scored_from_handle_locked_original_evidence_snapshot": True,
             "research_only": True}
 
 
