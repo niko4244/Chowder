@@ -185,10 +185,160 @@ def test_live_production_has_no_security_or_source_approval():
     assert not bridge.APPROVED_HISTORICAL_REAP160_MODEL_SHA256
     assert not bridge.APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256
     assert not bridge.APPROVED_HISTORICAL_ITEM_LINEAGE_SHA256
+    assert bridge.APPROVED_HISTORICAL_V1_REVIEW_SHA256 is None
+    assert bridge.APPROVED_HISTORICAL_V1_MODEL_SHA256 is None
+    assert not bridge.APPROVED_HISTORICAL_V1_ITEM_LINEAGE_SHA256
     blocked = bridge.bridge_frozen_evidence("Z:/nonexistent", "Z:/observer.json")
     assert blocked["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
     assert blocked["chosen"] is None and blocked["release_approved"] is False
     assert all(blocked[g] == "UNKNOWN" for g in ("gate0", "gate1", "gate2", "control", "speed"))
+
+
+@pytest.fixture
+def synthetic_historical_v1(synthetic, monkeypatch):
+    """Separate synthetic v1 native reviewer; never installs production pins."""
+    from chowder_batch.reap_v2_authentic_amendment4_replay_20261027 import replay
+
+    root, observer = synthetic
+    model = "1" * 64
+    session = "9" * 32
+    serve = {
+        "gguf_sha256": model, "flags": reap_select.FROZEN_SERVE_FLAGS,
+        "eval_session_id": session, "server_pid": 191,
+        "server_port": 8991,
+    }
+    _write(root / "reap128" / "serve.json", serve)
+    lineage = {}
+    for suite in ("gsm8k", "humaneval"):
+        rows = [json.loads(line) for line in
+                (root / "reap128" / f"{suite}.jsonl").read_text().splitlines()]
+        traces = []
+        for row in rows:
+            canonical = json.dumps(row, sort_keys=True, separators=(",", ":"),
+                                   ensure_ascii=False, allow_nan=False).encode()
+            traces.append({
+                "id": row["id"], "eval_session_id": session,
+                "gguf_sha256": model, "server_pid": 191, "server_port": 8991,
+                "native_response_sha256": hashlib.sha256(row["text"].encode()).hexdigest(),
+                "scored_row_sha256": hashlib.sha256(canonical).hexdigest(),
+                "completion_tokens": row["completion_tokens"],
+                "seconds": row["seconds"],
+                "predicted_per_second": row["predicted_per_second"],
+            })
+        path = root / "reap128" / f"{suite}.native-lineage.jsonl"
+        path.write_text("".join(json.dumps(item) + "\n" for item in traces),
+                        encoding="utf-8")
+        lineage[suite] = _sha(path)
+    snapshot = replay()
+    historical = json.loads(
+        (Path(__file__).resolve().parent.parent /
+         "docs/quals/reap128-v2-frozen-gate-snapshot-prequality-20261025.json")
+        .read_text(encoding="utf-8")
+    )["gates"]["reap128"]
+    review = {
+        "schema": bridge.HISTORICAL_V1_SCHEMA,
+        "status": "INDEPENDENTLY_APPROVED_ORIGINAL_REAP128_V1_PREREQUISITE",
+        "native_windows_server_owner_verified": True,
+        "independent_model_bytes_verified": True,
+        "per_item_session_binding_verified": True,
+        "original_executable_scorer_verified": True,
+        "original_40_layer_bf16_observer_verified": True,
+        "canonical_source_sha256": reap_gates.FROZEN_SOURCE_SHA256,
+        "frozen_snapshot_sha256": snapshot["source_sha256"],
+        "historical_gate1_lower_bound": snapshot["historical_v1_gate1"]["lower_bound"],
+        "observer_sha256": _sha(observer),
+        "original_scored_counts": {"gsm8k": 1319, "humaneval": 164},
+        "arms": {"reap128": {
+            "model_sha256": model, "session_id": session,
+            "physical_host_sha256": "a" * 64,
+            "hardware_profile_sha256": "b" * 64,
+            "rows_sha256": {
+                suite: _sha(root / "reap128" / f"{suite}.jsonl")
+                for suite in ("gsm8k", "humaneval")
+            },
+            "item_lineage_sha256": lineage,
+        }},
+    }
+    path = root / "reap128-v1.frozen-prerequisite-review.json"
+    _write(path, review)
+    monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
+                        reap_select._input_digests(root, observer, None, None))
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_V1_REVIEW_SHA256", _sha(path))
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_V1_MODEL_SHA256", model)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_V1_ITEM_LINEAGE_SHA256",
+                        {f"reap128/{suite}": sha for suite, sha in lineage.items()})
+    baseline = {
+        arm: {
+            "session_id": str(i) * 32,
+            "physical_host_sha256": "a" * 64,
+            "hardware_profile_sha256": "b" * 64,
+        }
+        for i, arm in enumerate(
+            ("reap160", "dense", "random128", "reap160_q4", "dense_q4"), 2
+        )
+    }
+    return root, observer, historical, baseline, session, review, path
+
+
+def test_historical_v1_independent_lineage_valid_synthetic(synthetic_historical_v1):
+    root, observer, historical, baseline, session, _, _ = synthetic_historical_v1
+    bridge._verify_historical_v1_prerequisite(
+        root, observer, historical, baseline, forbidden_sessions=frozenset(),
+    )
+    with pytest.raises(bridge.FrozenEvidenceError, match="incompatible hosts or sessions"):
+        bridge._verify_historical_v1_prerequisite(
+            root, observer, historical, baseline,
+            forbidden_sessions=frozenset({session}),
+        )
+
+
+@pytest.mark.parametrize("attack", [
+    "model_substitution", "review_sha_drift", "lineage_missing",
+    "response_substitution", "baseline_session_replay", "baseline_host_drift",
+    "snapshot_gate1_substitution", "observer_substitution",
+])
+def test_historical_v1_adversarial_refusal(
+    synthetic_historical_v1, monkeypatch, attack,
+):
+    root, observer, historical, baseline, session, review, path = synthetic_historical_v1
+    if attack == "model_substitution":
+        serve_path = root / "reap128" / "serve.json"
+        serve = json.loads(serve_path.read_text())
+        serve["gguf_sha256"] = "f" * 64
+        _write(serve_path, serve)
+        monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
+                            reap_select._input_digests(root, observer, None, None))
+    elif attack == "review_sha_drift":
+        review["native_windows_server_owner_verified"] = False
+        _write(path, review)
+    elif attack == "lineage_missing":
+        (root / "reap128" / "gsm8k.native-lineage.jsonl").unlink()
+    elif attack == "response_substitution":
+        trace_path = root / "reap128" / "humaneval.native-lineage.jsonl"
+        traces = trace_path.read_text().splitlines()
+        first = json.loads(traces[0])
+        first["native_response_sha256"] = "0" * 64
+        traces[0] = json.dumps(first)
+        trace_path.write_text("\n".join(traces) + "\n", encoding="utf-8")
+        new_sha = _sha(trace_path)
+        review["arms"]["reap128"]["item_lineage_sha256"]["humaneval"] = new_sha
+        _write(path, review)
+        monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_V1_REVIEW_SHA256", _sha(path))
+        pins = dict(bridge.APPROVED_HISTORICAL_V1_ITEM_LINEAGE_SHA256)
+        pins["reap128/humaneval"] = new_sha
+        monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_V1_ITEM_LINEAGE_SHA256", pins)
+    elif attack == "baseline_session_replay":
+        baseline["dense"]["session_id"] = session
+    elif attack == "baseline_host_drift":
+        baseline["random128"]["physical_host_sha256"] = "f" * 64
+    elif attack == "snapshot_gate1_substitution":
+        historical["gates"]["gate1"]["statistic"] = -0.031
+    elif attack == "observer_substitution":
+        observer.write_text('{"fake":true}\n', encoding="utf-8")
+    with pytest.raises(bridge.FrozenEvidenceError):
+        bridge._verify_historical_v1_prerequisite(
+            root, observer, historical, baseline, forbidden_sessions=frozenset(),
+        )
 
 
 def test_synthetic_complete_reviewer_pins_delegate_exact_science_to_original_selector(synthetic):
@@ -300,8 +450,9 @@ def test_incomplete_mandatory_gate_cannot_expose_selected_v2_as_gen0_choice(
     assert result["chosen"] is None and result["release_approved"] is False
 
 
+@pytest.mark.parametrize("approve_v1", [False, True])
 def test_optional_mcnemar_ambiguity_does_not_veto_mandatory_v1_fail_fallback(
-    synthetic, monkeypatch,
+    synthetic, monkeypatch, approve_v1,
 ):
     """Test-only: mandatory ordered fallback is distinct from optional replacement."""
     root, obs = synthetic
@@ -332,7 +483,17 @@ def test_optional_mcnemar_ambiguity_does_not_veto_mandatory_v1_fail_fallback(
 
     monkeypatch.setattr(bridge, "_verify_historical_reap160_prerequisite",
                         independently_approved_historical_prerequisite)
+    # This test isolates the selector's optional McNemar distinction; the
+    # historical v1 antecedent has separate adversarial source-lineage tests.
+    if approve_v1:
+        monkeypatch.setattr(bridge, "_verify_historical_v1_prerequisite",
+                            lambda *args, **kwargs: None)
     result = bridge.bridge_frozen_evidence(root, obs)
+    if not approve_v1:
+        assert result["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
+        assert "historical REAP128-v1 failure antecedent" in result["reason"]
+        assert result["chosen"] is None and result["release_approved"] is False
+        return
     assert result["status"] == "SOURCE_APPROVED_ORIGINAL_EVIDENCE_EVALUATED"
     assert result["chosen"] == "reap128_v2"
     assert result["amendment4"].startswith("BLOCKED_PENDING")

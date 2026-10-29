@@ -25,6 +25,7 @@ SCHEMA = "chowder.reap-v2-frozen-gate-evidence-bridge.v1"
 REVIEW_SCHEMA = "chowder.reap-v2-independent-original-frozen-review.v1"
 SECURITY_SCHEMA = "chowder.reap-v2-independent-frozen-humaneval-security.v1"
 HISTORICAL_REAP160_SCHEMA = "chowder.reap-v2-independent-historical-reap160-prerequisite.v1"
+HISTORICAL_V1_SCHEMA = "chowder.reap-v2-independent-historical-reap128-v1-prerequisite.v1"
 
 Q8_V2_SHA256 = "89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6"
 Q4_DENSE_SHA256 = "2c6d9466129e8802839566b35728e2506aaf1e8705cd137009e2f08feb9dd049"
@@ -79,6 +80,13 @@ APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256: dict[str, str] = {}
 # Independently observed per-item native lineage must therefore be separately
 # source-approved; NEVER retrofit or reserialize the immutable scored rows.
 APPROVED_HISTORICAL_ITEM_LINEAGE_SHA256: dict[str, str] = {}
+# The original v1 Gate1 FAIL is the antecedent that enables Amendment4's
+# mandatory fallback. Its archived selector snapshot is not proof that the
+# underlying model, serving sessions, and executable scored rows were genuine.
+# These independent v1 approvals intentionally remain EMPTY in production.
+APPROVED_HISTORICAL_V1_REVIEW_SHA256: str | None = None
+APPROVED_HISTORICAL_V1_MODEL_SHA256: str | None = None
+APPROVED_HISTORICAL_V1_ITEM_LINEAGE_SHA256: dict[str, str] = {}
 CERTIFICATE_INPUT_FIELDS = frozenset({
     "capture_path", "witness_path", "capability_path", "broker_path",
     "review_path", "trace_dir", "serve_path", "owner_review_path",
@@ -209,10 +217,13 @@ def _verify_historical_canonical_rows(root: Path) -> None:
 
 def _verify_historical_item_lineage(
     root: Path, arm: str, suite: str, rows: dict, serve: dict, record: dict,
+    *, approved_lineage: dict[str, str] | None = None,
 ) -> None:
     """Join independently source-approved native traces to untouched score rows."""
     key = f"{arm}/{suite}"
-    pinned = APPROVED_HISTORICAL_ITEM_LINEAGE_SHA256.get(key)
+    pins = (APPROVED_HISTORICAL_ITEM_LINEAGE_SHA256 if approved_lineage is None
+            else approved_lineage)
+    pinned = pins.get(key)
     declared = record.get("item_lineage_sha256")
     _require(_hex(pinned) and isinstance(declared, dict)
              and declared.get(suite) == pinned,
@@ -267,7 +278,7 @@ def _verify_historical_item_lineage(
 
 def _verify_historical_reap160_prerequisite(
     root: Path, *, forbidden_sessions: frozenset[str],
-) -> None:
+) -> dict[str, dict]:
     """Require separately pinned native REAP160 evidence before v2 fallback selection.
 
     The original frozen selector legitimately computes from historical rows;
@@ -438,6 +449,121 @@ def _verify_historical_reap160_prerequisite(
     historical_sessions = {review["arms"][arm]["session_id"] for arm in arms}
     _require(not (historical_sessions & forbidden_sessions),
              "historical REAP160 and fresh v2 serving sessions overlap")
+    return review["arms"]
+
+
+def _verify_historical_v1_prerequisite(
+    root: Path, observer: Path, historical_v1: dict,
+    baseline_arms: dict[str, dict], *, forbidden_sessions: frozenset[str],
+) -> None:
+    """Authenticate the actual v1 Gate1-failure antecedent, not just its label.
+
+    REAP160's independently reviewed dense/random128 cohorts are the original
+    v1 quality comparators too. Their provenance is checked by the caller
+    first; this separate approval binds the historical REAP128 model, both
+    original Q8 scored cohorts, native response lineage, observer and archived
+    frozen selector result. No historical Q4 speed PASS is implied.
+    """
+    from chowder_batch.reap_v2_authentic_amendment4_replay_20261027 import replay
+
+    suites = {"gsm8k": 1319, "humaneval": 164}
+    expected_lineage = {f"reap128/{suite}" for suite in suites}
+    _require(_hex(APPROVED_HISTORICAL_V1_REVIEW_SHA256)
+             and _hex(APPROVED_HISTORICAL_V1_MODEL_SHA256)
+             and set(APPROVED_HISTORICAL_V1_ITEM_LINEAGE_SHA256) == expected_lineage
+             and all(_hex(value)
+                     for value in APPROVED_HISTORICAL_V1_ITEM_LINEAGE_SHA256.values()),
+             "historical REAP128-v1 failure antecedent has no independent approval")
+    snapshot = replay()
+    gates = historical_v1.get("gates") if isinstance(historical_v1, dict) else None
+    _require(isinstance(gates, dict)
+             and all(reap_select._status(historical_v1, key) == "PASS"
+                     for key in ("d0", "gate0"))
+             and reap_select._status(historical_v1, "gate1") == "FAIL"
+             and gates["gate1"].get("statistic")
+             == snapshot["historical_v1_gate1"]["lower_bound"],
+             "original v1 Gate1 failure differs from pinned frozen historical result")
+    path = root / "reap128-v1.frozen-prerequisite-review.json"
+    _require(path.is_file() and not path.is_symlink(),
+             "historical REAP128-v1 native prerequisite review missing")
+    raw = path.read_bytes()
+    _require(_sha(raw) == APPROVED_HISTORICAL_V1_REVIEW_SHA256,
+             "historical REAP128-v1 native prerequisite review SHA mismatch")
+    review = _json_bytes(raw)
+    observer_sha = _sha(observer.read_bytes())
+    _require(review.get("schema") == HISTORICAL_V1_SCHEMA
+             and review.get("status")
+             == "INDEPENDENTLY_APPROVED_ORIGINAL_REAP128_V1_PREREQUISITE"
+             and review.get("native_windows_server_owner_verified") is True
+             and review.get("independent_model_bytes_verified") is True
+             and review.get("per_item_session_binding_verified") is True
+             and review.get("original_executable_scorer_verified") is True
+             and review.get("original_40_layer_bf16_observer_verified") is True
+             and review.get("canonical_source_sha256") == reap_gates.FROZEN_SOURCE_SHA256
+             and review.get("frozen_snapshot_sha256") == snapshot["source_sha256"]
+             and review.get("historical_gate1_lower_bound")
+             == snapshot["historical_v1_gate1"]["lower_bound"]
+             and review.get("observer_sha256") == observer_sha
+             and APPROVED_ORIGINAL_ARTIFACT_SHA256.get(str(observer)) == observer_sha
+             and review.get("original_scored_counts") == suites
+             and set(review.get("arms", {})) == {"reap128"},
+             "historical REAP128-v1 model/scorer/observer review incomplete")
+    record = review["arms"]["reap128"]
+    _require(isinstance(record, dict),
+             "historical REAP128-v1 native arm review malformed")
+    directory = root / "reap128"
+    serve_path = directory / "serve.json"
+    serve = _json_file(serve_path)
+    session = serve.get("eval_session_id")
+    _require(not (directory / ".serve.lock").exists()
+             and not any(directory.glob("serve.resume-*.json"))
+             and not any(directory.glob("server.resume-*.log"))
+             and not any(directory.glob(".serve-pending-*.json")),
+             "historical REAP128-v1 serving session resumed or incomplete")
+    _require(_hex(session, 32)
+             and serve.get("gguf_sha256") == APPROVED_HISTORICAL_V1_MODEL_SHA256
+             and serve.get("flags") == reap_select.FROZEN_SERVE_FLAGS
+             and type(serve.get("server_pid")) is int and serve["server_pid"] > 0
+             and type(serve.get("server_port")) is int
+             and 0 < serve["server_port"] < 65536
+             and APPROVED_ORIGINAL_ARTIFACT_SHA256.get(str(serve_path))
+             == _sha(serve_path.read_bytes())
+             and record.get("model_sha256") == serve["gguf_sha256"]
+             and record.get("session_id") == session
+             and _hex(record.get("physical_host_sha256"))
+             and _hex(record.get("hardware_profile_sha256"))
+             and isinstance(record.get("rows_sha256"), dict)
+             and set(record["rows_sha256"]) == set(suites)
+             and isinstance(record.get("item_lineage_sha256"), dict)
+             and set(record["item_lineage_sha256"]) == set(suites),
+             "historical REAP128-v1 original model/session/row provenance incomplete")
+    _require(isinstance(baseline_arms, dict)
+             and {"dense", "random128", "reap160", "dense_q4", "reap160_q4"}
+             <= set(baseline_arms)
+             and all(record["physical_host_sha256"]
+                     == baseline_arms[arm]["physical_host_sha256"]
+                     and record["hardware_profile_sha256"]
+                     == baseline_arms[arm]["hardware_profile_sha256"]
+                     for arm in ("dense", "random128"))
+             and session not in forbidden_sessions
+             and session not in {item["session_id"] for item in baseline_arms.values()},
+             "historical REAP128-v1 and approved comparators have incompatible hosts or sessions")
+    for suite, count in suites.items():
+        rows_path = directory / f"{suite}.jsonl"
+        _require(rows_path.is_file() and not rows_path.is_symlink()
+                 and record["rows_sha256"][suite] == _sha(rows_path.read_bytes())
+                 and APPROVED_ORIGINAL_ARTIFACT_SHA256.get(str(rows_path))
+                 == record["rows_sha256"][suite],
+                 f"reap128/{suite}: historical v1 original score rows not source approved")
+        rows = reap_select._attested_rows(root, "reap128", suite, count)
+        _require(isinstance(rows, dict)
+                 and all("eval_session_id" not in row
+                         or row["eval_session_id"] == session for row in rows.values()),
+                 f"reap128/{suite}: original v1 scored session mismatch")
+        _verify_historical_item_lineage(
+            root, "reap128", suite, rows, serve, record,
+            approved_lineage=APPROVED_HISTORICAL_V1_ITEM_LINEAGE_SHA256,
+        )
 
 
 def _verify_original_sessions(root: Path, review: dict) -> dict[str, dict]:
@@ -749,8 +875,14 @@ def bridge_frozen_evidence(
                 # The frozen mandatory fallback requires BOTH v2 and REAP160
                 # to be genuinely scored, not just the winning v2 arm. A
                 # synthetic or unreviewed REAP160 row set cannot satisfy it.
-                _verify_historical_reap160_prerequisite(
+                historical_arms = _verify_historical_reap160_prerequisite(
                     root, forbidden_sessions=frozenset(
+                        item["session_id"] for item in serving.values()
+                    ),
+                )
+                _verify_historical_v1_prerequisite(
+                    root, observer, historical_v1, historical_arms,
+                    forbidden_sessions=frozenset(
                         item["session_id"] for item in serving.values()
                     ),
                 )
