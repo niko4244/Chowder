@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -37,6 +38,16 @@ IMPORTED_AUXILIARY = (
     # to affect the supposedly Git-pinned original guard.v3 scorer/runner.
     "chowder_batch/reap_context_budget_20261026.py",
 )
+# These are the exact immutable auxiliary source bytes in original commit
+# 84ff970, not hashes learned from today's worktree or a Git replace object.
+AUXILIARY_SHA256 = {
+    "chowder_batch/reap_q4_automationbench_ctx64k_20261026.py":
+        "5d8b9cb66ca5ac5824f443a917b3efa9ff38d7f26749c3340be8bd98edac755b",
+    "chowder_batch/reap_q8_automationbench_kaggle_20261026.py":
+        "1ba5b0ffa9d1edd0d82f3e374c8dabb3db859935610c56988b555539830e8eb9",
+    "chowder_batch/reap_context_budget_20261026.py":
+        "0286d498a35227074ba5b4aa32576967790ccbe6dd987e43b5ff3f01fd2e4632",
+}
 SCHEMA = "chowder.reap-original600-guardv3-git-pinned-independent.v1"
 
 
@@ -46,12 +57,15 @@ def sha(raw: bytes) -> str:
 
 def git_bytes(path: str) -> bytes:
     return subprocess.check_output(
-        ["git", "show", f"{COMMIT}:{path}"], cwd=REPO, timeout=20
+        ["git", "show", f"{COMMIT}:{path}"], cwd=REPO, timeout=20,
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
     )
 
 
 def source_bytes() -> dict[str, bytes]:
     result = {}
+    if set(IMPORTED_AUXILIARY) != set(AUXILIARY_SHA256):
+        raise ValueError("historical auxiliary source SHA inventory incomplete")
     for path, expected in PINNED.items():
         raw = git_bytes(path)
         if sha(raw) != expected:
@@ -59,7 +73,7 @@ def source_bytes() -> dict[str, bytes]:
         result[path] = raw
     for path in IMPORTED_AUXILIARY:
         original = git_bytes(path)
-        if sha(original) != sha((REPO / path).read_bytes()):
+        if sha(original) != AUXILIARY_SHA256[path]:
             raise ValueError("historical scorer auxiliary dependency drift: " + path)
         result[path] = original
     if b'POLICY_NAME = "guard.v3"' not in result[next(iter(PINNED))]:

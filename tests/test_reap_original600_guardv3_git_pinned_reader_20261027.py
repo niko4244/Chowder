@@ -63,6 +63,57 @@ def test_transitive_context_budget_source_drift_refused(
         reader.source_bytes()
 
 
+def test_coordinated_git_replacement_and_auxiliary_worktree_drift_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matching forged Git/worktree bytes must not redefine the 84ff970 source."""
+    target = "chowder_batch/reap_context_budget_20261026.py"
+    actual_git = reader.git_bytes
+    actual_read = Path.read_bytes
+    forged = actual_git(target) + b"\n# attacker-controlled original dependency\n"
+
+    def forged_git(path: str) -> bytes:
+        return forged if path == target else actual_git(path)
+
+    def forged_read(path: Path) -> bytes:
+        return forged if path == reader.REPO / target else actual_read(path)
+
+    monkeypatch.setattr(reader, "git_bytes", forged_git)
+    monkeypatch.setattr(Path, "read_bytes", forged_read)
+    with pytest.raises(ValueError, match="auxiliary dependency drift"):
+        reader.source_bytes()
+
+
+def test_historical_git_bytes_ignore_replacement_refs(monkeypatch: pytest.MonkeyPatch) -> None:
+    actual = reader.subprocess.check_output
+    seen = []
+
+    def checked(*args, **kwargs):
+        seen.append(kwargs.get("env", {}).get("GIT_NO_REPLACE_OBJECTS"))
+        return actual(*args, **kwargs)
+
+    monkeypatch.setattr(reader.subprocess, "check_output", checked)
+    path = "chowder_batch/reap_context_budget_20261026.py"
+    assert reader.sha(reader.git_bytes(path)) == reader.AUXILIARY_SHA256[path]
+    assert seen == ["1"]
+
+
+def test_later_worktree_helper_edits_do_not_change_git_pinned_historical_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = "chowder_batch/reap_context_budget_20261026.py"
+    original_read = Path.read_bytes
+
+    def forged_read(self: Path) -> bytes:
+        if self == reader.REPO / path:
+            return original_read(self) + b"\n# legitimate later helper edit\n"
+        return original_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", forged_read)
+    sources = reader.source_bytes()
+    assert reader.sha(sources[path]) == reader.AUXILIARY_SHA256[path]
+
+
 @pytest.mark.parametrize("auxiliary", [
     "reap_context_budget_20261026", "reap_q8_automationbench_kaggle_20261026",
 ])
