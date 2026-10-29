@@ -183,8 +183,108 @@ def test_original_owner_symlink_refused(monkeypatch: pytest.MonkeyPatch, tmp_pat
         (tmp_path / "owner.json").symlink_to(target)
     except OSError:
         pytest.skip("native symlink privilege unavailable")
-    with pytest.raises(ValueError, match="owner SHA drift"):
+    with pytest.raises(ValueError, match="reparse"):
         reader.inspect(tmp_path)
+
+
+@pytest.mark.parametrize("target", ["root", "nested_directory", "nested_file"])
+def test_historical_ntfs_reparse_tree_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str,
+) -> None:
+    """A Windows junction is not necessarily reported by Path.is_symlink()."""
+    nested = tmp_path / "original"
+    nested.mkdir()
+    payload = nested / "scored.jsonl"
+    payload.write_text("{}\n", encoding="utf-8")
+    attacked = {"root": tmp_path, "nested_directory": nested,
+                "nested_file": payload}[target]
+    real_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):
+        original = real_lstat(path)
+        if path == attacked:
+            return types.SimpleNamespace(
+                st_mode=original.st_mode,
+                st_file_attributes=getattr(original, "st_file_attributes", 0) | 0x400,
+            )
+        return original
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    with pytest.raises(ValueError, match="reparse"):
+        reader._assert_ordinary_tree(tmp_path)
+
+
+def test_historical_nested_symlink_refused(tmp_path: Path) -> None:
+    original = tmp_path / "original.jsonl"
+    original.write_text("{}\n", encoding="utf-8")
+    linked = tmp_path / "linked.jsonl"
+    try:
+        linked.symlink_to(original)
+    except OSError:
+        pytest.skip("native symlink privilege unavailable")
+    with pytest.raises(ValueError, match="reparse"):
+        reader._assert_ordinary_tree(tmp_path)
+
+
+def test_historical_inspect_refuses_reparse_before_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reader, "ROOT", tmp_path)
+    original_lstat = Path.lstat
+
+    def root_reparse(path: Path):
+        metadata = original_lstat(path)
+        if path == tmp_path:
+            return types.SimpleNamespace(st_mode=metadata.st_mode, st_file_attributes=0x400)
+        return metadata
+
+    monkeypatch.setattr(Path, "lstat", root_reparse)
+    with pytest.raises(ValueError, match="reparse"):
+        reader.inspect(tmp_path)
+
+
+def test_historical_inspect_refuses_reparse_added_during_scoring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newly introduced task junction must invalidate the final result."""
+    monkeypatch.setattr(reader, "ROOT", tmp_path)
+    (tmp_path / "owner.json").write_bytes(b"synthetic-owner")
+    nested = tmp_path / "task"
+    nested.mkdir()
+    scored = nested / "scored.jsonl"
+    scored.write_text("{}\n", encoding="utf-8")
+    actual_sha = reader.sha
+    monkeypatch.setattr(
+        reader, "sha", lambda raw: reader.OWNER_SHA if raw == b"synthetic-owner" else actual_sha(raw),
+    )
+    audit_result = {
+        "owner_sha256": reader.OWNER_SHA,
+        "official_complete_600_claim_allowed": False,
+        "completed_scored_tasks": 88,
+        "noncomparable_to_frozen_four_slot": True,
+        "frozen_gen0_status": "BLOCKED",
+        "chosen": None,
+        "release_approved": False,
+    }
+    monkeypatch.setattr(reader, "historical_modules", lambda: (
+        types.SimpleNamespace(), types.SimpleNamespace(inspect=lambda _: audit_result),
+    ))
+    original_lstat = Path.lstat
+    checks = 0
+
+    def late_reparse(path: Path):
+        nonlocal checks
+        metadata = original_lstat(path)
+        if path == scored:
+            checks += 1
+            if checks > 1:
+                return types.SimpleNamespace(st_mode=metadata.st_mode, st_file_attributes=0x400)
+        return metadata
+
+    monkeypatch.setattr(Path, "lstat", late_reparse)
+    with pytest.raises(ValueError, match="reparse"):
+        reader.inspect(tmp_path)
+    assert checks == 2
 
 
 def test_actual_historical_reader_is_read_only_and_fail_closed() -> None:

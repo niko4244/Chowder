@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import types
@@ -138,9 +139,36 @@ def historical_modules():
     return runner, audit
 
 
+def _assert_ordinary_tree(root: Path) -> None:
+    """Reject redirected evidence at *every* depth before original scoring.
+
+    On Windows, an NTFS junction/mount point can be a directory with
+    ``is_symlink() == False``. Checking only the owner and native logs leaves
+    nested task evidence reachable through an unreviewed reparse target.
+    ``lstat`` inspects the link itself rather than following it; the Windows
+    reparse attribute covers junctions and other non-symlink redirects.
+    """
+    pending = [root]
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    while pending:
+        path = pending.pop()
+        try:
+            metadata = path.lstat()
+            if (stat.S_ISLNK(metadata.st_mode)
+                    or getattr(metadata, "st_file_attributes", 0) & reparse_flag):
+                raise ValueError("original guard.v3 evidence reparse point: " + str(path))
+            if stat.S_ISDIR(metadata.st_mode):
+                pending.extend(path.iterdir())
+            elif not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("original guard.v3 evidence nonregular entry: " + str(path))
+        except OSError as exc:
+            raise ValueError("original guard.v3 evidence tree unreadable: " + str(path)) from exc
+
+
 def inspect(root: Path = ROOT) -> dict:
     if root != ROOT or not root.is_dir() or root.is_symlink():
         raise ValueError("only the original ordinary guard.v3 evidence root is allowed")
+    _assert_ordinary_tree(root)
     owner = root / "owner.json"
     if owner.is_symlink() or not owner.is_file() or sha(owner.read_bytes()) != OWNER_SHA:
         raise ValueError("original guard.v3 owner SHA drift")
@@ -160,6 +188,9 @@ def inspect(root: Path = ROOT) -> dict:
             if path.is_symlink() or not path.is_file():
                 raise ValueError("linked/nonfile original native session")
             sessions.append({"name": path.name, "sha256": runner._digest(path)})
+    # A contributor may add a junction while the original scorer is reading.
+    # Recheck the complete tree before reporting any authenticated result.
+    _assert_ordinary_tree(root)
     return {**result, "schema": SCHEMA, "historical_source_commit": COMMIT,
             "historical_source_sha256": PINNED,
             "historical_guard_policy": "guard.v3", "session_evidence": sessions,
