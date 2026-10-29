@@ -47,6 +47,64 @@ def test_auxiliary_dependency_drift_refused(monkeypatch: pytest.MonkeyPatch) -> 
         reader.source_bytes()
 
 
+def test_transitive_context_budget_source_drift_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Historical ctx64k imports this executable helper transitively."""
+    path = "chowder_batch/reap_context_budget_20261026.py"
+    actual = reader.git_bytes
+
+    def corrupt(name: str) -> bytes:
+        raw = actual(name)
+        return raw + b"\n# modified context budget\n" if name == path else raw
+
+    monkeypatch.setattr(reader, "git_bytes", corrupt)
+    with pytest.raises(ValueError, match="auxiliary dependency drift"):
+        reader.source_bytes()
+
+
+@pytest.mark.parametrize("auxiliary", [
+    "reap_context_budget_20261026", "reap_q8_automationbench_kaggle_20261026",
+])
+def test_historical_loader_refuses_preimported_auxiliary(auxiliary: str) -> None:
+    """A preloaded executable module cannot bypass pinned source bytes."""
+    code = (
+        "import importlib, sys\n"
+        "importlib.import_module('chowder_batch.' + sys.argv[1])\n"
+        "from chowder_batch import reap_original600_guardv3_git_pinned_reader_20261027 as r\n"
+        "try:\n"
+        "    r.historical_modules()\n"
+        "except ValueError as exc:\n"
+        "    if 'fresh interpreter required' in str(exc):\n"
+        "        sys.exit(0)\n"
+        "sys.exit(3)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code, auxiliary], cwd=reader.REPO,
+        capture_output=True, text=True, timeout=25,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_historical_loader_refuses_shadow_namespace_path() -> None:
+    code = (
+        "import sys, chowder_batch\n"
+        "from chowder_batch import reap_original600_guardv3_git_pinned_reader_20261027 as r\n"
+        "chowder_batch.__path__ = [str(r.REPO / 'chowder_batch'), 'C:/untrusted-shadow']\n"
+        "try:\n"
+        "    r.historical_modules()\n"
+        "except ValueError as exc:\n"
+        "    if 'namespace source path' in str(exc):\n"
+        "        sys.exit(0)\n"
+        "sys.exit(3)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=reader.REPO,
+        capture_output=True, text=True, timeout=25,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
 def test_historical_loader_refuses_preimported_module(monkeypatch: pytest.MonkeyPatch) -> None:
     name = "chowder_batch.reap_original600_live_independent_audit_20261027"
     monkeypatch.setitem(sys.modules, name, types.ModuleType(name))

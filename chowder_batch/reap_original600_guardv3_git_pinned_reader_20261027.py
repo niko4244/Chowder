@@ -32,6 +32,10 @@ PINNED = {
 IMPORTED_AUXILIARY = (
     "chowder_batch/reap_q4_automationbench_ctx64k_20261026.py",
     "chowder_batch/reap_q8_automationbench_kaggle_20261026.py",
+    # ctx64k imports the budget calculator at module import time. Omitting
+    # this transitive executable dependency permits a worktree replacement
+    # to affect the supposedly Git-pinned original guard.v3 scorer/runner.
+    "chowder_batch/reap_context_budget_20261026.py",
 )
 SCHEMA = "chowder.reap-original600-guardv3-git-pinned-independent.v1"
 
@@ -54,8 +58,10 @@ def source_bytes() -> dict[str, bytes]:
             raise ValueError("historical Git source SHA mismatch: " + path)
         result[path] = raw
     for path in IMPORTED_AUXILIARY:
-        if sha(git_bytes(path)) != sha((REPO / path).read_bytes()):
+        original = git_bytes(path)
+        if sha(original) != sha((REPO / path).read_bytes()):
             raise ValueError("historical scorer auxiliary dependency drift: " + path)
+        result[path] = original
     if b'POLICY_NAME = "guard.v3"' not in result[next(iter(PINNED))]:
         raise ValueError("historical source does not implement guard.v3")
     return result
@@ -84,15 +90,35 @@ def _load(name: str, raw: bytes) -> types.ModuleType:
 def historical_modules():
     import chowder_batch  # noqa: F401 - initializes only the namespace package
 
+    package_paths = list(chowder_batch.__path__)
+    if (len(package_paths) != 1
+            or Path(package_paths[0]).resolve() != (REPO / "chowder_batch").resolve()):
+        raise ValueError("historical namespace source path is not uniquely original")
     raw = source_bytes()
     prefix = "chowder_batch/"
     names = list(PINNED)
-    # Strict import order: the historical runner must import historical guard.
+    # Source SHA equality is insufficient if importlib executes a preloaded
+    # module or timestamp-valid but substituted .pyc. Execute every transitive
+    # original Python dependency directly from the authenticated Git bytes.
+    # Strict import order: context budget -> original guard -> ctx64k/Q8 ->
+    # historical runner -> scorer. A preimported auxiliary fails closed.
+    def historical_name(path: str) -> str:
+        return "chowder_batch." + path.removeprefix(prefix).removesuffix(".py")
+
+    budget_path = "chowder_batch/reap_context_budget_20261026.py"
+    q4_path = "chowder_batch/reap_q4_automationbench_ctx64k_20261026.py"
+    q8_path = "chowder_batch/reap_q8_automationbench_kaggle_20261026.py"
+    budget = _load(historical_name(budget_path), raw[budget_path])
     guard = _load("chowder_batch." + names[0].removeprefix(prefix).removesuffix(".py"), raw[names[0]])
+    q4 = _load(historical_name(q4_path), raw[q4_path])
+    q8 = _load(historical_name(q8_path), raw[q8_path])
     runner = _load("chowder_batch." + names[1].removeprefix(prefix).removesuffix(".py"), raw[names[1]])
     audit = _load("chowder_batch." + names[2].removeprefix(prefix).removesuffix(".py"), raw[names[2]])
     if (guard.POLICY_NAME != "guard.v3" or runner.q4.POLICY_NAME != "guard.v3"
             or runner.start_guard is not guard.start_guard
+            or runner.q4 is not q4 or runner.source_ids is not q8
+            or q4.assess is not budget.assess
+            or q4.trajectory_from_native_log is not budget.trajectory_from_native_log
             or audit.run is not runner):
         raise ValueError("historical guard/runner/scorer identities are mixed")
     return runner, audit

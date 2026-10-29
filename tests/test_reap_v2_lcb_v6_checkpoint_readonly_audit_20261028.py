@@ -6,6 +6,7 @@ import json
 import hashlib
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -209,6 +210,34 @@ def test_runtime_python_inventory_must_be_symmetric_and_source_bound(tmp_path):
     (original / "__init__.py").write_text("# pinned original\n", encoding="utf-8")
     (copied / "__init__.py").write_text("# altered runtime\n", encoding="utf-8")
     with pytest.raises(ValueError, match="runtime source drift"):
+        audit.verify_runtime_python_sources(source, runtime)
+
+
+@pytest.mark.parametrize("marked", [
+    "source/lcb_runner", "runtime/lcb_runner", "runtime/lcb_runner/nested",
+])
+def test_runtime_refuses_ntfs_junction_even_when_python_is_symlink_false(
+    tmp_path, monkeypatch, marked,
+):
+    """NTFS junctions are reparse points but not Python 3.11 symlinks."""
+    source = tmp_path / "source"
+    runtime = tmp_path / "runtime"
+    for tree in (source, runtime):
+        package = tree / "lcb_runner"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("# original\n", encoding="utf-8")
+        nested = package / "nested"
+        nested.mkdir()
+        (nested / "__init__.py").write_text("# original nested\n", encoding="utf-8")
+    original_lstat = audit.os.lstat
+
+    def fake_lstat(path, *args, **kwargs):
+        if str(path) == str(tmp_path / marked):
+            return SimpleNamespace(st_file_attributes=0x400)
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(audit.os, "lstat", fake_lstat)
+    with pytest.raises(ValueError, match="reparse"):
         audit.verify_runtime_python_sources(source, runtime)
 
 

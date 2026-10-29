@@ -537,13 +537,49 @@ def test_forged_reap160_speed_fail_cannot_satisfy_v2_fallback_prerequisite(
     assert result["chosen"] is None and result["release_approved"] is False
 
 
+@pytest.mark.parametrize("substituted_arm", ["dense", "random128"])
+def test_historical_reference_model_sha_cannot_be_reapproved_as_an_alternate(
+    tmp_path, monkeypatch, substituted_arm,
+):
+    """Source approval must not redefine the frozen original comparator."""
+    models = {
+        "reap160": "d" * 64,
+        "dense": reap_select.FROZEN_REFERENCE_MODEL_SHA256["dense_v2"],
+        "random128": reap_select.FROZEN_REFERENCE_MODEL_SHA256["random128_v2"],
+        "reap160_q4": "e" * 64, "dense_q4": bridge.Q4_DENSE_SHA256,
+    }
+    models[substituted_arm] = "f" * 64
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", "a" * 64)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_MODEL_SHA256", models)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256", {
+        "reap160_q4": "a" * 64, "dense_q4": "b" * 64,
+    })
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_ITEM_LINEAGE_SHA256", {
+        f"{arm}/{suite}": "c" * 64
+        for arm, suites in (
+            ("reap160", ("gsm8k", "humaneval")),
+            ("dense", ("gsm8k", "humaneval")),
+            ("random128", ("gsm8k",)),
+            ("reap160_q4", ("gsm8k",)),
+            ("dense_q4", ("gsm8k",)),
+        )
+        for suite in suites
+    })
+    with pytest.raises(bridge.FrozenEvidenceError, match="source-owned approval"):
+        bridge._verify_historical_reap160_prerequisite(
+            tmp_path, forbidden_sessions=frozenset(),
+        )
+
+
 def test_historical_reap160_requires_separate_source_pinned_native_review(
     synthetic, monkeypatch,
 ):
     """Synthetic-only positive schema plus original-byte tamper rejection."""
     root, obs = synthetic
-    models = {"reap160": "d" * 64, "dense": "1" * 64,
-              "random128": "2" * 64, "reap160_q4": "e" * 64,
+    models = {"reap160": "d" * 64,
+              "dense": reap_select.FROZEN_REFERENCE_MODEL_SHA256["dense_v2"],
+              "random128": reap_select.FROZEN_REFERENCE_MODEL_SHA256["random128_v2"],
+              "reap160_q4": "e" * 64,
               "dense_q4": bridge.Q4_DENSE_SHA256}
     sessions = {"reap160": "c" * 32, "dense": "3" * 32,
                 "random128": "4" * 32, "reap160_q4": "f" * 32,

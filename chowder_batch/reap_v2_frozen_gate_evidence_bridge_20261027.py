@@ -305,6 +305,14 @@ def _verify_historical_reap160_prerequisite(
              and set(APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256) == speed_arms
              and all(_hex(value) for value in APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256.values())
              and set(APPROVED_HISTORICAL_REAP160_MODEL_SHA256) == arms
+             # Historical dense/random128 are the original frozen reference
+             # weights, not arbitrary models a later reviewer may reapprove.
+             # Their substitutions would alter Gate1/control while leaving
+             # internally consistent serving and row SHA receipts.
+             and APPROVED_HISTORICAL_REAP160_MODEL_SHA256.get("dense")
+             == reap_select.FROZEN_REFERENCE_MODEL_SHA256["dense_v2"]
+             and APPROVED_HISTORICAL_REAP160_MODEL_SHA256.get("random128")
+             == reap_select.FROZEN_REFERENCE_MODEL_SHA256["random128_v2"]
              and APPROVED_HISTORICAL_REAP160_MODEL_SHA256.get("dense_q4") == Q4_DENSE_SHA256
              and all(_hex(value) for value in APPROVED_HISTORICAL_REAP160_MODEL_SHA256.values()),
              "historical REAP160 prerequisite has no independent source-owned approval")

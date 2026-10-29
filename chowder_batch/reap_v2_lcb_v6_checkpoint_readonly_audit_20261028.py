@@ -46,6 +46,19 @@ def sha(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _reject_linked_or_reparse(path: Path) -> None:
+    """Refuse NTFS junctions/mount points as well as ordinary symlinks.
+
+    Python 3.11's ``Path.is_symlink`` does not identify Windows junctions.
+    The runtime must not follow an executable package path outside the
+    independently reviewed source/runtime trees.
+    """
+    metadata = os.lstat(path)
+    if (getattr(metadata, "st_file_attributes", 0) & 0x400
+            or path.is_symlink()):  # FILE_ATTRIBUTE_REPARSE_POINT
+        raise ValueError("official evaluator source/runtime contains reparse path")
+
+
 def verify_source_python_git_inventory(source: Path) -> int:
     """Require every evaluator Python module to belong to the pinned Git tree.
 
@@ -57,6 +70,10 @@ def verify_source_python_git_inventory(source: Path) -> int:
     original = source / "lcb_runner"
     if not original.is_dir() or original.is_symlink():
         raise ValueError("original evaluator Python source package missing or linked")
+    for path in (source, original):
+        _reject_linked_or_reparse(path)
+    for path in original.rglob("*"):
+        _reject_linked_or_reparse(path)
     tracked_raw = subprocess.check_output(
         ["git", "-C", str(source), "ls-files", "-z", "--", "lcb_runner"],
         timeout=15,
@@ -86,9 +103,11 @@ def verify_runtime_python_sources(source: Path, runtime: Path) -> None:
             or not copied.is_dir() or copied.is_symlink()
             or runtime.is_symlink()):
         raise ValueError("original evaluator runtime package missing or linked")
+    _reject_linked_or_reparse(source)
     for tree in (original, runtime):
-        if any(path.is_symlink() for path in tree.rglob("*")):
-            raise ValueError("official evaluator runtime contains linked package paths")
+        _reject_linked_or_reparse(tree)
+        for path in tree.rglob("*"):
+            _reject_linked_or_reparse(path)
     unreviewed_suffixes = {
         ".pyc", ".pyo", ".pyw", ".pyd", ".so", ".dll",
         ".zip", ".egg", ".whl", ".pyz", ".pth",
