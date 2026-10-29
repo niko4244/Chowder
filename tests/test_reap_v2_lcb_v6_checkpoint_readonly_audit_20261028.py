@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -237,3 +238,41 @@ def test_runtime_refuses_unreviewed_executable_import_paths(tmp_path, relative):
     injected.write_bytes(b"unreviewed executable import path")
     with pytest.raises(ValueError, match="unreviewed.*(source|import|bytecode)"):
         audit.verify_runtime_python_sources(source, runtime)
+
+
+@pytest.mark.parametrize("relative", [
+    "lcb_runner/ignored.py",
+    "lcb_runner/nested/ignored.py",
+])
+def test_git_pinned_runtime_refuses_ignored_source_python_even_if_copied(
+    tmp_path, relative,
+):
+    """A clean Git status and matching runtime bytes cannot authorize ignored code."""
+    source = tmp_path / "source"
+    runtime = tmp_path / "runtime"
+    for tree in (source, runtime):
+        package = tree / "lcb_runner"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("# original\n", encoding="utf-8")
+    (source / ".gitignore").write_text(f"/{relative}\n", encoding="utf-8")
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(source), *args], stderr=subprocess.PIPE,
+            timeout=15,
+        )
+
+    git("init", "-q")
+    git("add", ".gitignore", "lcb_runner/__init__.py")
+    git("-c", "user.name=Qualification Test", "-c", "user.email=test@example.invalid",
+        "commit", "-qm", "Pinned original")
+    assert audit.verify_source_python_git_inventory(source) == 1
+
+    for tree in (source, runtime):
+        injected = tree / relative
+        injected.parent.mkdir(parents=True, exist_ok=True)
+        injected.write_text("# executable ignored source\n", encoding="utf-8")
+    assert not git("status", "--porcelain").strip()
+    audit.verify_runtime_python_sources(source, runtime)
+    with pytest.raises(ValueError, match="pinned Git inventory"):
+        audit.verify_source_python_git_inventory(source)

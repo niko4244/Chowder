@@ -46,6 +46,32 @@ def sha(path: Path) -> str:
     return digest.hexdigest()
 
 
+def verify_source_python_git_inventory(source: Path) -> int:
+    """Require every evaluator Python module to belong to the pinned Git tree.
+
+    A clean ``git status --porcelain`` does not report ignored files. An
+    ignored, executable ``lcb_runner/*.py`` copied into the runtime could
+    otherwise pass source/runtime byte parity without belonging to the
+    independently authenticated source commit.
+    """
+    original = source / "lcb_runner"
+    if not original.is_dir() or original.is_symlink():
+        raise ValueError("original evaluator Python source package missing or linked")
+    tracked_raw = subprocess.check_output(
+        ["git", "-C", str(source), "ls-files", "-z", "--", "lcb_runner"],
+        timeout=15,
+    )
+    tracked = {
+        Path(os.fsdecode(item)).relative_to("lcb_runner")
+        for item in tracked_raw.split(b"\0") if item
+        and Path(os.fsdecode(item)).suffix.lower() == ".py"
+    }
+    actual = {path.relative_to(original) for path in original.rglob("*.py")}
+    if not tracked or tracked != actual:
+        raise ValueError("original evaluator Python files differ from pinned Git inventory")
+    return len(tracked)
+
+
 def verify_runtime_python_sources(source: Path, runtime: Path) -> None:
     """Require matching Python sources and refuse unreviewed executable imports.
 
@@ -273,6 +299,7 @@ def inspect(*, include_canonical: bool = False) -> dict:
         raise ValueError("original LiveCodeBench repository source drift")
     if sha(GENERATOR) != GENERATOR_SHA or sha(EVALUATOR) != EVALUATOR_SHA:
         raise ValueError("generation or evaluation driver source drift")
+    verify_source_python_git_inventory(SOURCE)
     verify_runtime_python_sources(SOURCE, RUNTIME)
     result = checkpoint_consistency(
         DATA, OUT / "gen_q4.jsonl", OUT / "metrics_q4_checkpoint.json",
