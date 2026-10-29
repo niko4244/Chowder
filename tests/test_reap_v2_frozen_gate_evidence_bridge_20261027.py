@@ -323,8 +323,15 @@ def test_optional_mcnemar_ambiguity_does_not_veto_mandatory_v1_fail_fallback(
     monkeypatch.setattr(bridge.reap_select, "evaluate", simulate_complete_frozen_fallback)
     # This test isolates the optional-statistics branch. The separate
     # historical REAP160 native prerequisite has its own adversarial tests.
+    def independently_approved_historical_prerequisite(root_arg, *, forbidden_sessions):
+        assert root_arg == root
+        assert forbidden_sessions == frozenset(
+            json.loads((root / arm / "serve.json").read_text())["eval_session_id"]
+            for arm in bridge.COHORTS
+        )
+
     monkeypatch.setattr(bridge, "_verify_historical_reap160_prerequisite",
-                        lambda root: None)
+                        independently_approved_historical_prerequisite)
     result = bridge.bridge_frozen_evidence(root, obs)
     assert result["status"] == "SOURCE_APPROVED_ORIGINAL_EVIDENCE_EVALUATED"
     assert result["chosen"] == "reap128_v2"
@@ -482,14 +489,24 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
                         native_logs)
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_ITEM_LINEAGE_SHA256",
                         lineage_pins)
-    bridge._verify_historical_reap160_prerequisite(root)
+    bridge._verify_historical_reap160_prerequisite(root, forbidden_sessions=frozenset())
+    # A historical session cannot double as a purported fresh v2 serving
+    # session, even if all five historical arms are mutually distinct and
+    # their original per-item lineage and review hashes were reapproved.
+    bridge._verify_historical_reap160_prerequisite(
+        root, forbidden_sessions=frozenset({"7" * 32}),
+    )
+    with pytest.raises(bridge.FrozenEvidenceError, match="sessions overlap"):
+        bridge._verify_historical_reap160_prerequisite(
+            root, forbidden_sessions=frozenset({sessions["dense_q4"]}),
+        )
     # Even after source reapproval, a forged native response cannot be joined
     # to the original scored row by session and task ID alone.
     trace_path = root / "random128" / "gsm8k.native-lineage.jsonl"
     original_trace = trace_path.read_bytes()
     trace_path.unlink()
     with pytest.raises(bridge.FrozenEvidenceError, match="native item-lineage trace missing"):
-        bridge._verify_historical_reap160_prerequisite(root)
+        bridge._verify_historical_reap160_prerequisite(root, forbidden_sessions=frozenset())
     trace_path.write_bytes(original_trace)
     traces = [json.loads(line) for line in original_trace.splitlines()]
     traces[0]["native_response_sha256"] = "0" * 64
@@ -500,29 +517,29 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
     _write(path, review)
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
     with pytest.raises(bridge.FrozenEvidenceError, match="native item-lineage disagrees"):
-        bridge._verify_historical_reap160_prerequisite(root)
+        bridge._verify_historical_reap160_prerequisite(root, forbidden_sessions=frozenset())
     trace_path.write_bytes(original_trace)
     lineage_pins["random128/gsm8k"] = _sha(trace_path)
     review["arms"]["random128"]["item_lineage_sha256"]["gsm8k"] = _sha(trace_path)
     _write(path, review)
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
-    bridge._verify_historical_reap160_prerequisite(root)
+    bridge._verify_historical_reap160_prerequisite(root, forbidden_sessions=frozenset())
     # Historical Q8 reference/control arms are not interchangeable with a
     # self-reported REAP160 success. Every comparator needs its own source pin.
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_MODEL_SHA256",
                         {k: v for k, v in models.items() if k != "random128"})
     with pytest.raises(bridge.FrozenEvidenceError, match="source-owned approval"):
-        bridge._verify_historical_reap160_prerequisite(root)
+        bridge._verify_historical_reap160_prerequisite(root, forbidden_sessions=frozenset())
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_MODEL_SHA256", models)
     review["arms"]["random128"]["physical_host_sha256"] = "0" * 64
     _write(path, review)
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
     with pytest.raises(bridge.FrozenEvidenceError, match="Q8 quality comparator host"):
-        bridge._verify_historical_reap160_prerequisite(root)
+        bridge._verify_historical_reap160_prerequisite(root, forbidden_sessions=frozenset())
     review["arms"]["random128"]["physical_host_sha256"] = "a" * 64
     _write(path, review)
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
-    bridge._verify_historical_reap160_prerequisite(root)
+    bridge._verify_historical_reap160_prerequisite(root, forbidden_sessions=frozenset())
     # A separately SHA-approved log cannot contradict the declared offload
     # count; the actual original startup text must be parsed, not merely pinned.
     native_log = root / "reap160_q4" / "server.log"
@@ -536,7 +553,7 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256",
                         dict(native_logs))
     with pytest.raises(bridge.FrozenEvidenceError, match="native fit/offload log disagrees"):
-        bridge._verify_historical_reap160_prerequisite(root)
+        bridge._verify_historical_reap160_prerequisite(root, forbidden_sessions=frozenset())
     native_log.write_text("llama_params_fit: successfully fit\n"
                           "llama_params_fit: n_cpu_moe = 0\n", encoding="utf-8")
     native_logs["reap160_q4"] = _sha(native_log)
@@ -546,7 +563,7 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_SPEED_SERVER_LOG_SHA256",
                         dict(native_logs))
     with pytest.raises(bridge.FrozenEvidenceError, match="native fit/offload log disagrees"):
-        bridge._verify_historical_reap160_prerequisite(root)
+        bridge._verify_historical_reap160_prerequisite(root, forbidden_sessions=frozenset())
     native_log.write_text("llama_params_fit: successfully fit\n"
                           "llama_model_load: offloaded 40/40 layers to GPU\n", encoding="utf-8")
     native_logs["reap160_q4"] = _sha(native_log)
@@ -570,7 +587,7 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
     monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
                         reap_select._input_digests(root, obs, None, None))
     with pytest.raises(bridge.FrozenEvidenceError, match="per-item serving session mismatch"):
-        bridge._verify_historical_reap160_prerequisite(root)
+        bridge._verify_historical_reap160_prerequisite(root, forbidden_sessions=frozenset())
     rows[0].pop("eval_session_id")
     rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     summary["gsm8k"]["file_sha256"] = _sha(rows_path)
@@ -584,7 +601,7 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
     _write(path, review)
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
     with pytest.raises(bridge.FrozenEvidenceError, match="speed comparator host"):
-        bridge._verify_historical_reap160_prerequisite(root)
+        bridge._verify_historical_reap160_prerequisite(root, forbidden_sessions=frozenset())
     review["arms"]["dense_q4"]["physical_host_sha256"] = "a" * 64
     _write(path, review)
     monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_REAP160_REVIEW_SHA256", _sha(path))
@@ -598,7 +615,7 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
     monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
                         reap_select._input_digests(root, obs, None, None))
     with pytest.raises(bridge.FrozenEvidenceError, match="fit/offload receipt invalid"):
-        bridge._verify_historical_reap160_prerequisite(root)
+        bridge._verify_historical_reap160_prerequisite(root, forbidden_sessions=frozenset())
     bad_serve["experts_offloaded"] = bad_serve["measured_experts_offloaded"] = 0
     _write(serve_path, bad_serve)
     monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
@@ -606,7 +623,7 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
     with (root / "reap160_q4" / "gsm8k.jsonl").open("a", encoding="utf-8") as stream:
         stream.write('{"id":"gsm8k-0","correct":true}\n')
     with pytest.raises(bridge.FrozenEvidenceError, match="rows not independently bound"):
-        bridge._verify_historical_reap160_prerequisite(root)
+        bridge._verify_historical_reap160_prerequisite(root, forbidden_sessions=frozenset())
 
 
 def test_malformed_independent_rows_digest_map_fails_closed(synthetic, monkeypatch):

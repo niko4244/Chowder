@@ -265,7 +265,9 @@ def _verify_historical_item_lineage(
                  f"{key}/{task_id}: original native item-lineage disagrees with score")
 
 
-def _verify_historical_reap160_prerequisite(root: Path) -> None:
+def _verify_historical_reap160_prerequisite(
+    root: Path, *, forbidden_sessions: frozenset[str],
+) -> None:
     """Require separately pinned native REAP160 evidence before v2 fallback selection.
 
     The original frozen selector legitimately computes from historical rows;
@@ -428,6 +430,14 @@ def _verify_historical_reap160_prerequisite(root: Path) -> None:
              == review["arms"]["dense_q4"]["hardware_profile_sha256"]
              and len({review["arms"][arm]["session_id"] for arm in arms}) == len(arms),
              "historical REAP160/dense Q4 speed comparator host or sessions differ")
+    # Separate historical and v2 reviewers each prove internal uniqueness,
+    # but neither alone proves that a purported *fresh* v2 measurement did
+    # not replay an older REAP160/dense/random serving session. In particular,
+    # dense_q4 and dense_v2_q4 may share model bytes but must not share the
+    # same evaluation session for the required fresh speed comparison.
+    historical_sessions = {review["arms"][arm]["session_id"] for arm in arms}
+    _require(not (historical_sessions & forbidden_sessions),
+             "historical REAP160 and fresh v2 serving sessions overlap")
 
 
 def _verify_original_sessions(root: Path, review: dict) -> dict[str, dict]:
@@ -739,7 +749,11 @@ def bridge_frozen_evidence(
                 # The frozen mandatory fallback requires BOTH v2 and REAP160
                 # to be genuinely scored, not just the winning v2 arm. A
                 # synthetic or unreviewed REAP160 row set cannot satisfy it.
-                _verify_historical_reap160_prerequisite(root)
+                _verify_historical_reap160_prerequisite(
+                    root, forbidden_sessions=frozenset(
+                        item["session_id"] for item in serving.values()
+                    ),
+                )
         return {
             "schema": SCHEMA, "status": "SOURCE_APPROVED_ORIGINAL_EVIDENCE_EVALUATED",
             "gate0": gates["gate0"]["status"],
