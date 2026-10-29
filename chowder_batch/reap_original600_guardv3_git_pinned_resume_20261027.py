@@ -9,12 +9,14 @@ is read-only; --execute is required to load the original model.
 from __future__ import annotations
 
 import argparse
+import csv
 import ctypes
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import socket
+import subprocess
 import sys
 
 from chowder_batch import reap_original600_guardv3_git_pinned_reader_20261027 as reader
@@ -78,6 +80,42 @@ def competing_model_processes() -> list[dict[str, object]]:
     except psutil.Error as exc:
         raise ValueError("native process enumeration unavailable") from exc
     return competing
+
+
+def gpu_python_compute_owners() -> list[dict[str, object]]:
+    """Refuse unrelated Python CUDA owners missed by command-line heuristics.
+
+    WDDM's GPU-process inventory includes graphical desktop applications and
+    sometimes inaccessible system processes. It does *not* provide reliable
+    per-process VRAM accounting. We therefore use its PID/name observations
+    only as an additional veto for identifiable model/Python executables,
+    never as evidence of free VRAM or as a replacement for native floors.
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,process_name",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=8, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("NVIDIA GPU process inventory unavailable") from exc
+    if result.returncode:
+        raise ValueError("NVIDIA GPU process inventory unavailable")
+    owners: dict[int, dict[str, object]] = {}
+    for row in csv.reader(result.stdout.splitlines()):
+        if len(row) != 2 or not row[0].strip().isdecimal():
+            raise ValueError("malformed NVIDIA GPU process inventory")
+        pid = int(row[0].strip())
+        if pid <= 0:
+            raise ValueError("invalid NVIDIA GPU process identity")
+        if pid == os.getpid():
+            continue
+        name = PureWindowsPath(row[1].strip()).name.lower()
+        if (re.fullmatch(r"python(?:w|\d+(?:\.\d+)?)?\.exe", name)
+                or name in ("llama-server.exe", "llama_server.exe",
+                            "ollama.exe", "vllm.exe", "torchrun.exe")):
+            owners[pid] = {"pid": pid, "name": name}
+    return [owners[pid] for pid in sorted(owners)]
 
 
 def occupied_native_ports(ports: tuple[int, ...] = PORTS) -> list[int]:
@@ -146,6 +184,9 @@ def preflight(max_new: int) -> tuple[dict, object | None]:
     processes = competing_model_processes()
     if processes:
         blockers.append("OTHER_NATIVE_MODEL_SERVER_ACTIVE")
+    gpu_owners = gpu_python_compute_owners()
+    if gpu_owners:
+        blockers.append("OTHER_GPU_COMPUTE_PYTHON_ACTIVE")
     ports = occupied_native_ports()
     if ports:
         blockers.append("NATIVE_PORT_OCCUPIED")
@@ -166,6 +207,7 @@ def preflight(max_new: int) -> tuple[dict, object | None]:
         "active_unscored_indices": evidence["active_unscored_indices"],
         "max_new": max_new,
         "blockers": blockers, "competing_model_processes": processes,
+        "gpu_python_compute_owners": gpu_owners,
         "occupied_ports": ports, "native_prestart": resource,
         "model_executed": False, "frozen_four_slot_eligible": False,
         "gen0_status": "BLOCKED", "chosen": None,
@@ -179,7 +221,8 @@ def run(*, execute: bool, max_new: int) -> dict:
         return report
     # Recheck the volatile ownership evidence immediately before the original
     # runner performs its own native admission and immutable source validation.
-    if competing_model_processes() or occupied_native_ports():
+    if (competing_model_processes() or gpu_python_compute_owners()
+            or occupied_native_ports()):
         raise ValueError("native process or port ownership changed before execution")
     runner._native_prestart(reader.ROOT, bypass_conservative=False)
     result = runner.run(reader.ROOT, execute=True, max_new=max_new,

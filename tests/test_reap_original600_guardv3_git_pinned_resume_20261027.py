@@ -26,6 +26,7 @@ def _fake(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     monkeypatch.setattr(resume.reader, "ROOT", tmp_path)
     (tmp_path / "owner.json").write_text("fixture", encoding="utf-8")
     monkeypatch.setattr(resume, "competing_model_processes", lambda: [])
+    monkeypatch.setattr(resume, "gpu_python_compute_owners", lambda: [])
     monkeypatch.setattr(resume, "occupied_native_ports", lambda: [])
 
     def prestart(*_args, **kwargs):
@@ -182,6 +183,64 @@ def test_spark_gpu_owner_refuses_even_with_ample_physical_resources(
     assert result["status"] == "REFUSED_NATIVE_ADMISSION"
     assert "OTHER_NATIVE_MODEL_SERVER_ACTIVE" in result["blockers"]
     assert result["native_prestart"]["gpu_free_mib"] == 15000
+
+
+def test_unrecognized_python_cuda_owner_refuses_despite_free_ports_and_memory(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _fake(monkeypatch, tmp_path)
+    monkeypatch.setattr(resume, "gpu_python_compute_owners", lambda: [
+        {"pid": 4321, "name": "python.exe"}])
+    report, _ = resume.preflight(1)
+    assert report["status"] == "REFUSED_NATIVE_ADMISSION"
+    assert "OTHER_GPU_COMPUTE_PYTHON_ACTIVE" in report["blockers"]
+    assert report["gpu_python_compute_owners"] == [{"pid": 4321, "name": "python.exe"}]
+
+
+def test_unrecognized_python_cuda_owner_race_refuses_execution(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    runner = _fake(monkeypatch, tmp_path)
+    owners = iter([[], [{"pid": 4321, "name": "python.exe"}]])
+    monkeypatch.setattr(resume, "gpu_python_compute_owners", lambda: next(owners))
+    runner.run = lambda *_args, **_kwargs: pytest.fail("GPU must not load")
+    with pytest.raises(ValueError, match="ownership changed"):
+        resume.run(execute=True, max_new=1)
+
+
+def test_nvidia_gpu_inventory_identifies_arbitrary_python_cuda_process(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    def observe(*args, **kwargs):
+        assert args[0][1] == "--query-compute-apps=pid,process_name"
+        assert kwargs["timeout"] == 8
+        return SimpleNamespace(returncode=0, stdout=(
+            '4321, C:\\Python311\\python.exe\n'
+            '4322, C:\\Windows\\explorer.exe\n'
+            '4323, C:\\Users\\me\\python3.13.exe\n'
+            '4324, [Insufficient Permissions]\n'
+            '4321, C:\\Python311\\python.exe\n'))
+
+    monkeypatch.setattr(resume.subprocess, "run", observe)
+    assert resume.gpu_python_compute_owners() == [
+        {"pid": 4321, "name": "python.exe"},
+        {"pid": 4323, "name": "python3.13.exe"},
+    ]
+
+
+@pytest.mark.parametrize("output", ["not a process\n", "0, python.exe\n",
+                                            "4321\n", "4321, python.exe, extra\n"])
+def test_malformed_gpu_inventory_fails_closed(
+        monkeypatch: pytest.MonkeyPatch, output: str) -> None:
+    monkeypatch.setattr(resume.subprocess, "run", lambda *_args, **_kwargs:
+                        SimpleNamespace(returncode=0, stdout=output))
+    with pytest.raises(ValueError, match="NVIDIA GPU process"):
+        resume.gpu_python_compute_owners()
+
+
+def test_unavailable_gpu_inventory_fails_closed(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(resume.subprocess, "run", lambda *_args, **_kwargs:
+                        SimpleNamespace(returncode=1, stdout=""))
+    with pytest.raises(ValueError, match="NVIDIA GPU process inventory unavailable"):
+        resume.gpu_python_compute_owners()
 
 
 def test_process_inventory_access_failure_is_not_free_gpu(
