@@ -189,6 +189,9 @@ def parse_native_lifecycles(raw: bytes, *, expected_n: int = N) -> dict:
             task: (record["eval"][1], record["eval"][2])
             for task, record in events.items()
         },
+        "per_task_declared_prompt_tokens": {
+            task: record["new"][1] for task, record in events.items()
+        },
     }
 
 
@@ -244,7 +247,33 @@ def bind_archived_rows_to_native_timings(
         raise NativeWitnessError("native timing fingerprint lacks complete row coverage")
     canonical = json.dumps(bound, sort_keys=True, separators=(",", ":")).encode()
     return {"n": len(bound), "unique_native_tasks": len(used_tasks),
-            "mapping_sha256": hashlib.sha256(canonical).hexdigest()}
+            "mapping_sha256": hashlib.sha256(canonical).hexdigest(),
+            "row_to_native_task": bound}
+
+
+def bind_canonical_prompts_across_arms(
+    per_arm: dict[str, dict[str, int]],
+) -> dict:
+    """Compare independently timing-bound native prompt lengths per canonical id.
+
+    This detects swapped or inconsistent prompts that aggregate token multisets
+    cannot detect. Equal token lengths still cannot prove equal prompt text.
+    """
+    if set(per_arm) != {"q4", "q8"}:
+        raise NativeWitnessError("missing original prompt arm")
+    q4, q8 = per_arm["q4"], per_arm["q8"]
+    expected = {f"gsm8k-{i}" for i in range(1319)} | {
+        f"HumanEval/{i}" for i in range(164)
+    }
+    if set(q4) != expected or set(q8) != expected:
+        raise NativeWitnessError("cross-arm native prompt population mismatch")
+    if any(type(value) is not int or value <= 0 for arm in per_arm.values()
+           for value in arm.values()):
+        raise NativeWitnessError("invalid cross-arm native prompt length")
+    if q4 != q8:
+        raise NativeWitnessError("per-item original native prompt lengths disagree")
+    canonical = json.dumps(q4, sort_keys=True, separators=(",", ":")).encode()
+    return {"n": len(q4), "per_item_prompt_length_sha256": hashlib.sha256(canonical).hexdigest()}
 
 
 def human_completion_tokens(raw: bytes, session: str) -> Counter:
@@ -280,6 +309,7 @@ def verify_original_native_log_pair() -> dict:
     """Source-pinned aggregate witness only, never a frozen-gate certificate."""
     canonical = grade.load_canonical()
     prompts = {}
+    per_item_prompts = {}
     results = {}
     for arm, pinned in ARMS.items():
         source = pair.ARMS[arm]
@@ -323,6 +353,10 @@ def verify_original_native_log_pair() -> dict:
         native_row_binding = bind_archived_rows_to_native_timings(
             (gsm_raw, human_raw), parsed["per_task_eval_timing"]
         )
+        per_item_prompts[arm] = {
+            ident: parsed["per_task_declared_prompt_tokens"][task]
+            for ident, task in native_row_binding["row_to_native_task"].items()
+        }
         gsm_tokens = Counter(pair._json(line)["completion_tokens"] for line in gsm_raw.splitlines())
         if parsed["completion_tokens"] != gsm_tokens + human_tokens:
             raise NativeWitnessError("native per-request token multiset differs from archived rows")
@@ -352,10 +386,16 @@ def verify_original_native_log_pair() -> dict:
         }
     if prompts["q4"] != prompts["q8"]:
         raise NativeWitnessError("original Q4/Q8 native prompt-token multisets differ")
+    per_item_prompt_witness = bind_canonical_prompts_across_arms(per_item_prompts)
     return {
         "schema": "chowder.reap-original-linux-native-log-aggregate-witness.v1",
         "arms": results,
         "same_canonical_prompt_token_multiset": True,
+        "same_per_item_native_prompt_lengths": True,
+        "same_per_item_native_prompt_lengths_n": per_item_prompt_witness["n"],
+        "same_per_item_native_prompt_lengths_sha256": (
+            per_item_prompt_witness["per_item_prompt_length_sha256"]
+        ),
         "native_server_request_and_token_accounting_correlated": True,
         "per_item_native_timing_fingerprints_uniquely_correlated": True,
         "per_item_native_response_text_authenticated": False,

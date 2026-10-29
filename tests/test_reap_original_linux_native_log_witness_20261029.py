@@ -63,6 +63,7 @@ def test_interleaved_complete_lifecycles() -> None:
     assert result["cold_first_slot_requests"] is True
     assert result["max_simultaneously_active_slots"] == 3
     assert result["native_releases"] == 3
+    assert result["per_task_declared_prompt_tokens"] == {1: 108, 2: 78, 3: 100}
 
 
 def test_concurrent_requests_cannot_share_one_native_slot() -> None:
@@ -111,6 +112,40 @@ def test_unique_per_item_native_timing_fingerprint() -> None:
     )
     assert result["n"] == result["unique_native_tasks"] == 2
     assert len(result["mapping_sha256"]) == 64
+    assert result["row_to_native_task"] == {"case/a": 11, "case/b": 12}
+
+
+def _canonical_prompt_lengths() -> dict[str, int]:
+    return {**{f"gsm8k-{i}": 50 + (i % 19) for i in range(1319)},
+            **{f"HumanEval/{i}": 100 + (i % 13) for i in range(164)}}
+
+
+def test_cross_arm_per_item_native_prompt_length_binding() -> None:
+    q4 = _canonical_prompt_lengths()
+    result = witness.bind_canonical_prompts_across_arms({"q4": q4, "q8": q4.copy()})
+    assert result["n"] == 1483
+    assert len(result["per_item_prompt_length_sha256"]) == 64
+
+
+def test_cross_arm_equal_aggregate_prompt_multiset_but_swapped_items_refused() -> None:
+    q4 = _canonical_prompt_lengths()
+    q8 = q4.copy()
+    q8["gsm8k-0"], q8["gsm8k-1"] = q8["gsm8k-1"], q8["gsm8k-0"]
+    assert sorted(q4.values()) == sorted(q8.values())
+    with pytest.raises(witness.NativeWitnessError, match="per-item.*disagree"):
+        witness.bind_canonical_prompts_across_arms({"q4": q4, "q8": q8})
+
+
+def test_cross_arm_missing_or_noncanonical_prompt_identity_refused() -> None:
+    q4 = _canonical_prompt_lengths()
+    q8 = q4.copy()
+    q8["gsm8k-0"] = q8.pop("gsm8k-1")
+    with pytest.raises(witness.NativeWitnessError, match="population mismatch"):
+        witness.bind_canonical_prompts_across_arms({"q4": q4, "q8": q8})
+    q8 = q4.copy()
+    q8["forged-id"] = q8.pop("gsm8k-0")
+    with pytest.raises(witness.NativeWitnessError, match="population mismatch"):
+        witness.bind_canonical_prompts_across_arms({"q4": q4, "q8": q8})
 
 
 def test_native_timing_collision_refused_even_with_matching_token_total() -> None:
@@ -287,6 +322,11 @@ def test_live_pinned_native_logs_match_archived_rows_without_inference() -> None
     )
     assert result["per_item_native_timing_fingerprints_uniquely_correlated"] is True
     assert result["same_canonical_prompt_token_multiset"] is True
+    assert result["same_per_item_native_prompt_lengths"] is True
+    assert result["same_per_item_native_prompt_lengths_n"] == 1483
+    assert result["same_per_item_native_prompt_lengths_sha256"] == (
+        "c11f1973905352303f6890e4ec5781e3776a89aacbd46281a881f2f92811e8b0"
+    )
     assert result["per_item_native_response_text_authenticated"] is False
     assert result["independent_cryptographic_execution_witness"] is False
     assert result["frozen_windows_gate1_qualified"] is False

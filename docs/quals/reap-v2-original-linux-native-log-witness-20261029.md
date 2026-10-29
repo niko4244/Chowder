@@ -34,6 +34,7 @@ rejects an interleaving that passed the earlier per-task-only order check.
 | Later requests reusing 11 prompt tokens | 1,479 | 1,479 |
 | Native prompt tokens saved by reuse | 16,269 | 16,269 |
 | Individually unique archived-row/native-task timing fingerprints | **1,483/1,483** | **1,483/1,483** |
+| Native prompt-token lengths equal for the **same canonical item** across arms | **1,483/1,483** | **1,483/1,483** |
 
 Each archived row's `completion_tokens` and full-precision
 `predicted_per_second` determine its native generation duration as
@@ -55,6 +56,14 @@ signed native execution attestations or replacements for original evidence.
 Both original arms also have identical **prompt-token multisets**, consistent
 with their shared canonical task population. Concurrent slot scheduling
 changes the ordering of requests; no positional correspondence is assumed.
+The verifier now follows each archived row's unique timing match back to its
+native task's declared prompt-token count, checks all 1,319 canonical `gsm8k-N`
+and 164 `HumanEval/N` identities, and requires **per-item** prompt lengths to
+match between Q4 and Q8. The sorted per-item length-map SHA-256 is
+`c11f1973905352303f6890e4ec5781e3776a89aacbd46281a881f2f92811e8b0`.
+An adversarial swap of two item lengths preserves the aggregate multiset but
+is now rejected. Identical lengths do **not** establish identical prompt text,
+tokenizer content, or authenticated HTTP request bytes.
 The per-request prompt-cache deficit is exactly zero on the first request in
 each of four slots and exactly 11 tokens on every subsequent request. The
 auditor rejects any different cache-deficit distribution, even if the aggregate
