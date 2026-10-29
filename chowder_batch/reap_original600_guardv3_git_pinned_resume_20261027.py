@@ -53,12 +53,23 @@ def competing_model_processes() -> list[dict[str, object]]:
                 argv = [str(x).lower() for x in (info.get("cmdline") or [])]
                 # Shell commands can *mention* llama-server in their text;
                 # that does not make bash/pwsh a native model server.
-                vllm_python = (name.startswith("python") and
+                python_process = name.startswith("python")
+                vllm_python = (python_process and
                                (any("vllm.entrypoints" in x for x in argv)
                                 or any(argv[i:i + 2] == ["-m", "vllm"]
                                        for i in range(len(argv) - 1))))
+                # An unrelated GPU evaluation can use Python directly, without
+                # a llama-server or vLLM executable. In particular, the Spark
+                # harness is an active CUDA owner even when ports 8892/8894
+                # are free. Ollama's parent `serve` process is also an owner;
+                # `ollama list` and shell text mentioning these names are not.
+                spark_python = (python_process and any(
+                    x.replace("\\", "/").endswith("harness/run_eval.py")
+                    for x in argv[1:]))
+                ollama_serve = (name in ("ollama.exe", "ollama") and
+                                "serve" in argv[1:])
                 if ("llama-server" in name or "llama_server" in name
-                        or vllm_python):
+                        or vllm_python or spark_python or ollama_serve):
                     competing.append({"pid": info["pid"], "name": name})
             except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 continue

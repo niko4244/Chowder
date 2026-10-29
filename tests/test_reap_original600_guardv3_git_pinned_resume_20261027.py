@@ -150,6 +150,40 @@ def test_shell_mention_is_not_a_model_server(
     ]
 
 
+def test_protected_spark_and_ollama_gpu_owners_are_detected(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    entries = [
+        SimpleNamespace(info={"pid": 201, "name": "python.exe",
+                              "cmdline": ["python", "harness/run_eval.py",
+                                          "--model", "base"]}),
+        SimpleNamespace(info={"pid": 202, "name": "ollama.exe",
+                              "cmdline": ["C:/Ollama/ollama.exe", "serve"]}),
+        SimpleNamespace(info={"pid": 203, "name": "ollama.exe",
+                              "cmdline": ["ollama", "list"]}),
+        SimpleNamespace(info={"pid": 204, "name": "pwsh.exe",
+                              "cmdline": ["pwsh", "-c", "python harness/run_eval.py"]}),
+        SimpleNamespace(info={"pid": 205, "name": "python.exe",
+                              "cmdline": ["python", "I:\\spark-enh\\harness\\run_eval.py"]}),
+    ]
+    monkeypatch.setattr(psutil, "process_iter", lambda **_kwargs: iter(entries))
+    assert resume.competing_model_processes() == [
+        {"pid": 201, "name": "python.exe"},
+        {"pid": 202, "name": "ollama.exe"},
+        {"pid": 205, "name": "python.exe"},
+    ]
+
+
+def test_spark_gpu_owner_refuses_even_with_ample_physical_resources(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _fake(monkeypatch, tmp_path)
+    monkeypatch.setattr(resume, "competing_model_processes", lambda: [
+        {"pid": 201, "name": "python.exe"}])
+    result, _ = resume.preflight(1)
+    assert result["status"] == "REFUSED_NATIVE_ADMISSION"
+    assert "OTHER_NATIVE_MODEL_SERVER_ACTIVE" in result["blockers"]
+    assert result["native_prestart"]["gpu_free_mib"] == 15000
+
+
 def test_process_inventory_access_failure_is_not_free_gpu(
         monkeypatch: pytest.MonkeyPatch) -> None:
     def deny(**_kwargs):
