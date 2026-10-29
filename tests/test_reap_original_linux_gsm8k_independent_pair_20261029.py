@@ -39,6 +39,12 @@ def test_synthetic_complete_regrades_independently(canonical, synthetic_rows):
     assert result["native_request_and_response_lineage_authenticated"] is False
 
 
+def test_rejects_valid_first200_prefix_in_full_linux_pair(canonical, synthetic_rows):
+    """A canonical 200-prefix is valid for a different audit, not this one."""
+    with pytest.raises(pair.IndependentPairError, match="full 1319"):
+        pair.regrade_rows(_raw(synthetic_rows[:200]), canonical, "source-bound-session")
+
+
 @pytest.mark.parametrize("mutation", [
     "wrong_session", "wrong_correct", "wrong_trigram", "wrong_id",
     "wrong_text", "wrong_termination", "bad_tokens", "bad_seconds",

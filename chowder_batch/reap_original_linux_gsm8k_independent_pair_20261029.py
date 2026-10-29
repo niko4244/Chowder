@@ -122,6 +122,11 @@ def regrade_rows(raw: bytes, canonical: tuple[tuple[str, str, str], ...],
         summary = grade.verify_rows(rows, canonical)
     except grade.IndependentGradeError as exc:
         raise IndependentPairError("independent canonical answer regrading failed") from exc
+    # The shared canonical grader intentionally also supports a first-200
+    # cohort. This original Linux paired verifier does NOT: its two arms and
+    # paired publication are full 1,319-item populations only.
+    if summary["n"] != grade.FROZEN_GSM8K_N:
+        raise IndependentPairError("original Linux paired cohort is not full 1319")
     return {**summary, "tokens": tokens,
             "correct_by_id": {ident: row["correct"] for ident, row in rows.items()}}
 
