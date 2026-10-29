@@ -12,7 +12,9 @@ per-item native response attribution and frozen Gen-0 gates remain UNPROVEN.
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
+from decimal import Decimal, InvalidOperation
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -63,13 +65,14 @@ ARMS = {
     },
 }
 _SLOT = re.compile(
-    r"\bslot\s+(operator\(\)|print_timing): id\s+(\d+)"
+    r"\bslot\s+(operator\(\)|print_timing|release): id\s+(\d+)"
     r"\s+\| task (\d+) \| (.*)$"
 )
 _NEW = re.compile(
     r"new prompt, n_ctx_slot = (\d+), n_keep = (\d+), task\.n_tokens = (\d+)$"
 )
 _TIME = re.compile(r"(prompt eval time|eval time) =\s+([0-9.]+) ms /\s+(\d+) tokens.*$")
+_RELEASE = re.compile(r"stop processing: n_tokens = (\d+), truncated = ([01])$")
 
 
 class NativeWitnessError(ValueError):
@@ -77,19 +80,24 @@ class NativeWitnessError(ValueError):
 
 
 def parse_native_lifecycles(raw: bytes, *, expected_n: int = N) -> dict:
-    """Reconstruct one prompt, prompt evaluation and generation per task id."""
+    """Reconstruct prompt, generation and actual slot-release per task id."""
     try:
         lines = raw.decode("utf-8").splitlines()
     except UnicodeError as exc:
         raise NativeWitnessError("native log is not UTF-8") from exc
     events: dict[int, dict] = {}
+    active_slots: dict[int, int] = {}
+    seen_tasks: set[int] = set()
+    first_task_per_slot: dict[int, int] = {}
+    peak_active_slots = 0
     for ordinal, line in enumerate(lines):
         match = _SLOT.search(line)
         if not match:
             continue
         operation, slot_text, task_text, detail = match.groups()
         detail = detail.strip()
-        if not (detail.startswith("new prompt") or "eval time =" in detail):
+        if not (detail.startswith("new prompt") or "eval time =" in detail
+                or operation == "release"):
             continue
         task = int(task_text)
         slot = int(slot_text)
@@ -98,7 +106,12 @@ def parse_native_lifecycles(raw: bytes, *, expected_n: int = N) -> dict:
         record = events.setdefault(task, {"slot": slot})
         if record["slot"] != slot:
             raise NativeWitnessError("native task changed GPU serving slot")
-        if detail.startswith("new prompt"):
+        if operation == "release":
+            parsed = _RELEASE.fullmatch(detail)
+            if parsed is None or parsed.group(2) != "0":
+                raise NativeWitnessError("native release malformed or truncated")
+            kind, value = "release", int(parsed.group(1))
+        elif detail.startswith("new prompt"):
             parsed = _NEW.fullmatch(detail)
             if operation != "operator()" or parsed is None:
                 raise NativeWitnessError("malformed native new-prompt event")
@@ -119,20 +132,119 @@ def parse_native_lifecycles(raw: bytes, *, expected_n: int = N) -> dict:
             kind = "prompt_eval" if label == "prompt eval time" else "eval"
         if kind in record:
             raise NativeWitnessError("duplicate native task lifecycle event")
-        record[kind] = (ordinal, value)
+        if kind == "new":
+            if task in seen_tasks:
+                raise NativeWitnessError("native task id reused after completion")
+            if slot in active_slots:
+                raise NativeWitnessError("overlapping native requests on one serving slot")
+            seen_tasks.add(task)
+            active_slots[slot] = task
+            first_task_per_slot.setdefault(slot, task)
+            peak_active_slots = max(peak_active_slots, len(active_slots))
+        elif active_slots.get(slot) != task:
+            raise NativeWitnessError(
+                "native timing event out of order or without active matching slot"
+            )
+        if kind == "eval" and "prompt_eval" not in record:
+            raise NativeWitnessError("native generation timing preceded prompt evaluation")
+        if kind == "release":
+            if "eval" not in record:
+                raise NativeWitnessError("native slot released before generation timing")
+            if value != record["new"][1] + record["eval"][1] - 1:
+                raise NativeWitnessError("native release token accounting mismatch")
+            del active_slots[slot]
+        record[kind] = ((ordinal, value, milliseconds)
+                        if kind in ("prompt_eval", "eval") else (ordinal, value))
+    if active_slots:
+        raise NativeWitnessError(
+            "native serving slots left active: incomplete evaluation lifecycle"
+        )
     if len(events) != expected_n:
         raise NativeWitnessError("native server log does not contain the complete cohort")
     for record in events.values():
-        if set(record) != {"slot", "new", "prompt_eval", "eval"}:
+        if set(record) != {"slot", "new", "prompt_eval", "eval", "release"}:
             raise NativeWitnessError("native request lacks a complete evaluation lifecycle")
-        if not record["new"][0] < record["prompt_eval"][0] < record["eval"][0]:
+        if not (record["new"][0] < record["prompt_eval"][0]
+                < record["eval"][0] < record["release"][0]):
             raise NativeWitnessError("native task lifecycle is out of order")
+        if record["prompt_eval"][1] > record["new"][1]:
+            raise NativeWitnessError("native prompt evaluation exceeds declared prompt")
+    saved = Counter(
+        record["new"][1] - record["prompt_eval"][1] for record in events.values()
+    )
+    cold_first_slots = all(
+        events[task]["new"][1] == events[task]["prompt_eval"][1]
+        for task in first_task_per_slot.values()
+    )
     return {
         "n": len(events),
         "new_prompt_tokens": Counter(record["new"][1] for record in events.values()),
         "prompt_eval_tokens": sum(record["prompt_eval"][1] for record in events.values()),
         "completion_tokens": Counter(record["eval"][1] for record in events.values()),
+        "native_releases": sum("release" in record for record in events.values()),
+        "cached_prompt_savings": saved,
+        "cold_first_slot_requests": cold_first_slots,
+        "max_simultaneously_active_slots": peak_active_slots,
+        "per_task_eval_timing": {
+            task: (record["eval"][1], record["eval"][2])
+            for task, record in events.items()
+        },
     }
+
+
+def bind_archived_rows_to_native_timings(
+    raw_rows: tuple[bytes, bytes], native: dict[int, tuple[int, str]],
+) -> dict:
+    """Unique numeric timing fingerprint; never authenticates response text.
+
+    The archived llama-server response's predicted_per_second and the native
+    server's independently pinned eval milliseconds encode the same duration.
+    The native log rounds milliseconds to two decimal places, so matching uses
+    a conservative 0.0051 ms rounding interval. This is correlation, not a
+    signed request/response transcript.
+    """
+    by_tokens: dict[int, list[tuple[int, Decimal]]] = defaultdict(list)
+    for task, (tokens, milliseconds) in native.items():
+        try:
+            elapsed = Decimal(milliseconds)
+        except (InvalidOperation, TypeError) as exc:
+            raise NativeWitnessError("invalid native per-task evaluation time") from exc
+        if tokens < 2 or not elapsed.is_finite() or elapsed <= 0:
+            raise NativeWitnessError("invalid native per-task timing fingerprint")
+        by_tokens[tokens].append((task, elapsed))
+    bound: dict[str, int] = {}
+    used_tasks: set[int] = set()
+    for raw in raw_rows:
+        for line in raw.splitlines():
+            row = pair._json(line)
+            ident = row.get("id")
+            tokens = row.get("completion_tokens")
+            rate = row.get("predicted_per_second")
+            if (type(ident) is not str or ident in bound or type(tokens) is not int
+                    or tokens < 2 or type(rate) not in (int, float)):
+                raise NativeWitnessError("invalid archived native timing fingerprint")
+            try:
+                predicted_rate = Decimal(str(rate))
+                if not predicted_rate.is_finite() or predicted_rate <= 0:
+                    raise NativeWitnessError("nonpositive archived prediction rate")
+                elapsed = Decimal(tokens - 1) * 1000 / predicted_rate
+            except (InvalidOperation, ZeroDivisionError) as exc:
+                raise NativeWitnessError("invalid archived prediction rate") from exc
+            matches = [
+                task for task, native_ms in by_tokens.get(tokens, ())
+                if abs(native_ms - elapsed) <= Decimal("0.0051")
+            ]
+            if len(matches) != 1 or matches[0] in used_tasks:
+                raise NativeWitnessError(
+                    "archived row lacks unique unused native timing fingerprint"
+                )
+            bound[ident] = matches[0]
+            used_tasks.add(matches[0])
+    if used_tasks != set(native):
+        raise NativeWitnessError("native timing fingerprint lacks complete row coverage")
+    canonical = json.dumps(bound, sort_keys=True, separators=(",", ":")).encode()
+    return {"n": len(bound), "unique_native_tasks": len(used_tasks),
+            "mapping_sha256": hashlib.sha256(canonical).hexdigest()}
 
 
 def human_completion_tokens(raw: bytes, session: str) -> Counter:
@@ -199,10 +311,18 @@ def verify_original_native_log_pair() -> dict:
         if native.get("server_log_bytes") != len(log_raw):
             raise NativeWitnessError("native server-log length does not match receipt")
         parsed = parse_native_lifecycles(log_raw)
+        if (parsed["cached_prompt_savings"] != Counter({0: 4, 11: 1479})
+                or not parsed["cold_first_slot_requests"]
+                or parsed["max_simultaneously_active_slots"] != 4
+                or parsed["native_releases"] != N):
+            raise NativeWitnessError("original four-slot prompt-cache accounting drift")
         gsm_raw = pair._read_pinned(source["rows"], source["rows_sha"], 8 * 1024 * 1024)
         gsm = pair.regrade_rows(gsm_raw, canonical, source["session"])
         human_raw = pair._read_pinned(pinned["human"], pinned["human_sha"], 2 * 1024 * 1024)
         human_tokens = human_completion_tokens(human_raw, source["session"])
+        native_row_binding = bind_archived_rows_to_native_timings(
+            (gsm_raw, human_raw), parsed["per_task_eval_timing"]
+        )
         gsm_tokens = Counter(pair._json(line)["completion_tokens"] for line in gsm_raw.splitlines())
         if parsed["completion_tokens"] != gsm_tokens + human_tokens:
             raise NativeWitnessError("native per-request token multiset differs from archived rows")
@@ -217,6 +337,13 @@ def verify_original_native_log_pair() -> dict:
             "native_generation_tokens": sum(parsed["completion_tokens"].elements()),
             "native_prompt_evaluated_tokens": parsed["prompt_eval_tokens"],
             "native_declared_prompt_tokens": sum(parsed["new_prompt_tokens"].elements()),
+            "native_cold_prompt_requests": parsed["cached_prompt_savings"][0],
+            "native_cached_prompt_requests": parsed["cached_prompt_savings"][11],
+            "native_cached_prompt_tokens_saved": 11 * parsed["cached_prompt_savings"][11],
+            "native_slot_overlap_refused": True,
+            "native_nontruncated_slot_releases": parsed["native_releases"],
+            "native_archived_rows_uniquely_timing_correlated": native_row_binding["n"],
+            "native_archived_timing_mapping_sha256": native_row_binding["mapping_sha256"],
             "archived_gsm8k_items": gsm["n"],
             "archived_humaneval_items": sum(human_tokens.values()),
             "native_server_log_sha256": pinned["log_sha"],
@@ -230,6 +357,7 @@ def verify_original_native_log_pair() -> dict:
         "arms": results,
         "same_canonical_prompt_token_multiset": True,
         "native_server_request_and_token_accounting_correlated": True,
+        "per_item_native_timing_fingerprints_uniquely_correlated": True,
         "per_item_native_response_text_authenticated": False,
         "independent_cryptographic_execution_witness": False,
         "frozen_windows_gate1_qualified": False,
