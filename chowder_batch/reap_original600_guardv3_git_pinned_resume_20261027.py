@@ -9,6 +9,7 @@ is read-only; --execute is required to load the original model.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import csv
 import ctypes
 import json
@@ -25,6 +26,51 @@ SCHEMA = "chowder.reap-original600-guardv3-source-locked-resume.v1"
 RUNNER_MODULE = "chowder_batch.reap_q4_automationbench_full600_resumable_20261027"
 PORTS = (8892, 8894)
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+NATIVE_LEASE_NAME = f"Global\\Chowder_Original600_guardv3_{reader.OWNER_SHA}"
+
+
+@contextmanager
+def exclusive_native_resume():
+    """Serialize original guard.v3 native starts across independent wrappers.
+
+    Free-port probes and GPU snapshots alone are not an atomic reservation:
+    two concurrent wrappers can both pass them before either native server
+    binds. Hold a named kernel mutex from the final admission check through
+    the entire original runner lifetime, without writing to frozen evidence.
+    An abandoned lease is refused, not silently treated as clean ownership.
+    """
+    if os.name != "nt":
+        raise ValueError("original native lease requires Windows")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
+    kernel.CreateMutexW.restype = ctypes.c_void_p
+    kernel.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+    kernel.WaitForSingleObject.restype = ctypes.c_uint32
+    kernel.ReleaseMutex.argtypes = (ctypes.c_void_p,)
+    kernel.ReleaseMutex.restype = ctypes.c_int
+    kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel.CloseHandle.restype = ctypes.c_int
+    handle = kernel.CreateMutexW(None, False, NATIVE_LEASE_NAME)
+    if not handle:
+        raise ValueError("original guard.v3 native lease unavailable")
+    acquired = False
+    try:
+        status = kernel.WaitForSingleObject(handle, 0)
+        if status == 0:  # WAIT_OBJECT_0
+            acquired = True
+        elif status == 0x80:  # WAIT_ABANDONED: an earlier owner died
+            acquired = True
+            raise ValueError("original guard.v3 native lease abandoned")
+        elif status == 0x102:  # WAIT_TIMEOUT
+            raise ValueError("another original guard.v3 native resume owns the lease")
+        else:
+            raise ValueError("original guard.v3 native lease acquisition failed")
+        yield
+    finally:
+        release_ok = not acquired or bool(kernel.ReleaseMutex(handle))
+        close_ok = bool(kernel.CloseHandle(handle))
+        if not release_ok or not close_ok:
+            raise ValueError("original guard.v3 native lease cleanup failed")
 
 
 def assert_native_ordinary(path: Path) -> None:
@@ -51,6 +97,11 @@ def competing_model_processes() -> list[dict[str, object]]:
                 info = process.info
                 if info["pid"] == os.getpid():
                     continue
+                # psutil's default ad_value is None: an AccessDenied for one
+                # requested attribute can be silently substituted instead of
+                # raising. An unreadable owner is not proof of GPU exclusivity.
+                if info.get("name") is None or info.get("cmdline") is None:
+                    raise ValueError("native process inventory contains unreadable owner")
                 name = str(info.get("name") or "").lower()
                 argv = [str(x).lower() for x in (info.get("cmdline") or [])]
                 # Shell commands can *mention* llama-server in their text;
@@ -70,8 +121,19 @@ def competing_model_processes() -> list[dict[str, object]]:
                     for x in argv[1:]))
                 ollama_serve = (name in ("ollama.exe", "ollama") and
                                 "serve" in argv[1:])
+                # WDDM's compute-app inventory may omit GPU work performed
+                # inside WSL2/Podman. Treat a live VM/container host as an
+                # unverified competing owner until separately source-proven
+                # isolated; a harmless one-shot `podman ps` is not a server.
+                container_vm = name in (
+                    "vmmemwsl.exe", "vmmem.exe", "wslhost.exe", "vmwp.exe",
+                )
+                podman_active = (name in ("podman.exe", "podman") and
+                                 any(arg in ("run", "start", "exec", "machine")
+                                     for arg in argv[1:]))
                 if ("llama-server" in name or "llama_server" in name
-                        or vllm_python or spark_python or ollama_serve):
+                        or vllm_python or spark_python or ollama_serve
+                        or container_vm or podman_active):
                     competing.append({"pid": info["pid"], "name": name})
             except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 continue
@@ -111,11 +173,40 @@ def gpu_python_compute_owners() -> list[dict[str, object]]:
         if pid == os.getpid():
             continue
         name = PureWindowsPath(row[1].strip()).name.lower()
+        if (not name or name.startswith("[insufficient permissions]")
+                or name in ("[not supported]", "[unknown]")):
+            raise ValueError("NVIDIA GPU process owner cannot be attributed")
         if (re.fullmatch(r"python(?:w|\d+(?:\.\d+)?)?\.exe", name)
                 or name in ("llama-server.exe", "llama_server.exe",
-                            "ollama.exe", "vllm.exe", "torchrun.exe")):
+                            "ollama.exe", "vllm.exe", "torchrun.exe",
+                            "vmmemwsl.exe", "vmmem.exe", "podman.exe",
+                            "wslhost.exe", "vmwp.exe", "containerd.exe")):
             owners[pid] = {"pid": pid, "name": name}
     return [owners[pid] for pid in sorted(owners)]
+
+
+def native_single_gpu_uuid() -> str:
+    """Refuse ambiguous device selection in the pinned first-GPU resource probe.
+
+    The unchanged historical resource helper samples only the first GPU, but
+    the native launcher does not pin a UUID. Until that original architecture
+    has a reviewed explicit device binding, multi-GPU hosts are not admissible.
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=8, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("NVIDIA GPU device identity unavailable") from exc
+    uuids = [line.strip() for line in result.stdout.splitlines()]
+    if (result.returncode or len(uuids) != 1
+            or re.fullmatch(
+                r"GPU-[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}",
+                uuids[0],
+            ) is None):
+        raise ValueError("original native resource admission requires one identifiable GPU")
+    return uuids[0]
 
 
 def occupied_native_ports(ports: tuple[int, ...] = PORTS) -> list[int]:
@@ -181,12 +272,25 @@ def preflight(max_new: int) -> tuple[dict, object | None]:
                 "release_approved": False}, None
 
     blockers = []
-    processes = competing_model_processes()
+    try:
+        processes = competing_model_processes()
+    except (OSError, ValueError) as exc:
+        processes = []
+        blockers.append("NATIVE_PROCESS_INVENTORY_UNTRUSTED: " + str(exc)[:160])
     if processes:
         blockers.append("OTHER_NATIVE_MODEL_SERVER_ACTIVE")
-    gpu_owners = gpu_python_compute_owners()
+    try:
+        gpu_owners = gpu_python_compute_owners()
+    except (OSError, ValueError) as exc:
+        gpu_owners = []
+        blockers.append("NVIDIA_GPU_OWNER_INVENTORY_UNTRUSTED: " + str(exc)[:160])
     if gpu_owners:
         blockers.append("OTHER_GPU_COMPUTE_PYTHON_ACTIVE")
+    gpu_uuid = None
+    try:
+        gpu_uuid = native_single_gpu_uuid()
+    except (OSError, ValueError) as exc:
+        blockers.append("NATIVE_GPU_DEVICE_IDENTITY_UNTRUSTED: " + str(exc)[:160])
     ports = occupied_native_ports()
     if ports:
         blockers.append("NATIVE_PORT_OCCUPIED")
@@ -208,6 +312,7 @@ def preflight(max_new: int) -> tuple[dict, object | None]:
         "max_new": max_new,
         "blockers": blockers, "competing_model_processes": processes,
         "gpu_python_compute_owners": gpu_owners,
+        "native_gpu_uuid": gpu_uuid,
         "occupied_ports": ports, "native_prestart": resource,
         "model_executed": False, "frozen_four_slot_eligible": False,
         "gen0_status": "BLOCKED", "chosen": None,
@@ -216,22 +321,37 @@ def preflight(max_new: int) -> tuple[dict, object | None]:
 
 
 def run(*, execute: bool, max_new: int) -> dict:
-    report, runner = preflight(max_new)
-    if not execute or runner is None or report["status"] != "READY_ORIGINAL_GUARDV3_RESUME":
+    if not execute:
+        report, _ = preflight(max_new)
         return report
-    # Recheck the volatile ownership evidence immediately before the original
-    # runner performs its own native admission and immutable source validation.
-    if (competing_model_processes() or gpu_python_compute_owners()
-            or occupied_native_ports()):
-        raise ValueError("native process or port ownership changed before execution")
-    runner._native_prestart(reader.ROOT, bypass_conservative=False)
-    result = runner.run(reader.ROOT, execute=True, max_new=max_new,
-                        bypass_conservative=False)
-    if (result.get("gen0_status") != "BLOCKED"
-            or result.get("chosen") is not None
-            or result.get("release_approved") is not False
-            or result.get("original_frozen_gen0_serving_comparable") is not False):
-        raise ValueError("historical runner returned a forbidden release state")
+    with exclusive_native_resume():
+        # Even the source/checkpoint inspection must be performed under the
+        # cross-session lease. A competing cooperating resume cannot change
+        # the checkpoint between the independent audit and native launch.
+        report, runner = preflight(max_new)
+        if runner is None or report["status"] != "READY_ORIGINAL_GUARDV3_RESUME":
+            return report
+        # Recheck volatile ownership after admission, while the lease remains
+        # held until the original native server and guard have been torn down.
+        if (competing_model_processes() or gpu_python_compute_owners()
+                or occupied_native_ports()):
+            raise ValueError("native process or port ownership changed before execution")
+        if native_single_gpu_uuid() != report["native_gpu_uuid"]:
+            raise ValueError("original native GPU identity changed before execution")
+        runner._native_prestart(reader.ROOT, bypass_conservative=False)
+        result = runner.run(reader.ROOT, execute=True, max_new=max_new,
+                            bypass_conservative=False)
+        if (result.get("gen0_status") != "BLOCKED"
+                or result.get("chosen") is not None
+                or result.get("release_approved") is not False
+                or result.get("original_frozen_gen0_serving_comparable") is not False):
+            raise ValueError("historical runner returned a forbidden release state")
+        # The pinned original runner normally tears down its owned native
+        # server in finally. A guard-shutdown exception or an unsuccessful
+        # child-tree cleanup must not be reported as a clean native session.
+        if (competing_model_processes() or gpu_python_compute_owners()
+                or occupied_native_ports()):
+            raise ValueError("original native server or guard teardown unverified")
     return {**result, "historical_git": reader.COMMIT,
             "historical_owner_sha256": reader.OWNER_SHA,
             "historical_guard": "guard.v3", "frozen_four_slot_eligible": False}
