@@ -20,6 +20,9 @@ per-item length map has SHA-256
 `d148e024faa57d0df7dfb9b0e8cbdee024b68fdb9f6b505c89d989f4f2e251ef`.
 An adversarial swap of two prompt lengths preserving the aggregate histogram
 is refused; a consistent fabricated map is also refused by the frozen digest.
+A separate adversarial test confirms that changing only response text leaves
+the numeric native timing match unchanged; the original archived-file SHA pin
+would reject that alteration, but timing alone cannot authenticate text.
 
 **Scope limit:** equal token counts do not authenticate prompt bytes, HTTP
 request/response pairs, model weights at execution time, or independent

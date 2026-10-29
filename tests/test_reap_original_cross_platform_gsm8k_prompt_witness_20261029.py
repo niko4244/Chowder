@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 
 import pytest
 
@@ -73,3 +74,25 @@ def test_consistent_but_forged_three_arm_map_cannot_pass_frozen_digest():
     maps = _canonical_maps()
     with pytest.raises(witness.CrossPlatformPromptError, match="mapping digest differs"):
         witness.compare_original_prompt_maps(maps)
+
+
+def test_native_timing_fingerprint_does_not_authenticate_response_text():
+    """A timing match alone cannot establish which response bytes were sent.
+
+    The actual witness separately rejects altered archived files by SHA pin;
+    this synthetic example demonstrates the narrower timing correlation's
+    inherent inability to bind HTTP response content to a native task.
+    """
+    original = {"id": "gsm8k-0", "completion_tokens": 3,
+                "predicted_per_second": 20.0, "text": "authentic response"}
+    altered = {**original, "text": "substituted response"}
+    native_timing = {9: (3, "100.00")}
+
+    def binding(row):
+        raw = (json.dumps(row) + "\n").encode("utf-8")
+        return witness.native.bind_archived_rows_to_native_timings(
+            (raw, b""), native_timing
+        )
+
+    assert binding(original)["row_to_native_task"] == {"gsm8k-0": 9}
+    assert binding(original)["mapping_sha256"] == binding(altered)["mapping_sha256"]
