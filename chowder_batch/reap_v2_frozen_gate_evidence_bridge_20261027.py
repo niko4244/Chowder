@@ -246,8 +246,8 @@ def _verify_historical_item_lineage(
     lines = raw.splitlines(keepends=True)
     _require(len(lines) == len(rows), f"{key}: original native item-lineage incomplete")
     fields = {"id", "eval_session_id", "gguf_sha256", "server_pid", "server_port",
-              "native_response_sha256", "scored_row_sha256", "completion_tokens",
-              "seconds", "predicted_per_second"}
+              "native_response_sha256", "scored_row_sha256", "finish_reason",
+              "completion_tokens", "seconds", "predicted_per_second"}
     # The original reap_eval scorer writes completed futures in completion
     # order. A separately observed native request trace can be in launch order.
     # Join by *unique canonical task ID*, never by incidental file position.
@@ -290,6 +290,15 @@ def _verify_historical_item_lineage(
                  and trace["native_response_sha256"] == _sha(row["text"].encode("utf-8"))
                  and _hex(trace["scored_row_sha256"])
                  and trace["scored_row_sha256"] == _sha(scored)
+                 # The original reap_eval._score derives termination directly
+                 # from the native completion's finish_reason. Hashing only
+                 # row.text cannot authenticate a resealed termination PASS.
+                 and (trace["finish_reason"] is None
+                      or (isinstance(trace["finish_reason"], str)
+                          and len(trace["finish_reason"]) <= 64))
+                 and type(row.get("terminated")) is bool
+                 and row["terminated"] == (trace["finish_reason"] == "stop")
+                 and (not row.get("correct") or row["terminated"])
                  and type(trace["completion_tokens"]) is int
                  and trace["completion_tokens"] == row.get("completion_tokens")
                  and type(trace["seconds"]) in (float, int)

@@ -233,6 +233,7 @@ def synthetic_historical_v1(synthetic, monkeypatch):
                 "gguf_sha256": model, "server_pid": 191, "server_port": 8991,
                 "native_response_sha256": hashlib.sha256(row["text"].encode()).hexdigest(),
                 "scored_row_sha256": hashlib.sha256(canonical).hexdigest(),
+                "finish_reason": "stop" if row["terminated"] else "length",
                 "completion_tokens": row["completion_tokens"],
                 "seconds": row["seconds"],
                 "predicted_per_second": row["predicted_per_second"],
@@ -373,6 +374,59 @@ def test_historical_native_lineage_cannot_reapprove_forged_gate0_trigram_score(
         bridge._verify_historical_v1_prerequisite(
             root, observer, historical, baseline, forbidden_sessions=frozenset(),
         )
+
+
+@pytest.mark.parametrize("finish_reason,terminated,correct,accepted", [
+    ("length", True, False, False),  # Native truncation cannot become a stop.
+    ("stop", False, False, False),  # Native stop cannot be scored as truncated.
+    ("length", False, True, False),  # Truncated code cannot score correct.
+    ("length", False, False, True),  # Genuine truncated nonpass is admissible.
+])
+def test_historical_native_finish_reason_authenticates_termination_even_if_reapproved(
+    synthetic_historical_v1, monkeypatch, finish_reason, terminated, correct, accepted,
+):
+    """Independently pinned text/row SHA agreement is not native stop evidence."""
+    root, observer, historical, baseline, _, review, review_path = synthetic_historical_v1
+    rows_path = root / "reap128" / "gsm8k.jsonl"
+    rows = [json.loads(line) for line in rows_path.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["correct"] is False
+    rows[0]["terminated"] = terminated
+    rows[0]["correct"] = correct
+    rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows),
+                         encoding="utf-8")
+    summary_path = root / "reap128" / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["gsm8k"]["file_sha256"] = _sha(rows_path)
+    _write(summary_path, summary)
+
+    trace_path = root / "reap128" / "gsm8k.native-lineage.jsonl"
+    traces = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    traces[0]["finish_reason"] = finish_reason
+    scored = json.dumps(rows[0], sort_keys=True, separators=(",", ":"),
+                        ensure_ascii=False, allow_nan=False).encode("utf-8")
+    traces[0]["scored_row_sha256"] = hashlib.sha256(scored).hexdigest()
+    trace_path.write_text("".join(json.dumps(item) + "\n" for item in traces),
+                          encoding="utf-8")
+    review["arms"]["reap128"]["rows_sha256"]["gsm8k"] = _sha(rows_path)
+    review["arms"]["reap128"]["item_lineage_sha256"]["gsm8k"] = _sha(trace_path)
+    _write(review_path, review)
+    monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
+                        reap_select._input_digests(root, observer, None, None))
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_V1_REVIEW_SHA256",
+                        _sha(review_path))
+    pins = dict(bridge.APPROVED_HISTORICAL_V1_ITEM_LINEAGE_SHA256)
+    pins["reap128/gsm8k"] = _sha(trace_path)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_V1_ITEM_LINEAGE_SHA256", pins)
+
+    if accepted:
+        bridge._verify_historical_v1_prerequisite(
+            root, observer, historical, baseline, forbidden_sessions=frozenset(),
+        )
+    else:
+        with pytest.raises(bridge.FrozenEvidenceError, match="disagrees with score"):
+            bridge._verify_historical_v1_prerequisite(
+                root, observer, historical, baseline, forbidden_sessions=frozenset(),
+            )
 
 
 @pytest.mark.parametrize("attack", [
@@ -721,6 +775,7 @@ def test_historical_reap160_requires_separate_source_pinned_native_review(
                                     "reap160_q4": 8902, "dense_q4": 8903}[arm],
                     "native_response_sha256": hashlib.sha256(row["text"].encode()).hexdigest(),
                     "scored_row_sha256": hashlib.sha256(canonical).hexdigest(),
+                    "finish_reason": "stop" if row["terminated"] else "length",
                     "completion_tokens": row["completion_tokens"],
                     "seconds": row["seconds"],
                     "predicted_per_second": row["predicted_per_second"],
