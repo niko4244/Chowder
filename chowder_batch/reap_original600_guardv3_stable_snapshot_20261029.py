@@ -158,6 +158,11 @@ def stable_snapshot(root: Path, workspace: Path):
             # Each parent is already locked before its children are listed.
             directories, sources = _locked_inventory(root, locks)
             expected_dirs = {p.relative_to(root).as_posix() for p in directories}
+            # The original evaluator legitimately creates the next task's
+            # directory before its receipt exists. Preserve even empty
+            # directories: dropping them would falsely hide an active task.
+            for directory in directories:
+                (target / directory.relative_to(root)).mkdir(parents=True, exist_ok=True)
             for path, source in sorted(sources.items()):
                 relative = path.relative_to(root)
                 destination = target / relative

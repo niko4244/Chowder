@@ -81,6 +81,14 @@ def test_original_inventory_added_during_scoring_fail_closed(tmp_path: Path) -> 
     assert not list(tmp_path.glob(".reap-guardv3-readonly-*"))
 
 
+def test_empty_original_active_task_directory_is_preserved(tmp_path: Path) -> None:
+    root, _ = _fixture(tmp_path)
+    (root / "task-001").mkdir()
+    with snap.stable_snapshot(root, tmp_path) as stable:
+        assert (stable / "task-001").is_dir()
+        assert list((stable / "task-001").iterdir()) == []
+
+
 def test_original_source_symlink_refused(tmp_path: Path) -> None:
     root, receipt = _fixture(tmp_path)
     link = root / "redirect.json"
