@@ -49,6 +49,16 @@ def test_independent_receipt_json_preserves_unambiguous_nested_receipts(
     assert bridge._json_file(path) == {"arms": {"q8": {"approved": True}}, "count": 164}
 
 
+@pytest.mark.parametrize("text,expected", [
+    ("", 1.0),
+    ("one two", 1.0),
+    ("SYNTHETIC TEST ONLY SYNTHETIC TEST ONLY alpha beta gamma delta epsilon zeta", 0.9),
+    ("x x x x x", 0.3333),
+])
+def test_original_historical_gate0_trigram_scoring_semantics(text, expected):
+    assert bridge._original_scored_trigram_ratio(text) == expected
+
+
 def _rows(root, arm, suite, n, failures, *, source_witness, speed=0.0,
           session_id=None):
     folder = root / arm
@@ -60,7 +70,9 @@ def _rows(root, arm, suite, n, failures, *, source_witness, speed=0.0,
                      "correct": i >= failures, "terminated": True,
                      "trigram_ratio": 0.9, "completion_tokens": 12,
                      "seconds": 1.0, "predicted_per_second": speed,
-                     "text": "SYNTHETIC TEST ONLY"})
+                     # Exactly 9/10 distinct trigrams under original _score.
+                     "text": "SYNTHETIC TEST ONLY SYNTHETIC TEST ONLY "
+                             "alpha beta gamma delta epsilon zeta"})
         if session_id is not None:
             rows[-1]["eval_session_id"] = session_id
     output.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
@@ -289,6 +301,77 @@ def test_historical_v1_independent_lineage_valid_synthetic(synthetic_historical_
         bridge._verify_historical_v1_prerequisite(
             root, observer, historical, baseline,
             forbidden_sessions=frozenset({session}),
+        )
+
+
+def test_historical_native_trace_order_independent_but_duplicate_ids_refused(
+    synthetic_historical_v1, monkeypatch,
+):
+    """Native request order may differ from original as_completed score order."""
+    root, observer, historical, baseline, _, review, review_path = synthetic_historical_v1
+    trace_path = root / "reap128" / "humaneval.native-lineage.jsonl"
+    traces = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+
+    def approve_trace(items):
+        trace_path.write_text("".join(json.dumps(item) + "\n" for item in items),
+                              encoding="utf-8")
+        digest = _sha(trace_path)
+        review["arms"]["reap128"]["item_lineage_sha256"]["humaneval"] = digest
+        _write(review_path, review)
+        monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_V1_REVIEW_SHA256",
+                            _sha(review_path))
+        pins = dict(bridge.APPROVED_HISTORICAL_V1_ITEM_LINEAGE_SHA256)
+        pins["reap128/humaneval"] = digest
+        monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_V1_ITEM_LINEAGE_SHA256", pins)
+
+    approve_trace(list(reversed(traces)))
+    bridge._verify_historical_v1_prerequisite(
+        root, observer, historical, baseline, forbidden_sessions=frozenset(),
+    )
+    duplicate = list(reversed(traces))
+    duplicate[-1] = dict(duplicate[0])
+    approve_trace(duplicate)
+    with pytest.raises(bridge.FrozenEvidenceError, match="duplicate|population"):
+        bridge._verify_historical_v1_prerequisite(
+            root, observer, historical, baseline, forbidden_sessions=frozenset(),
+        )
+
+
+def test_historical_native_lineage_cannot_reapprove_forged_gate0_trigram_score(
+    synthetic_historical_v1, monkeypatch,
+):
+    """Signed row/text hashes alone cannot authenticate the original scorer."""
+    root, observer, historical, baseline, _, review, review_path = synthetic_historical_v1
+    rows_path = root / "reap128" / "humaneval.jsonl"
+    rows = [json.loads(line) for line in rows_path.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["trigram_ratio"] == 0.9
+    rows[0]["trigram_ratio"] = 0.1  # Not original _score(text), even if reapproved.
+    rows_path.write_text("".join(json.dumps(item) + "\n" for item in rows),
+                         encoding="utf-8")
+    summary_path = root / "reap128" / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["humaneval"]["file_sha256"] = _sha(rows_path)
+    _write(summary_path, summary)
+    trace_path = root / "reap128" / "humaneval.native-lineage.jsonl"
+    traces = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    canonical = json.dumps(rows[0], sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False, allow_nan=False).encode("utf-8")
+    traces[0]["scored_row_sha256"] = hashlib.sha256(canonical).hexdigest()
+    trace_path.write_text("".join(json.dumps(item) + "\n" for item in traces),
+                          encoding="utf-8")
+    review["arms"]["reap128"]["rows_sha256"]["humaneval"] = _sha(rows_path)
+    review["arms"]["reap128"]["item_lineage_sha256"]["humaneval"] = _sha(trace_path)
+    _write(review_path, review)
+    monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
+                        reap_select._input_digests(root, observer, None, None))
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_V1_REVIEW_SHA256",
+                        _sha(review_path))
+    pins = dict(bridge.APPROVED_HISTORICAL_V1_ITEM_LINEAGE_SHA256)
+    pins["reap128/humaneval"] = _sha(trace_path)
+    monkeypatch.setattr(bridge, "APPROVED_HISTORICAL_V1_ITEM_LINEAGE_SHA256", pins)
+    with pytest.raises(bridge.FrozenEvidenceError, match="trigram"):
+        bridge._verify_historical_v1_prerequisite(
+            root, observer, historical, baseline, forbidden_sessions=frozenset(),
         )
 
 

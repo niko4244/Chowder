@@ -106,6 +106,15 @@ def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _original_scored_trigram_ratio(text: str) -> float:
+    """Independently reproduce original reap_eval._score's Gate 0 statistic."""
+    words = text.split()
+    if len(words) < 3:
+        return 1.0
+    grams = {tuple(words[i:i + 3]) for i in range(len(words) - 2)}
+    return round(len(grams) / (len(words) - 2), 4)
+
+
 def _hex(value: object, width: int = 64) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{" + str(width) + r"}", value) is not None
 
@@ -239,7 +248,11 @@ def _verify_historical_item_lineage(
     fields = {"id", "eval_session_id", "gguf_sha256", "server_pid", "server_port",
               "native_response_sha256", "scored_row_sha256", "completion_tokens",
               "seconds", "predicted_per_second"}
-    for (task_id, row), line in zip(rows.items(), lines, strict=True):
+    # The original reap_eval scorer writes completed futures in completion
+    # order. A separately observed native request trace can be in launch order.
+    # Join by *unique canonical task ID*, never by incidental file position.
+    traces = {}
+    for line in lines:
         _require(line.endswith(b"\n") and not line.startswith(b"\xef\xbb\xbf")
                  and b"\r" not in line.rstrip(b"\r\n"),
                  f"{key}: original native item-lineage framing invalid")
@@ -249,17 +262,30 @@ def _verify_historical_item_lineage(
                                parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite")))
         except (ValueError, UnicodeError) as exc:
             raise FrozenEvidenceError(f"{key}: original native item-lineage JSON invalid") from exc
+        _require(isinstance(trace, dict) and set(trace) == fields
+                 and isinstance(trace.get("id"), str)
+                 and trace["id"] in rows,
+                 f"{key}: original native item-lineage task population invalid")
+        _require(trace["id"] not in traces,
+                 f"{key}: duplicate original native item-lineage task ID")
+        traces[trace["id"]] = trace
+    _require(set(traces) == set(rows),
+             f"{key}: original native item-lineage task population incomplete")
+    for task_id, row in rows.items():
+        trace = traces[task_id]
+        _require(isinstance(row.get("text"), str)
+                 and type(row.get("trigram_ratio")) in (int, float)
+                 and row["trigram_ratio"] == _original_scored_trigram_ratio(row["text"]),
+                 f"{key}/{task_id}: original trigram scorer mismatch")
         scored = json.dumps(row, sort_keys=True, separators=(",", ":"),
                             ensure_ascii=False, allow_nan=False).encode("utf-8")
-        _require(isinstance(trace, dict) and set(trace) == fields
-                 and trace["id"] == task_id
+        _require(trace["id"] == task_id
                  and trace["eval_session_id"] == serve["eval_session_id"]
                  and trace["gguf_sha256"] == serve["gguf_sha256"]
                  and type(trace["server_pid"]) is int
                  and trace["server_pid"] == serve["server_pid"]
                  and type(trace["server_port"]) is int
                  and trace["server_port"] == serve["server_port"]
-                 and isinstance(row.get("text"), str)
                  and _hex(trace["native_response_sha256"])
                  and trace["native_response_sha256"] == _sha(row["text"].encode("utf-8"))
                  and _hex(trace["scored_row_sha256"])
