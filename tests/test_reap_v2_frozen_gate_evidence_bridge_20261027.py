@@ -66,6 +66,39 @@ def test_original_historical_gate0_trigram_scoring_semantics(text, expected):
     assert bridge._original_scored_trigram_ratio(text) == expected
 
 
+@pytest.mark.parametrize("arm,suite", [
+    ("reap128_v2", "gsm8k"), ("dense_v2", "gsm8k"),
+    ("random128_v2", "gsm8k"), ("reap128_v2_q4", "gsm8k"),
+    ("reap128_v2", "humaneval"),
+])
+def test_fresh_original_gate0_rejects_forged_ratio_despite_resealed_evidence(
+    synthetic, monkeypatch, arm, suite,
+):
+    """SYNTHETIC: hashes and reviewer are reapproved; ratio still fails."""
+    root, obs = synthetic
+    path = root / arm / f"{suite}.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    rows[0]["text"] = "x x x x x"  # genuine original ratio 0.3333
+    rows[0]["trigram_ratio"] = 1.0  # forged Gate0 favorable value
+    rows[0]["correct"] = False  # synthetic fixture isolates Gate0 from grading
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    summary_path = root / arm / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary[suite]["file_sha256"] = _sha(path)
+    _write(summary_path, summary)
+    review_path = root / "frozen-independent-review.json"
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    review["arms"][arm]["rows_sha256"][suite] = _sha(path)
+    _write(review_path, review)
+    monkeypatch.setattr(bridge, "APPROVED_ORIGINAL_ARTIFACT_SHA256",
+                        reap_select._input_digests(root, obs, None, None))
+    monkeypatch.setattr(bridge, "APPROVED_INDEPENDENT_REVIEW_SHA256", _sha(review_path))
+    result = bridge.bridge_frozen_evidence(root, obs)
+    assert result["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
+    assert "Gate0 trigram statistic differs from scored text" in result["reason"]
+    assert result["chosen"] is None and result["release_approved"] is False
+
+
 def _rows(root, arm, suite, n, failures, *, source_witness, speed=0.0,
           session_id=None):
     folder = root / arm
@@ -554,6 +587,9 @@ def test_original_v2_resealed_gsm8k_correctness_forgery_refused(
     else:
         rows[0]["text"] = original_gsm8k.load_canonical()[0][2]
         rows[0]["correct"] = False
+    # Keep Gate0's independently checked statistic valid so this existing
+    # adversarial test reaches the separate GSM8K correctness verifier.
+    rows[0]["trigram_ratio"] = bridge._original_scored_trigram_ratio(rows[0]["text"])
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     summary_path = root / arm / "summary.json"
     summary = json.loads(summary_path.read_text())

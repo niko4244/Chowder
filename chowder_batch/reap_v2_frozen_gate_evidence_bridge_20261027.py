@@ -730,6 +730,19 @@ def _verify_original_sessions(root: Path, review: dict) -> dict[str, dict]:
                          and ("eval_session_id" not in row or row["eval_session_id"] == session)
                          for row in rows.values()),
                      f"{arm}/{suite}: scorer semantics or recorded item session mismatch")
+            # Gate0 consumes the stored trigram statistic. A pinned row SHA
+            # authenticates bytes, not that this statistic came from the
+            # original _score(text). Recompute for EVERY fresh original arm
+            # and suite before the frozen selector sees these rows, including
+            # Q4 controls and HumanEval. Synthetic reviewer re-pinning cannot
+            # turn repeated text into a high-diversity PASS.
+            _require(all(type(row.get("text")) is str
+                         and type(row.get("trigram_ratio")) in (float, int)
+                         and math.isfinite(row["trigram_ratio"])
+                         and row["trigram_ratio"]
+                         == _original_scored_trigram_ratio(row["text"])
+                         for row in rows.values()),
+                     f"{arm}/{suite}: original Gate0 trigram statistic differs from scored text")
             if suite == "gsm8k":
                 # An independently pinned row digest authenticates *bytes*,
                 # not whether the evaluator correctly scored those bytes.
