@@ -98,6 +98,11 @@ def _rows(root, arm, suite, n, failures, *, source_witness, speed=0.0,
 @pytest.fixture
 def synthetic(tmp_path, monkeypatch):
     """Untrusted test-only evidence, with fake review hashes installed in memory."""
+    # The fabricated historical rows contain no canonical GSM8K answers.
+    # Exercise the real independent grader in its dedicated adversarial tests;
+    # never represent these synthetic labels as official original correctness.
+    monkeypatch.setattr(bridge, "_verify_historical_gsm8k_correctness",
+                        lambda root, rows: None)
     root = tmp_path / "original-frozen-fixtures"
     root.mkdir()
     obs = root / "observer-v1.json"
@@ -303,6 +308,25 @@ def test_historical_v1_independent_lineage_valid_synthetic(synthetic_historical_
             root, observer, historical, baseline,
             forbidden_sessions=frozenset({session}),
         )
+
+
+def test_historical_v1_cannot_skip_canonical_gsm8k_regrading(
+    synthetic_historical_v1, monkeypatch,
+):
+    root, observer, historical, baseline, _, _, _ = synthetic_historical_v1
+    calls = []
+
+    def refuse_unverified_canonical(root_arg, rows):
+        calls.append((root_arg, len(rows)))
+        raise bridge.FrozenEvidenceError("canonical historical GSM8K grade absent")
+
+    monkeypatch.setattr(bridge, "_verify_historical_gsm8k_correctness",
+                        refuse_unverified_canonical)
+    with pytest.raises(bridge.FrozenEvidenceError, match="canonical historical GSM8K"):
+        bridge._verify_historical_v1_prerequisite(
+            root, observer, historical, baseline, forbidden_sessions=frozenset(),
+        )
+    assert calls == [(root, 1319)]
 
 
 def test_historical_native_trace_order_independent_but_duplicate_ids_refused(

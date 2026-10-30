@@ -20,12 +20,19 @@ from pathlib import Path
 import re
 
 from chowder_batch import reap_gates, reap_select, reap_serve
+from chowder_batch import reap_original_gsm8k_frozen_scorer_20261029 as frozen_gsm8k
 
 SCHEMA = "chowder.reap-v2-frozen-gate-evidence-bridge.v1"
 REVIEW_SCHEMA = "chowder.reap-v2-independent-original-frozen-review.v1"
 SECURITY_SCHEMA = "chowder.reap-v2-independent-frozen-humaneval-security.v1"
 HISTORICAL_REAP160_SCHEMA = "chowder.reap-v2-independent-historical-reap160-prerequisite.v1"
 HISTORICAL_V1_SCHEMA = "chowder.reap-v2-independent-historical-reap128-v1-prerequisite.v1"
+# Canonical answers are a separately reviewable, digest-locked source copy,
+# NEVER an additional file written into immutable original F: evidence.
+CANONICAL_GSM8K_MANIFEST = (
+    Path(__file__).resolve().parent.parent /
+    "docs/quals/reap-v2-original-gsm8k-canonical-items.json"
+)
 
 Q8_V2_SHA256 = "89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6"
 Q4_DENSE_SHA256 = "2c6d9466129e8802839566b35728e2506aaf1e8705cd137009e2f08feb9dd049"
@@ -113,6 +120,66 @@ def _original_scored_trigram_ratio(text: str) -> float:
         return 1.0
     grams = {tuple(words[i:i + 3]) for i in range(len(words) - 2)}
     return round(len(grams) / (len(words) - 2), 4)
+
+
+def _verify_historical_gsm8k_correctness(
+    root: Path, rows: dict, *, canonical_path: Path | None = None,
+) -> None:
+    """Regrade historical GSM8K against the *frozen* complete answer population.
+
+    This does not accept a reviewer-supplied ``correct`` label as a grader.
+    The canonical manifest must contain the original 1,319 rendered items,
+    whose content digest is independently frozen in ``reap_gates``. It is
+    read once, hashed and parsed from the same bytes. No dataset download or
+    generated-code execution occurs at this admission boundary.
+
+    This check does NOT authenticate the historical native *request* prompt,
+    nor does it certify historical HumanEval execution; those still require
+    separately verified original native/executable witnesses.
+    """
+    # The root remains an immutable original evidence tree. Synthetic tests
+    # may provide a temporary source path, but its content must STILL match
+    # the frozen official population SHA before any scored row is accepted.
+    path = CANONICAL_GSM8K_MANIFEST if canonical_path is None else canonical_path
+    _require(path.is_file() and not path.is_symlink(),
+             "historical GSM8K canonical source manifest absent")
+    raw = path.read_bytes()
+    _require(0 < len(raw) <= 16 * 1024 * 1024,
+             "historical GSM8K canonical source size invalid")
+    try:
+        items = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite")),
+        )
+    except (ValueError, UnicodeError) as exc:
+        raise FrozenEvidenceError("historical GSM8K canonical source JSON invalid") from exc
+    _require(isinstance(items, list) and len(items) == 1319
+             and all(isinstance(item, dict)
+                     and set(item) == {"id", "prompt", "expected"}
+                     and item["id"] == f"gsm8k-{i}"
+                     and isinstance(item["prompt"], str)
+                     and isinstance(item["expected"], str)
+                     for i, item in enumerate(items)),
+             "historical GSM8K canonical source population invalid")
+    encoded = json.dumps(items, sort_keys=True, ensure_ascii=False,
+                         separators=(",", ":"), allow_nan=False).encode("utf-8")
+    _require(_sha(encoded) == reap_gates.FROZEN_SOURCE_SHA256["gsm8k"],
+             "historical GSM8K canonical source differs from frozen original")
+    _require(len(rows) in (200, 1319)
+             and set(rows) == {f"gsm8k-{i}" for i in range(len(rows))},
+             "historical GSM8K scored population differs from canonical prefix")
+    for i in range(len(rows)):
+        row = rows[f"gsm8k-{i}"]
+        _require(type(row.get("correct")) is bool
+                 and type(row.get("terminated")) is bool
+                 and isinstance(row.get("text"), str),
+                 f"gsm8k-{i}: historical GSM8K scorer input invalid")
+        independently_correct = frozen_gsm8k.score_original_gsm8k(
+            row["text"], items[i]["expected"], terminated=row["terminated"],
+        )
+        _require(row["correct"] is independently_correct,
+                 f"gsm8k-{i}: historical GSM8K correctness differs from original scorer")
 
 
 def _hex(value: object, width: int = 64) -> bool:
@@ -271,6 +338,8 @@ def _verify_historical_item_lineage(
         traces[trace["id"]] = trace
     _require(set(traces) == set(rows),
              f"{key}: original native item-lineage task population incomplete")
+    if suite == "gsm8k":
+        _verify_historical_gsm8k_correctness(root, rows)
     for task_id, row in rows.items():
         trace = traces[task_id]
         _require(isinstance(row.get("text"), str)
