@@ -730,6 +730,14 @@ def _verify_original_sessions(root: Path, review: dict) -> dict[str, dict]:
                          and ("eval_session_id" not in row or row["eval_session_id"] == session)
                          for row in rows.values()),
                      f"{arm}/{suite}: scorer semantics or recorded item session mismatch")
+            if suite == "gsm8k":
+                # An independently pinned row digest authenticates *bytes*,
+                # not whether the evaluator correctly scored those bytes.
+                # Regrade every original v2 candidate/control item against
+                # the frozen canonical answers and the source-bound scorer,
+                # just as for the historical prerequisite cohorts. Never
+                # infer correctness from a review's PASS label alone.
+                _verify_historical_gsm8k_correctness(root, rows)
         serving[arm] = {"session_id": session,
                         "hardware_profile_sha256": record["hardware_profile_sha256"],
                         "physical_host_sha256": record["physical_host_sha256"]}

@@ -14,6 +14,13 @@ import pytest
 
 from chowder_batch import reap_gates, reap_select
 from chowder_batch import reap_v2_frozen_gate_evidence_bridge_20261027 as bridge
+from chowder_batch import reap_original_gsm8k_independent_grade_20261029 as original_gsm8k
+from chowder_batch import reap_original_gsm8k_frozen_scorer_20261029 as frozen_gsm8k
+
+
+# Capture the real verifier before the deliberately fabricated synthetic
+# fixture monkeypatches it. No test-only approval may become a production pin.
+REAL_ORIGINAL_GSM8K_REGRADER = bridge._verify_historical_gsm8k_correctness
 
 
 def _write(path: Path, data: dict) -> None:
@@ -515,6 +522,63 @@ def test_synthetic_complete_reviewer_pins_delegate_exact_science_to_original_sel
     expected = statistics.fmean(q8) - 1.645 * statistics.stdev(q8) / math.sqrt(1319)
     gate = result["frozen_selector"]["gates"]["reap128_v2"]["gates"]["gate1"]
     assert gate["statistic"] == pytest.approx(expected, abs=1e-14)
+
+
+def test_original_v2_admission_invokes_independent_gsm8k_regrader_for_every_arm(
+    synthetic, monkeypatch,
+):
+    root, _ = synthetic
+    review = json.loads((root / "frozen-independent-review.json").read_text())
+    populations = []
+
+    def record_regrade(_root, rows):
+        populations.append(len(rows))
+
+    monkeypatch.setattr(bridge, "_verify_historical_gsm8k_correctness", record_regrade)
+    bridge._verify_original_sessions(root, review)
+    assert populations == [1319, 1319, 1319, 200, 200]
+
+
+@pytest.mark.parametrize("forgery", ["false_positive", "false_negative"])
+def test_original_v2_resealed_gsm8k_correctness_forgery_refused(
+    synthetic, monkeypatch, forgery,
+):
+    """Even matching synthetic reviewer/summary digests cannot forge grades."""
+    root, _ = synthetic
+    arm = "reap128_v2"
+    path = root / arm / "gsm8k.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    if forgery == "false_positive":
+        rows[0]["text"] = "no answer"
+        rows[0]["correct"] = True
+    else:
+        rows[0]["text"] = original_gsm8k.load_canonical()[0][2]
+        rows[0]["correct"] = False
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    summary_path = root / arm / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["gsm8k"]["file_sha256"] = _sha(path)
+    _write(summary_path, summary)
+    review = json.loads((root / "frozen-independent-review.json").read_text())
+    review["arms"][arm]["rows_sha256"]["gsm8k"] = _sha(path)
+    monkeypatch.setattr(bridge, "_verify_historical_gsm8k_correctness",
+                        REAL_ORIGINAL_GSM8K_REGRADER)
+    with pytest.raises(bridge.FrozenEvidenceError, match="gsm8k-0.*correctness"):
+        bridge._verify_original_sessions(root, review)
+
+
+def test_original_v2_source_drift_refuses_regraded_admission(
+    synthetic, monkeypatch, tmp_path,
+):
+    root, _ = synthetic
+    review = json.loads((root / "frozen-independent-review.json").read_text())
+    altered = tmp_path / "scoring.py"
+    altered.write_text("def score(*args): return 1.0\n", encoding="utf-8")
+    monkeypatch.setattr(frozen_gsm8k, "_ORIGINAL_SCORER_PATH", altered)
+    monkeypatch.setattr(bridge, "_verify_historical_gsm8k_correctness",
+                        REAL_ORIGINAL_GSM8K_REGRADER)
+    with pytest.raises(frozen_gsm8k.OriginalScorerSourceError, match="drift"):
+        bridge._verify_original_sessions(root, review)
 
 
 def _reseal_legacy_for_adversarial_test(root, obs, monkeypatch, arm, suite, mutate):
