@@ -138,6 +138,10 @@ def _rows(root, arm, suite, n, failures, *, source_witness, speed=0.0,
 @pytest.fixture
 def synthetic(tmp_path, monkeypatch):
     """Untrusted test-only evidence, with fake review hashes installed in memory."""
+    # Synthetic fixtures deliberately mutate the frozen selector's globals
+    # and substitute evaluator functions. Test the REAL executable witness
+    # separately; never treat this synthetic bypass as production approval.
+    monkeypatch.setattr(bridge, "_verify_frozen_selector_source", lambda: None)
     # The fabricated historical rows contain no canonical GSM8K answers.
     # Exercise the real independent grader in its dedicated adversarial tests;
     # never represent these synthetic labels as official original correctness.
@@ -555,6 +559,21 @@ def test_synthetic_complete_reviewer_pins_delegate_exact_science_to_original_sel
     expected = statistics.fmean(q8) - 1.645 * statistics.stdev(q8) / math.sqrt(1319)
     gate = result["frozen_selector"]["gates"]["reap128_v2"]["gates"]["gate1"]
     assert gate["statistic"] == pytest.approx(expected, abs=1e-14)
+
+
+def test_synthetic_bridge_rechecks_selector_executable_before_and_after_grading(
+    synthetic, monkeypatch,
+):
+    # Synthetic-only fixture replaces real source policies. Assert the real
+    # bridge's check placement, not synthetic scientific gate approval.
+    root, obs = synthetic
+    calls = []
+    monkeypatch.setattr(bridge, "_verify_frozen_selector_source",
+                        lambda: calls.append("source-checked"))
+    report = bridge.bridge_frozen_evidence(root, obs)
+    assert report["status"] == "SOURCE_APPROVED_ORIGINAL_EVIDENCE_EVALUATED"
+    assert calls == ["source-checked", "source-checked"]
+    assert report["chosen"] is None and report["release_approved"] is False
 
 
 def test_original_v2_admission_invokes_independent_gsm8k_regrader_for_every_arm(

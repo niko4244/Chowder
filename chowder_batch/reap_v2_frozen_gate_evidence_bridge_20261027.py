@@ -13,16 +13,21 @@ with explicitly SYNTHETIC adversarial specimens in isolated test processes.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
 from pathlib import Path
 import re
+import sys
+from types import CodeType, FunctionType
 
 from chowder_batch import reap_gates, reap_select, reap_serve
 from chowder_batch import reap_original_gsm8k_frozen_scorer_20261029 as frozen_gsm8k
+from chowder_batch import reap_v2_frozen_selector_executable_witness_20261030 as selector_witness
 
 SCHEMA = "chowder.reap-v2-frozen-gate-evidence-bridge.v1"
+FROZEN_SELECTOR_WITNESS_SHA256 = "a6851e14785f986c56a5657d26e3972ce70e44022ee2df40b40b4522c7fd3ea2"
 REVIEW_SCHEMA = "chowder.reap-v2-independent-original-frozen-review.v1"
 SECURITY_SCHEMA = "chowder.reap-v2-independent-frozen-humaneval-security.v1"
 HISTORICAL_REAP160_SCHEMA = "chowder.reap-v2-independent-historical-reap160-prerequisite.v1"
@@ -111,6 +116,115 @@ def _require(condition: bool, reason: str) -> None:
 
 def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def _bridge_code_signature(code: CodeType) -> tuple:
+    """Compare live witness code without trusting a witness-owned helper."""
+    return (
+        code.co_argcount, code.co_posonlyargcount, code.co_kwonlyargcount,
+        code.co_nlocals, code.co_stacksize, code.co_flags, code.co_code,
+        tuple(_bridge_code_signature(item) if isinstance(item, CodeType)
+              else (type(item), item) for item in code.co_consts),
+        code.co_names, code.co_varnames, code.co_freevars, code.co_cellvars,
+        code.co_filename, code.co_name, code.co_qualname, code.co_firstlineno,
+        code.co_linetable, code.co_exceptiontable,
+    )
+
+
+def _verify_frozen_selector_source() -> None:
+    """Bind the executing original selector to independently frozen source.
+
+    This witness is source-pinned by the bridge, not by a caller-provided
+    review receipt. Recheck before AND after grading to refuse runtime swaps.
+    This does not establish external process or model execution attestation.
+    """
+    source = Path(__file__).resolve().parent / (
+        "reap_v2_frozen_selector_executable_witness_20261030.py"
+    )
+    raw = source.read_bytes() if source.is_file() and not source.is_symlink() else b""
+    # Git's original LF source may be checked out as CRLF on Windows. Hash
+    # only the exact EOL-normalized Git content; reject any lone/mixed CR.
+    canonical = raw.replace(b"\r\n", b"\n")
+    _require(source.is_file() and not source.is_symlink()
+             and Path(selector_witness.__file__).resolve() == source.resolve()
+             and b"\r" not in canonical
+             and _sha(canonical) == FROZEN_SELECTOR_WITNESS_SHA256,
+             "independent frozen selector executable witness source drift")
+    _require(reap_select is selector_witness.reap_select
+             and reap_gates is selector_witness.reap_gates
+             and reap_serve is selector_witness.reap_serve
+             and sys.modules.get(selector_witness.__name__) is selector_witness
+             and Path(selector_witness.__spec__.origin).resolve() == source.resolve(),
+             "bridge frozen selector/gate module binding changed")
+    # A disk SHA alone does not authenticate the in-memory verifier function:
+    # a process-local monkeypatch could replace verify() with an always-PASS
+    # lambda. Independently compare every witness function with compiled
+    # original source; compilation does NOT execute the source module.
+    try:
+        source_text = raw.decode("utf-8")
+        tree = ast.parse(source_text, filename=str(source))
+        compiled = compile(source_text, str(source), "exec", dont_inherit=True,
+                           optimize=sys.flags.optimize)
+    except (UnicodeError, SyntaxError, ValueError, TypeError) as exc:
+        raise FrozenEvidenceError("frozen selector witness source invalid") from exc
+    functions = {
+        node.name: node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    expected = {
+        item.co_name: item for item in compiled.co_consts
+        if isinstance(item, CodeType)
+    }
+    classes = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    _require(bool(functions) and expected.keys() == functions.keys() | classes,
+             "frozen selector witness function inventory invalid")
+    for name, node in functions.items():
+        live = vars(selector_witness).get(name)
+        _require(isinstance(live, FunctionType)
+                 and live.__module__ == selector_witness.__name__
+                 and live.__globals__ is vars(selector_witness)
+                 and _bridge_code_signature(live.__code__)
+                 == _bridge_code_signature(expected[name]),
+                 f"frozen selector witness live function changed: {name}")
+        _require(live.__defaults__ == (
+            tuple(ast.literal_eval(item) for item in node.args.defaults) or None
+        ) and live.__kwdefaults__ is None,
+                 f"frozen selector witness defaults changed: {name}")
+    declarations = {
+        node.targets[0].id: node.value for node in tree.body
+        if isinstance(node, ast.Assign) and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+    }
+    for name in ("SCHEMA", "FROZEN_SOURCE_SHA256", "FROZEN_STATISTICS_SHA256",
+                 "FROZEN_JSON_SHA256"):
+        expected_value = ast.literal_eval(declarations[name])
+        actual = vars(selector_witness).get(name)
+        _require(type(actual) is type(expected_value) and actual == expected_value,
+                 f"frozen selector witness policy changed: {name}")
+    declared_literals = declarations["_LITERALS"]
+    _require(isinstance(declared_literals, ast.Dict),
+             "frozen selector witness policy inventory malformed")
+    expected_literals = {}
+    for key, value in zip(declared_literals.keys, declared_literals.values):
+        _require(isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                 and value.func.id == "frozenset" and len(value.args) == 1,
+                 "frozen selector witness policy inventory malformed")
+        expected_literals[ast.literal_eval(key)] = frozenset(
+            ast.literal_eval(value.args[0])
+        )
+    _require(selector_witness._LITERALS == expected_literals,
+             "frozen selector witness literal policy inventory changed")
+    _require(selector_witness._ROOT == source.parent
+             and set(selector_witness._MODULES) == {
+                 "reap_select", "reap_gates", "reap_serve",
+                 "reap_v2_source_identity",
+             } and all(selector_witness._MODULES[name] is getattr(
+                 selector_witness, name) for name in selector_witness._MODULES)
+             and selector_witness.SelectorExecutableRefused.__module__
+             == selector_witness.__name__
+             and selector_witness.SelectorExecutableRefused.__bases__ == (ValueError,),
+             "frozen selector witness module inventory changed")
+    selector_witness.verify_frozen_selector_executable()
 
 
 def _original_scored_trigram_ratio(text: str) -> float:
@@ -922,7 +1036,11 @@ def _blocked(reason: str) -> dict:
         "schema": SCHEMA, "status": "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE",
         "reason": reason, "gate0": "UNKNOWN", "gate1": "UNKNOWN", "gate2": "UNKNOWN",
         "control": "UNKNOWN", "speed": "UNKNOWN",
-        "selection": reap_select.select({}),
+        # Never call a selector that the executable-source witness may have
+        # JUST rejected. A forged select() could otherwise put SELECTED into
+        # this nested field despite the top-level BLOCKED outcome.
+        "selection": {"status": "BLOCKED", "chosen": None,
+                      "reason": "original frozen evidence unverified"},
         "amendment4": "BLOCKED_PENDING_INDEPENDENT_PREREG_METHOD_RECONCILIATION",
         "chosen": None, "release_approved": False,
     }
@@ -941,6 +1059,7 @@ def bridge_frozen_evidence(
     the frozen deterministic selector eventually returns SELECTED.
     """
     try:
+        _verify_frozen_selector_source()
         root = Path(eval_dir)
         observer = Path(observation)
         observer_v2 = Path(observation_v2) if observation_v2 is not None else None
@@ -958,6 +1077,7 @@ def bridge_frozen_evidence(
         # outcomes. Its paired Wald is statistics.stdev (sample SD), not a
         # discordance-only McNemar substitution; it preserves Amendment4 block.
         report = reap_select.evaluate(root, observer, observer_v2, calibration)
+        _verify_frozen_selector_source()
         _require(reap_select._input_digests(root, observer, observer_v2, calibration) == first,
                  "frozen selector inputs changed during independent validation")
         # Original selector input digests do not contain the separately
