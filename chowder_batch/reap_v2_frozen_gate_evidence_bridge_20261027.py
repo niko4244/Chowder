@@ -14,9 +14,11 @@ with explicitly SYNTHETIC adversarial specimens in isolated test processes.
 from __future__ import annotations
 
 import ast
+import builtins
 import hashlib
 import json
 import math
+import pathlib
 from pathlib import Path
 import re
 import sys
@@ -27,7 +29,7 @@ from chowder_batch import reap_original_gsm8k_frozen_scorer_20261029 as frozen_g
 from chowder_batch import reap_v2_frozen_selector_executable_witness_20261030 as selector_witness
 
 SCHEMA = "chowder.reap-v2-frozen-gate-evidence-bridge.v1"
-FROZEN_SELECTOR_WITNESS_SHA256 = "a6851e14785f986c56a5657d26e3972ce70e44022ee2df40b40b4522c7fd3ea2"
+FROZEN_SELECTOR_WITNESS_SHA256 = "ebaa43d4a048d4358fccdf94a7b2a3ed7268e54ae3ecfc09cec8ea8ca1a2f72a"
 REVIEW_SCHEMA = "chowder.reap-v2-independent-original-frozen-review.v1"
 SECURITY_SCHEMA = "chowder.reap-v2-independent-frozen-humaneval-security.v1"
 HISTORICAL_REAP160_SCHEMA = "chowder.reap-v2-independent-historical-reap160-prerequisite.v1"
@@ -153,6 +155,11 @@ def _verify_frozen_selector_source() -> None:
     _require(reap_select is selector_witness.reap_select
              and reap_gates is selector_witness.reap_gates
              and reap_serve is selector_witness.reap_serve
+             # The witness's own Path alias is mutable. Bind it to the
+             # bridge's separately imported original pathlib.Path before
+             # accepting any source or scored-row reader identity checks.
+             and selector_witness.Path is Path
+             and pathlib.Path is Path
              and sys.modules.get(selector_witness.__name__) is selector_witness
              and Path(selector_witness.__spec__.origin).resolve() == source.resolve(),
              "bridge frozen selector/gate module binding changed")
@@ -183,6 +190,8 @@ def _verify_frozen_selector_source() -> None:
         _require(isinstance(live, FunctionType)
                  and live.__module__ == selector_witness.__name__
                  and live.__globals__ is vars(selector_witness)
+                 and live.__builtins__ is vars(builtins)
+                 and vars(selector_witness).get("__builtins__") is vars(builtins)
                  and _bridge_code_signature(live.__code__)
                  == _bridge_code_signature(expected[name]),
                  f"frozen selector witness live function changed: {name}")
@@ -196,7 +205,7 @@ def _verify_frozen_selector_source() -> None:
         and isinstance(node.targets[0], ast.Name)
     }
     for name in ("SCHEMA", "FROZEN_SOURCE_SHA256", "FROZEN_STATISTICS_SHA256",
-                 "FROZEN_JSON_SHA256"):
+                 "FROZEN_FRACTIONS_SHA256", "FROZEN_AST_SHA256", "FROZEN_JSON_SHA256"):
         expected_value = ast.literal_eval(declarations[name])
         actual = vars(selector_witness).get(name)
         _require(type(actual) is type(expected_value) and actual == expected_value,

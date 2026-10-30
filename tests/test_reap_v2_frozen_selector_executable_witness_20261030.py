@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import ast
+import builtins
 import hashlib
+import fractions
 import json
 import math
 from pathlib import Path
 import statistics
+import sys
 from types import SimpleNamespace
+from types import FunctionType
 
 import pytest
 
@@ -151,6 +156,98 @@ def test_json_default_native_scanner_replacement_refused(monkeypatch):
         witness.verify_frozen_selector_executable()
 
 
+@pytest.mark.parametrize("key,value", [
+    ("NaN", 1.0),
+    ("Infinity", 0.0),
+    ("-Infinity", 0.0),
+])
+def test_json_nonfinite_constant_map_mutation_refused(monkeypatch, key, value):
+    before = json.loads('{"trigram_ratio": NaN}')["trigram_ratio"]
+    assert math.isnan(before)
+    monkeypatch.setitem(json.decoder._CONSTANTS, key, value)
+    if key == "NaN":
+        assert json.loads('{"trigram_ratio": NaN}')["trigram_ratio"] == 1.0
+    with pytest.raises(witness.SelectorExecutableRefused,
+                       match="JSON nonfinite constant map changed"):
+        witness.verify_frozen_selector_executable()
+
+
+def test_json_nonfinite_constant_map_extra_key_refused(monkeypatch):
+    monkeypatch.setitem(json.decoder._CONSTANTS, "forged", 0.0)
+    with pytest.raises(witness.SelectorExecutableRefused,
+                       match="JSON nonfinite constant map changed"):
+        witness.verify_frozen_selector_executable()
+
+
+def test_forged_ast_literal_eval_cannot_authorize_gate1_threshold_mutation(monkeypatch):
+    n = 1319
+    base = {f"gsm8k-{i}": {"correct": True} for i in range(n)}
+    arm = {f"gsm8k-{i}": {"correct": i >= 31} for i in range(n)}
+    assert reap_gates._lb_gate(arm, base, reap_gates.G1_THRESH, "test")["status"] == "FAIL"
+    original = ast.literal_eval
+
+    def forged_literal(node):
+        value = original(node)
+        return -1.0 if type(value) is float and value == -0.03 else value
+
+    monkeypatch.setattr(ast, "literal_eval", forged_literal)
+    monkeypatch.setattr(reap_gates, "G1_THRESH", -1.0)
+    assert reap_gates._lb_gate(arm, base, reap_gates.G1_THRESH, "test")["status"] == "PASS"
+    with pytest.raises(witness.SelectorExecutableRefused,
+                       match="AST runtime function changed"):
+        witness.verify_frozen_selector_executable()
+    with pytest.raises(witness.SelectorExecutableRefused,
+                       match="AST runtime function changed"):
+        bridge._verify_frozen_selector_source()
+
+
+def test_forged_gate_row_reader_path_alias_refused(monkeypatch, tmp_path):
+    n = 50
+    for arm, correct in (("candidate", False), ("dense", True)):
+        directory = tmp_path / arm
+        directory.mkdir()
+        lines = [json.dumps({"id": f"gsm8k-{i}", "correct": correct,
+                             "terminated": True, "trigram_ratio": 1.0})
+                 for i in range(n)]
+        (directory / "gsm8k.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    original_bytes = (tmp_path / "candidate" / "gsm8k.jsonl").read_bytes()
+
+    def score_from_disk():
+        arm = reap_gates._load(tmp_path, "candidate", "gsm8k", expected_n=n)
+        base = reap_gates._load(tmp_path, "dense", "gsm8k", expected_n=n)
+        return reap_gates._lb_gate(arm, base, reap_gates.G1_THRESH, "test")["status"]
+
+    assert score_from_disk() == "FAIL"
+    native_path = type(Path())
+
+    class ForgedPath(native_path):
+        def read_text(self, *args, **kwargs):
+            content = super().read_text(*args, **kwargs)
+            if self.parent.name == "candidate" and self.name == "gsm8k.jsonl":
+                return content.replace('"correct": false', '"correct": true')
+            return content
+
+    monkeypatch.setattr(reap_gates, "Path", ForgedPath)
+    assert score_from_disk() == "PASS"
+    assert (tmp_path / "candidate" / "gsm8k.jsonl").read_bytes() == original_bytes
+    assert reap_select._load is reap_gates._load
+    with pytest.raises(witness.SelectorExecutableRefused, match="filesystem Path binding"):
+        witness.verify_frozen_selector_executable()
+
+
+def test_coordinated_witness_and_selector_path_alias_swap_refused(monkeypatch):
+    class ForgedPath(type(Path())):
+        def read_text(self, *args, **kwargs):
+            return super().read_text(*args, **kwargs)
+
+    for module in (witness, reap_gates, reap_select, reap_serve,
+                   reap_v2_source_identity):
+        monkeypatch.setattr(module, "Path", ForgedPath)
+    with pytest.raises(bridge.FrozenEvidenceError,
+                       match="bridge frozen selector/gate module binding changed"):
+        bridge._verify_frozen_selector_source()
+
+
 def test_actual_gate1_false_pass_from_stdev_hijack_is_refused(monkeypatch):
     """A changed imported dependency can reverse a real frozen gate result."""
     base = {f"gsm8k-{i}": {"correct": True} for i in range(50)}
@@ -164,6 +261,152 @@ def test_actual_gate1_false_pass_from_stdev_hijack_is_refused(monkeypatch):
     assert blocked["status"] == "BLOCKED_UNVERIFIED_FROZEN_EVIDENCE"
     assert blocked["selection"]["status"] == "BLOCKED"
     assert blocked["chosen"] is None and blocked["release_approved"] is False
+
+
+def test_original_gate1_false_pass_from_mutable_statistical_precision_refused(monkeypatch):
+    """Source-pinned stdev bytecode is insufficient if its precision drifts."""
+    n = 1319
+    base = {f"gsm8k-{i}": {"correct": True} for i in range(n)}
+    arm = {f"gsm8k-{i}": {"correct": i >= 31} for i in range(n)}
+    original = reap_gates._lb_gate(arm, base, reap_gates.G1_THRESH, "test")
+    assert original["status"] == "FAIL"
+    assert original["statistic"] < reap_gates.G1_THRESH
+
+    # CPython 3.11 statistics._float_sqrt_of_frac reads this mutable global.
+    # Understating stdev makes a genuine original Gate1 FAIL look like PASS.
+    monkeypatch.setattr(statistics, "_sqrt_bit_width", 0)
+    forged = reap_gates._lb_gate(arm, base, reap_gates.G1_THRESH, "test")
+    assert forged["status"] == "PASS"
+    with pytest.raises(witness.SelectorExecutableRefused, match="statistical/hash/JSON"):
+        witness.verify_frozen_selector_executable()
+    result = bridge.bridge_frozen_evidence("Z:/no-original-evidence", "Z:/no-observer")
+    assert result["selection"]["status"] == "BLOCKED"
+    assert result["chosen"] is None and result["release_approved"] is False
+
+
+def test_original_gate1_false_pass_from_mutable_fraction_binding_refused(monkeypatch):
+    """Unchanged _ss bytecode can compute zero variance through a forged Fraction."""
+    n = 1319
+    base = {f"gsm8k-{i}": {"correct": True} for i in range(n)}
+    arm = {f"gsm8k-{i}": {"correct": i >= 31} for i in range(n)}
+    assert reap_gates._lb_gate(arm, base, reap_gates.G1_THRESH, "test")["status"] == "FAIL"
+    monkeypatch.setattr(statistics, "Fraction", lambda *_args: fractions.Fraction(0))
+    assert reap_gates._lb_gate(arm, base, reap_gates.G1_THRESH, "test")["status"] == "PASS"
+    with pytest.raises(witness.SelectorExecutableRefused, match="statistical/hash/JSON"):
+        witness.verify_frozen_selector_executable()
+
+
+def test_original_gate1_false_pass_from_fraction_class_method_refused(monkeypatch):
+    n = 1319
+    base = {f"gsm8k-{i}": {"correct": True} for i in range(n)}
+    arm = {f"gsm8k-{i}": {"correct": i >= 31} for i in range(n)}
+    assert reap_gates._lb_gate(arm, base, reap_gates.G1_THRESH, "test")["status"] == "FAIL"
+    original = fractions.Fraction.__new__
+    monkeypatch.setattr(fractions.Fraction, "__new__",
+                        staticmethod(lambda cls, *_args, **_kwargs: original(cls, 0)))
+    assert reap_gates._lb_gate(arm, base, reap_gates.G1_THRESH, "test")["status"] == "PASS"
+    with pytest.raises(witness.SelectorExecutableRefused,
+                       match="fractional arithmetic method changed"):
+        witness.verify_frozen_selector_executable()
+
+
+def test_original_gate1_false_pass_from_generated_fraction_operator_refused(monkeypatch):
+    n = 1319
+    base = {f"gsm8k-{i}": {"correct": True} for i in range(n)}
+    arm = {f"gsm8k-{i}": {"correct": i >= 31} for i in range(n)}
+    assert reap_gates._lb_gate(arm, base, reap_gates.G1_THRESH, "test")["status"] == "FAIL"
+    # _ss uses sum(Fraction(...)); replacing the dynamically installed
+    # arithmetic method can zero the variance with unchanged source methods.
+    original = fractions.Fraction.__new__
+    monkeypatch.setattr(fractions.Fraction, "__add__",
+                        lambda self, _other: original(type(self), 0))
+    monkeypatch.setattr(fractions.Fraction, "__radd__",
+                        lambda self, _other: original(type(self), 0))
+    assert reap_gates._lb_gate(arm, base, reap_gates.G1_THRESH, "test")["status"] == "PASS"
+    with pytest.raises(witness.SelectorExecutableRefused,
+                       match="generated fractional operator changed"):
+        witness.verify_frozen_selector_executable()
+
+
+def test_mutable_float_info_cannot_reauthorize_forged_statistical_precision(monkeypatch):
+    monkeypatch.setattr(statistics, "_sqrt_bit_width", 0)
+    monkeypatch.setattr(sys, "float_info", SimpleNamespace(mant_dig=-1.5, radix=2))
+    with pytest.raises(witness.SelectorExecutableRefused, match="statistical/hash/JSON"):
+        witness.verify_frozen_selector_executable()
+
+
+def test_coordinated_fraction_module_alias_replacement_refused(monkeypatch):
+    class FakeFraction(fractions.Fraction):
+        pass
+
+    monkeypatch.setattr(statistics, "Fraction", FakeFraction)
+    monkeypatch.setattr(fractions, "Fraction", FakeFraction)
+    with pytest.raises(witness.SelectorExecutableRefused,
+                       match="fractional arithmetic class binding changed"):
+        witness.verify_frozen_selector_executable()
+
+
+def test_original_gate0_false_pass_from_cloned_function_builtins_refused(monkeypatch):
+    """A new FunctionType captures forged builtins even after globals restore."""
+    n = 200
+    base = {f"gsm8k-{i}": {"terminated": True, "trigram_ratio": 0.5}
+            for i in range(n)}
+    arm = {f"gsm8k-{i}": {"terminated": i >= 50, "trigram_ratio": 0.5}
+           for i in range(n)}
+    assert reap_gates._gate0(arm, base)["status"] == "FAIL"
+    original = reap_gates._rates
+    real_builtins = vars(reap_gates)["__builtins__"]
+    forged_builtins = dict(vars(builtins), sum=lambda *_args, **_kwargs: 0)
+    try:
+        vars(reap_gates)["__builtins__"] = forged_builtins
+        forged = FunctionType(original.__code__, vars(reap_gates), original.__name__,
+                              original.__defaults__, original.__closure__)
+    finally:
+        vars(reap_gates)["__builtins__"] = real_builtins
+    assert forged.__builtins__ is forged_builtins
+    assert forged.__globals__ is original.__globals__
+    assert forged.__code__ is original.__code__
+    monkeypatch.setattr(reap_gates, "_rates", forged)
+    assert reap_gates._gate0(arm, base)["status"] == "PASS"
+    with pytest.raises(witness.SelectorExecutableRefused,
+                       match="executing function differs"):
+        witness.verify_frozen_selector_executable()
+    result = bridge.bridge_frozen_evidence("Z:/no-original-evidence", "Z:/no-observer")
+    assert result["selection"]["status"] == "BLOCKED"
+    assert result["chosen"] is None and result["release_approved"] is False
+
+
+def test_cloned_witness_function_with_forged_builtins_refused_by_bridge(monkeypatch):
+    original = witness.verify_frozen_selector_executable
+    original_builtins = vars(witness)["__builtins__"]
+    try:
+        vars(witness)["__builtins__"] = dict(vars(builtins), sum=lambda *_args: 0)
+        forged = FunctionType(original.__code__, vars(witness), original.__name__,
+                              original.__defaults__, original.__closure__)
+    finally:
+        vars(witness)["__builtins__"] = original_builtins
+    monkeypatch.setattr(witness, "verify_frozen_selector_executable", forged)
+    with pytest.raises(bridge.FrozenEvidenceError, match="witness live function changed"):
+        bridge._verify_frozen_selector_source()
+
+
+def test_mutable_builtin_sum_refused(monkeypatch):
+    monkeypatch.setattr(builtins, "sum", lambda *_args, **_kwargs: 0)
+    with pytest.raises(witness.SelectorExecutableRefused, match="statistical/hash/JSON"):
+        witness.verify_frozen_selector_executable()
+
+
+@pytest.mark.parametrize("attribute,replacement", [
+    ("Decimal", object()),
+    ("groupby", lambda *_args: ()),
+    ("defaultdict", dict),
+])
+def test_original_statistics_import_binding_mutation_refused(
+    monkeypatch, attribute, replacement,
+):
+    monkeypatch.setattr(statistics, attribute, replacement)
+    with pytest.raises(witness.SelectorExecutableRefused, match="statistical/hash/JSON"):
+        witness.verify_frozen_selector_executable()
 
 
 def test_statistical_function_default_mutation_refused(monkeypatch):

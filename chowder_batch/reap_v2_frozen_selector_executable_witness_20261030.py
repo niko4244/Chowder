@@ -15,7 +15,11 @@ from __future__ import annotations
 
 import ast
 import builtins
+import collections
+import decimal
+import fractions
 import hashlib
+import itertools
 import json
 import json.decoder
 import json.encoder
@@ -48,6 +52,8 @@ FROZEN_SOURCE_SHA256 = {
 # source review; silently substituting a different CI/interpreter version
 # cannot qualify the ORIGINAL frozen statistical gate.
 FROZEN_STATISTICS_SHA256 = "99ea70b550d381eadc2099866206a716273eec54764e27c78daf7a66039588da"
+FROZEN_FRACTIONS_SHA256 = "40a8d672dd0fd67a188c9ea7353842965fdbbd3fd945dd53bab86937dd628260"
+FROZEN_AST_SHA256 = "60ca452cfac189e51c7c2a582c1240c28fccd12964221bc8d10462f2ee74de18"
 FROZEN_JSON_SHA256 = {
     "__init__": "feb17670e443e5db2723f217727dcc5d5e155c40e4e6935b16061c88542f24e7",
     "decoder": "b719fbcfcebd2b174f076e71292e22b1a17d9e258dbe896c768325383bad4f80",
@@ -139,6 +145,18 @@ def _builtin_identity(value: object, *, module: str, name: str) -> bool:
             and value.__module__ == module and value.__name__ == name)
 
 
+def _trusted_builtins(live: FunctionType, module: ModuleType) -> bool:
+    """Reject cloned source-identical functions capturing a forged builtin map.
+
+    FunctionType captures __builtins__ when it is constructed; restoring the
+    module's globals later does NOT restore the function's captured mapping.
+    Comparing bytecode, defaults and globals alone therefore misses a forged
+    sum() that can reverse the frozen termination/degeneracy Gate0.
+    """
+    return (live.__builtins__ is vars(builtins)
+            and vars(module).get("__builtins__") is vars(builtins))
+
+
 def _git_lf_source(raw: bytes) -> bytes:
     """Normalize Windows checkout EOL only; reject mixed or lone CR bytes."""
     canonical = raw.replace(b"\r\n", b"\n")
@@ -188,6 +206,43 @@ def _check_defaults(live: FunctionType, node: ast.FunctionDef,
                     for name, expression in expected_kw.items()))
 
 
+def _check_ast_runtime() -> dict[str, object]:
+    """Authenticate literal_eval before deriving frozen policy from source AST.
+
+    A forged ast.literal_eval can turn source -0.03 into a fabricated -1.0,
+    making an in-memory Gate1 threshold swap look like an unchanged literal.
+    The original Python 3.11.9 AST source and the executing functions must
+    both match; this does not certify the interpreter's native AST engine.
+    """
+    path = Path(ast.__file__).resolve()
+    _require(path.is_file() and not path.is_symlink()
+             and path.name == "ast.py"
+             and sys.modules.get("ast") is ast
+             and Path(ast.__spec__.origin).resolve() == path,
+             "original AST runtime module origin invalid")
+    raw = path.read_bytes()
+    _require(hashlib.sha256(raw).hexdigest() == FROZEN_AST_SHA256,
+             "original AST runtime source SHA drift")
+    source = raw.decode("utf-8")
+    compiled = compile(source, str(path), "exec", dont_inherit=True,
+                       optimize=sys.flags.optimize)
+    expected = _top_level_functions(compiled)
+    tree = ast.parse(source)
+    nodes = {node.name: node for node in tree.body
+             if isinstance(node, ast.FunctionDef)}
+    checked = ("parse", "literal_eval", "walk", "iter_fields")
+    for name in checked:
+        live = vars(ast).get(name)
+        _require(isinstance(live, FunctionType)
+                 and live.__globals__ is vars(ast)
+                 and _trusted_builtins(live, ast)
+                 and _code_signature(live.__code__) == _code_signature(expected[name])
+                 and _check_defaults(live, nodes[name], ast),
+                 f"original AST runtime function changed: {name}")
+    return {"source_sha256": FROZEN_AST_SHA256,
+            "verified_functions": len(checked)}
+
+
 def _check_json_runtime() -> dict[str, object]:
     """Authenticate the actual JSON parser/encoder used for frozen row intake."""
     modules = {
@@ -218,6 +273,7 @@ def _check_json_runtime() -> dict[str, object]:
                 _require(isinstance(live, FunctionType)
                          and live.__module__ == module.__name__
                          and live.__globals__ is vars(module)
+                         and _trusted_builtins(live, module)
                          and _code_signature(live.__code__)
                          == _code_signature(expected[node.name])
                          and _check_defaults(live, node, module),
@@ -233,6 +289,7 @@ def _check_json_runtime() -> dict[str, object]:
                         live = getattr(cls, child.name, None)
                         _require(isinstance(live, FunctionType)
                                  and live.__globals__ is vars(module)
+                                 and _trusted_builtins(live, module)
                                  and _code_signature(live.__code__)
                                  == _code_signature(methods[child.name])
                                  and _check_defaults(live, child, module),
@@ -263,8 +320,95 @@ def _check_json_runtime() -> dict[str, object]:
              and json._default_decoder.scan_once.parse_constant.__self__
              is json.decoder._CONSTANTS,
              "original JSON decoder binding changed")
+    # CPython's parse_constant is a bound getter into a mutable dictionary.
+    # Its method identity can remain pristine while NaN is remapped to a
+    # finite value, bypassing the frozen Gate0 finite-ratio rejection.
+    constants = json.decoder._CONSTANTS
+    _require(type(constants) is dict
+             and set(constants) == {"NaN", "Infinity", "-Infinity"}
+             and all(type(value) is float for value in constants.values())
+             and math.isnan(constants["NaN"])
+             and math.isinf(constants["Infinity"])
+             and constants["Infinity"] > 0
+             and math.isinf(constants["-Infinity"])
+             and constants["-Infinity"] < 0,
+             "original JSON nonfinite constant map changed")
     return {"source_sha256": dict(FROZEN_JSON_SHA256),
             "verified_functions_and_methods": verified}
+
+
+def _check_fraction_runtime() -> dict[str, object]:
+    """Source-bind Fraction construction/arithmetic used by statistics.stdev."""
+    path = Path(fractions.__file__).resolve()
+    _require(path.is_file() and not path.is_symlink()
+             and path.name == "fractions.py"
+             and sys.modules.get("fractions") is fractions
+             and Path(fractions.__spec__.origin).resolve() == path,
+             "original fractional arithmetic module origin invalid")
+    raw = path.read_bytes()
+    _require(hashlib.sha256(raw).hexdigest() == FROZEN_FRACTIONS_SHA256,
+             "original fractional arithmetic source SHA drift")
+    source = raw.decode("utf-8")
+    compiled = compile(source, str(path), "exec", dont_inherit=True,
+                       optimize=sys.flags.optimize)
+    expected_class = _top_level_functions(compiled)["Fraction"]
+    expected_methods = _top_level_functions(expected_class)
+    cls = fractions.Fraction
+    _require(isinstance(cls, type) and cls.__module__ == "fractions"
+             and cls.__qualname__ == "Fraction",
+             "original fractional arithmetic class binding changed")
+    # The full class includes dynamically generated operators. Authenticate
+    # the source-defined construction and exact arithmetic primitives that
+    # statistics._ss uses, rather than trusting a swapped Fraction alias.
+    method_names = ("__new__", "_operator_fallbacks", "_add", "_sub",
+                    "_mul", "_div", "__neg__", "__eq__")
+    for name in method_names:
+        descriptor = vars(cls).get(name)
+        live = descriptor.__func__ if isinstance(descriptor, staticmethod) else descriptor
+        _require(isinstance(live, FunctionType)
+                 and live.__globals__ is vars(fractions)
+                 and _trusted_builtins(live, fractions)
+                 and _code_signature(live.__code__)
+                 == _code_signature(expected_methods[name]),
+                 f"original fractional arithmetic method changed: {name}")
+    # The Python Fraction class installs its public arithmetic methods by
+    # executing _operator_fallbacks at import time. They are NOT ordinary
+    # class AST methods, so checking the declared methods above misses a
+    # replacement of __add__ (which _ss uses through builtin sum()). Bind
+    # both the generated function code and its captured exact operators.
+    generated = _top_level_functions(expected_methods["_operator_fallbacks"])
+    operators = (
+        ("__add__", "forward", "add", "_add"),
+        ("__radd__", "reverse", "add", "_add"),
+        ("__sub__", "forward", "sub", "_sub"),
+        ("__rsub__", "reverse", "sub", "_sub"),
+        ("__mul__", "forward", "mul", "_mul"),
+        ("__rmul__", "reverse", "mul", "_mul"),
+        ("__truediv__", "forward", "truediv", "_div"),
+        ("__rtruediv__", "reverse", "truediv", "_div"),
+    )
+    _require(fractions.operator is operator,
+             "original fractional arithmetic operator module changed")
+    for name, code_name, fallback_name, exact_name in operators:
+        live = vars(cls).get(name)
+        closure = getattr(live, "__closure__", None)
+        _require(isinstance(live, FunctionType)
+                 and live.__globals__ is vars(fractions)
+                 and _trusted_builtins(live, fractions)
+                 and _code_signature(live.__code__)
+                 == _code_signature(generated[code_name])
+                 and live.__defaults__ is None and live.__kwdefaults__ is None
+                 and closure is not None and len(closure) == 2
+                 and closure[0].cell_contents is getattr(operator, fallback_name)
+                 and closure[1].cell_contents is getattr(cls, exact_name),
+                 f"original generated fractional operator changed: {name}")
+    # __new__ defaults are mutable and can change exact fraction semantics
+    # without touching its source-verified bytecode.
+    _require(cls.__new__.__defaults__ == (0, None)
+             and cls.__new__.__kwdefaults__ == {"_normalize": True},
+             "original fractional arithmetic constructor defaults changed")
+    return {"source_sha256": FROZEN_FRACTIONS_SHA256,
+            "verified_methods": len(method_names) + len(operators)}
 
 
 def _check_numeric_dependencies() -> dict[str, object]:
@@ -300,17 +444,38 @@ def _check_numeric_dependencies() -> dict[str, object]:
         _require(isinstance(live, FunctionType)
                  and live.__module__ == "statistics"
                  and live.__globals__ is vars(statistics)
+                 and _trusted_builtins(live, statistics)
                  and _code_signature(live.__code__) == _code_signature(expected[name])
                  and _check_defaults(live, functions[name], statistics),
                  f"statistics.{name}: executing statistical function differs from source")
     _require(_builtin_identity(math.sqrt, module="math", name="sqrt")
              and _builtin_identity(math.isfinite, module="math", name="isfinite")
+             and _builtin_identity(math.isnan, module="math", name="isnan")
+             and _builtin_identity(math.isinf, module="math", name="isinf")
              and _builtin_identity(math.fsum, module="math", name="fsum")
              and statistics.fsum is math.fsum
              and statistics.mul is operator.mul
+             # statistics.stdev -> _ss -> Fraction/groupby/defaultdict and
+             # _float_sqrt_of_frac -> _sqrt_bit_width. Its Python bytecode can
+             # be pristine while these mutable globals fabricate a zero or
+             # understated variance, reversing a genuine Gate1 FAIL.
+             and statistics.Fraction is fractions.Fraction
+             and statistics.Decimal is decimal.Decimal
+             and statistics.groupby is itertools.groupby
+             and statistics.defaultdict is collections.defaultdict
+             and type(statistics._sqrt_bit_width) is int
+             and statistics._sqrt_bit_width == 109
+             and type(sys.float_info.mant_dig) is int
+             and sys.float_info.mant_dig == 53
+             and sys.float_info.radix == 2
              and _builtin_identity(statistics._normal_dist_inv_cdf,
                                    module="_statistics", name="_normal_dist_inv_cdf")
              and _builtin_identity(hashlib.sha256, module="_hashlib", name="openssl_sha256")
+             and all(_builtin_identity(getattr(builtins, name),
+                                       module="builtins", name=name)
+                     for name in ("sum", "len", "min", "max", "all", "any",
+                                  "abs", "round", "sorted", "getattr",
+                                  "isinstance", "issubclass", "compile"))
              and isinstance(json.loads, FunctionType)
              and json.loads.__module__ == "json"
              and json.loads.__globals__ is vars(json),
@@ -321,6 +486,11 @@ def _check_numeric_dependencies() -> dict[str, object]:
 
 def _check_source_and_code(name: str, module: ModuleType) -> dict[str, object]:
     path = _ROOT / f"{name}.py"
+    # The selector and scorer each import their own Path alias. A replaced
+    # reap_gates.Path can return forged scored rows while reap_select.Path
+    # still hashes the unchanged original bytes, creating a false Gate1 PASS.
+    _require(vars(module).get("Path") is Path,
+             f"{name}: original filesystem Path binding changed")
     _require(path.is_file() and not path.is_symlink(), f"{name}: original source missing")
     metadata = path.stat()
     _require(0 < metadata.st_size <= 128 * 1024, f"{name}: source size invalid")
@@ -358,6 +528,7 @@ def _check_source_and_code(name: str, module: ModuleType) -> dict[str, object]:
         _require(isinstance(live, FunctionType)
                  and live.__module__ == module.__name__
                  and live.__globals__ is vars(module)
+                 and _trusted_builtins(live, module)
                  and _code_signature(live.__code__) == _code_signature(code),
                  f"{name}.{function_name}: executing function differs from frozen source")
         # Function defaults are mutable runtime attributes not included in a
@@ -389,7 +560,9 @@ def _check_source_and_code(name: str, module: ModuleType) -> dict[str, object]:
 
 def verify_frozen_selector_executable() -> dict[str, object]:
     """Refuse unpinned source, foreign modules, code swaps and policy mutation."""
+    ast_runtime = _check_ast_runtime()
     json_runtime = _check_json_runtime()
+    fractions_runtime = _check_fraction_runtime()
     numeric = _check_numeric_dependencies()
     results = {
         name: _check_source_and_code(name, module)
@@ -434,6 +607,8 @@ def verify_frozen_selector_executable() -> dict[str, object]:
         "schema": SCHEMA,
         "modules": results,
         "json_runtime": json_runtime,
+        "ast_runtime": ast_runtime,
+        "fractions_runtime": fractions_runtime,
         "numeric_runtime": numeric,
         "original_selector_unchanged": True,
         "independent_execution_attestation": False,
