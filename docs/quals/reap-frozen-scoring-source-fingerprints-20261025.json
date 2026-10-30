@@ -1,0 +1,29 @@
+{
+  "generator": "chowder_batch.reap_eval._load + _digest; canonical sorted JSON",
+  "generator_source_sha256": "4ac1c26f88232d01c248e1fcf4a5fb7c7becfcd3d263cf6eac0ee31328df43c9",
+  "limitations": "Local exact rendered scoring source input fingerprints, not quality scores, live model provenance, or an independently audited upstream dataset revision.",
+  "recorded_at_utc": "2026-10-25T15:48:18.298758+00:00",
+  "schema": "chowder.reap-registered-scoring-source-fingerprints.v1",
+  "source": "local Hugging Face datasets cache only; no external upstream network verification",
+  "status": "OFFLINE_LOCAL_FROZEN_SOURCE_RENDERED_INPUTS_WITNESSED_NOT_SCIENTIFIC_GATE",
+  "suites": {
+    "gsm8k": {
+      "configuration": "main",
+      "dataset": "openai/gsm8k",
+      "first_id": "gsm8k-0",
+      "last_id": "gsm8k-1318",
+      "n": 1319,
+      "source_items_sha256": "913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89",
+      "split": "test"
+    },
+    "humaneval": {
+      "configuration": "openai_humaneval",
+      "dataset": "openai/openai_humaneval",
+      "first_id": "HumanEval/0",
+      "last_id": "HumanEval/163",
+      "n": 164,
+      "source_items_sha256": "49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420",
+      "split": "test"
+    }
+  }
+}

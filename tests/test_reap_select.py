@@ -12,13 +12,26 @@ import sys
 import pytest
 
 from chowder_batch.reap_gates import GateError
+from chowder_batch.reap_gates import FROZEN_SOURCE_SHA256
 from chowder_batch.reap_select import (
-    PAIRED_METHOD_DISCREPANCY, REQUIRED, _paired, _validate_v2_observation,
+    FROZEN_REFERENCE_MODEL_SHA256, PAIRED_METHOD_DISCREPANCY, REQUIRED,
+    _paired, _validate_v2_observation,
     evaluate, select,
 )
 from chowder_batch import reap_v2_source_identity as identity
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_v2_source_pins(monkeypatch):
+    # All synthetic attestations below use invented benchmark rows. Patch the
+    # source pins only inside this test module; production keeps official SHAs.
+    monkeypatch.setitem(FROZEN_SOURCE_SHA256, "gsm8k", "b" * 64)
+    monkeypatch.setitem(FROZEN_SOURCE_SHA256, "humaneval", "b" * 64)
+    # Synthetic GGUFs are fixture-only: never weaken production model pins.
+    monkeypatch.setitem(FROZEN_REFERENCE_MODEL_SHA256, "dense_v2", "a" * 64)
+    monkeypatch.setitem(FROZEN_REFERENCE_MODEL_SHA256, "random128_v2", "a" * 64)
 
 
 def arm(**statuses):
@@ -121,7 +134,8 @@ def _attest(root, arm, suite, n, *, fail=0, speed=False):
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{suite}.jsonl"
     rows = [
-        {"id": f"{suite}-{i}", "correct": i >= fail, "terminated": True,
+        {"id": (f"HumanEval/{i}" if suite == "humaneval" else f"{suite}-{i}"),
+         "correct": i >= fail, "terminated": True,
          "trigram_ratio": 0.9, "predicted_per_second": 42.0 if speed else None}
         for i in range(n)
     ]
@@ -133,6 +147,19 @@ def _attest(root, arm, suite, n, *, fail=0, speed=False):
     summary.write_text(json.dumps(values), encoding="utf-8")
     if speed:
         (directory / "serve.json").write_text(json.dumps({"experts_offloaded": 0}))
+    if arm.endswith("_v2") or arm.endswith("_v2_q4"):
+        model = {"gguf": f"C:/models/{arm}.gguf", "gguf_sha256": "a" * 64,
+                 "flags": ["--fit", "on", "-np", "4", "-c", "16384", "--jinja"]}
+        (directory / "serve.json").write_text(json.dumps({**model, "experts_offloaded": 0}))
+        (directory / f"{suite}.inputs.json").write_text(json.dumps({
+            "schema": "chowder.reap-eval-input-identity.v1", "model": model,
+            "suite": suite, "source_items_sha256": "b" * 64,
+            "source_items_n": 1319 if suite == "gsm8k" else 164,
+            "decode": {"system": "You are a helpful assistant.", "temperature": 0.0,
+                       "top_k": 1, "seed": 7, "max_tokens": 1024 if suite == "gsm8k" else 768,
+                       "enable_thinking": False},
+            "scoring": "frozen reap_eval production scoring: final_number_match/boxed/HumanEval",
+        }), encoding="utf-8")
     return path
 
 
@@ -177,6 +204,219 @@ def test_full_synthetic_raw_evidence_blocks_missing_mandatory_v2(tmp_path):
     assert "mandatory fallback unchanged" in result["paired_method"]["scope"]
     assert result["input_sha256"][str(tmp_path / "dense" / "gsm8k.jsonl")]
     assert result["release_approved"] is False
+
+
+def _full_v2_rows(root):
+    obs = _evidence(root)
+    _attest(root, "reap128_v2", "gsm8k", 1319)
+    _attest(root, "reap128_v2", "humaneval", 164)
+    _attest(root, "reap128_v2_q4", "gsm8k", 200, speed=True)
+    return obs
+
+
+@pytest.mark.parametrize(("target", "mutation", "error"), [
+    ("reap128_v2/gsm8k.inputs.json", "delete", "witness"),
+    ("reap128_v2_q4/gsm8k.inputs.json", "delete", "witness"),
+    ("reap128_v2/humaneval.inputs.json", "delete", "witness"),
+    ("reap128_v2/gsm8k.inputs.json", ("schema", "wrong"), "schema"),
+    ("reap128_v2/humaneval.inputs.json", ("suite", "gsm8k"), "suite"),
+    ("reap128_v2/gsm8k.inputs.json", ("source_items_sha256", "fake"), "source"),
+    ("reap128_v2_q4/gsm8k.inputs.json", ("source_items_n", 200), "source"),
+    ("reap128_v2_q4/gsm8k.inputs.json", ("source_items_n", 1319.0), "source"),
+    ("reap128_v2/gsm8k.inputs.json", ("decode", {}), "decode"),
+    ("reap128_v2/humaneval.inputs.json", ("scoring", "other"), "scoring"),
+    ("reap128_v2/gsm8k.inputs.json", ("model", {}), "model"),
+    ("reap128_v2_q4/gsm8k.inputs.json", ("model.flags", ["--fit", "off"]), "model"),
+    ("reap128_v2_q4/gsm8k.inputs.json", ("model.gguf_sha256", "c" * 64), "model"),
+    ("reap128_v2_q4/gsm8k.inputs.json", ("model.gguf", "C:/models/foreign.gguf"), "model"),
+    ("reap128_v2_q4/serve.json", ("flags", ["--fit", "off"]), "flags"),
+    ("reap128_v2/serve.json", ("gguf_sha256", "c" * 64), "model"),
+    ("reap128_v2/gsm8k.jsonl", "append", "SHA256"),
+    ("reap128_v2_q4/gsm8k.inputs.json", ("source_items_sha256", "c" * 64), "source"),
+    ("reap128_v2/gsm8k.inputs.json", "corrupt_json", "unreadable"),
+])
+def test_uncertified_v2_results_refuse_selection(tmp_path, target, mutation, error):
+    obs = _full_v2_rows(tmp_path)
+    path = tmp_path / target
+    if mutation == "delete":
+        path.unlink()
+    elif mutation == "corrupt_json":
+        path.write_text("{", encoding="utf-8")
+    elif mutation == "append":
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write('{}\n')
+    else:
+        key, value = mutation
+        content = json.loads(path.read_text(encoding="utf-8"))
+        if key.startswith("model."):
+            content["model"][key.removeprefix("model.")] = value
+        else:
+            content[key] = value
+        path.write_text(json.dumps(content), encoding="utf-8")
+    with pytest.raises(GateError, match=error):
+        evaluate(tmp_path, obs)
+
+
+def test_v2_full_population_fingerprint_is_bound_across_q8_q4(tmp_path):
+    obs = _full_v2_rows(tmp_path)
+    report = evaluate(tmp_path, obs)
+    assert report["gates"]["reap128_v2"]["gates"]["d0"]["status"] == "UNKNOWN"
+    for arm in ("reap128_v2", "reap128_v2_q4"):
+        witness = tmp_path / arm / "gsm8k.inputs.json"
+        assert report["input_sha256"][str(witness)] == hashlib.sha256(witness.read_bytes()).hexdigest()
+
+
+def test_new_v2_quality_cannot_pass_using_detached_archived_dense_or_random_control(tmp_path):
+    obs = _full_v2_rows(tmp_path)
+    # Old archived dense/random128 baseline result files exist, but the new
+    # v2 arm has not generated original-server-bound contemporary references.
+    # Its G0/G1/G2 and negative control therefore remain UNKNOWN.
+    report = evaluate(tmp_path, obs)
+    gates = report["gates"]["reap128_v2"]["gates"]
+    for key in ("gate0", "gate1", "gate2", "control"):
+        assert gates[key]["status"] == "UNKNOWN", (key, gates[key])
+    assert report["decision"]["status"] == "BLOCKED"
+
+
+def test_complete_new_v2_source_witnessed_quality_references_enable_only_quality_gates(tmp_path):
+    obs = _full_v2_rows(tmp_path)
+    for suite, n in (("gsm8k", 1319), ("humaneval", 164)):
+        _attest(tmp_path, "dense_v2", suite, n)
+    _attest(tmp_path, "random128_v2", "gsm8k", 1319, fail=1000)
+    report = evaluate(tmp_path, obs)
+    gates = report["gates"]["reap128_v2"]["gates"]
+    for key in ("gate0", "gate1", "gate2", "control"):
+        assert gates[key]["status"] == "PASS", (key, gates[key])
+    assert gates["speed"]["status"] == "UNKNOWN"
+    assert report["decision"]["status"] == "BLOCKED"
+    assert report["release_approved"] is False
+
+
+def test_new_v2_forged_correct_nontermination_cannot_turn_gate1_fail_to_pass(tmp_path):
+    observation = _full_v2_rows(tmp_path)
+    _attest(tmp_path, "dense_v2", "gsm8k", 1319)
+    _attest(tmp_path, "dense_v2", "humaneval", 164)
+    _attest(tmp_path, "random128_v2", "gsm8k", 1319, fail=1000)
+    result_path = tmp_path / "reap128_v2" / "gsm8k.jsonl"
+    summary_path = result_path.parent / "summary.json"
+    rows = [json.loads(line) for line in result_path.read_text(encoding="utf-8").splitlines()]
+    # Genuine complete benchmark: 45 wrong answers, only 20 non-stops;
+    # termination remains inside Gate0's preregistered 2% tolerance.
+    for i in range(45):
+        rows[i]["correct"] = False
+        rows[i]["terminated"] = i >= 20
+
+    def reseal():
+        result_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["gsm8k"]["file_sha256"] = hashlib.sha256(result_path.read_bytes()).hexdigest()
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    reseal()
+    genuine = evaluate(tmp_path, observation)["gates"]["reap128_v2"]["gates"]
+    assert genuine["gate0"]["status"] == "PASS"
+    assert genuine["gate1"]["status"] == "FAIL"
+
+    # Falsify only correctness of NON-terminated responses. Production
+    # reap_eval._score always reports these as incorrect; rehashing the
+    # JSONL + summary must never turn the scientific Gate1 into PASS.
+    for row in rows[:20]:
+        row["correct"] = True
+    reseal()
+    with pytest.raises(GateError, match="nonterminated.*correct|correct.*nonterminated"):
+        evaluate(tmp_path, observation)
+
+
+@pytest.mark.parametrize("reference", ["dense_v2", "random128_v2"])
+def test_fresh_v2_controls_reject_foreign_model_with_consistent_resealed_witnesses(
+    tmp_path, reference,
+):
+    obs = _full_v2_rows(tmp_path)
+    for suite, n in (("gsm8k", 1319), ("humaneval", 164)):
+        _attest(tmp_path, "dense_v2", suite, n)
+    _attest(tmp_path, "random128_v2", "gsm8k", 1319, fail=1000)
+    # The foreign server and BOTH suite input witnesses agree on the same
+    # forged model SHA; all summary/result/source/decode attestations remain
+    # intact. This must not be admitted as the frozen dense/random control.
+    serve_path = tmp_path / reference / "serve.json"
+    serving = json.loads(serve_path.read_text(encoding="utf-8"))
+    serving["gguf_sha256"] = "c" * 64
+    serve_path.write_text(json.dumps(serving), encoding="utf-8")
+    for suite in (("gsm8k", "humaneval") if reference == "dense_v2" else ("gsm8k",)):
+        witness_path = tmp_path / reference / f"{suite}.inputs.json"
+        witness = json.loads(witness_path.read_text(encoding="utf-8"))
+        witness["model"]["gguf_sha256"] = "c" * 64
+        witness_path.write_text(json.dumps(witness), encoding="utf-8")
+    with pytest.raises(GateError, match="frozen original.*model SHA"):
+        evaluate(tmp_path, obs)
+
+
+def test_resealed_forged_fresh_negative_control_source_refuses_v2_selection(tmp_path):
+    obs = _full_v2_rows(tmp_path)
+    _attest(tmp_path, "random128_v2", "gsm8k", 1319, fail=1000)
+    path = tmp_path / "random128_v2" / "gsm8k.inputs.json"
+    witness = json.loads(path.read_text(encoding="utf-8"))
+    witness["source_items_sha256"] = "f" * 64
+    path.write_text(json.dumps(witness), encoding="utf-8")
+    with pytest.raises(GateError, match="source fingerprint.*official"):
+        evaluate(tmp_path, obs)
+
+
+@pytest.mark.parametrize(("arm", "suite", "new_id"), [
+    ("reap128_v2", "gsm8k", "gsm8k-99999"),
+    ("reap128_v2", "humaneval", "HumanEval/99999"),
+    ("reap128_v2_q4", "gsm8k", "gsm8k-99999"),
+])
+def test_v2_selector_rejects_forged_item_ids_even_with_resealed_result_sha(
+    tmp_path, arm, suite, new_id,
+):
+    obs = _full_v2_rows(tmp_path)
+    predictions = tmp_path / arm / f"{suite}.jsonl"
+    rows = [json.loads(line) for line in predictions.read_text(encoding="utf-8").splitlines()]
+    rows[0]["id"] = new_id
+    predictions.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    summary_path = tmp_path / arm / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary[suite]["file_sha256"] = hashlib.sha256(predictions.read_bytes()).hexdigest()
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    with pytest.raises(GateError, match="item IDs.*frozen official cohort"):
+        evaluate(tmp_path, obs)
+
+
+@pytest.mark.parametrize(("suite", "official"), [
+    ("gsm8k", "913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89"),
+    ("humaneval", "49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420"),
+])
+def test_v2_rejects_consistent_but_nonofficial_dataset_claim(tmp_path, monkeypatch, suite, official):
+    obs = _full_v2_rows(tmp_path)
+    # The attacker wrote matching plausible Q8/Q4 hashes, but those hashes
+    # are not the official unmodified source-item population fingerprint.
+    monkeypatch.setitem(FROZEN_SOURCE_SHA256, suite, official)
+    with pytest.raises(GateError, match="source fingerprint.*official"):
+        evaluate(tmp_path, obs)
+
+
+def test_v2_q4_original_server_log_is_sha_snapshotted_for_selection(tmp_path):
+    obs = _full_v2_rows(tmp_path)
+    log = tmp_path / "reap128_v2_q4" / "server.log"
+    log.write_bytes(b"frozen startup prefix and logged fit rows\n")
+    report = evaluate(tmp_path, obs)
+    assert report["gates"]["reap128_v2"]["gates"]["speed"]["status"] == "UNKNOWN"
+    assert report["input_sha256"][str(log)] == hashlib.sha256(log.read_bytes()).hexdigest()
+
+
+def test_v2_q4_gsm8k_window_must_pair_with_q8_item_ids(tmp_path):
+    obs = _full_v2_rows(tmp_path)
+    path = tmp_path / "reap128_v2_q4" / "gsm8k.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    rows[0]["id"] = "gsm8k-not-in-quality-arm"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    summary_path = path.parent / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["gsm8k"]["file_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    with pytest.raises(GateError, match="frozen official cohort|paired GSM8K IDs"):
+        evaluate(tmp_path, obs)
 
 
 def test_sha_tampered_raw_baseline_refuses_before_selection(tmp_path):
@@ -390,6 +630,17 @@ def test_v2_worked_is_refused_by_both_selector_entrypoints(tmp_path, entrypoint)
     _attest(tmp_path, "reap128_v2", "gsm8k", 1319)
     _attest(tmp_path, "reap128_v2", "humaneval", 164)
     _attest(tmp_path, "reap128_v2_q4", "gsm8k", 200, speed=True)
+    # CLI subprocesses use production pins rather than pytest's synthetic
+    # monkeypatch. Keep this case testing Ornith qualification, not sources.
+    for arm, suite, actual_sha in (
+        ("reap128_v2", "gsm8k", "913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89"),
+        ("reap128_v2", "humaneval", "49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420"),
+        ("reap128_v2_q4", "gsm8k", "913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89"),
+    ):
+        witness_path = tmp_path / arm / f"{suite}.inputs.json"
+        witness = json.loads(witness_path.read_text(encoding="utf-8"))
+        witness["source_items_sha256"] = actual_sha
+        witness_path.write_text(json.dumps(witness), encoding="utf-8")
     calib = tmp_path / "calib"
     calib.mkdir()
     raw = calib / "calibration.jsonl"

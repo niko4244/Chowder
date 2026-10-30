@@ -1,0 +1,24 @@
+{
+  "arm": "reap160_q4",
+  "frozen_speed_ratio_required": 1.3,
+  "input_sha256": {
+    "C:\\llm-work\\reap\\eval\\dense_q4\\gsm8k.jsonl": "9141c5024ceb6217f1d7a31d567fe763609947a43514c0ebee5f962256412a74",
+    "C:\\llm-work\\reap\\eval\\reap160_q4\\gsm8k.jsonl": "1687ca3f400695ca773a1c197ee1caa9cdedc6533283ba7595bc0efc2f5efa36",
+    "C:\\llm-work\\reap\\eval\\reap160_q4\\placement.json": "c438beaeea4c9b01a10aae503d6261f86cef83d1572b6ecb1304133f064c4140",
+    "C:\\llm-work\\reap\\eval\\reap160_q4\\probe.log": "947010c795a456c93e39fb101f775a94f55090cce471fbd6cb865b76565ef05a",
+    "C:\\llm-work\\reap\\eval\\reap160_q4\\serve.json": "fae19f44b18769e08ddff71388859ef55cd3dc95040746aeb24bddb8dc89d861"
+  },
+  "original_gguf": "C:\\llm-work\\reap\\gguf\\reap160-q4_k_m.gguf",
+  "original_gguf_recorded_sha256": "8c840461752e1343e81bc12ab9b95d422a4b45c0b0048f00938fe882f299f8f5",
+  "original_serve_offload_status": null,
+  "schema": "chowder.reap160-historical-placement-reconciliation.v1",
+  "separate_probe_all_gpu_layers": 41,
+  "separate_probe_fit": true,
+  "separate_probe_total_layers": 41,
+  "speed_arm_pps": 48.93855150725031,
+  "speed_dense_pps": 12.703763851920808,
+  "speed_ratio": 3.8522875643544654,
+  "speed_ratio_passes": true,
+  "status": "CORROBORATED_SEPARATE_LOAD_PROBE_NOT_CANONICAL_GATE",
+  "what_is_not_proven": "The separately generated load-only placement probe has no complete cryptographic, live-process or artifact/measurement-session binding to the earlier serve.json and 200-item evaluation. The original canonical gate remains UNKNOWN until provenance adjudication; this report does not override reap_gates or thaw thresholds."
+}

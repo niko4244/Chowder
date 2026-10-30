@@ -1,0 +1,64 @@
+{
+  "binary": "C:\\llama.cpp\\bin\\llama-quantize.exe",
+  "binary_sha256": "eeb75877bd41d8d7b51d18129d873e6220014613baea349fa18e6b5d36c987de",
+  "schema": "chowder.reap-quantizer-buffer-equivalence.v1",
+  "sizes": {
+    "Q4_K_M": {
+      "bounded": {
+        "command": [
+          "C:\\llama.cpp\\bin\\llama-quantize.exe",
+          "--max-buffer-size",
+          "1",
+          "C:\\llm-work\\reap\\quant-buffer-equivalence-20261025\\v3\\tiny-qwen35moe-bf16.gguf",
+          "C:\\llm-work\\reap\\quant-buffer-equivalence-20261025\\v3\\q4_k_m-buffer_1mib.gguf",
+          "Q4_K_M",
+          "2"
+        ],
+        "sha256": "605129350c854b104b64677d0fedb30fafb6d6539cd1327558fbfbea0782752b",
+        "size_bytes": 4008800
+      },
+      "byte_identical": true,
+      "default": {
+        "command": [
+          "C:\\llama.cpp\\bin\\llama-quantize.exe",
+          "C:\\llm-work\\reap\\quant-buffer-equivalence-20261025\\v3\\tiny-qwen35moe-bf16.gguf",
+          "C:\\llm-work\\reap\\quant-buffer-equivalence-20261025\\v3\\q4_k_m-default.gguf",
+          "Q4_K_M",
+          "2"
+        ],
+        "sha256": "605129350c854b104b64677d0fedb30fafb6d6539cd1327558fbfbea0782752b",
+        "size_bytes": 4008800
+      }
+    },
+    "Q8_0": {
+      "bounded": {
+        "command": [
+          "C:\\llama.cpp\\bin\\llama-quantize.exe",
+          "--max-buffer-size",
+          "1",
+          "C:\\llm-work\\reap\\quant-buffer-equivalence-20261025\\v3\\tiny-qwen35moe-bf16.gguf",
+          "C:\\llm-work\\reap\\quant-buffer-equivalence-20261025\\v3\\q8_0-buffer_1mib.gguf",
+          "Q8_0",
+          "2"
+        ],
+        "sha256": "4fad228106a6650fd32ddc97da895653ccb315bd6999ef682a10ae6819bd3887",
+        "size_bytes": 6981472
+      },
+      "byte_identical": true,
+      "default": {
+        "command": [
+          "C:\\llama.cpp\\bin\\llama-quantize.exe",
+          "C:\\llm-work\\reap\\quant-buffer-equivalence-20261025\\v3\\tiny-qwen35moe-bf16.gguf",
+          "C:\\llm-work\\reap\\quant-buffer-equivalence-20261025\\v3\\q8_0-default.gguf",
+          "Q8_0",
+          "2"
+        ],
+        "sha256": "4fad228106a6650fd32ddc97da895653ccb315bd6999ef682a10ae6819bd3887",
+        "size_bytes": 6981472
+      }
+    }
+  },
+  "source": "C:\\llm-work\\reap\\quant-buffer-equivalence-20261025\\v3\\tiny-qwen35moe-bf16.gguf",
+  "source_sha256": "255f8b2e2b2be2ea54fe01b75889624bd2369d6376cabb5dd951aabcb89348c7",
+  "status": "BYTE_IDENTICAL_ALL_TYPES"
+}

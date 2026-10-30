@@ -32,6 +32,7 @@ _CONFIG_KEYS = {
 def verify_header_topology(
     fields: Mapping[str, Any], tensors: Mapping[str, tuple[int, ...]],
     model_config: Mapping[str, Any], prune: Mapping[str, Any],
+    *, expected_file_type: int = 15,
 ) -> dict[str, Any]:
     """Validate all routed layers and expert-shape axes, without model load."""
     if model_config.get("model_type") != "qwen3_5_moe":
@@ -41,8 +42,11 @@ def verify_header_topology(
         raise GGUFHeaderRefusal("model config lacks text_config")
     if fields.get("general.architecture") != "qwen35moe":
         raise GGUFHeaderRefusal("GGUF architecture does not match Qwen35 MoE")
-    if fields.get("general.file_type") != 15 or fields.get("general.quantization_version") != 2:
-        raise GGUFHeaderRefusal("GGUF is not declared Q4_K_M/quantization v2")
+    if expected_file_type not in (7, 15, 32):
+        raise GGUFHeaderRefusal("only preregistered BF16/Q8_0/Q4_K_M GGUF types are supported")
+    if (fields.get("general.file_type") != expected_file_type
+            or fields.get("general.quantization_version") != 2):
+        raise GGUFHeaderRefusal("GGUF file type or quantization version does not match frozen stage")
     for gguf_key, cfg_key in _CONFIG_KEYS.items():
         if cfg_key == "vocab_size" and fields.get(gguf_key) is None:
             # llama.cpp vocab-size metadata is optional, but embedding tensor
@@ -117,7 +121,7 @@ def _sha256_small(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def run_preflight(gguf: Path, model_dir: Path) -> dict[str, Any]:
+def run_preflight(gguf: Path, model_dir: Path, *, expected_file_type: int = 15) -> dict[str, Any]:
     """Check a real GGUF against local model metadata, without tensor loads."""
     try:
         from gguf import GGUFReader
@@ -139,7 +143,9 @@ def run_preflight(gguf: Path, model_dir: Path) -> dict[str, Any]:
         if tensor.name in tensors:
             raise GGUFHeaderRefusal(f"GGUF has duplicate tensor header {tensor.name}")
         tensors[tensor.name] = tuple(int(v) for v in tensor.shape)
-    receipt = verify_header_topology(fields, tensors, config, prune)
+    receipt = verify_header_topology(
+        fields, tensors, config, prune, expected_file_type=expected_file_type,
+    )
     return {
         "schema": "chowder.reap-gguf-header-preflight.v1",
         **receipt,
@@ -155,10 +161,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gguf", type=Path, required=True)
     parser.add_argument("--bf16-model", type=Path, required=True)
+    parser.add_argument("--expected-file-type", type=int, choices=(7, 15, 32), default=15)
     parser.add_argument("--out", type=Path, help="new output receipt (never overwrite)")
     args = parser.parse_args(argv)
     try:
-        report = run_preflight(args.gguf, args.bf16_model)
+        report = run_preflight(
+            args.gguf, args.bf16_model, expected_file_type=args.expected_file_type,
+        )
     except (OSError, ValueError, UnicodeError) as exc:
         parser.exit(2, f"REAP GGUF header preflight REFUSED: {exc}\n")
     encoded = json.dumps(report, sort_keys=True, indent=2) + "\n"

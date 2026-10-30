@@ -1,0 +1,54 @@
+{
+  "amendment4": "BLOCKED_PENDING_PROSPECTIVE_CI_SPECIFICATION",
+  "automationbench": {
+    "frozen_four_slot_eligible": false,
+    "historic_guard_source_git": "84ff9703d6e2aba68eda8585ee461e3d84abec0c",
+    "model_calls": 2278,
+    "model_sha256": "2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7",
+    "next_unscored": [
+      87
+    ],
+    "original_prompt_sha256": "1c8feeec1f680b05b392a5d00fc634edb143c3e7bdd152c476af50cebcec57b5",
+    "original_scorer_source_sha256": "38e7646ad259afdeaadc308d0e6f0da7d44dd3d93ccf59a43e90fccbdff0ede7",
+    "original_source_commit": "4a8e1061254004d9dac807054eed33fad7d1ff14",
+    "owner_sha256": "b6aa1f37e81943344217ede4429066c468bce2176a74eb8b15fcc0fe4a4e0529",
+    "registered_population": 600,
+    "scored": 87,
+    "status": "SOURCE_SCORED_PARTIAL_NOT_COMPLETE_600",
+    "strict_passes": 3,
+    "tool_calls": 3294
+  },
+  "eleven_frontier_original_suite_status": "INCOMPLETE",
+  "gate0": "UNKNOWN",
+  "gate1": "UNKNOWN",
+  "gate2": "UNKNOWN",
+  "gen0": {
+    "chosen": null,
+    "release_approved": false,
+    "status": "BLOCKED"
+  },
+  "human_eval": {
+    "both_correct": 147,
+    "frozen_gate2_eligible": false,
+    "neither_correct": 8,
+    "population": 164,
+    "q4_correct": 151,
+    "q4_generated_rows_sha256": "92ec6439be77a7dbeb1a80448a0bb664e3cb6113a9cc0d356f7dbe300db69c43",
+    "q4_journal_sha256": "d77ff1475bbea9dce352cb1318d15cdc2e76bae6c9d7869b17cf24cf0ec8a902",
+    "q4_model_sha256": "2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7",
+    "q4_only_correct": 4,
+    "q4_serving_session": "a2a6b83e345145839cc333561b2f3baf",
+    "q8_correct": 152,
+    "q8_generated_rows_sha256": "cd3c9d1577611a032b36e69a3f96bd272d118819074352503f143bcd68cac301",
+    "q8_journal_sha256": "03d7931bebcaaf70235f9e2dd6d30d0b23d5a476c487a83f8ef25852297376e8",
+    "q8_model_sha256": "89dcaf33b61f59c83a31b718ba98b73c33437d0320ae0cc56737a5d7e43519c6",
+    "q8_only_correct": 5,
+    "q8_serving_session": "95876063255e45159f57e29306e0e885",
+    "status": "COMPLETE_ORIGINAL_MODEL_RESEARCH_ONLY"
+  },
+  "random_control": "UNKNOWN_FROZEN_COMPARABLE",
+  "reap160_speed": "UNKNOWN",
+  "schema": "chowder.reap-v2-phase45-original-receipt-progress.v1",
+  "source": "independent archived original item witnesses; no new inference",
+  "throughput_gate": "UNKNOWN_PAIRED_DENSE_MISSING"
+}

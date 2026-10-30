@@ -1,0 +1,271 @@
+{
+  "F_assembly": "ABSENT",
+  "abort_text": "OWNED_CONVERSION_ABORT: insufficient unowned physical RAM",
+  "active_owned_Q8_and_quantizer_pids": [],
+  "chunks": 42,
+  "current_payload_hashing": "NOT_REPEATED; original 42 SHA-certified outputs currently match receipt file sizes; exclusive resume rehashes every GGUF",
+  "final_Q8": "ABSENT",
+  "log_sha256": "4b4ce1e52d42fe25aaeebc77a2621ba8a59ba23e02c563c1adb88fbaafdc6271",
+  "mitigation": "CPU-only memory-bounded GGUF streaming merge preserving all 42 source-bound chunks, same >=7GiB physical floor, no unowned service interference",
+  "recorded_at_utc": "2026-10-25T16:29:31.125029+00:00",
+  "schema": "chowder.reap128-v2-q8-merge-memory-guard-abort.v1",
+  "science_gates": "NOT_EVALUATED",
+  "sealed_chunk_receipts": [
+    {
+      "bytes": 578025984,
+      "name": "chunk-001-of-042",
+      "original_sealed_sha256": "2ba9f621815809dc2380ed30e085f0ceea318886a794e4bec22f0515ec9179fa",
+      "receipt_sha256": "aa6bfe4bf09ef873cb8870b82eeba235488156f72ddf2037a3081a0b0532e30e"
+    },
+    {
+      "bytes": 483326752,
+      "name": "chunk-002-of-042",
+      "original_sealed_sha256": "d9bd76dceff39901f0f823aa2d05254042c1e4930e8df9e085a8a41664d38ccb",
+      "receipt_sha256": "a0d58bff0a790bcc5211bbe4d697d1c1a33ab36b6faffb53afce011002d787fd"
+    },
+    {
+      "bytes": 484068192,
+      "name": "chunk-003-of-042",
+      "original_sealed_sha256": "1f21282c20e0e93f9a2cab7318e5b4a2f4020c1f581c33f448555682a0e0c774",
+      "receipt_sha256": "2f20081317ed103e08fbaba021faccdd1ef464b261a5725f93dbc91471fddbeb"
+    },
+    {
+      "bytes": 443177952,
+      "name": "chunk-004-of-042",
+      "original_sealed_sha256": "981b7335aa4106ea8d90c93a3b5e8a6b9d3f876e40d5b17e8602f47605cab87f",
+      "receipt_sha256": "e816e98988b386aa1b33db331e03a2d4bac2bfc857e6bfc360ada6801eb46517"
+    },
+    {
+      "bytes": 508070464,
+      "name": "chunk-005-of-042",
+      "original_sealed_sha256": "94e0dc45f33af735f0378d3c95f4749fec6622c8cb77b5396d2f9144885a0afc",
+      "receipt_sha256": "0d6ad891491c1558292e6bc115788e0f53739db1aba5a34e77ea6f2d3bd61a44"
+    },
+    {
+      "bytes": 479101152,
+      "name": "chunk-006-of-042",
+      "original_sealed_sha256": "f55d221d1413a7ae89e706cad3d2b9cd5c1afcf1d1433775a927f2d2c878f0eb",
+      "receipt_sha256": "ed6f1a9ae53c2b286b8f11ba4594c751a3aa3b23ab04936e7e854d74ddab1f84"
+    },
+    {
+      "bytes": 479101152,
+      "name": "chunk-007-of-042",
+      "original_sealed_sha256": "ad812c212a8fc64a9efefcd8ab5a027a93455a99848df4a7972d038857f3995f",
+      "receipt_sha256": "e7c6e04e4364b4a1b84b0761b541decb3950ed8024ca5cc36ba90cbce61f68e0"
+    },
+    {
+      "bytes": 443177952,
+      "name": "chunk-008-of-042",
+      "original_sealed_sha256": "c78a13655924bdb920601f8abef0c10caf8d12351866971f947e307963902172",
+      "receipt_sha256": "e2ce150ca163721bca62aa9ee4274e375f1351cb028d1ab4964a8f08a9830136"
+    },
+    {
+      "bytes": 507790784,
+      "name": "chunk-009-of-042",
+      "original_sealed_sha256": "961fb7db58ffb19b3afad1e62a6f1998a2cfaa77de26069ff30239d790ade033",
+      "receipt_sha256": "67e189c8d4f6ef15e47e7f631a580f57d79345b56aaf622f9b4832adbd667ac1"
+    },
+    {
+      "bytes": 474413792,
+      "name": "chunk-010-of-042",
+      "original_sealed_sha256": "0ec786499d8b1498051999047e82ea33c09b802fe0a5a0f0336fc3ae7273e1b0",
+      "receipt_sha256": "4dc793a98b44c020d8d0b57e9172a47e49d95e369f5e885ed3e699cf1d656d62"
+    },
+    {
+      "bytes": 474413792,
+      "name": "chunk-011-of-042",
+      "original_sealed_sha256": "aa922b498f980f44ac9338f1e7ff3d886b9f676955d0395b1ea11ec097833c7b",
+      "receipt_sha256": "147b0681e5e085a3fb965775cdbdd800633b6cd1d7ce97a2f95b6e4473f6b4bb"
+    },
+    {
+      "bytes": 452824128,
+      "name": "chunk-012-of-042",
+      "original_sealed_sha256": "4db0397d1a9002886f5e4ef4d65c20b09c8f2c34158f5149c4319d706b5fea28",
+      "receipt_sha256": "db68b4ec9308a8d5a5518db5bc1c2fe1b78b096c7fbe9e7422e1ea36a5fa7025"
+    },
+    {
+      "bytes": 503380928,
+      "name": "chunk-013-of-042",
+      "original_sealed_sha256": "e684b3ddb6c8cc4e16ced79a89e553a7a3621d8237164604ab4882216b3ae28d",
+      "receipt_sha256": "7802b6c74b93b2d26137e9096383dbefd66f6efbc873862c80c8f6d4e273a2ec"
+    },
+    {
+      "bytes": 474413792,
+      "name": "chunk-014-of-042",
+      "original_sealed_sha256": "1239c1feeced1134bcc00fe8a8c30a83b41e21a0dd62bc5a51f07ec88275ecc7",
+      "receipt_sha256": "0465017270e6577b745a83042ad5ab2ea077b63ecab5c214ac70e06cd528c3bf"
+    },
+    {
+      "bytes": 488206656,
+      "name": "chunk-015-of-042",
+      "original_sealed_sha256": "2fe77f7550bcba435cf419e5abfc19433dd3d64e905ef034e30088cecaa8a9c5",
+      "receipt_sha256": "1d028dbf692da31e10e8fdb0dde65a2c17f996993f8849c6a491ecceef9ea98f"
+    },
+    {
+      "bytes": 581368416,
+      "name": "chunk-016-of-042",
+      "original_sealed_sha256": "ccb35ba475f46a20838dc27f7b372fafdc1e941a788033e626f9639fca172d88",
+      "receipt_sha256": "9d19c2b5d9c59127ee317bb4cceb2a23e9a9140e1229607d6a4f931d0305e608"
+    },
+    {
+      "bytes": 508076576,
+      "name": "chunk-017-of-042",
+      "original_sealed_sha256": "01959ac30020f7f3beb6b96448580bfbf3a409505e021fd0f25f4eaca6a3d225",
+      "receipt_sha256": "7747a4dc3350ccbfee34e5fd12986ef5600f71e98d971bc3db88c0eb1ac6d4d5"
+    },
+    {
+      "bytes": 483511040,
+      "name": "chunk-018-of-042",
+      "original_sealed_sha256": "9955ea7b6af18ea1aa985bfdc6d0bd9911475a5b3daac8118fd21b3d0401b359",
+      "receipt_sha256": "76da058d15332352892a98d08a023e30cc451904168e9da4c637b9dfdc823d82"
+    },
+    {
+      "bytes": 474413792,
+      "name": "chunk-019-of-042",
+      "original_sealed_sha256": "b2aa1e646fd83545909415c2a03bdb124957011b6b9d47b13fefe7c2d7c005ff",
+      "receipt_sha256": "7005ccfeea299b9d267eb3194657e6abe18df66d33c3ff0772e5ac51d1593ffa"
+    },
+    {
+      "bytes": 472696256,
+      "name": "chunk-020-of-042",
+      "original_sealed_sha256": "e020d1373a2ea50f42b928092addd8aef70063e08477fa4ecfc782ca9bd1c8d6",
+      "receipt_sha256": "1cce20f664ba690b1e7fd7586a89d984d4d39d2e07678db9cceca9ab9fc19e20"
+    },
+    {
+      "bytes": 483239584,
+      "name": "chunk-021-of-042",
+      "original_sealed_sha256": "92411a74a2ebf1eee5479b05c48d41ecfecdf413cfe2408cb6185c83fc2c814f",
+      "receipt_sha256": "f82c327736b0800eddbbab76e0e780198b00659cbab733399fb4c73e7f47a7d9"
+    },
+    {
+      "bytes": 510065568,
+      "name": "chunk-022-of-042",
+      "original_sealed_sha256": "79cef7ae547dbb6db583683c78892b5b542dcc093c964b2030621b43cd43fb0f",
+      "receipt_sha256": "70ca2903423d560afaf8f670158f39dc9ee44b440b24f7807f6bc664428b537c"
+    },
+    {
+      "bytes": 443729088,
+      "name": "chunk-023-of-042",
+      "original_sealed_sha256": "54a99e33457a244fe77610977e4772a6bb1a829fd5a25ba25fd82f9b93360c84",
+      "receipt_sha256": "4eb937ae7a80fb49fbd1bf0b60b1942b9fa65f54bec6eed3f8ef2b682a9665de"
+    },
+    {
+      "bytes": 447857088,
+      "name": "chunk-024-of-042",
+      "original_sealed_sha256": "8bb04ff5f4df408202bc297c40bed821fd0a72ae135054d05e09ed502ec39323",
+      "receipt_sha256": "ecff3d89cfa941d922a8a3866cd28bb15fa06150ebc4c88950b1cc76b88fff4a"
+    },
+    {
+      "bytes": 503380928,
+      "name": "chunk-025-of-042",
+      "original_sealed_sha256": "a3103b39c8a58919bea5c52c8fe788d75d2723425bbfde52a518b5015896041f",
+      "receipt_sha256": "282a0e7707aa3d5ccf0427ca6b769e431df1f26d0bdf1606d7fd15f639787328"
+    },
+    {
+      "bytes": 483798944,
+      "name": "chunk-026-of-042",
+      "original_sealed_sha256": "0b4968b72482c604fe940f9dbe36bcdd375d984c2116bde7f9016eafdd2d016e",
+      "receipt_sha256": "47260ee70a280e6b552c716cc9f75289a727aa14a0cb2a972eda56af4b14ee93"
+    },
+    {
+      "bytes": 478821472,
+      "name": "chunk-027-of-042",
+      "original_sealed_sha256": "24d7c2a7a9b332f823829ce34a04fc17fbfd74b209bd79d65c20af9f38556164",
+      "receipt_sha256": "a9f23500ac3c336c5cb76b451ca3e6f83c5ef441a222b59369cf837572147cda"
+    },
+    {
+      "bytes": 503380928,
+      "name": "chunk-028-of-042",
+      "original_sealed_sha256": "ab21a8a97d961d208d6107afd2276a120de23c92142326c610b381616621f146",
+      "receipt_sha256": "a96ca9642d3f414e23c88c1f7d380eba4d2fd974681d60f2b483aeaeca33a98d"
+    },
+    {
+      "bytes": 439041696,
+      "name": "chunk-029-of-042",
+      "original_sealed_sha256": "d341fab5abe2287872d7e497013550a68e6289db3dfe419f53ab7f845b45a989",
+      "receipt_sha256": "d469505fec2685db07978e4c2352b3ef0c5c0836e9e36abd329f7e57402e8737"
+    },
+    {
+      "bytes": 523578720,
+      "name": "chunk-030-of-042",
+      "original_sealed_sha256": "ab5b3cbe5e99d32ee1fc5117936402f5fe315dc55714e3c9c45684ba70912342",
+      "receipt_sha256": "8380c66909c999b81a07f22e25fb4b3cd8910834aa6932f8f2610ce4455c54bd"
+    },
+    {
+      "bytes": 581368416,
+      "name": "chunk-031-of-042",
+      "original_sealed_sha256": "76567ee0f7bcf8104901436deb51d85fde494596a708832fc87fcf253dc779a9",
+      "receipt_sha256": "71b3a5881d4e9e57d8664211b69097ff7fa2cb45fdbbe732167a01848e8a6ab6"
+    },
+    {
+      "bytes": 472696256,
+      "name": "chunk-032-of-042",
+      "original_sealed_sha256": "71e9e4180bab25e80857379cd76213368ce58bb99dc0ba40c065be41334cd410",
+      "receipt_sha256": "994242cd4f806167314618d352d3c49c092592d33834990272702c691c85fd39"
+    },
+    {
+      "bytes": 483519264,
+      "name": "chunk-033-of-042",
+      "original_sealed_sha256": "080c4bde32a7452ae517b32e12f9a946696b0e5db1f6ca39edac0c8178c4b27f",
+      "receipt_sha256": "870a0d6872890096ddcf9fa8703a988b59a2d265f3a47046f5bce65886aaa677"
+    },
+    {
+      "bytes": 479101152,
+      "name": "chunk-034-of-042",
+      "original_sealed_sha256": "97d650cc8ebe0cc383af2b7f478710175f30b6c4912e3ee2eb1ee428fcdc0e68",
+      "receipt_sha256": "8c4ca57096cd767ba59386e73e8a7fdb0f147a9178212677407d7486d270777c"
+    },
+    {
+      "bytes": 479101152,
+      "name": "chunk-035-of-042",
+      "original_sealed_sha256": "a0cc0e9e164efe20e179778ad4f72c427b4d13f91caf87c6d327f0f783e5db02",
+      "receipt_sha256": "d37f4c0265b7ade65a91df08cc844fdcdc16fb1cc6f381997935be2b2577eca3"
+    },
+    {
+      "bytes": 443177952,
+      "name": "chunk-036-of-042",
+      "original_sealed_sha256": "a69cd64e0dfbbc8f18fb8fbfe2ce743f63f59fb2065ebdc307afc3547646e539",
+      "receipt_sha256": "3831f9d1742c7338fd7601b12b31619712f311f799fb8a69ed20a211cf9633de"
+    },
+    {
+      "bytes": 508070496,
+      "name": "chunk-037-of-042",
+      "original_sealed_sha256": "3147272ea414007649ace2342ac7a143f95baf4e29a14e3679ee3ec2afc6cb51",
+      "receipt_sha256": "e5e3d0c48501261ccd83baf986ff0bfa90d25975444dadb0a876d8bbc78f21c5"
+    },
+    {
+      "bytes": 479101152,
+      "name": "chunk-038-of-042",
+      "original_sealed_sha256": "203026ed8bb536dadc13ad1cce87ed89e53cd1f4aab039fbe27b7d9af3a150e9",
+      "receipt_sha256": "e5aebd2b3e405a408044dfed184281e71115b3897c2009fd2bd29f059540b109"
+    },
+    {
+      "bytes": 479101152,
+      "name": "chunk-039-of-042",
+      "original_sealed_sha256": "27742d27950e86a732987c1e9b3ae878c30c6642b11dc26d4c7c4aeb711cc53c",
+      "receipt_sha256": "64efedd0bafe3fd45222bc8886a7b27d3fe4ceb841f29f2f9a5e3d0a1459524e"
+    },
+    {
+      "bytes": 443169696,
+      "name": "chunk-040-of-042",
+      "original_sealed_sha256": "8938dd8f295d73036033941e893c78946a8959eeb504dc6a59df264f32ac266e",
+      "receipt_sha256": "586f3b36344430be28eb4fe6252a8549b2de35c2ef521b90240c416fff88eadb"
+    },
+    {
+      "bytes": 551295392,
+      "name": "chunk-041-of-042",
+      "original_sealed_sha256": "ff3eabbbca1ed5be71bb079715238d9a17676df0bbe6f5c11ddfbcfce09b6939",
+      "receipt_sha256": "a599877df238836502578e79efa8b7dfbbb93477ee47c8397bb6cfe31bcd86a6"
+    },
+    {
+      "bytes": 186934464,
+      "name": "chunk-042-of-042",
+      "original_sealed_sha256": "ec6ec24bfcb91132dcc9568792d0547e8a7ac2d165fb4fe22f27132338248455",
+      "receipt_sha256": "a343971fc77c0aff7ba9f070e84a2dbe3cc3f9e7eb1b69028107252248055dbf"
+    }
+  ],
+  "source_gguf_registered_sha256": "80341aa776ad9b5f937c21b081b6d76de4a2ea277e5fb88c9ae2634a9da8f4c6",
+  "status": "OWNED_MERGE_ABORT_PHYSICAL_RAM_FLOOR_42_SEALED_PARTS_RETAINED",
+  "supervision_log": "F:\\reap128-v2-q8-streaming-recovery1-20261025.log",
+  "unique_registered_tensor_names": 733
+}

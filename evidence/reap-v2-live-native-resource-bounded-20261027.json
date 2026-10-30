@@ -1,0 +1,286 @@
+{
+  "full_frozen_serving_stability_proven": false,
+  "gen0": {
+    "chosen": null,
+    "release_approved": false,
+    "status": "BLOCKED"
+  },
+  "isolated_model_peak_ram_or_vram_known": false,
+  "min_available": {
+    "commit_free_bytes": 25682505728,
+    "ram_available_bytes": 10727972864
+  },
+  "model_inference_launched": false,
+  "sample_count": 3,
+  "sampled_max_host_gpu_used_mib": 12325,
+  "sampled_max_native_llama_working_set_bytes": 20600455168,
+  "sampled_min_host_gpu_free_mib": 3726,
+  "samples": [
+    {
+      "gpus": [
+        {
+          "free_mib": 3727,
+          "index": 0,
+          "name": "NVIDIA GeForce RTX 5060 Ti",
+          "total_mib": 16311,
+          "used_mib": 12324,
+          "utilization_percent": 88,
+          "wddm_unaccounted_mib": 260
+        }
+      ],
+      "monotonic_ns": 100292781000000,
+      "physical_and_commit": {
+        "commit_free_bytes": 26164215808,
+        "commit_limit_bytes": 112107528192,
+        "commit_peak_since_boot_bytes": 90979233792,
+        "commit_total_bytes": 85943312384,
+        "ram_available_bytes": 11221680128,
+        "ram_total_bytes": 68613722112
+      },
+      "processes": [
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 10036,
+          "private_bytes": 103927808,
+          "role": "freebuff_app",
+          "working_set_bytes": 112066560
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 27876,
+          "private_bytes": 219688960,
+          "role": "freebuff_app",
+          "working_set_bytes": 140439552
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 30416,
+          "private_bytes": 95027200,
+          "role": "ollama_service",
+          "working_set_bytes": 29528064
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 40080,
+          "private_bytes": 2726006784,
+          "role": "livebench_evaluator",
+          "working_set_bytes": 988024832
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 45512,
+          "private_bytes": 12980224,
+          "role": "freebuff_app",
+          "working_set_bytes": 88608768
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 45572,
+          "private_bytes": 15417344,
+          "role": "freebuff_app",
+          "working_set_bytes": 54079488
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 46608,
+          "private_bytes": 411578368,
+          "role": "freebuff_app",
+          "working_set_bytes": 341962752
+        },
+        {
+          "frozen_fit_flags_present": true,
+          "one_slot_present": true,
+          "pid": 55032,
+          "private_bytes": 22197637120,
+          "role": "native_llama_server",
+          "working_set_bytes": 20600442880
+        }
+      ]
+    },
+    {
+      "gpus": [
+        {
+          "free_mib": 3727,
+          "index": 0,
+          "name": "NVIDIA GeForce RTX 5060 Ti",
+          "total_mib": 16311,
+          "used_mib": 12324,
+          "utilization_percent": 86,
+          "wddm_unaccounted_mib": 260
+        }
+      ],
+      "monotonic_ns": 100296062000000,
+      "physical_and_commit": {
+        "commit_free_bytes": 25682505728,
+        "commit_limit_bytes": 112107528192,
+        "commit_peak_since_boot_bytes": 90979233792,
+        "commit_total_bytes": 86425022464,
+        "ram_available_bytes": 10727972864,
+        "ram_total_bytes": 68613722112
+      },
+      "processes": [
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 10036,
+          "private_bytes": 103919616,
+          "role": "freebuff_app",
+          "working_set_bytes": 112058368
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 27876,
+          "private_bytes": 213741568,
+          "role": "freebuff_app",
+          "working_set_bytes": 140468224
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 30416,
+          "private_bytes": 95027200,
+          "role": "ollama_service",
+          "working_set_bytes": 29523968
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 40080,
+          "private_bytes": 2726006784,
+          "role": "livebench_evaluator",
+          "working_set_bytes": 988024832
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 45512,
+          "private_bytes": 12980224,
+          "role": "freebuff_app",
+          "working_set_bytes": 88608768
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 45572,
+          "private_bytes": 15437824,
+          "role": "freebuff_app",
+          "working_set_bytes": 54087680
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 46608,
+          "private_bytes": 410841088,
+          "role": "freebuff_app",
+          "working_set_bytes": 341336064
+        },
+        {
+          "frozen_fit_flags_present": true,
+          "one_slot_present": true,
+          "pid": 55032,
+          "private_bytes": 22197637120,
+          "role": "native_llama_server",
+          "working_set_bytes": 20600442880
+        }
+      ]
+    },
+    {
+      "gpus": [
+        {
+          "free_mib": 3726,
+          "index": 0,
+          "name": "NVIDIA GeForce RTX 5060 Ti",
+          "total_mib": 16311,
+          "used_mib": 12325,
+          "utilization_percent": 91,
+          "wddm_unaccounted_mib": 260
+        }
+      ],
+      "monotonic_ns": 100300171000000,
+      "physical_and_commit": {
+        "commit_free_bytes": 26041270272,
+        "commit_limit_bytes": 112107528192,
+        "commit_peak_since_boot_bytes": 90979233792,
+        "commit_total_bytes": 86066257920,
+        "ram_available_bytes": 11176513536,
+        "ram_total_bytes": 68613722112
+      },
+      "processes": [
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 10036,
+          "private_bytes": 103923712,
+          "role": "freebuff_app",
+          "working_set_bytes": 112066560
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 27876,
+          "private_bytes": 213741568,
+          "role": "freebuff_app",
+          "working_set_bytes": 140472320
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 30416,
+          "private_bytes": 95027200,
+          "role": "ollama_service",
+          "working_set_bytes": 29511680
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 40080,
+          "private_bytes": 2726006784,
+          "role": "livebench_evaluator",
+          "working_set_bytes": 988024832
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 45512,
+          "private_bytes": 12980224,
+          "role": "freebuff_app",
+          "working_set_bytes": 88608768
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 45572,
+          "private_bytes": 15437824,
+          "role": "freebuff_app",
+          "working_set_bytes": 54087680
+        },
+        {
+          "frozen_fit_flags_present": null,
+          "one_slot_present": null,
+          "pid": 46608,
+          "private_bytes": 410611712,
+          "role": "freebuff_app",
+          "working_set_bytes": 340758528
+        },
+        {
+          "frozen_fit_flags_present": true,
+          "one_slot_present": true,
+          "pid": 55032,
+          "private_bytes": 22197637120,
+          "role": "native_llama_server",
+          "working_set_bytes": 20600455168
+        }
+      ]
+    }
+  ],
+  "schema": "chowder.reap-v2-windows-native-bounded-resource-witness.v1",
+  "status": "BOUNDED_HOST_MEASUREMENT_NOT_EXPERIMENT_PEAK"
+}

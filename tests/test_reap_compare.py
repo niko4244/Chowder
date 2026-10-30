@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "chowder_batch"))
 import reap_compare as rc  # noqa: E402
 import reap_gates as rg  # noqa: E402
+import reap_select as rs  # noqa: E402
 
 
 def write_arm(base, arm, suite, correct, ids=None):
@@ -149,3 +150,123 @@ def test_cli_exit_codes_via_subprocess(tmp_path):
         capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
     assert json.loads(out.read_text())["candidate_beats_all"] is True
+
+
+def _full_v2_quality_fixture(tmp_path):
+    for suite, (size, _) in rc.FROZEN_QUALITY_COHORTS.items():
+        write_arm(tmp_path, "reap128_v2", suite, [True] * size,
+                  ids=([f"gsm8k-{i}" for i in range(size)] if suite == "gsm8k"
+                       else [f"HumanEval/{i}" for i in range(size)]))
+        write_arm(tmp_path, "dense", suite, [False] * size,
+                  ids=([f"gsm8k-{i}" for i in range(size)] if suite == "gsm8k"
+                       else [f"HumanEval/{i}" for i in range(size)]))
+    folder = tmp_path / "reap128_v2"
+    model = {"gguf": "I:/registered-example.gguf", "gguf_sha256": "a" * 64,
+             "flags": rs.FROZEN_SERVE_FLAGS}
+    (folder / "serve.json").write_text(json.dumps(model), encoding="utf-8")
+    for suite, (size, _) in rc.FROZEN_QUALITY_COHORTS.items():
+        witness = {"schema": rs.FROZEN_INPUT_SCHEMA, "model": model,
+                   "suite": suite, "source_items_sha256": rg.FROZEN_SOURCE_SHA256[suite],
+                   "source_items_n": size,
+                   "decode": {"system": "You are a helpful assistant.",
+                              "temperature": 0.0, "top_k": 1, "seed": 7,
+                              "max_tokens": rs.FROZEN_MAX_TOKENS[suite],
+                              "enable_thinking": False},
+                   "scoring": rs.FROZEN_SCORING}
+        (folder / f"{suite}.inputs.json").write_text(json.dumps(witness), encoding="utf-8")
+
+
+def test_v2_descriptive_comparison_requires_both_full_registered_suites(tmp_path):
+    # Before hardening, an apparently successful 4-item or GSM8K-only v2
+    # comparison was reportable as a complete head-to-head win.
+    write_arm(tmp_path, "reap128_v2", "gsm8k", [True] * 4)
+    write_arm(tmp_path, "dense", "gsm8k", [False] * 4)
+    with pytest.raises(rc.CompareError, match="source-bound comparison input|full registered"):
+        rc.compare(tmp_path, "reap128_v2", ["dense"])
+
+
+@pytest.mark.parametrize("tamper", ["source", "cohort", "correct"])
+def test_v2_comparison_refuses_resealed_source_population_or_invalid_rows(tmp_path, tamper):
+    _full_v2_quality_fixture(tmp_path)
+    directory = tmp_path / "reap128_v2"
+    if tamper == "source":
+        path = directory / "gsm8k.inputs.json"
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        receipt["source_items_sha256"] = "b" * 64
+        path.write_text(json.dumps(receipt), encoding="utf-8")
+    else:
+        path = directory / "gsm8k.jsonl"
+        rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
+        if tamper == "cohort":
+            rows[0]["id"] = "gsm8k-not-frozen"
+        else:
+            rows[0]["correct"] = 2
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        summary = json.loads((directory / "summary.json").read_text(encoding="utf-8"))
+        summary["gsm8k"]["file_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        (directory / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    with pytest.raises(rc.CompareError, match="source|cohort|correctness|nonbinary"):
+        rc.compare(tmp_path, "reap128_v2", ["dense"])
+
+
+def test_v2_comparison_valid_full_source_witness_is_descriptive_only(tmp_path):
+    _full_v2_quality_fixture(tmp_path)
+    result = rc.compare(tmp_path, "reap128_v2", ["dense"])
+    assert result["candidate_beats_all"] is True
+    assert {row["suite"]: row["n"] for row in result["rows"]} == {
+        "gsm8k": 1319, "humaneval": 164}
+    assert result["version"] == "reap-compare-v1"
+    for name in ("serve.json", "gsm8k.inputs.json", "humaneval.inputs.json"):
+        assert result["inputs"]["reap128_v2"][name] == hashlib.sha256(
+            (tmp_path / "reap128_v2" / name).read_bytes()).hexdigest()
+    assert result["qualification"] == "DESCRIPTIVE_PAIRED_COMPARISON_NOT_REGISTERED_SCIENTIFIC_GATE"
+
+
+def test_new_v2_uses_frozen_full_gsm8k_only_random128_negative_control(tmp_path):
+    _full_v2_quality_fixture(tmp_path)
+    write_arm(tmp_path, "random128", "gsm8k", [False] * 1319,
+              ids=[f"gsm8k-{i}" for i in range(1319)])
+    result = rc.compare(tmp_path, "reap128_v2", ["dense", "random128"])
+    assert result["candidate_beats_all"] is True
+    assert {row["baseline"]: row["n"] for row in result["rows"]
+            if row["suite"] == "gsm8k"} == {"dense": 1319, "random128": 1319}
+    assert result["not_compared"] == [{"baseline": "random128",
+                                       "suite": "humaneval", "candidate_has": True,
+                                       "baseline_has": False}]
+    assert result["qualification"].endswith("NOT_REGISTERED_SCIENTIFIC_GATE")
+
+
+def test_v2_refuses_truncated_random128_negative_control(tmp_path):
+    _full_v2_quality_fixture(tmp_path)
+    write_arm(tmp_path, "random128", "gsm8k", [False] * 200)
+    with pytest.raises(rc.CompareError, match="noncanonical or partial"):
+        rc.compare(tmp_path, "reap128_v2", ["random128"])
+
+
+@pytest.mark.parametrize("changed", ["serve.json", "gsm8k.inputs.json", "gsm8k.jsonl"])
+def test_v2_paired_comparison_refuses_mutating_source_bound_inputs(
+    tmp_path, monkeypatch, changed,
+):
+    _full_v2_quality_fixture(tmp_path)
+    witness = tmp_path / "reap128_v2" / changed
+    original_bounds = rc._bounds
+    altered = []
+
+    def change_during_statistics(values):
+        if not altered:
+            # A concurrent process alters the input after all earlier source
+            # and summary checks, but before the signed descriptive result.
+            with witness.open("ab") as stream:
+                stream.write(b"\n")
+            altered.append(True)
+        return original_bounds(values)
+
+    monkeypatch.setattr(rc, "_bounds", change_during_statistics)
+    with pytest.raises(rc.CompareError, match="changed during scoring"):
+        rc.compare(tmp_path, "reap128_v2", ["dense"])
+
+
+@pytest.mark.parametrize("margin", [float("nan"), -0.1, float("inf")])
+def test_comparison_refuses_invalid_margin_without_writing_report(tmp_path, margin):
+    with pytest.raises(rc.CompareError, match="finite nonnegative"):
+        rc.compare(tmp_path, "reap128_v2", ["dense"], margin)

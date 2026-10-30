@@ -1,0 +1,10 @@
+{
+  "scientific_artifact": false,
+  "valid_gguf_claim": false,
+  "cleaned_utc": "2026-10-25T13:49:21.8195269Z",
+  "created_by_owned_supervisor": "F:\\reap128-v2-gguf-buffer64-resume-20261025.log",
+  "length_bytes": 6072422400,
+  "abort_reason": "physical RAM below 7GiB runtime floor",
+  "file": "I:\\.reap128-v2-q8_0-20261025.owned-da1c3a33334e45109f0338fa6cc8ad40.gguf",
+  "schema": "chowder.reap-discarded-unpublished-private-q8.v1"
+}

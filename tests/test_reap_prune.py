@@ -18,6 +18,25 @@ ROOT = Path(__file__).resolve().parents[1]
 E, H, I, LAYERS, TOPK = 8, 4, 3, 2, 2
 
 
+def test_registered_shard_pin_checks_live_bytes_and_size(tmp_path: Path) -> None:
+    from chowder_batch.reap_prune import _verify_registered_shard
+
+    parent = tmp_path / "weights"
+    parent.mkdir()
+    shard = parent / "model-00001-of-00001.safetensors"
+    shard.write_bytes(b"original BF16 payload")
+    expected = hashlib.sha256(shard.read_bytes()).hexdigest()
+    assert _verify_registered_shard(
+        shard, parent, size=shard.stat().st_size, sha256=expected,
+    ) == expected
+    # Same-size tampering is not detected by a metadata-only preflight.
+    shard.write_bytes(b"tampered BF16 payload")
+    with pytest.raises(ValueError, match="differs from pinned upstream"):
+        _verify_registered_shard(shard, parent, size=shard.stat().st_size, sha256=expected)
+    with pytest.raises(ValueError, match="wrong-size"):
+        _verify_registered_shard(shard, parent, size=123456, sha256=expected)
+
+
 def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     model = tmp_path / "model"
     model.mkdir()

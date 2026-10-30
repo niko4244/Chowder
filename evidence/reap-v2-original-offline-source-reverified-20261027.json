@@ -1,0 +1,38 @@
+{
+  "cohorts": {
+    "gsm8k": {
+      "first_item_id": "gsm8k-0",
+      "frozen_first200_subset_sha256": "60ba9e741b73fe6cbbcbd33047fc74ffc944a4c6c4d59fa4633cf5d862a87f47",
+      "full_population_and_order_verified": true,
+      "full_rendered_source_sha256": "913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89",
+      "humaneval_generated_code_executed": false,
+      "last_item_id": "gsm8k-1318",
+      "models_invoked": false,
+      "n": 1319,
+      "suite": "gsm8k"
+    },
+    "humaneval": {
+      "first_item_id": "HumanEval/0",
+      "frozen_first200_subset_sha256": null,
+      "full_population_and_order_verified": true,
+      "full_rendered_source_sha256": "49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420",
+      "humaneval_generated_code_executed": false,
+      "last_item_id": "HumanEval/163",
+      "models_invoked": false,
+      "n": 164,
+      "suite": "humaneval"
+    }
+  },
+  "datasets_version": "4.3.0",
+  "evaluator_sha256": "9736714f21834a45c23599a50fa92ef3bebc6cf70967aca7e2329d26b4d73ee1",
+  "gen0": {
+    "chosen": null,
+    "release_approved": false,
+    "status": "BLOCKED"
+  },
+  "network_or_model_called": false,
+  "official_quality_scored": false,
+  "python": "3.11.9",
+  "schema": "chowder.reap-v2-original-offline-frozen-source-admission.v1",
+  "status": "COMPLETE_ORIGINAL_FROZEN_OFFLINE_SOURCES_MATCHED"
+}

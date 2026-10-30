@@ -3,3 +3,34 @@
 # never rewrite their line endings (`core.autocrlf` would otherwise turn LF into
 # CRLF and make a clean clone look corrupt).
 src/chowder/growth/instruments/* -text
+
+# The registered original BF16 upstream pin is SHA-256 bound to exact bytes.
+# A Windows checkout with core.autocrlf=true must keep its LF bytes intact.
+chowder_batch/reference/reap_v2_original_qwen36_bf16_995ad96e.json -text
+docs/quals/reap128-v2-bf16-selection-20261025.json -text
+docs/quals/reap160-historical-speed-reconciliation-20261025.json -text
+docs/quals/reap128-v2-frozen-gate-snapshot-prequality-20261025.json -text
+docs/quals/reap128-v2-bf16-header-sample-verification-20261025.json -text
+docs/quals/reap128-v2-full-source-equivalence-20261025.json -text
+docs/quals/reap128-v2-bf16-real-inference-20261025.json -text
+docs/quals/reap128-v2-bf16-gguf-stage-20261025.json -text
+docs/quals/reap128-v2-incomplete-q8-cleanup-20261025.json -text
+docs/quals/reap128-v2-quant-buffer-equivalence-v3-20261025.json -text
+docs/quals/reap128-v2-incomplete-q8-cleanup-second-20261025.json -text
+docs/quals/reap128-v2-incomplete-q8-cleanup-third-20261025.json -text
+docs/quals/reap128-v2-incomplete-q4-cleanup-20261025.json -text
+docs/quals/reap128-v2-q8-orphan-chunk003-audit-20261025.json -text
+docs/quals/reap128-v2-frozen-post-evidence-integrity-20261025.json -text
+docs/quals/reap-frozen-scoring-source-fingerprints-20261025.json -text
+docs/quals/reap128-v2-cuda-host-static-refusal-20261025.json -text
+docs/quals/reap128-v2-q8-merge-memory-guard-abort-20261025.json -text
+docs/quals/reap128-v2-q8-F-orphan-header-only-20261025.json -text
+docs/quals/reap128-v2-q8-F-full-independent-tensor-cert-20261025.json -text
+docs/quals/reap128-v2-q8-I-final-construction-receipt-20261025.json -text
+docs/quals/reap128-v2-q8-bf16-numeric-sample-20261025.json -text
+docs/quals/reap128-v2-frozen-offline-inputs-20261025.json -text
+docs/quals/reap128-v2-q4-independent-full-tensor-cert-20261025.json -text
+docs/quals/reap128-v2-q4-bf16-numeric-sample-20261025.json -text
+docs/quals/reap128-v2-q4-cpu-smoke-original*-20261025.json -text
+docs/quals/reap128-v2-q4-cpu-smoke-original*-20261025.log -text
+docs/quals/reap128-v2-post-q4-numeric-safety-selection-20261025.json -text

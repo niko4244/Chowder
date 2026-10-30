@@ -1,0 +1,26 @@
+{
+  "cohorts": {
+    "gsm8k": {
+      "canonical_ids_exact": true,
+      "first_id": "gsm8k-0",
+      "last_id": "gsm8k-1318",
+      "n": 1319,
+      "source_items_sha256": "913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89"
+    },
+    "humaneval": {
+      "canonical_ids_exact": true,
+      "first_id": "HumanEval/0",
+      "last_id": "HumanEval/163",
+      "n": 164,
+      "source_items_sha256": "49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420"
+    }
+  },
+  "mode": "HF_HUB_OFFLINE=1;HF_DATASETS_OFFLINE=1",
+  "model_inference_performed": false,
+  "quality_gate": "NOT_EVALUATED",
+  "registered_evaluator_sha256": "a3b7b561847d56fe108d73e45f57d40263c356796586c2939176e54cd531b426",
+  "registered_gates_sha256": "5d099f482b7f6b8ff890fcd689b8544e3680be33dc00c3efb7b86009da6760a7",
+  "release_approved": false,
+  "schema": "chowder.reap-v2-full-offline-benchmark-inputs.v1",
+  "status": "FULL_FROZEN_OFFLINE_DATASET_CONTENT_MATCH_NOT_MODEL_QUALITY"
+}

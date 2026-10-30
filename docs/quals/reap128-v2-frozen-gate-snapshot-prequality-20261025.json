@@ -1,0 +1,187 @@
+{
+  "schema": "reap-frozen-amendment4-selection-v1",
+  "gates": {
+    "reap128": {
+      "arm": "reap128",
+      "dense": "dense",
+      "control": "random128",
+      "gates": {
+        "d0": {
+          "status": "PASS",
+          "statistic": 10.646096340629155,
+          "threshold": 20.0,
+          "n": 40,
+          "reason": null
+        },
+        "gate0": {
+          "status": "PASS",
+          "statistic": {
+            "terminated_arm": 0.9636087945413192,
+            "terminated_dense": 0.979529946929492,
+            "degenerate_arm": 0.000758150113722517,
+            "degenerate_dense": 0.0
+          },
+          "threshold": {
+            "terminated_delta_min": -0.02,
+            "degenerate_delta_max": 0.02
+          },
+          "n": 1319
+        },
+        "gate1": {
+          "status": "FAIL",
+          "statistic": -0.03780741197234255,
+          "threshold": -0.03,
+          "n": 1319,
+          "mean_diff": -0.027293404094010616
+        },
+        "gate2": {
+          "status": "NOT_EVALUATED",
+          "statistic": -0.048833886816767966,
+          "threshold": -0.1,
+          "n": 164,
+          "mean_diff": -0.024390243902439025,
+          "after_failure": true,
+          "computed_status": "PASS"
+        },
+        "control": {
+          "status": "NOT_EVALUATED",
+          "statistic": 0.16246171660168018,
+          "threshold": 0.0,
+          "n": 1319,
+          "mean_diff": 0.18347232752084913,
+          "after_failure": true,
+          "computed_status": "PASS"
+        },
+        "speed": {
+          "status": "NOT_EVALUATED",
+          "statistic": {
+            "experts_offloaded": null,
+            "pps_arm": 46.71921016089172,
+            "pps_dense": 12.703763851920808,
+            "ratio": 3.677588052286392
+          },
+          "threshold": {
+            "experts_offloaded": 0,
+            "speed_ratio_min": 1.3
+          },
+          "n": 200,
+          "reason": "missing serve.json or complete finite speed samples (arm 200/200, dense 200/200)",
+          "after_failure": true,
+          "computed_status": "UNKNOWN"
+        }
+      },
+      "decision": "v1 failed: score both reap128_v2 and reap160 (amendment 4)"
+    },
+    "reap160": {
+      "arm": "reap160",
+      "dense": "dense",
+      "control": "random128",
+      "gates": {
+        "d0": {
+          "status": "PASS",
+          "statistic": 10.646096340629155,
+          "threshold": 20.0,
+          "n": 40,
+          "reason": null
+        },
+        "gate0": {
+          "status": "PASS",
+          "statistic": {
+            "terminated_arm": 0.9772554965883244,
+            "terminated_dense": 0.979529946929492,
+            "degenerate_arm": 0.0,
+            "degenerate_dense": 0.0
+          },
+          "threshold": {
+            "terminated_delta_min": -0.02,
+            "degenerate_delta_max": 0.02
+          },
+          "n": 1319
+        },
+        "gate1": {
+          "status": "PASS",
+          "statistic": -0.016884620004562416,
+          "threshold": -0.03,
+          "n": 1319,
+          "mean_diff": -0.008339651250947688
+        },
+        "gate2": {
+          "status": "PASS",
+          "statistic": -0.024644828553727363,
+          "threshold": -0.1,
+          "n": 164,
+          "mean_diff": 0.0
+        },
+        "control": {
+          "status": "PASS",
+          "statistic": 0.18196524412526072,
+          "threshold": 0.0,
+          "n": 1319,
+          "mean_diff": 0.20242608036391205
+        },
+        "speed": {
+          "status": "UNKNOWN",
+          "statistic": {
+            "experts_offloaded": null,
+            "pps_arm": 48.93855150725031,
+            "pps_dense": 12.703763851920808,
+            "ratio": 3.8522875643544654
+          },
+          "threshold": {
+            "experts_offloaded": "partial permitted",
+            "speed_ratio_min": 1.3
+          },
+          "n": 200,
+          "reason": "missing serve.json or complete finite speed samples (arm 200/200, dense 200/200)"
+        }
+      },
+      "decision": "undecided \u2014 UNKNOWN: speed"
+    }
+  },
+  "paired_v2_minus_v1": null,
+  "decision": {
+    "status": "BLOCKED",
+    "chosen": null,
+    "reason": "amendment 4 requires both REAP128_v2 and REAP160 full gates"
+  },
+  "paired_method": {
+    "status": "NOT_EVALUATED",
+    "scope": "optional v2 replacement of passing v1; frozen mandatory fallback unchanged",
+    "reported_statistic": "Section 4 paired-difference Wald one-sided 95% LB",
+    "frozen_margin": -0.02,
+    "amendment_4_method": "paired McNemar one-sided 95% LB",
+    "qualification": "NOT_CERTIFIED: frozen Amendment 4 paired McNemar one-sided noninferiority CI is not uniquely specified against the frozen Section 4 Wald LB; prospective documented statistical-method resolution required"
+  },
+  "input_sha256": {
+    "C:\\llm-work\\reap\\observe-v1\\observation.json": "3d5446d58316d085240eb3561e2ca87352faf92222f827110ebd17799e8098c0",
+    "C:\\llm-work\\reap\\observe-v2-bf16-atomic-20261024-222950-223f34d3\\observation.json": "799cc170767f6b17b40c3b01eb3f95ec71310a1154a1ce0570fb07468dde76ed",
+    "C:\\llm-work\\reap\\calib-v2-ornith-bare-20261023\\calibration.jsonl": "f6a09b694ae43a6d8b44b5180a861856501295eabf3d5297eb9749a008cdd929",
+    "C:\\llm-work\\reap\\calib-v2-ornith-bare-20261023\\calibration-manifest.json": "b6f07f3d3f4d35a62e7b99f657668f6779737314f2b6420c49390bcead3a3a1a",
+    "C:\\llm-work\\reap\\eval\\dense\\summary.json": "c8b246e078638f36b41258f9905c0e947a4634ba14e0d088893119357d997a49",
+    "C:\\llm-work\\reap\\eval\\dense\\gsm8k.jsonl": "7a7c99606d7a312e4d4a9b780aa1b80915b6d9eae74a81e672cec4c7037dfa24",
+    "C:\\llm-work\\reap\\eval\\dense\\humaneval.jsonl": "fecfcf29ab85a6680a0064080d2611aaf20b94bbc45f3958278ff0e5e0003c6f",
+    "C:\\llm-work\\reap\\eval\\dense\\serve.json": "007c6199803267def4e8c880d4febc67c0c00dd1e9b42dfd4b56f0874f8f038b",
+    "C:\\llm-work\\reap\\eval\\dense_q4\\summary.json": "0faed6e122ea601b88663488054831cc8800476a22130339b542b3a56c72f44d",
+    "C:\\llm-work\\reap\\eval\\dense_q4\\gsm8k.jsonl": "9141c5024ceb6217f1d7a31d567fe763609947a43514c0ebee5f962256412a74",
+    "C:\\llm-work\\reap\\eval\\dense_q4\\serve.json": "f552a0d997176184b335a07784740c3b96cf135aac73f90beacc7b913de7e1c2",
+    "C:\\llm-work\\reap\\eval\\random128\\summary.json": "dafca2b98b9fd00afd4c56ea4cd2dbfe27d41986cacef393787a3923e2a2e0c6",
+    "C:\\llm-work\\reap\\eval\\random128\\gsm8k.jsonl": "1616e80dfee48f1d05aadcbf56f016ad980a9f1f0798c4c212a14c2f5b632935",
+    "C:\\llm-work\\reap\\eval\\random128\\serve.json": "447470ee1c0652cbd34e895adff67cef4dc46584234f8048e592c99bb148761b",
+    "C:\\llm-work\\reap\\eval\\reap128\\summary.json": "95ec4d3143a6cff772e293bb3d413cfc4b4b7532c325344ac4c80ef2f2af8464",
+    "C:\\llm-work\\reap\\eval\\reap128\\gsm8k.jsonl": "0da1190684b07226625703fa2550a9357dfead1bb1eaaaffcacd07c0976689c2",
+    "C:\\llm-work\\reap\\eval\\reap128\\humaneval.jsonl": "2fa8075a2b2896d546f9a4983a2cd1d424f418bfc6c5131666046d5b98991cdf",
+    "C:\\llm-work\\reap\\eval\\reap128\\serve.json": "fa28bb92e004c9619c3528b8e32d33945031f985039b70e8d4e4c2eaf1e2a7d8",
+    "C:\\llm-work\\reap\\eval\\reap128_q4\\summary.json": "3a3323273978252d220ce9d7494baf51111a79da73c1c77c1aa88571a03e8bbd",
+    "C:\\llm-work\\reap\\eval\\reap128_q4\\gsm8k.jsonl": "0476979cedf8ac35ebb8d92f550969879252deeb4340e6f9b810fadc4c8abce6",
+    "C:\\llm-work\\reap\\eval\\reap128_q4\\serve.json": "c4730f15fc3deb61f3f5fcd701010f096ceb0ae0d84820301a6e03708af16c1d",
+    "C:\\llm-work\\reap\\eval\\reap160\\summary.json": "fc886c1dccdea25dfb2ad6113c3e49c4762a10e59b8c0d83e2c9a5c0ddf58cb5",
+    "C:\\llm-work\\reap\\eval\\reap160\\gsm8k.jsonl": "15731c419616ada3c297064238d00dc07b229981edf08fe25864138140e80638",
+    "C:\\llm-work\\reap\\eval\\reap160\\humaneval.jsonl": "88d7b96c827041540225857a1c03e6a24c2452bc3ab92953c19496759c97424f",
+    "C:\\llm-work\\reap\\eval\\reap160\\serve.json": "58b9f8a1ee0697e58bb90c226724d9873fd3e1e96df84c8c9fba8e467a1b8c3d",
+    "C:\\llm-work\\reap\\eval\\reap160_q4\\summary.json": "965008e21ada2a886364a56bde0d811eb3568bc8a4dad4e0c0adb3cc4d8ef090",
+    "C:\\llm-work\\reap\\eval\\reap160_q4\\gsm8k.jsonl": "1687ca3f400695ca773a1c197ee1caa9cdedc6533283ba7595bc0efc2f5efa36",
+    "C:\\llm-work\\reap\\eval\\reap160_q4\\serve.json": "fae19f44b18769e08ddff71388859ef55cd3dc95040746aeb24bddb8dc89d861"
+  },
+  "release_approved": false,
+  "scope": "frozen selection score only; human approval and hardware gates separate"
+}

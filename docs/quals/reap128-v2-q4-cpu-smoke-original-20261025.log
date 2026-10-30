@@ -1,0 +1,2 @@
+0.02.588.612 E ggml_cuda_init: failed to initialize CUDA: no CUDA-capable device is detected
+error: invalid argument: --no-conversation

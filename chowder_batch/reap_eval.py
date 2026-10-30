@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+from contextlib import contextmanager
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -34,12 +36,24 @@ import sys
 import tempfile
 import time
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
+
+import psutil
 
 MAX_TOKENS = {"gsm8k": 1024, "humaneval": 768, "math500": 2048}
 SYSTEM = "You are a helpful assistant."
 IDENTITY_SCHEMA = "chowder.reap-eval-input-identity.v1"
+REGISTERED_V2_ARMS = {"reap128_v2", "reap128_v2_q4", "reap160_v2", "reap160_v2_q4",
+                      "dense_v2_q4", "dense_v2", "random128_v2"}
+# Frozen *rendered* complete source populations, including canonical order,
+# item IDs, prompts, answers and executable HumanEval tests. These are not
+# supplied by the serving receipt or by a locally generated input witness.
+FROZEN_V2_QUALITY_SOURCES = {
+    "gsm8k": (1319, "913ca81f724cba16a07099608047e7522b00910c1c7fe13499c501ac9e4bad89"),
+    "humaneval": (164, "49fb688c6788b0531803dfd1cb85a69926ec5a7179e74cdfffc53ba52a92b420"),
+}
 
 
 def _digest(value: Any) -> str:
@@ -47,6 +61,28 @@ def _digest(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, ensure_ascii=False,
                          separators=(",", ":"), allow_nan=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _publish_input_witness_exclusive(path: Path, context: dict) -> None:
+    """Publish a complete, fsynced source witness without clobber or partial JSON.
+
+    A killed evaluator may leave a private pending sibling but never an
+    incomplete authoritative `.inputs.json`. A fresh run can safely retry
+    without taking over an earlier serving/model witness.
+    """
+    pending = path.with_name(f".{path.name}.{uuid.uuid4().hex}.pending")
+    try:
+        with pending.open("xb") as stream:
+            stream.write((json.dumps(context, sort_keys=True, indent=2,
+                                     allow_nan=False) + "\n").encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.name == "nt":
+            pending.rename(path)  # Windows rename refuses existing targets.
+        else:
+            os.link(pending, path)  # POSIX rename would replace existing proof.
+    finally:
+        pending.unlink(missing_ok=True)
 
 
 def _bind_evaluation_inputs(out_dir: Path, suite: str, items: list[dict]) -> dict:
@@ -85,8 +121,15 @@ def _bind_evaluation_inputs(out_dir: Path, suite: str, items: list[dict]) -> dic
                    "enable_thinking": False},
         "scoring": "frozen reap_eval production scoring: final_number_match/boxed/HumanEval",
     }
+    if out_dir.name in REGISTERED_V2_ARMS and suite in FROZEN_V2_QUALITY_SOURCES:
+        expected_n, expected_sha = FROZEN_V2_QUALITY_SOURCES[suite]
+        if len(items) != expected_n or context["source_items_sha256"] != expected_sha:
+            raise ValueError(f"REAP registered v2 {suite} official frozen source mismatch; "
+                             "refuse self-witnessed substituted benchmark inputs")
     witness = out_dir / f"{suite}.inputs.json"
     results = out_dir / f"{suite}.jsonl"
+    if witness.is_symlink() or (witness.exists() and not witness.is_file()):
+        raise ValueError("REAP source identity witness must be a regular file")
     if witness.is_file():
         try:
             recorded = json.loads(witness.read_text(encoding="utf-8"))
@@ -99,28 +142,32 @@ def _bind_evaluation_inputs(out_dir: Path, suite: str, items: list[dict]) -> dic
         if results.exists():
             raise ValueError("REAP unclaimed existing results have no original resume identity; "
                              "use a new experiment output directory")
-        # Exclusive creation preserves an earlier interrupted experiment witness.
-        with witness.open("x", encoding="utf-8") as stream:
-            json.dump(context, stream, sort_keys=True, indent=2)
-            stream.write("\n")
+        # Source identity is authoritative only once the entire JSON is
+        # flushed and atomically published. Never overwrite a racing owner.
+        _publish_input_witness_exclusive(witness, context)
     return context
 
 
 def _read_resume_rows(path: Path, allowed_ids: set[str], summary_path: Path,
-                      suite: str) -> dict[str, dict]:
+                      suite: str, *, expected_summary: dict | None = None) -> dict[str, dict]:
     """Reject duplicate, unrelated and post-summary edited outputs."""
+    if path.is_symlink():
+        raise ValueError("REAP result JSONL cannot be a symlink")
     if not path.is_file():
         return {}
     raw = path.read_bytes()
-    summary = {}
-    if summary_path.is_file():
-        try:
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError) as exc:
-            raise ValueError("REAP saved evaluation summary cannot be parsed") from exc
-        if not isinstance(summary, dict):
-            raise ValueError("REAP saved evaluation summary is malformed")
-    earlier = summary.get(suite)
+    if expected_summary is None:
+        summary = {}
+        if summary_path.is_file():
+            try:
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise ValueError("REAP saved evaluation summary cannot be parsed") from exc
+            if not isinstance(summary, dict):
+                raise ValueError("REAP saved evaluation summary is malformed")
+        earlier = summary.get(suite)
+    else:
+        earlier = expected_summary
     if earlier is not None and (
         not isinstance(earlier, dict)
         or earlier.get("file_sha256") != hashlib.sha256(raw).hexdigest()
@@ -141,6 +188,197 @@ def _read_resume_rows(path: Path, allowed_ids: set[str], summary_path: Path,
     if isinstance(earlier, dict) and earlier.get("n") != len(done):
         raise ValueError("REAP existing summary row count differs from recorded results")
     return done
+
+
+def _summarize_rows(rows: list[dict], path: Path) -> dict:
+    """Recompute the original summary fields from witnessed scored rows."""
+    if not rows:
+        raise ValueError("REAP cannot summarize zero scored rows")
+    for row in rows:
+        ratio = row.get("trigram_ratio")
+        tokens = row.get("completion_tokens")
+        if (not isinstance(row.get("correct"), bool)
+                or not isinstance(row.get("terminated"), bool)
+                or isinstance(ratio, bool) or not isinstance(ratio, (int, float))
+                or not math.isfinite(ratio) or not 0 <= ratio <= 1
+                or (tokens is not None and (
+                    isinstance(tokens, bool) or not isinstance(tokens, (int, float))
+                    or not math.isfinite(tokens) or tokens < 0))):
+            raise ValueError("REAP existing result has invalid scored row fields")
+    n = len(rows)
+    return {
+        "n": n,
+        "accuracy": sum(row["correct"] for row in rows) / n,
+        "terminated_rate": sum(row["terminated"] for row in rows) / n,
+        "degenerate_rate": sum(row["trigram_ratio"] < 0.5 for row in rows) / n,
+        "mean_completion_tokens": sum((row["completion_tokens"] or 0) for row in rows) / n,
+        "file_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+
+def _summary_bytes(path: Path) -> bytes | None:
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError("REAP evaluation summary must be a regular file")
+    return path.read_bytes() if path.is_file() else None
+
+
+def _require_live_new_v2_server(out_dir: Path, *, arm: str, port: int) -> None:
+    """Require the actual just-launched Windows serving owner for v2 scoring.
+
+    The historical CLI remains usable for *descriptive* older arms. A new v2
+    result cannot be produced by pointing standalone reap_eval at an unrelated
+    server while borrowing an old matching serve.json model claim. The serving
+    wrapper alone starts the model-bound child and supplies this context; it
+    independently verifies the loopback listener PID before launching us.
+    """
+    if arm not in REGISTERED_V2_ARMS:
+        return
+    if os.name != "nt":
+        raise ValueError("registered v2 scoring requires Windows serving-owner attestation")
+    try:
+        from chowder_batch.reap_serve import (
+            FLAGS as REGISTERED_SERVE_FLAGS, REGISTERED_QUALITY_REFERENCE_SHA256,
+        )
+
+        context = json.loads(os.environ.get("REAP_BOUND_EVALUATION_SESSION", ""))
+        if not isinstance(context, dict) or set(context) != {
+            "session_id", "server_pid", "port", "model_sha256", "receipt"
+        }:
+            raise ValueError("missing bound serving session context")
+        if (not isinstance(context["session_id"], str)
+                or not re.fullmatch(r"[0-9a-f]{32}", context["session_id"])
+                or type(context["server_pid"]) is not int or context["server_pid"] <= 0
+                or type(context["port"]) is not int or context["port"] != port
+                or not isinstance(context["model_sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", context["model_sha256"])
+                or not isinstance(context["receipt"], str)
+                or not (context["receipt"] == "serve.json"
+                        or re.fullmatch(r"serve\.resume-[0-9a-f]{32}\.json", context["receipt"]))):
+            raise ValueError("invalid or mismatched serving session identity")
+        receipt_file = out_dir / context["receipt"]
+        if receipt_file.is_symlink() or not receipt_file.is_file():
+            raise ValueError("bound serving session receipt missing")
+        serve = json.loads(receipt_file.read_text(encoding="utf-8"))
+        if (not isinstance(serve, dict)
+                or serve.get("eval_session_id") != context["session_id"]
+                or serve.get("server_pid") != context["server_pid"]
+                or serve.get("server_port") != port
+                or serve.get("gguf_sha256") != context["model_sha256"]
+                or serve.get("flags") != REGISTERED_SERVE_FLAGS
+                or not isinstance(serve.get("gguf"), str)
+                or not serve["gguf"]):
+            raise ValueError("bound serving receipt disagrees with live evaluator session")
+        expected_reference = REGISTERED_QUALITY_REFERENCE_SHA256.get(arm)
+        if expected_reference and serve["gguf_sha256"] != expected_reference:
+            raise ValueError("same-session reference/control model differs from frozen original SHA")
+        argv = psutil.Process(context["server_pid"]).cmdline()
+        if (not argv or "llama-server" not in Path(argv[0]).stem.lower()
+                or argv[1:1 + len(REGISTERED_SERVE_FLAGS)] != REGISTERED_SERVE_FLAGS
+                or argv.count("-m") != 1 or argv.count("--port") != 1
+                or Path(argv[argv.index("-m") + 1]).resolve() != Path(serve["gguf"]).resolve()
+                or argv[argv.index("--port") + 1] != str(port)):
+            raise ValueError("live server executable/model/port differs from bound serving receipt")
+        listeners = {item.pid for item in psutil.net_connections(kind="tcp")
+                     if item.status == psutil.CONN_LISTEN and item.laddr
+                     and item.laddr.port == port and item.laddr.ip in (
+                         "127.0.0.1", "0.0.0.0", "::1", "::")}
+        if listeners != {context["server_pid"]}:
+            raise ValueError("bound serving server does not own the live loopback listener")
+    except (psutil.Error, OSError, UnicodeError, KeyError, IndexError, TypeError,
+            json.JSONDecodeError) as exc:
+        raise ValueError(f"registered v2 serving owner not verifiable: {exc}") from exc
+
+
+def _validated_saved_summary(out_dir: Path, *, skip: str | None = None) -> tuple[dict, bytes | None]:
+    """Admit only summaries backed by the current input identity and JSONL bytes.
+
+    `skip` is the suite currently being appended, whose *old* summary digest
+    necessarily differs until the new summary is atomically published.
+    """
+    summary_path = out_dir / "summary.json"
+    raw = _summary_bytes(summary_path)
+    if raw is None:
+        return {}, None
+    try:
+        saved = json.loads(raw)
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("REAP saved evaluation summary cannot be parsed") from exc
+    if not isinstance(saved, dict):
+        raise ValueError("REAP saved evaluation summary is malformed")
+    for suite, entry in saved.items():
+        if suite == skip:
+            continue
+        if suite not in MAX_TOKENS or not isinstance(entry, dict):
+            raise ValueError("REAP saved evaluation summary contains unsupported suite or fields")
+        path = out_dir / f"{suite}.jsonl"
+        witness = out_dir / f"{suite}.inputs.json"
+        if (not path.is_file() or path.is_symlink()
+                or not witness.is_file() or witness.is_symlink()):
+            raise ValueError(f"REAP saved {suite} summary lacks a result or identity witness")
+        full_items = _load(suite)
+        _bind_evaluation_inputs(out_dir, suite, full_items)
+        allowed = {it["id"] for it in full_items}
+        done = _read_resume_rows(path, allowed, summary_path, suite)
+        expected = _summarize_rows([done[it["id"]] for it in full_items
+                                    if it["id"] in done], path)
+        if expected != entry:
+            raise ValueError(f"REAP saved {suite} summary metrics or SHA256 mismatch")
+    return saved, raw
+
+
+@contextmanager
+def _summary_write_guard(out_dir: Path):
+    """Serialize suite re-entry; an orphan lock fails closed after an unclean exit."""
+    lock = out_dir / ".summary.json.lock"
+    with lock.open("x", encoding="utf-8") as stream:
+        stream.write(f"pid={os.getpid()}\n")
+        stream.flush()
+    # Windows prevents unlinking an open file, including our own lock.
+    try:
+        yield
+    finally:
+        lock.unlink()
+
+
+def _publish_summary(out_dir: Path, summary: dict, *, prior_bytes: bytes | None,
+                     updated_suite: str) -> bytes:
+    """Reject stale changes before atomic replacement of one completed suite."""
+    path = out_dir / "summary.json"
+    existing, raw = _validated_saved_summary(out_dir, skip=updated_suite)
+    if raw != prior_bytes:
+        raise ValueError("REAP summary changed while scoring; refuse stale overwrite")
+    if any(summary.get(suite) != entry for suite, entry in existing.items()
+           if suite != updated_suite):
+        raise ValueError("REAP other suite summary changed during merge")
+    selected = out_dir / f"{updated_suite}.jsonl"
+    if (selected.is_symlink() or not selected.is_file()
+            or summary[updated_suite]["file_sha256"]
+            != hashlib.sha256(selected.read_bytes()).hexdigest()):
+        raise ValueError("REAP latest suite output SHA256 changed before publication")
+    full_items = _load(updated_suite)
+    _bind_evaluation_inputs(out_dir, updated_suite, full_items)
+    done = _read_resume_rows(
+        selected, {it["id"] for it in full_items}, path, updated_suite,
+        expected_summary=summary[updated_suite],
+    )
+    expected = _summarize_rows([done[it["id"]] for it in full_items
+                                if it["id"] in done], selected)
+    if expected != summary[updated_suite]:
+        raise ValueError("REAP new suite metrics/rows changed before publication")
+    encoded = (json.dumps(summary, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    pending = out_dir / ".summary.json.pending"
+    with pending.open("xb") as stream:
+        stream.write(encoded)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        if _summary_bytes(path) != prior_bytes:
+            raise ValueError("REAP summary changed before atomic publication")
+        os.replace(pending, path)
+    finally:
+        if pending.exists():
+            pending.unlink()
+    return encoded
 
 
 def _load(suite: str):
@@ -232,6 +470,71 @@ def _score(suite: str, item: dict, out: dict) -> dict:
             "predicted_per_second": (out.get("timings") or {}).get("predicted_per_second"), "text": text}
 
 
+def _run_suites(args: argparse.Namespace, out_dir: Path) -> None:
+    suites = args.suites.split(",")
+    if (not suites or len(suites) != len(set(suites))
+            or any(suite not in MAX_TOKENS for suite in suites)):
+        raise ValueError("REAP evaluation requires unique known suite names")
+    if args.limit < 0 or args.parallel < 1:
+        raise ValueError("REAP evaluation limit/parallel values must be nonnegative/positive")
+    if args.arm in REGISTERED_V2_ARMS and out_dir.name != args.arm:
+        raise ValueError("REAP registered v2 evaluator arm/output path mismatch")
+    _require_live_new_v2_server(out_dir, arm=args.arm, port=args.port)
+    with _summary_write_guard(out_dir):
+        # Validate ALL previously summarized suites before any new model call.
+        # A run for HumanEval must never silently discard corrupt GSM8K proof.
+        summary, summary_bytes = _validated_saved_summary(out_dir)
+        for suite in suites:
+            summary_bytes = _run_suite(args, out_dir, suite, summary, summary_bytes)
+
+
+def _run_suite(args: argparse.Namespace, out_dir: Path, suite: str,
+               summary: dict, summary_bytes: bytes | None) -> bytes:
+    path = out_dir / f"{suite}.jsonl"
+    if args.arm in REGISTERED_V2_ARMS and path.exists():
+        # A new live llama-server session can measure a *different* registered
+        # suite, but may never adopt rows from an earlier serving session as
+        # its own complete quality cohort. The original serve.json is immutable;
+        # reap_serve places every later live session in a distinct resume
+        # receipt. The entry and exit ownership checks validate this context.
+        try:
+            context = json.loads(os.environ["REAP_BOUND_EVALUATION_SESSION"])
+        except (KeyError, ValueError, UnicodeError) as exc:
+            raise ValueError("REAP registered v2 existing rows lack a bound same-session owner") from exc
+        if not isinstance(context, dict) or context.get("receipt") != "serve.json":
+            raise ValueError("REAP registered v2 same-suite rows belong to a previous serving session; "
+                             "a resumed server must use a fresh experiment arm for that suite")
+    items = _load(suite)
+    # Bind the complete source population, not just an optional limited
+    # first batch, so legitimate partial runs can resume full evaluation.
+    input_witness = _bind_evaluation_inputs(out_dir, suite, items)
+    if args.limit:
+        items = items[: args.limit]
+    done = _read_resume_rows(path, {str(it["id"]) for it in items},
+                             out_dir / "summary.json", suite)
+    todo = [it for it in items if it["id"] not in done]
+    t0 = time.time()
+    with path.open("a", encoding="utf-8") as handle, cf.ThreadPoolExecutor(args.parallel) as pool:
+        futures = {pool.submit(_chat, args.port, it["prompt"], MAX_TOKENS[suite]): it for it in todo}
+        for n, fut in enumerate(cf.as_completed(futures), 1):
+            it = futures[fut]
+            row = _score(suite, it, fut.result())
+            done[row["id"]] = row
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            handle.flush()
+            if n % 50 == 0:
+                print(f"{args.arm}/{suite}: {len(done)}/{len(items)} ({time.time() - t0:.0f}s)", flush=True)
+    rows = [done[it["id"]] for it in items]
+    if _bind_evaluation_inputs(out_dir, suite, _load(suite)) != input_witness:
+        raise ValueError("REAP evaluation source identity changed while scoring")
+    _require_live_new_v2_server(out_dir, arm=args.arm, port=args.port)
+    summary[suite] = _summarize_rows(rows, path)
+    summary_bytes = _publish_summary(out_dir, summary, prior_bytes=summary_bytes,
+                                     updated_suite=suite)
+    print(args.arm, suite, json.dumps(summary[suite]), flush=True)
+    return summary_bytes
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
@@ -244,42 +547,7 @@ def main() -> None:
 
     out_dir = Path(args.out) / args.arm
     out_dir.mkdir(parents=True, exist_ok=True)
-    summary = {}
-    for suite in args.suites.split(","):
-        items = _load(suite)
-        # Bind the complete source population, not just an optional limited
-        # first batch, so legitimate partial runs can resume full evaluation.
-        input_witness = _bind_evaluation_inputs(out_dir, suite, items)
-        if args.limit:
-            items = items[: args.limit]
-        path = out_dir / f"{suite}.jsonl"
-        done = _read_resume_rows(path, {str(it["id"]) for it in items},
-                                 out_dir / "summary.json", suite)
-        todo = [it for it in items if it["id"] not in done]
-        t0 = time.time()
-        with path.open("a", encoding="utf-8") as handle, cf.ThreadPoolExecutor(args.parallel) as pool:
-            futures = {pool.submit(_chat, args.port, it["prompt"], MAX_TOKENS[suite]): it for it in todo}
-            for n, fut in enumerate(cf.as_completed(futures), 1):
-                it = futures[fut]
-                row = _score(suite, it, fut.result())
-                done[row["id"]] = row
-                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-                handle.flush()
-                if n % 50 == 0:
-                    print(f"{args.arm}/{suite}: {len(done)}/{len(items)} ({time.time() - t0:.0f}s)", flush=True)
-        rows = [done[it["id"]] for it in items]
-        if _bind_evaluation_inputs(out_dir, suite, _load(suite)) != input_witness:
-            raise ValueError("REAP evaluation source identity changed while scoring")
-        summary[suite] = {
-            "n": len(rows),
-            "accuracy": sum(r["correct"] for r in rows) / len(rows),
-            "terminated_rate": sum(r["terminated"] for r in rows) / len(rows),
-            "degenerate_rate": sum(r["trigram_ratio"] < 0.5 for r in rows) / len(rows),
-            "mean_completion_tokens": sum((r["completion_tokens"] or 0) for r in rows) / len(rows),
-            "file_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        }
-        print(args.arm, suite, json.dumps(summary[suite]), flush=True)
-    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    _run_suites(args, out_dir)
 
 
 if __name__ == "__main__":

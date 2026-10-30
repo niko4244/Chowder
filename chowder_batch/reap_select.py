@@ -10,20 +10,33 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
 try:
-    from chowder_batch.reap_gates import GateError, _load, compute, lower_bound
+    from chowder_batch.reap_gates import GateError, FROZEN_SOURCE_SHA256, _load, compute, lower_bound
     from chowder_batch.reap_v2_source_identity import (
         V2SourceIdentityError, frozen_v2_source_identity,
     )
 except ImportError:  # direct script mode outside the repository package path
-    from reap_gates import GateError, _load, compute, lower_bound
+    from reap_gates import GateError, FROZEN_SOURCE_SHA256, _load, compute, lower_bound
     from reap_v2_source_identity import V2SourceIdentityError, frozen_v2_source_identity
 
 REQUIRED = ("d0", "gate0", "gate1", "gate2", "control", "speed")
 MARGIN = -0.02  # frozen strict lower bound for paired v2-v1 comparisons
+FROZEN_SERVE_FLAGS = ["--fit", "on", "-np", "4", "-c", "16384", "--jinja"]
+FROZEN_SCORING = "frozen reap_eval production scoring: final_number_match/boxed/HumanEval"
+FROZEN_INPUT_SCHEMA = "chowder.reap-eval-input-identity.v1"
+FROZEN_SOURCE_COUNTS = {"gsm8k": 1319, "humaneval": 164}
+FROZEN_MAX_TOKENS = {"gsm8k": 1024, "humaneval": 768}
+# SHA-256 digests of the original frozen models, recorded before Amendment 4.
+# Fresh v2 references must re-measure THESE model bytes, not arbitrarily
+# substituted dense/random models with mutually consistent JSON receipts.
+FROZEN_REFERENCE_MODEL_SHA256 = {
+    "dense_v2": "2ff57a74a36939c5baabf40a0d3eb06d4424ecc94cf7d4ef04b3ac02059097c2",
+    "random128_v2": "601871e00403658708eb4eebf3b05f9dc54a93b326e31f2f87b48cb59f92241b",
+}
 # §4 explicitly defines LB = mean(d) - 1.645 * sd(d)/sqrt(n), whereas
 # Amendment 4 §2 calls for "paired McNemar" one-sided 95% noninferiority at
 # -0.02. McNemar's equality test does not uniquely determine a lower CI for
@@ -101,6 +114,61 @@ def select(gates: dict[str, dict | None], paired: dict | None = None) -> dict:
     return {"status": "SELECTED", "chosen": "reap128", "reason": "v1 retained under amendment 4"}
 
 
+def _is_new_v2(arm: str) -> bool:
+    return arm in {"reap128_v2", "reap128_v2_q4", "reap160_v2", "reap160_v2_q4",
+                   "dense_v2", "dense_v2_q4", "random128_v2"}
+
+
+def _v2_input_witness(eval_dir: Path, arm: str, suite: str) -> dict:
+    """Validate the frozen evaluator's new-arm source/model/decode claim."""
+    directory = eval_dir / arm
+    path = directory / f"{suite}.inputs.json"
+    serving = directory / "serve.json"
+    if not path.is_file() or not serving.is_file() or path.is_symlink() or serving.is_symlink():
+        raise GateError(f"{arm}/{suite}: new v2 evaluation witness or serve.json missing")
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        serve = json.loads(serving.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise GateError(f"{arm}/{suite}: v2 input witness/serving receipt is unreadable") from exc
+    if not isinstance(record, dict) or record.get("schema") != FROZEN_INPUT_SCHEMA:
+        raise GateError(f"{arm}/{suite}: frozen input witness schema mismatch")
+    if set(record) != {"schema", "model", "suite", "source_items_sha256",
+                       "source_items_n", "decode", "scoring"}:
+        raise GateError(f"{arm}/{suite}: frozen input witness schema fields mismatch")
+    if record.get("suite") != suite:
+        raise GateError(f"{arm}/{suite}: input witness suite mismatch")
+    source_sha = record.get("source_items_sha256")
+    if (not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", source_sha)
+            or type(record.get("source_items_n")) is not int
+            or record["source_items_n"] != FROZEN_SOURCE_COUNTS[suite]):
+        raise GateError(f"{arm}/{suite}: frozen source item digest/count invalid")
+    if source_sha != FROZEN_SOURCE_SHA256[suite]:
+        raise GateError(f"{arm}/{suite}: new v2 source fingerprint differs from frozen official {suite}")
+    decode = {"system": "You are a helpful assistant.", "temperature": 0.0,
+              "top_k": 1, "seed": 7, "max_tokens": FROZEN_MAX_TOKENS[suite],
+              "enable_thinking": False}
+    if (record.get("decode") != decode or not isinstance(record["decode"], dict)
+            or any(type(record["decode"][key]) is not type(value)
+                   for key, value in decode.items())):
+        raise GateError(f"{arm}/{suite}: frozen decode policy mismatch")
+    if record.get("scoring") != FROZEN_SCORING:
+        raise GateError(f"{arm}/{suite}: frozen scoring policy mismatch")
+    if not isinstance(serve, dict) or serve.get("flags") != FROZEN_SERVE_FLAGS:
+        raise GateError(f"{arm}/{suite}: frozen serving flags mismatch")
+    model = record.get("model")
+    if (not isinstance(model, dict) or set(model) != {"gguf", "gguf_sha256", "flags"}
+            or not isinstance(model.get("gguf"), str) or not model["gguf"].strip()
+            or not isinstance(model.get("gguf_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", model["gguf_sha256"])
+            or any(serve.get(key) != model[key] for key in model)):
+        raise GateError(f"{arm}/{suite}: input witness model identity disagrees with serving receipt")
+    original_sha = FROZEN_REFERENCE_MODEL_SHA256.get(arm)
+    if original_sha is not None and model["gguf_sha256"] != original_sha:
+        raise GateError(f"{arm}/{suite}: frozen original reference model SHA mismatch")
+    return record
+
+
 def _attested_rows(eval_dir: Path, arm: str, suite: str, expected: int) -> dict | None:
     path = eval_dir / arm / f"{suite}.jsonl"
     summary_path = eval_dir / arm / "summary.json"
@@ -116,6 +184,26 @@ def _attested_rows(eval_dir: Path, arm: str, suite: str, expected: int) -> dict 
     rows = _load(eval_dir, arm, suite, expected_n=expected)
     if entry.get("n") != len(rows):
         raise GateError(f"{arm}/{suite} summary item count mismatch")
+    if _is_new_v2(arm):
+        # The official source-population fingerprint in .inputs.json binds
+        # the *questions*, but alone does not prove that the saved answers
+        # correspond to the canonical item IDs. Full cohorts and the first
+        # 200 speed items must use the actual frozen dataset ordering.
+        if suite == "gsm8k" and expected in (1319, 200):
+            frozen_ids = {f"gsm8k-{i}" for i in range(expected)}
+        elif suite == "humaneval" and expected == 164:
+            frozen_ids = {f"HumanEval/{i}" for i in range(164)}
+        else:
+            raise GateError(f"{arm}/{suite}: unregistered v2 population requested")
+        if set(rows) != frozen_ids:
+            raise GateError(f"{arm}/{suite}: item IDs do not match the frozen official cohort")
+        # reap_eval._score applies `correct = terminated and scored_answer` on
+        # every suite. A re-sealed result marking an unfinished generation
+        # correct is impossible under the registered scoring policy, yet it
+        # could falsely elevate Gate1 while Gate0 remains within tolerance.
+        if any(row["correct"] and not row["terminated"] for row in rows.values()):
+            raise GateError(f"{arm}/{suite}: nonterminated response cannot be correct")
+        _v2_input_witness(eval_dir, arm, suite)
     return rows
 
 
@@ -145,16 +233,33 @@ def _input_digests(
     if calibration_v2 is not None:
         paths.extend((calibration_v2 / "calibration.jsonl",
                       calibration_v2 / "calibration-manifest.json"))
-    for arm in ("dense", "dense_q4", "random128", "reap128",
+    for arm in ("dense", "dense_q4", "dense_v2", "dense_v2_q4",
+                "random128", "random128_v2", "reap128",
                 "reap128_q4", "reap128_v2", "reap128_v2_q4",
                 "reap160", "reap160_q4", "reap160_v2", "reap160_v2_q4"):
         directory = eval_dir / arm
-        for name in ("summary.json", "gsm8k.jsonl", "humaneval.jsonl", "serve.json"):
+        for name in ("summary.json", "gsm8k.jsonl", "humaneval.jsonl", "serve.json",
+                     "gsm8k.inputs.json", "humaneval.inputs.json"):
             path = directory / name
             if path.is_file():
                 paths.append(path)
-    return {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in paths if path.is_file()}
+        if _is_new_v2(arm) and arm.endswith("_q4"):
+            log = directory / "server.log"
+            if log.exists() and (log.is_symlink() or not log.is_file()):
+                raise GateError(f"{arm}: Q4 original startup log is not a regular file")
+            if log.is_file():
+                paths.append(log)
+    # Snapshot serving log bytes as well as the receipt; otherwise a log that
+    # changes after the speed gate check could escape the final drift check.
+    digests = {}
+    for path in paths:
+        if path.is_file():
+            h = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1 << 20), b""):
+                    h.update(chunk)
+            digests[str(path)] = h.hexdigest()
+    return digests
 
 
 def _validate_v2_observation(calibration: Path, observation: Path) -> None:
@@ -269,6 +374,14 @@ def evaluate(
                           ("random128", "gsm8k", 1319), ("dense_q4", "gsm8k", 200)):
         if _attested_rows(root, arm, suite, n) is None:
             raise GateError(f"missing frozen baseline {arm}/{suite}")
+    # New v2 qualification cannot borrow archived dense/control *scores*.
+    # When present, the genuine full fresh reference and negative-control
+    # inputs must be independently source/session witnessed. Missing arms
+    # remain UNKNOWN in the gate consumer, never a fabricated PASS.
+    for reference, suite, n in (("dense_v2", "gsm8k", 1319),
+                                ("dense_v2", "humaneval", 164),
+                                ("random128_v2", "gsm8k", 1319)):
+        _attested_rows(root, reference, suite, n)
     present = {}
     for arm in ("reap128", "reap128_v2", "reap160", "reap160_v2"):
         # A partially present arm is explicitly unresolved, not silently absent.
@@ -279,7 +392,14 @@ def evaluate(
         if any(row is None for row in entries):
             raise GateError(f"{arm}: missing full SHA-attested quality evidence")
         speed_arm = f"{arm}_q4"
-        _attested_rows(root, speed_arm, "gsm8k", 200)
+        speed_rows = _attested_rows(root, speed_arm, "gsm8k", 200)
+        if _is_new_v2(arm) and speed_rows is not None:
+            quality_source = _v2_input_witness(root, arm, "gsm8k")
+            speed_source = _v2_input_witness(root, speed_arm, "gsm8k")
+            if (quality_source["source_items_sha256"] != speed_source["source_items_sha256"]
+                    or quality_source["source_items_n"] != speed_source["source_items_n"]
+                    or not set(speed_rows).issubset(entries[0])):
+                raise GateError(f"{arm}: Q8/Q4 source item fingerprints or paired GSM8K IDs mismatch")
         # v2 is a separately observed saliency/calibration arm. Never borrow
         # the v1 observer's successful D0 as evidence that v2 passed D0.
         observer = observation_path
@@ -288,8 +408,15 @@ def evaluate(
             if v2_path is not None and v2_calib is not None:
                 _validate_v2_observation(v2_calib, v2_path)
                 observer = v2_path
-        present[arm] = compute(root, arm, "dense", "random128",
-                               speed_arm, "dense_q4", observer)
+        # Existing detached/archived dense_q4 throughput is not a valid
+        # hardware comparator for newly constructed v2 Q4 speed. Re-measure
+        # the exact original pinned dense Q4 model in a new first-200
+        # same-session arm; preserve historical baselines unchanged.
+        dense_speed_arm = "dense_v2_q4" if _is_new_v2(arm) else "dense_q4"
+        dense_quality = "dense_v2" if _is_new_v2(arm) else "dense"
+        random_control = "random128_v2" if _is_new_v2(arm) else "random128"
+        present[arm] = compute(root, arm, dense_quality, random_control,
+                               speed_arm, dense_speed_arm, observer)
     paired = _paired(root) if "reap128_v2" in present else None
     decision = select(present, paired)
     if _input_digests(root, observation_path, v2_path, v2_calib) != input_sha256:

@@ -1,0 +1,3 @@
+# Preserve the new independently manifest-hashed notebook's exact bytes.
+# Historical published notebook snapshots and source hashes are unchanged.
+dense_q4_first200_material_postload.py -text

@@ -1,0 +1,32 @@
+{
+  "schema": "chowder.reap-v2-phase48-immutable-code-only-bundle.v1",
+  "source_git_head": "8ab4042dd7f3792cc5a87074076298628b3e75ed",
+  "bundle_path": "evidence/reap-v2-dedicated-original-code-only-runner-phase48-20261027.zip",
+  "sha256": "c6c77731659d655a2e8fbeadbea4a8d1fc3664492739a94f6203983148155bbc",
+  "bytes": 262647,
+  "source_files": 35,
+  "zip_members_including_manifest": 36,
+  "archive_status": "SOURCE_AND_ABI_VERIFIED_NO_MODEL_EXECUTION",
+  "frozen_flags": [
+    "--fit",
+    "on",
+    "-np",
+    "4",
+    "-c",
+    "16384",
+    "--jinja"
+  ],
+  "new_modules_present": [
+    "chowder_batch/reap_v2_original_artifact_portability_20261027.py",
+    "chowder_batch/reap_v2_supervisor_integration_guard_20261027.py",
+    "chowder_batch/reap_v2_humaneval_certificate_verifier_20261027.py"
+  ],
+  "previous_immutable_archive_sha256": "edfdd77dba017ce9a54d9dccbc4717e1d0b006f4376af94312dfd782cabc386e",
+  "original_model_weights_embedded": false,
+  "native_inference_executed": false,
+  "gen0": {
+    "release_approved": false,
+    "status": "BLOCKED",
+    "chosen": null
+  }
+}

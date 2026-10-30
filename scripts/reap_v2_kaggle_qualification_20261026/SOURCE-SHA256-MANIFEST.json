@@ -1,0 +1,90 @@
+{
+  "schema": "chowder.reap128-v2-private-kaggle-runner-snapshots.v1",
+  "historical_windows_source_commit": "7609846557c50f9d984719a9e1e8c5f3d02f807b",
+  "source_git_HEAD_when_copied": "dc0b1246dc4cd9d454d8c5ac25b1637dfd62592a",
+  "input_models_not_included": true,
+  "original_gguf_sha256": "2d64b786461b99a335fdbbdf7c4d3a6758b21409bce755751714ab7cd8f63bf7",
+  "frozen_core_flags": "--fit on -np 4 -c 16384 --jinja",
+  "snapshots": [
+    {
+      "bytes": 2528,
+      "sha256": "ab2d3ca62a43dc2dabff54dd9a8687514771fa8333d7281cbbd5c235e4187037",
+      "file": "pinned_linux_cuda_build.py"
+    },
+    {
+      "bytes": 1887,
+      "sha256": "567e5e6861be5263642a1afee78396b303ff46a1f346088d46c31db479f9280c",
+      "file": "private_source_and_gguf_sha.py"
+    },
+    {
+      "bytes": 4018,
+      "sha256": "e410472eb4a9f1bad0d031387a87cacbb25fdbfe40377bb2f30e39e134f1aae8",
+      "file": "original_scorer_synthetic.py"
+    },
+    {
+      "bytes": 8388,
+      "sha256": "3a43ec9b68da837762d3ce97a0fb0f211850cb1e59800929436cc87f1c7f5bfd",
+      "file": "q4_native_cuda_smoke.py"
+    },
+    {
+      "bytes": 13555,
+      "sha256": "38160ac7e7230e8aba1eea0b731fceb5fa4f229467f702256e1e295bb3f4782b",
+      "file": "candidate_full_1319_164.py"
+    },
+    {
+      "bytes": 13564,
+      "sha256": "32fdd58d908ea41ec0c9d7ba53434abf0ed19faaec9c29863a2d942d116b2ffa",
+      "file": "dense_q4_first200.py"
+    },
+    {
+      "bytes": 13583,
+      "sha256": "0ffa365136b9f4b43e34e44aab6354fee78aa145cadf055709ca295f9ce9c1fb",
+      "file": "candidate_q4_first200.py"
+    },
+    {
+      "bytes": 8621,
+      "sha256": "f628b43f722dd04134ac71aad9e2ee547cb784b46dff42d949de6f7f95cbeb93",
+      "file": "single_t4_parity.py"
+    },
+    {
+      "file": "human164_lowpriv_independent.py",
+      "bytes": 5489,
+      "sha256": "ee6d3eb7e3d556908ab1f0c8987d2a0a0bdd04f6a975adb2ed8a13e8c6e7daef"
+    },
+    {
+      "bytes": 8537,
+      "sha256": "219ba88d14e987b217d9540e2f18f0239bbe56294611303e1aaaaa8fcdbb15fe",
+      "file": "q8_native_original_smoke.py"
+    },
+    {
+      "bytes": 13589,
+      "sha256": "da3ee6fc17df7b160ce1608a544c4c84b4cd5b4c769c270f7969b0fb3ac0c2b0",
+      "file": "q8_complete_1319_164.py"
+    },
+    {
+      "bytes": 2501,
+      "sha256": "d4a304363fb313a947a9ce29196c4a7f1fd8b4f274ca162889074088cace664b",
+      "file": "q8_random128_private_hash_only.py"
+    },
+    {
+      "file": "random128_original_smoke.py",
+      "bytes": 8652,
+      "sha256": "c9bdde512cbe0a302c099a00c6a0b2779b2b51b13bddaa6da812818f6c840c84"
+    },
+    {
+      "file": "q8_postload_cache_resource_probe.py",
+      "bytes": 10411,
+      "sha256": "aff28b3813bfe1d4f5d1aea89b249a18145f5b399d0f9d84dd133a942c8fba2a"
+    },
+    {
+      "file": "q8_complete_postload_reclaim.py",
+      "sha256": "e85e33395012dbdacd30bdb25cdb5921ae3e884e03813c00370c0082415a5b5a",
+      "bytes": 15218
+    },
+    {
+      "file": "random128_complete_postload_reclaim.py",
+      "sha256": "a69429bcec20e3fd4d6907a360b0d2511beba0d1ddfef1d4d958d13cf6840935",
+      "bytes": 15277
+    }
+  ]
+}
