@@ -211,3 +211,180 @@ was verified to hold before proposing it (zero candidate artifacts under
   completions, which is a different and narrower thing.
 
 
+## Automated pool drop -- 2026-11-09
+
+> **Unvetted, machine-appended -- nothing here is registered.** These are
+> arXiv search hits that named a surface mechanism in a watched primary
+> category, listed for triage. No paper here has been read, no result is
+> quoted, and no intervention family, maturity label, or gate is touched
+> (`README.md`, rule 7). Curate anything real into a dated curated section
+> under the rules, or delete this drop if it adds nothing.
+
+- window: last 14 day(s) | surfaced: 82 | new: 74 | already in the log: 8 | off-scope: 12
+- source: `.github/workflows/literature-watch.yml` (`watch.py --append-log`: the primary-category gate plus the surface-term screen)
+
+### training-methods
+
+- **Verifier Noise Is a Temperature: Testing Tilt Predictions in Finite-Budget LLM-Guided Search** -- `arXiv:2611.09699v1` -- 2026-11-06 -- cs.LG -- matched: optimizer
+  - https://arxiv.org/abs/2611.09699
+- **Steerable Multi-Objective Group-Relative Preference Optimization with Jointly Trained Low-Rank Adapters** -- `arXiv:2611.09634v1` -- 2026-11-06 -- cs.CL -- matched: post-training, reinforcement learning, preference optimization
+  - https://arxiv.org/abs/2611.09634
+- **Solver-Free Decision-Focused Learning via Neural Optimization Layers for Edge Selection** -- `arXiv:2611.09560v1` -- 2026-11-06 -- cs.LG -- matched: pretraining
+  - https://arxiv.org/abs/2611.09560
+- **e-means: outperforming k-means (in one-tenth the epochs)** -- `arXiv:2611.09501v1` -- 2026-11-06 -- cs.LG -- matched: data curation, scaling law
+  - https://arxiv.org/abs/2611.09501
+- **Not All Entropy Is Equal: Reward-Conditioned Entropy Allocation in Reinforcement Learning with Verifiable Rewards** -- `arXiv:2611.09448v1` -- 2026-11-06 -- cs.LG -- matched: rlvr, reinforcement learning
+  - https://arxiv.org/abs/2611.09448
+- **Safety-Focused Reinforcement Learning Using Risk-Sensitive Coupled Control** -- `arXiv:2611.09290v1` -- 2026-11-06 -- cs.LG -- matched: reinforcement learning
+  - https://arxiv.org/abs/2611.09290
+- **Rethinking MoE Load Balancing as Feedback Control** -- `arXiv:2611.09252v1` -- 2026-11-06 -- cs.LG -- matched: curriculum, pretraining, data mixture
+  - https://arxiv.org/abs/2611.09252
+
+### compression
+
+- **FlowMoP: Stochastic Multi-Person Motion Prediction** -- `arXiv:2611.09882v1` -- 2026-11-06 -- cs.CV -- matched: compress
+  - https://arxiv.org/abs/2611.09882
+- **Breaking the Privacy Promise: Gradient Inversion Attacks on Federated Low-Rank Adapted Vision Transformers** -- `arXiv:2611.09652v1` -- 2026-11-06 -- cs.CV -- matched: low-rank
+  - https://arxiv.org/abs/2611.09652
+- **Transformer-FSQ: Discrete Latents for Extreme KV-Cache Compression** -- `arXiv:2611.09598v1` -- 2026-11-06 -- cs.LG -- matched: quantis, kv-cache, compress
+  - https://arxiv.org/abs/2611.09598
+- **Query-Guided RoPE Modulation for Lost-in-the-Middle Mitigation in Long-Context LLMs** -- `arXiv:2611.09554v1` -- 2026-11-06 -- cs.CL -- matched: compress
+  - https://arxiv.org/abs/2611.09554
+- **From LoRA to Language: Recovering Skill Documents from Adapters** -- `arXiv:2611.09454v1` -- 2026-11-06 -- cs.LG -- matched: low-rank
+  - https://arxiv.org/abs/2611.09454
+- **MINE: Entropy-coded Memory-efficient Inference for Large Language Models** -- `arXiv:2611.09424v1` -- 2026-11-06 -- cs.LG -- matched: quantiz, compress
+  - https://arxiv.org/abs/2611.09424
+- **Robust Deep Prototype Classifiers via Lipschitz Training** -- `arXiv:2611.09327v1` -- 2026-11-06 -- cs.LG -- matched: quantiz
+  - https://arxiv.org/abs/2611.09327
+- **Fused-Softmax for efficient quantized attention** -- `arXiv:2611.09225v1` -- 2026-11-06 -- cs.AI -- matched: quantiz
+  - https://arxiv.org/abs/2611.09225
+- **RoleWalk: training-free structural embeddings for directed graphs that transfer across graphs** -- `arXiv:2611.09189v1` -- 2026-11-06 -- cs.LG -- matched: prun
+  - https://arxiv.org/abs/2611.09189
+- **ResQAdam: Residual-Preserving Adaptive Optimization for Memory-Efficient Quantization Aware Training** -- `arXiv:2611.08924v1` -- 2026-11-06 -- cs.LG -- matched: quantiz, low-rank
+  - https://arxiv.org/abs/2611.08924
+- **Spectral and Subspace Dynamics of LoRA in Supervised Fine-Tuning and Reinforcement Learning** -- `arXiv:2611.08414v1` -- 2026-11-05 -- cs.LG -- matched: low-rank
+  - https://arxiv.org/abs/2611.08414
+- **Muir: Linear Attention with Sensitivity-Allocated Gating and Matched-Filter Readout** -- `arXiv:2611.08376v1` -- 2026-11-05 -- cs.LG -- matched: low-rank, compress
+  - https://arxiv.org/abs/2611.08376
+- **StrataFlux: Memory-Hierarchy-Native Low-Bit LLM Inference** -- `arXiv:2611.08363v1` -- 2026-11-05 -- cs.LG -- matched: quantiz, kv-cache
+  - https://arxiv.org/abs/2611.08363
+- **AutoCompress: Automated Hardware-Guided Model Compression** -- `arXiv:2611.08290v1` -- 2026-11-05 -- cs.LG -- matched: prun, compress
+  - https://arxiv.org/abs/2611.08290
+
+### peft-adapters
+
+- **RuACT: Recovering Inactive Rubrics as Adaptive Critics and Teachers** -- `arXiv:2611.09597v1` -- 2026-11-06 -- cs.CL -- matched: lora
+  - https://arxiv.org/abs/2611.09597
+- **Turkish Multimodal Video Fact-Checking: A New Dataset and a Comparison of Zero-Shot Agentic and Fine-Tuned Systems** -- `arXiv:2611.08651v1` -- 2026-11-05 -- cs.CV -- matched: lora
+  - https://arxiv.org/abs/2611.08651
+- **Beyond K/V Caches: Cross-Model State Handoff in Hybrid Linear-Attention LLMs** -- `arXiv:2611.08133v1` -- 2026-11-05 -- cs.CL -- matched: adapter
+  - https://arxiv.org/abs/2611.08133
+- **Axis-LoRA: Probing and Adapting Embedding Models for Personal-Memory Retrieval** -- `arXiv:2611.07820v1` -- 2026-11-05 -- cs.CL -- matched: lora, adapter
+  - https://arxiv.org/abs/2611.07820
+- **Automated Video-to-QA Pipeline: End-to-End Question Generation and Verification Using Large Language Models** -- `arXiv:2611.07755v1` -- 2026-11-05 -- cs.CL -- matched: lora
+  - https://arxiv.org/abs/2611.07755
+
+### distillation
+
+- **Mosaic:montage-agnostic self-distilled graph learning for subject-independent ieeg seizure detection** -- `arXiv:2611.09496v1` -- 2026-11-06 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2611.09496
+- **COMBIO: Automated Discovery of a Compact Composite Biomarker from Routine Laboratory Panels** -- `arXiv:2611.09102v1` -- 2026-11-06 -- cs.LG -- matched: distil
+  - https://arxiv.org/abs/2611.09102
+- **WearableBridge: Task-Guided Latent Transport for Free-Living Activity Recognition** -- `arXiv:2611.09067v1` -- 2026-11-06 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2611.09067
+- **Failure Profiling and Reachable Trajectory Selection for Reasoning Distillation** -- `arXiv:2611.09042v1` -- 2026-11-06 -- cs.CL -- matched: distillation, teacher model
+  - https://arxiv.org/abs/2611.09042
+- **Knowledge Distillation from Neural Networks to Differentiable Logic Networks** -- `arXiv:2611.09024v1` -- 2026-11-06 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2611.09024
+- **MotionBench-XAI: Benchmarking What Shapes Shapley Explanations in Spatiotemporal Machine Learning** -- `arXiv:2611.08797v1` -- 2026-11-05 -- cs.LG -- matched: distil
+  - https://arxiv.org/abs/2611.08797
+- **MEDALLION: Manifold Embedding Distillation and Attributions for Low-dimensional Latent InterpretatiON** -- `arXiv:2611.08767v1` -- 2026-11-05 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2611.08767
+- **Unpacking the Compute Efficiency of Strong-to-Weak OPD against GRPO** -- `arXiv:2611.08453v1` -- 2026-11-05 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2611.08453
+- **Discovering Update Rules for Opponent Shaping in General-Sum Games** -- `arXiv:2611.08335v2` -- 2026-11-05 -- cs.LG -- matched: self-play
+  - https://arxiv.org/abs/2611.08335
+- **Learning Dynamics of On-Policy Distillation** -- `arXiv:2611.08016v1` -- 2026-11-05 -- cs.LG -- matched: distillation, teacher-student
+  - https://arxiv.org/abs/2611.08016
+- **CoRD: Coupled Rollouts Fill the Blind Spot of On-Policy Distillation** -- `arXiv:2611.07959v1` -- 2026-11-05 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2611.07959
+- **Optimal Learning in Games with Arbitrary Delays: Best-of-Both-Worlds for Self-Play and Adversarial Opponents** -- `arXiv:2611.07773v1` -- 2026-11-05 -- cs.LG -- matched: self-play
+  - https://arxiv.org/abs/2611.07773
+- **Reinforcing What the Student Has Learned: Teacher-Guided On-Policy Distillation** -- `arXiv:2611.07722v2` -- 2026-11-05 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2611.07722
+- **IMUDINO: Self-distilled Foundation Model for Inertial Sensing** -- `arXiv:2611.07437v1` -- 2026-11-05 -- cs.LG -- matched: distil
+  - https://arxiv.org/abs/2611.07437
+- **Test-Time Self-Play: Scaling without a Verifier** -- `arXiv:2611.07367v1` -- 2026-11-05 -- cs.LG -- matched: self-play
+  - https://arxiv.org/abs/2611.07367
+- **Using Transformers for Teaching and Learning via Symbolic Distillation of Neural A-life Agents** -- `arXiv:2611.07254v1` -- 2026-11-05 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2611.07254
+- **$D^2$-OPD: Separating Direction and Distance in Extrapolative On-Policy Distillation** -- `arXiv:2611.07241v1` -- 2026-11-04 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2611.07241
+- **Recursive Sparse Attention: Million-Token Length Extrapolation at Logarithmic Cost** -- `arXiv:2611.07232v1` -- 2026-11-04 -- cs.CL -- matched: distil
+  - https://arxiv.org/abs/2611.07232
+- **Fingerprinting the Dispatchers behind Distributed Model Extraction** -- `arXiv:2611.06661v1` -- 2026-11-04 -- cs.LG -- matched: distillation
+  - https://arxiv.org/abs/2611.06661
+
+### efficient-inference
+
+- **Intent-Aware Caching for Efficient LLM Serving** -- `arXiv:2611.09715v1` -- 2026-11-06 -- cs.AI -- matched: latency, serving
+  - https://arxiv.org/abs/2611.09715
+- **TimeOmni-Live: Continuous & Live Time Series Understanding with Long-Term Memory** -- `arXiv:2611.09502v1` -- 2026-11-06 -- cs.LG -- matched: latency
+  - https://arxiv.org/abs/2611.09502
+- **RPEG: Training Reasoning Language Models Scalably and Cost-Effectively** -- `arXiv:2611.09207v1` -- 2026-11-06 -- cs.DC -- matched: latency
+  - https://arxiv.org/abs/2611.09207
+- **Large Language Model Deployment on Resource-Constrained Edge Devices: A Practitioners Survey** -- `arXiv:2611.09075v1` -- 2026-11-06 -- cs.LG -- matched: latency
+  - https://arxiv.org/abs/2611.09075
+- **QRAE: Query-Relevant Attention Entropy for Context Compression in DeepSearch Agents** -- `arXiv:2611.07976v1` -- 2026-11-05 -- cs.LG -- matched: latency
+  - https://arxiv.org/abs/2611.07976
+- **Equivariant Deep Learning in Direct-Product Space for Electronic-Structure Hamiltonian Prediction** -- `arXiv:2611.07695v1` -- 2026-11-05 -- cs.LG -- matched: inference efficiency
+  - https://arxiv.org/abs/2611.07695
+- **ACSeL: Adaptive Configuration Search for Hardware-Constrained LLM Inference** -- `arXiv:2611.07570v1` -- 2026-11-05 -- cs.LG -- matched: throughput, latency, serving
+  - https://arxiv.org/abs/2611.07570
+- **Latency-Aware Adaptive Best-of-$N$** -- `arXiv:2611.07453v1` -- 2026-11-05 -- cs.CL -- matched: latency, serving
+  - https://arxiv.org/abs/2611.07453
+- **FastAFD: When Does Attention-FFN Disaggregation Pay on Rack-Scale NVLink?** -- `arXiv:2611.07149v1` -- 2026-11-04 -- cs.DC -- matched: speculative decoding, throughput, serving
+  - https://arxiv.org/abs/2611.07149
+- **LowRAM: Low-Rank Keys and Amortised Values for Composable KV Cache Compression at Test-Time** -- `arXiv:2611.07025v1` -- 2026-11-04 -- cs.LG -- matched: throughput, memory footprint
+  - https://arxiv.org/abs/2611.07025
+
+### evaluation-integrity
+
+- **Khmer PFGen-Bench: Building a Judge-Free Benchmark for Open-Ended Generation in a Low-Resource Language** -- `arXiv:2611.09222v1` -- 2026-11-06 -- cs.CL -- matched: judge
+  - https://arxiv.org/abs/2611.09222
+- **Copies Are Not Confirmations: How News Duplication Fools LLM Judges and Continual Learners** -- `arXiv:2611.09203v1` -- 2026-11-06 -- cs.LG -- matched: llm judge
+  - https://arxiv.org/abs/2611.09203
+- **AlienBench: A Benchmark of Structural Novelty in Language Model Outputs** -- `arXiv:2611.09094v1` -- 2026-11-06 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2611.09094
+- **Terminal-style Mathematical Modeling Bench: The First Agentic and Verifiable Benchmark for Mathematical Modeling** -- `arXiv:2611.08237v1` -- 2026-11-05 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2611.08237
+- **Decodability Is Not Validity: Evaluating Nuisance Sensitivity in Language Model Concept Probes** -- `arXiv:2611.07805v1` -- 2026-11-05 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2611.07805
+- **Compositional Unalignment: Auditing Safety in Large Vision-Language Models** -- `arXiv:2611.07216v1` -- 2026-11-04 -- cs.LG -- matched: llm judge
+  - https://arxiv.org/abs/2611.07216
+- **Adapting LLM Judges to Observed Human Annotation Policy through Soft Prompt Tuning** -- `arXiv:2611.07126v1` -- 2026-11-04 -- cs.CL -- matched: llm judge, annotat
+  - https://arxiv.org/abs/2611.07126
+- **Measuring Risk, Not Harm: Detecting Psychological Harm Risk Factors in LLM Conversations** -- `arXiv:2611.06806v1` -- 2026-11-04 -- cs.CL -- matched: judge, annotat
+  - https://arxiv.org/abs/2611.06806
+- **Mass Producing Training Data with Surprising Side Effects** -- `arXiv:2611.06324v1` -- 2026-11-04 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2611.06324
+- **The Harness Is the Model: Agent Scaffolding Changes a Fixed LLM's Compliance with Banking Conduct Rules, Unevenly Across Models** -- `arXiv:2611.06116v1` -- 2026-11-04 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2611.06116
+- **PAYWORTHY: Can LLMs Predict Which Freelance Jobs an AI Agent Will Complete?** -- `arXiv:2611.05759v1` -- 2026-11-03 -- cs.AI -- matched: llm judge
+  - https://arxiv.org/abs/2611.05759
+- **AGORA: Reliability-Aware Aggregation of LLM Judges via Item-Response Theory** -- `arXiv:2611.05556v1` -- 2026-11-03 -- cs.AI -- matched: llm judge
+  - https://arxiv.org/abs/2611.05556
+- **ToolSpace: Scaling Tool-Centric Environment Synthesis for Long-Horizon Agents** -- `arXiv:2611.05036v1` -- 2026-11-03 -- cs.CL -- matched: judge
+  - https://arxiv.org/abs/2611.05036
+- **Same Rule, Different Verdicts: Rubric Language and Clause Structure in LLM Judges for Korean Support Dialogues** -- `arXiv:2611.04091v1` -- 2026-11-03 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2611.04091
+- **Swapping the Judge Changes the Ranking: A Preregistered Study of Cross-Provider Replication in LLM-Judged System Comparisons** -- `arXiv:2611.04090v1` -- 2026-11-03 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2611.04090
+- **Same Outputs, Different Scores: Auditing the Unchecked Graders of Multimodal LLM Benchmarks** -- `arXiv:2611.03377v1` -- 2026-11-02 -- cs.AI -- matched: judge, leaderboard
+  - https://arxiv.org/abs/2611.03377
+- **Solver-Like Behavior in Large Language Models as Formalizers** -- `arXiv:2611.02395v1` -- 2026-11-02 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2611.02395
+- **MemShift: Separating Detection from Repair in LLM-Derived Personal Memory** -- `arXiv:2611.02338v1` -- 2026-11-02 -- cs.CL -- matched: llm judge
+  - https://arxiv.org/abs/2611.02338
+- **ClickSight: An LLM Framework for Interpreting Student Clickstreams Through Learning Strategies** -- `arXiv:2611.02021v1` -- 2026-11-01 -- cs.AI -- matched: llm judge
+  - https://arxiv.org/abs/2611.02021
